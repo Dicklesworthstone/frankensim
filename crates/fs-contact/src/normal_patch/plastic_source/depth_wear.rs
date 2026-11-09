@@ -16,6 +16,10 @@
 //! elastic kernel, coating failure, debris transport, hardness-to-yield
 //! conversion, or annealing is inferred. Elasticity remains homogeneous; explicit
 //! temperature continuations refresh original sources between wear intervals.
+//! A profile prepared from complete native J2/cyclic history also retains its
+//! admitted preconditioning alpha throughout the declared material column.
+//! Contact removal changes only exposed depth; no local indentation-to-alpha
+//! conversion or transfer of bulk residual stress/plastic work is performed.
 
 use std::sync::Arc;
 
@@ -25,7 +29,10 @@ use fs_matdb::PropertyKey;
 use fs_material::hardness::depth::{
     DepthHardnessError, EXPOSED_MATERIAL_DEPTH_AXIS, ResolvedDepthHardness,
 };
-use fs_material::state_point::ResolvedInterfaceStatePoint;
+use fs_material::hardness::plastic_history::ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA;
+use fs_material::state_point::{
+    POISSON_RATIO_PROPERTY, ResolvedInterfaceStatePoint, YOUNG_MODULUS_PROPERTY,
+};
 use fs_qty::{Dims, QuantitySpec};
 use fs_tribo::{ArchardLaw, LocalHardnessArchardSample, TriboError, WearAdvance, WearState};
 
@@ -160,6 +167,10 @@ impl SourceDepthHardnessWear {
     /// Bind original dry interface, homogeneous elasticity, separate measured
     /// H(depth) profiles and fixed k_A/k_B. The pristine surface starts at depth
     /// zero in both bodies; normal loading does not change either exposed depth.
+    /// Profiles made by `ResolvedDepthHardness::from_j2_accepted` or
+    /// `from_cyclic_accepted` retain their native preconditioning and exact
+    /// selected elastic claims. That accepted alpha must represent each complete
+    /// declared material column; this reduced contact law does not evolve it.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         normal: BoundNormalInterfaceState,
@@ -578,27 +589,33 @@ fn admit_depth_sources(
             "wear coefficients must retain the original ordered interface and fixed query",
         ));
     }
-    let bulk = [
-        normal.elastic().surface_a_state().resolved(),
-        normal.elastic().surface_b_state().resolved(),
+    let surfaces = [
+        normal.elastic().surface_a_state(),
+        normal.elastic().surface_b_state(),
     ];
     let mut k = [0.0; 2];
     let mut selected = [0; 2];
     for side in 0..2 {
+        let surface = surfaces[side];
+        let bulk = surface.resolved();
+        let history = hardness[side].accepted_history();
+        let owned = |name: &str| {
+            name == EXPOSED_MATERIAL_DEPTH_AXIS || (history.is_some() && name == ALPHA)
+        };
         let h = hardness[side].reference_source().resolved();
-        if h.card_identity() != bulk[side].card_identity()
-            || h.material() != bulk[side].material()
+        if h.card_identity() != bulk.card_identity()
+            || h.material() != bulk.material()
             || !h
                 .query_point()
                 .iter()
-                .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
-                .eq(bulk[side].query_point().iter())
+                .filter(|(name, _)| !owned(name))
+                .eq(bulk.query_point().iter())
             || !h
                 .axis_quantities()
                 .iter()
-                .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
-                .eq(bulk[side].axis_quantities().iter())
-            || bulk[side]
+                .filter(|(name, _)| !owned(name))
+                .eq(bulk.axis_quantities().iter())
+            || bulk
                 .properties()
                 .iter()
                 .any(|property| !property.is_static_at_fixed_external_conditions())
@@ -606,6 +623,37 @@ fn admit_depth_sources(
             return Err(invalid(
                 "depth hardness must retain each original ordered material and fixed environment",
             ));
+        }
+        if let Some(history) = history {
+            let mechanical = history.mechanical_source();
+            if mechanical.card_identity() != bulk.card_identity()
+                || mechanical.material() != bulk.material()
+                || mechanical.query_point() != bulk.query_point()
+                || mechanical.axis_quantities() != bulk.axis_quantities()
+                || h.state_coordinate(ALPHA) != Some(history.alpha())
+                || h.axis_quantities().get(ALPHA) != Some(&QuantitySpec::dimensional(Dims::NONE))
+                || surface.elastic_state().derivation().is_some()
+            {
+                return Err(invalid(
+                    "preconditioned depth hardness requires its admitted native alpha and original canonical elastic source",
+                ));
+            }
+            for (name, value) in [
+                (YOUNG_MODULUS_PROPERTY, surface.young_modulus_pa()),
+                (POISSON_RATIO_PROPERTY, surface.poisson_ratio()),
+            ] {
+                let selected = mechanical
+                    .property(name)
+                    .ok_or_else(|| invalid("missing original native elastic source role"))?;
+                if Some(selected) != bulk.property(name)
+                    || !selected.is_static_at_fixed_external_conditions()
+                    || selected.value_si().to_bits() != value.to_bits()
+                {
+                    return Err(invalid(
+                        "preconditioned profile and half-space must retain identical original selected elastic claims",
+                    ));
+                }
+            }
         }
         let coefficient = coefficients
             .property_by_key(&coefficient_keys[side])

@@ -16,6 +16,9 @@ mod temperature;
 #[path = "source_depth_hardness_wear/sliding.rs"]
 mod sliding;
 
+#[path = "source_depth_hardness_wear/history.rs"]
+mod history;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{
@@ -160,6 +163,12 @@ impl Fixture {
             ResolvedDepthHardness::new(card, &point, key.clone(), select.clone(), MAX_DEPTH)
                 .unwrap()
         });
+        Self::from_profiles(cards, profiles)
+    }
+
+    fn from_profiles(cards: [MaterialCard; 2], profiles: [ResolvedDepthHardness; 2]) -> Self {
+        let point = common::query();
+        let select = MaterialPropertySelection::SingleClaimOnly;
         let base = common::bind(&cards[0], &cards[1], None, 0.0);
         let original = base.normal_state().elastic().interface().card();
         let mut claims = original.claims().clone();

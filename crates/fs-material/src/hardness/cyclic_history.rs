@@ -145,7 +145,7 @@ fn same_backbone(a: &ResolvedJ2Plasticity, b: &ResolvedJ2Plasticity) -> bool {
         && a.law() == b.law()
 }
 
-fn native_source_identity(
+pub(super) fn native_source_identity(
     family: &[u8],
     backbone: &ResolvedJ2Plasticity,
     branches: &[BackstressProperties],

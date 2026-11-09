@@ -1301,6 +1301,34 @@ not indenter penetration, relative plastic indentation, inferred case depth,
 layered elasticity or a coating-failure law. Synthetic contact/wear tests check
 source holes, exact tests, graded-profile refinement and zero-depth endpoints.
 
+### Joint original depth and accepted plastic history
+
+`ResolvedDepthHardness::{from_j2_accepted,from_cyclic_accepted}` prepare an
+original H(z, alpha) profile after the native J2, Voce or Chaboche owner validates
+the complete accepted tensor history and instantaneous yield surface. The exact
+indentation test, original material card, fixed external context, native law and
+complete cyclic branch identity remain bound. The private
+`AcceptedDepthHardnessHistory` receipt exposes provenance and actual
+dimensionless alpha without cloning constitutive histories into wear proposals.
+Ordinary construction still cannot admit an arbitrary caller-supplied alpha.
+
+Native history supplies alpha and actual removal supplies dimensional exposed
+material depth. Continuous source coverage, positive interior knots, prepared
+binary-search evaluation and the existing exact piecewise-affine integral and
+stable inverse are reused. Preparation queries the source once; wear stepping
+does not rerun plasticity or material resolution. Exact no-op temperature
+refresh is admitted, but changed temperature requires newly validated native
+history and a newly prepared profile.
+
+This is a frozen, externally preconditioned material column: the caller must
+establish that its admitted alpha represents the declared depth interval.
+Surface indentation does not advance alpha, and no residual stress, bulk
+plastic work, thermal history or hardness-to-yield conversion is transferred.
+Native load/unload/reversal, full cyclic-branch admission, exact integral
+inversion, selected-test identity and support-hole/interior-positivity refusal
+regressions specify this numerical contract. They do not establish empirical
+material qualification.
+
 ## Bulk brittle crack bands through the original cohesive history
 
 `brittle::BrittleCrackBand` composes isotropic small-strain elasticity with the

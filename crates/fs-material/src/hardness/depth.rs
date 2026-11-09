@@ -12,6 +12,8 @@
 
 mod integral;
 pub use integral::DepthHardnessAdvance;
+/// Joint depth profiles at complete accepted native plastic-history endpoints.
+pub mod history;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
@@ -38,6 +40,7 @@ pub struct ResolvedDepthHardness {
     knots: Vec<(f64, f64)>,
     maximum_depth_m: f64,
     identity: ContentHash,
+    history: Option<history::AcceptedDepthHardnessHistory>,
 }
 
 impl ResolvedDepthHardness {
@@ -79,7 +82,7 @@ impl ResolvedDepthHardness {
             resolve_material_state_point(card, &lower, &[requirement], selection)?,
             hardness_key,
         )?;
-        Self::prepare_from_source(card, source, maximum_depth_m)
+        Self::prepare_from_source(card, source, maximum_depth_m, None)
     }
 
     // Both initial preparation and temperature continuation retain the same
@@ -88,16 +91,25 @@ impl ResolvedDepthHardness {
         card: &MaterialCard,
         source: IndentationHardnessStatePoint,
         maximum_depth_m: f64,
+        history: Option<history::AcceptedDepthHardnessHistory>,
     ) -> Result<Self, DepthHardnessError> {
         let depth_quantity = QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0]));
+        let owned = [
+            (EXPOSED_MATERIAL_DEPTH_AXIS, depth_quantity),
+            (
+                super::plastic_history::ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS,
+                QuantitySpec::dimensional(Dims::NONE),
+            ),
+        ];
         require(
             source
                 .property()
-                .has_only_owned_and_fixed_external_conditions(
-                    EXPOSED_MATERIAL_DEPTH_AXIS,
-                    depth_quantity,
-                ),
-            "hardness may depend only on exposed material depth and fixed external conditions",
+                .has_only_owned_coordinates_and_fixed_external_conditions(if history.is_some() {
+                    &owned
+                } else {
+                    &owned[..1]
+                }),
+            "hardness may depend only on exposed depth, admitted native history and fixed external conditions",
         )?;
         let lower = source.resolved().query();
         let upper = lower
@@ -128,12 +140,16 @@ impl ResolvedDepthHardness {
         let mut hash = DomainHasher::new("org.frankensim.fs-material.depth-hardness.v1");
         hash.update(source.identity().as_bytes());
         hash.update(&maximum_depth_m.to_bits().to_le_bytes());
+        if let Some(history) = &history {
+            hash.update(history.native_source_identity().as_bytes());
+        }
         Ok(Self {
             source,
             source_line,
             knots,
             maximum_depth_m,
             identity: hash.finalize(),
+            history,
         })
     }
 
@@ -149,6 +165,9 @@ impl ResolvedDepthHardness {
     /// insufficient. This checks the new temperature's full depth line, not
     /// support along the intervening thermal path. No thermal history, heat,
     /// annealing, expansion, wear recession or indentation state is advanced.
+    /// A profile pinned to accepted native plastic history can only receive an
+    /// exact no-op here: a changed temperature requires newly admitted native
+    /// history, rather than transporting its old constitutive receipt.
     pub fn at_temperature(
         &self,
         card: &MaterialCard,
@@ -183,15 +202,26 @@ impl ResolvedDepthHardness {
         if original.axes()["T"].to_bits() == temperature_k.to_bits() {
             return Ok(self.clone());
         }
+        require(
+            self.history.is_none(),
+            "temperature changes require a newly admitted native history for a preconditioned depth profile",
+        )?;
         let query = original.with("T", temperature_k)?;
         let source = self.source.at_query_point(card, &query)?;
-        Self::prepare_from_source(card, source, self.maximum_depth_m)
+        Self::prepare_from_source(card, source, self.maximum_depth_m, None)
     }
 
     /// Original surface endpoint with the exact selected claim and indentation test.
     #[must_use]
     pub const fn reference_source(&self) -> &IndentationHardnessStatePoint {
         &self.source
+    }
+
+    /// Present only for a profile prepared from a complete admitted native
+    /// plastic history. Ordinary fixed-environment construction cannot forge it.
+    #[must_use]
+    pub const fn accepted_history(&self) -> Option<&history::AcceptedDepthHardnessHistory> {
+        self.history.as_ref()
     }
 
     /// Complete original continuous-support breakpoints and receipts.

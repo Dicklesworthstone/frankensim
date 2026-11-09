@@ -3559,6 +3559,29 @@ constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
 histories. G0/G4 checks cover original claim/test ownership, interior support
 holes, negative hardness, actual body-depth limits and late refusal atomicity.
 
+### Native preconditioning through the original depth profile
+
+The same `SourceDepthHardnessWear` owner accepts H(z, alpha) profiles prepared
+by `ResolvedDepthHardness::from_j2_accepted` or `from_cyclic_accepted`.
+Admission checks the original ordered material card and fixed environment, the
+private native-history receipt, actual dimensionless alpha, and identical
+selected canonical Young/Poisson claims and values. Equal numerical moduli or a
+swapped body profile cannot substitute for original-source agreement.
+
+Each body's validated alpha stays fixed over its explicitly representative
+preconditioned column. Removal changes only its exposed depth. The pressure cap
+uses the smaller current H(z, alpha), while each body's wear integral and
+inventory use its own profile. Existing exact depth integration, cap refresh,
+native normal continuation and separate signed work accounts remain unchanged;
+there is no new wear law or contact-indentation-to-alpha conversion. A changed
+temperature requires new native admission instead of silently retaining an old
+constitutive receipt.
+
+Regressions drive native J2 preconditioning into the actual loaded contact,
+compare both graded wear depths and inventories with independent quadratic
+roots, retain alpha and exact claims at exposed endpoints, verify refreshed
+caps and normal work, and reject profiles exchanged between original bodies.
+
 ## Mixed-mode JKR normal traction on structural faces
 
 `AdhesiveTractionProfile::{jkr_mixed_mode_displacement,jkr_mixed_mode_force}`
