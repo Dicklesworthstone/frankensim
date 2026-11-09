@@ -14,6 +14,9 @@
 //! phase-equilibrium and thermal-model applicability conditions. Observer
 //! refusal or cancellation discards the entire uncommitted physical window.
 
+/// Resolved moving liquid heat storage on the same phase/acoustic trajectory.
+pub mod conducting;
+
 use super::compact_source_from_flow;
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::TimedCompactSource;

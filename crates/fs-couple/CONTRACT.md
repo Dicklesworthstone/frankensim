@@ -11766,3 +11766,51 @@ One caloric proposal admits all requested heat shares together through the origi
 This base path is a same-time frozen-source impulse split. It supplies no conducting area, temperature feedback, coupled mixed-mode stability or native body impulse. Normal and retained spring release follow the original prescribed mode-I fold and calibrated homogeneous twist model, with its existing mode-III applicability ceiling.
 
 Four focused integration cases cover independently derived fold twist energy and normal release, fresh recontact and retained prior loss, elastic/area work versus plastic heat, finite caloric refusal, and final cancellation/stale history with deterministic retry. Pinned `rustfmt --check` passed. The new cases were not compiled or run: DSR and RCH are unavailable and local build memory/disk headroom is exhausted.
+
+## Resolved liquid thermal cavitation and its causal acoustic source
+
+`cavitation::bubble::vapor::conducting::MaterialConductingVaporBubble`
+binds the original water source to the native resolved-liquid vapor owner and
+the existing compact observer. The native owner retains the entire moving
+liquid temperature profile with phase mass, vapor temperature and radial
+motion on one adaptive trajectory. Every stage receives its conductive
+interface heat from that profile; this composition supplies no replacement
+bubble heat coefficient or separately advanced thermal field.
+
+Compact sound uses the actual displaced-liquid flow `4*pi*R^2*U_liquid`
+and its original analytic derivative. During phase exchange this differs
+from the geometric bubble-volume rate. Receiver density and sound speed
+come from the same original water source. Observation introduces no added
+radiation damping or acoustic backreaction to the incompressible model.
+
+The direct, compact-source and observed advance paths retain the same
+complete native proposal. A mismatched medium, late observer refusal or
+final cancellation leaves every liquid cell and the complete phase/radial
+history unchanged. The explicitly authored outer bath carries the finite
+grid's conductive heat and advected enthalpy. Native source-property,
+pressure-heating, capacity, outflow-Peclet, phase-equilibrium, balance and
+radial/Mach restrictions remain binding.
+
+`conducting_vapor_cavitation` is a runnable example under the existing
+`cavitation` feature. It follows a 100 micrometre vapor bubble in 373.15 K
+water through a 40 microsecond sinusoidal pressure cycle of 1 kPa amplitude.
+It retains a graded 40 micrometre liquid layer, samples a receiver at 0.1 m,
+and compares 16, 32 and 64 liquid cells plus a halved maximum time step.
+Its TSV output includes interface and first-cell temperatures, signed
+phase transfer and interface heat, causal receiver pressure, viscous heat,
+and independently reconstructed cumulative phase/liquid thermal and mass
+balances. Heat and phase transfer both reverse direction during the cycle.
+
+All four new coupling groups and five existing vapor-coupling groups passed
+in focused builds of the actual sources. The new groups compare the entire
+adapter result against the native thermal trajectory, verify finite liquid
+heat changes phase inventory and sound, and exercise observer refusal and
+final cancellation with all cells retained. The example completed all
+640 samples. At 64 cells it gave a sampled peak receiver magnitude of 1.48027 Pa and
+peak interface heat magnitude of 16.6006 mW; the maximum independently
+reconstructed cumulative thermal and mass residuals were 1.80e-18 J and
+3.25e-26 kg. Changing 32 to 64 cells changed those pressure and heat peaks
+by 0.1413% and 0.1530%; halving the time-step ceiling changed them by less
+than 1.5e-13 and 2.8e-9 relative. These are case-specific numerical
+comparisons, not general accuracy bounds or experimental qualification.
+The complete workspace was not executed.
