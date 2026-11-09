@@ -8169,3 +8169,9 @@ Three focused regressions specify independent support, complex frequency jets,
 cusp selection, reference-loss overflow independence and TE/TM Airy/local-work
 agreement. Native execution is not claimed; the final source review followed
 loss of the executor after the earlier draft's pinned formatting checks.
+
+## Positive short-window film populations and reservoir heat
+
+Uniform-window film observations evaluate admitted short-band electric/magnetic populations and each original Debye/Lorentz friction heat as positive orthogonal temporal squares. Original angular frequencies and source-bank statistics remain attached: proper factors retain their peak-phasor half before products, while real fields retain the full carrier and sum-frequency content. The fixed factor is reused across grid points and reservoirs without observation heap allocation; preparation reserves its bounded projection work. Signed Poynting flux and reversible storage retain their original contractions. Wider or shaped windows retain the existing pair law.
+
+Focused source-level regressions resolve three-tone T^4 and real T^6 heat nulls through 1 ps, preserve filtered-product residuals and extreme proper power, and retain signed flux/storage and cancellation behavior. This is numerical evidence, not a null-relative certificate. Prepared local and spatially integrated heat spectra are separate owners; this direct-layer change does not alter their observation law.

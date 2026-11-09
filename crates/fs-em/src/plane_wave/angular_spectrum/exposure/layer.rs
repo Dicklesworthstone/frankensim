@@ -4,9 +4,20 @@
 //! not a switch-on transient. Ohmic and each original polarization reservoir dissipate
 //! after all spatial and temporal interference. Boundary power loss also
 //! contains the signed change of electromagnetic/polarization storage.
+//! Short uniform bands evaluate nonnegative field populations and reservoir
+//! heat through shared orthogonal temporal modes. Native angular frequencies
+//! and the distinction between real fields and proper factors are retained;
+//! a real band admits its full carrier, not just its slow beat. Wider/shaped
+//! windows keep the original pair law. Signed flux and storage keep their
+//! original contractions; the positive factor is not a null-relative error
+//! certificate and adds no material or switch-on approximation.
 
 use super::*;
 use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
+use fs_fft::harmonic_window::{
+    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
+    UniformHarmonicBandWorkspace,
+};
 
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
@@ -35,6 +46,9 @@ pub struct AngularSpectrumExposureLayerLimits {
     /// N * sum(F_r²) * (3 + D + 2*L), with D Debye and L Lorentz poles, plus
     /// sum_real F_r*N*(width+height) for a nonzero common carrier. The three
     /// base channels cover the vector field and its instantaneous E/H stores.
+    /// Eligible short-band banks additionally reserve N*(2+D+L)*(F_r+1)*17.
+    /// At most 64 proper or 32 real tones use this bounded factor. This bounds
+    /// positive temporal projections before the query's shutter is known.
     pub maximum_point_reservoir_frequency_pairs: usize,
     pub maximum_workspace_bytes: usize,
     pub maximum_fft_work: u64,
@@ -158,6 +172,103 @@ struct MomentKernel<P> {
     storage_frequency: Dd,
 }
 
+// Real peak phasors use BOTH signed frequencies. Their full carrier span must
+// fit the shared factor; a short beat alone never licenses cycle averaging.
+fn positive_band_tones(frequencies: usize, proper: bool) -> Option<usize> {
+    if frequencies < 3 {
+        return None;
+    }
+    let maximum = MAX_UNIFORM_HARMONIC_BAND_TONES / if proper { 1 } else { 2 };
+    (frequencies <= maximum).then_some(frequencies)
+}
+
+struct PositiveLayerMoments<'w> {
+    factor: UniformHarmonicBandRef<'w>,
+    frequencies: usize,
+    proper: bool,
+}
+
+impl<'w> PositiveLayerMoments<'w> {
+    fn prepare(
+        window: HarmonicWindow,
+        frequencies: &[f64],
+        proper: bool,
+        workspace: &'w mut UniformHarmonicBandWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Self>, AngularSpectrumError> {
+        let Some(_) = positive_band_tones(frequencies.len(), proper) else {
+            return Ok(None);
+        };
+        poll(cancelled)?;
+        let factor = if proper {
+            window.prepare_uniform_band_rad_s_in(frequencies, workspace)
+        } else {
+            window.prepare_uniform_real_band_rad_s_in(frequencies, workspace)
+        }
+        .map_err(|_| bad("film exposure positive temporal factor is unrepresentable"))?;
+        poll(cancelled)?;
+        Ok(factor.map(|factor| Self {
+            factor,
+            frequencies: frequencies.len(),
+            proper,
+        }))
+    }
+
+    // Inputs keep the native exp(+i*omega*t) EM convention. Proper random
+    // factors have <Re(E)^2>=<|E|^2>/2. The real factor uses both signed
+    // frequencies algebraically, retaining every physical sum-frequency term.
+    fn square(
+        &self,
+        field: impl Fn(usize) -> [Dd; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, MomentError> {
+        if cancelled() {
+            return Err(MomentError::Cancelled);
+        }
+        let mut amplitudes = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_TONES];
+        let half = Dd::from_f64(0.5);
+        let mut nonzero = false;
+        for i in 0..self.frequencies {
+            let [real, imaginary] = field(i);
+            amplitudes[i] = [real, -imaginary];
+            nonzero |= real != Dd::ZERO || imaginary != Dd::ZERO;
+        }
+        if !nonzero {
+            return Ok(Dd::ZERO);
+        }
+        let mut modes = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
+        let count = self.factor.mode_count();
+        self.factor
+            .project_parts_dd(&amplitudes[..self.frequencies], &mut modes[..count])
+            .map_err(MomentError::Product)?;
+        let scale = if self.proper { half } else { Dd::ONE };
+        let mut power = Dd::ZERO;
+        for (mode, &field) in modes[..count].iter().enumerate() {
+            power = power
+                + self
+                    .factor
+                    .mode_cross_parts_dd_scaled(mode, field, field, scale)
+                    .map_err(MomentError::Product)?[0];
+        }
+        if cancelled() {
+            return Err(MomentError::Cancelled);
+        }
+        if !power.to_f64().is_finite() {
+            return Err(MomentError::Unrepresentable);
+        }
+        Ok(power)
+    }
+}
+
+// Filtering in DD retains the original product residual through a reservoir
+// null. Rounding each complex field/filter product first would lose it before
+// the positive temporal factor has a chance to resolve the surviving heat.
+fn filtered_parts(field: C64, transfer: C64) -> [Dd; 2] {
+    let (a, b) = (Dd::from_f64(field.re), Dd::from_f64(field.im));
+    let (c, d) = (Dd::from_f64(transfer.re), Dd::from_f64(transfer.im));
+    [a * c - b * d, a * d + b * c]
+}
+
 impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     fn new(
         anchor: &'b PlanarAngularSpectrum<'s, 'm>,
@@ -184,6 +295,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let mut point_line_pairs = 0_usize;
         let mut pairs = 0_usize;
         let mut carrier_pairs = 0_usize;
+        let mut positive_pairs = 0_usize;
         let mut field_fft_work = 0_u64;
         let mut query_workspace = anchor.workspace_bytes();
         let extra_kernel_bytes = core::mem::size_of::<MomentKernel<HarmonicProduct>>()
@@ -210,6 +322,15 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 .and_then(|v| v.checked_add(point_line_pairs))
                 .ok_or_else(|| bad("film exposure line work overflow"))?;
             let f = bank.frequency_count();
+            let band_tones = positive_band_tones(f, proper);
+            if let Some(tones) = band_tones {
+                positive_pairs = n
+                    .checked_mul(law.pole_count() + 2)
+                    .and_then(|v| v.checked_mul(tones + 1))
+                    .and_then(|v| v.checked_mul(MAX_UNIFORM_HARMONIC_BAND_MODES))
+                    .and_then(|v| v.checked_add(positive_pairs))
+                    .ok_or_else(|| bad("film exposure positive moment work overflow"))?;
+            }
             let bank_pairs = n
                 .checked_mul(f)
                 .and_then(|v| v.checked_mul(f))
@@ -244,6 +365,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let point_reservoir_frequency_pairs = pairs
             .checked_mul(law.reservoir_pair_channels() + 3)
             .and_then(|v| v.checked_add(carrier_pairs))
+            .and_then(|v| v.checked_add(positive_pairs))
             .ok_or_else(|| bad("film exposure reservoir work overflow"))?;
         let index_bytes = groups
             .checked_mul(core::mem::size_of::<ExposureLine<'_, '_, '_>>())
@@ -448,6 +570,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                         bank,
                         depth_m,
                         true,
+                        window,
                         |a, b| window.proper_product_kernel(a, b),
                         proper_product,
                         ProperHarmonicProduct::mean_real_product_parts_dd,
@@ -460,6 +583,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                         bank,
                         depth_m,
                         false,
+                        window,
                         |a, b| window.product_kernel(a, b),
                         product,
                         HarmonicProduct::mean_real_product_parts_dd,
@@ -529,6 +653,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         bank: &AngularSpectrumExposure<'b, 's, 'm>,
         depth: f64,
         proper: bool,
+        window: HarmonicWindow,
         make_kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
         product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
         product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -540,6 +665,15 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         if f == 0 {
             return Ok(Dd::ZERO);
         }
+        // The factor is reused across every spatial point and original loss
+        // reservoir. Its bounded stack workspace adds no query allocation.
+        let mut positive_workspace =
+            positive_band_tones(f, proper).map(|_| UniformHarmonicBandWorkspace::new());
+        let positive = if let Some(workspace) = positive_workspace.as_mut() {
+            PositiveLayerMoments::prepare(window, &bank.frequencies, proper, workspace, cancelled)?
+        } else {
+            None
+        };
         let mut kernels = Vec::new();
         kernels
             .try_reserve_exact(f * f)
@@ -611,11 +745,12 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         }
         for (point, sum) in sums.iter_mut().enumerate() {
             poll(cancelled)?;
-            let moments = integrate_point_dd(
+            let moments = layer_point_moments(
                 f,
                 &kernels,
                 |i| fields[i][point],
                 |k, a, b| product(k.product, a, b),
+                positive.as_ref(),
                 cancelled,
             )
             .map_err(moment_error)?;
@@ -638,17 +773,40 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                     }
                     let transfer = self.frequencies[mapping[i]].poles[pole];
                     for c in 0..3 {
-                        filtered[i][c] = fields[i][point][c] * transfer.heat;
+                        if positive.is_none() {
+                            filtered[i][c] = fields[i][point][c] * transfer.heat;
+                        }
                         filtered[i][c + 3] = fields[i][point][c] * transfer.storage;
                         if !kinetic.is_empty() {
                             kinetic[i][c] = fields[i][point][c] * transfer.kinetic_storage;
                         }
                     }
                 }
-                let (heat, rate) = pole_moments(
+                let positive_heat = if let Some(positive) = &positive {
+                    let mut heat = Dd::ZERO;
+                    for c in 0..3 {
+                        heat = heat
+                            + positive
+                                .square(
+                                    |i| {
+                                        filtered_parts(
+                                            fields[i][point][c],
+                                            self.frequencies[mapping[i]].poles[pole].heat,
+                                        )
+                                    },
+                                    cancelled,
+                                )
+                                .map_err(moment_error)?;
+                    }
+                    Some(heat)
+                } else {
+                    None
+                };
+                let (heat, rate) = pole_moments_with_heat(
                     &kernels,
                     &filtered,
                     (!kinetic.is_empty()).then_some(kinetic.as_slice()),
+                    positive_heat,
                     &product,
                     cancelled,
                 )
@@ -679,6 +837,51 @@ fn moment_error(error: MomentError) -> AngularSpectrumError {
 
 fn rotate_i(z: C64) -> C64 {
     C64::new(-z.im, z.re)
+}
+
+// Positive field populations do not make a signed Poynting component positive.
+// Keep its original ordered cross products and source clock, including genuine
+// transient backflow; only the six diagonal moments use squared temporal modes.
+fn layer_point_moments<P: Copy>(
+    frequencies: usize,
+    kernels: &[P],
+    field_at: impl Fn(usize) -> [C64; 6],
+    product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    positive: Option<&PositiveLayerMoments<'_>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Dd; 9], MomentError> {
+    let Some(positive) = positive else {
+        return integrate_point_dd(frequencies, kernels, field_at, product, cancelled);
+    };
+    let mut sum = [Dd::ZERO; 9];
+    for c in 0..6 {
+        sum[c] = positive.square(
+            |i| {
+                let value = field_at(i)[c];
+                [Dd::from_f64(value.re), Dd::from_f64(value.im)]
+            },
+            cancelled,
+        )?;
+    }
+    for i in 0..frequencies {
+        let a = field_at(i);
+        for j in 0..frequencies {
+            if j % 64 == 0 && cancelled() {
+                return Err(MomentError::Cancelled);
+            }
+            let b = field_at(j);
+            let kernel = kernels[i * frequencies + j];
+            for c in 0..3 {
+                let (u, v) = ((c + 1) % 3, (c + 2) % 3);
+                sum[c + 6] = sum[c + 6] + product(kernel, a[u], b[v + 3])?;
+                sum[c + 6] = sum[c + 6] - product(kernel, a[v], b[u + 3])?;
+            }
+        }
+    }
+    if sum.iter().any(|value| !value.to_f64().is_finite()) {
+        return Err(MomentError::Unrepresentable);
+    }
+    Ok(sum)
 }
 
 fn instantaneous_storage_rate<P: Copy>(
@@ -712,6 +915,7 @@ fn instantaneous_storage_rate<P: Copy>(
     Ok(electric * Dd::from_f64(epsilon) + magnetic * Dd::from_f64(mu))
 }
 
+#[cfg(test)]
 fn pole_moments<P: Copy>(
     kernels: &[MomentKernel<P>],
     fields: &[[C64; 6]],
@@ -719,11 +923,22 @@ fn pole_moments<P: Copy>(
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Dd, Dd), MomentError> {
+    pole_moments_with_heat(kernels, fields, kinetic, None, product, cancelled)
+}
+
+fn pole_moments_with_heat<P: Copy>(
+    kernels: &[MomentKernel<P>],
+    fields: &[[C64; 6]],
+    kinetic: Option<&[[C64; 3]]>,
+    positive_heat: Option<Dd>,
+    product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Dd, Dd), MomentError> {
     let f = fields.len();
     if kinetic.is_some_and(|values| values.len() != f) {
         return Err(MomentError::Unrepresentable);
     }
-    let mut heat = Dd::ZERO;
+    let mut heat = positive_heat.unwrap_or(Dd::ZERO);
     let mut storage = Dd::ZERO;
     for (i, a) in fields.iter().enumerate() {
         for (j, b) in fields.iter().enumerate() {
@@ -732,7 +947,9 @@ fn pole_moments<P: Copy>(
             }
             let kernel = kernels[i * f + j];
             for c in 0..3 {
-                heat = heat + product(kernel.product, a[c], b[c])?;
+                if positive_heat.is_none() {
+                    heat = heat + product(kernel.product, a[c], b[c])?;
+                }
                 storage = storage
                     + product(kernel.product, rotate_i(a[c + 3]), b[c + 3])?
                         * kernel.storage_frequency;
@@ -752,6 +969,9 @@ fn pole_moments<P: Copy>(
 
 #[cfg(test)]
 mod lorentz_tests;
+
+#[cfg(test)]
+mod short_window_tests;
 
 #[cfg(test)]
 mod tests {
