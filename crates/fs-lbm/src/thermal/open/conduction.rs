@@ -12,7 +12,7 @@ use crate::thermal::boundary::conduction::{
 };
 
 /// Inverse of the carrier's x-fast surface index, for any normal axis.
-fn boundary_cell(dims: [usize; 3], axis: usize, side: usize, link: usize) -> usize {
+pub(super) fn boundary_cell(dims: [usize; 3], axis: usize, side: usize, link: usize) -> usize {
     let stride: usize = dims[..axis].iter().product();
     (link / stride) * (stride * dims[axis]) + link % stride + side * (dims[axis] - 1) * stride
 }

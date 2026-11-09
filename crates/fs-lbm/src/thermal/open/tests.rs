@@ -342,3 +342,5 @@ fn heated_danckwerts_channel_converges_to_independent_continuum_solution() {
         "outlet errors {coarse_outlet:e}, {fine_outlet:e}"
     );
 }
+
+mod inputs;

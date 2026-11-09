@@ -302,6 +302,48 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             .set_reservoir_temperature(face, temperature)
             .map_err(Into::into)
     }
+    /// Change an existing stateless wall's held thermal input. Prescribed
+    /// temperatures also obey the buoyancy envelope; film/flux laws are
+    /// checked against their actual fluid traces during the original step.
+    /// Finite wall storage cannot be replaced through this input setter.
+    pub fn set_wall_boundary(
+        &mut self,
+        face: usize,
+        wall: ThermalWall,
+    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+        if let ThermalWall::Temperature(temperature) = wall {
+            admit_boundary_temperature(self.law, face, temperature)?;
+        }
+        self.thermal
+            .set_wall_boundary(face, wall)
+            .map_err(Into::into)
+    }
+
+    /// Update only the stateless law on unassigned fluid-to-solid links.
+    /// Original immersed bodies retain their temperature and heat ownership.
+    pub fn set_internal_wall_boundary(
+        &mut self,
+        wall: ThermalWall,
+    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+        if let ThermalWall::Temperature(temperature) = wall {
+            admit_boundary_temperature(self.law, 6, temperature)?;
+        }
+        self.thermal
+            .set_internal_wall_boundary(wall)
+            .map_err(Into::into)
+    }
+
+    /// Set external heat into the retained finite wall cells, in original
+    /// x-fast surface order. This changes inputs without adding energy or
+    /// detaching accepted scalar, momentum or buoyancy history.
+    pub fn set_finite_wall_heat(
+        &mut self,
+        face: usize,
+        heat_per_step: &[f64],
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal.set_finite_wall_heat(face, heat_per_step)
+    }
+
     pub fn set_wall_conduction(
         &mut self,
         axis: usize,

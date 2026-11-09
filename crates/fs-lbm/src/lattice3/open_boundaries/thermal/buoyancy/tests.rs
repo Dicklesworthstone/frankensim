@@ -652,3 +652,5 @@ fn boussinesq_tensor_refusal_and_late_cancellation_preserve_force_wall_and_heat_
 }
 
 mod varying_background;
+
+mod wall_inputs;

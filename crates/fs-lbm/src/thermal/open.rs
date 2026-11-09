@@ -27,6 +27,9 @@ pub mod conduction;
 /// Shared finite thermal storage on explicitly grouped immersed solid cells.
 pub mod immersed;
 
+// Time-dependent boundary inputs on the retained thermal state.
+mod inputs;
+
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThermalOpenFace3 {
