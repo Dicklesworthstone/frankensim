@@ -7,20 +7,23 @@ use fs_ascent::projected_al::{
 use fs_topopt::sdf3::response::limits::design::MinimumMaterialObjective3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3,
-    constraints::AffineLoadSpaceConstraints3,
+    constraints::{AffineLoadSpaceConstraintPolicy3, AffineLoadSpaceConstraints3},
     design::{
         AffineLoadSpaceDesign3, AffineLoadSpaceDesignCheckpoint3, AffineLoadSpaceDesignGoal3,
         AffineLoadSpaceDesignIteration3, AffineLoadSpaceDesignOptions3,
         AffineLoadSpaceDesignPoint3, AffineLoadSpaceGradientCheck3,
     },
+    response::{AffineResponseLimits3, AffineResponseOptions3},
     stress::AffineStressLimit3,
 };
 #[path = "affine_load_space/output.rs"]
 mod output;
 #[path = "affine_load_space/resume.rs"]
 mod resume;
+#[path = "affine_load_space/response_binding.rs"]
+mod response_binding;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Compliance and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use fixed reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
 
 const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
     objective: MinimumMaterialObjective3::VolumeFraction,
@@ -32,12 +35,24 @@ pub(super) struct Config {
     pub cap_j: f64,
     pub options: AffineLoadSpaceDesignOptions3,
     pub stress: Option<AffineStressLimit3>,
+    pub response_options: Option<AffineResponseOptions3>,
     pub joint_sharpness: f64,
 }
 impl Config {
-    pub(super) fn constraints(self) -> AffineLoadSpaceConstraints3<'static> {
+    pub(super) fn constraints<'a>(
+        self,
+        responses: Option<AffineResponseLimits3<'a>>,
+    ) -> AffineLoadSpaceConstraints3<'a> {
         AffineLoadSpaceConstraints3 {
-            responses: None,
+            responses,
+            stress: self.stress,
+            sharpness: self.joint_sharpness,
+        }
+    }
+
+    pub(super) fn constraint_policy(self) -> AffineLoadSpaceConstraintPolicy3 {
+        AffineLoadSpaceConstraintPolicy3 {
+            responses: self.response_options,
             stress: self.stress,
             sharpness: self.joint_sharpness,
         }
@@ -49,6 +64,12 @@ impl Config {
 
     pub(super) fn validate(self, spec: &Spec) -> Result<()> {
         self.policy(spec.loads.len())?;
+        if self.response_options != spec.affine_responses.as_ref().map(|family| family.options) {
+            return Err(fail("cli-study-sdf3-input", "affine response policy must match its authored physical observations"));
+        }
+        if let Some(family) = &spec.affine_responses {
+            family.validate(spec)?;
+        }
         self.options
             .optimizer
             .validate::<EvaluationStop>(spec.leaves)
@@ -97,7 +118,7 @@ impl Config {
         let e = &point.evaluation;
         self.policy(e.policy.dimension()).is_ok_and(|policy|
             e.robustness == self.options.robustness
-                && e.constraints == self.constraints().policy()
+                && e.constraints == self.constraint_policy()
                 && point.physically_feasible(GOAL, &policy))
     }
 }
@@ -327,49 +348,63 @@ fn compute_observed(
         // The changing material body force is assembled by the native owner
         // once at eroded occupancy. It must not be baked into each basis load.
         let dead = vec![0.0; forces[0].len()];
-        let mut design = match recovery {
-            None => AffineLoadSpaceDesign3::new_with_constraints(
-                &mut study,
-                &dead,
-                &basis,
-                &raw,
-                policy,
-                GOAL,
-                config.options,
-                config.constraints(),
-                &mut control,
-            ),
-            Some(recovery) => AffineLoadSpaceDesign3::restore_with_constraints(
-                &mut study,
-                &dead,
-                &basis,
-                &mut recovery.checkpoint.clone(),
-                policy,
-                GOAL,
-                config.options,
-                config.constraints(),
-                &mut control,
-            ),
-        }
-        .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
-        let result = design.run(0);
-        let mut state = State::capture(&design, result);
-        let updates = limit.min(spec.updates - design.optimizer_work().iterations);
-        for _ in 0..updates {
-            if state.error.is_some()
-                || state
-                    .report
-                    .as_ref()
-                    .is_some_and(|r| r.stop != ProjectedAlStop::IterationLimit)
-            {
-                break;
+        let response_fields = response_binding::assemble(spec, study.operator().elasticity(), &poll)
+            .map_err(|e| Failure {
+                code: "cli-study-sdf3-affine-response",
+                message: e.to_string(),
+                exit: if gate.is_requested() {
+                    exit::CANCELLED
+                } else if poll().is_break() {
+                    exit::BUDGET
+                } else {
+                    exit::REFUSED
+                },
+            })?;
+        response_binding::with_limits(response_fields.as_ref(), |responses| {
+            let mut design = match recovery {
+                None => AffineLoadSpaceDesign3::new_with_constraints(
+                    &mut study,
+                    &dead,
+                    &basis,
+                    &raw,
+                    policy,
+                    GOAL,
+                    config.options,
+                    config.constraints(responses),
+                    &mut control,
+                ),
+                Some(recovery) => AffineLoadSpaceDesign3::restore_with_constraints(
+                    &mut study,
+                    &dead,
+                    &basis,
+                    &mut recovery.checkpoint.clone(),
+                    policy,
+                    GOAL,
+                    config.options,
+                    config.constraints(responses),
+                    &mut control,
+                ),
             }
-            state.spent = prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
-            observed(design.study(), &state)?;
-            let result = design.run(1);
-            state = State::capture(&design, result);
-        }
-        Ok(state)
+            .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
+            let result = design.run(0);
+            let mut state = State::capture(&design, result);
+            let updates = limit.min(spec.updates - design.optimizer_work().iterations);
+            for _ in 0..updates {
+                if state.error.is_some()
+                    || state
+                        .report
+                        .as_ref()
+                        .is_some_and(|r| r.stop != ProjectedAlStop::IterationLimit)
+                {
+                    break;
+                }
+                state.spent = prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
+                observed(design.study(), &state)?;
+                let result = design.run(1);
+                state = State::capture(&design, result);
+            }
+            Ok(state)
+        })
     })?;
     state.spent = prior.add(control.work(), geometry, start.elapsed().as_secs_f64())?;
     state.status = state.terminal(config, gate, state.spent.wall_s >= spec.wall_s);
@@ -405,3 +440,7 @@ mod tests;
 #[cfg(test)]
 #[path = "affine_load_space/strength_tests.rs"]
 mod strength_tests;
+
+#[cfg(test)]
+#[path = "affine_load_space/response_tests.rs"]
+mod response_tests;

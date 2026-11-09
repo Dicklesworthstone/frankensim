@@ -40,8 +40,8 @@ fn g1_affine_strength_source_binds_the_full_family_and_admits_only_valid_physics
     let strength = config.stress.unwrap();
     assert_eq!(strength.options.max_cases, spec.loads.len() + 1);
     assert_eq!(strength.options.max_points, 100_000);
-    assert_eq!(config.constraints().stress, Some(strength));
-    assert!(config.constraints().responses.is_none());
+    assert_eq!(config.constraints(None).stress, Some(strength));
+    assert!(config.constraints(None).responses.is_none());
 
     for (from, to) in [
         (":stress-limit-pa 40.0", ":stress-limit-pa 0.0"),
@@ -145,7 +145,7 @@ fn g1_g5_affine_strength_cap_controls_the_joint_constraint_and_feasible_archive(
     assert!(loose.state.gradient.passed());
     assert_eq!(
         loose.state.gradient.constraints,
-        spec.affine_load_space.unwrap().constraints().policy()
+        spec.affine_load_space.unwrap().constraint_policy()
     );
 
     let mut strict_spec = spec.clone();
@@ -261,7 +261,7 @@ fn g4_affine_strength_cancellation_keeps_the_accepted_native_constraints() {
     assert_eq!(stress.limit, limit);
     assert_eq!(
         stopped.state.gradient.constraints,
-        spec.affine_load_space.unwrap().constraints().policy()
+        spec.affine_load_space.unwrap().constraint_policy()
     );
     assert!(stopped.state.spent.linear.linear_iterations > 0);
 }

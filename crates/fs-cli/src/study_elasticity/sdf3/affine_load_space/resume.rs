@@ -114,7 +114,7 @@ fn gradient(report: &JsonValue, spec: &Spec) -> Result<AffineLoadSpaceGradientCh
         params: spec.schedule[0],
         goal: GOAL,
         options: config.options.gradient_check,
-        constraints: config.constraints().policy(),
+        constraints: config.constraint_policy(),
         baseline_objective: real(data, "baseline_objective")?,
         baseline_constraint: real(data, "baseline_constraint")?,
         objective_relative_error: real(data, "objective_relative_error")?,

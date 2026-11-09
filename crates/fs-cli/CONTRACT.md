@@ -2018,7 +2018,7 @@ declares no strength limit; the optional section below adds sampled strength.
 
 ### Joint strength under self-weight and uncertain loads
 
-The affine minimum-material mode accepts an optional final `affine-strength`
+The affine minimum-material mode accepts an optional `affine-strength`
 section after `material-acceleration`, with these ordered fields:
 
 ```lisp
@@ -2067,6 +2067,69 @@ allowable, relaxation, aggregation or joint sharpness changes the problem and
 cannot reuse the old optimizer state. The numerical demonstration is
 `examples/marquee/bracket-3d-affine-strength.fsim`; its illustrative allowable
 does not certify a physical part.
+
+### Signed displacement, support-force and support-moment limits
+
+The same affine minimum-material mode accepts a final `affine-responses`
+section after `material-acceleration` and any `affine-strength` declaration:
+
+```lisp
+(affine-responses
+  :sharpness 40.0
+  :joint-sharpness 40.0
+  :limits (
+    (mean-displacement :name "tip-z-lower" :axis z
+      :x-fraction (0.5 1.0) :sense at-least :bound-m -0.02 :scale-m 0.02)
+    (support-force :name "support-z-upper" :axis z
+      :sense at-most :bound-n 2.0 :scale-n 2.0)
+    (support-moment :name "support-y-upper" :axis y
+      :about-m (0.0 0.0 0.0) :sense at-most :bound-n-m 1.0 :scale-n-m 1.0)))
+```
+
+Every original inequality applies to the entire affine load ball. For a scalar
+response `y(q)=y0+v^T q`, the adverse upper/lower values are `y0 +/- ||v||`.
+The native owner retains that inequality's own coefficients and remeasures
+the actual combined field. `at-most` and `at-least` are signed physical bounds;
+zero and negative bounds are valid. A two-sided window uses two original
+inequalities, each with a positive scale in the same physical unit.
+
+`mean-displacement` integrates a Cartesian component over the selected
+reference cut-volume band and divides by its actual retained native volume,
+including supported material. The band is fixed independently of optimized
+occupancy, aligns to initial octree planes, and must have positive numerical
+volume. `support-force` integrates native numerical support traction on the
+solid in N; `support-moment` tests that same traction with
+`axis cross (position - about_m)` in N*m. These observations require an
+authored embedded support and retain its Nitsche-consistent state and direct
+material derivatives. Strongly clamped background-box reactions are not
+available through these observation kinds.
+
+Response constraints reuse the existing affine primal fields. The native
+aggregate uses at most `min(limit_count, basis_count+1)` response adjoints;
+only the common offset carries the changing material body-load derivative.
+Compliance, responses and optional sampled strength enter one conservative
+joint upper aggregate. Every original physical bound and all relevant
+aggregates must pass for a design to enter the feasible archive. Exactly
+zero response radius supplies no smooth norm gradient, so native smooth
+optimization admission refuses such a baseline.
+
+The source admits 1..=64 uniquely named limits. Names contain ASCII letters,
+digits, underscores or hyphens, up to 64 bytes. Bounds are finite with
+magnitude at most 1e15; scales lie in `[1e-12,1e15]` in their declared unit.
+Both sharpness values lie in `[1e-6,1e6]`; when strength also declares
+`joint-sharpness`, the values must agree. The memory admission envelope
+includes bounded observation storage. Reports preserve original order, signed
+bounds, units, observation patches/origins, separate adverse coefficients,
+physical extrema, measured witnesses, residuals and complete gradient policy.
+Continuation rebuilds the same observations and verifies the native accepted
+and incumbent endpoints with all constraints enabled. Changing an observation,
+bound, sense, support or moment origin changes the source-bound problem.
+
+`examples/marquee/bracket-3d-affine-responses.fsim` declares a displacement
+window, a support-force window and a support-moment upper bound together with
+compliance and strength. Its inputs are a numerical demonstration; these
+discrete linear-model estimates do not establish continuum serviceability or
+support capacity.
 
 ### Scientific field export for 3-D studies
 

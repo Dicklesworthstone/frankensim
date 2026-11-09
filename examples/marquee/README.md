@@ -175,6 +175,44 @@ continuum stress maximum or certify safety, fatigue, buckling or manufacturing
 tolerance. The example's geometry, stiffness and allowable are demonstration
 inputs, and its feasibility must be assessed from the actual computed report.
 
+## Minimum material with displacement and support limits
+
+`bracket-3d-affine-responses.fsim` combines compliance, sampled strength and
+signed serviceability limits over the same self-weight and uncertain-load
+family. It declares a free-side mean z-displacement window, a z support-force
+window, and an upper bound on the y support moment about the authored origin.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-responses.fsim responses.db --budget 2
+frankensim --json report study-<receipt-hash> responses.db
+frankensim --json study --resume study-<receipt-hash> responses.db --budget 2
+```
+
+The final `affine-responses` section declares `sharpness`, `joint-sharpness`
+and an ordered `limits` list. Each `mean-displacement`, `support-force` or
+`support-moment` row has a unique name, Cartesian axis, signed `at-most` or
+`at-least` sense, original bound and positive same-unit scale. Displacement
+uses `bound-m`/`scale-m`, force uses `bound-n`/`scale-n`, and moment uses
+`bound-n-m`/`scale-n-m`. The example demonstrates both sides of a window;
+negative and zero bounds retain their ordinary signed meanings.
+
+Mean displacement uses the fixed reference cut-volume average in the declared
+initial-grid-aligned `x-fraction` band. Force and moment are native numerical
+tractions on the solid's embedded support; moments use the authored
+`about-m` origin. The support reaction remains material dependent during
+optimization. Each inequality has its own adverse load coefficients and
+remeasured combined-field witness. Reports show all original bounds and their
+physical units, with selected and last-accepted values. Resume preserves the
+full constraint family and original gradient evidence.
+
+The implementation shares offset/basis primal fields with compliance and
+strength. Response adjoints are bounded by the smaller of the number of
+limits and the number of affine fields. A response with exactly zero
+uncertainty radius has no smooth norm derivative and is refused for smooth
+optimization. The example's limits are demonstration inputs whose feasibility
+must be read from the computed report; no continuum serviceability or physical
+support-capacity certification is implied.
+
 ## Thermal cooling-hole radius study
 
 `thermal-2d.fsim` runs normalized scalar Poisson physics through the CLI,

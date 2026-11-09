@@ -1,10 +1,16 @@
 //! Retain the actual affine witness and selected physical design in the ledger.
 use super::*;
 
+#[path = "response_output.rs"]
+mod response_output;
 #[path = "strength_output.rs"]
 mod strength;
 
-pub(super) fn measurement(point: &AffineLoadSpaceDesignPoint3, config: Config) -> Result<String> {
+pub(super) fn measurement(
+    point: &AffineLoadSpaceDesignPoint3,
+    config: Config,
+    spec: &Spec,
+) -> Result<String> {
     let e = &point.evaluation;
     let p = &e.physical;
     let o = &e.oracle;
@@ -23,8 +29,21 @@ pub(super) fn measurement(point: &AffineLoadSpaceDesignPoint3, config: Config) -
         .map(strength::measurement)
         .transpose()?
         .unwrap_or_else(|| "null".into());
+    let responses = match (&spec.affine_responses, &e.responses) {
+        (None, None) => String::new(),
+        (Some(family), Some(evaluation)) => format!(
+            ",\"responses\":{}",
+            response_output::measurement(family, evaluation)?
+        ),
+        _ => {
+            return Err(fail(
+                "cli-study-sdf3-response-output",
+                "retained response family differs from its source",
+            ));
+        }
+    };
     Ok(format!(
-        "{{\"dilated_volume_fraction\":{:.17e},\"nominal_volume_fraction\":{:.17e},\"eroded_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"feasible\":{},\"joint_constraint\":{constraint:.17e},\"strength\":{strength},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"duality_gap\":{:.17e},\"relative_duality_gap\":{:.17e},\"relative_separation\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
+        "{{\"dilated_volume_fraction\":{:.17e},\"nominal_volume_fraction\":{:.17e},\"eroded_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"feasible\":{},\"joint_constraint\":{constraint:.17e},\"strength\":{strength}{responses},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"duality_gap\":{:.17e},\"relative_duality_gap\":{:.17e},\"relative_separation\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
         p.dilated_volume_fraction,
         p.nominal_volume_fraction,
         p.eroded_volume_fraction,
@@ -56,6 +75,7 @@ pub(super) fn measurement(point: &AffineLoadSpaceDesignPoint3, config: Config) -
 fn fields(
     study: &CutDensityStudy3<AdaptiveSolveSpace3>,
     point: &AffineLoadSpaceDesignPoint3,
+    spec: &Spec,
 ) -> Result<String> {
     let e = &point.evaluation;
     let operator = study.operator().elasticity();
@@ -99,8 +119,21 @@ fn fields(
         .map(|stress| strength::fields(stress, study.cells()))
         .transpose()?
         .map_or_else(String::new, |fields| format!(",\"strength\":{fields}"));
+    let responses = match (&spec.affine_responses, &e.responses) {
+        (None, None) => String::new(),
+        (Some(family), Some(evaluation)) => format!(
+            ",\"responses\":{}",
+            response_output::fields(family, evaluation)?
+        ),
+        _ => {
+            return Err(fail(
+                "cli-study-sdf3-response-output",
+                "retained response fields differ from their source",
+            ));
+        }
+    };
     Ok(format!(
-        "{{\"cells\":[{cells}],\"physical_nodes_m\":{:?},\"cell_nodes\":{:?},\"displacement_layout\":\"basis column then node-major xyz, on eroded material\",\"basis_displacements_m\":{basis:?},\"offset_displacement_m\":{offset:?},\"worst_displacement_m\":{worst:?}{strength}}}",
+        "{{\"cells\":[{cells}],\"physical_nodes_m\":{:?},\"cell_nodes\":{:?},\"displacement_layout\":\"basis column then node-major xyz, on eroded material\",\"basis_displacements_m\":{basis:?},\"offset_displacement_m\":{offset:?},\"worst_displacement_m\":{worst:?}{strength}{responses}}}",
         operator.physical_nodes(),
         operator.cell_nodes(),
     ))
@@ -153,17 +186,22 @@ pub(super) fn persist(
         "last-accepted"
     };
     let feasible = config.feasible(state.selected());
-    let selected = measurement(state.selected(), config)?;
-    let accepted = measurement(&state.accepted, config)?;
+    let selected = measurement(state.selected(), config, spec)?;
+    let accepted = measurement(&state.accepted, config, spec)?;
     let strength_marker = if config.stress.is_some() {
         ",\"strength_constrained\":true"
     } else {
         ""
     };
+    let response_marker = if spec.affine_responses.is_some() {
+        ",\"response_constrained\":true"
+    } else {
+        ""
+    };
     let design = format!(
-        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{},\"last_accepted\":{}}}",
-        fields(study, state.selected())?,
-        fields(study, &state.accepted)?
+        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker}{response_marker},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{},\"last_accepted\":{}}}",
+        fields(study, state.selected(), spec)?,
+        fields(study, &state.accepted, spec)?
     );
     let mut history = String::new();
     let mut table = String::new();
@@ -202,6 +240,20 @@ pub(super) fn persist(
         },
         |limit| strength::policy(limit, gradient.constraints.sharpness),
     );
+    let constraint_policy = match gradient.constraints.responses {
+        None => constraint_policy,
+        Some(options) => {
+            let strength = gradient.constraints.stress.map_or_else(
+                || "null".into(),
+                |limit| strength::policy(limit, gradient.constraints.sharpness),
+            );
+            format!(
+                "{{\"kind\":\"joint-affine-constraints\",\"joint_sharpness\":{:.17e},\"responses\":{},\"strength\":{strength}}}",
+                gradient.constraints.sharpness,
+                response_output::options(options)
+            )
+        }
+    };
     let check = format!(
         "{{\"passed\":{},\"directions\":{},\"step\":{:.17e},\"relative_tolerance\":{:.17e},\"baseline_objective\":{:.17e},\"baseline_constraint\":{:.17e},\"objective_relative_error\":{:.17e},\"constraint_relative_error\":{:.17e},\"linear_iterations\":{},\"linear_solves\":{},\"preconditioner_operator_applications\":{},\"preconditioner_galerkin_products\":{},\"constraint_policy\":{constraint_policy}}}",
         gradient.passed(),
@@ -231,8 +283,16 @@ pub(super) fn persist(
         || "null".into(),
         |limit| strength::policy(limit, config.joint_sharpness),
     );
+    let response_model = spec
+        .affine_responses
+        .as_ref()
+        .map(response_output::model)
+        .transpose()?
+        .map_or_else(String::new, |model| {
+            format!(",\"response_constraints\":{model}")
+        });
     let model = format!(
-        "{{\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_limit_j\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\",\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}}}",
+        "{{\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_limit_j\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\",\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}}}",
         spec.loads.len(),
         law.density_kg_m3,
         law.acceleration_m_s2,
@@ -262,8 +322,14 @@ pub(super) fn persist(
         (Some(selected), Some(accepted)) => strength::html(selected, accepted),
         _ => String::new(),
     };
+    let response_html = match (&spec.affine_responses, &chosen.responses, &latest.responses) {
+        (Some(family), Some(selected), Some(accepted)) => {
+            response_output::html(family, selected, accepted)?
+        }
+        _ => String::new(),
+    };
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum material with self-weight and uncertain loads</title><body><h1>3-D minimum material with self-weight and uncertain loads</h1><p>Status: {}. Estimated numerical results.</p><p>Selected design: {selection}; cap-feasible over the declared affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>Worst compliance must be at most {:.8e} J. The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{strength_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Dilated volume fraction</th><th>Worst compliance / limit</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum material with self-weight and uncertain loads</title><body><h1>3-D minimum material with self-weight and uncertain loads</h1><p>Status: {}. Estimated numerical results.</p><p>Selected design: {selection}; cap-feasible over the declared affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>Worst compliance must be at most {:.8e} J. The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{strength_html}{response_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Dilated volume fraction</th><th>Worst compliance / limit</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
         state.status,
         chosen.physical.dilated_volume_fraction,
         chosen.worst_compliance,

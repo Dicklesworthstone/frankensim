@@ -10,6 +10,8 @@ use fs_topopt::sdf3::stress::{StressMeasure3, StressOptions3};
 mod csg;
 #[path = "spec/sampled.rs"]
 mod sampled;
+#[path = "spec/responses.rs"]
+pub(super) mod responses;
 
 #[derive(Clone, Debug)]
 pub(super) struct Spec {
@@ -60,6 +62,8 @@ pub(super) struct Spec {
     pub load_space: Option<load_space::Config>,
     /// Native self-weight is a common offset to the uncertain external load space.
     pub affine_load_space: Option<affine_load_space::Config>,
+    /// Original signed displacement/support bounds over the same affine ball.
+    pub affine_responses: Option<responses::Family>,
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
@@ -155,7 +159,7 @@ fn linear_solver(node: &Node) -> Result<solver::Policy> {
 pub(super) fn parse(source: &str) -> Result<Spec> {
     let root = fs_ir::sexpr::parse(source).map_err(|e| invalid(e.to_string()))?;
     let items = super::super::list(&root, "3-D study")?;
-    if !(13..=17).contains(&items.len())
+    if !(13..=18).contains(&items.len())
         || !matches!(&items[0].kind, NodeKind::Symbol(s) if s == "fsim-sdf3-study")
         || !matches!(&items[1].kind, NodeKind::Keyword(s) if s == "version")
         || !matches!(items[2].kind, NodeKind::Int(1))
@@ -272,6 +276,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
             affine_load_space = Some(affine_load_space::Config {
                 cap_j: scalar(opt[5])?,
                 stress: None,
+                response_options: None,
                 joint_sharpness: 40.0,
                 options: fs_topopt::sdf3::robust::envelope::affine_load_space::design::AffineLoadSpaceDesignOptions3 {
                     robustness: fs_topopt::sdf3::robust::RobustOptions3 { threshold_offset: scalar(opt[6])? },
@@ -362,21 +367,22 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let mut region_node = None;
     let mut material_acceleration = None;
     let mut affine_strength = false;
+    let mut affine_responses = None;
     for node in &items[13..] {
         let section = super::super::list(node, "optional 3-D study section")?;
         match section.first().map(|n| &n.kind) {
             Some(NodeKind::Symbol(name)) if name == "design-regions"
                 && region_node.is_none() && matches!(solver, solver::Policy::Legacy)
-                && material_acceleration.is_none() && !affine_strength => {
+                && material_acceleration.is_none() && !affine_strength && affine_responses.is_none() => {
                 region_node = Some(node);
             }
             Some(NodeKind::Symbol(name)) if name == "linear-solver"
                 && matches!(solver, solver::Policy::Legacy) && material_acceleration.is_none()
-                && !affine_strength => {
+                && !affine_strength && affine_responses.is_none() => {
                 solver = linear_solver(node)?;
             }
             Some(NodeKind::Symbol(name)) if name == "material-acceleration"
-                && material_acceleration.is_none() && !affine_strength => {
+                && material_acceleration.is_none() && !affine_strength && affine_responses.is_none() => {
                 let values = fields(node, "material-acceleration", &[
                     "density-kg-m3", "acceleration-m-s2", "max-stencil-terms",
                 ])?;
@@ -387,7 +393,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                 });
             }
             Some(NodeKind::Symbol(name)) if name == "affine-strength"
-                && !affine_strength && material_acceleration.is_some() => {
+                && !affine_strength && material_acceleration.is_some() && affine_responses.is_none() => {
                 let config = affine_load_space.as_mut().ok_or_else(||
                     invalid("affine-strength requires affine-load-space-limited-simp"))?;
                 let values = fields(node, "affine-strength", &[
@@ -406,7 +412,19 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                 config.joint_sharpness = scalar(values[4])?;
                 affine_strength = true;
             }
-            _ => return Err(invalid("optional sections must be design-regions, linear-solver, material-acceleration, then affine-strength, without duplicates or unknown fields")),
+            Some(NodeKind::Symbol(name)) if name == "affine-responses"
+                && affine_responses.is_none() && material_acceleration.is_some() => {
+                let config = affine_load_space.as_mut().ok_or_else(||
+                    invalid("affine-responses requires affine-load-space-limited-simp"))?;
+                let (family, joint_sharpness) = responses::parse(node)?;
+                if affine_strength && joint_sharpness != config.joint_sharpness {
+                    return Err(invalid("affine-responses and affine-strength must declare the same joint-sharpness"));
+                }
+                config.response_options = Some(family.options);
+                config.joint_sharpness = joint_sharpness;
+                affine_responses = Some(family);
+            }
+            _ => return Err(invalid("optional sections must be design-regions, linear-solver, material-acceleration, affine-strength, then affine-responses, without duplicates or unknown fields")),
         }
     }
     let canonical = fs_ir::sexpr::print(&root).map_err(|e| invalid(e.to_string()))?;
@@ -427,7 +445,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?, formulation,
         loads, surfaces, material_acceleration, density, volume, radius, updates, move_limit, marking, max_marks,
-        schedule, regions: Vec::new(), solver, stress, stress_measure, load_space, affine_load_space,
+        schedule, regions: Vec::new(), solver, stress, stress_measure, load_space, affine_load_space, affine_responses,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
     spec.validate()?;
@@ -481,6 +499,7 @@ impl Spec {
             } else { 0 })
             .saturating_add(self.sampled.as_ref().map_or(0, |s| s.memory_envelope))
             .saturating_add(self.material_acceleration.map_or(0, |law| law.memory_envelope()))
+            .saturating_add(self.affine_responses.as_ref().map_or(0, |family| family.memory_envelope()))
             .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
             return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));
