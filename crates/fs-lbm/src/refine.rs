@@ -480,31 +480,32 @@ impl RefinedChannel {
 
     /// Seed a transverse shear wave u_y = a·sin(2πx/L) on both grids
     /// (same PHYSICAL field; lattice velocity is scale-invariant under
-    /// convective scaling).
+    /// convective scaling). Retain every cell's density and held force while
+    /// replacing its velocity and nonequilibrium stress. Wall populations stay
+    /// unchanged; no unit-density reset or additional half-force impulse occurs.
     pub fn seed_shear_wave(&mut self, a: f64) {
-        let nxc = self.coarse.nx;
-        for j in 0..self.coarse.ny {
-            for x in 0..nxc {
-                let i = self.coarse.idx(x, j);
-                if self.coarse.flags[i] != Cell::Wall {
+        for grid in [&mut self.coarse, &mut self.fine] {
+            for cell in 0..grid.f.len() {
+                if grid.flags[cell] != Cell::Wall {
+                    let rho = grid.f[cell].iter().sum::<f64>();
+                    let x = cell % grid.nx;
+                    // Each grid's cell centre samples the same physical period.
                     let uy = a * fs_math::det::sin(
-                        std::f64::consts::TAU * (x as f64 + 0.5) / nxc as f64,
+                        std::f64::consts::TAU * (x as f64 + 0.5) / grid.nx as f64,
                     );
-                    self.coarse.f[i] = equilibrium(1.0, 0.0, uy);
-                }
-            }
-        }
-        let nxf = self.fine.nx;
-        for k in 0..self.fine.ny {
-            for x in 0..nxf {
-                let i = self.fine.idx(x, k);
-                if self.fine.flags[i] != Cell::Wall {
-                    // Same physical phase: fine cell x covers phase
-                    // (x + 0.5)/nxf of the same period.
-                    let uy = a * fs_math::det::sin(
-                        std::f64::consts::TAU * (x as f64 + 0.5) / nxf as f64,
-                    );
-                    self.fine.f[i] = equilibrium(1.0, 0.0, uy);
+                    let force =
+                        core::array::from_fn(|d| grid.g[d].mul_add(rho, grid.fext[cell][d]));
+                    let mut populations = equilibrium(rho, 0.0, uy);
+                    if force != [0.0; 2] {
+                        crate::thermal::forcing::reframe2(
+                            &mut populations,
+                            [0.0, uy],
+                            [0.0; 2],
+                            force,
+                        );
+                    }
+                    populations[0] += rho - populations.iter().sum::<f64>();
+                    grid.f[cell] = populations;
                 }
             }
         }
@@ -839,6 +840,58 @@ mod tests {
                     strain[i][j]
                 );
             }
+        }
+    }
+
+    /// G0/G3: changing the prescribed velocity is not a mass reset, and each
+    /// level's distinct Guo force must not add a spurious half-step velocity.
+    #[test]
+    fn shear_wave_seed_preserves_density_and_uses_physical_velocity() {
+        for acceleration in [0.0, 0.004] {
+            let mut channel = RefinedChannel::new(4, 3, 4, 0.8, acceleration);
+            for grid in [&mut channel.coarse, &mut channel.fine] {
+                for cell in 0..grid.f.len() {
+                    let rho = 0.4 + 0.17 * (cell % 9) as f64;
+                    grid.fext[cell] = [
+                        -0.3 * acceleration * (1 + cell % 3) as f64,
+                        0.2 * acceleration * (1 + cell % 2) as f64,
+                    ];
+                    grid.f[cell] = forced_state(
+                        rho,
+                        [0.03, -0.02],
+                        [[0.001, 0.002], [0.002, -0.0005]],
+                        grid.tau[cell],
+                        grid.g,
+                        grid.fext[cell],
+                    );
+                }
+            }
+            let before = [channel.coarse.f.clone(), channel.fine.f.clone()];
+            let mass_before = inventory(&channel, [0.0; 2])[0];
+            let amplitude = 0.05;
+            channel.seed_shear_wave(amplitude);
+            for (grid, original) in [&channel.coarse, &channel.fine].into_iter().zip(before) {
+                for (cell, previous) in original.iter().enumerate() {
+                    if grid.flags[cell] == Cell::Wall {
+                        assert_eq!(grid.f[cell].map(f64::to_bits), previous.map(f64::to_bits));
+                    } else {
+                        let rho = previous.iter().sum::<f64>();
+                        let phase = std::f64::consts::TAU * ((cell % grid.nx) as f64 + 0.5)
+                            / grid.nx as f64;
+                        assert_state(
+                            grid,
+                            cell,
+                            rho,
+                            [0.0, amplitude * fs_math::det::sin(phase)],
+                            [[0.0; 2]; 2],
+                        );
+                    }
+                }
+            }
+            assert!(
+                (inventory(&channel, [0.0; 2])[0] - mass_before).abs()
+                    < 8.0 * f64::EPSILON * mass_before
+            );
         }
     }
 
