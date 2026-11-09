@@ -264,3 +264,114 @@ fn g4_planar_pressure_outlet_invalid_pressure_backflow_and_late_cancel_are_atomi
     assert_eq!(flow.last_step(), Some(&report));
     assert_eq!(flow.time(), time);
 }
+
+
+fn characteristic_topology(
+    side: BoundarySide,
+    reference_pressure_pa: f64,
+    reference_velocity_m_s: f64,
+) -> Boundaries2d {
+    let outlet = BoundaryCondition::CharacteristicOutlet {
+        reference_pressure_pa,
+        reference_velocity_m_s,
+    };
+    let pair = AxisBoundaries::Ends {
+        lower: if side.sign() < 0.0 { outlet } else { BoundaryCondition::Transmissive },
+        upper: if side.sign() > 0.0 { outlet } else { BoundaryCondition::Transmissive },
+    };
+    if side.axis() == 0 {
+        Boundaries2d { x: pair, ..PERIODIC }
+    } else {
+        Boundaries2d { y: pair, ..PERIODIC }
+    }
+}
+
+#[test]
+fn g0_characteristic_outlet_preserves_planar_advection_and_shear_on_every_side() {
+    let grid = CartesianGrid::new(2, 3, 0.1, 0.2, 0.4).unwrap();
+    for side in SIDES {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let mut velocity = [0.2, -0.3];
+            velocity[side.axis()] = 0.4 * side.sign();
+            let mut flow = field(
+                gas(0.4),
+                grid,
+                characteristic_topology(side, 1.0, velocity[side.axis()]),
+                |_| [1.0, velocity[0], velocity[1], 1.0],
+            );
+            let initial = flow.states().to_vec();
+            let report = flow.step(
+                Time::new(0.001),
+                StepControl { reconstruction, ..StepControl::default() },
+                || false,
+            ).unwrap();
+            check_balance(&report);
+            assert_eq!(report.halvings, 0);
+            for (actual, expected) in flow.states().iter().zip(initial) {
+                for (a, e) in actual.array().into_iter().zip(expected.array()) {
+                    close(a, e, 3e-11);
+                }
+            }
+        }
+    }
+}
+
+fn planar_outgoing_pulse_remainder(outlet: BoundaryCondition) -> f64 {
+    let cells = 96;
+    let grid = CartesianGrid::new(cells, 2, 1.0 / cells as f64, 0.5, 0.4).unwrap();
+    let boundaries = Boundaries2d {
+        x: AxisBoundaries::Ends {
+            lower: BoundaryCondition::Transmissive,
+            upper: outlet,
+        },
+        y: AxisBoundaries::Periodic,
+    };
+    let mut flow = field(gas(0.0), grid, boundaries, |x| {
+        // Independent gamma=1.4 simple wave over the manufactured Cp/R=3.5 source.
+        let pressure = 1.0 + 1e-3 * (-((x[0] - 0.65) / 0.055).powi(2)).exp();
+        let density = pressure.powf(1.0 / 1.4);
+        let sound_speed = (1.4 * pressure / density).sqrt();
+        [density, 0.3 + 5.0 * (sound_speed - 1.4_f64.sqrt()), 0.2, pressure]
+    });
+    run(&mut flow, 0.6);
+    flow.states().iter().map(|state| {
+        (state.primitive(flow.gas(), || false).unwrap().pressure - 1.0).powi(2)
+    }).sum::<f64>().sqrt()
+}
+
+#[test]
+fn g1_characteristic_outlet_releases_a_pressure_pulse_from_the_planar_rk_owner() {
+    let outgoing = planar_outgoing_pulse_remainder(BoundaryCondition::CharacteristicOutlet {
+        reference_pressure_pa: 1.0,
+        reference_velocity_m_s: 0.3,
+    });
+    let fixed = planar_outgoing_pulse_remainder(BoundaryCondition::PressureOutlet {
+        pressure_pa: 1.0,
+    });
+    assert!(fixed > 1e-4, "fixed-pressure reflection={fixed:e}");
+    assert!(outgoing < 0.05 * fixed, "characteristic={outgoing:e}, fixed={fixed:e}");
+}
+
+#[test]
+fn g4_characteristic_outlet_admission_backflow_and_cancellation_are_atomic() {
+    let grid = CartesianGrid::new(2, 2, 0.1, 0.1, 0.4).unwrap();
+    for (pressure, velocity) in [(0.0, 0.3), (f64::NAN, 0.3), (1.0, -0.3), (1.0, f64::INFINITY)] {
+        assert!(characteristic_topology(BoundarySide::XMax, pressure, velocity)
+            .x.admit::<Error>().is_err());
+    }
+    let mut flow = field(
+        gas(0.4), grid,
+        characteristic_topology(BoundarySide::XMax, 1.0, 0.3),
+        |_| [1.0, -0.2, 0.1, 1.0],
+    );
+    let initial = flow.states().to_vec();
+    assert!(flow.step(Time::new(0.001), StepControl::default(), || false).is_err());
+    assert_eq!(flow.states(), initial);
+    assert_eq!(flow.time().value(), 0.0);
+    assert!(matches!(
+        flow.step(Time::new(0.001), StepControl::default(), || true),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(flow.states(), initial);
+    assert_eq!(flow.time().value(), 0.0);
+}

@@ -481,15 +481,26 @@ impl MixtureEuler2d {
             &self.grid,
             self.boundaries,
             cancelled,
-            |index, axis, sign, pressure_pa, cancelled| {
+            |index, axis, sign, pressure_pa, reference_velocity, cancelled| {
                 let q = cell(&self.states[index * width..(index + 1) * width], n);
-                let flux = self.gas.pressure_outlet_normal_flux(
-                    q.normal(axis),
-                    sign,
-                    pressure_pa,
-                    &mut outlet_flux[..width],
-                    cancelled,
-                )?;
+                let flux = if let Some(velocity) = reference_velocity {
+                    self.gas.characteristic_outlet_normal_flux(
+                        q.normal(axis),
+                        sign,
+                        pressure_pa,
+                        velocity,
+                        &mut outlet_flux[..width],
+                        cancelled,
+                    )?
+                } else {
+                    self.gas.pressure_outlet_normal_flux(
+                        q.normal(axis),
+                        sign,
+                        pressure_pa,
+                        &mut outlet_flux[..width],
+                        cancelled,
+                    )?
+                };
                 let density = sum(q.partial_densities.iter().copied());
                 Ok(flux.signal_speed / self.grid.spacing[axis]
                     + ((q.momentum[1 - axis] / density).abs() + flux.signal_speed)
@@ -1005,6 +1016,20 @@ fn spatial_with_contact(
                             .pressure_outlet_normal_flux(
                                 q(k), sign, pressure_pa, &mut result[..width], &mut *cancelled,
                             )?,
+                        (
+                            true,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => gas.characteristic_outlet_normal_flux(
+                            q(k),
+                            sign,
+                            reference_pressure_pa,
+                            reference_velocity_m_s,
+                            &mut result[..width],
+                            &mut *cancelled,
+                        )?,
                         (false, BoundaryCondition::Reflecting) => {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
                             gas.stationary_wall_normal_flux_from_primitive(
@@ -1030,6 +1055,23 @@ fn spatial_with_contact(
                                 normal_primitive(&left[..width], n, axis),
                                 sign,
                                 pressure_pa,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        (
+                            false,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            gas.characteristic_outlet_normal_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
+                                sign,
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?

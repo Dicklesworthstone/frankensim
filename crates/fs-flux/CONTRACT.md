@@ -9457,3 +9457,41 @@ residuals and independent energy accounting. A native FEM regression is authored
 for the complete perfect-slip channel plus external storage/inertia, physical
 pressure datum and coupled energy. Full native FEM execution remains pending:
 the workspace dependency build was killed in pinned asupersync before fs-flux.
+
+## Characteristic pressure outlets on Cartesian gas fields
+
+`BoundaryCondition::CharacteristicOutlet { reference_pressure_pa,
+reference_velocity_m_s }` connects the original acoustic characteristic law to
+frozen and evolving-species Euler fields in two and three dimensions. Reference
+velocity is signed along the positive Cartesian axis and must point outward
+(or be zero) on its side. Reference absolute pressure must be positive.
+The original source projects that pressure onto the local interior isentrope;
+no remote temperature, constant gamma or replacement composition is inferred.
+
+Both first-order and MUSCL traces retain departing entropy, all original
+species, tangential velocities and complete kinetic energy. The same face flux
+supplies conservative RK transfer and boundary impulse. Source-owned sonic
+sampling and supersonic causality remain active; reverse contact motion refuses
+before publication. Initial face wave bounds participate in the complete
+unsplit interval, including transverse advection. Hydrostatic bounds distinguish
+the configured pressure reference from the reconstructed physical face state.
+Uniform 3-D bindings survive trial clones without per-step allocation.
+
+Frozen molecular open-face behavior is unchanged. Planar evolving-species
+molecular transport refuses incomplete baths. The volumetric mixture's explicit
+`PressureOutletPolicy::ZeroDiffusiveFlux` may also close a characteristic outlet;
+its default still refuses. This is an independently declared molecular closure,
+not a thermodynamic reservoir implied by the acoustic condition.
+
+The added G0/G1/G4 regressions cover all four/six orientations, both
+reconstruction modes, variable heat capacities, complete shear/species energy,
+absent species, outgoing pulse reflection versus fixed pressure, admission and
+transactional refusal. The source-owned boundary kernels passed native tests
+in a bounded source-linked build. The added Cartesian integration regressions
+were not executed: the workspace's constellation dependencies were unavailable
+and the execution environment subsequently went offline.
+
+This locally one-dimensional, smooth-wave outlet does not establish exact
+nonreflection for oblique waves, shocks or vortical boundary interactions. It
+does not fix instantaneous outlet pressure, supply backflow thermodynamics,
+resolve a finite exterior gas inventory or certify discrete entropy stability.

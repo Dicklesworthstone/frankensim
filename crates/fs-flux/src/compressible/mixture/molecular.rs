@@ -882,7 +882,8 @@ fn spatial<L: TransportLaw>(
                 )?
             }
             cartesian::FaceKind::Boundary {
-                condition: BoundaryCondition::PressureOutlet { .. },
+                condition: BoundaryCondition::PressureOutlet { .. }
+                    | BoundaryCondition::CharacteristicOutlet { .. },
                 ..
             } => {
                 return Err(DissipationError::Invalid(

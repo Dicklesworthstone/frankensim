@@ -173,6 +173,35 @@ pub enum BoundaryCondition {
         /// Externally maintained absolute pressure [Pa].
         pressure_pa: f64,
     },
+    /// Incoming acoustic characteristic from reference pressure and velocity.
+    /// The outgoing characteristic, entropy, composition and shear remain
+    /// interior-owned. The original caloric source projects the pressure
+    /// reference onto that same entropy without assuming constant gamma.
+    ///
+    /// This locally one-dimensional condition releases normally outgoing
+    /// smooth acoustic waves; it is not an exact nonreflecting condition for
+    /// oblique waves, shocks, or a molecular reservoir. Backflow refuses and
+    /// supersonic outflow extrapolates the complete interior state.
+    CharacteristicOutlet {
+        /// Positive absolute reference pressure [Pa].
+        reference_pressure_pa: f64,
+        /// Velocity along the positive Cartesian axis [m/s], not the outward
+        /// normal. It must point outward or be zero on the selected side.
+        reference_velocity_m_s: f64,
+    },
+}
+
+impl BoundaryCondition {
+    fn pressure_control(self) -> Option<(f64, Option<f64>)> {
+        match self {
+            Self::PressureOutlet { pressure_pa } => Some((pressure_pa, None)),
+            Self::CharacteristicOutlet {
+                reference_pressure_pa,
+                reference_velocity_m_s,
+            } => Some((reference_pressure_pa, Some(reference_velocity_m_s))),
+            _ => None,
+        }
+    }
 }
 
 /// Periodic axes share exactly the same face flux at both ends.
@@ -191,12 +220,24 @@ pub enum AxisBoundaries {
 impl AxisBoundaries {
     fn admit<E: cartesian::Failure>(self) -> Result<(), E> {
         if let Self::Ends { lower, upper } = self {
-            for condition in [lower, upper] {
+            for (condition, sign) in [(lower, -1.0), (upper, 1.0)] {
                 if let BoundaryCondition::PressureOutlet { pressure_pa } = condition
                     && (!pressure_pa.is_finite() || pressure_pa < 0.0)
                 {
                     return Err(E::invalid(
                         "pressure outlet needs nonnegative finite absolute pressure",
+                    ));
+                }
+                if let BoundaryCondition::CharacteristicOutlet {
+                    reference_pressure_pa,
+                    reference_velocity_m_s,
+                } = condition
+                    && (!positive(reference_pressure_pa)
+                        || !reference_velocity_m_s.is_finite()
+                        || sign * reference_velocity_m_s < 0.0)
+                {
+                    return Err(E::invalid(
+                        "characteristic outlet needs positive pressure and outward reference velocity",
                     ));
                 }
             }
@@ -874,6 +915,19 @@ fn spatial(
                     .pressure_outlet_normal_flux(
                         states[k].normal(axis), sign, pressure_pa, &mut *cancelled,
                     )?,
+                (
+                    true,
+                    BoundaryCondition::CharacteristicOutlet {
+                        reference_pressure_pa,
+                        reference_velocity_m_s,
+                    },
+                ) => gas.characteristic_outlet_normal_flux(
+                    states[k].normal(axis),
+                    sign,
+                    reference_pressure_pa,
+                    reference_velocity_m_s,
+                    &mut *cancelled,
+                )?,
                 (false, BoundaryCondition::Reflecting) => gas
                     .stationary_wall_normal_flux_from_primitive(
                         reconstruct(k, 0.5 * sign),
@@ -888,6 +942,19 @@ fn spatial(
                     .pressure_outlet_normal_flux_from_primitive(
                         reconstruct(k, 0.5 * sign), sign, pressure_pa, &mut *cancelled,
                     )?,
+                (
+                    false,
+                    BoundaryCondition::CharacteristicOutlet {
+                        reference_pressure_pa,
+                        reference_velocity_m_s,
+                    },
+                ) => gas.characteristic_outlet_normal_flux_from_primitive(
+                    reconstruct(k, 0.5 * sign),
+                    sign,
+                    reference_pressure_pa,
+                    reference_velocity_m_s,
+                    &mut *cancelled,
+                )?,
             }
         };
         stats.fallback += usize::from(flux.used_hll_fallback);
@@ -924,7 +991,7 @@ fn pressure_outlet_rate(
         grid,
         boundaries,
         cancelled,
-        |cell, axis, sign, p, cancelled| {
+        |cell, axis, sign, p, reference_velocity, cancelled| {
             let q = states[cell];
             let (flux, shear) = if let Some(balance) = hydrostatic {
                 let primitive = balance.primitive(gas, grid, cell, q, cancelled)?;
@@ -951,22 +1018,34 @@ fn pressure_outlet_rate(
                     primitive.array()
                 };
                 (
-                    gas.pressure_outlet_normal_flux_from_primitive(
-                        NormalPrimitive {
+                    {
+                        let primitive = NormalPrimitive {
                             density: trace[0],
                             normal_velocity: trace[axis + 1],
                             transverse_velocity: trace[2 - axis],
                             pressure: trace[3],
-                        },
-                        sign,
-                        p,
-                        cancelled,
-                    )?,
+                        };
+                        if let Some(velocity) = reference_velocity {
+                            gas.characteristic_outlet_normal_flux_from_primitive(
+                                primitive, sign, p, velocity, cancelled,
+                            )?
+                        } else {
+                            gas.pressure_outlet_normal_flux_from_primitive(
+                                primitive, sign, p, cancelled,
+                            )?
+                        }
+                    },
                     trace[2 - axis],
                 )
             } else {
                 (
-                    gas.pressure_outlet_normal_flux(q.normal(axis), sign, p, cancelled)?,
+                    if let Some(velocity) = reference_velocity {
+                        gas.characteristic_outlet_normal_flux(
+                            q.normal(axis), sign, p, velocity, cancelled,
+                        )?
+                    } else {
+                        gas.pressure_outlet_normal_flux(q.normal(axis), sign, p, cancelled)?
+                    },
                     q.momentum[1 - axis] / q.density,
                 )
             };

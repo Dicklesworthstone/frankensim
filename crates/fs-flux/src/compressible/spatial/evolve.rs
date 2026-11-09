@@ -368,6 +368,19 @@ fn spatial(
                             let q = states[k].normal(axis);
                             gas.hllc_spatial_flux(q, q, &mut *cancelled)?
                         }
+                        (
+                            true,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => gas.characteristic_outlet_spatial_flux(
+                            states[k].normal(axis),
+                            sign,
+                            reference_pressure_pa,
+                            reference_velocity_m_s,
+                            &mut *cancelled,
+                        )?,
                         (false, BoundaryCondition::Reflecting) => gas
                             .stationary_wall_spatial_flux_from_primitive(
                                 reconstruct(k, 0.5 * sign),
@@ -378,6 +391,19 @@ fn spatial(
                             let p = reconstruct(k, 0.5 * sign);
                             gas.hllc_spatial_flux_from_primitive(p, p, &mut *cancelled)?
                         }
+                        (
+                            false,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => gas.characteristic_outlet_spatial_flux_from_primitive(
+                            reconstruct(k, 0.5 * sign),
+                            sign,
+                            reference_pressure_pa,
+                            reference_velocity_m_s,
+                            &mut *cancelled,
+                        )?,
                         (_, BoundaryCondition::PressureOutlet { .. }) => {
                             unreachable!("admitted pressure outlet has an immutable source binding")
                         }

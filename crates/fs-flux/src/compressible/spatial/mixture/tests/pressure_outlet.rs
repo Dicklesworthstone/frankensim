@@ -177,3 +177,49 @@ fn g4_volumetric_mixture_pressure_outlet_refuses_invalid_pressure_and_reverse_fl
     assert!(reversed.last_step().is_none());
     assert!(reversed.boundary_impulses.iter().all(|&value| value == 0.0));
 }
+
+
+#[test]
+fn g0_characteristic_outlet_preserves_volumetric_species_and_complete_shear_energy() {
+    let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
+    for side in BoundarySide::ALL {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let mut velocity = [0.2, -0.3, 0.1];
+            velocity[side.axis()] = 0.4 * side.sign();
+            let outlet = BoundaryCondition::CharacteristicOutlet {
+                reference_pressure_pa: 1.0,
+                reference_velocity_m_s: velocity[side.axis()],
+            };
+            let pair = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 { outlet } else { BoundaryCondition::Transmissive },
+                upper: if side.sign() > 0.0 { outlet } else { BoundaryCondition::Transmissive },
+            };
+            let mut axes = [AxisBoundaries::Periodic; 3];
+            axes[side.axis()] = pair;
+            let boundaries = Boundaries3d { x: axes[0], y: axes[1], z: axes[2] };
+            let mut flow = field(standard(0.4), grid, boundaries, |_| {
+                ([0.35, 0.65, 0.0], velocity, 1.0)
+            });
+            let initial = flow.states().to_vec();
+            let report = flow.step(
+                Time::new(0.001),
+                StepControl { reconstruction, ..StepControl::default() },
+                || false,
+            ).unwrap();
+            balance(report);
+            for (&actual, expected) in flow.states().iter().zip(initial) {
+                close(actual, expected, 3e-11);
+            }
+            for impulse in flow.boundary_impulses(side) {
+                let mass: f64 = impulse.species_masses.iter().sum();
+                assert!(mass > 0.0);
+                close(impulse.species_masses[0], 0.35 * mass, 3e-12);
+                close(impulse.species_masses[1], 0.65 * mass, 3e-12);
+                assert_eq!(impulse.species_masses[2], 0.0);
+                for tangent in tangents(side.axis()) {
+                    close(impulse.momentum[tangent], velocity[tangent] * mass, 3e-12);
+                }
+            }
+        }
+    }
+}

@@ -74,6 +74,7 @@ impl AdmittedReservoir {
 pub(super) struct Reservoirs {
     states: [Option<AdmittedReservoir>; 6],
     outlets: [Option<PressureOutletBoundary>; 6],
+    characteristic_outlets: [Option<(f64, f64)>; 6],
     pub(super) profiles: profiles::Profiles,
 }
 
@@ -99,6 +100,7 @@ impl Reservoirs {
         let mut result = Self {
             states: [None; 6],
             outlets: [None; 6],
+            characteristic_outlets: [None; 6],
             profiles: profiles::Profiles::default(),
         };
         for side in BoundarySide::ALL {
@@ -110,6 +112,15 @@ impl Reservoirs {
             {
                 result.outlets[2 * side.axis() + usize::from(side.sign() > 0.0)] =
                     Some(PressureOutletBoundary { side, pressure_pa });
+            }
+            if let AxisBoundaries::Ends { lower, upper } = pair
+                && let BoundaryCondition::CharacteristicOutlet {
+                    reference_pressure_pa,
+                    reference_velocity_m_s,
+                } = (if side.sign() < 0.0 { lower } else { upper })
+            {
+                result.characteristic_outlets[2 * side.axis() + usize::from(side.sign() > 0.0)] =
+                    Some((reference_pressure_pa, reference_velocity_m_s));
             }
         }
         for &input in inputs {
@@ -202,6 +213,7 @@ impl Reservoirs {
         Ok(Self {
             states: self.states,
             outlets: self.outlets,
+            characteristic_outlets: self.characteristic_outlets,
             profiles: self.profiles.try_clone(cancelled)?,
         })
     }
@@ -277,11 +289,20 @@ impl<'a> View<'a> {
             self.owner.profiles.maximum_rate(grid, cancelled)?
         };
         rate = rate.max(profile_rate);
-        for outlet in self.owner.outlets.iter().flatten() {
-            let axis = outlet.side.axis();
-            let sign = outlet.side.sign();
+        for side in BoundarySide::ALL {
+            let axis = side.axis();
+            let sign = side.sign();
+            let slot = 2 * axis + usize::from(sign > 0.0);
+            let (outlet_pressure, reference_velocity) =
+                if let Some(outlet) = self.owner.outlets[slot] {
+                    (outlet.pressure_pa, None)
+                } else if let Some((pressure, velocity)) = self.owner.characteristic_outlets[slot] {
+                    (pressure, Some(velocity))
+                } else {
+                    continue;
+                };
             let [a, b] = tangents(axis);
-            for face in 0..grid.face_count(outlet.side) {
+            for face in 0..grid.face_count(side) {
                 let mut c = [0; 3];
                 c[axis] = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
                 c[a] = face % grid.shape[a];
@@ -313,22 +334,28 @@ impl<'a> View<'a> {
                         pressure,
                     };
                     (
-                        gas.pressure_outlet_spatial_flux_from_primitive(
-                            trace,
-                            sign,
-                            outlet.pressure_pa,
-                            &mut *cancelled,
-                        )?,
+                        if let Some(velocity) = reference_velocity {
+                            gas.characteristic_outlet_spatial_flux_from_primitive(
+                                trace, sign, outlet_pressure, velocity, &mut *cancelled,
+                            )?
+                        } else {
+                            gas.pressure_outlet_spatial_flux_from_primitive(
+                                trace, sign, outlet_pressure, &mut *cancelled,
+                            )?
+                        },
                         trace.transverse_velocity,
                     )
                 } else {
                     (
-                        gas.pressure_outlet_spatial_flux(
-                            q.normal(axis),
-                            sign,
-                            outlet.pressure_pa,
-                            &mut *cancelled,
-                        )?,
+                        if let Some(velocity) = reference_velocity {
+                            gas.characteristic_outlet_spatial_flux(
+                                q.normal(axis), sign, outlet_pressure, velocity, &mut *cancelled,
+                            )?
+                        } else {
+                            gas.pressure_outlet_spatial_flux(
+                                q.normal(axis), sign, outlet_pressure, &mut *cancelled,
+                            )?
+                        },
                         [q.momentum[a] / q.density, q.momentum[b] / q.density],
                     )
                 };

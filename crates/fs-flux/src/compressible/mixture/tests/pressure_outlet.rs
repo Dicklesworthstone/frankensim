@@ -187,3 +187,53 @@ fn g4_planar_mixture_pressure_outlet_refuses_invalid_data_backflow_and_reservoir
     assert_eq!(flow.last_step(), Some(&previous));
     assert_eq!(flow.time(), time);
 }
+
+
+#[test]
+fn g0_characteristic_outlet_preserves_planar_species_entropy_and_shear() {
+    let grid = CartesianGrid::new(2, 3, 0.1, 0.2, 0.4).unwrap();
+    for side in SIDES {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let mut velocity = [0.2, -0.3];
+            velocity[side.axis()] = 0.4 * side.sign();
+            let outlet = BoundaryCondition::CharacteristicOutlet {
+                reference_pressure_pa: 1.0,
+                reference_velocity_m_s: velocity[side.axis()],
+            };
+            let pair = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 { outlet } else { BoundaryCondition::Transmissive },
+                upper: if side.sign() > 0.0 { outlet } else { BoundaryCondition::Transmissive },
+            };
+            let boundaries = if side.axis() == 0 {
+                Boundaries2d { x: pair, ..PERIODIC }
+            } else {
+                Boundaries2d { y: pair, ..PERIODIC }
+            };
+            let mut flow = field(standard(0.4), grid, boundaries, |_| {
+                ([0.35, 0.65, 0.0], velocity, 1.0)
+            });
+            let initial = flow.states().to_vec();
+            let report = flow.step(
+                Time::new(0.001),
+                StepControl { reconstruction, ..StepControl::default() },
+                || false,
+            ).unwrap();
+            balance(report);
+            for (&actual, expected) in flow.states().iter().zip(initial) {
+                close(actual, expected, 3e-11);
+            }
+            for impulse in flow.boundary_impulses(side) {
+                let mass: f64 = impulse.species_masses.iter().sum();
+                assert!(mass > 0.0);
+                close(impulse.species_masses[0], 0.35 * mass, 3e-12);
+                close(impulse.species_masses[1], 0.65 * mass, 3e-12);
+                assert_eq!(impulse.species_masses[2], 0.0);
+                close(
+                    impulse.momentum[1 - side.axis()],
+                    velocity[1 - side.axis()] * mass,
+                    3e-12,
+                );
+            }
+        }
+    }
+}

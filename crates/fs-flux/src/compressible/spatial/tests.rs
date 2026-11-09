@@ -1073,3 +1073,47 @@ fn g4_pressure_outlet_admission_backflow_and_cancellation_are_atomic() {
     assert_eq!(flow.last_step, report);
     assert_eq!(flow.boundary_impulses(outlet.side), impulses);
 }
+
+
+#[test]
+fn g0_characteristic_outlet_preserves_volumetric_advection_and_both_shears() {
+    let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
+    for side in BoundarySide::ALL {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let mut velocity = [0.2, -0.1, 0.3];
+            velocity[side.axis()] = side.sign() * 0.4;
+            let outlet = BoundaryCondition::CharacteristicOutlet {
+                reference_pressure_pa: 1.0,
+                reference_velocity_m_s: velocity[side.axis()],
+            };
+            let pair = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 { outlet } else { BoundaryCondition::Transmissive },
+                upper: if side.sign() > 0.0 { outlet } else { BoundaryCondition::Transmissive },
+            };
+            let mut topology = PERIODIC;
+            match side.axis() {
+                0 => topology.x = pair,
+                1 => topology.y = pair,
+                _ => topology.z = pair,
+            }
+            let mut flow = field(gas(0.4), grid, topology, |_| {
+                [1.0, velocity[0], velocity[1], velocity[2], 1.0]
+            });
+            let initial = flow.states().to_vec();
+            for _ in 0..3 {
+                let report = flow.step(
+                    Time::new(0.001),
+                    StepControl { reconstruction, ..StepControl::default() },
+                    || false,
+                ).unwrap();
+                balance(&report);
+                assert_eq!(report.halvings, 0);
+                for (actual, expected) in flow.states().iter().zip(&initial) {
+                    for (a, e) in actual.array().into_iter().zip(expected.array()) {
+                        close(a, e, 3e-11);
+                    }
+                }
+            }
+        }
+    }
+}

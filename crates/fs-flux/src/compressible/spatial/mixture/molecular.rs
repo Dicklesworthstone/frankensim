@@ -217,7 +217,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
     /// Prepare the original molecular operator with an explicit outlet closure.
     ///
-    /// The policy applies only to `BoundaryCondition::PressureOutlet` faces.
+    /// The policy applies to fixed-pressure and characteristic-pressure outlets.
     /// Transmissive faces still require complete source-owned bath traces;
     /// periodic and reflecting faces retain their existing laws. The selected
     /// closure follows every SSP/RKL stage, retry and coupled composition.
@@ -1363,7 +1363,8 @@ fn spatial<'a, L: TransportLaw>(
                 receipt
             }
             cartesian::FaceKind::Boundary {
-                condition: BoundaryCondition::PressureOutlet { .. },
+                condition: BoundaryCondition::PressureOutlet { .. }
+                    | BoundaryCondition::CharacteristicOutlet { .. },
                 ..
             } => {
                 if pressure_outlets != PressureOutletPolicy::ZeroDiffusiveFlux {
@@ -1434,7 +1435,9 @@ fn compatible_stress_domain(
             AxisBoundaries::Ends { lower, upper } => [lower, upper].into_iter().all(|condition| {
                 matches!(
                     condition,
-                    BoundaryCondition::Reflecting | BoundaryCondition::PressureOutlet { .. }
+                    BoundaryCondition::Reflecting
+                        | BoundaryCondition::PressureOutlet { .. }
+                        | BoundaryCondition::CharacteristicOutlet { .. }
                 )
             }),
         })

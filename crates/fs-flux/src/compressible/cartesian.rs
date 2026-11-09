@@ -200,7 +200,7 @@ pub(super) fn pressure_outlet_rate<E: Failure, C: FnMut() -> bool>(
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
     cancelled: &mut C,
-    mut face_rate: impl FnMut(usize, usize, f64, f64, &mut C) -> Result<f64, E>,
+    mut face_rate: impl FnMut(usize, usize, f64, f64, Option<f64>, &mut C) -> Result<f64, E>,
 ) -> Result<f64, E> {
     let mut rate: f64 = 0.0;
     for side in SIDES {
@@ -209,8 +209,8 @@ pub(super) fn pressure_outlet_rate<E: Failure, C: FnMut() -> bool>(
         let AxisBoundaries::Ends { lower, upper } = boundaries.axis(axis) else {
             continue;
         };
-        let BoundaryCondition::PressureOutlet { pressure_pa } =
-            (if sign < 0.0 { lower } else { upper })
+        let Some((pressure_pa, reference_velocity)) =
+            (if sign < 0.0 { lower } else { upper }).pressure_control()
         else {
             continue;
         };
@@ -222,7 +222,9 @@ pub(super) fn pressure_outlet_rate<E: Failure, C: FnMut() -> bool>(
             } else {
                 position * grid.shape[0] + line
             };
-            rate = rate.max(face_rate(cell, axis, sign, pressure_pa, cancelled)?);
+            rate = rate.max(face_rate(
+                cell, axis, sign, pressure_pa, reference_velocity, cancelled,
+            )?);
         }
     }
     Ok(rate)

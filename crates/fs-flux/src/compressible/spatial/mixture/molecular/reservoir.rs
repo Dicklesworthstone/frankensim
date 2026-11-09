@@ -45,7 +45,10 @@ pub(super) fn admit(
             None | Some(BoundaryCondition::Reflecting) => {}
             Some(BoundaryCondition::Transmissive)
                 if reservoirs.primitive_face(side, 0).is_some() => {}
-            Some(BoundaryCondition::PressureOutlet { .. })
+            Some(
+                BoundaryCondition::PressureOutlet { .. }
+                | BoundaryCondition::CharacteristicOutlet { .. },
+            )
                 if pressure_outlets == PressureOutletPolicy::ZeroDiffusiveFlux => {}
             _ => {
                 return Err(DissipationError::Invalid(

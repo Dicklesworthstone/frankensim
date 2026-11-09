@@ -500,8 +500,8 @@ impl MixtureEuler3d {
             let super::AxisBoundaries::Ends { lower, upper } = self.boundaries.axis(axis) else {
                 continue;
             };
-            let BoundaryCondition::PressureOutlet { pressure_pa } =
-                (if sign < 0.0 { lower } else { upper })
+            let Some((pressure_pa, reference_velocity)) =
+                (if sign < 0.0 { lower } else { upper }).pressure_control()
             else {
                 continue;
             };
@@ -518,13 +518,24 @@ impl MixtureEuler3d {
                 coordinate[b] = face / self.grid.shape[a];
                 let index = self.grid.index(coordinate);
                 let q = cell(&self.states[index * width..(index + 1) * width], n);
-                let flux = self.gas.pressure_outlet_spatial_flux(
-                    q.normal(axis),
-                    sign,
-                    pressure_pa,
-                    &mut outlet_flux[..width],
-                    &mut *cancelled,
-                )?;
+                let flux = if let Some(velocity) = reference_velocity {
+                    self.gas.characteristic_outlet_spatial_flux(
+                        q.normal(axis),
+                        sign,
+                        pressure_pa,
+                        velocity,
+                        &mut outlet_flux[..width],
+                        &mut *cancelled,
+                    )?
+                } else {
+                    self.gas.pressure_outlet_spatial_flux(
+                        q.normal(axis),
+                        sign,
+                        pressure_pa,
+                        &mut outlet_flux[..width],
+                        &mut *cancelled,
+                    )?
+                };
                 let density = sum(q.partial_densities.iter().copied());
                 // The characteristic speed includes the sampled face sound
                 // speed; shear is carried unchanged through that wave.
@@ -1132,6 +1143,20 @@ fn spatial_with_contact(
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?,
+                        (
+                            true,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => gas.characteristic_outlet_spatial_flux(
+                            q(k),
+                            sign,
+                            reference_pressure_pa,
+                            reference_velocity_m_s,
+                            &mut result[..width],
+                            &mut *cancelled,
+                        )?,
                         (false, BoundaryCondition::Reflecting) => {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
                             gas.stationary_wall_spatial_flux_from_primitive(
@@ -1157,6 +1182,23 @@ fn spatial_with_contact(
                                 normal_primitive(&left[..width], n, axis),
                                 sign,
                                 pressure_pa,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        (
+                            false,
+                            BoundaryCondition::CharacteristicOutlet {
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
+                            },
+                        ) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            gas.characteristic_outlet_spatial_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
+                                sign,
+                                reference_pressure_pa,
+                                reference_velocity_m_s,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?
