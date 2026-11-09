@@ -26,7 +26,7 @@ use fs_thermochem::{
     },
 };
 
-const REFERENCE: &str = "source-elemental-reference-authored-electrolyte-material-test";
+pub(super) const REFERENCE: &str = "source-elemental-reference-authored-electrolyte-material-test";
 pub const H: &str = "H+(aq)";
 pub const OH: &str = "OH[-](aq)";
 pub const WATER: &str = "H2O(l)";
@@ -211,7 +211,7 @@ pub fn hydrolysis(temperature: f64, kprec: f64) -> HydrolysisPrecipitation {
     .unwrap()
 }
 
-fn point(temperature: f64, phase: &str, ionic: bool) -> QueryPoint {
+pub(super) fn point(temperature: f64, phase: &str, ionic: bool) -> QueryPoint {
     let mut point = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -248,7 +248,7 @@ fn point(temperature: f64, phase: &str, ionic: bool) -> QueryPoint {
     point
 }
 
-fn pack(name: &str, gibbs: f64, point: &QueryPoint) -> NormalizedPack {
+pub(super) fn pack(name: &str, gibbs: f64, point: &QueryPoint) -> NormalizedPack {
     let mut validity = ValidityDomain::unconstrained();
     for (axis, value) in point.axes() {
         validity = validity.with_quantity(axis, point.axis_quantities()[axis], *value, *value);

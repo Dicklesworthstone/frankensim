@@ -61,3 +61,26 @@ Four focused regression groups use the existing independent original ODE/DAE
 test seam: ramps/holds/reversals in every ordered material plane, full endpoint
 and mean finite-difference tangents, subdivision/tiny-hold/algebraic limits,
 and atomic domain/source/cancellation refusals.
+
+## Complexation-controlled mineral solubility
+
+`osmosis::solubility::electrolyte::complexation::ComplexedElectrolyteSolubilitySolution`
+binds the original source-qualified `CopperSulfidePrecipitation` and its complete
+metal/ligand chemistry. Solvent-volume changes and explicit analytical dosing
+re-solve the original coupled Cu/S/CN phase, ligand and charge balances. Complete
+metal, ligand, other acid-family and spectator inventories survive independently
+of the actual dissolved report and retained Cu2S formula stock.
+
+The shared dissolved material view includes H+, OH-, acid-family forms, charged
+metal members and neutral metal complexes exactly once. Charged members already
+occur in the native aqueous spectator report; only neutral members are appended.
+Bound ligand units and solid formula units are not additional osmotic particles.
+Every update preserves the original species axis, source receipts, physical
+volume/activity conversion and bounded cancellation semantics.
+
+This is the selected fixed-temperature, fixed-pressure ideal dilute source
+model, including its admitted pH domain and pure-water ion background. It does
+not supply concentrated-electrolyte activities, omitted complexes, competing
+solids, heat or kinetic rates. Neutral-complex particle counting, dilution,
+analytical dosing, source refusal and transactional cancellation are covered by
+focused native regressions using explicitly authored Gibbs test data.

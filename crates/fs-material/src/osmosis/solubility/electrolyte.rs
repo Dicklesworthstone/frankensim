@@ -17,10 +17,12 @@
 //! osmolarity is `2 * sqrt(K_w) * reference_amount_per_m3`. Thus empty analytical
 //! stocks still have this small positive particle pressure and an activity
 //! slightly below one; this view does not exactly normalize to pure solvent.
-//! Reaction water, solute/crystal partial volumes, heat, additional complexes
-//! and competing solids remain outside this adapter. Explicit finite-rate
-//! crystal inventories use [`kinetics`] with the same aqueous publication.
+//! Reaction water, solute/crystal partial volumes, heat and competing solids
+//! remain outside this adapter. Explicit finite-rate crystal inventories use
+//! [`kinetics`]; selected Cu/S/CN metal association uses [`complexation`]. Both
+//! retain their original chemical owners and share aqueous publication.
 
+pub mod complexation;
 pub mod kinetics;
 
 use std::sync::Arc;
@@ -34,6 +36,7 @@ use fs_thermochem::{
             StandardReactionGibbs,
             acid_base::{
                 AcidBaseError, AcidBaseSpeciation, IdealAcidBaseSystem, SpectatorIon,
+                complexation::LigandSpeciationError,
                 precipitation::{
                     HydrolysisPrecipitation, PrecipitationOptions, PrecipitationSpeciation,
                     PrecipitationStatus,
@@ -50,6 +53,7 @@ use super::super::{AqueousSolution, IdealDiluteSolution, MAX_OSMOTIC_SOLUTES, Os
 #[derive(Clone, Debug, PartialEq)]
 pub enum ElectrolyteSolubilityError {
     Speciation(AcidBaseError),
+    Complexation(LigandSpeciationError),
     Aqueous(OsmosisError),
     Invalid(&'static str),
 }
@@ -67,6 +71,11 @@ impl From<AcidBaseError> for ElectrolyteSolubilityError {
 impl From<OsmosisError> for ElectrolyteSolubilityError {
     fn from(error: OsmosisError) -> Self {
         Self::Aqueous(error)
+    }
+}
+impl From<LigandSpeciationError> for ElectrolyteSolubilityError {
+    fn from(error: LigandSpeciationError) -> Self {
+        Self::Complexation(error)
     }
 }
 type Result<T> = core::result::Result<T, ElectrolyteSolubilityError>;
@@ -465,6 +474,25 @@ fn publish_aqueous(
     species_axis: Option<Arc<[SpeciesId]>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Arc<[SpeciesId]>, AqueousSolution)> {
+    publish_aqueous_with_additional_particles(
+        basis, volume, aqueous, &[solid], &[], temperature, species_axis, cancelled,
+    )
+}
+
+/// Publish the original charged/acid-base state plus explicitly resolved
+/// neutral particles. Metal complexes with nonzero charge are already present
+/// in the native aqueous spectator axis and must not be appended again.
+#[allow(clippy::too_many_arguments)]
+fn publish_aqueous_with_additional_particles(
+    basis: SolventActivityBasis,
+    volume: Volume,
+    aqueous: &AcidBaseSpeciation,
+    solids: &[&SpeciesId],
+    additional_particles: &[(&SpeciesId, Amount)],
+    temperature: fs_qty::Temperature,
+    species_axis: Option<Arc<[SpeciesId]>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Arc<[SpeciesId]>, AqueousSolution)> {
     poll(cancelled)?;
     let count = 2
         + aqueous
@@ -472,7 +500,8 @@ fn publish_aqueous(
             .iter()
             .map(|family| family.forms.len())
             .sum::<usize>()
-        + aqueous.spectators.len();
+        + aqueous.spectators.len()
+        + additional_particles.len();
     if count > MAX_OSMOTIC_SOLUTES
         || species_axis
             .as_ref()
@@ -491,7 +520,7 @@ fn publish_aqueous(
     let water = aqueous.model().water();
     let mut append = |id: &SpeciesId, amount: Amount| -> Result<()> {
         poll(cancelled)?;
-        if id == water.water() || id == solid {
+        if id == water.water() || solids.contains(&id) {
             return Err(ElectrolyteSolubilityError::Invalid(
                 "solvent or solid cannot be counted as dissolved osmotic particles",
             ));
@@ -521,6 +550,9 @@ fn publish_aqueous(
     }
     for ion in &aqueous.spectators {
         append(&ion.species, ion.amount)?;
+    }
+    for &(id, amount) in additional_particles {
+        append(id, amount)?;
     }
     let solution: AqueousSolution = IdealDiluteSolution::new(
         temperature.value(),
