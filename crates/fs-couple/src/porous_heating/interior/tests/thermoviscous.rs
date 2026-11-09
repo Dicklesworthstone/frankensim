@@ -7,7 +7,7 @@ use super::*;
 use crate::porous_heating::interior::thermoviscous::{
     ThermoviscousHeatingEnergy, ThermoviscousHeatingError, ThermoviscousViscousHeating,
 };
-use fs_feec::acoustics::helmholtz::BoundaryMode;
+use fs_feec::acoustics::helmholtz::multiport::BoundaryMode;
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousBoundary, ThermoviscousElementPower, ThermoviscousError, ThermoviscousFe,
     ThermoviscousLimits, ThermoviscousMedium,

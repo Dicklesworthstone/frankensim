@@ -88,6 +88,7 @@ fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
+fs-fmm = { path = "../fs-fmm" }
 [lints]
 workspace = true
 

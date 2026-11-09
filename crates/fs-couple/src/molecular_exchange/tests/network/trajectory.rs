@@ -1,5 +1,6 @@
 //! G0/G1/G3/G4: finite inventories, independent kinetic moments and full windows.
 use super::*;
+use crate::molecular_exchange::network::trajectory::MolecularNetworkStreamMoments;
 use crate::molecular_exchange::network::trajectory::{
     MolecularExchangeAdaptiveControls, MolecularNetworkAdaptiveControls,
     MolecularNetworkTrajectoryCandidate, MolecularNetworkTrajectoryError,
@@ -355,7 +356,10 @@ fn shared_withdrawal_retries_and_closed_apertures_keep_inactive_sources_inactive
     assert_eq!(result.gases(), &closed_gases);
     assert_eq!(result.step().residual, Default::default());
     assert_eq!(result.step().debit, Default::default());
-    assert_eq!(result.step().links[0].gross, Default::default());
+    assert_eq!(
+        result.step().links[0].gross,
+        [MolecularNetworkStreamMoments::default(); 2]
+    );
     let empty = evolve(&closed_gases, &[], 0.2, budgets([0.0; 3]), fixed(0.05));
     assert_eq!(empty.gases(), &closed_gases);
     assert!(empty.step().links.is_empty());

@@ -1346,6 +1346,7 @@ dependencies = [
  "fs-feec",
  "fs-fft",
  "fs-flux",
+ "fs-fmm",
  "fs-ga",
  "fs-gas",
  "fs-geom",

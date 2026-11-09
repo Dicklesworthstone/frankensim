@@ -90,7 +90,7 @@ fn continuous(path: &DiffuseChannelMomentumInterface, duration: f64) -> [f64; 7]
         let mass_out = -0.028 * dn;
         let heat_return = 2.0 * R * incident * hr * (w - t);
         let heat_wall = -2.0 * R * incident * (ht + hr) * (w - t);
-        let speed = |temperature| (core::f64::consts::PI * R * temperature / (2.0 * 0.028)).sqrt();
+        let speed = |temperature: f64| (core::f64::consts::PI * R * temperature / (2.0 * 0.028)).sqrt();
         let impulse = 1.5 * incident * 0.028 * (retained * speed(t) + reset * speed(w));
         [dn, (-0.5 * R * incident * tau * t + heat_return) / (1.5 * R * n),
             heat_wall / (1e-6 * (1e6 + 1000.0 * w)), v,
