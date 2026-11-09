@@ -18662,7 +18662,8 @@ The reported time-average flow is midpoint quadrature, not an exact continuous
 trajectory integral. Nonlinear momentum residual work and the observed balance
 defect remain separate from physical heat. Both endpoint shear fields must stay
 inside the original source/rate support; their linear time interpolation cannot
-have a larger face-rate magnitude. Temperature, density and geometry stay fixed.
+have a larger face-rate magnitude. Temperature is held during each interval;
+density and geometry stay fixed.
 Density is an explicit physical input, not new material calibration authority.
 
 Analytic original stress tangents form a tridiagonal Newton system, solved by
@@ -18684,6 +18685,21 @@ nonlinear work and final cancellation checks precede the output swap; refusal
 leaves that output unchanged. The `fs_airflow::graph::rheology::transient`
 consumer uses this operation for coupled nodal pressure and linear storage
 solves, while this material owner remains a single original radial pipe.
+
+`LaminarCarreauPipe::at_temperature` prepares the same original calibration at
+a prescribed temperature without changing geometry or the physical rate ceiling.
+Both rest and that unchanged ceiling must remain inside the original reduced-rate
+support. `RadialCarreauPipe::at_temperature` carries this preparation into the
+same radial discretization, preserving every annular mass and its compatibility
+identity. Existing states and scratch/output buffers remain usable without
+copying or resetting velocities or time; kinetic storage is unchanged by the
+viscosity switch. The diffusion timescale is recomputed from the actual shifted
+zero-rate viscosity. This no-allocation radial rebind supplies a uniform held
+temperature, not heat evolution, expansion or density feedback. The caller must
+retain the original fixed-density approximation and separately account for
+thermal energy. G1/G3 tests cover the exact discrete Arrhenius diffusion mode,
+both nonlinear shift conventions, retained energy/history, warm workspace reuse
+and refusal of unsupported temperature or reduced-rate ceilings.
 
 This is a spatially and temporally convergent discretization, not an exact
 propagator. Midpoint is second order but under-resolved stiff modes can oscillate;

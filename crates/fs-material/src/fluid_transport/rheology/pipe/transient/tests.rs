@@ -72,6 +72,150 @@ fn balance(step: &RadialCarreauStep) {
 }
 
 #[test]
+fn g1_prescribed_temperature_continues_the_exact_discrete_diffusion_mode() {
+    let original = model(2, false);
+    let mut state = original
+        .state_from_velocities(vec![1.0, 1.0 / 3.0], 0.4, || false)
+        .unwrap();
+    let mut work = original.workspace().unwrap();
+    let mut amplitude = 1.0;
+    let mut previous_energy = None;
+    for temperature in [300.0, 330.0, 290.0, 315.0] {
+        let before = state.velocities_m_s().to_vec();
+        let time = state.accepted_time_s();
+        let pipe = original.at_temperature(temperature).unwrap();
+        assert_eq!(state.velocities_m_s(), before);
+        assert_eq!(state.accepted_time_s(), time);
+        assert_eq!(pipe.pipe().temperature_k(), temperature);
+        assert_eq!(original.pipe().temperature_k(), 300.0);
+        assert_eq!(pipe.density_kg_m3(), original.density_kg_m3());
+        assert_eq!(pipe.pipe().radius_m(), original.pipe().radius_m());
+        assert_eq!(pipe.pipe().length_m(), original.pipe().length_m());
+        // Independent Arrhenius coefficient and exact eigenvector [1, 1/3]
+        // of the two-ring finite-volume operator, including each held change.
+        let shift = (9000.0 / 8.314_462_618_153_24 * (1.0 / temperature - 1.0 / 300.0)).exp();
+        near(
+            pipe.radial_diffusion_time_s(),
+            original.radial_diffusion_time_s() / shift,
+            3e-14,
+            0.0,
+        );
+        let lambda = 4.0 * shift / (3.0 * original.radial_diffusion_time_s());
+        let dt = 0.02;
+        amplitude *= (1.0 - 0.5 * lambda * dt) / (1.0 + 0.5 * lambda * dt);
+        let step = pipe
+            .step(&mut state, &mut work, 0.0, dt, controls(), || false)
+            .unwrap();
+        near(state.velocities_m_s()[0], amplitude, 3e-14, 1e-15);
+        near(state.velocities_m_s()[1], amplitude / 3.0, 3e-14, 1e-15);
+        if let Some(energy) = previous_energy {
+            assert_eq!(step.initial_kinetic_energy_j, energy);
+        }
+        previous_energy = Some(step.final_kinetic_energy_j);
+        near(
+            step.viscous_heat_j,
+            -step.kinetic_energy_change_j,
+            3e-14,
+            1e-16,
+        );
+        balance(&step);
+    }
+}
+
+#[test]
+fn g3_thermal_continuation_reuses_the_full_nonlinear_profile_and_workspace() {
+    for mode in [
+        ViscosityShiftMode::Vertical,
+        ViscosityShiftMode::VerticalAndRate,
+    ] {
+        let source = law(0.2, true, mode);
+        let original = RadialCarreauPipe::new(
+            LaminarCarreauPipe::new(source, 300.0, 0.02, 0.7, 1e5).unwrap(),
+            1000.0,
+            24,
+        )
+        .unwrap();
+        let mut state = original.rest_state().unwrap();
+        let mut work = original.workspace().unwrap();
+        original
+            .step(&mut state, &mut work, 70.0, 0.02, controls(), || false)
+            .unwrap();
+        let mut cold = state.clone();
+        let changed = original.at_temperature(330.0).unwrap();
+        let fresh = RadialCarreauPipe::new(
+            LaminarCarreauPipe::new(source, 330.0, 0.02, 0.7, 1e5).unwrap(),
+            1000.0,
+            24,
+        )
+        .unwrap();
+        let mut reference = fresh
+            .state_from_velocities(
+                state.velocities_m_s().to_vec(),
+                state.accepted_time_s(),
+                || false,
+            )
+            .unwrap();
+        let mut fresh_work = fresh.workspace().unwrap();
+        let cold_step = original
+            .step(&mut cold, &mut work, 0.0, 0.0005, controls(), || false)
+            .unwrap();
+        let step = changed
+            .step(&mut state, &mut work, 0.0, 0.0005, controls(), || false)
+            .unwrap();
+        let expected = fresh
+            .step(
+                &mut reference,
+                &mut fresh_work,
+                0.0,
+                0.0005,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(step, expected);
+        assert_eq!(state.velocities_m_s(), reference.velocities_m_s());
+        assert_eq!(state.accepted_time_s(), reference.accepted_time_s());
+        assert_eq!(
+            step.initial_kinetic_energy_j,
+            cold_step.initial_kinetic_energy_j
+        );
+        assert!(step.viscous_heat_j < cold_step.viscous_heat_j);
+        assert!(step.final_kinetic_energy_j > cold_step.final_kinetic_energy_j);
+        balance(&step);
+    }
+}
+
+#[test]
+fn g0_thermal_continuation_preserves_the_original_source_and_physical_rate_ceiling() {
+    let source = ThermalCarreauYasuda::new(
+        CarreauYasuda::new(0.2, 0.01, 0.8, 0.5, 1.0, [0.0, 100.0]).unwrap(),
+        *law(0.2, true, ViscosityShiftMode::VerticalAndRate).temperature_shift(),
+        ViscosityShiftMode::VerticalAndRate,
+    );
+    let original = RadialCarreauPipe::new(
+        LaminarCarreauPipe::new(source, 300.0, 0.02, 0.7, 100.0).unwrap(),
+        1000.0,
+        8,
+    )
+    .unwrap();
+    let state = original.rest_state().unwrap();
+    for temperature in [0.0, 279.0, 351.0, f64::NAN, f64::INFINITY, 290.0] {
+        // 290 K is within the thermal range, but its a_T > 1 moves the
+        // unchanged physical ceiling beyond the reference-rate support.
+        assert!(matches!(
+            original.at_temperature(temperature),
+            Err(RadialCarreauError::Material(_))
+        ));
+    }
+    let hot = original.at_temperature(330.0).unwrap();
+    assert_eq!(hot.pipe().maximum_laminar_wall_rate_per_s(), 100.0);
+    assert_eq!(hot.pipe().law(), original.pipe().law());
+    assert_eq!(state.velocities_m_s(), &[0.0; 8]);
+    assert_eq!(state.accepted_time_s(), 0.0);
+    assert_eq!(original.pipe().temperature_k(), 300.0);
+}
+
+#[test]
 fn immutable_pressure_trials_share_the_original_solve_and_publish_only_complete_outputs() {
     let pipe = model(24, true);
     let mut initial = pipe.rest_state().unwrap();

@@ -17,8 +17,11 @@
 //! on a declared pressure interval. Its energy is `C*p*p/2` in the same pressure
 //! reference as the ports. The owner does not infer bulk modulus, nominal
 //! volume, density changes, acoustic wave propagation, cavitation, temperature
-//! evolution or entrance/junction losses. Radial and temporal discretization
-//! errors remain; midpoint energy accounting does not certify time resolution.
+//! evolution or entrance/junction losses. Prescribed uniform temperature can
+//! change between intervals through [`TransientCarreauGraph::at_temperature`]
+//! without resetting radial history or hydraulic storage. Radial and temporal
+//! discretization errors remain; midpoint energy accounting does not certify
+//! time resolution.
 
 use std::sync::Arc;
 
@@ -352,6 +355,53 @@ impl TransientCarreauGraph {
     }
     pub fn storage(&self) -> &[Option<LinearHydraulicStorage>] {
         &self.storage
+    }
+
+    /// Continue every original pipe at one prescribed uniform temperature.
+    ///
+    /// Each branch re-evaluates its original thermal calibration and physical
+    /// rate ceiling. A refusal or cancellation returns no partial graph. The
+    /// source topology, density, annular masses and hydraulic compliance remain
+    /// unchanged; existing accepted states and workspaces stay compatible.
+    /// No velocity, stored pressure, volume or clock is reset. Compatibility
+    /// identity binds the original material calibration and discretization,
+    /// not the temperature held for a particular interval.
+    ///
+    /// Preparation copies graph-sized metadata but no radial history or solve
+    /// buffers. Subsequent steps reuse the original workspace. Temperature is
+    /// held during each interval and is supplied by the caller; the authored
+    /// fixed-density and fixed-compliance assumptions must remain valid across
+    /// this change. Thermal expansion, heat storage and coupled temperature
+    /// evolution are not inferred from the viscosity law.
+    pub fn at_temperature(
+        &self,
+        temperature_k: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TransientCarreauError> {
+        checkpoint(cx)?;
+        let mut pipes = Vec::new();
+        pipes
+            .try_reserve_exact(self.pipes.len())
+            .map_err(|_| TransientCarreauError::Capacity)?;
+        for (branch, pipe) in self.pipes.iter().enumerate() {
+            checkpoint(cx)?;
+            pipes.push(
+                pipe.at_temperature(temperature_k)
+                    .map_err(|source| TransientCarreauError::Radial { branch, source })?,
+            );
+        }
+        let mut graph = self.graph.clone();
+        for (branch, (owner, pipe)) in graph.branches.iter_mut().zip(&pipes).enumerate() {
+            periodic_checkpoint(branch, cx)?;
+            owner.pipe = *pipe.pipe();
+        }
+        checkpoint(cx)?;
+        Ok(Self {
+            graph,
+            pipes,
+            storage: self.storage.clone(),
+            identity: self.identity.clone(),
+        })
     }
 
     fn admit_pressures(&self, pressures: &[Option<Pressure>]) -> Result<(), TransientCarreauError> {

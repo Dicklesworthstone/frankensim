@@ -139,6 +139,179 @@ fn balance(step: &TransientCarreauStep) {
 }
 
 #[test]
+fn g3_temperature_continuation_preserves_radial_and_storage_history() {
+    let graph = CarreauPipeGraph::new(
+        3,
+        vec![
+            branch("supply", 0, 1, 0.3, 0.01, true),
+            branch("return", 1, 2, 0.7, 0.013, true),
+        ],
+    )
+    .unwrap();
+    let model = TransientCarreauGraph::new(
+        graph,
+        1000.0,
+        &[16, 20],
+        vec![None, storage(2e-9), storage(3e-9)],
+    )
+    .unwrap();
+    let mut state = with_cx(|cx| {
+        model.rest_state(
+            &[None, Some(Pressure::new(0.0)), Some(Pressure::new(0.0))],
+            cx,
+        )
+    })
+    .unwrap();
+    let mut work = model.workspace().unwrap();
+    for _ in 0..3 {
+        balance(
+            &with_cx(|cx| {
+                model.step(
+                    &mut state,
+                    &mut work,
+                    &[boundary(0, 1000.0)],
+                    &[],
+                    0.003,
+                    controls(),
+                    cx,
+                )
+            })
+            .unwrap(),
+        );
+    }
+    let before = snapshot(&state);
+    let changed = with_cx(|cx| model.at_temperature(330.0, cx)).unwrap();
+    assert_eq!(snapshot(&state), before);
+    assert_eq!(changed.storage(), model.storage());
+    for (old, new) in model.pipes().iter().zip(changed.pipes()) {
+        assert_eq!(old.pipe().temperature_k(), 300.0);
+        assert_eq!(new.pipe().temperature_k(), 330.0);
+        assert_eq!(old.density_kg_m3(), new.density_kg_m3());
+        assert_eq!(old.radial_cells(), new.radial_cells());
+    }
+    assert!(
+        changed
+            .graph()
+            .branches()
+            .iter()
+            .all(|b| b.pipe.temperature_k() == 330.0)
+    );
+    // A separately constructed original hot-law network receives the complete
+    // measured radial history and storage state as its initial condition.
+    let fresh = TransientCarreauGraph::new(
+        changed.graph().clone(),
+        1000.0,
+        &[16, 20],
+        model.storage().to_vec(),
+    )
+    .unwrap();
+    let mut reference = with_cx(|cx| {
+        fresh.state_from_velocities(
+            state
+                .branches()
+                .iter()
+                .map(|b| b.velocities_m_s().to_vec())
+                .collect(),
+            state.storage_pressures(),
+            state.accepted_time_s(),
+            cx,
+        )
+    })
+    .unwrap();
+    let mut reference_work = fresh.workspace().unwrap();
+    for pressure in [500.0, -100.0, 0.0] {
+        let actual = with_cx(|cx| {
+            changed.step(
+                &mut state,
+                &mut work,
+                &[boundary(0, pressure)],
+                &[],
+                0.003,
+                controls(),
+                cx,
+            )
+        })
+        .unwrap();
+        let expected = with_cx(|cx| {
+            fresh.step(
+                &mut reference,
+                &mut reference_work,
+                &[boundary(0, pressure)],
+                &[],
+                0.003,
+                controls(),
+                cx,
+            )
+        })
+        .unwrap();
+        assert_eq!(snapshot(&state), snapshot(&reference));
+        assert_eq!(actual.branches, expected.branches);
+        assert_eq!(
+            actual.storage_energy_change_j,
+            expected.storage_energy_change_j
+        );
+        assert_eq!(actual.viscous_heat_j, expected.viscous_heat_j);
+        balance(&actual);
+    }
+}
+
+#[test]
+fn g4_temperature_continuation_refuses_a_later_branch_without_clipping_its_rate() {
+    let source = ThermalCarreauYasuda::new(
+        CarreauYasuda::new(0.2, 0.01, 0.8, 0.5, 1.2, [0.0, 100.0]).unwrap(),
+        *source(0.5, 0.01, true).law().temperature_shift(),
+        ViscosityShiftMode::VerticalAndRate,
+    );
+    let branches = [10.0, 100.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, ceiling)| CarreauPipeBranch {
+            name: format!("bounded-{i}"),
+            from: i,
+            to: i + 1,
+            pipe: LaminarCarreauPipe::new(source, 300.0, 0.01, 0.5, ceiling).unwrap(),
+        })
+        .collect();
+    let model = TransientCarreauGraph::new(
+        CarreauPipeGraph::new(3, branches).unwrap(),
+        1000.0,
+        &[8, 8],
+        vec![None; 3],
+    )
+    .unwrap();
+    let mut state = with_cx(|cx| model.rest_state(&[None; 3], cx)).unwrap();
+    let before = snapshot(&state);
+    // Cooling increases reduced shear; only the second unchanged physical
+    // ceiling exceeds its source. The first prepared branch must not escape.
+    assert!(matches!(
+        with_cx(|cx| model.at_temperature(290.0, cx)),
+        Err(TransientCarreauError::Radial { branch: 1, .. })
+    ));
+    assert_eq!(snapshot(&state), before);
+    assert!(
+        model
+            .pipes()
+            .iter()
+            .all(|p| p.pipe().temperature_k() == 300.0)
+    );
+    let mut work = model.workspace().unwrap();
+    let hot = with_cx(|cx| model.at_temperature(330.0, cx)).unwrap();
+    let step = with_cx(|cx| {
+        hot.step(
+            &mut state,
+            &mut work,
+            &[boundary(0, 1.0), boundary(2, 0.0)],
+            &[],
+            0.001,
+            controls(),
+            cx,
+        )
+    })
+    .unwrap();
+    balance(&step);
+}
+
+#[test]
 fn g1_nonlinear_series_retains_the_single_original_pipe_trajectory() {
     let graph = CarreauPipeGraph::new(
         3,
@@ -881,6 +1054,12 @@ fn g4_context_cancellation_and_foreign_histories_publish_nothing() {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
+        assert!(matches!(
+            model.at_temperature(330.0, &cx),
+            Err(TransientCarreauError::Graph(CarreauGraphError::Graph(
+                GraphError::Interrupted
+            )))
+        ));
         model.step(
             &mut state,
             &mut work,

@@ -13,7 +13,10 @@
 //! of timestep-independent accuracy or positivity. Refine time and radius for
 //! the actual forcing bandwidth; a radial diffusion timescale is exposed.
 //!
-//! Density, geometry, temperature and the original material law are fixed.
+//! Density, geometry and the original material calibration are fixed.
+//! Temperature is uniform and held during each interval;
+//! [`RadialCarreauPipe::at_temperature`] continues the original velocity
+//! history under a new prescribed temperature.
 //! Walls are rigid, stationary and no-slip. There is no axial development,
 //! convective transport, compressibility, cavitation, transition prediction,
 //! thermal evolution or junction/network model. Heat is reported, not deposited.
@@ -279,6 +282,34 @@ impl RadialCarreauPipe {
 
     pub const fn pipe(&self) -> &LaminarCarreauPipe {
         &self.pipe
+    }
+    /// Continue the original radial history at a new prescribed temperature.
+    ///
+    /// The original thermal law admits the complete physical rate envelope at
+    /// this temperature. Density, geometry, annular masses and every accepted
+    /// velocity remain unchanged, so changing viscosity creates no kinetic
+    /// energy or instantaneous momentum jump. Existing states, output buffers
+    /// and workspaces remain compatible; their identity denotes this source
+    /// calibration and spatial discretization, not a temperature fingerprint.
+    /// Only the prepared constitutive response and diffusion timescale change.
+    /// This operation allocates no radial storage and never mutates history.
+    ///
+    /// The caller supplies a spatially uniform temperature held over the next
+    /// interval. The original fixed-density assumption must remain valid;
+    /// thermal expansion, a density change, thermal storage and the energy used
+    /// to change temperature require separate physical owners. This method
+    /// neither evolves temperature nor deposits the reported viscous heat.
+    pub fn at_temperature(&self, temperature_k: f64) -> Result<Self, RadialCarreauError> {
+        let pipe = self.pipe.at_temperature(temperature_k)?;
+        let diffusion_time_s = super::product_ratio(
+            &[self.density_kg_m3, self.spacing_m, self.spacing_m],
+            &[pipe.prepared.rest.viscosity],
+        )?;
+        Ok(Self {
+            pipe,
+            diffusion_time_s,
+            ..self.clone()
+        })
     }
     pub const fn density_kg_m3(&self) -> f64 {
         self.density_kg_m3

@@ -361,6 +361,21 @@ impl LaminarCarreauPipe {
     pub const fn temperature_k(&self) -> f64 {
         self.prepared.temperature.temperature_k()
     }
+    /// Re-evaluate the same declared source at an explicit uniform temperature.
+    /// Geometry and the authored physical rate ceiling remain unchanged. The
+    /// entire interval from rest to that ceiling must still lie inside the
+    /// original reduced-rate support; a thermal shift never clips the ceiling.
+    /// This is a frozen constitutive preparation, not a heat-evolution model.
+    pub fn at_temperature(&self, temperature_k: f64) -> Result<Self, MaterialError> {
+        Ok(Self {
+            prepared: PreparedCarreau::new(
+                self.prepared.law,
+                temperature_k,
+                self.prepared.ceiling.rate,
+            )?,
+            ..*self
+        })
+    }
     pub const fn radius_m(&self) -> f64 {
         self.radius_m
     }

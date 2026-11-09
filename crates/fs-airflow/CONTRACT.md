@@ -279,10 +279,10 @@ power-driven coupled solid/stream balance.
 `graph::rheology::transient::TransientCarreauGraph` connects original
 `RadialCarreauPipe` histories through ideal pressure junctions and explicitly
 authored linear hydraulic storage. Every branch retains its complete annular
-velocity field, original thermal Carreau law and rate ceiling. Density and
-prepared temperature are fixed. This consumer adds coupled dynamics to the
-existing Carreau topology; it does not fit an effective resistance or replace
-the radial field with a mean-flow inertance.
+velocity field, original thermal Carreau law and rate ceiling. Density is fixed
+and temperature is held during each interval. This consumer adds coupled dynamics
+to the existing Carreau topology; it does not fit an effective resistance or
+replace the radial field with a mean-flow inertance.
 
 All branches advance from the same accepted initial histories and duration.
 Unknown midpoint pressures satisfy `Q_out - injection + C*(p_next-p_old)/dt = 0`,
@@ -314,6 +314,21 @@ reports still allocate graph-sized storage. Only a complete globally admitted
 step swaps all branch histories, storage pressures and common time. Source
 refusal, work exhaustion, invalid storage and cancellation preserve accepted
 history and permit an identical retry.
+
+`TransientCarreauGraph::at_temperature` continues this same network at one
+prescribed uniform temperature between intervals. Every original pipe must
+admit its unchanged physical rate ceiling against the shifted reference support;
+a refusal in any branch or cancellation returns no partially rebound graph.
+The original topology, density, annular masses, compliance laws and compatibility
+identity remain unchanged, so accepted radial histories, storage pressures, time
+and existing workspaces carry forward. Preparation copies graph metadata but
+neither radial history nor solve buffers. The actual new nonlinear viscosity
+enters each subsequent original pressure trial and physical heat calculation.
+This requires the authored fixed-density and fixed-compliance approximations
+to remain valid; temperature evolution, thermal energy and expansion need their
+own owner. G3/G4 tests exercise retained storage/radial history, both old and
+new workspace compatibility, the original hot-source trajectory, cancellation
+and atomic refusal of a later branch's reduced-rate ceiling.
 
 Each transient connected component may instead be sealed and anchored by its
 own positive physical storage. Stored pressures remain unknowns in the original
