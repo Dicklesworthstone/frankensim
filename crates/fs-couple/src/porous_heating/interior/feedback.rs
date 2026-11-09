@@ -17,14 +17,17 @@
 //! never replaced by rho(T)*volume. The native caloric law must justify the
 //! thermally lumped specimen storage and its shared fluid/skeleton temperature.
 //! Mean mass transport, pressure evolution and separate constituent temperatures
-//! require their own owners. Mechanical coefficients and Robin data are held
-//! fixed explicitly, although wall motion and absorption respond to the field.
+//! require their own owners. Original material walls can refresh their stiffness,
+//! viscosity and complete relaxation spectrum at their own native temperatures.
+//! Authored mechanical coefficients and Robin data otherwise remain held.
 
 use super::heat::{InteriorHeatAccount, InteriorHeatState};
 use super::{
     InteriorAcousticHeating, InteriorCellHeating, InteriorHeatCell, InteriorHeatingError,
     InteriorHeatingStep, InteriorWallHeatCell, InteriorWallHeating, MAX_INTERIOR_HEATING_CELLS,
 };
+use crate::bernoulli_aperture::wall::material::LocalMaterialWall;
+use crate::cavity_modal::interior::heterogeneous::mechanical::MaterialMechanicalHarmonicError;
 use crate::cavity_modal::interior::heterogeneous::porous::AcousticVolumeRegionState;
 use crate::porous_heating::PorousHeatingError;
 use crate::porous_heating::feedback::{IsobaricPorousGas, PorousTemperatureFluid, fluid};
@@ -42,6 +45,9 @@ use fs_thermal::enthalpy::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod wall;
+pub use wall::TemperatureInteriorWall;
+
 /// One complete original tetrahedron and its thermally lumped specimen law.
 #[derive(Clone, Copy)]
 pub struct TemperatureInteriorCell<'t, 'm> {
@@ -51,11 +57,12 @@ pub struct TemperatureInteriorCell<'t, 'm> {
     pub porous: Option<&'m PorousFluidLaw>,
 }
 
-/// Fixed frequency, boundaries and coherent physical velocity drive.
+/// Fixed frequency, boundary geometry and coherent physical velocity drive.
 ///
-/// All original pressure and mechanical coordinates remain in the solve. These
-/// mechanical coefficients are explicitly held; temperature-dependent material
-/// wall laws must be refreshed by their own source owner, outside this closure.
+/// All original pressure and mechanical coordinates remain in the solve.
+/// `try_new` holds the authored mechanical coefficients. The material-wall
+/// constructor supplies and refreshes them through their original source laws;
+/// it requires an empty input `mechanical_walls` instead of replacing a law.
 #[derive(Clone, Debug)]
 pub struct InteriorTemperatureAcoustics {
     pub frequency_hz: f64,
@@ -78,6 +85,7 @@ pub enum InteriorFeedbackError {
         element: usize,
         source: MaterialError,
     },
+    Wall(MaterialMechanicalHarmonicError),
 }
 
 impl core::fmt::Display for InteriorFeedbackError {
@@ -90,6 +98,7 @@ impl core::fmt::Display for InteriorFeedbackError {
             Self::Material { element, source } => {
                 write!(f, "interior element {element} material: {source}")
             }
+            Self::Wall(error) => error.fmt(f),
         }
     }
 }
@@ -99,6 +108,7 @@ impl std::error::Error for InteriorFeedbackError {
             Self::Heating(error) => Some(error),
             Self::Fluid { source, .. } => Some(source),
             Self::Material { source, .. } => Some(source),
+            Self::Wall(error) => Some(error),
         }
     }
 }
@@ -117,12 +127,19 @@ impl From<HeterogeneousError> for InteriorFeedbackError {
         Self::Heating(value.into())
     }
 }
+impl From<MaterialMechanicalHarmonicError> for InteriorFeedbackError {
+    fn from(value: MaterialMechanicalHarmonicError) -> Self {
+        Self::Wall(value)
+    }
+}
 
 /// Work performed during one advance, excluding initial preparation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InteriorFeedbackWork {
     pub fluid_evaluations: usize,
     pub porous_evaluations: usize,
+    /// Changed wall-temperature evaluations of the original material bundles.
+    pub wall_evaluations: usize,
     /// Complete global FE preparations/solves, including changed endpoints.
     pub field_solves: usize,
 }
@@ -131,6 +148,18 @@ fn increment(value: &mut usize) -> Result<(), InteriorFeedbackError> {
     *value = value.checked_add(1).ok_or(DepositionError::Budget(
         "interior acoustic feedback evaluations",
     ))?;
+    Ok(())
+}
+
+fn admit_count(elements: usize, walls: usize, maximum: usize) -> Result<(), InteriorFeedbackError> {
+    if maximum == 0
+        || maximum > MAX_INTERIOR_HEATING_CELLS
+        || elements
+            .checked_add(walls)
+            .is_none_or(|total| total > maximum)
+    {
+        return Err(DepositionError::Budget("interior acoustic feedback cells").into());
+    }
     Ok(())
 }
 
@@ -165,6 +194,8 @@ pub struct TemperatureInteriorHeating<
     geometry: &'f HelmholtzFe<'c>,
     cells: Arc<[TemperatureInteriorCell<'t, 'm>]>,
     wall_destinations: Arc<[InteriorWallHeatCell<'t>]>,
+    wall_bindings: Arc<[TemperatureInteriorWall<'t, 'm>]>,
+    wall_states: Vec<wall::State>,
     fluid: F,
     problem: Arc<InteriorTemperatureAcoustics>,
     maximum_cells: usize,
@@ -286,21 +317,91 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
         fluid: F,
         problem: InteriorTemperatureAcoustics,
         maximum_cells: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, InteriorFeedbackError> {
+        Self::try_new_inner(
+            geometry,
+            thermal,
+            cells,
+            wall_destinations,
+            &[],
+            fluid,
+            problem,
+            maximum_cells,
+            checkpoint,
+        )
+    }
+
+    /// Bind each wall to its original temperature-dependent material source.
+    ///
+    /// `problem.mechanical_walls` must be empty: every supplied material binding
+    /// contributes its complete original mechanical boundary. Cold preparation
+    /// evaluates the wall at its receiver's native temperature, then performs
+    /// one complete fluid/wall solve. Later wall-only changes also trigger that
+    /// solve, without reevaluating unchanged fluid sources.
+    ///
+    /// The same fixed-mass, geometry, caloric and accepted-start heat bindings
+    /// apply. Constitutive refresh is quasisteady; finite acoustic settling,
+    /// transient Maxwell-history transfer and parametric stored-energy work
+    /// require a transient owner and are not represented by harmonic snapshots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_material_walls(
+        geometry: &'f HelmholtzFe<'c>,
+        thermal: &DepositionSimulation<'_>,
+        cells: &[TemperatureInteriorCell<'t, 'm>],
+        wall_bindings: &[TemperatureInteriorWall<'t, 'm>],
+        fluid: F,
+        problem: InteriorTemperatureAcoustics,
+        maximum_cells: usize,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, InteriorFeedbackError> {
+        checkpoint()?;
+        admit_count(
+            geometry.tetrahedra().len(),
+            wall_bindings.len(),
+            maximum_cells,
+        )?;
+        if !problem.mechanical_walls.is_empty() {
+            return Err(InteriorHeatingError::Invalid(
+                "material wall feedback cannot replace authored mechanical boundaries",
+            )
+            .into());
+        }
+        let destinations: Vec<_> = wall_bindings.iter().map(|wall| wall.destination).collect();
+        Self::try_new_inner(
+            geometry,
+            thermal,
+            cells,
+            &destinations,
+            wall_bindings,
+            fluid,
+            problem,
+            maximum_cells,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_inner(
+        geometry: &'f HelmholtzFe<'c>,
+        thermal: &DepositionSimulation<'_>,
+        cells: &[TemperatureInteriorCell<'t, 'm>],
+        wall_destinations: &[InteriorWallHeatCell<'t>],
+        wall_bindings: &[TemperatureInteriorWall<'t, 'm>],
+        fluid: F,
+        mut problem: InteriorTemperatureAcoustics,
+        maximum_cells: usize,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, InteriorFeedbackError> {
         checkpoint()?;
         let count = geometry.tetrahedra().len();
-        let total = count.checked_add(problem.mechanical_walls.len());
-        if maximum_cells == 0
-            || maximum_cells > MAX_INTERIOR_HEATING_CELLS
-            || total.is_none_or(|total| total > maximum_cells)
-        {
-            return Err(DepositionError::Budget("interior acoustic feedback cells").into());
-        }
-        if count == 0
-            || cells.len() != count
-            || wall_destinations.len() != problem.mechanical_walls.len()
-        {
+        let wall_count = if wall_bindings.is_empty() {
+            problem.mechanical_walls.len()
+        } else {
+            wall_bindings.len()
+        };
+        admit_count(count, wall_count, maximum_cells)?;
+        if count == 0 || cells.len() != count || wall_destinations.len() != wall_count {
             return Err(InteriorHeatingError::Invalid(
                 "interior feedback needs every original element and wall receiver",
             )
@@ -324,6 +425,25 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
         for cell in cells {
             checkpoint()?;
             temperatures.push(thermal.temperature_k(cell.destination.cell)?);
+        }
+        let mut wall_states = Vec::with_capacity(wall_bindings.len());
+        for (index, binding) in wall_bindings.iter().enumerate() {
+            checkpoint()?;
+            let temperature = thermal.temperature_k(binding.destination.cell)?;
+            let (state, boundary) = acoustic(&mut checkpoint, |cancelled| {
+                wall::evaluate(
+                    binding,
+                    index,
+                    None,
+                    temperature,
+                    geometry,
+                    problem.frequency_hz,
+                    &mut || cancelled(),
+                )
+                .map_err(Into::into)
+            })?;
+            wall_states.push(state);
+            problem.mechanical_walls.push(boundary);
         }
         let omega = core::f64::consts::TAU * problem.frequency_hz;
         let mut states = vec![None; count];
@@ -364,6 +484,8 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
             geometry,
             cells: cells.to_vec().into(),
             wall_destinations: wall_destinations.to_vec().into(),
+            wall_bindings: wall_bindings.to_vec().into(),
+            wall_states,
             fluid,
             problem: Arc::new(problem),
             maximum_cells,
@@ -388,6 +510,16 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
     pub fn wall_destinations(&self) -> &[InteriorWallHeatCell<'t>] {
         &self.wall_destinations
     }
+    /// Original wall cards, reference material states and physical bindings.
+    /// Empty for a problem with explicitly held mechanical coefficients.
+    pub fn wall_bindings(&self) -> &[TemperatureInteriorWall<'t, 'm>] {
+        &self.wall_bindings
+    }
+    /// Complete wall material snapshots at the accepted native temperatures.
+    pub fn wall_materials(&self) -> impl ExactSizeIterator<Item = &LocalMaterialWall> {
+        self.wall_states.iter().map(|state| state.material.as_ref())
+    }
+    /// Original drive/controls and the current accepted mechanical coefficients.
     pub fn problem(&self) -> &InteriorTemperatureAcoustics {
         &self.problem
     }
@@ -428,16 +560,51 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
             }
             changed.push((element, state, response));
         }
-        if changed.is_empty() {
+        let mut changed_walls = Vec::new();
+        for (index, binding) in self.wall_bindings.iter().enumerate() {
+            checkpoint()?;
+            let temperature = thermal.temperature_k(binding.destination.cell)?;
+            if temperature.to_bits() == self.wall_states[index].temperature_k.to_bits() {
+                continue;
+            }
+            let (state, boundary) = acoustic(checkpoint, |cancelled| {
+                wall::evaluate(
+                    binding,
+                    index,
+                    Some(&self.wall_states[index]),
+                    temperature,
+                    self.geometry,
+                    self.problem.frequency_hz,
+                    &mut || cancelled(),
+                )
+                .map_err(Into::into)
+            })?;
+            increment(&mut work.wall_evaluations)?;
+            changed_walls.push((index, state, boundary));
+        }
+        if changed.is_empty() && changed_walls.is_empty() {
             return Ok(());
         }
         let mut responses = self.responses.clone();
         for &(element, _, response) in &changed {
             responses[element] = response;
         }
+        let mut next_wall_states = None;
+        let problem = if changed_walls.is_empty() {
+            Arc::clone(&self.problem)
+        } else {
+            let mut problem = (*self.problem).clone();
+            let mut states = self.wall_states.clone();
+            for (index, state, boundary) in changed_walls {
+                states[index] = state;
+                problem.mechanical_walls[index] = boundary;
+            }
+            next_wall_states = Some(states);
+            Arc::new(problem)
+        };
         let snapshot = prepare(
             self.geometry,
-            &self.problem,
+            &problem,
             &self.cells,
             &self.wall_destinations,
             self.maximum_cells,
@@ -452,6 +619,10 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
         for (element, state, _) in changed {
             self.states[element] = state;
         }
+        if let Some(states) = next_wall_states {
+            self.wall_states = states;
+        }
+        self.problem = problem;
         self.responses = responses;
         self.snapshot = Arc::new(snapshot);
         Ok(())

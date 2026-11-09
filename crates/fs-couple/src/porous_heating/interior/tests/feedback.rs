@@ -16,6 +16,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 mod molecular;
+mod walls;
 
 static SPEC: GasSpec = GasSpec::dry_air_ussa1976();
 const SCALE: f64 = 0.03;

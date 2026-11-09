@@ -94,7 +94,7 @@ original native caloric temperatures to the existing `PorousTemperatureFluid`
 gas/liquid/molecular sources and complete equivalent-fluid FE owner. Each original
 tetrahedron retains its own fluid state and, where declared, the original fixed
 `PorousFluidLaw` response. Spatially distinct temperatures are never averaged.
-Initial acoustic material sampling occurs after native FE work/storage admission;
+Initial volume-fluid sampling occurs after native FE work/storage admission;
 later refreshes reevaluate only changed cells before one global coherent solve.
 Original pressure, all distributed mechanical coordinates and their separate
 volume/wall physical loss forms remain in that solve.
@@ -125,12 +125,31 @@ hook refuses, preserving dispersive behavior instead of falling back silently
 to its equilibrium `ThermoviscousFluid` tuple. The existing coherent-layer hook
 retains its own unchanged native owner.
 
-The owned frequency, coherent velocity drive, Robin data and mechanical wall
-coefficients remain fixed explicitly. Wall motion and heat still respond to
-the changed volume field, but this owner does not refresh material-wall laws.
+The owned frequency, coherent velocity drive and Robin data remain fixed.
+`try_new` also holds its explicitly authored mechanical coefficients.
+`try_new_with_material_walls` instead binds each original
+`CylindricalMaterialBoundary`, material card and temperature coordinate to its
+complete native wall receiver. It evaluates the same source at that receiver's
+accepted temperature, retaining property claims, axes, restraint, thickness and
+applicability. Original Young-viscosity, source-pair Maxwell and admitted
+principal-aligned laws use `LocalMaterialWall::at_temperature_pinned`; unsupported
+constitutive continuations, changed density/mass, phase and expansion refuse.
+The original cylindrical faceting and harmonic reduction are shared with
+`MaterialMechanicalHarmonic`, rather than inferred from a replacement impedance.
+
+Wall-only temperature changes refresh the complete field without reevaluating
+unchanged fluid sources. Simultaneous fluid/wall changes share one preparation.
+Unchanged wall states share their immutable full material receipts; accepted
+wall temperatures, material states, mechanical coefficients, field and heat
+advance together. The source constructor requires empty raw mechanical inputs
+and never silently replaces an authored wall. `problem()` exposes the current
+accepted mechanical coefficients, while `wall_bindings()` retains the original
+sources and `wall_materials()` exposes their accepted material snapshots.
+
 Thermal timestep refinement must resolve feedback independently of conduction
 CFL; acoustic startup, parametric stored-energy work and moving geometry remain
-outside this cycle-mean approximation. The accepted factor remains live while
+outside this cycle-mean approximation, as does transient wall-memory transfer
+between harmonic solutions. The accepted factor remains live while
 a new preparation is built, adding its retained storage to the native
 per-preparation memory allowance. Native substep and FE budgets remain binding.
 
@@ -140,7 +159,9 @@ events, split continuation, latent/one-cell cache reuse, source-domain and
 cancellation rollback, and temporal refinement against independently
 orchestrated original material/FE/frozen-heat owners. Its molecular child compares
 changed-temperature free-gas and porous responses with the original joint
-reservoir owners and retained source composition.
+reservoir owners and retained source composition. The wall child exercises
+source-backed temperature-dependent walls, independent frozen-source heat and
+field reconstruction, changed-wall work/cache behavior, and refusal rollback.
 
 ## Optional local material tangents in finite-solid motion
 

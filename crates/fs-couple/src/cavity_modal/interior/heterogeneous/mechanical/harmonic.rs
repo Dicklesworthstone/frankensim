@@ -110,32 +110,8 @@ impl<'f, 'c, 's> MaterialMechanicalHarmonic<'f, 'c, 's> {
         let mut wall_band_hz = first.source.band_hz();
         let mut numerical = Vec::with_capacity(boundaries.len());
         for (index, boundary) in boundaries.iter().enumerate() {
-            if cancelled() {
-                return Err(
-                    MaterialMechanicalError::Interior(HeterogeneousError::Cancelled).into(),
-                );
-            }
             let band = boundary.source.band_hz();
-            if !frequency_hz.is_finite() || frequency_hz < band[0] || frequency_hz > band[1] {
-                return Err(MaterialMechanicalHarmonicError::Frequency {
-                    boundary: index,
-                    frequency_hz,
-                    source_band_hz: band,
-                });
-            }
-            let span = boundary.admit_geometry(index, geometry, cancelled)?;
-            let wall = boundary
-                .source
-                .acoustic_cell_wall(boundary.radius_m, span)
-                .map_err(|source| MaterialMechanicalError::Source {
-                    boundary: index,
-                    source,
-                })?;
-            numerical.push(MechanicalBoundary {
-                faces: boundary.faces.clone(),
-                wall: wall.wall,
-                relaxation: wall.relaxation,
-            });
+            numerical.push(boundary.prepare_harmonic(index, geometry, frequency_hz, cancelled)?);
             wall_band_hz[0] = wall_band_hz[0].max(band[0]);
             wall_band_hz[1] = wall_band_hz[1].min(band[1]);
         }
@@ -180,5 +156,42 @@ impl<'f, 'c, 's> MaterialMechanicalHarmonic<'f, 'c, 's> {
     #[must_use]
     pub const fn prepared(&self) -> &PreparedEquivalentFluid<'f, 'c> {
         self.interior.operator()
+    }
+}
+
+impl CylindricalMaterialBoundary<'_> {
+    /// The same geometry/source admission and surface-specific reduction for
+    /// frozen and temperature-refreshed interiors. The FE trace supplies area.
+    pub(crate) fn prepare_harmonic(
+        &self,
+        index: usize,
+        geometry: &HelmholtzFe<'_>,
+        frequency_hz: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalBoundary, MaterialMechanicalHarmonicError> {
+        if cancelled() {
+            return Err(MaterialMechanicalError::Interior(HeterogeneousError::Cancelled).into());
+        }
+        let band = self.source.band_hz();
+        if !frequency_hz.is_finite() || frequency_hz < band[0] || frequency_hz > band[1] {
+            return Err(MaterialMechanicalHarmonicError::Frequency {
+                boundary: index,
+                frequency_hz,
+                source_band_hz: band,
+            });
+        }
+        let span = self.admit_geometry(index, geometry, cancelled)?;
+        let wall = self
+            .source
+            .acoustic_cell_wall(self.radius_m, span)
+            .map_err(|source| MaterialMechanicalError::Source {
+                boundary: index,
+                source,
+            })?;
+        Ok(MechanicalBoundary {
+            faces: self.faces.clone(),
+            wall: wall.wall,
+            relaxation: wall.relaxation,
+        })
     }
 }
