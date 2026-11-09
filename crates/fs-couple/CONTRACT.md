@@ -10234,3 +10234,29 @@ regressions have been reviewed statically but not executed.
 Wall storage remains part of the existing dry vessel, with fixed geometry and constant-density calorics. Both stages share one physical interval and retain first-order splitting; source support, Biot, finite-inventory, drift, frame and mechanical gates remain authoritative. The shared source-relative energy account sums absolute thermal/particle defects and native inventory/gravity reserves under one fixed budget. Wall, gas and vehicle publish together; late source, withdrawal, callback, balance or cancellation refusal leaves inputs unchanged. Prescribed source inventories remain external and undepleted. Exterior wall-pressure forces, rotation, spatial thermal equilibration and empirical heat-transfer accuracy are not inferred.
 
 Four focused regression groups cover independently calculated comoving supply/discharge and finite heat, mixed ambient/comoving/vacuum ports and inertial transforms, exact insulated-wall parity and inventory reserves, and atomic source/withdrawal/callback/cancellation refusals. Production formatting/source checks and an independent monatomic balance calculation completed before the executor outage; full owner tests were not compiled or run. Production sources were recovered byte-for-byte; the new test source was recovered from its complete pre-format patch.
+
+## Causal material memory and caloric heat acceptance
+
+`causal_heat_assembly_candidate` connects the original solid causal history
+to the existing harmonic solid-to-thermal candidate solver. It deposits the
+actual interval Maxwell/Kelvin heat, including energy released from retained
+memory with zero AC forcing. The shared caloric solver retains its original
+source/inventory admission, cell mapping, thermal residual and energy account.
+The observation is evaluated once before its nonlinear thermal trials.
+
+The returned candidate owns both unpublished endpoints. Only successful
+material evolution, thermal solution and final cancellation admission return
+the new material history and thermal simulation together; late failures leave
+both accepted inputs unchanged. Interval work/heat/storage remain distinct
+from cumulative material ledgers. The existing thermal owner has an f64 clock,
+so its start and target must match the retained DD material interval exactly;
+the standalone solid owner retains its wider DD-clock capability.
+
+This is a fixed-law, prescribed-displacement material/heat handoff using the
+existing caloric time discretization. Temperature-dependent material feedback,
+thermal eigenstrain evolution and a mechanical equilibrium solve are not
+inferred. Three G1/G3/G4 regression groups specify retained-memory relaxation
+with zero AC forcing, consecutive coherent forced intervals against independent
+real-time work/heat integrals, physical caloric endpoints, and late-failure/
+clock/cancellation atomicity. They were authored and independently reviewed
+but not native-compiled or executed after the execution environment failed.

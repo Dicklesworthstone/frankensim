@@ -36,6 +36,9 @@ use std::{
     convert::Infallible,
 };
 
+mod causal;
+pub use causal::{CausalHarmonicSolidHeatCandidate, causal_heat_assembly_candidate};
+
 /// Original source, quadrature, receiving-cell and heat-provider failures.
 #[derive(Debug)]
 pub enum HarmonicSolidHeatError<E> {
@@ -315,6 +318,36 @@ fn candidate<'t, A: HeatAssembly + ?Sized>(
     controls: CircuitEnthalpySolve,
     initial_energy_increments_j: &[f64],
 ) -> Result<HarmonicSolidHeatCandidate<'t, A::Sample>, Error<A::Error>> {
+    candidate_from_observation(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        observer.source(),
+        cells,
+        controls,
+        initial_energy_increments_j,
+        |window| match bias {
+            Some(bias) => observer.observe_window_with_bias(displacements, bias, window, cx),
+            None => observer.observe_window(displacements, window, cx),
+        },
+    )
+}
+
+// Settled and causal material histories share the exact caloric/source owner.
+// Observation happens once, after source admission and before Newton trials.
+#[allow(clippy::too_many_arguments)]
+fn candidate_from_observation<'t, A: HeatAssembly + ?Sized>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    solid: &fs_solid::linear3::visco::ViscoElements,
+    cells: &[ElementThermalCell<'_>],
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    observe: impl FnOnce(HarmonicWindow) -> Result<ViscoHarmonicMaterialSpectrumField, ViscoHarmonicError>,
+) -> Result<HarmonicSolidHeatCandidate<'t, A::Sample>, Error<A::Error>> {
     poll(cx)?;
     admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
     let dt = finite(target_s - thermal.time_s())?;
@@ -323,7 +356,6 @@ fn candidate<'t, A: HeatAssembly + ?Sized>(
             "harmonic heat needs a positive representable thermal interval",
         )
     })?;
-    let solid = observer.source();
     let sources = solid
         .material_sources()
         .ok_or(CircuitEnthalpyError::Invalid(
@@ -434,11 +466,7 @@ fn candidate<'t, A: HeatAssembly + ?Sized>(
         Ok(coefficients.bulk)
     };
     resolve(thermal)?;
-    let observed = match bias {
-        Some(bias) => observer.observe_window_with_bias(displacements, bias, window, cx),
-        None => observer.observe_window(displacements, window, cx),
-    }
-    .map_err(observation)?;
+    let observed = observe(window).map_err(observation)?;
     balance(
         observed.energy_balance_residual_j,
         controls.total_energy_tolerance_j,

@@ -1,4 +1,7 @@
 //! G1/G3/G4: exact coherent Kelvin/Maxwell loss drives real finite thermal cells.
+
+#[path = "harmonic/causal.rs"]
+mod causal;
 use super::*;
 use fs_couple::{
     circuit_enthalpy::{
