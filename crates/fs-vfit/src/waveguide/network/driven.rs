@@ -79,7 +79,22 @@ impl WaveguideNetwork {
     pub fn step_with_driven(&mut self, outgoing: f64, waves: &[DrivenWave])
         -> Result<NetworkFrame, WaveguideError>
     {
+        self.step_with_driven_checked(outgoing, waves, |_| Ok(()))
+    }
+
+    /// Validate one external coupled participant against the original native
+    /// candidate before any accepted wave, load, observation or clock moves.
+    /// The callback must not publish external state until this method succeeds.
+    /// A refusal keeps accepted history, allowing retry; candidate scratch may
+    /// change. No second network preview or wave-history clone is required.
+    pub fn step_with_driven_checked(
+        &mut self,
+        outgoing: f64,
+        waves: &[DrivenWave],
+        check: impl FnOnce(&NetworkFrame) -> Result<(), WaveguideError>,
+    ) -> Result<NetworkFrame, WaveguideError> {
         let frame = self.preview_step_with_driven(outgoing, waves)?;
+        check(&frame)?;
         self.accept_preview();
         Ok(frame)
     }

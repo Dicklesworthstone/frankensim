@@ -11036,3 +11036,41 @@ The combined transfer audit adds original compensated relative native audits and
 This is a frozen-source split with prescribed normal loading at interval start and average-power reconstruction of a monotone rolling step. Temporal refinement is required for within-step transients. Contact heat partition and thermal topology remain explicit caller-selected physics; temperature feedback and reciprocal contact conductance are separate operations.
 
 Four focused integration cases cover independent two-cell conduction/cooling eigenmodes, snap followed by a scheduled cooling change, budget/final-callback/stale-clock rollback, and finite caloric refusal. Pinned `rustfmt --check` passed. These integration cases were not compiled or executed under this session's resource ceiling.
+
+## Initialized acoustic source storage and characteristic reflection
+
+`upstream_airway::StoredPressureSource` retains the original
+`fs_vfit::impedance::SeriesImpedance`, including explicitly initialized
+compliance pressure and inertive flow. Its existing `UpstreamPort` law is
+`p = P_s + p_load(-U_out)`: one same-sample affine solve followed by a
+transactional storage commit, with no delayed compliance response. Initial
+energy remains initial storage, not source work or irreversible loss.
+
+The native driven-network path subtracts half the ideal series source from
+the arriving wave, solves the original R-L-C boundary, and adds it back to
+the departing wave. It accepts the source and complete original network
+only after one native preview and the combined finite-energy/cancellation
+check. It requires one additional driven endpoint and identical physical
+clock and adjacent characteristic reference. No wave history is cloned;
+source work is O(1), and the original network's work and memory bounds apply.
+
+Original quadratic storage, resistor heat, ideal-source work and signed
+source-to-network work remain separate. The combined account cancels that
+internal exchange exactly once. A charged compliance can release pressure
+with zero ideal-source drive and later recover reflected wave energy without
+calling that exchange heat. Cancellation or either owner's refusal retains
+both accepted histories, the original network clock and pending valve port.
+
+Seven focused native tests execute the actual source, R-L-C, propagation and
+driven-network owners. They cover a three-rung second-order compliance decay,
+known transit, source/duct energy conservation under repeated reflections,
+initialized driven R-L-C work/heat, original wave/flow parity and transactional
+refusal. Five existing original reactive-impedance regressions also pass.
+The isolated build omits unused exact-parallel-cell and MIMO module wiring;
+full workspace and native valve/airway integration tests remain unrun.
+
+This is the fixed-coefficient linear acoustic model, with explicit bilinear
+frequency warping. It is not a finite thermochemical inventory, changing
+reservoir volume, inferred anatomical law, validated player population, or
+storage certificate for an independently fitted airway FIR. Such a FIR must
+not receive a second copy of its already included termination.

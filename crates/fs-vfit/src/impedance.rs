@@ -80,7 +80,7 @@ impl ImpedanceFrame {
     }
 }
 
-/// Constant-coefficient, zero-initialized impedance; no per-step allocation.
+/// Constant-coefficient impedance with explicit physical history; no per-step allocation.
 /// Bilinear frequency warping is explicit: s = (2/dt) (z-1)/(z+1).
 #[derive(Debug, Clone, Copy)]
 pub struct SeriesImpedance {
@@ -130,6 +130,63 @@ impl SeriesImpedance {
         })
     }
 
+    /// Bind admitted initial physical storage without disguising it as an input impulse.
+    /// Omitted inertance/compliance coordinates must be exactly zero. Initial
+    /// energy belongs to this load; it is not credited as source work.
+    ///
+    /// # Errors
+    /// As `new`, nonfinite state, a nonzero omitted coordinate, or unrepresentable energy.
+    pub fn new_with_state(
+        spec: SeriesImpedanceSpec,
+        port_impedance: f64,
+        dt: f64,
+        state: ImpedanceState,
+    ) -> Result<Self, WaveguideError> {
+        let mut load = Self::new(spec, port_impedance, dt)?;
+        if !state.inertive_flow_m3_s.is_finite()
+            || !state.compliance_pressure_pa.is_finite()
+            || (spec.inertance_pa_s2_m3 == 0.0 && state.inertive_flow_m3_s != 0.0)
+            || (spec.compliance_m3_pa.is_none() && state.compliance_pressure_pa != 0.0)
+            || !load.energy_at(state).is_finite()
+        {
+            return Err(WaveguideError(
+                "series load initial state or storage is not representable",
+            ));
+        }
+        load.state = state;
+        Ok(load)
+    }
+
+    /// Physical sample interval [s], shared with a coupled boundary.
+    #[must_use]
+    pub const fn time_step_s(&self) -> f64 {
+        self.dt
+    }
+
+    /// Pressure/volume-flow wave reference [Pa s/m^3], not a physical series loss.
+    #[must_use]
+    pub const fn port_impedance(&self) -> f64 {
+        self.port_impedance
+    }
+
+    /// Step-mean affine pressure `p = history + coefficient * U`, where U
+    /// enters this load. The existing midpoint R-L-C equation supplies both
+    /// values; no delay, filter fit or additional dissipation is introduced.
+    ///
+    /// # Errors
+    /// The affine pressure or positive coefficient sum is not representable.
+    pub fn affine_pressure(&self) -> Result<(f64, f64), WaveguideError> {
+        let zm = 2.0 * (self.spec.inertance_pa_s2_m3 / self.dt);
+        let coefficient = self.spec.resistance_pa_s_m3 + zm + self.compliance_coefficient;
+        let history = self.state.compliance_pressure_pa - zm * self.state.inertive_flow_m3_s;
+        if !history.is_finite() || !coefficient.is_finite() {
+            return Err(WaveguideError(
+                "series load flow-driven port is not representable",
+            ));
+        }
+        Ok((history, coefficient))
+    }
+
     /// Immutable coefficient declaration; changing it would require material work.
     #[must_use]
     pub const fn spec(&self) -> &SeriesImpedanceSpec { &self.spec }
@@ -156,9 +213,11 @@ impl SeriesImpedance {
         self.preview_with_loss(incident, None)
     }
 
-    pub(crate) fn preview_with_loss(&self, incident: f64,
-        loss: Option<crate::quadratic_loss::QuadraticLossSpec>)
-        -> Result<ImpedanceFrame, WaveguideError> {
+    pub(crate) fn preview_with_loss(
+        &self,
+        incident: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>,
+    ) -> Result<ImpedanceFrame, WaveguideError> {
         let old = self.state;
         // (Z + R + 2L/dt + dt/(2C)) U_mid = 2a + 2L/dt U_0 - p_c0.
         let mut flow = 2.0 * (incident * self.inverse_sum)
@@ -167,32 +226,84 @@ impl SeriesImpedance {
         let quadratic_power = if let Some(loss) = loss {
             flow = loss.solve(flow, self.inverse_sum)?;
             loss.at_flow(flow)?.1
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let reflected = incident - self.port_impedance * flow;
         let pressure = incident + reflected;
+        self.frame_at_flow(flow, pressure, reflected, quadratic_power)
+    }
+
+    fn frame_at_flow(
+        &self,
+        flow: f64,
+        pressure: f64,
+        reflected: f64,
+        quadratic_power: f64,
+    ) -> Result<ImpedanceFrame, WaveguideError> {
+        let old = self.state;
         let state = ImpedanceState {
             inertive_flow_m3_s: if self.spec.inertance_pa_s2_m3 > 0.0 {
                 2.0 * flow - old.inertive_flow_m3_s
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             compliance_pressure_pa: if self.spec.compliance_m3_pa.is_some() {
                 old.compliance_pressure_pa + 2.0 * (self.compliance_coefficient * flow)
-            } else { 0.0 },
+            } else {
+                0.0
+            },
         };
         let stored_energy_j = self.energy_at(state);
         let frame = ImpedanceFrame {
-            state, reflected_pressure_pa: reflected, pressure_pa: pressure, flow_m3_s: flow,
-            stored_energy_j, storage_change_j: stored_energy_j - self.stored_energy_j(),
+            state,
+            reflected_pressure_pa: reflected,
+            pressure_pa: pressure,
+            flow_m3_s: flow,
+            stored_energy_j,
+            storage_change_j: stored_energy_j - self.stored_energy_j(),
             dissipated_energy_j: (self.spec.resistance_pa_s_m3 * flow) * (flow * self.dt)
                 + quadratic_power * self.dt,
             supplied_work_j: pressure * (flow * self.dt),
         };
-        if ![incident, flow, reflected, pressure, state.inertive_flow_m3_s,
-            state.compliance_pressure_pa, stored_energy_j, frame.storage_change_j,
-            frame.dissipated_energy_j, frame.supplied_work_j, frame.balance_residual_j()]
-            .iter().all(|x| x.is_finite())
+        if ![
+            flow,
+            reflected,
+            pressure,
+            state.inertive_flow_m3_s,
+            state.compliance_pressure_pa,
+            stored_energy_j,
+            frame.storage_change_j,
+            frame.dissipated_energy_j,
+            frame.supplied_work_j,
+            frame.balance_residual_j(),
+        ]
+        .iter()
+        .all(|x| x.is_finite())
         {
             return Err(WaveguideError("series load step left the finite set"));
         }
+        Ok(frame)
+    }
+
+    /// Original storage update after a caller has solved the SAME step flow
+    /// using `affine_pressure`. Positive flow enters the passive load.
+    /// The returned wave uses this owner's declared reference only for observation.
+    ///
+    /// # Errors
+    /// Nonfinite flow, pressure, state, wave, storage or work.
+    pub fn preview_at_flow(&self, flow: f64) -> Result<ImpedanceFrame, WaveguideError> {
+        let (history, coefficient) = self.affine_pressure()?;
+        let pressure = history + coefficient * flow;
+        let reflected = 0.5 * pressure - (0.5 * self.port_impedance) * flow;
+        self.frame_at_flow(flow, pressure, reflected, 0.0)
+    }
+
+    /// Accept one externally solved flow after the immutable preview succeeds.
+    /// Refusal preserves all original storage.
+    pub fn step_at_flow(&mut self, flow: f64) -> Result<ImpedanceFrame, WaveguideError> {
+        let frame = self.preview_at_flow(flow)?;
+        self.accept_frame(frame);
         Ok(frame)
     }
 

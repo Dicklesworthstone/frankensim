@@ -86,7 +86,13 @@
 //! resistance, inertance or compliant relaxation, but its causal law belongs to the caller; no alveolar parameters
 //! are inferred. [`UpstreamAirway::realize_with_source_admittance`] also accepts sealed compliance and resonant zeros
 //! through U_source=Y_L(P_s-p_R), with exact R(0)=1, G(0)=0 when Y_L(0)=0. This is a zero-state wave response;
-//! initialized reservoir storage, changing volume and a local energy ledger need an explicit storage owner.
+//! initialized reservoir storage needs an explicit owner. [`StoredPressureSource`] provides that owner through
+//! the original R-L-C storage and native characteristic-network boundary; changing volume remains outside this
+//! fixed-coefficient linear model.
+
+/// Initialized source storage at the existing valve or characteristic-network port.
+pub mod stored;
+pub use stored::{StoredPressureSource, StoredSourceFrame, StoredSourceNetworkFrame};
 
 use crate::driving_point::{
     DrivingPointError, LineDc, LineLadder, LineRealization, PoleState, realize_characteristic_response,

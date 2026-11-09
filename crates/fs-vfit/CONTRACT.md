@@ -708,3 +708,23 @@ the same discrete pressure-flow work identity, with exactly zero resistor loss.
 This supplies physical storage for the source-derived, band-qualified
 evanescent reflection realization in `fs-couple`; midpoint frequency warping
 is an explicit approximation, not an exact-ZOH claim.
+
+## Initialized and flow-driven native series storage
+
+`SeriesImpedance::new_with_state` admits original inertive-flow and
+compliance-pressure coordinates and their finite quadratic energy. Omitted
+coordinates must be zero. The existing constructor remains zero-initialized.
+`affine_pressure`, `preview_at_flow` and `step_at_flow` expose the same
+midpoint law to an external simultaneous flow solve; wave-driven and
+flow-driven paths share the original state, heat and work update. Neither
+route fits, resets or adds dissipation to physical storage.
+
+`WaveguideNetwork::step_with_driven_checked` runs one original native preview,
+then an immutable external admission callback, before accepting any wave,
+load, observation or clock. A callback refusal retains accepted history;
+candidate scratch can change. The callback must defer external publication
+until success. Existing `step_with_driven` delegates with no added gate.
+This seam supports atomic initialized source/network coupling without a
+second network solve or history clone. The source regressions in fs-couple
+and the five existing reactive-impedance regressions pass in focused native
+builds; this is not a full workspace verification.
