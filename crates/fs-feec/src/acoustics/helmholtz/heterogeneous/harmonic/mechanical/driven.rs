@@ -7,10 +7,13 @@ use super::{
 };
 use fs_math::dd::Dd;
 pub use fs_phs::harmonic::resonance::{
-    DrivenResonance, ResonanceControls, ResonanceSearchError, ResonanceSurvey,
-    ResonanceSurveyControls, ResonanceSurveyError,
+    AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, DrivenResonance,
+    ResonanceControls, ResonanceSearchError, ResonanceSurvey, ResonanceSurveyControls,
+    ResonanceSurveyError,
 };
 use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
+
+mod antiresonance;
 
 /// A FIXED coherent peak-phasor experiment across the requested frequency band.
 /// Velocity/flow sources retain their original SI units and FE owner binding.

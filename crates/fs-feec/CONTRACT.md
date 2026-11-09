@@ -3092,3 +3092,25 @@ Two native coupled/search tests cover independent pressure, displacement and
 velocity peak/width limits, hereditary loss, and coherent cancellation. Two
 public FE integration tests additionally exercise applied traction, integrated
 volume injection and foreign-owner refusal.
+
+## Coherent cavity and wall antiresonance bands
+
+`HeterogeneousHelmholtzFe::driven_antiresonance_with_coupled_mechanical_walls`
+uses the same immutable physical drive and receiver as the peak adapter, with
+the shared zero-safe minimum/recovery search. Fixed integrated fluid injections,
+applied wall tractions and signed pressure/wall observations retain their units,
+original source ownership, coherent phases and spatial projection. Every actual
+frequency reuses one complete pressure/wall/Maxwell factor for the response and
+its analytic tangent; recovery crossings skip the tangent. No pressure receiver
+or wall impedance is inverted and no internal motion or memory is discarded at
+a cancellation. Explicit recovery levels use the observation's squared units
+(Pa², m² or m²/s²), require both crossings, and imply no material or free-mode Q.
+Original residuals, release constraints, cancellation and query limits remain.
+
+The added public P1 tetrahedron regression independently derives a coherent
+volume/traction cancellation at 1.7 rad/s and its two recovery edges. It checks
+that a zero pressure observation retains all three wall coordinates, positive
+stored wall energy and 0.003625 W of actual traction work and wall heat. Its
+rational oracle and derivative were independently evaluated. The public FE test
+is authored but unexecuted while the full dependency build remains unavailable;
+shared search and original rotor/wave numerical tests are separately verified.

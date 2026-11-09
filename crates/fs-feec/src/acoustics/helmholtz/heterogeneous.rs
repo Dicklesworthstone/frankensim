@@ -40,22 +40,23 @@ use fs_sparse::{Coo, Csr};
 
 mod harmonic;
 pub use harmonic::{
-    BoundaryAdmittance, BoundaryAdmittanceFrequencySample, DrivenResonance,
+    AntiresonanceControls, AntiresonanceRecovery, BoundaryAdmittance,
+    BoundaryAdmittanceFrequencySample, DrivenAntiresonance, DrivenResonance,
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
     EquivalentFluidPressureField, HarmonicLimits, HeterogeneousFrequencyResponse,
     HeterogeneousPressureField, MAX_HARMONIC_DOFS, MechanicalHarmonicField,
     MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits, MechanicalPoleError,
     MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleResponseOptions, MechanicalPoleWall,
-    MechanicalPressureObservation, MechanicalRelaxationParameterDirection,
-    MechanicalResonanceDrive, MechanicalResonanceObservation,
-    MechanicalResonanceParameterDerivative, MechanicalResonancePole, MechanicalResonanceRegion,
-    MechanicalResonanceResidue, MechanicalResonanceResponseError, MechanicalResonanceSpectrum,
-    MechanicalSpectrumOptions, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
-    MechanicalWallParameterDerivative, MechanicalWallParameterDirection, MechanicalWallPhasors,
-    MechanicalWallPower, MechanicalWallResidue, PreparedEquivalentFluid,
-    PreparedEquivalentFluidTraction, PreparedHeterogeneous, PreparedMechanicalHarmonic,
-    PreparedMechanicalResonance, ResonanceControls, ResonanceSearchError, ResonanceSurvey,
-    ResonanceSurveyControls, ResonanceSurveyError, VelocityTrace,
+    MechanicalPressureObservation, MechanicalRelaxationParameterDirection, MechanicalResonanceDrive,
+    MechanicalResonanceObservation, MechanicalResonanceParameterDerivative, MechanicalResonancePole,
+    MechanicalResonanceRegion, MechanicalResonanceResidue, MechanicalResonanceResponseError,
+    MechanicalResonanceSpectrum, MechanicalSpectrumOptions, MechanicalWallAccounting,
+    MechanicalWallFrequencyDerivative, MechanicalWallParameterDerivative,
+    MechanicalWallParameterDirection, MechanicalWallPhasors, MechanicalWallPower,
+    MechanicalWallResidue, PreparedEquivalentFluid, PreparedEquivalentFluidTraction,
+    PreparedHeterogeneous, PreparedMechanicalHarmonic, PreparedMechanicalResonance,
+    ResonanceControls, ResonanceSearchError, ResonanceSurvey, ResonanceSurveyControls,
+    ResonanceSurveyError, VelocityTrace,
 };
 
 mod observation;

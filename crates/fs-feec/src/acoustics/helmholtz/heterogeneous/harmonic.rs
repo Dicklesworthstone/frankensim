@@ -22,17 +22,17 @@ pub use equivalent::{
 mod frequency;
 mod mechanical;
 pub use mechanical::{
-    DrivenResonance, MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse,
-    MechanicalHarmonicLimits, MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions,
-    MechanicalPoleResponseOptions, MechanicalPoleWall, MechanicalPressureObservation,
-    MechanicalRelaxationParameterDirection, MechanicalResonanceDrive,
-    MechanicalResonanceObservation, MechanicalResonanceParameterDerivative,
-    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceResidue,
-    MechanicalResonanceResponseError, MechanicalResonanceSpectrum, MechanicalSpectrumOptions,
-    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallParameterDerivative,
-    MechanicalWallParameterDirection, MechanicalWallPhasors, MechanicalWallPower,
-    MechanicalWallResidue, PreparedMechanicalHarmonic, PreparedMechanicalResonance,
-    ResonanceControls, ResonanceSearchError,
+    AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, DrivenResonance,
+    MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
+    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleResponseOptions,
+    MechanicalPoleWall, MechanicalPressureObservation, MechanicalRelaxationParameterDirection,
+    MechanicalResonanceDrive, MechanicalResonanceObservation,
+    MechanicalResonanceParameterDerivative, MechanicalResonancePole, MechanicalResonanceRegion,
+    MechanicalResonanceResidue, MechanicalResonanceResponseError, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection, MechanicalWallPhasors,
+    MechanicalWallPower, MechanicalWallResidue, PreparedMechanicalHarmonic,
+    PreparedMechanicalResonance, ResonanceControls, ResonanceSearchError,
 };
 mod resonance;
 pub use resonance::{ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError};

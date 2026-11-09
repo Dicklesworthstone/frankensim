@@ -25,8 +25,9 @@ use fs_phs::harmonic::resonance::survey_resonances;
 
 mod driven;
 pub use driven::{
-    DrivenResonance, MechanicalPressureObservation, MechanicalResonanceDrive,
-    MechanicalResonanceObservation, ResonanceControls, ResonanceSearchError,
+    AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, DrivenResonance,
+    MechanicalPressureObservation, MechanicalResonanceDrive, MechanicalResonanceObservation,
+    ResonanceControls, ResonanceSearchError,
 };
 
 mod poles;
