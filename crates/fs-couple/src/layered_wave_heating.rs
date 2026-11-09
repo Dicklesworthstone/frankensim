@@ -53,8 +53,8 @@ pub mod substrate;
 pub mod thermo_optical;
 pub use thermo_optical::{
     BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating,
-    BroadbandThermoOpticalWaveStep, SpectralThermoOpticalSource, ThermoOpticalLayer,
-    ThermoOpticalSource, ThermoOpticalSpectralLine, ThermoOpticalWaveHeating,
+    BroadbandThermoOpticalWaveStep, SchottThermoOpticalSource, SpectralThermoOpticalSource,
+    ThermoOpticalLayer, ThermoOpticalSource, ThermoOpticalSpectralLine, ThermoOpticalWaveHeating,
     ThermoOpticalWaveStep,
 };
 

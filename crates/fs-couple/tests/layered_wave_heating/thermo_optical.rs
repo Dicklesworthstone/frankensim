@@ -1,5 +1,7 @@
 //! Accepted-temperature optical feedback and transactional source support.
 
+#[path = "thermo_optical/schott.rs"]
+mod schott;
 #[path = "thermo_optical/spectral.rs"]
 mod spectral;
 
@@ -652,4 +654,3 @@ fn glass_endpoint_outside_original_spectral_source_support_refuses_atomically() 
     assert_eq!(initial.time_s(), 0.0);
     assert_eq!(source.resolved().state_coordinate("T"), Some(300.0));
 }
-

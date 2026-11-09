@@ -25,11 +25,16 @@ pub use broadband::{
     BroadbandThermoOpticalWaveStep, ThermoOpticalSpectralLine,
 };
 
+/// Original reference glass plus a source-bounded analytic thermal correction.
+mod schott;
+pub use schott::SchottThermoOpticalSource;
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for fs_material::state_point::VisibleConductorStatePoint {}
     impl Sealed for fs_material::state_point::VisibleOpticalStatePoint {}
     impl Sealed for super::SpectralThermoOpticalSource {}
+    impl Sealed for super::SchottThermoOpticalSource {}
 }
 
 /// Original source families supported by this thermal/Maxwell bridge.
@@ -38,6 +43,8 @@ mod sealed {
 /// The default conductor type preserves existing callers. A
 /// `VisibleOpticalStatePoint` additionally supports mixed metal/glass layers;
 /// `SpectralThermoOpticalSource` retains explicit finite-band infrared sources.
+/// `SchottThermoOpticalSource` keeps a reference spectrum fixed while the native
+/// cell temperature drives its separately sourced real-index correction.
 pub trait ThermoOpticalSource: sealed::Sealed + Clone {
     fn resolved(&self) -> &ResolvedMaterialStatePoint;
     fn at_query_point(

@@ -9621,3 +9621,34 @@ only that original physical AC heat is deposited. Source-temperature independenc
 reference mass/volume, exact caloric ownership, nonlinear transport, cancellation
 and constitutive/caloric energy gates remain unchanged. Neither static force
 balance, geometric prestress, thermal expansion nor startup memory is inferred.
+
+## Reference-only glass optics on the accepted thermal timeline
+
+`layered_wave_heating::SchottThermoOpticalSource` supplies the native
+monochromatic and broadband thermo-optical heating owners with an immutable
+original dielectric spectrum plus the shared SCHOTT absolute-index law.
+Each original thermal cell's accepted temperature refreshes its separately
+selected material/permeability requirements on the same immutable card. The
+reference spectrum stays at its original T0, even when its claims have no hot
+support. All supplied current-state requirements, source identities, coordinate
+semantics, interpolation gaps and intersected wavelength/temperature bounds
+remain binding. Reference data/law are Arc-shared across cells and endpoints;
+no fitted spectrum or accumulated temperature increment replaces them.
+
+The explicit lossless mode refuses original absorption. The separate reference-
+absorption mode freezes original alpha(lambda) while the native full complex
+Maxwell response changes refraction, standing waves and positive local volume
+loss. Existing native owners sum physical spectral-line watts once, preserve
+two-face coherence within each line, solve heat once, and admit all endpoint
+optical states before publication. Original work bounds and cancellation apply.
+This is the existing quasi-steady explicit optical/thermal split with fixed
+geometry and caller-owned interval convergence, not a supplied absorption(T),
+transient EM storage, expansion, thermal-emission or implicit feedback law.
+
+Three focused regressions in `tests/layered_wave_heating/thermo_optical/schott.rs`
+specify exact reference retention and source refusal, nonuniform native cell
+heat/cool refresh with an independent two-cell caloric solution, and broadband
+complex Airy absorption with endpoint-domain atomicity. Source/API, independent
+scalar formula and pinned formatter checks were completed; these native
+integration tests remain unexecuted in this environment because the dependency
+build was killed before the physics crates were reached.
