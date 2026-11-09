@@ -9751,3 +9751,35 @@ Full FEM execution remains blocked by the prior pinned-asupersync SIGKILL;
 format/parsing and bounded static API review are distinct from runtime evidence.
 The original six scalar BDF/RCR model tests were previously executed; their
 unchanged leaf model does not establish new nonlinear integration test coverage.
+
+## Consistent Newton integration of planar Smagorinsky stress
+
+`PlanarSgs::{solve_steady_newton,bdf1_newton_step,bdf2_newton_variable_step}`
+connect the authored Smagorinsky closure to the original damped Newton owner.
+The constitutive tangent is `d(nu_eff)/d(gamma) = (Cs*Delta)^2`; the native
+Jacobian differentiates cell stress, harmonic SIP weights, penalties, boundary
+loads and convection. Filter widths and molecular viscosity remain the prepared
+cell fields. Neither an artificial steady mass nor a frozen eddy viscosity is
+introduced to obtain convergence.
+
+These entries prescribe velocity on every boundary. The BDF2 history carries
+its actual previous interval, admits a new/previous step ratio in (0,2], and
+uses the real previous velocity as the Newton initial iterate. Missing older
+history is exactly BDF1 startup. Accepted SGS diagnostics belong to the same
+velocity endpoint and remain instantaneous modeled transfer, not added heat.
+
+At exactly zero strain, the tangent uses the zero generalized derivative of
+the strain norm. Viscosity-dependent DG penalties may still be nonsmooth when
+a tangential jump remains. WALE and Vreman require full-gradient tangents and
+are refused by these scalar-tangent entries; their original Picard paths remain.
+Original work bounds, Armijo backtracking, endpoint residual checks, and
+read-only history apply. No new cancellation mechanism or three-dimensional
+turbulence qualification is implied.
+
+Four focused regressions cover an independently reassembled stiff nonlinear
+momentum residual, unequal-step quadratic shear, exact zero-SGS native
+reduction, and unsupported-tangent/history/work refusals. They and twelve
+existing planar regressions pass under pinned-Rust validation with the original
+NS, Jacobian, sparse, Krylov and dense numerical owners. That focused build
+omits unrelated material/thermal/density adapters; it is not a full workspace
+or runtime integration qualification.

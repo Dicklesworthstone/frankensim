@@ -37,6 +37,9 @@ pub use fs_lbm::sgs3::SgsModel;
 use fs_lbm::sgs3::eddy_viscosity;
 use std::cell::RefCell;
 
+mod newton;
+pub use newton::PlanarSgsNewtonStep;
+
 /// Admission, arithmetic or native nonlinear-solve refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanarSgsError {
@@ -50,6 +53,8 @@ pub enum PlanarSgsError {
     UnrepresentableDissipation { cell: usize },
     /// The original boundary, history, linear or nonlinear solve refused.
     Flow(StokesBoundaryError),
+    /// The original consistent-tangent Newton owner refused the solve.
+    Newton(super::newton::FluxNewtonError),
 }
 
 impl core::fmt::Display for PlanarSgsError {
