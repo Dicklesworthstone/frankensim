@@ -9,6 +9,8 @@ use fs_math::c64::C64;
 
 mod adjoint;
 pub use adjoint::{AutonomousObjectiveGradient, PreparedAutonomousAdjoint};
+mod objective;
+pub use objective::AutonomousMeanObjective;
 
 /// The unchanged original autonomous balance in its fixed physical phase chart.
 /// No phase row, frequency slot or normalization appears in the coefficients.

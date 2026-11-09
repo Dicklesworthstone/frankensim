@@ -128,7 +128,7 @@ impl PreparedForcedSensitivity {
     }
 }
 
-fn sample_objective(
+pub(super) fn sample_objective(
     pack: &Packing,
     omega: f64,
     aft: &mut AftWorkspace,

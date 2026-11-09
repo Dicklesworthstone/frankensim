@@ -19,8 +19,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod autonomous;
 pub use autonomous::{
-    AutonomousObjectiveGradient, AutonomousOrbitSensitivity, AutonomousSensitivityPoint,
-    PreparedAutonomousAdjoint, PreparedAutonomousSensitivity,
+    AutonomousMeanObjective, AutonomousObjectiveGradient, AutonomousOrbitSensitivity,
+    AutonomousSensitivityPoint, PreparedAutonomousAdjoint, PreparedAutonomousSensitivity,
 };
 mod adjoint;
 pub use adjoint::{ForcedObjectiveGradient, PreparedForcedAdjoint};

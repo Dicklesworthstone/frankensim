@@ -1200,3 +1200,39 @@ G1/G3 tests compare physical objectives with independent analytic memory cycles
 and forward contractions, including changing mass/time scales, all state and
 objective units, a frequency-only objective, a nonzero phase weight verified by
 independently phase-aligned cycles, complete direction sampling and refusal/retry.
+
+## Autonomous cycle means and period derivatives
+
+`PreparedAutonomousSensitivity::mean_objective` evaluates a differentiable
+cycle mean and its complete coefficient/frequency covector on the unchanged
+cached autonomous trajectories. It reuses the original centered AFT observation
+owner for the scalar value and every ordinary real coefficient partial. One
+additional compensated scalar mean carries the declared frequency partial;
+there is no second waveform reconstruction, source call or factorization.
+
+The observation callback must write the value, all state partials, and its
+complete frequency partial at FIXED phase and state on every sample. For
+`f(t,x,omega)` with `t=theta/omega`, this partial is
+`f_omega-(t/omega)*f_t`. A state-only mean supplies zero. Energy per cycle
+from power P(x) supplies `(TAU/omega)*P`, scales its state gradient by the same
+period, and supplies `-value/omega` as the frequency partial. The phase measure
+of a normalized cycle mean introduces no additional period factor.
+Original physical time-unit conversions remain the caller's authored chart.
+
+The result's coefficient gradient and separate angular-frequency partial feed
+the autonomous `prepare_adjoint` arguments directly. Independent sampling
+admission includes the entire covector, using the original frequency scale as
+well as every state scale. Agreement of values and state partials cannot hide
+an unresolved frequency derivative. Incomplete/nonfinite declarations and
+cancellation publish no partial result; the cached trajectories remain reusable.
+The existing per-query allowance covers two coefficient vectors and the added
+constant scalar storage and linear accumulation work. Explicit objective
+parameter partials remain separate adjoint contributions. Differentiability,
+fixed phase-reference semantics and harmonic refinement retain their original
+obligations; two finite grids do not bound the infinite harmonic tail.
+
+G1/G3 tests in `tests/autonomous_objective.rs` check energy-per-cycle derivatives
+on independently known nonisochronous cycles, including changing period and
+independent state, equation, time, parameter and objective units. They also
+check phase shifts, exact Parseval covectors, callback counts, frequency-only
+aliasing refusal, complete declarations, cancellation and deterministic reuse.
