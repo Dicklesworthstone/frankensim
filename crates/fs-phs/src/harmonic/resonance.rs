@@ -325,14 +325,14 @@ where
             "a peak requires increasing then decreasing nonzero response",
         ));
     }
-    let mut stationary = None;
+    let mut stationary: Option<Sample> = None;
     let peak_sample = loop {
         let frequency_resolved = search.resolved(left.omega, right.omega);
         if !frequency_resolved && let Some(middle) = stationary {
             // Reuse the exactly stationary evaluated response while its
             // two sign endpoints contract; do not refactor its frequency.
-            let a = search.sample(interior_midpoint(left.omega, middle)?, true)?;
-            let b = search.sample(interior_midpoint(middle, right.omega)?, true)?;
+            let a = search.sample(interior_midpoint(left.omega, middle.omega)?, true)?;
+            let b = search.sample(interior_midpoint(middle.omega, right.omega)?, true)?;
             if a.slope <= 0.0 || b.slope >= 0.0 {
                 return Err(ResonanceSearchError::NotBracketed(
                     "stationary response does not retain a resolved maximum bracket",
@@ -347,7 +347,11 @@ where
         } else {
             interior_midpoint(left.omega, right.omega)?
         };
-        let middle = search.sample(omega, true)?;
+        let middle = if let Some(sample) = stationary.filter(|sample| sample.omega == omega) {
+            sample
+        } else {
+            search.sample(omega, true)?
+        };
         // A pole also changes the sign of d(log |H|)/domega, but its slope
         // diverges instead of tending to zero. For H ~ 1/(omega - pole),
         // |slope(midpoint)| * bracket_width >= 2; a finite maximum tends to
@@ -367,7 +371,7 @@ where
         } else {
             // An exactly zero rounded slope is not a zero-width frequency
             // certificate. Retain an actual smaller sign bracket around it.
-            stationary = Some(middle.omega);
+            stationary = Some(middle);
         }
     };
     let peak = ResonanceFrequency {

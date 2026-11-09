@@ -1,6 +1,7 @@
 //! Source-owned observed peaks: no pHS conversion or second search algorithm.
 use core::convert::Infallible;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
 use fs_math::c64::C64;
 use fs_phs::harmonic::resonance::{
@@ -73,6 +74,43 @@ fn external_mechanical_source_resolves_high_q_and_retains_physical_query_account
         assert_eq!(result.maximum_relative_residual, maximum_residual.get());
         assert!(result.maximum_relative_residual <= 1e-14);
     }
+}
+
+#[test]
+fn exactly_stationary_peak_is_not_factored_again_for_publication() {
+    let calls = RefCell::new(BTreeSet::new());
+    let tolerance = 2.0_f64.powi(-34);
+    let result = search_resonance(
+        (6.0, 10.0),
+        ResonanceControls {
+            absolute_frequency_tolerance_rad_s: tolerance,
+            relative_frequency_tolerance: 0.0,
+            maximum_evaluations: 75,
+            measure_half_power_bandwidth: false,
+        },
+        || false,
+        |omega, need_derivative, _| {
+            assert!(need_derivative);
+            assert!(
+                calls.borrow_mut().insert(omega.to_bits()),
+                "repeated original physical solve at {omega}"
+            );
+            let denominator = C64::new(0.5, 8.0 - omega);
+            let amplitude = C64::from_re(0.5) / denominator;
+            Ok::<_, Infallible>((
+                amplitude,
+                C64::new(0.0, 1.0) * amplitude / denominator,
+                0.0,
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(result.peak.angular_frequency_rad_s, 8.0);
+    assert_eq!(result.observation, C64::ONE);
+    assert_eq!(result.observation_derivative, C64::new(0.0, 2.0));
+    assert_eq!(result.evaluations, calls.borrow().len());
+    assert!(result.peak.bracket_rad_s.0 < 8.0 && result.peak.bracket_rad_s.1 > 8.0);
+    assert!(result.peak.bracket_rad_s.1 - result.peak.bracket_rad_s.0 <= tolerance);
 }
 
 #[test]
