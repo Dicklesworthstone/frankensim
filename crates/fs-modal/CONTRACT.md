@@ -946,6 +946,21 @@ one continuous ramp, complete transient reverse sweeps and the ratio chain rule;
 G0 checks refusal and deterministic replay in
 `tests/linear_forcing_sensitivity.rs`.
 
+`ModalAcousticTimeModel::prepare_linear_forcing_sensitivities` binds these
+derivatives to the bank's original nominal-clock ramp cache. Preparation is
+shared by immutable mechanics clones. Physical rate/ratio changes replace the
+kernel and require fresh preparation, even when two different free-coordinate
+rates have the same infinite diagnostic ratio. Unchanged laws and observation
+edits retain the valid cache. `advance_exact_linear_step_with_sensitivities`
+previews the original motion and coefficient partials; `pullback_exact_linear_step`
+supplies the complete state/force/coefficient transpose without allocation,
+transcendentals or accepted-state mutation. Units and fixed-input chain rules
+are the scalar owner's; no dimensional mass or changing basis is inferred.
+`tests/linear_forcing_bank_sensitivity.rs` checks mixed free/soft/elastic modes,
+legacy arithmetic, cache lifetime and clone isolation, then recovers a shared
+dimensional dashpot coefficient from actual bank transients with unequal masses
+through the critical-damping point, including the physical `dc/dC` chain rule.
+
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections.

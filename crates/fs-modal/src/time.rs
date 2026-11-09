@@ -331,6 +331,7 @@ struct ExactZohKernel {
     full: Box<[PreparedZohCoefficients]>,
     half: std::sync::OnceLock<Box<[PreparedZohCoefficients]>>,
     linear: std::sync::OnceLock<Box<[LinearForceTransition]>>,
+    linear_sensitivities: std::sync::OnceLock<Box<[PreparedLinearForceSensitivity]>>,
 }
 
 impl ExactZohKernel {
@@ -371,6 +372,7 @@ impl ExactZohKernel {
             full,
             half: std::sync::OnceLock::new(),
             linear: std::sync::OnceLock::new(),
+            linear_sensitivities: std::sync::OnceLock::new(),
         }
     }
 

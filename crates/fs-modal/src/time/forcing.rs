@@ -9,6 +9,7 @@
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use super::heat::LinearViscousIntegral;
 
+mod bank;
 mod sensitivity;
 pub use sensitivity::{
     LinearForceParameterPullback, LinearForceParameterSensitivity, LinearForceSensitivityFrame,
