@@ -11,8 +11,9 @@
 //!
 //! - `t_i` open (Eq. 31 times `G` of Eq. 32): `t_i/b = 0.822 - 0.095 d - 1.566 d^2 + 2.138 d^3 -
 //!   1.640 d^4 + 0.502 d^5`, `G = 1 + H(d) I(ka)`, `H = 1 - 4.56 d + 6.55 d^2`,
-//!   `I = 0.17 ka + 0.92 (ka)^2 + 0.16 (ka)^3 - 0.29 (ka)^4`. Printed for `ka <= 1` and `d <= 1`:
-//!   above that `I` is held at its `ka = 1` value.
+//!   `I = 0.17 ka + 0.92 (ka)^2 + 0.16 (ka)^3 - 0.29 (ka)^4`. Printed for `ka <= 1` and `d <= 1`; the
+//!   finite-element data of the source stop at `ka = 1` and it prints no fit above it. Above `ka = 1`
+//!   `I` is a DECLARED CONTINUATION with no source, not a printed law: see `frequency_factor`.
 //! - `t_m` on open and closed holes (Eq. 8, Nederveen et al. 1998): `t_m = b d (1 + 0.207 d^3)/8`.
 //! - `t_r` (Eq. 11, Dalmont and Nederveen 2001): `t_r = (0.822 - 0.47 [b/(a+t)]^0.8) b`. The flanged
 //!   load keeps its radiation resistance and its frequency dependence; only its low-frequency mass
@@ -108,11 +109,47 @@ fn inner_over_b(d: f64) -> f64 {
     0.822 + d * (-0.095 + d * (-1.566 + d * (2.138 + d * (-1.640 + d * 0.502))))
 }
 
-/// Eq. 32: `G = 1 + H(d) I(ka)`, `ka` held inside the printed range `0..=1`.
+/// The printed coefficients of `I(ka)` in Eq. 32: `I = C1 ka + C2 (ka)^2 + C3 (ka)^3 + C4 (ka)^4`.
+const I_C1: f64 = 0.17;
+const I_C2: f64 = 0.92;
+const I_C3: f64 = 0.16;
+const I_C4: f64 = -0.29;
+/// `I'(1)` of the printed quartic, `C1 + 2 C2 + 3 C3 + 4 C4 = 1.33`.
+const I_SLOPE_AT_ONE: f64 = I_C1 + 2.0 * I_C2 + 3.0 * I_C3 + 4.0 * I_C4;
+
+/// The printed quartic `I(x)` of Eq. 32, in Horner form.
+fn printed_i(x: f64) -> f64 {
+    x * (I_C1 + x * (I_C2 + x * (I_C3 + I_C4 * x)))
+}
+
+/// Eq. 32: `G = 1 + H(d) I(ka)`, with `ka = k a` and `a` the BORE radius at the hole.
+///
+/// Up to `ka = 1` this is the printed quartic, unchanged. ABOVE `ka = 1` NOTHING IS PRINTED: Lefebvre
+/// (2010, sec. 2.3) ran its finite-element data over `0.1 <= ka <= 1` only and gives no fit beyond,
+/// so what follows is a DECLARED CONTINUATION, not printed physics and with no source. It is built
+/// from the printed quartic alone, with no constant chosen to pass any test:
+///
+/// `I(ka) = I(1) + I'(1) tanh(ka - 1)`, `I(1) = 0.96`, `I'(1) = 1.33`.
+///
+/// Value and slope are continuous at `ka = 1`, and `I` saturates at `I(1) + I'(1) = 2.29`, 2.39 times
+/// the `ka = 1` value; its one scale is 1 in units of `ka`. The second derivative still steps at
+/// `ka = 1` (from `I''(1) = -0.68` to 0).
+///
+/// It replaces a hold at `I(1)`, which was no printed law either and broke causality: the hold has a
+/// slope step at `ka = 1`, so the open hole's inner length has a kink at `f1 = c / (2 pi a)`, and the
+/// realized reflectance carries a two-sided `1/t^2` tail BEFORE its arrival. On the saxophone lattice
+/// study's C4 mouthpiece card (hole 0.4807 m, `f1` near 3.1 kHz) that skirt held 1.7e-10 of the
+/// response energy in the last eighth of the circular buffer and the line ladder refused the card
+/// at 65536 taps (tail 1.665e-10 against 1e-10); with this continuation the same card converges at
+/// 16384 taps (tail 2.6e-11, skirt 9.6e-12), and a second card on another hole (F3, 1894 Hz) falls
+/// from 1.06e-10 to 1.2e-11 (MB 18399, 18433).
 fn frequency_factor(d: f64, ka: f64) -> f64 {
-    let x = ka.clamp(0.0, 1.0);
     let h = 1.0 + d * (-4.56 + d * 6.55);
-    let i = x * (0.17 + x * (0.92 + x * (0.16 - 0.29 * x)));
+    let i = if ka <= 1.0 {
+        printed_i(ka.clamp(0.0, 1.0))
+    } else {
+        printed_i(1.0) + I_SLOPE_AT_ONE * det::tanh(ka - 1.0)
+    };
     1.0 + h * i
 }
 

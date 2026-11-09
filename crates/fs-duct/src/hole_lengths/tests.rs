@@ -78,17 +78,80 @@ fn the_printed_lengths_follow_the_printed_equations_for_a_hand_computed_hole() {
 }
 
 #[test]
-fn a_hole_outside_the_bore_keeps_the_engine_terms_and_the_frequency_factor_stops_at_ka_one() {
+fn a_hole_outside_the_bore_keeps_the_engine_terms() {
     for b in [A, 1.2 * A] {
         assert_eq!(HoleLengths::Printed.open_extra_m(b, T, A, 40.0), HoleLengths::Engine.open_extra_m(b, T, A, 40.0));
         assert_eq!(HoleLengths::Printed.sealed_extra_m(b, A), 0.0);
         assert_eq!(HoleLengths::Printed.series_m(b, T, A, 1.0, 0.0), HoleLengths::Engine.series_m(b, T, A, 1.0, 0.0));
     }
-    // Eq. 32 is printed for ka <= 1: ka = 3 holds the ka = 1 value instead of the quartic's excursion.
+}
+
+/// `G` of Eq. 32 exactly as this module computed it before the continuation above `ka = 1`: the printed quartic in
+/// Horner form on `ka` clamped to `0..=1`.
+fn printed_factor_as_it_was(d: f64, ka: f64) -> f64 {
+    let x = ka.clamp(0.0, 1.0);
+    let h = 1.0 + d * (-4.56 + d * 6.55);
+    let i = x * (0.17 + x * (0.92 + x * (0.16 - 0.29 * x)));
+    1.0 + h * i
+}
+
+/// Planted test 1 (MB 18434): the printed quartic is untouched for `ka <= 1`, bit for bit.
+#[test]
+fn the_frequency_factor_is_bit_identical_to_the_printed_quartic_up_to_ka_one() {
+    let mut grid = vec![-0.5, -1.0e-12, 0.0, 1.0e-9, 0.1, 0.25, 0.5, 0.75, 0.999, 1.0 - f64::EPSILON, 1.0];
+    grid.extend((0..=200).map(|i| f64::from(i) / 200.0));
+    for d in [0.0, 0.1, 8.0 / 15.0, 0.9, 1.0] {
+        for &ka in &grid {
+            assert_eq!(
+                frequency_factor(d, ka).to_bits(),
+                printed_factor_as_it_was(d, ka).to_bits(),
+                "d = {d}, ka = {ka}"
+            );
+        }
+    }
+}
+
+/// Planted test 2 (MB 18434): above `ka = 1` the declared continuation `I(1) + I'(1) tanh(ka - 1)` takes the printed
+/// value and slope at the edge (`I(1) = 0.96`, `I'(1) = 0.17 + 2 * 0.92 + 3 * 0.16 - 4 * 0.29 = 1.33`, so `G - 1 = H(d) I`
+/// has slope `1.33 H(d)`) and saturates at `I(1) + I'(1) = 2.29`. The old hold had slope 0 to the right of `ka = 1`, so
+/// the slope assertion FAILS on the old file: the kink that gave the reflectance its pre-arrival skirt.
+#[test]
+fn above_ka_one_the_declared_continuation_has_the_printed_value_and_slope_and_saturates() {
+    for d in [0.2_f64, 8.0 / 15.0, 0.8] {
+        let h = 1.0 + d * (-4.56 + d * 6.55);
+        assert!(h.abs() > 0.3, "d = {d}: H = {h} keeps the slope test sensitive");
+        let g = |ka: f64| frequency_factor(d, ka);
+        // Value at the edge, continuous across it.
+        assert!(near(g(1.0), 1.0 + h * 0.96, 1.0e-13), "d = {d}: {}", g(1.0));
+        assert!((g(1.0 + 1.0e-9) - g(1.0 - 1.0e-9)).abs() < 1.0e-8, "d = {d}");
+        // Slope at the edge, the same from both sides: the printed quartic's 1.33 H(d).
+        let step = 1.0e-7;
+        let (left, right) = ((g(1.0) - g(1.0 - step)) / step, (g(1.0 + step) - g(1.0)) / step);
+        assert!(near(left, 1.33 * h, 1.0e-6), "d = {d}: left slope {left} vs {}", 1.33 * h);
+        assert!(near(right, 1.33 * h, 1.0e-6), "d = {d}: right slope {right} vs {}", 1.33 * h);
+        // Saturation at I(1) + I'(1) = 2.29, approached from below without overshoot (H > 0 here; mirrored if H < 0).
+        let ceiling = 1.0 + h * 2.29;
+        assert!(near(g(40.0), ceiling, 1.0e-12), "d = {d}: {} vs {ceiling}", g(40.0));
+        let mut last = g(1.0);
+        for i in 1..=400 {
+            let value = g(1.0 + f64::from(i) * 0.1);
+            assert!((value - last) * h >= 0.0, "d = {d}: G turned back at ka = {}", 1.0 + f64::from(i) * 0.1);
+            assert!((ceiling - value) * h >= -1.0e-12, "d = {d}: G passed its ceiling at ka = {}", 1.0 + f64::from(i) * 0.1);
+            last = value;
+        }
+    }
+}
+
+#[test]
+fn the_open_hole_inner_length_past_ka_one_follows_the_declared_continuation() {
+    // ka = 3 is no longer the ka = 1 value: only t_i depends on ka, so the open length differs by t_i/b * b * H * 1.33 tanh(2).
+    let d = B / A;
+    let h = 1.0 + d * (-4.56 + d * 6.55);
     let at_one = HoleLengths::Printed.open_extra_m(B, T, A, 1.0 / A);
     let beyond = HoleLengths::Printed.open_extra_m(B, T, A, 3.0 / A);
-    assert!(near(at_one, beyond, 1.0e-12), "{at_one} vs {beyond}");
-    assert!(at_one.is_finite() && at_one > 0.0);
+    assert!(at_one.is_finite() && at_one > 0.0 && beyond > at_one, "{at_one} vs {beyond}");
+    let expected = inner_over_b(d) * B * h * 1.33 * 2.0_f64.tanh();
+    assert!(near(beyond - at_one, expected, 1.0e-9), "{} vs {expected}", beyond - at_one);
     // And the factor grows from ka = 0 for this d (H(d) > 0).
     assert!(HoleLengths::Printed.open_extra_m(B, T, A, 0.0) < at_one);
 }
