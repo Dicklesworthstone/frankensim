@@ -14,6 +14,8 @@ mod navier_stokes;
 mod reaction;
 #[path = "stokes_boundary/transient.rs"]
 mod transient;
+#[path = "stokes_boundary/thermal_dilation.rs"]
+mod thermal_dilation;
 
 fn velocity_boundaries<'a>(
     mesh: &TriMesh,

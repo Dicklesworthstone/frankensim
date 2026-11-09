@@ -46,6 +46,7 @@ fs-thermochem = { path = "../fs-thermochem", optional = true }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-blake3 = { path = "../fs-blake3" }
 fs-matdb = { path = "../fs-matdb" }
 fs-evidence = { path = "../fs-evidence" }
 fs-thermochem = { path = "../fs-thermochem" }
