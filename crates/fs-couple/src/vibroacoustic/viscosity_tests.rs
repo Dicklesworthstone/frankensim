@@ -9,7 +9,7 @@ fn viscosity(matrix: Vec<f64>, modes: usize, resistance: f64) -> ModalPlateVisco
 
 fn model(
     omegas: Vec<f64>, coupling: Vec<f64>, eta_s: f64, eta_a: f64,
-    radiation: Option<Vec<C64>>,
+    radiation: Option<ModalRadiationLoading>,
 ) -> VibroacousticModel {
     let n = omegas.len();
     VibroacousticModel::try_new(
@@ -65,9 +65,10 @@ fn full_viscosity_matches_independent_cavity_elimination_and_cycle_work() {
         C64::new(-0.06, 0.04), C64::new(0.14, -0.08),
     ];
     let forces = [C64::new(1.0, 0.3), C64::new(-0.4, 0.2)];
-    let m = model(ws.to_vec(), coupling.to_vec(), 0.0, 0.035, Some(z.to_vec()))
-        .with_structural_viscosity(viscosity(c.to_vec(), 2, 3.0)).unwrap();
     for omega in [0.7, 1.9, 2.6, 4.3, 6.0] {
+        let m = model(ws.to_vec(), coupling.to_vec(), 0.0, 0.035,
+            Some(radiation_sample(omega, 2, z.to_vec())))
+            .with_structural_viscosity(viscosity(c.to_vec(), 2, 3.0)).unwrap();
         // Eliminate the cavity analytically, then invert the remaining
         // complex 2x2 system by its determinant, independently of production LU.
         let da = C64::new(4.4 * 4.4 - omega * omega, -0.035 * 4.4 * 4.4);
@@ -123,12 +124,14 @@ fn signed_modal_basis_changes_preserve_response_and_all_power_owners() {
     let z = vec![C64::new(0.4, -0.2), C64::new(0.1, 0.03),
                  C64::new(0.1, 0.03), C64::new(0.5, -0.1)];
     let force = [C64::new(0.9, 0.2), C64::new(-0.3, 0.5)];
-    let m = model(vec![2.0, 3.6], vec![0.25, -0.16], 0.0, 0.035, Some(z.clone()))
+    let m = model(vec![2.0, 3.6], vec![0.25, -0.16], 0.0, 0.035,
+        Some(radiation_sample(2.3, 2, z.clone())))
         .with_structural_viscosity(viscosity(c.clone(), 2, 1.0)).unwrap();
     let signs = [-1.0, 1.0];
     let transformed_c = (0..4).map(|i|c[i]*signs[i/2]*signs[i%2]).collect();
     let transformed_z = (0..4).map(|i|z[i].scale(signs[i/2]*signs[i%2])).collect();
-    let flipped = model(vec![2.0, 3.6], vec![-0.25, -0.16], 0.0, 0.035, Some(transformed_z))
+    let flipped = model(vec![2.0, 3.6], vec![-0.25, -0.16], 0.0, 0.035,
+        Some(radiation_sample(2.3, 2, transformed_z)))
         .with_structural_viscosity(viscosity(transformed_c, 2, 1e120)).unwrap();
     let actual = m.frf(2.3, &force).unwrap();
     let changed = flipped.frf(2.3, &[-force[0], force[1]]).unwrap();

@@ -12,7 +12,7 @@ fn complex_near(a: C64, b: C64) {
     );
 }
 
-fn model(medium: AcousticMedium, cavity_scale: f64) -> VibroacousticModel {
+fn model(medium: AcousticMedium, cavity_scale: f64, omega: f64) -> VibroacousticModel {
     VibroacousticModel::try_new(
         &StructuralModes {
             omegas: vec![150.0, 280.0],
@@ -28,12 +28,16 @@ fn model(medium: AcousticMedium, cavity_scale: f64) -> VibroacousticModel {
             c0: medium.c0,
         },
         vec![0.003 * cavity_scale, 0.001, -0.001 * cavity_scale, 0.002],
-        Some(vec![
-            C64::new(0.3, -0.1),
-            C64::ZERO,
-            C64::ZERO,
-            C64::from_re(0.2),
-        ]),
+        Some(radiation_sample(
+            omega,
+            2,
+            vec![
+                C64::new(0.3, -0.1),
+                C64::ZERO,
+                C64::ZERO,
+                C64::from_re(0.2),
+            ],
+        )),
     )
     .unwrap()
 }
@@ -73,10 +77,10 @@ fn boundary_projection_preserves_cancelled_modes_and_physical_surface_work() {
 #[test]
 fn injected_volume_drives_the_wall_and_radiation_with_analytic_sealed_pressure() {
     let medium = AcousticMedium::air();
-    let coupled = model(medium, 1.0);
     let bulk = C64::from_re(medium.rho0 * medium.c0 * medium.c0);
     let flow = C64::new(2e-5, -7e-6);
     for omega in [5.0, 80.0, 150.0, 330.0] {
+        let coupled = model(medium, 1.0, omega);
         for force in [C64::ZERO, C64::new(0.3, 0.1)] {
             let result = coupled
                 .frf_truncated_with_sources(omega, &[force, C64::ZERO], &[flow, C64::ZERO], 1, 1)
@@ -134,10 +138,10 @@ fn acoustic_drive_retains_molecular_compressibility_and_independent_cycle_work()
         .evaluate(&medium_from_record(&record).unwrap())
         .unwrap();
     let medium = AcousticMedium::try_from_gas(record.state()).unwrap();
-    let coupled = model(medium, 1.0)
+    let omega = 700.0;
+    let coupled = model(medium, 1.0, omega)
         .with_cavity_relaxation(relaxation.clone())
         .unwrap();
-    let omega = 700.0;
     let flow = C64::new(2e-5, -7e-6);
     let result = coupled
         .frf_truncated_with_sources(omega, &[C64::ZERO; 2], &[flow, C64::ZERO], 1, 1)
@@ -170,9 +174,9 @@ fn acoustic_drive_retains_molecular_compressibility_and_independent_cycle_work()
 #[test]
 fn coherent_sources_keep_reciprocity_signed_work_and_modal_normalization() {
     let medium = AcousticMedium::air();
-    let ordinary = model(medium, 1.0);
-    let reversed = model(medium, -3.0);
     let omega = 180.0;
+    let ordinary = model(medium, 1.0, omega);
+    let reversed = model(medium, -3.0, omega);
     let forces = [C64::new(-0.08, 0.04), C64::new(0.3, -0.1)];
     let flows = [C64::new(3e-5, 2e-6), C64::new(-1e-5, 3e-6)];
     let full = ordinary.frf_with_sources(omega, &forces, &flows).unwrap();
@@ -225,7 +229,7 @@ fn coherent_sources_keep_reciprocity_signed_work_and_modal_normalization() {
 
 #[test]
 fn acoustic_source_truncation_uses_the_original_full_basis_and_checks_sources() {
-    let coupled = model(AcousticMedium::air(), 1.0);
+    let coupled = model(AcousticMedium::air(), 1.0, 190.0);
     let forces = [C64::ZERO; 2];
     let flows = [C64::new(2e-5, 1e-6), C64::new(8e-6, -3e-6)];
     let full = coupled.frf_with_sources(190.0, &forces, &flows).unwrap();

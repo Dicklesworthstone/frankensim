@@ -40,7 +40,11 @@
 //! `Zm` is the exterior radiation impedance matrix
 //! projected onto the structural modes
 //! ([`project_radiation_impedance`]; produced upstream by
-//! `fs_bem::helmholtz::radiation_impedance_matrix`). Hysteretic loss
+//! `fs_bem::helmholtz::radiation_impedance_matrix`).
+//! [`ModalRadiationLoading`] retains the exact evaluated frequency of every
+//! matrix and admits its complete Hermitian work form before attachment.
+//! A native BEM/Rayleigh bake supplies a complete sweep without freezing or
+//! interpolating its dispersive loading. Hysteretic loss
 //! factors `eta_s`, `eta_a` model structural and cavity dissipation.
 //! Alternatively, [`VibroacousticModel::with_structural_viscosity`] admits
 //! the existing full PSD modal material/joint viscosity instead of `eta_s`:
@@ -103,6 +107,8 @@ use fs_math::c64::C64;
 
 mod boundary;
 pub use boundary::CavityBoundaryAdmittance;
+mod radiation;
+pub use radiation::ModalRadiationLoading;
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
 const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
@@ -112,6 +118,8 @@ const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
 pub enum VibroError {
     /// Boundary preparation was cancelled before publishing a load.
     Cancelled,
+    /// The original full-Hermitian physical-port loading admission refused.
+    Radiation(fs_modal::harmonic::HarmonicResponseError),
     /// A parameter is non-finite, non-positive, or out of range.
     BadParameter {
         /// Which parameter refused.
@@ -144,6 +152,7 @@ impl core::fmt::Display for VibroError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             VibroError::Cancelled => write!(f, "FS-COUPLE-VIBRO-CANCELLED"),
+            VibroError::Radiation(error) => write!(f, "FS-COUPLE-VIBRO-RADIATION: {error}"),
             VibroError::BadParameter { what } => {
                 write!(f, "FS-COUPLE-VIBRO-BAD-PARAMETER: {what}")
             }
@@ -720,14 +729,16 @@ pub struct VibroacousticModel {
     cavity_relaxation: Option<RelaxationState>,
     cavity_boundary: Option<CavityBoundaryAdmittance>,
     coupling: Vec<f64>,
-    z_modal: Option<Vec<C64>>,
+    z_modal: Option<ModalRadiationLoading>,
 }
 
 impl VibroacousticModel {
     /// Assemble from structural/cavity bases and a coupling matrix
     /// (row-major `n_s x n_a`; see [`assemble_coupling`]). An optional
-    /// modal radiation impedance (row-major `n_s x n_s`; see
-    /// [`project_radiation_impedance`]) attaches exterior radiation.
+    /// frequency-qualified modal radiation loading (row-major `n_s x n_s`;
+    /// see [`ModalRadiationLoading`]) attaches exterior radiation. Subsequent
+    /// FRFs select only exact declared rows. The original structural basis
+    /// and mode normalization must match the radiation producer's basis.
     ///
     /// # Errors
     /// [`VibroError`] on empty bases, shape mismatches, or non-finite
@@ -736,7 +747,7 @@ impl VibroacousticModel {
         structure: &StructuralModes,
         cavity: &CavityModes,
         coupling: Vec<f64>,
-        z_modal: Option<Vec<C64>>,
+        z_modal: Option<ModalRadiationLoading>,
     ) -> Result<Self, VibroError> {
         let n_s = structure.omegas.len();
         let n_a = cavity.omegas.len();
@@ -768,7 +779,7 @@ impl VibroacousticModel {
             });
         }
         if let Some(z) = &z_modal
-            && z.len() != n_s * n_s
+            && z.mode_count() != n_s
         {
             return Err(VibroError::ShapeMismatch {
                 what: "modal radiation impedance must be n_s x n_s",
@@ -1102,6 +1113,11 @@ impl VibroacousticModel {
                 what: "cavity boundary admittance must be evaluated at the solved angular frequency",
             });
         }
+        let z_modal = self
+            .z_modal
+            .as_ref()
+            .map(|loading| loading.at_omega(omega))
+            .transpose()?;
         let n_s_full = self.omegas_s.len();
         let n_a_full = self.omegas_a.len();
         if modal_force.len() != n_s_full {
@@ -1173,7 +1189,7 @@ impl VibroacousticModel {
             for q in 0..keep_a {
                 mat[r * n + (keep_s + q)] = C64::from_re(-self.coupling[r * n_a_full + q]);
             }
-            if let Some(z) = &self.z_modal {
+            if let Some(z) = z_modal {
                 // Radiation force -Zm v = i omega Zm b moves to the
                 // left as -i omega Zm b.
                 for s in 0..keep_s {
@@ -1283,16 +1299,7 @@ impl VibroacousticModel {
             .as_ref()
             .map_or(0.0, |boundary| boundary.outward_power(&a));
         cavity += cavity_boundary;
-        let mut radiated = 0.0;
-        if let Some(z) = &self.z_modal {
-            for r in 0..keep_s {
-                let vr = vel(b[r]);
-                for s in 0..keep_s {
-                    let vs = vel(b[s]);
-                    radiated += 0.5 * (vr.conj() * z[r * n_s_full + s] * vs).re;
-                }
-            }
-        }
+        let radiated = z_modal.map_or(0.0, |z| radiation::outward_power(z, n_s_full, omega, &b));
         let input = structural_input + acoustic_input;
         let balance = input - structural - cavity - radiated;
         let denom = input
@@ -1465,6 +1472,32 @@ impl VibroacousticModel {
             error_norm / full_norm
         })
     }
+}
+
+#[cfg(test)]
+fn with_radiation_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>, &fs_exec::CancelGate) -> R) -> R {
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 19,
+                kernel_id: 6,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx, &gate)
+    })
+}
+
+#[cfg(test)]
+fn radiation_sample(omega: f64, modes: usize, matrix: Vec<C64>) -> ModalRadiationLoading {
+    with_radiation_cx(|cx, _| ModalRadiationLoading::try_new(omega, modes, matrix, cx).unwrap())
 }
 
 #[cfg(test)]

@@ -9415,3 +9415,30 @@ original-source build: independent modal/interface reconstruction, original
 scalar duct impedance, number/class weighting, heat-channel closure, IF97
 source retention, and material/thermal-domain/cancellation refusals. The broad
 DG/duct-chain dependency closure and full workspace/DSR were not executed.
+
+## Frequency-qualified modal radiation reaction
+
+`vibroacoustic::ModalRadiationLoading` replaces the unqualified exterior matrix
+in `VibroacousticModel::try_new`. A direct sample carries its exact angular
+frequency; `from_bem_bake` retains the native BEM/Rayleigh producer's complete
+frequency grid, matrices and declaration identity. A loaded FRF selects its
+original row by binary search. An absent frequency refuses on all full,
+truncated and convergence solve paths; no frozen loading, interpolation or
+extrapolation is inferred. A sweep reuses the original structural/cavity bases.
+
+The shared `fs-modal` physical-port owner admits the COMPLETE Hermitian work
+form at preparation, with its existing dense-work and cancellation bounds.
+Positive diagonal resistance alone is insufficient. Nonfinite or active mutual
+directions refuse without symmetrization, clipping or loss floors. Original
+mutual reaction and exact loss nullspaces remain in the coupled equations.
+Radiated power contracts the Hermitian part before multiplying fields, using
+double-double accumulation; large reactive exchange cannot become fictitious
+outgoing work. Truncation uses the same principal matrix and original stride,
+without allocating another velocity or impedance matrix.
+
+This is sampled passivity, not a causal realization or an inter-sample proof.
+The producer still owns geometry, medium, modal normalization and spatial
+convergence. Focused G0/G1/G3 regressions specify spherical added mass/radiation,
+coherent mutual work and nullspaces, frequency refusal, active complex
+directions and cancellation. The existing BEM casebook consumes one complete
+loading bake across its physical sweep and checks the original loaded equations.

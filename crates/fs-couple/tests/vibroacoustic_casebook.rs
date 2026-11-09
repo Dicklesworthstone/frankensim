@@ -14,8 +14,8 @@
 //! exact power identities integrated into a green WindowAuditReport.
 
 use fs_couple::vibroacoustic::{
-    AcousticMedium, CavityModes, StructuralModes, VibroacousticModel, assemble_coupling,
-    project_radiation_impedance, rectangular_cavity_modes,
+    AcousticMedium, CavityModes, ModalRadiationLoading, StructuralModes, VibroacousticModel,
+    assemble_coupling, project_radiation_impedance, rectangular_cavity_modes,
 };
 use fs_couple::{
     AccountingBoundary, AccountingWindowInterval, AccountingWindowSpec, BoundaryEntropyBreakdown,
@@ -38,6 +38,26 @@ use material_packs::{
 };
 
 const PI: f64 = core::f64::consts::PI;
+
+fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 19,
+                kernel_id: 6,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
 
 #[test]
 fn original_fluid_material_drives_cavity_modes_and_reciprocal_structural_loading() {
@@ -205,7 +225,7 @@ fn build_model(
     eta_s: f64,
     eta_a: f64,
     cavity_count: usize,
-    z_modal: Option<Vec<C64>>,
+    z_modal: Option<ModalRadiationLoading>,
 ) -> (VibroacousticModel, CavityModes, StructuralModes) {
     let structure = StructuralModes {
         omegas: plate.omegas.clone(),
@@ -261,11 +281,14 @@ fn modal_loading_bake_feeds_loaded_frequency_response() {
         || false,
     )
     .unwrap();
+    let loading = with_cx(|cx| ModalRadiationLoading::from_bem_bake(&bake, cx)).unwrap();
+    assert_eq!(loading.source_declaration(), Some(bake.declaration_hash()));
+    assert_eq!(loading.angular_frequencies_rad_s().collect::<Vec<_>>(), omegas);
+    let (model, cavity, structure) = build_model(&plate, 0.01, 0.005, 8, Some(loading));
+    let (unloaded, _, _) = build_model(&plate, 0.01, 0.005, 8, None);
     let mut changed = false;
     for &omega in &omegas {
         let z = bake.at_omega(omega).unwrap().impedance();
-        let (model, cavity, structure) = build_model(&plate, 0.01, 0.005, 8, Some(z.to_vec()));
-        let (unloaded, _, _) = build_model(&plate, 0.01, 0.005, 8, None);
         let coupling = assemble_coupling(&structure, &cavity, &plate.node_areas).unwrap();
         let ns = structure.omegas.len();
         let na = cavity.omegas.len();
@@ -303,6 +326,12 @@ fn modal_loading_bake_feeds_loaded_frequency_response() {
         );
     }
     assert!(changed, "the loading data must change the coupled response");
+    assert!(
+        model
+            .frf(0.5 * (omegas[0] + omegas[1]), &vec![C64::ONE; structure.omegas.len()])
+            .is_err(),
+        "a sampled exterior is not silently interpolated or frozen"
+    );
 }
 
 #[test]
@@ -674,6 +703,10 @@ fn radiated_power_and_accounting_window_audit() {
     .expect("radiation impedance");
     let z_modal =
         project_radiation_impedance(&z_panel, panels.areas(), &shapes_at_panels).expect("Zm");
+    let z_modal = with_cx(|cx| {
+        ModalRadiationLoading::try_new(omega, plate.omegas.len(), z_modal, cx)
+    })
+    .expect("frequency-qualified passive radiation");
     let (model, _, structure) = build_model(&plate, 0.01, 0.005, 8, Some(z_modal));
 
     let mut force = vec![C64::ZERO; structure.omegas.len()];
