@@ -565,6 +565,10 @@ impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> IncompressibleMixedVi
             .reference_mass
             .acceleration_load_n(acceleration_m_s2, cx)?)
     }
+    // Preserve original support/free inertial coupling in physical reactions.
+    pub(super) fn reference_mass_matrix(&self) -> &Csr {
+        self.reference_mass.operator.matrix()
+    }
     pub const fn equilibrium(&self) -> &MixedUpSolution {
         &self.equilibrium
     }

@@ -14247,3 +14247,48 @@ indefinite even on a stable branch: generic definiteness events are not a
 mechanical bifurcation certificate, and unverified branch-switch directions
 are refused. No mesh/inf-sup convergence, spatial injectivity, stability,
 evolving temperature/reference, or constitutive-history claim is added.
+
+## Full forced harmonic response of finite-strain mixed equilibria
+
+Both finite-compliance and exact-incompressible vibration owners expose
+`prepare_harmonic_response`, returning a reusable native harmonic factor at a
+held physical frequency. `solve` accepts peak force phasors in ALL original
+node-major displacement coordinates, including support entries. It retains the
+original full consistent reference mass, mixed material/geometric tangent,
+follower-pressure or conservative-gravity tangent already in that equilibrium,
+pressure ordering, and admitted gauge. Pressure has no mass. Supports have zero
+incremental displacement about their original absolute static motion.
+
+Finite compliance uses the original condensed stiffness and `dp=R du`. Exact
+incompressibility projects force through the COMPLETE retained nullspace, then
+recovers pressure from the original forced momentum equation using one reused
+native QR factor. Constraint-blocked loading can therefore produce nonzero
+pressure with zero displacement; summing modal pressure shapes alone would miss
+this contribution. A zero-dimensional admissible space remains a pressure-only
+solve. No modes are discarded and no bulk penalty or physical damping is added.
+Native harmonic admission refuses singular lossless poles.
+
+Returned displacement, velocity and pressure use original physical coordinates.
+Support reactions are `(Kuu-omega² M)du + Kup dp - authored_force`; full support
+mass coupling is retained and an authored support force is subtracted once.
+Every original pressure equation, including the gauge row, and every free
+momentum equation must meet their respective backward-error budgets before
+publication. Reported cycle-mean input power is signed numerical external work,
+not material heat or a passivity certificate.
+
+`HarmonicResponseControls` counts free displacement coordinates BEFORE exact
+constraint reduction. Its payload cap covers the adapter, QR, native harmonic
+factor/preparation, and one physical response; the borrowed original matrices
+retain their original budgets and are excluded from this extra payload count.
+Native QR is bounded by the original 128-free-displacement cap and polled before
+and after; sparse audits and physical-vector work poll cancellation. The source
+equilibrium and prepared factors remain immutable after all refusals.
+
+This is a frozen-equilibrium small-perturbation response, not finite-amplitude
+material admission, nonlinear transient motion, evolving source/history,
+moving incremental supports, thermoelastic recoupling or physical damping.
+`tests/mixed_up/harmonic.rs` defines four G1/G3 native regression groups for the
+loaded finite-bulk analytic response, hydrostatic force with zero motion,
+graded inertia with pressure gauge and support reactions, and zero-dimensional
+constraints plus budgets/cancellation. These are discrete implementation
+checks, not continuum convergence or physical calibration.

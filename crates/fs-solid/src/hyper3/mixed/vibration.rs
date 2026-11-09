@@ -20,6 +20,8 @@
 //! mesh convergence. This route is not an inf-sup or continuum-stability proof.
 
 pub mod incompressible;
+/// Full forced response with pressure recovery and original support reactions.
+pub mod harmonic;
 
 use super::gravity::HeldMixedGravity;
 use super::pressure::UniformBoundaryPressure;
