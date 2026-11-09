@@ -1,7 +1,8 @@
 //! Original tensor-shell motion, complete P2 cavity fields and reciprocal work.
 
 use fs_couple::cavity_modal::interior::structure::shell::{
-    ConformingShellFace, TensorShellInterior, TensorShellInteriorControls, TensorShellInteriorError,
+    ConformingShellFace, RefinedFluidFace, TensorShellInterior, TensorShellInteriorControls,
+    TensorShellInteriorError,
 };
 use fs_exec::{CancelGate, Cx};
 use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe;
@@ -502,5 +503,288 @@ fn interface_domains_original_strain_and_complete_coordinate_budgets_refuse() {
         assert!(prepared.solve(&force(), &zero, cx).is_err());
         assert!(model.prepare(cx).is_err());
         assert!(build(&valid, 1.7, controls()).is_err());
+    });
+}
+
+#[test]
+fn refined_fluid_keeps_conforming_work_and_independent_vertex_orders() {
+    fixture(|cx, _, shell, interior| {
+        let old =
+            TensorShellInterior::new(interior, shell, &faces(), &[], 1.7, controls(), cx).unwrap();
+        let mut bindings = faces().map(|face| RefinedFluidFace {
+            fluid: face.fluid,
+            shell: face.shell,
+        });
+        let exact = TensorShellInterior::new_with_refined_fluid(
+            interior,
+            shell,
+            &bindings,
+            0.0,
+            &[],
+            1.7,
+            controls(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(old.coupling(), exact.coupling());
+        // Fluid and shell vertex order need not correspond in the nested path.
+        for face in &mut bindings {
+            face.fluid.swap(0, 2);
+            face.shell.swap(0, 1);
+        }
+        let reordered = TensorShellInterior::new_with_refined_fluid(
+            interior,
+            shell,
+            &bindings,
+            0.0,
+            &[],
+            1.7,
+            controls(),
+            cx,
+        )
+        .unwrap();
+        for (&expected, &actual) in old.coupling().iter().zip(reordered.coupling()) {
+            assert!((expected - actual).abs() < 2e-16);
+        }
+        let zero = vec![C64::ZERO; interior.ndof()];
+        let reference = old.prepare(cx).unwrap().solve(&force(), &zero, cx).unwrap();
+        let response = reordered
+            .prepare(cx)
+            .unwrap()
+            .solve(&force(), &zero, cx)
+            .unwrap();
+        for (&actual, &expected) in response
+            .field
+            .structural_displacement
+            .iter()
+            .zip(&reference.field.structural_displacement)
+        {
+            near(actual, expected, 2e-10);
+        }
+    });
+}
+
+// Refine only the acoustic mesh: every original material shell DOF remains.
+// Coning each refined base triangle to one apex gives a conforming tet mesh.
+fn refined_acoustic_mesh(
+    shell: &TensorPronyShell,
+    levels: usize,
+) -> (TetComplex, Vec<[f64; 3]>, Vec<RefinedFluidFace>) {
+    let mut points = shell.mesh().nodes.clone();
+    let apex = points.len() as u32;
+    points.push([0.0, 0.0, 1.0]);
+    let mut bindings: Vec<_> = shell
+        .mesh()
+        .tris
+        .iter()
+        .map(|&face| RefinedFluidFace {
+            fluid: face.map(|node| node as u32),
+            shell: face,
+        })
+        .collect();
+    for _ in 0..levels {
+        let mut edges = std::collections::BTreeMap::new();
+        let mut refined = Vec::with_capacity(4 * bindings.len());
+        for face in &bindings {
+            let [a, b, c] = face.fluid;
+            let mut middle = |mut edge: [u32; 2]| {
+                edge.sort_unstable();
+                *edges.entry(edge).or_insert_with(|| {
+                    let index = points.len() as u32;
+                    points.push(core::array::from_fn(|d| {
+                        points[edge[0] as usize][d].midpoint(points[edge[1] as usize][d])
+                    }));
+                    index
+                })
+            };
+            let (ab, bc, ca) = (middle([a, b]), middle([b, c]), middle([c, a]));
+            for fluid in [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]] {
+                refined.push(RefinedFluidFace {
+                    fluid,
+                    shell: face.shell,
+                });
+            }
+        }
+        bindings = refined;
+    }
+    let tetrahedra = bindings
+        .iter()
+        .map(|face| {
+            let [a, b, c] = face.fluid;
+            [a, b, c, apex]
+        })
+        .collect();
+    (
+        TetComplex::from_tets(points.len(), tetrahedra),
+        points,
+        bindings,
+    )
+}
+
+// Independent physical traction integral: the center-node hat is 3y,
+// 3(1-x-y), or 3x on the three ORIGINAL shell triangles. The cubic-exact
+// quadrature integrates P2 pressure times that hat on each fluid subface.
+fn refined_pressure_force(
+    interior: &HeterogeneousHelmholtzFe<'_, '_>,
+    points: &[[f64; 3]],
+    bindings: &[RefinedFluidFace],
+    pressure: &[C64],
+) -> C64 {
+    let quadrature = [
+        ([1.0 / 3.0; 3], -27.0 / 48.0),
+        ([0.6, 0.2, 0.2], 25.0 / 48.0),
+        ([0.2, 0.6, 0.2], 25.0 / 48.0),
+        ([0.2, 0.2, 0.6], 25.0 / 48.0),
+    ];
+    let mut force = C64::ZERO;
+    for (element, face) in bindings.iter().enumerate() {
+        let [a, b, c] = face.fluid.map(|node| points[node as usize]);
+        let area = 0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+        for (l, weight) in quadrature {
+            let p = interior
+                .pressure_at(pressure, element, [l[0], l[1], l[2], 0.0])
+                .unwrap();
+            let x = l[0] * a[0] + l[1] * b[0] + l[2] * c[0];
+            let y = l[0] * a[1] + l[1] * b[1] + l[2] * c[1];
+            let center = match face.shell {
+                [0, 1, 3] => 3.0 * y,
+                [1, 2, 3] => 3.0 * (1.0 - x - y),
+                [2, 0, 3] => 3.0 * x,
+                _ => panic!("original three-facet fixture required"),
+            };
+            force = force - p.scale(area * weight * center);
+        }
+    }
+    force
+}
+
+#[test]
+fn independently_refined_pressure_transfers_actual_shell_work_without_extra_loss() {
+    fixture(|cx, _, shell, _| {
+        for level in 0..=2 {
+            let (complex, points, bindings) = refined_acoustic_mesh(shell, level);
+            let medium = Medium {
+                density_kg_m3: 1.2,
+                sound_speed_m_s: 3.0,
+            };
+            let geometry = HelmholtzFe::new(&complex, &points, 2, medium).unwrap();
+            let interior = HeterogeneousHelmholtzFe::new(
+                &geometry,
+                5,
+                &mut |_, _| Ok::<_, AcousticFeError>(medium),
+                &mut || false,
+            )
+            .unwrap();
+            let mut limits = controls();
+            limits.maximum_interface_faces = bindings.len();
+            limits.maximum_trace_bytes = 256 * 1024;
+            limits.maximum_trace_work = 2_000_000;
+            limits.coupled.maximum_coordinates = 256;
+            let model = TensorShellInterior::new_with_refined_fluid(
+                &interior,
+                shell,
+                &bindings,
+                1e-14,
+                &[],
+                1.7,
+                limits,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(model.structural_dofs(), shell.model().free);
+            assert_eq!(model.pressure_dofs(), geometry.ndof());
+            // A linear field lives in the original P2 vertex basis, with zero
+            // hierarchical edge coefficients. Its exact physical resultant is
+            // -integral(N_center*p dA) = -5/18 - i/9 on EVERY refinement.
+            let mut linear_pressure = vec![C64::ZERO; geometry.ndof()];
+            for (node, p) in points.iter().enumerate() {
+                linear_pressure[node] =
+                    C64::new(2.0 + 3.0 * p[0] - 4.0 * p[1], 1.0 - 2.0 * p[0] + p[1]);
+            }
+            let physical = refined_pressure_force(&interior, &points, &bindings, &linear_pressure);
+            near(physical, C64::new(-5.0 / 18.0, -1.0 / 9.0), 3e-14);
+            for s in 0..model.structural_dofs() {
+                let projected = linear_pressure
+                    .iter()
+                    .enumerate()
+                    .fold(C64::ZERO, |sum, (a, p)| {
+                        sum + p.scale(model.coupling()[a * model.structural_dofs() + s])
+                    });
+                if s == 2 {
+                    near(projected, physical, 3e-14);
+                } else {
+                    assert_eq!(projected, C64::ZERO);
+                }
+            }
+
+            // Coherent structural force and a native inward-flow drive exercise
+            // signed pressure exchange and the complete enclosing work account.
+            let applied = force();
+            let excitation: Vec<_> = bindings
+                .iter()
+                .map(|face| (face.fluid, [C64::new(1e-8, -2e-8); 3]))
+                .collect();
+            let flow = model.project_inward_velocity(&excitation, cx).unwrap();
+            let response = model
+                .prepare(cx)
+                .unwrap()
+                .solve(&applied, &flow, cx)
+                .unwrap();
+            let field = &response.field;
+            let actual_traction =
+                refined_pressure_force(&interior, &points, &bindings, &field.pressure_pa);
+            near(field.fluid_force[2], actual_traction, 2e-10);
+            let actual_exchange = 0.5 * (actual_traction * field.structural_velocity[2].conj()).re;
+            let allowance = 2e-9 * response.apparent_power_scale_w;
+            assert!(
+                (field.average_fluid_to_structure_power_w - actual_exchange).abs() <= allowance
+            );
+            let original_source_work =
+                work(&applied, &field.structural_velocity) + work(&field.pressure_pa, &flow);
+            assert!(original_source_work > 0.0);
+            assert!(
+                (original_source_work
+                    - field.average_structural_dissipation_w
+                    - field.average_wall_dissipation_w)
+                    .abs()
+                    <= allowance
+            );
+            assert!(field.power_balance_residual_w.abs() <= allowance);
+        }
+    });
+}
+
+#[test]
+fn refined_fluid_refuses_crossed_faces_offsets_duplicate_work_and_cancellation() {
+    fixture(|cx, gate, shell, interior| {
+        let bindings = faces().map(|face| RefinedFluidFace {
+            fluid: face.fluid,
+            shell: face.shell,
+        });
+        let build = |faces: &[RefinedFluidFace], tolerance| {
+            TensorShellInterior::new_with_refined_fluid(
+                interior,
+                shell,
+                faces,
+                tolerance,
+                &[],
+                1.7,
+                controls(),
+                cx,
+            )
+        };
+        assert!(build(&bindings, 0.0).is_ok());
+        assert!(build(&[bindings[0]; 2], 0.0).is_err());
+        let mut crossed = bindings;
+        crossed[0].shell = bindings[1].shell;
+        assert!(build(&crossed, 1e-12).is_err());
+        let mut offset = bindings;
+        offset[0].fluid = [0, 1, 3]; // Original fluid side face reaches z = 1 m.
+        assert!(build(&offset, 1e-12).is_err());
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(build(&bindings, invalid).is_err());
+        }
+        gate.request();
+        assert!(build(&bindings, 0.0).is_err());
     });
 }

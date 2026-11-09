@@ -327,6 +327,19 @@ compressibility remain with the native FE owner. An empty interface is an
 explicit detached limit. Real nonnegative wall admittance is relative to the
 moving wall, as in that native owner.
 
+`new_with_refined_fluid` additionally admits `RefinedFluidFace` bindings:
+multiple distinct acoustic boundary triangles may lie inside one original
+shell facet. The material shell and every original mechanical coordinate stay
+unchanged while the acoustic mesh is refined independently. Original P1 shell
+shapes are evaluated at the fluid vertices using scaled compensated geometry;
+the existing pressure quadrature constructs the same `B` and `-B^T` used for
+traction and displaced volume. Fluid and shell vertex orders are independent.
+An explicit meter-valued geometry allowance bounds plane separation and
+extrapolation beyond each shell edge; admitted shapes are never clipped.
+The allowance does not model a physical offset skin. Each fluid face is owned
+once, so duplicate bindings cannot add its work twice. Cross-facet intersections
+and arbitrary nonmatching overlap require a separate intersection trace.
+
 Both mechanical force/torque and prescribed inward flow use peak
 `exp(-i omega t)` phasors and may act coherently. Repeated load cases reuse one
 complete factor. A different frequency requires original material evaluation
@@ -340,8 +353,9 @@ or extra radiation debit is added.
 Original material and complete-coordinate factor bounds apply alongside
 explicit interface-face, trace-storage and trace-work caps. Cancellation and
 invalid geometry/material/load refusals publish no partial accepted field.
-The current adapter requires conforming planar faces and fixed small-signal
-geometry; nonconforming/curved traces, offset skins, tangential viscous fluid
+The current adapter requires conforming or nested planar faces and fixed
+small-signal geometry; arbitrary overlap/curved traces, offset skins,
+tangential viscous fluid
 traction, exterior radiation and causal dispersive fluids require their own
 physical owners. Spatial FE convergence remains a caller obligation.
 

@@ -15,6 +15,7 @@
 
 /// Simultaneous original interior pressure and closed exterior radiation loading.
 pub mod exterior;
+mod trace;
 
 use super::{
     PreparedStructuralInterior, StructuralInterior, StructuralInteriorError,
@@ -39,6 +40,16 @@ pub struct ConformingShellFace {
     pub shell: [usize; 3],
 }
 
+/// One planar fluid boundary face contained in an original P1 shell facet.
+/// Several distinct fluid faces may refine the same shell facet. The two
+/// vertex orders are independent; geometry determines the interpolation.
+/// Faces crossing shell edges require an intersection trace and are refused.
+#[derive(Clone, Copy, Debug)]
+pub struct RefinedFluidFace {
+    pub fluid: [u32; 3],
+    pub shell: [usize; 3],
+}
+
 /// Source, complete coupled solve and additional interface admission.
 #[derive(Clone, Copy, Debug)]
 pub struct TensorShellInteriorControls {
@@ -53,7 +64,8 @@ pub struct TensorShellInteriorControls {
     /// material operators, coupled pencil and allocator metadata are separate.
     pub maximum_trace_bytes: usize,
     /// Topology/normal-trace construction score only:
-    /// 512*(T+1)*(1+ceil(log2(T+1))) + 2048*I + 128*q.
+    /// 512*(T+1)*(1+ceil(log2(T+1))) + 2048*I + 128*q for
+    /// conforming faces; refined fluid faces use 16384*I instead.
     /// Original material and coupled FE assembly retain their native admission.
     pub maximum_trace_work: u64,
     /// Relative structural, acoustic and enclosing power defects in (0,1).
@@ -135,7 +147,74 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
         controls: TensorShellInteriorControls,
         cx: &Cx<'_>,
     ) -> Result<Self, TensorShellInteriorError> {
+        Self::from_faces(
+            interior,
+            shell,
+            interfaces.iter().map(|face| (face.fluid, face.shell)),
+            None,
+            walls,
+            omega_rad_s,
+            controls,
+            cx,
+        )
+    }
+
+    /// Bind a separately refined acoustic mesh to the original material shell.
+    ///
+    /// Each fluid face must be wholly contained in its selected planar shell
+    /// facet, within the explicit geometric allowance in meters. The original
+    /// shell P1 shape is evaluated at the fluid vertices; the native pressure
+    /// quadrature integrates that same trace and its opposite transpose. Thus
+    /// pressure traction and displaced volume use one work pairing, including
+    /// nonuniform pressure and independently ordered vertices.
+    ///
+    /// `maximum_geometry_error_m` bounds both distance from the shell plane and
+    /// extrapolation beyond each shell edge. Admitted barycentric values are
+    /// never clipped. This is a mesh-coordinate allowance, not an offset-skin
+    /// model or a continuum error certificate. Shell faces need not be fully
+    /// covered; unselected fluid faces keep their original boundary conditions.
+    /// Duplicate fluid faces, crossing shell edges beyond the allowance, curved
+    /// faces and unsupported topology refuse before any field is published.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_refined_fluid(
+        interior: &'a HeterogeneousHelmholtzFe<'f, 'c>,
+        shell: &'shell TensorPronyShell,
+        interfaces: &[RefinedFluidFace],
+        maximum_geometry_error_m: f64,
+        walls: &[ResistiveBoundary],
+        omega_rad_s: f64,
+        controls: TensorShellInteriorControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TensorShellInteriorError> {
+        Self::from_faces(
+            interior,
+            shell,
+            interfaces.iter().map(|face| (face.fluid, face.shell)),
+            Some(maximum_geometry_error_m),
+            walls,
+            omega_rad_s,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_faces(
+        interior: &'a HeterogeneousHelmholtzFe<'f, 'c>,
+        shell: &'shell TensorPronyShell,
+        interfaces: impl ExactSizeIterator<Item = ([u32; 3], [usize; 3])>,
+        maximum_geometry_error_m: Option<f64>,
+        walls: &[ResistiveBoundary],
+        omega_rad_s: f64,
+        controls: TensorShellInteriorControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TensorShellInteriorError> {
         poll(cx)?;
+        if maximum_geometry_error_m.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err(TensorShellInteriorError::Invalid(
+                "finite nonnegative interface geometry allowance required",
+            ));
+        }
         let q = shell.model().free;
         admit(q, interior.ndof(), controls.coupled)?;
         cap(
@@ -178,7 +257,13 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
         };
         cap(
             "shell interface trace work",
-            512 * (t + 1) * (1 + u128::from(levels)) + 2048 * i + 128 * n,
+            512 * (t + 1) * (1 + u128::from(levels))
+                + if maximum_geometry_error_m.is_some() {
+                    16384
+                } else {
+                    2048
+                } * i
+                + 128 * n,
             controls.maximum_trace_work as u128,
         )?;
         let mut original_facets = BTreeMap::new();
@@ -196,22 +281,22 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
         let mut selected_fluid = BTreeSet::new();
         let mut traces = vec![Vec::new(); q];
         let mut exterior_side_consistent = true;
-        for face in interfaces {
+        for (fluid, shell_nodes) in interfaces {
             poll(cx)?;
-            let (mut shell_key, mut fluid_key) = (face.shell, face.fluid);
+            let (mut shell_key, mut fluid_key) = (shell_nodes, fluid);
             shell_key.sort_unstable();
             fluid_key.sort_unstable();
             if !original_facets.contains_key(&shell_key)
-                || !selected_shell.insert(shell_key)
+                || (maximum_geometry_error_m.is_none() && !selected_shell.insert(shell_key))
                 || !selected_fluid.insert(fluid_key)
             {
                 return Err(TensorShellInteriorError::Invalid(
-                    "interface must pair unique original shell facets and fluid faces",
+                    "interface requires original shell facets and unique fluid faces; conforming shell facets cannot repeat",
                 ));
             }
             let (points, normal, _) = interior
                 .geometry()
-                .boundary_geometry(face.fluid)
+                .boundary_geometry(fluid)
                 .map_err(StructuralInteriorError::from)?;
             let original = original_facets[&shell_key].map(|node| shell.mesh().nodes[node]);
             let a: [f64; 3] = core::array::from_fn(|d| original[1][d] - original[0][d]);
@@ -223,19 +308,35 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
             ];
             let outward: f64 = cross.iter().zip(normal).map(|(a, b)| a * b).sum();
             exterior_side_consistent &= outward.is_finite() && outward > 0.0;
-            for local in 0..3 {
-                let node = face.shell[local];
-                if points[local] != shell.mesh().nodes[node] {
-                    return Err(TensorShellInteriorError::Invalid(
-                        "fluid and shell interface vertices must coincide exactly",
-                    ));
+            let shapes = if let Some(tolerance) = maximum_geometry_error_m {
+                trace::contained_p1(
+                    points,
+                    shell_nodes.map(|node| shell.mesh().nodes[node]),
+                    tolerance,
+                )?
+            } else {
+                for local in 0..3 {
+                    if points[local] != shell.mesh().nodes[shell_nodes[local]] {
+                        return Err(TensorShellInteriorError::Invalid(
+                            "fluid and shell interface vertices must coincide exactly",
+                        ));
+                    }
                 }
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            };
+            for local in 0..3 {
+                let node = shell_nodes[local];
                 for axis in 0..3 {
                     if let Some(coordinate) = shell.model().dof_map[6 * node + axis] {
                         if normal[axis] != 0.0 {
-                            let mut values = [0.0; 3];
-                            values[local] = normal[axis];
-                            traces[coordinate].push((face.fluid, values));
+                            let values = shapes.map(|shape| {
+                                if shape[local] == 0.0 {
+                                    0.0
+                                } else {
+                                    normal[axis] * shape[local]
+                                }
+                            });
+                            traces[coordinate].push((fluid, values));
                         }
                     }
                 }
