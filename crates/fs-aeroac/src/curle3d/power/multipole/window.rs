@@ -381,6 +381,7 @@ fn window_error(error: WindowError) -> AeroacError {
     match error {
         WindowError::InvalidWindow => invalid("invalid retarded-time radiation window"),
         WindowError::InvalidFrequency => invalid("invalid radiated-energy frequency"),
+        WindowError::InvalidBandShape => invalid("invalid radiated-energy temporal band shape"),
         WindowError::NonFiniteAmplitude | WindowError::Unrepresentable =>
             nonfinite("radiated-energy temporal product"),
     }
