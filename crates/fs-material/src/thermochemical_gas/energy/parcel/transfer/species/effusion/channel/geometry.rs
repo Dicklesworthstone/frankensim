@@ -15,7 +15,10 @@
 
 mod clausing;
 pub use clausing::accommodation::{AccommodationResolution, MolecularAccommodation};
-pub use clausing::momentum::{AxialMomentumResolution, MolecularAxialMoments};
+pub use clausing::momentum::{
+    AxialAccommodationResolution, AxialMomentumResolution, MolecularAxialAccommodation,
+    MolecularAxialMoments,
+};
 pub use clausing::{ClausingControls, ClausingResolution};
 
 use super::super::{GasEnergyError, invalid, positive};
@@ -185,6 +188,35 @@ impl CylindricalMolecularGeometry {
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, MolecularAxialMoments), GasEnergyError> {
         clausing::momentum::resolve(self, controls, cancelled)
+    }
+
+    /// Resolve mass, heat and angular/collision-history moments on the same
+    /// final grid for one to `MAX_EFFUSIVE_SPECIES` coefficients. Each wall
+    /// encounter independently resets the molecular speed and internal state
+    /// to the isothermal wall distribution with probability alpha; otherwise
+    /// it retains them. Both outcomes scatter diffusely and independently of
+    /// speed. This explicit Bernoulli law is stronger than mean energy
+    /// accommodation alone and must be qualified by the material consumer.
+    ///
+    /// Results retain input order and duplicate coefficients reuse their solve.
+    /// Retained and reset angular weights partition the total outgoing moments;
+    /// each response also owns its heat probabilities on these exact rings.
+    /// One mass solve and one shared angular-escape pair per grid serve every
+    /// distinct interior coefficient, with O(rings + species) scratch storage.
+    pub fn resolve_axial_accommodation_batch(
+        self,
+        coefficients: &[f64],
+        controls: ClausingControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        (
+            Self,
+            MolecularAxialMoments,
+            Vec<MolecularAxialAccommodation>,
+        ),
+        GasEnergyError,
+    > {
+        clausing::momentum::resolve_accommodation_batch(self, coefficients, controls, cancelled)
     }
 
     /// `None` identifies the original Santeler approximation. A retained report

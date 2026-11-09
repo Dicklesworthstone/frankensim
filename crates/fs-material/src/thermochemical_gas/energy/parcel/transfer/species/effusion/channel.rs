@@ -20,13 +20,14 @@
 
 mod geometry;
 pub use geometry::{
-    AccommodationResolution, AxialMomentumResolution, ClausingControls, ClausingResolution,
-    CylindricalMolecularGeometry, MolecularAccommodation, MolecularAxialMoments,
+    AccommodationResolution, AxialAccommodationResolution, AxialMomentumResolution,
+    ClausingControls, ClausingResolution, CylindricalMolecularGeometry, MolecularAccommodation,
+    MolecularAxialAccommodation, MolecularAxialMoments,
 };
-/// Molecular escape through the same diffuse channel into a true vacuum.
-pub mod vacuum;
 /// Geometry-resolved axial molecular momentum and stationary-wall impulse.
 pub mod momentum;
+/// Molecular escape through the same diffuse channel into a true vacuum.
+pub mod vacuum;
 
 use super::{
     ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, MAX_EFFUSIVE_SPECIES, R,

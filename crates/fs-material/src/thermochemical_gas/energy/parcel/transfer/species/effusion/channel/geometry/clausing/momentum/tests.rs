@@ -1,6 +1,8 @@
 //! Independent ray tracing and aperture-overlap quadrature for angular moments.
 use super::*;
 
+mod history;
+
 fn geometry(h: f64) -> CylindricalMolecularGeometry {
     CylindricalMolecularGeometry::try_new(
         1.0,
@@ -102,8 +104,8 @@ fn overlap_direct_moment(h: f64) -> f64 {
     let value = |i: usize| {
         let mu = lower + i as f64 * delta;
         let shift = (h * (1.0 - mu * mu).max(0.0).sqrt() / mu).min(1.0);
-        let overlap = 2.0 / core::f64::consts::PI
-            * (shift.acos() - shift * (1.0 - shift * shift).sqrt());
+        let overlap =
+            2.0 / core::f64::consts::PI * (shift.acos() - shift * (1.0 - shift * shift).sqrt());
         2.0 * mu * mu * overlap
     };
     let interior = (1..n).map(|i| {
@@ -134,6 +136,12 @@ fn direct_angular_integral_matches_independent_shifted_disc_overlap() {
 // production angular integrals. Samples uniform entry area, cosine incidence
 // and fresh diffuse wall directions; counts actual first exit direction cosines.
 fn ray_trace(h: f64, histories: usize) -> [f64; 3] {
+    let mut totals = [0.0; 3];
+    trace_histories(h, histories, |index, cosine, _| totals[index] += cosine);
+    totals.map(|sum| sum / histories as f64)
+}
+
+fn trace_histories(h: f64, histories: usize, mut record: impl FnMut(usize, f64, usize)) {
     let mut seed = 0x4d595df4d0f33173_u64;
     let mut uniform = || {
         seed ^= seed << 13;
@@ -141,7 +149,6 @@ fn ray_trace(h: f64, histories: usize) -> [f64; 3] {
         seed ^= seed << 17;
         ((seed >> 32) as f64 + 0.5) / 4294967296.0
     };
-    let mut totals = [0.0; 3];
     for _ in 0..histories {
         let radius = 0.5 * uniform().sqrt();
         let azimuth = 2.0 * core::f64::consts::PI * uniform();
@@ -151,6 +158,7 @@ fn ray_trace(h: f64, histories: usize) -> [f64; 3] {
         let azimuth = 2.0 * core::f64::consts::PI * uniform();
         let (mut vx, mut vy) = (transverse * azimuth.cos(), transverse * azimuth.sin());
         let mut wall_hit = false;
+        let mut collisions = 0;
         let mut completed = false;
         for _ in 0..10000 {
             let transverse2 = vx * vx + vy * vy;
@@ -175,7 +183,7 @@ fn ray_trace(h: f64, histories: usize) -> [f64; 3] {
                 } else {
                     0
                 };
-                totals[index] += vz.abs();
+                record(index, vz.abs(), collisions);
                 completed = true;
                 break;
             }
@@ -193,13 +201,13 @@ fn ray_trace(h: f64, histories: usize) -> [f64; 3] {
             vx = -2.0 * (normal * x + tangent * y);
             vy = 2.0 * (tangent * x - normal * y);
             wall_hit = true;
+            collisions += 1;
         }
         assert!(
             completed,
             "independent ray history exceeded its explicit budget"
         );
     }
-    totals.map(|sum| sum / histories as f64)
 }
 
 #[test]
@@ -240,10 +248,7 @@ fn dimensionless_results_scale_deterministically_and_retain_tiny_wall_paths() {
             .resolve_axial_momentum(controls(), || false)
             .unwrap()
             .1;
-        let repeated = g
-            .resolve_axial_momentum(controls(), || false)
-            .unwrap()
-            .1;
+        let repeated = g.resolve_axial_momentum(controls(), || false).unwrap().1;
         assert_eq!(first, repeated);
         assert_eq!(first, reference);
     }

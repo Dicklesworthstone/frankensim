@@ -22,10 +22,10 @@ use super::{
 /// the coefficient for its original species and temperature/pressure support.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MolecularAccommodation {
-    coefficient: f64,
-    transmitted_heat_probability: f64,
-    reflected_heat_probability: f64,
-    resolution: Option<AccommodationResolution>,
+    pub(super) coefficient: f64,
+    pub(super) transmitted_heat_probability: f64,
+    pub(super) reflected_heat_probability: f64,
+    pub(super) resolution: Option<AccommodationResolution>,
 }
 
 impl MolecularAccommodation {
@@ -93,27 +93,7 @@ pub(in super::super) fn resolve_batch(
 ) -> Result<(CylindricalMolecularGeometry, Vec<MolecularAccommodation>), GasEnergyError> {
     poll(&mut cancelled)?;
     controls.validate()?;
-    if coefficients.is_empty() || coefficients.len() > MAX_EFFUSIVE_SPECIES {
-        return Err(invalid(
-            "accommodation batch exceeds effusive species bounds",
-        ));
-    }
-    if coefficients
-        .iter()
-        .any(|coefficient| !coefficient.is_finite() || !(0.0..=1.0).contains(coefficient))
-    {
-        return Err(invalid(
-            "thermal accommodation coefficient must be finite and in [0,1]",
-        ));
-    }
-    // Canonical solve order makes work and results independent of species order.
-    let mut distinct: Vec<_> = coefficients
-        .iter()
-        .copied()
-        .filter(|coefficient| *coefficient > 0.0 && *coefficient < 1.0)
-        .collect();
-    distinct.sort_by(f64::total_cmp);
-    distinct.dedup();
+    let distinct = canonical_coefficients(coefficients)?;
     if distinct.is_empty() || geometry.length_m == 0.0 {
         let responses = coefficients
             .iter()
@@ -253,7 +233,32 @@ pub(in super::super) fn resolve_batch(
     }
 }
 
-fn exact_response(
+pub(super) fn canonical_coefficients(coefficients: &[f64]) -> Result<Vec<f64>, GasEnergyError> {
+    if coefficients.is_empty() || coefficients.len() > MAX_EFFUSIVE_SPECIES {
+        return Err(invalid(
+            "accommodation batch exceeds effusive species bounds",
+        ));
+    }
+    if coefficients
+        .iter()
+        .any(|coefficient| !coefficient.is_finite() || !(0.0..=1.0).contains(coefficient))
+    {
+        return Err(invalid(
+            "thermal accommodation coefficient must be finite and in [0,1]",
+        ));
+    }
+    // Canonical solve order makes work and results independent of species order.
+    let mut distinct: Vec<_> = coefficients
+        .iter()
+        .copied()
+        .filter(|coefficient| *coefficient > 0.0 && *coefficient < 1.0)
+        .collect();
+    distinct.sort_by(f64::total_cmp);
+    distinct.dedup();
+    Ok(distinct)
+}
+
+pub(super) fn exact_response(
     geometry: &CylindricalMolecularGeometry,
     coefficient: f64,
 ) -> MolecularAccommodation {
@@ -273,12 +278,12 @@ fn exact_response(
     }
 }
 
-struct HeatSolution {
-    transmitted: f64,
-    reflected: f64,
-    linear_estimate: f64,
-    residuals: [f64; 2],
-    iterations: usize,
+pub(super) struct HeatSolution {
+    pub(super) transmitted: f64,
+    pub(super) reflected: f64,
+    pub(super) linear_estimate: f64,
+    pub(super) residuals: [f64; 2],
+    pub(super) iterations: usize,
 }
 
 fn solve_heat(
@@ -289,17 +294,44 @@ fn solve_heat(
     target: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<HeatSolution, GasEnergyError> {
+    let field = solve_discounted(
+        grid,
+        &grid.end,
+        coefficient,
+        maximum_iterations,
+        target,
+        cancelled,
+    )?;
+    heat_from_field(grid, mass, coefficient, &field)
+}
+
+/// A reflected pair holds the near-left and near-right values of the same
+/// discounted source field. Reused by heat and joint angular/history moments.
+pub(super) struct DiscountedField {
+    pub(super) pairs: Vec<[f64; 2]>,
+    pub(super) residuals: [f64; 2],
+    pub(super) iterations: usize,
+}
+
+pub(super) fn solve_discounted(
+    grid: &Grid,
+    source: &[f64],
+    coefficient: f64,
+    maximum_iterations: usize,
+    target: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DiscountedField, GasEnergyError> {
     let rings = grid.wall.len();
     let half = rings / 2;
     let mut fields = Vec::with_capacity(2);
     for symmetric in [true, false] {
         let rhs: Vec<_> = (0..half)
             .map(|i| {
-                0.5 * (grid.end[i]
+                0.5 * (source[i]
                     + if symmetric {
-                        grid.end[rings - 1 - i]
+                        source[rings - 1 - i]
                     } else {
-                        -grid.end[rings - 1 - i]
+                        -source[rings - 1 - i]
                     })
             })
             .collect();
@@ -333,10 +365,26 @@ fn solve_heat(
             "discounted Clausing probabilities left their physical bounds",
         ));
     }
+    Ok(DiscountedField {
+        pairs,
+        residuals: [even.residual_l1, odd.residual_l1],
+        iterations: even.iterations + odd.iterations,
+    })
+}
+
+pub(super) fn heat_from_field(
+    grid: &Grid,
+    mass: &GridSolution,
+    coefficient: f64,
+    field: &DiscountedField,
+) -> Result<HeatSolution, GasEnergyError> {
+    let rings = grid.wall.len();
+    let half = rings / 2;
+    let pairs = &field.pairs;
     let norm = (mass.wall_transmitted + mass.reflected)
         / (4.0 * grid.delta * compensated(grid.end.iter().copied()));
     let retention = 1.0 - coefficient;
-    let residual_l1 = 2.0 * (even.residual_l1 + odd.residual_l1);
+    let residual_l1 = 2.0 * (field.residuals[0] + field.residuals[1]);
     let (transmitted, reflected, linear_estimate) = if coefficient < 0.5 {
         let weight = 4.0 * grid.delta * coefficient * norm;
         let transmitted = weight
@@ -393,8 +441,8 @@ fn solve_heat(
         transmitted,
         reflected,
         linear_estimate,
-        residuals: [even.residual_l1, odd.residual_l1],
-        iterations: even.iterations + odd.iterations,
+        residuals: field.residuals,
+        iterations: field.iterations,
     })
 }
 

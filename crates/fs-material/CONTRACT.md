@@ -23749,12 +23749,10 @@ The exact zero-length aperture retains direct moment 2/3 with no wall paths.
 those moments to the original channel catalog, mouth qualification, original
 species caloric owners, and explicit speed-distribution provenance. Construction
 rebinds the existing common or species-specific heat accommodation to that same
-final geometry without another geometry solve. It qualifies full Maxwellian
-wall accommodation or elastic diffuse scattering preserving incident speed,
-including a mixed endpoint table over the original species. Finite-channel
-intermediate accommodation is refused: its joint angular/collision-history
-speed moments are not implemented here. The existing partial-accommodation
-mass/energy owner remains available. An aperture has no active wall and
+final geometry without another geometry solve. It qualifies the original independent per-collision Maxwellian reset or
+speed-preserving diffuse event for every species, including intermediate
+probabilities. The joint angular/collision-history extension below supplies
+matching heat and speed partitions on the same final geometry. An aperture has no active wall and
 does not acquire a wall-temperature or accommodation dependency.
 
 The new rate APIs preserve the original full vacuum or reciprocal mass/energy
@@ -23907,3 +23905,59 @@ focused source regressions cover original pins and interlaced knots, fixed-press
 surface slices and holes, interior crossings and auxiliary-domain exits, bounded
 cancellation, and transparent moving support. These regressions are authored and
 source-reviewed; native compilation/execution remains unverified in this session.
+
+
+## Joint angular and collision-history accommodation for channel momentum
+
+`CylindricalMolecularGeometry::resolve_axial_accommodation_batch` resolves
+mass transmission, total axial angular moments, native thermal accommodation,
+and retained-speed/reset-speed angular partitions on one final Clausing grid.
+Coefficients retain their authored order; duplicate coefficients reuse their
+solves. The law is the channel's existing explicit independent per-collision
+Bernoulli reset: with probability alpha, speed and internal state equilibrate
+with the stationary isothermal wall; otherwise both are retained while angles
+remain diffuse. A thermal accommodation coefficient alone does not establish
+this stronger distribution law; it must be covered by the original qualification.
+
+With q=1-alpha, the discounted visit field solves (I-qW)y=eL. Retained wall
+angular moments use q*y dotted with the appropriate end angular kernel; reset
+moments use alpha*y dotted with the common angular escape field (I-W)^-1*m.
+These retain the correlation between collision count and eventual exit angle.
+A scalar heat fraction times a total angular moment is not this joint law.
+
+Each refinement shares one mass solve and one coefficient-independent angular
+escape parity pair. Each distinct interior coefficient needs one discounted
+parity pair, reused for both heat and angular weights. Only one coefficient's
+ring fields are active at a time; scratch storage is O(rings + species).
+Tiny reset terms and tiny retained complements are evaluated positively.
+Their resolvent partition is checked against numerical residual bounds before
+obtaining the dominant component by subtraction. Exact alpha=0, alpha=1 and
+zero-length limits remain algebraic. All mass, total angular, heat and split
+angular estimates must satisfy the same authored controls before publication.
+Reports retain work, residual and refinement estimates; they are not certified
+continuum or floating-point enclosures.
+
+`DiffuseChannelMomentumInterface` now admits intermediate common and
+species-specific reset probabilities. It binds the returned native heat
+responses directly into the original channel, preserving source and surface
+qualifications without a second geometry solve. Immutable split responses
+are shared between interface clones. Rate and accepted-impulse calculations
+combine the original gas and wall Maxwellian mean speeds with their respective
+angular partitions. They do not take the square root of an averaged energy
+temperature. Source and stationary-wall momentum accounts, original accepted
+species masses, exact aperture behavior, and inactive elastic wall semantics
+remain unchanged. The finite-wall vessel adapter consumes this same interface.
+
+Focused native geometry validation passes all 35 tests: the original 29 plus
+six new groups covering independent collision-generation enumeration and
+160,000 three-dimensional diffuse ray histories with counted collisions,
+different angular versus thermal reset fractions, exact endpoints/aperture,
+shared geometry and duplicate work reuse, alpha=1e-18 with relative-only
+control, alpha=1-epsilon, thin passages, scale invariance, exhausted budgets,
+and cancellation. The launcher uses actual production geometry modules and a
+real fs-math library with minimal enclosing error/poll context; it is not a
+full fs-material or workspace build. Pinned formatting passes all nine changed
+Rust files. The material integration tests exercise partial-reset wall-speed
+scaling, pressure/momentum closure, matching heat weights, inactive species
+sources and actual vacuum/reciprocal accepted impulses; those integration tests
+were statically reviewed but not compiled or executed in this workspace.

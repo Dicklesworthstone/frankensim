@@ -20,6 +20,9 @@
 //! accommodation is inferred. A material consumer binds the returned geometry
 //! and moments to its original physically qualified channel and speed laws.
 
+mod history;
+pub use history::{AxialAccommodationResolution, MolecularAxialAccommodation};
+
 use super::{
     ClausingControls, ClausingResolution, CylindricalMolecularGeometry, GasEnergyError, Grid,
     GridSolution, compensated, det, invalid, poll, positive,
@@ -87,42 +90,86 @@ struct Moments {
     quadrature: [f64; 3],
 }
 
+struct AngularIntegrals {
+    values: [f64; 3],
+    end: Vec<f64>,
+}
+
 pub(in super::super) fn resolve(
-    mut geometry: CylindricalMolecularGeometry,
+    geometry: CylindricalMolecularGeometry,
+    controls: ClausingControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(CylindricalMolecularGeometry, MolecularAxialMoments), GasEnergyError> {
+    let (geometry, moments, _) = resolve_joint(geometry, &[], &[], controls, cancelled)?;
+    Ok((geometry, moments))
+}
+
+pub(in super::super) fn resolve_accommodation_batch(
+    geometry: CylindricalMolecularGeometry,
+    coefficients: &[f64],
     controls: ClausingControls,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<(CylindricalMolecularGeometry, MolecularAxialMoments), GasEnergyError> {
+) -> Result<
+    (
+        CylindricalMolecularGeometry,
+        MolecularAxialMoments,
+        Vec<MolecularAxialAccommodation>,
+    ),
+    GasEnergyError,
+> {
+    poll(&mut cancelled)?;
+    let distinct = super::accommodation::canonical_coefficients(coefficients)?;
+    resolve_joint(geometry, coefficients, &distinct, controls, cancelled)
+}
+
+fn resolve_joint(
+    mut geometry: CylindricalMolecularGeometry,
+    coefficients: &[f64],
+    distinct: &[f64],
+    controls: ClausingControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        CylindricalMolecularGeometry,
+        MolecularAxialMoments,
+        Vec<MolecularAxialAccommodation>,
+    ),
+    GasEnergyError,
+> {
     poll(&mut cancelled)?;
     controls.validate()?;
     if geometry.length_m == 0.0 {
         let geometry = super::resolve(geometry, controls, &mut cancelled)?;
-        return Ok((
-            geometry,
-            MolecularAxialMoments {
-                direct: 2.0 / 3.0,
-                wall_transmitted: 0.0,
-                reflected: 0.0,
-                resolution: AxialMomentumResolution {
-                    controls,
-                    rings: 0,
-                    angular_panels: 0,
-                    refinements: 0,
-                    iterations: 0,
-                    quadrature_evaluations: 0,
-                    direct_quadrature_estimate: 0.0,
-                    wall_transmitted_quadrature_estimate: 0.0,
-                    reflected_quadrature_estimate: 0.0,
-                    wall_transmitted_grid_change: 0.0,
-                    reflected_grid_change: 0.0,
-                    linear_solve_estimate: 0.0,
-                    previous_linear_solve_estimate: 0.0,
-                    direct_error_estimate: 0.0,
-                    wall_transmitted_error_estimate: 0.0,
-                    reflected_error_estimate: 0.0,
-                    reciprocity_residual: 0.0,
-                },
+        let moments = MolecularAxialMoments {
+            direct: 2.0 / 3.0,
+            wall_transmitted: 0.0,
+            reflected: 0.0,
+            resolution: AxialMomentumResolution {
+                controls,
+                rings: 0,
+                angular_panels: 0,
+                refinements: 0,
+                iterations: 0,
+                quadrature_evaluations: 0,
+                direct_quadrature_estimate: 0.0,
+                wall_transmitted_quadrature_estimate: 0.0,
+                reflected_quadrature_estimate: 0.0,
+                wall_transmitted_grid_change: 0.0,
+                reflected_grid_change: 0.0,
+                linear_solve_estimate: 0.0,
+                previous_linear_solve_estimate: 0.0,
+                direct_error_estimate: 0.0,
+                wall_transmitted_error_estimate: 0.0,
+                reflected_error_estimate: 0.0,
+                reciprocity_residual: 0.0,
             },
-        ));
+        };
+        let responses = coefficients
+            .iter()
+            .map(|&coefficient| history::exact_response(&geometry, &moments, coefficient))
+            .collect();
+        poll(&mut cancelled)?;
+        return Ok((geometry, moments, responses));
     }
     let h = geometry.length_m / geometry.diameter_m;
     let tolerance = |value: f64| controls.absolute_tolerance + controls.relative_tolerance * value;
@@ -132,8 +179,9 @@ pub(in super::super) fn resolve(
     }
     let mut rings = controls.initial_rings;
     let (mut refinements, mut iterations, mut evaluations) = (0, 0, 0);
+    let (mut history_iterations, mut angular_escape_iterations) = (0, 0);
     let mut panels = 4;
-    let mut previous: Option<(GridSolution, Moments)> = None;
+    let mut previous: Option<(GridSolution, Moments, history::GridResponses)> = None;
     loop {
         let grid = Grid::new(h, rings, &mut cancelled)?;
         let mass = grid.solve(
@@ -145,19 +193,52 @@ pub(in super::super) fn resolve(
         iterations += mass.iterations;
         let mut coarse = angular_moments(&grid, &mass, h, panels / 2, &mut cancelled)?;
         evaluations += (rings + 1) * 8 * (panels / 2);
-        let moments = loop {
+        let (moments, angular, kernel_quadrature) = loop {
             let fine = angular_moments(&grid, &mass, h, panels, &mut cancelled)?;
             evaluations += (rings + 1) * 8 * panels;
-            let quadrature = core::array::from_fn(|i| (fine[i] - coarse[i]).abs());
+            // Absolute ring differences also control any nonnegative retained
+            // or reset visitation field; opposite angular changes cannot hide.
+            let kernel_difference: Vec<_> = fine
+                .end
+                .iter()
+                .zip(&coarse.end)
+                .map(|(a, b)| (a - b).abs())
+                .collect();
+            let weight =
+                (mass.wall_transmitted + mass.reflected) / compensated(grid.end.iter().copied());
+            let quadrature = [
+                (fine.values[0] - coarse.values[0]).abs(),
+                weight
+                    * compensated((0..rings / 2).map(|i| {
+                        kernel_difference[i] * (0.5 + mass.half_escape[i])
+                            + kernel_difference[rings - 1 - i] * (0.5 - mass.half_escape[i])
+                    })),
+                weight
+                    * compensated((0..rings / 2).map(|i| {
+                        kernel_difference[i] * (0.5 - mass.half_escape[i])
+                            + kernel_difference[rings - 1 - i] * (0.5 + mass.half_escape[i])
+                    })),
+            ];
+            let kernel_quadrature = kernel_difference
+                .iter()
+                .zip(&fine.end)
+                .map(|(difference, value)| difference / value)
+                .fold(0.0_f64, f64::max);
             if fine
+                .values
                 .iter()
                 .zip(quadrature)
                 .all(|(&value, error)| error <= 0.1 * tolerance(value))
+                && (distinct.is_empty() || kernel_quadrature <= 0.05 * tolerance(1.0))
             {
-                break Moments {
-                    values: fine,
-                    quadrature,
-                };
+                break (
+                    Moments {
+                        values: fine.values,
+                        quadrature,
+                    },
+                    fine,
+                    kernel_quadrature,
+                );
             }
             if panels > controls.maximum_rings / 4 {
                 return Err(invalid("axial moment angular quadrature budget exhausted"));
@@ -165,7 +246,20 @@ pub(in super::super) fn resolve(
             panels *= 2;
             coarse = fine;
         };
-        if let Some((old_mass, old)) = &previous {
+        let history = history::solve_grid(
+            &grid,
+            &mass,
+            &angular,
+            &moments,
+            kernel_quadrature,
+            distinct,
+            controls,
+            target,
+            &mut cancelled,
+        )?;
+        history_iterations += history.iterations;
+        angular_escape_iterations += history.angular_escape_iterations;
+        if let Some((old_mass, old, old_history)) = &previous {
             let mass_change = (mass.wall_transmitted - old_mass.wall_transmitted).abs();
             let mass_error = mass_change + mass.linear_estimate + old_mass.linear_estimate;
             let transmission = geometry.direct + mass.wall_transmitted;
@@ -191,6 +285,7 @@ pub(in super::super) fn resolve(
                     .iter()
                     .zip(errors)
                     .all(|(&value, error)| error <= tolerance(value))
+                && history.converged(old_history, &moments, tolerance)
             {
                 poll(&mut cancelled)?;
                 geometry.transmission = transmission;
@@ -248,10 +343,20 @@ pub(in super::super) fn resolve(
                         reciprocity_residual,
                     },
                 };
-                return Ok((geometry, response));
+                let responses = history::responses(
+                    &geometry,
+                    &response,
+                    coefficients,
+                    distinct,
+                    (&history, old_history),
+                    iterations + history_iterations,
+                    angular_escape_iterations,
+                )?;
+                poll(&mut cancelled)?;
+                return Ok((geometry, response, responses));
             }
         }
-        previous = Some((mass, moments));
+        previous = Some((mass, moments, history));
         if rings > controls.maximum_rings / 2 {
             return Err(invalid("axial moment spatial refinement budget exhausted"));
         }
@@ -276,7 +381,7 @@ fn angular_moments(
     h: f64,
     panels: usize,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<[f64; 3], GasEnergyError> {
+) -> Result<AngularIntegrals, GasEnergyError> {
     let width = core::f64::consts::FRAC_PI_2 / panels as f64;
     let mut nodes = Vec::with_capacity(8 * panels);
     for panel in 0..panels {
@@ -320,21 +425,19 @@ fn angular_moments(
         * grid.delta
         * norm
         * compensated((0..rings / 2).map(|i| {
-            end[i] * (0.5 + mass.half_escape[i])
-                + end[rings - 1 - i] * (0.5 - mass.half_escape[i])
+            end[i] * (0.5 + mass.half_escape[i]) + end[rings - 1 - i] * (0.5 - mass.half_escape[i])
         }));
     let reflected = 4.0
         * grid.delta
         * norm
         * compensated((0..rings / 2).map(|i| {
-            end[i] * (0.5 - mass.half_escape[i])
-                + end[rings - 1 - i] * (0.5 + mass.half_escape[i])
+            end[i] * (0.5 - mass.half_escape[i]) + end[rings - 1 - i] * (0.5 + mass.half_escape[i])
         }));
     let values = [direct, transmitted, reflected];
     if !values.into_iter().all(positive) {
         return Err(invalid("axial angular integral is not representable"));
     }
-    Ok(values)
+    Ok(AngularIntegrals { values, end })
 }
 
 fn angular_integral(
