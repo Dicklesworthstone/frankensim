@@ -199,6 +199,166 @@ fn conserved(g: &FrozenGas, p: SpatialPrimitive) -> SpatialConserved {
 }
 
 #[test]
+fn g3_ale_spatial_momentum_and_work_are_covariant_on_contact_shock_and_hll() {
+    for cp in [0.0, 0.4] {
+        let g = gas(cp, 1e18);
+        for (l, r) in [
+            ([1.0, 0.2, 0.3, -0.4, 1.0], [0.3, 0.2, -0.7, 0.8, 1.0]),
+            ([1.0, 0.0, 0.3, -0.4, 1.0], [0.125, 0.0, -0.7, 0.8, 0.1]),
+            ([1.0, -2.0, 0.3, -0.4, 0.4], [1.0, 2.0, -0.7, 0.8, 0.4]),
+        ] {
+            let (left, right) = (trace(l), trace(r));
+            let speed = 0.6;
+            let f = g
+                .moving_hllc_spatial_flux_from_primitive(left, right, speed, || false)
+                .unwrap();
+            // A uniform boost of both fluids AND the face preserves the
+            // relative Riemann problem, including the chosen fallback.
+            let boost = [1.25, -0.5, 0.75];
+            let shift = |p: SpatialPrimitive| SpatialPrimitive {
+                normal_velocity: p.normal_velocity + boost[0],
+                transverse_velocity: [
+                    p.transverse_velocity[0] + boost[1],
+                    p.transverse_velocity[1] + boost[2],
+                ],
+                ..p
+            };
+            let transformed = g
+                .moving_hllc_spatial_flux_from_primitive(
+                    shift(left),
+                    shift(right),
+                    speed + boost[0],
+                    || false,
+                )
+                .unwrap();
+            close(transformed.mass, f.mass);
+            close(
+                transformed.normal_momentum,
+                f.normal_momentum + boost[0] * f.mass,
+            );
+            for axis in 0..2 {
+                close(
+                    transformed.transverse_momentum[axis],
+                    f.transverse_momentum[axis] + boost[axis + 1] * f.mass,
+                );
+            }
+            close(
+                transformed.energy,
+                f.energy
+                    + boost[0] * f.normal_momentum
+                    + boost[1] * f.transverse_momentum[0]
+                    + boost[2] * f.transverse_momentum[1]
+                    + 0.5 * boost.iter().map(|b| b * b).sum::<f64>() * f.mass,
+            );
+            close(transformed.signal_speed, f.signal_speed);
+            assert_eq!(transformed.used_hll_fallback, f.used_hll_fallback);
+            if l[1] == -2.0 {
+                assert!(f.used_hll_fallback);
+            }
+            let ql = conserved(&g, left);
+            let qr = conserved(&g, right);
+            let decoded = g.moving_hllc_spatial_flux(ql, qr, speed, || false).unwrap();
+            for (actual, expected) in components(decoded).into_iter().zip(components(f)) {
+                close(actual, expected);
+            }
+            assert_eq!(
+                g.moving_hllc_spatial_flux(ql, qr, 0.0, || false).unwrap(),
+                g.hllc_spatial_flux(ql, qr, || false).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_ale_spatial_reduces_to_planar_and_has_the_comoving_wall_limit() {
+    let g = gas(0.4, -1e18);
+    let left = trace([1.1, 0.4, -0.3, 0.0, 1.0]);
+    let right = trace([0.7, -0.2, 0.8, 0.0, 0.5]);
+    let planar = |p: SpatialPrimitive| NormalPrimitive {
+        density: p.density,
+        normal_velocity: p.normal_velocity,
+        transverse_velocity: p.transverse_velocity[0],
+        pressure: p.pressure,
+    };
+    for speed in [-1.0, 0.0, 0.7] {
+        let p = g
+            .moving_hllc_normal_flux_from_primitive(planar(left), planar(right), speed, || false)
+            .unwrap();
+        let s = g
+            .moving_hllc_spatial_flux_from_primitive(left, right, speed, || false)
+            .unwrap();
+        assert_eq!(
+            components(s),
+            [
+                p.mass,
+                p.normal_momentum,
+                p.transverse_momentum,
+                0.0,
+                p.energy,
+                p.signal_speed,
+            ]
+        );
+        assert_eq!(s.used_hll_fallback, p.used_hll_fallback);
+    }
+    let left = SpatialPrimitive {
+        transverse_velocity: [-0.3, 0.9],
+        ..left
+    };
+    let right = SpatialPrimitive {
+        density: 0.3,
+        transverse_velocity: [0.8, -0.5],
+        ..left
+    };
+    let flux = g
+        .moving_hllc_spatial_flux_from_primitive(left, right, left.normal_velocity, || false)
+        .unwrap();
+    assert_eq!(flux.mass, 0.0);
+    assert_eq!(flux.transverse_momentum, [0.0; 2]);
+    close(flux.normal_momentum, left.pressure);
+    close(flux.energy, left.pressure * left.normal_velocity);
+    let wall = g
+        .moving_wall_spatial_flux_from_primitive(left, 1.0, left.normal_velocity, || false)
+        .unwrap();
+    close(wall.normal_momentum, flux.normal_momentum);
+    close(wall.energy, flux.energy);
+}
+
+#[test]
+fn g4_ale_faces_refuse_nonfinite_speeds_caloric_loss_and_cancelled_work() {
+    let g = gas(0.4, 0.0);
+    let p = trace([1.0, 0.3, -0.2, 0.4, 1.0]);
+    let q = conserved(&g, p);
+    for velocity in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e100] {
+        assert!(
+            g.moving_hllc_spatial_flux(q, q, velocity, || false)
+                .is_err()
+        );
+        assert!(
+            g.moving_hllc_spatial_flux_from_primitive(p, p, velocity, || false)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        g.moving_hllc_spatial_flux(q, q, 0.1, || true),
+        Err(Error::Cancelled)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        g.moving_hllc_spatial_flux_from_primitive(p, p, 0.1, || {
+            polls += 1;
+            polls == 5
+        }),
+        Err(Error::Cancelled)
+    );
+    // Failed and cancelled evaluations have no retained state or scratch;
+    // the original traces still supply the identical next accepted flux.
+    assert_eq!(
+        g.moving_hllc_spatial_flux(q, q, 0.1, || false).unwrap(),
+        g.moving_hllc_spatial_flux(q, q, 0.1, || false).unwrap()
+    );
+}
+
+#[test]
 fn g0_spatial_flux_reduces_bitwise_to_the_original_planar_kernel() {
     let g = gas(0.4, 1e18);
     for (left, right) in [

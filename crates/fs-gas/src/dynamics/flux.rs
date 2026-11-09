@@ -260,6 +260,52 @@ impl FrozenGas {
         self.normal_interface(left, pl, right, pr, &mut cancelled)
     }
 
+    /// Conservative planar flux through a face translating at `face_velocity`
+    /// along the supplied normal axis [m/s].
+    ///
+    /// The original Riemann problem is sampled in the face frame, then mass,
+    /// both momenta and full referenced energy are returned in laboratory
+    /// coordinates. This is `F - face_velocity * U`, not a stationary-face
+    /// flux with an independently upwinded geometric correction. Tangential
+    /// momentum follows the same contact and HLL waves as all other storage.
+    /// The wave-speed bound is relative to the face. Tangential face motion
+    /// does not change the normal transport through an inviscid planar face.
+    ///
+    /// Zero face velocity retains the stationary API exactly. A spatial owner
+    /// must still evolve cell volumes consistently and apply each shared face
+    /// flux with opposite signs; this leaf supplies neither a moving mesh nor
+    /// a discrete geometric-conservation or temporal-accuracy guarantee.
+    pub fn moving_hllc_normal_flux(
+        &self,
+        left: NormalConserved,
+        right: NormalConserved,
+        face_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let pl = self.normal_primitive(left, &mut cancelled)?;
+        let pr = self.normal_primitive(right, &mut cancelled)?;
+        self.moving_trace_interface(left, pl, right, pr, face_velocity, &mut cancelled)
+            .map(NormalFaceFlux::from)
+    }
+
+    /// Source-owned reconstructed-trace path to [`Self::moving_hllc_normal_flux`].
+    /// Laboratory and face-frame energy must both retain the declared caloric
+    /// precision. The original source computes every thermodynamic property.
+    pub fn moving_hllc_normal_flux_from_primitive(
+        &self,
+        left: NormalPrimitive,
+        right: NormalPrimitive,
+        face_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (left, pl) = self.normal_state_at(left)?;
+        poll(&mut cancelled)?;
+        let (right, pr) = self.normal_state_at(right)?;
+        self.moving_trace_interface(left, pl, right, pr, face_velocity, &mut cancelled)
+            .map(NormalFaceFlux::from)
+    }
+
     /// Reflect a planar trace at a stationary, adiabatic slip wall.
     ///
     /// `outward_normal` is -1 or +1 relative to the supplied normal axis. The
@@ -621,31 +667,79 @@ impl FrozenGas {
         velocity: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, Error> {
+        self.moving_trace_interface(
+            NormalConserved::from(left),
+            pl,
+            NormalConserved::from(right),
+            pr,
+            velocity,
+            cancelled,
+        )
+        .map(|f| FaceFlux::from(NormalFaceFlux::from(f)))
+    }
+
+    // One Galilean transformation for axial, planar and spatial transport.
+    // Solve in the face frame, then transform the numerical momentum and
+    // energy FLUX, including pressure work, back to laboratory coordinates.
+    // Springel (2010), section 3.4, arXiv:0901.4107.
+    #[allow(clippy::too_many_arguments)]
+    fn moving_trace_interface<const N: usize, Q: Trace<N>>(
+        &self,
+        left: Q,
+        pl: Primitive,
+        right: Q,
+        pr: Primitive,
+        velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
         if velocity == 0.0 {
-            return self.interface(left, pl, right, pr, cancelled);
+            return self.trace_interface(left, pl, right, pr, cancelled);
         }
         if !velocity.is_finite() {
             return Err(Error::Invalid("nonfinite face velocity"));
         }
-        poll(cancelled)?;
-        let (left, pl) = self.state_at(pl.density, pl.velocity - velocity, pl.pressure)?;
-        poll(cancelled)?;
-        let (right, pr) = self.state_at(pr.density, pr.velocity - velocity, pr.pressure)?;
-        let relative = self.interface(left, pl, right, pr, cancelled)?;
-        let flux = FaceFlux {
-            mass: relative.mass,
-            momentum: relative.momentum + velocity * relative.mass,
-            energy: relative.energy
-                + velocity * relative.momentum
-                + (0.5 * velocity * velocity) * relative.mass,
-            signal_speed: relative.signal_speed,
-            used_hll_fallback: relative.used_hll_fallback,
+        let shift = |state: Q, primitive: Primitive| {
+            let (normal, primitive) = self.state_at(
+                primitive.density,
+                primitive.velocity - velocity,
+                primitive.pressure,
+            )?;
+            let mut values = state.array();
+            values[1] = normal.momentum;
+            values[N - 1] = normal.energy;
+            let mut has_shear = false;
+            for k in 2..N - 1 {
+                // Preserve the original tangential momentum; only the normal
+                // frame changed. Rebuild heat from the source rather than
+                // subtracting large laboratory kinetic-energy terms.
+                has_shear |= values[k] != 0.0;
+                values[N - 1] += 0.5 * values[k] * (values[k] / values[0]);
+            }
+            let state = Q::from_array(values);
+            if has_shear {
+                self.admit_trace_precision(
+                    state,
+                    primitive,
+                    "moving-face state cannot retain the declared caloric precision",
+                )
+            } else {
+                // state_at already admitted the complete axial energy. Keep
+                // the original one-dimensional source work and arithmetic.
+                Ok((state, primitive))
+            }
         };
-        if flux.array().iter().any(|value| !value.is_finite()) {
-            return Err(Error::Invalid("moving-face laboratory flux overflow"));
-        }
         poll(cancelled)?;
-        Ok(flux)
+        let (left, pl) = shift(left, pl)?;
+        poll(cancelled)?;
+        let (right, pr) = shift(right, pr)?;
+        let relative = self.trace_interface(left, pl, right, pr, cancelled)?;
+        let mut values = relative.values;
+        values[1] = relative.values[1] + velocity * relative.values[0];
+        values[N - 1] = relative.values[N - 1]
+            + velocity * relative.values[1]
+            + (0.5 * velocity * velocity) * relative.values[0];
+        poll(cancelled)?;
+        flux(values, relative.signal_speed, relative.used_hll_fallback)
     }
 
     fn normal_interface(

@@ -181,6 +181,48 @@ impl FrozenGas {
             .map(SpatialFaceFlux::from)
     }
 
+    /// Three-dimensional ALE HLLC/HLL flux through a face with the declared
+    /// normal translation speed [m/s].
+    ///
+    /// All three momenta and full energy use the original face-frame Riemann
+    /// solution; the returned `F - face_velocity * U` is in the laboratory
+    /// frame and `signal_speed` is relative to the moving face. The original
+    /// source admits both tangential kinetic energies in every HLL state.
+    /// Tangential face translation has no effect on normal inviscid transport.
+    ///
+    /// Zero face speed reproduces [`Self::hllc_spatial_flux`] exactly. Geometry,
+    /// opposite shared-face updates and the discrete geometric conservation
+    /// law remain the spatial owner's responsibility, as with the planar entry.
+    pub fn moving_hllc_spatial_flux(
+        &self,
+        left: SpatialConserved,
+        right: SpatialConserved,
+        face_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        let pl = self.spatial_primitive(left, &mut cancelled)?;
+        let pr = self.spatial_primitive(right, &mut cancelled)?;
+        self.moving_trace_interface(left, pl, right, pr, face_velocity, &mut cancelled)
+            .map(SpatialFaceFlux::from)
+    }
+
+    /// Reconstructed-trace fast path to [`Self::moving_hllc_spatial_flux`],
+    /// with original-source and complete laboratory/face-frame energy admission.
+    pub fn moving_hllc_spatial_flux_from_primitive(
+        &self,
+        left: SpatialPrimitive,
+        right: SpatialPrimitive,
+        face_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (left, pl) = self.spatial_state_at(left)?;
+        poll(&mut cancelled)?;
+        let (right, pr) = self.spatial_state_at(right)?;
+        self.moving_trace_interface(left, pl, right, pr, face_velocity, &mut cancelled)
+            .map(SpatialFaceFlux::from)
+    }
+
     /// Pressure-only outlet with both outgoing shear velocities and full energy.
     /// See [`Self::pressure_outlet_flux`] for wave sampling and backflow policy.
     pub fn pressure_outlet_spatial_flux(

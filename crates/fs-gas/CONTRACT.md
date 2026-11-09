@@ -1072,6 +1072,30 @@ limitations remain unchanged. All 162 focused native gas library tests passed
 on the pinned nightly through the original dependency sources; the complete
 workspace DSR gate was unavailable and is not implied by this narrower result.
 
+`moving_hllc_normal_flux`, `moving_hllc_spatial_flux` and their reconstructed
+primitive entries expose conservative transport through translating internal
+faces. They reuse the original HLLC/HLL problem in the face's normal rest frame
+and return laboratory mass, all momenta and full referenced energy flux. The
+existing one-dimensional moving-volume solver now uses this same transformation.
+The source reconstructs face-frame caloric storage; no subtraction of large
+laboratory kinetic energies or independent shear advection is used. Its HLL
+middle-state check includes both tangential kinetic energies. The transformation
+uses fixed-size stack arrays; source evaluations retain their original limits.
+
+The returned flux is `F - w_n U`, and its signal bound is relative to the face.
+Laboratory momentum gains `w_n * mass_flux` on transformation from the face
+frame; laboratory energy gains `w_n * normal_momentum_flux + w_n^2/2 * mass_flux`.
+A comoving pressure/shear contact therefore transfers zero mass and tangential
+momentum while retaining pressure traction and `p*w_n` work. Zero normal speed
+returns the original stationary result exactly. These are the moving-face
+relations in Springel (2010), [arXiv:0901.4107](https://arxiv.org/abs/0901.4107).
+The consuming spatial owner still supplies consistent moving volumes, opposite
+shared-face signs, geometric conservation and time integration. No general
+moving-mesh solver, entropy theorem or new material qualification is implied.
+G0/G1/G3/G4 face regressions cover stationary/axial/planar reduction, Reynolds
+transport, double-shear contacts, the comoving slip-wall limit, full momentum
+and work covariance on HLLC/HLL, source-frame precision and cancellation.
+
 MUSCL uses monotonized-central primitive slopes, reduced together when needed
 to retain positive density/pressure and the declared source interval. SSP RK2
 uses one shared oriented flux per face. Periodic end faces share the same flux

@@ -8,6 +8,103 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g0_ale_planar_flux_retains_stationary_and_original_axial_transport() {
+    let g = gas(0.4, 1e18);
+    for (left, right) in [
+        ([1.0, 0.2, 1.0], [0.3, 0.2, 1.0]),
+        ([1.0, 0.0, 1.0], [0.125, 0.0, 0.1]),
+        ([1.0, -2.0, 0.4], [1.0, 2.0, 0.4]),
+    ] {
+        let l = g.conserved(left[0], left[1], left[2]).unwrap();
+        let r = g.conserved(right[0], right[1], right[2]).unwrap();
+        let pl = g.primitive(l, || false).unwrap();
+        let pr = g.primitive(r, || false).unwrap();
+        for speed in [-0.7, 0.0, 0.9] {
+            let planar = g
+                .moving_hllc_normal_flux(l.into(), r.into(), speed, || false)
+                .unwrap();
+            let axial = g
+                .moving_interface(l, pl, r, pr, speed, &mut || false)
+                .unwrap();
+            assert_eq!(FaceFlux::from(planar), axial);
+            assert_eq!(planar.transverse_momentum, 0.0);
+            if speed == 0.0 {
+                assert_eq!(
+                    planar,
+                    g.hllc_normal_flux(l.into(), r.into(), || false).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_ale_planar_transport_uses_relative_advection_and_laboratory_pressure_work() {
+    let g = gas(0.4, -1e18);
+    let p = NormalPrimitive {
+        density: 1.2,
+        normal_velocity: 0.3,
+        transverse_velocity: -0.7,
+        pressure: 1.7,
+    };
+    let q = g
+        .normal_conserved(
+            p.density,
+            p.normal_velocity,
+            p.transverse_velocity,
+            p.pressure,
+        )
+        .unwrap();
+    let fixed = g.hllc_normal_flux_from_primitive(p, p, || false).unwrap();
+    for speed in [-0.7, 0.0, p.normal_velocity, 1.3] {
+        let f = g
+            .moving_hllc_normal_flux_from_primitive(p, p, speed, || false)
+            .unwrap();
+        close(f.mass, fixed.mass - speed * q.density);
+        close(
+            f.normal_momentum,
+            fixed.normal_momentum - speed * q.normal_momentum,
+        );
+        close(
+            f.transverse_momentum,
+            fixed.transverse_momentum - speed * q.transverse_momentum,
+        );
+        close(f.energy, fixed.energy - speed * q.energy);
+        let from_conserved = g.moving_hllc_normal_flux(q, q, speed, || false).unwrap();
+        for (actual, expected) in [
+            (from_conserved.mass, f.mass),
+            (from_conserved.normal_momentum, f.normal_momentum),
+            (from_conserved.transverse_momentum, f.transverse_momentum),
+            (from_conserved.energy, f.energy),
+        ] {
+            close(actual, expected);
+        }
+    }
+    // A face moving with a pressure/shear contact carries no material mass
+    // or shear momentum, but it still transfers mechanical pressure work.
+    let other = NormalPrimitive {
+        density: 0.4,
+        transverse_velocity: 1.1,
+        ..p
+    };
+    let f = g
+        .moving_hllc_normal_flux_from_primitive(p, other, p.normal_velocity, || false)
+        .unwrap();
+    assert_eq!(f.mass, 0.0);
+    assert_eq!(f.transverse_momentum, 0.0);
+    close(f.normal_momentum, p.pressure);
+    close(f.energy, p.pressure * p.normal_velocity);
+    assert!(!f.used_hll_fallback);
+    for normal in [-1.0, 1.0] {
+        let wall = g
+            .moving_wall_normal_flux_from_primitive(p, normal, p.normal_velocity, || false)
+            .unwrap();
+        close(wall.normal_momentum, f.normal_momentum);
+        close(wall.energy, f.energy);
+    }
+}
+
+#[test]
 fn g3_planar_characteristic_outlet_transports_shear_through_each_acoustic_regime() {
     for cp in [0.0, 0.4] {
         let gas = gas(cp, 1e18);
