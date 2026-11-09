@@ -18,8 +18,8 @@ pub use energy::{HarmonicForceFrame, PreparedHarmonicForce};
 pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
 pub use sensitivity::{
-    HarmonicForceParameterSensitivity, HarmonicForcePullback, HarmonicForceSensitivityFrame,
-    PreparedHarmonicForceSensitivity,
+    HarmonicForceParameterSensitivity, HarmonicForcePhasePullback, HarmonicForcePullback,
+    HarmonicForceSensitivityFrame, PreparedHarmonicForceSensitivity,
 };
 pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 

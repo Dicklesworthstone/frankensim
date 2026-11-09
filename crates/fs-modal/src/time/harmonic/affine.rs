@@ -9,9 +9,17 @@ pub(super) fn delta_gains(
     base: &HarmonicForceTransition,
     frequency: f64,
 ) -> Result<[f64; 4], ModalAcousticTimeError> {
+    delta_gains_for_phase(base, frequency * base.duration_s)
+}
+
+// Sensitivities retain the original unwrapped source phase, without recovering
+// a frequency by division only to multiply it by the same duration again.
+pub(super) fn delta_gains_for_phase(
+    base: &HarmonicForceTransition,
+    mut phase: f64,
+) -> Result<[f64; 4], ModalAcousticTimeError> {
     let mut angle = base.transition.angle;
     let mut drag = base.transition.drag;
-    let mut phase = frequency * base.duration_s;
     let mut doublings = 0;
     while angle.max(drag).max(phase) > 0.25 {
         angle *= 0.5;

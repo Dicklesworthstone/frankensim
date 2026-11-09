@@ -15,8 +15,13 @@ use crate::time::forcing::{
 };
 use fs_math::det;
 
+mod clock;
+pub use clock::HarmonicForcePhasePullback;
+
 /// Endpoint partials in the original mass-normalized physical coordinates.
-/// Initial state, cosine/sine force, forcing frequency and duration stay fixed.
+/// Each partial holds the initial state, duration and other physical inputs
+/// fixed. Initial phase means a common additional phase rotation of the two
+/// prescribed force quadratures at the interval start.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicForceParameterSensitivity {
     /// dq_end/dk for k = omega^2 [1/s^2], holding c fixed.
@@ -27,6 +32,15 @@ pub struct HarmonicForceParameterSensitivity {
     pub displacement_by_damping_rate: f64,
     /// dv_end/dc in velocity units times s.
     pub velocity_by_damping_rate: f64,
+    /// dq_end/dOmega, varying the FORCING angular frequency [rad/s] at fixed
+    /// initial source phase. This is independent of natural-frequency/k changes.
+    pub displacement_by_forcing_angular_frequency: f64,
+    /// dv_end/dOmega in velocity units times seconds.
+    pub velocity_by_forcing_angular_frequency: f64,
+    /// dq_end/dphi for F = Fc*cos(Omega*t+phi) + Fs*sin(Omega*t+phi), at phi=0.
+    pub displacement_by_initial_phase: f64,
+    /// dv_end/dphi for the same common initial phase [rad].
+    pub velocity_by_initial_phase: f64,
 }
 
 /// Original motion plus its independently propagated physical partials.
@@ -34,7 +48,7 @@ pub struct HarmonicForceParameterSensitivity {
 pub struct HarmonicForceSensitivityFrame {
     /// The original [`HarmonicForceTransition::advance`] result, unchanged.
     pub state: ModalAcousticState,
-    /// Fixed-input physical stiffness and viscous-rate derivatives.
+    /// Local physical stiffness, viscous-rate and source clock/phase derivatives.
     pub parameters: HarmonicForceParameterSensitivity,
 }
 
@@ -54,6 +68,10 @@ pub struct HarmonicForcePullback {
     pub stiffness: f64,
     /// dJ/dc for the physical viscous rate, at fixed k.
     pub damping_rate: f64,
+    /// dJ/dOmega for the FORCING angular frequency, at fixed initial phase.
+    pub forcing_angular_frequency: f64,
+    /// dJ/dphi for a common additional interval-start source phase [rad].
+    pub initial_phase: f64,
 }
 
 /// Analytic harmonic-transient derivatives prepared outside the hot loop.
@@ -67,10 +85,13 @@ pub struct HarmonicForcePullback {
 /// Partials use independent k = omega^2 and c = C/m, including their one-sided
 /// limits at zero. At fixed c, dJ/domega = 2*omega*dJ/dk. For c=2*zeta*omega,
 /// dJ/domega also includes 2*zeta*dJ/dc, and dJ/dzeta=2*omega*dJ/dc.
-/// The forcing clock/phase, duration, material/basis changes and work/heat are
-/// not differentiated. A reverse trajectory propagates state cotangents and
-/// sums shared k/c contributions; source-phase rotations need their own chain
-/// rule when differentiating an authored source rather than local coefficients.
+/// Forcing-frequency derivatives instead integrate the exact affine envelope
+/// t*(Fs*cos(Omega*t)-Fc*sin(Omega*t)); phase derivatives rotate the two force
+/// quadratures. Duration, material/basis changes and work/heat are not
+/// differentiated. A reverse trajectory propagates state cotangents and sums
+/// shared parameter contributions. When it advances the source phase too,
+/// [`HarmonicForceTransition::pullback_force_phase`] supplies that clock chain
+/// rule; a local frequency partial alone holds each interval's input phase fixed.
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedHarmonicForceSensitivity {
     motion: HarmonicForceTransition,
@@ -78,11 +99,12 @@ pub struct PreparedHarmonicForceSensitivity {
     damping: MomentDerivative,
     force_stiffness: [f64; 4],
     force_damping: [f64; 4],
+    force_envelope: [f64; 4],
 }
 
 impl HarmonicForceTransition {
-    /// Cold-prepare stiffness and physical damping-rate derivatives of this
-    /// original step. The forward cache and accepted physical state are read-only.
+    /// Cold-prepare stiffness, physical damping-rate and prescribed source
+    /// clock/phase derivatives. The original forward cache and state are read-only.
     ///
     /// # Errors
     /// Unrepresentable dimensionless derivative coefficients. Runtime queries
@@ -155,6 +177,7 @@ impl HarmonicForceTransition {
             damping,
             force_stiffness,
             force_damping,
+            force_envelope: super::affine::delta_gains_for_phase(self, self.forcing_phase_rad)?,
         })
     }
 }
@@ -206,6 +229,7 @@ impl PreparedHarmonicForceSensitivity {
                 "harmonic physical sensitivities must be representable",
             ));
         }
+        let [qw, vw, qp, vp] = self.clock_partials(cosine_force, sine_force)?;
         Ok(HarmonicForceSensitivityFrame {
             state: next,
             parameters: HarmonicForceParameterSensitivity {
@@ -213,12 +237,17 @@ impl PreparedHarmonicForceSensitivity {
                 velocity_by_stiffness: vk,
                 displacement_by_damping_rate: qc,
                 velocity_by_damping_rate: vc,
+                displacement_by_forcing_angular_frequency: qw,
+                velocity_by_forcing_angular_frequency: vw,
+                displacement_by_initial_phase: qp,
+                velocity_by_initial_phase: vp,
             },
         })
     }
 
     /// Pull endpoint-objective cotangents through state, both force quadratures,
-    /// stiffness and physical viscous rate on the same continuous interval.
+    /// stiffness, physical viscous rate and source clock/phase on the same
+    /// continuous interval. Initial phase is independent of forcing frequency.
     ///
     /// # Errors
     /// Invalid state, force or cotangents, or unrepresentable motion/derivatives.
@@ -264,6 +293,14 @@ impl PreparedHarmonicForceSensitivity {
             parameter.displacement_by_damping_rate,
             v_bar * parameter.velocity_by_damping_rate,
         );
+        let forcing_angular_frequency = q_bar.mul_add(
+            parameter.displacement_by_forcing_angular_frequency,
+            v_bar * parameter.velocity_by_forcing_angular_frequency,
+        );
+        let initial_phase = q_bar.mul_add(
+            parameter.displacement_by_initial_phase,
+            v_bar * parameter.velocity_by_initial_phase,
+        );
         if ![
             initial_displacement,
             initial_velocity,
@@ -271,6 +308,8 @@ impl PreparedHarmonicForceSensitivity {
             sine_force,
             stiffness,
             damping_rate,
+            forcing_angular_frequency,
+            initial_phase,
         ]
         .into_iter()
         .all(f64::is_finite)
@@ -284,6 +323,8 @@ impl PreparedHarmonicForceSensitivity {
             sine_force,
             stiffness,
             damping_rate,
+            forcing_angular_frequency,
+            initial_phase,
         })
     }
 }

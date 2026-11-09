@@ -848,30 +848,55 @@ Long oscillatory intervals and repeated cached phase rotations accumulate
 floating-point error; no amplitude normalization is applied.
 
 `HarmonicForceTransition::prepare_sensitivities` adds analytic transient
-partials with respect to independent mass-normalized stiffness `k = omega^2`
-and physical viscous rate `c`. It differentiates the original continuous-tone
-convolution and its exact doubling, sharing the existing homogeneous-flow
-derivative owner with held-ramp forcing. Startup motion, resonant secular
-growth and ringdown remain in the derivative; a steady-state response is not
-substituted. The original motion is returned unchanged. Cold preparation
-retains the original unwrapped forcing phase; warm `advance` and `pullback`
-allocate nothing and call no transcendental functions. The pullback returns
-initial-state, cosine/sine-force and k/c cotangents, so a reverse trajectory
-can propagate state adjoints and sum every shared-parameter contribution.
-The original near-DC force imbalance preserves static balance, and the shared
-independent homogeneous retentions preserve late damping-sensitivity tails.
+partials with respect to independent mass-normalized stiffness `k = omega^2`,
+physical viscous rate `c`, forcing angular frequency `Omega`, and common initial
+source phase `phi`. The mechanics derivatives hold the forcing clock and phase
+fixed; source derivatives hold the mechanics and interval-start state fixed.
+Natural-frequency `omega` and damping-ratio changes require the k/c chain rules
+documented for held-ramp forcing below; they are independent of driving-frequency
+changes.
 
-These are partials at fixed interval duration, forcing frequency, initial
-phase, coordinates and mass normalization. Natural-frequency and damping-ratio
-parameters require the same k/c chain rules documented for held-ramp forcing
-below. Authored source phase rotation, material/basis changes, work/heat and
-nonsmooth observations retain their separate derivatives. Finite arithmetic
-can lose accuracy, and unrepresentable results refuse without changing motion.
-`tests/harmonic_sensitivities.rs` compares independent RK4 integration of the
-physical variational ODEs through free, resonant, critical, near-critical,
-overdamped and high-Q motion; it also checks an analytic secular derivative,
-the DC/held-force limit, exact static balance, late critical decay, complete
-transient reverse sweeps, the state/force transpose and finite-input refusals.
+The k/c path differentiates the original continuous-tone convolution and its
+exact doubling, sharing the homogeneous-flow derivative owner with held-ramp
+forcing. The original near-DC force imbalance preserves static balance, and
+independent homogeneous retentions preserve late damping-sensitivity tails.
+For `F(t) = Fc*cos(Omega*t+phi) + Fs*sin(Omega*t+phi)` at `phi=0`, the source
+phase derivative is `Fs*cos(Omega*t)-Fc*sin(Omega*t)`. Its response reuses the
+original constant-tone owner with rotated quadratures `(Fs,-Fc)`. The frequency
+derivative multiplies that same source by physical time `t`; it reuses the
+existing entire affine-envelope convolution with the original unwrapped
+`Omega*h`. No detuning denominator, finite difference or substituted
+steady-state response is introduced. Startup, exact resonant secular growth,
+free coordinates and critical/overdamped motion retain the original dynamics.
+
+The original motion is returned unchanged. Cold preparation caches the added
+affine gains; warm `advance` and `pullback` allocate nothing and call no
+transcendental functions. The pullback returns initial-state, cosine/sine-force,
+k/c, forcing-frequency and initial-phase cotangents. Initial phase means a
+common additional rotation of the prescribed force quadratures at the interval
+start, independent of `Omega`. At DC, a sine quadrature contributes no primal
+force but can have a nonzero clock or phase derivative; it is retained.
+
+`HarmonicForceTransition::pullback_force_phase` supplies the transpose and clock
+derivative of the SAME source rotation as `advance_force_phase`. A reverse
+trajectory must combine its source-force cotangents with the motion pullback
+and sum both forcing-frequency contributions at every interval. The rotation's
+frequency contribution is `h*(next_sine*bar_next_cosine -
+next_cosine*bar_next_sine)`. A trajectory's common initial-phase derivative is
+formed once from its original force covector, `Fs*bar_Fc-Fc*bar_Fs`; additionally
+summing every local phase partial would double-count that dependence.
+
+These are fixed-duration, fixed-coordinate and fixed-mass-normalization
+partials. Material/basis changes, work/heat and nonsmooth observations retain
+their separate derivatives. Finite arithmetic can lose accuracy; unrepresentable
+results refuse without changing motion. G1/G3 checks in
+`tests/harmonic_sensitivities.rs` retain the independent mechanical variational
+ODEs, secular/DC limits, static balance, late critical decay and reverse sweeps.
+`tests/harmonic_clock_sensitivity.rs` independently integrates the physical
+frequency/phase variational equations across damping regimes, checks exact DC
+and resonant limits, and compares an unequal-interval state-and-source reverse
+sweep with the complete interval and independent ODE. Phase-transpose and
+finite-input refusal checks cover reusable clock propagation.
 
 `time::PreparedHarmonicForce` adds the same independently integrated signed
 work and positive viscous heat to a standalone scalar tone transition. Its
