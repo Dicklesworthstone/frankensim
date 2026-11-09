@@ -97,6 +97,16 @@ before posterior evaluation rather than returning NaN or silently ignoring a
 partial row. Both EI paths reject non-finite candidates, incumbents, and
 posterior state; closed-form EI also requires a finite exploration margin.
 Objective callbacks used by classic BO must return finite values.
+`mf_minimize` likewise admits finite ordered boxes with finite width, positive
+optimizer counts, 32-bit-addressable initial/start counts, positive finite
+fidelity costs, and a finite nonnegative total budget before callbacks. At
+least one initial high-fidelity point is mandatory; zero initial low-fidelity
+points are allowed. The complete declared initialization must fit the original
+budget under the same ordered floating-point additions used in its trace, or
+the study refuses before spending. Every later callback requires an affordable
+charge that strictly advances that ledger; exhausted or unrepresentable charges
+cannot create free evaluations. Non-finite objective results refuse immediately.
+These admissions retain the existing panic-based classic optimizer interface.
 
 ## Determinism class
 
@@ -189,7 +199,11 @@ local polish on a needle hunt would be dishonest in both
 directions).
 `tests/mf_battery.rs`: multi-fidelity correlation recovery and
 variance reduction, dimension/fidelity mismatch fail-fast behavior,
-cost-aware allocation and replay, and MF golden.
+cost-aware allocation and replay, initial/adaptive callback-cost accounting,
+pre-callback malformed/underfunded-study refusals, non-finite observation
+refusal in each callback phase, and MF golden. The initialization-only golden
+declares its actual 50-unit cost; its previous 40-unit budget was underfunded.
+The output fingerprint is unchanged.
 `tests/bo_study_replay.rs` (3 Casebook cases plus a seeded red
 self-test): runs the production sequential-EI loop on the short Branin
 golden configuration (`n_init = 6`, two one-point iterations), records

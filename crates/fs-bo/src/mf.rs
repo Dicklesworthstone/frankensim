@@ -283,15 +283,15 @@ pub struct MfConfig {
     pub log_box: (f64, f64),
     /// Hyperparameter multistarts.
     pub hyper_starts: usize,
-    /// Initial low-fidelity points.
+    /// Initial low-fidelity points (zero is allowed).
     pub n_init_low: usize,
-    /// Initial high-fidelity points.
+    /// Initial high-fidelity points (at least one is required).
     pub n_init_high: usize,
     /// Cost of one low-fidelity evaluation.
     pub cost_low: f64,
     /// Cost of one high-fidelity evaluation.
     pub cost_high: f64,
-    /// Total cost budget.
+    /// Finite total cost budget, including the complete declared initial design.
     pub budget: f64,
     /// Acquisition CMA-ES restarts.
     pub acq_starts: usize,
@@ -318,14 +318,103 @@ pub struct MfReport {
     pub learned_correlation: f64,
 }
 
+/// A paid evaluation must advance the floating-point cost ledger and fit in
+/// the original budget. In particular, a tiny positive price must not become
+/// an unlimited supply of evaluations once addition rounds back to `spent`.
+fn next_cost(spent: f64, price: f64, budget: f64) -> Option<f64> {
+    let next = spent + price;
+    (next.is_finite() && next > spent && next <= budget).then_some(next)
+}
+
+fn assert_valid_mf_inputs(dim: usize, config: &MfConfig) {
+    assert!(
+        dim > 0 && dim.checked_add(4).is_some(),
+        "MF-BO requires a positive representable dimension"
+    );
+    let (lo, hi) = config.bounds;
+    assert!(
+        lo.is_finite() && hi.is_finite() && lo < hi && (hi - lo).is_finite(),
+        "MF-BO bounds must be finite, strictly increasing, and have finite width"
+    );
+    let (log_lo, log_hi) = config.log_box;
+    assert!(
+        log_lo.is_finite()
+            && log_hi.is_finite()
+            && log_lo < log_hi
+            && (log_hi - log_lo).is_finite(),
+        "MF-BO hyperparameter log-box must be finite, strictly increasing, and have finite width"
+    );
+    assert!(
+        config.n_init_high > 0,
+        "MF-BO needs at least one initial high-fidelity point"
+    );
+    assert!(
+        config
+            .n_init_low
+            .checked_add(config.n_init_high)
+            .is_some_and(|n| u32::try_from(n).is_ok()),
+        "MF-BO initial-point count must fit the 32-bit Sobol index space"
+    );
+    assert!(
+        config.hyper_starts > 0 && u32::try_from(config.hyper_starts).is_ok(),
+        "MF-BO hyperparameter-start count must be positive and fit the 32-bit Sobol index space"
+    );
+    assert!(
+        config.acq_starts > 0 && u32::try_from(config.acq_starts).is_ok(),
+        "MF-BO acquisition-start count must be positive and fit the 32-bit Sobol index space"
+    );
+    assert!(
+        config.acq_evals > 0,
+        "MF-BO needs a positive acquisition evaluation budget"
+    );
+    assert!(
+        config.cost_low.is_finite()
+            && config.cost_low > 0.0
+            && config.cost_high.is_finite()
+            && config.cost_high > 0.0,
+        "MF-BO evaluation costs must be finite and strictly positive"
+    );
+    assert!(
+        config.budget.is_finite() && config.budget >= 0.0,
+        "MF-BO total cost budget must be finite and nonnegative"
+    );
+    // Use the same ordered additions as the actual callback trace. Multiplying
+    // counts by prices can round differently and admit an initialization that
+    // would run out of budget before its mandatory high-fidelity baseline.
+    // This preflight allocates nothing and invokes no objective callbacks.
+    let mut initial_cost = 0.0;
+    for (count, price) in [
+        (config.n_init_low, config.cost_low),
+        (config.n_init_high, config.cost_high),
+    ] {
+        for _ in 0..count {
+            initial_cost = next_cost(initial_cost, price, config.budget)
+                .expect("MF-BO budget must cover the complete initial design with representable positive charges");
+        }
+    }
+}
+
 /// Run cost-aware two-fidelity BO for MINIMIZATION of the HIGH
 /// fidelity. `f(x, m)` evaluates fidelity m ∈ {0 = low, 1 = high}.
+///
+/// The complete declared initial design must fit the cost budget; an
+/// underfunded study refuses before any callback rather than returning a
+/// missing high-fidelity incumbent. Every later evaluation is admitted before
+/// its callback, and an unaffordable preferred fidelity ends the study.
+/// Cost is the ordered floating-point sum of the declared evaluation prices.
+///
+/// # Panics
+/// Panics before the first objective callback for invalid dimensions, boxes,
+/// counts, nonpositive/non-finite prices, a non-finite/negative budget, or an
+/// initial design whose charges cannot advance the cost ledger within budget.
+/// Panics at the offending callback if an objective value is non-finite.
 #[allow(clippy::too_many_lines)] // one coherent cost-aware BO loop
 pub fn mf_minimize(
     f: &mut dyn FnMut(&[f64], usize) -> f64,
     dim: usize,
     config: &MfConfig,
 ) -> MfReport {
+    assert_valid_mf_inputs(dim, config);
     let (lo, hi) = config.bounds;
     let span = hi - lo;
     let kq = dim.min(fs_rand::qmc::MAX_SOBOL_DIM);
@@ -354,8 +443,14 @@ pub fn mf_minimize(
     };
     for s in 0..config.n_init_low {
         let x = draw(s, &mut pt, &mut tail);
+        let charged = next_cost(cost, config.cost_low, config.budget)
+            .expect("initial cost preflight admitted this evaluation");
         let y = f(&x, 0);
-        cost += config.cost_low;
+        assert!(
+            y.is_finite(),
+            "MF-BO objective returned a non-finite value at initial low-fidelity point {s}"
+        );
+        cost = charged;
         xs.push(x);
         fid.push(0);
         ys.push(y);
@@ -363,8 +458,14 @@ pub fn mf_minimize(
     }
     for s in 0..config.n_init_high {
         let x = draw(config.n_init_low + s, &mut pt, &mut tail);
+        let charged = next_cost(cost, config.cost_high, config.budget)
+            .expect("initial cost preflight admitted this evaluation");
         let y = f(&x, 1);
-        cost += config.cost_high;
+        assert!(
+            y.is_finite(),
+            "MF-BO objective returned a non-finite value at initial high-fidelity point {s}"
+        );
+        cost = charged;
         best_high = best_high.min(y);
         xs.push(x);
         fid.push(1);
@@ -375,7 +476,9 @@ pub fn mf_minimize(
     let mut it = 0u64;
     let mut evals_low = config.n_init_low;
     let mut evals_high = config.n_init_high;
-    while cost + config.cost_low <= config.budget {
+    while next_cost(cost, config.cost_low, config.budget).is_some()
+        || next_cost(cost, config.cost_high, config.budget).is_some()
+    {
         it += 1;
         // Standardize on the joint set.
         let n = ys.len() as f64;
@@ -429,20 +532,29 @@ pub fn mf_minimize(
         // corr²·(cost_high/cost_low) > 1 (variance-reduction per cost).
         let corr = gp.posterior_fid_correlation(&x_new).clamp(-1.0, 1.0);
         let gain_low = corr * corr * (config.cost_high / config.cost_low);
-        let take_low = gain_low > 1.0 && cost + config.cost_low <= config.budget;
+        let low_charge = next_cost(cost, config.cost_low, config.budget);
+        let take_low = gain_low > 1.0 && low_charge.is_some();
         if take_low {
             let y = f(&x_new, 0);
-            cost += config.cost_low;
+            assert!(
+                y.is_finite(),
+                "MF-BO objective returned a non-finite low-fidelity value at acquisition {it}"
+            );
+            cost = low_charge.expect("low-fidelity charge admitted before callback");
             evals_low += 1;
             xs.push(x_new);
             fid.push(0);
             ys.push(y);
         } else {
-            if cost + config.cost_high > config.budget {
+            let Some(charged) = next_cost(cost, config.cost_high, config.budget) else {
                 break;
-            }
+            };
             let y = f(&x_new, 1);
-            cost += config.cost_high;
+            assert!(
+                y.is_finite(),
+                "MF-BO objective returned a non-finite high-fidelity value at acquisition {it}"
+            );
+            cost = charged;
             evals_high += 1;
             best_high = best_high.min(y);
             xs.push(x_new);

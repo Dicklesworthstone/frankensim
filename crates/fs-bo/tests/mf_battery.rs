@@ -146,6 +146,212 @@ fn mf_config(seed: u64, budget: f64) -> MfConfig {
     }
 }
 
+fn assert_refused_before_callbacks(dim: usize, config: &MfConfig) {
+    let mut calls = 0;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        mf_minimize(
+            &mut |_, _| {
+                calls += 1;
+                0.0
+            },
+            dim,
+            config,
+        )
+    }));
+    assert!(result.is_err(), "invalid MF configuration was accepted");
+    assert_eq!(calls, 0, "admission must precede every paid callback");
+}
+
+#[test]
+fn mf_cost_budget_includes_the_complete_initial_design() {
+    for budget in [0.0, 40.0, 50.0_f64.next_down()] {
+        assert_refused_before_callbacks(2, &mf_config(9, budget));
+    }
+    let config = MfConfig {
+        n_init_low: 2,
+        n_init_high: 1,
+        cost_low: 0.25,
+        cost_high: 1.5,
+        budget: 2.0,
+        ..mf_config(9, 2.0)
+    };
+    let mut callbacks = Vec::new();
+    let report = mf_minimize(
+        &mut |x, fidelity| {
+            callbacks.push(fidelity);
+            x.iter().sum::<f64>() + fidelity as f64
+        },
+        2,
+        &config,
+    );
+    assert_eq!(callbacks, [0, 0, 1]);
+    assert_eq!((report.evals_low, report.evals_high), (2, 1));
+    assert_eq!(report.cost, 2.0);
+    assert_eq!(
+        report.trace.iter().map(|row| row.0).collect::<Vec<_>>(),
+        [0.25, 0.5, 2.0]
+    );
+    assert!(report.f_best_high.is_finite());
+    assert_eq!(
+        report.learned_correlation, 0.0,
+        "an exhausted budget must not fit a new model"
+    );
+
+    // Initialization preflight must use the callback's actual addition order:
+    // 6 * 0.1 rounds above the result of six consecutive additions.
+    let decimal = MfConfig {
+        n_init_low: 5,
+        n_init_high: 1,
+        cost_low: 0.1,
+        cost_high: 0.1,
+        budget: 0.6,
+        ..config.clone()
+    };
+    let report = mf_minimize(&mut |_, _| 1.0, 1, &decimal);
+    assert_eq!(report.trace.len(), 6);
+    assert_eq!(report.cost, 0.6);
+
+    // A high-fidelity-only initial design is meaningful and explicitly allowed.
+    let high_only = MfConfig {
+        n_init_low: 0,
+        budget: 1.5,
+        ..config
+    };
+    let report = mf_minimize(
+        &mut |_, fidelity| {
+            assert_eq!(fidelity, 1);
+            3.0
+        },
+        1,
+        &high_only,
+    );
+    assert_eq!(
+        (report.evals_low, report.evals_high, report.cost),
+        (0, 1, 1.5)
+    );
+    assert_eq!(report.f_best_high, 3.0);
+}
+
+#[test]
+fn mf_invalid_costs_budgets_and_unrepresentable_charges_refuse_before_work() {
+    for price in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_refused_before_callbacks(
+            2,
+            &MfConfig {
+                cost_low: price,
+                ..mf_config(0, 50.0)
+            },
+        );
+        assert_refused_before_callbacks(
+            2,
+            &MfConfig {
+                cost_high: price,
+                ..mf_config(0, 50.0)
+            },
+        );
+    }
+    for budget in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_refused_before_callbacks(2, &mf_config(0, budget));
+    }
+    // Finite positive prices can still be unchargeable after a much larger
+    // evaluation. Refuse before spending on an unusable initial design.
+    assert_refused_before_callbacks(
+        1,
+        &MfConfig {
+            n_init_low: 1,
+            n_init_high: 1,
+            cost_low: 1.0e300,
+            cost_high: 1.0e-300,
+            ..mf_config(0, 1.1e300)
+        },
+    );
+}
+
+#[test]
+fn mf_invalid_shapes_and_optimizer_counts_refuse_before_work() {
+    let valid = mf_config(0, 50.0);
+    assert_refused_before_callbacks(0, &valid);
+    for bounds in [
+        (1.0, 0.0),
+        (0.0, 0.0),
+        (f64::NAN, 1.0),
+        (0.0, f64::INFINITY),
+        (-f64::MAX, f64::MAX),
+    ] {
+        assert_refused_before_callbacks(
+            2,
+            &MfConfig {
+                bounds,
+                ..valid.clone()
+            },
+        );
+        assert_refused_before_callbacks(
+            2,
+            &MfConfig {
+                log_box: bounds,
+                ..valid.clone()
+            },
+        );
+    }
+    for invalid in [
+        MfConfig {
+            n_init_high: 0,
+            ..valid.clone()
+        },
+        MfConfig {
+            n_init_low: usize::MAX,
+            ..valid.clone()
+        },
+        MfConfig {
+            hyper_starts: 0,
+            ..valid.clone()
+        },
+        MfConfig {
+            acq_starts: 0,
+            ..valid.clone()
+        },
+        MfConfig {
+            acq_evals: 0,
+            ..valid.clone()
+        },
+    ] {
+        assert_refused_before_callbacks(2, &invalid);
+    }
+}
+
+#[test]
+fn mf_nonfinite_observations_stop_at_the_offending_callback() {
+    let config = mf_config(5, 51.0);
+    // First low point, first high point, and the known one-step acquisition
+    // fixture cover every callback phase without manufacturing a failed GP.
+    for (bad_at, value) in [(0, f64::NAN), (10, f64::INFINITY), (14, f64::NEG_INFINITY)] {
+        let mut calls = 0;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            mf_minimize(
+                &mut |x, fidelity| {
+                    let index = calls;
+                    calls += 1;
+                    if index == bad_at {
+                        value
+                    } else if fidelity == 0 {
+                        branin_low(x)
+                    } else {
+                        branin(x)
+                    }
+                },
+                2,
+                &config,
+            )
+        }));
+        assert!(result.is_err(), "non-finite observation must refuse");
+        assert_eq!(
+            calls,
+            bad_at + 1,
+            "no callback may follow a non-finite observation"
+        );
+    }
+}
+
 #[test]
 fn allocation_cost_to_target_and_replay() {
     let seeds = [13u64, 31];
@@ -154,8 +360,24 @@ fn allocation_cost_to_target_and_replay() {
     let mut sf_bests = Vec::new();
     let mut low_share = Vec::new();
     for &seed in &seeds {
-        let mut f = |x: &[f64], m: usize| -> f64 { if m == 0 { branin_low(x) } else { branin(x) } };
+        let mut charged = 0.0;
+        let mut callback_costs = Vec::new();
+        let mut f = |x: &[f64], m: usize| -> f64 {
+            charged += if m == 0 { 1.0 } else { 10.0 };
+            assert!(
+                charged <= budget,
+                "paid callback exceeded the original study budget"
+            );
+            callback_costs.push(charged);
+            if m == 0 { branin_low(x) } else { branin(x) }
+        };
         let rep = mf_minimize(&mut f, 2, &mf_config(seed, budget));
+        assert_eq!(rep.cost, charged);
+        assert_eq!(rep.evals_low + rep.evals_high, callback_costs.len());
+        assert_eq!(
+            rep.trace.iter().map(|row| row.0).collect::<Vec<_>>(),
+            callback_costs
+        );
         // ALLOCATION: at 10:1 costs with a highly-correlated cheap
         // fidelity, low evaluations must dominate the COUNT.
         assert!(
@@ -256,7 +478,10 @@ fn mf_golden_hash() {
     feed(gp.posterior_fid_correlation(&[0.4, 0.4]));
     // Short MF-BO fingerprint.
     let mut f = |x: &[f64], m: usize| if m == 0 { branin_low(x) } else { branin(x) };
-    let rep = mf_minimize(&mut f, 2, &mf_config(9, 40.0));
+    // The frozen result already contains a 50-unit initial design. Fund that
+    // exact design; the old 40-unit input accidentally tested overspending.
+    // The scientific fingerprint and GOLDEN_HASH remain unchanged.
+    let rep = mf_minimize(&mut f, 2, &mf_config(9, 50.0));
     feed(rep.f_best_high);
     feed(rep.cost);
     feed(rep.learned_correlation);
