@@ -27,6 +27,9 @@ mod radius;
 /// Original-source thermal changes with retained loading and release history.
 pub mod temperature;
 
+/// Explicit affine apparatus clocks and the first accepted source boundary.
+pub mod timed;
+
 use super::{JkrCombinedBoundary, JkrCombinedError, JkrCombinedResponse, SourceJkrMixedMode};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -53,6 +56,7 @@ pub enum JkrCombinedLoadingError {
     UnresolvedBoundary,
     BeyondFirstBoundary,
     NotAtSeparatingFold,
+    ClockRoundoff { residual_s: f64, tolerance_s: f64 },
     EnergyBalance { residual_j: f64, tolerance_j: f64 },
 }
 impl From<JkrCombinedError> for JkrCombinedLoadingError {
