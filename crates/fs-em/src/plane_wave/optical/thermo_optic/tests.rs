@@ -1,5 +1,7 @@
 //! Synthetic source controls: these test propagation and source binding, not
 //! measured glass qualification or a fitted temperature-dependent loss model.
+mod current_absorption;
+
 use super::*;
 use crate::plane_wave::{
     DielectricResponse, PlanarDielectricInterface, Polarization,

@@ -167,34 +167,7 @@ impl SpectralSellmeierStatePoint {
     /// allocations. Its domain is independent of the fitted-index domain;
     /// consumers requiring both must also admit `wavelength_bounds_m()`.
     pub fn absorption_per_m_at(&self, wavelength_m: f64) -> Result<f64, MaterialStatePointError> {
-        if !wavelength_m.is_finite()
-            || wavelength_m < self.absorption[0].wavelength_m
-            || wavelength_m > self.absorption[8].wavelength_m
-        {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "wavelength outside the original Sellmeier absorption spectrum",
-            });
-        }
-        let upper = self
-            .absorption
-            .partition_point(|sample| sample.wavelength_m < wavelength_m);
-        if self.absorption[upper].wavelength_m == wavelength_m {
-            return Ok(self.absorption[upper].absorption_per_m);
-        }
-        let [left, right] = [self.absorption[upper - 1], self.absorption[upper]];
-        let t = (wavelength_m - left.wavelength_m) / (right.wavelength_m - left.wavelength_m);
-        let [a, b] = [left.absorption_per_m, right.absorption_per_m];
-        let value = if t <= 0.5 {
-            a + t * (b - a)
-        } else {
-            b + (1.0 - t) * (a - b)
-        };
-        if !ScalarAdmissibility::NonNegative.admits(value) {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "unrepresentable Sellmeier-source absorption interpolation",
-            });
-        }
-        Ok(value)
+        super::absorption::interpolate(wavelength_m, |index| self.absorption[index])
     }
 
     /// Re-evaluate the exact selected coefficient, bound and absorption claims

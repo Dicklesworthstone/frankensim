@@ -8144,3 +8144,28 @@ numerical tests cover independent TE/TM loss-channel slopes, thin weak loss,
 near-critical geometry/material directions, and representable power across these
 scales. Public stack tests additionally exercise original per-film heat, source
 normalization, actual Airy absorption peaks and half-height crossings.
+
+## Independently sourced current absorption in thermo-optic glass
+
+`ThermoOpticOpticalResponse::try_with_current_absorption` combines original
+SCHOTT-corrected reference phase with `SpectralDielectricAbsorptionStatePoint`
+at the actual temperature. That complete state supplies mu and retains every
+selected current requirement. Original PHASE, thermal and current-loss bands
+intersect; the current table's own maximum gap is admitted. The Sellmeier fit's
+support remains independent of discarded reference alpha support and magnitude.
+The resulting epsilon uses n(T)-i alpha(T,lambda) lambda/(4 pi), replacing
+reference loss once. Native interfaces, coherent fields, angular spectra,
+local heating and frequency jets consume it without another attenuation term.
+
+Analytic complex jets retain current alpha slopes, exact zero attenuation
+dispersion for constant alpha, and current-loss or reference-phase derivative
+cusps. Discarded reference-loss cusps and permittivity overflow do not limit
+independently supported phase/current-loss composition. `at_absorption_state`
+rebinds loss/mu together; `at_state` refuses this mode to prevent silently
+freezing current absorption. Existing one-coordinate absolute-temperature
+admission remains binding, including refusal of pressure/composition axes.
+No absorption(T) law or causal time-domain reservoir is inferred beyond sources.
+Three focused regressions specify independent support, complex frequency jets,
+cusp selection, reference-loss overflow independence and TE/TM Airy/local-work
+agreement. Native execution is not claimed; the final source review followed
+loss of the executor after the earlier draft's pinned formatting checks.

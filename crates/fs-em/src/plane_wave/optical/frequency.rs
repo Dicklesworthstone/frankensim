@@ -365,3 +365,108 @@ pub(super) fn silica(
         C64::from_re(sample.group_index),
     )
 }
+
+/// Original real phase on its OWN support, without evaluating reference alpha.
+pub(super) fn dielectric_phase_index(
+    response: SpectralOpticalResponse<'_>,
+    omega: f64,
+) -> Result<f64> {
+    let constant = core::f64::consts::TAU * VACUUM_SPEED_M_S;
+    match response.source() {
+        SpectralOpticalSource::DielectricSellmeier(source) => {
+            let (lo, hi) = source.dispersion_wavelength_bounds_m();
+            let wavelength = dispersion::wavelength_from_frequency(omega, constant, [lo, hi])
+                .ok_or_else(|| invalid("frequency is outside original phase-fit support"))?;
+            let (b, c) = source.sellmeier_coefficients_si();
+            dispersion::sellmeier_index_m(b, c, wavelength)
+                .ok_or_else(|| invalid("original Sellmeier phase index is unrepresentable"))
+        }
+        SpectralOpticalSource::TabulatedDielectric(source) => {
+            let (lo, hi) = source.wavelength_bounds_m();
+            let wavelength = dispersion::wavelength_from_frequency(omega, constant, [lo, hi])
+                .ok_or_else(|| invalid("frequency is outside original phase-table support"))?;
+            let samples = source.samples();
+            let upper = samples.partition_point(|sample| sample.wavelength_m < wavelength);
+            if samples[upper].wavelength_m == wavelength {
+                return Ok(samples[upper].phase_index);
+            }
+            let [left, right] = [samples[upper - 1], samples[upper]];
+            let t = (wavelength - left.wavelength_m)
+                / (right.wavelength_m - left.wavelength_m);
+            let [a, b] = [left.phase_index, right.phase_index];
+            let n = if t <= 0.5 { a + t * (b - a) } else { b + (1.0 - t) * (a - b) };
+            if !n.is_finite() || n <= 0.0 {
+                return Err(invalid("original tabulated phase index is unrepresentable"));
+            }
+            Ok(n)
+        }
+        SpectralOpticalSource::LosslessAirRelativeSellmeier { .. } => {
+            Ok(response.complex_index(omega)?.re)
+        }
+        _ => Err(invalid("thermal phase requires an original dielectric")),
+    }
+}
+
+/// The original real dielectric jet without the reference absorption derivative.
+/// A separately sourced current loss must not inherit a discarded alpha cusp.
+pub(super) fn dielectric_phase(
+    response: SpectralOpticalResponse<'_>,
+    omega: f64,
+    index: f64,
+    scale: f64,
+) -> Result<OpticalFrequencyJet> {
+    if matches!(
+        response.source(),
+        SpectralOpticalSource::LosslessAirRelativeSellmeier { .. }
+    ) {
+        return spectral(response, omega, scale);
+    }
+    let constant = core::f64::consts::TAU * VACUUM_SPEED_M_S;
+    let phase = match response.source() {
+        SpectralOpticalSource::DielectricSellmeier(source) => {
+            let (lo, hi) = source.dispersion_wavelength_bounds_m();
+            let wavelength = interior(omega, constant, [lo, hi])?;
+            let (b, c) = source.sellmeier_coefficients_si();
+            sellmeier(index, b, c, wavelength)
+        }
+        SpectralOpticalSource::TabulatedDielectric(source) => {
+            let samples = source.samples();
+            let (lo, hi) = source.wavelength_bounds_m();
+            let wavelength = interior(omega, constant, [lo, hi])?;
+            let values = line(omega, constant, samples.len(), |i| {
+                (samples[i].wavelength_m, [samples[i].phase_index])
+            })?;
+            (wavelength * values.slope[0], 0.0, values.intercept[0])
+        }
+        _ => return Err(invalid("thermal phase derivative requires an original dielectric")),
+    };
+    finish(
+        C64::from_re(index),
+        scale,
+        C64::from_re(phase.0),
+        C64::from_re(phase.1),
+        C64::from_re(phase.2),
+    )
+}
+
+/// (N_im, group_im, lambda² N_im'') of the current original alpha spectrum.
+pub(super) fn dielectric_absorption(
+    source: &fs_material::state_point::SpectralDielectricAbsorptionStatePoint,
+    omega: f64,
+) -> Result<(f64, f64, f64)> {
+    let (lo, hi) = source.wavelength_bounds_m();
+    let constant = core::f64::consts::TAU * VACUUM_SPEED_M_S;
+    let wavelength = interior(omega, constant, [lo, hi])?;
+    let samples = source.absorption_samples();
+    let values = line(omega, constant, samples.len(), |i| {
+        (samples[i].wavelength_m, [samples[i].absorption_per_m])
+    })?;
+    let alpha = source
+        .absorption_per_m_at(wavelength)
+        .map_err(fs_material::field_storage::FieldStorageError::from)?;
+    let extinction = dispersion::attenuating_index_m(1.0, alpha, wavelength)
+        .ok_or_else(|| invalid("current source intensity absorption is unrepresentable"))?
+        .im;
+    let group = (wavelength * values.slope[0]) * (wavelength / (4.0 * core::f64::consts::PI));
+    Ok((extinction, group, -2.0 * group))
+}

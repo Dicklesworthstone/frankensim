@@ -23,6 +23,11 @@ pub use sellmeier::{
     resolve_spectral_sellmeier_state_point,
 };
 
+mod absorption;
+pub use absorption::{
+    SpectralDielectricAbsorptionStatePoint, resolve_spectral_dielectric_absorption_state_point,
+};
+
 /// Number of original knots retained by each finite-band optical table.
 pub const SPECTRAL_OPTICAL_SAMPLE_COUNT: usize = 9;
 
@@ -283,32 +288,13 @@ impl SpectralTabulatedDielectricStatePoint {
     /// including for transparent tables. It neither evaluates the phase index
     /// nor converts alpha to a complex extinction index.
     pub fn absorption_per_m_at(&self, wavelength_m: f64) -> Result<f64, MaterialStatePointError> {
-        let (minimum_m, maximum_m) = self.wavelength_bounds_m();
-        if !wavelength_m.is_finite() || wavelength_m < minimum_m || wavelength_m > maximum_m {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "wavelength outside the original tabulated absorption spectrum",
-            });
-        }
-        let upper = self
-            .samples
-            .partition_point(|sample| sample.wavelength_m < wavelength_m);
-        if self.samples[upper].wavelength_m == wavelength_m {
-            return Ok(self.samples[upper].absorption_per_m);
-        }
-        let [left, right] = [self.samples[upper - 1], self.samples[upper]];
-        let t = (wavelength_m - left.wavelength_m) / (right.wavelength_m - left.wavelength_m);
-        let [a, b] = [left.absorption_per_m, right.absorption_per_m];
-        let value = if t <= 0.5 {
-            a + t * (b - a)
-        } else {
-            b + (1.0 - t) * (a - b)
-        };
-        if !ScalarAdmissibility::NonNegative.admits(value) {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "unrepresentable tabulated-source absorption interpolation",
-            });
-        }
-        Ok(value)
+        absorption::interpolate(wavelength_m, |index| {
+            let sample = self.samples[index];
+            SpectralDielectricAbsorptionSample {
+                wavelength_m: sample.wavelength_m,
+                absorption_per_m: sample.absorption_per_m,
+            }
+        })
     }
 
     /// Continue the original source claims at one new complete physical state.

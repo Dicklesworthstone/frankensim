@@ -547,3 +547,66 @@ fn g1_tabulated_absorption_retains_lossless_support_and_large_positive_values() 
         assert!(source.absorption_per_m_at(550e-9).is_err());
     }
 }
+
+#[test]
+fn g3_independent_absorption_refreshes_claims_without_phase_requirements() {
+    let alpha_card = card(true, |source| {
+        (!SPECTRAL_DIELECTRIC_IOR_PROPERTIES.contains(&source.key.name())).then_some(source)
+    });
+    let original = resolve_spectral_dielectric_absorption_state_point(
+        &alpha_card, &point(300.0), MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    assert_eq!(original.resolved().properties().len(), 18);
+    assert!(resolve_spectral_tabulated_dielectric_state_point(
+        &alpha_card, &point(300.0), MaterialPropertySelection::SingleClaimOnly,
+    ).is_err());
+    let hot = original.at_query_point(&alpha_card, &point(600.0)).unwrap();
+    assert!((original.absorption_per_m_at(10.125e-6).unwrap() - 3.25).abs() < 2e-13);
+    assert!((hot.absorption_per_m_at(10.125e-6).unwrap() - 3.75).abs() < 2e-13);
+    assert_ne!(original.identity(), hot.identity());
+    for (old, new) in original.resolved().properties().iter().zip(hot.resolved().properties()) {
+        assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
+    }
+    assert_eq!(hot.at_query_point(&alpha_card, &point(300.0)).unwrap(), original);
+    assert!(original.at_query_point(&alpha_card, &point(601.0)).is_err());
+    let complete_card = card(true, Some);
+    assert!(original.at_query_point(&complete_card, &point(450.0)).is_err());
+    let complete = resolve_spectral_tabulated_dielectric_state_point(
+        &complete_card, &point(450.0), MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let projection = SpectralDielectricAbsorptionStatePoint::try_from_material(
+        complete.resolved().clone(),
+    ).unwrap();
+    assert_eq!(projection.resolved(), complete.resolved());
+    for wavelength in [
+        8.0e-6, 9.8e-6, 10.125e-6, 13.7e-6, complete.wavelength_bounds_m().1,
+    ] {
+        assert_eq!(
+            projection.absorption_per_m_at(wavelength).unwrap(),
+            complete.absorption_per_m_at(wavelength).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn g0_absorption_projection_rechecks_quantity_nonnegativity_and_order() {
+    for defect in 0..3 {
+        let invalid = card(true, |mut source| {
+            if source.key.name() == SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[0] {
+                if defect == 0 { constant(&mut source, -1.0); }
+                if defect == 1 {
+                    source.key = PropertyKey::new(source.key.name(), source.key.dims());
+                }
+            }
+            if defect == 2
+                && source.key.name() == SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES[1]
+            {
+                constant(&mut source, 8e-6);
+            }
+            Some(source)
+        });
+        assert!(resolve_spectral_dielectric_absorption_state_point(
+            &invalid, &point(450.0), MaterialPropertySelection::SingleClaimOnly,
+        ).is_err());
+    }
+}
