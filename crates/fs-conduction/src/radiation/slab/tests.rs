@@ -1,6 +1,7 @@
 use super::*;
 
 mod beam;
+mod diffuse;
 mod heterogeneous;
 
 fn slab(depths: &[f64]) -> AbsorbingSlab {

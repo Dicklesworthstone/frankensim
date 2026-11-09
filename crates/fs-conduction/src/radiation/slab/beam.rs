@@ -263,16 +263,19 @@ impl SlabBeamResponse {
         irradiation_w_m2: [f64; 2],
     ) -> Result<f64, ConductionError> {
         let (material, field) = self.admit_depth_interval(layer, interval_m, irradiation_w_m2)?;
-        let [lo, hi] = interval_m;
-        let alpha = material.absorption_m_inv();
-        let mu = field.direction_cosine;
-        let absorbed = decayed_fraction(optical_path(alpha, hi - lo, mu));
-        let forward = remaining_fraction(optical_path(alpha, lo, mu));
-        let backward = remaining_fraction(optical_path(alpha, material.thickness_m() - hi, mu));
-        let fractions: [f64; 2] = core::array::from_fn(|side| {
-            absorbed * (field.endpoints[0][side] * forward + field.endpoints[1][side] * backward)
-        });
+        let fractions = interval_absorptance(material, field, interval_m);
         finite(fractions[0] * irradiation_w_m2[0] + fractions[1] * irradiation_w_m2[1])
+    }
+
+    // Share exact positive interval integration with the diffuse preparation.
+    pub(super) fn layer_interval_absorptance(
+        &self,
+        layer: usize,
+        interval_m: [f64; 2],
+    ) -> Result<[f64; 2], ConductionError> {
+        let (material, field) = self.admit_depth_interval(layer, interval_m, [0.0; 2])?;
+        let fractions = interval_absorptance(material, field, interval_m);
+        Ok([finite(fractions[0])?, finite(fractions[1])?])
     }
 
     fn admit_depth_interval(
@@ -349,6 +352,21 @@ impl SlabBeamResponse {
             balance_residual_w_m2,
         })
     }
+}
+
+fn interval_absorptance(
+    material: &AbsorbingLayer,
+    field: &BeamLayerFields,
+    [lo, hi]: [f64; 2],
+) -> [f64; 2] {
+    let alpha = material.absorption_m_inv();
+    let mu = field.direction_cosine;
+    let absorbed = decayed_fraction(optical_path(alpha, hi - lo, mu));
+    let forward = remaining_fraction(optical_path(alpha, lo, mu));
+    let backward = remaining_fraction(optical_path(alpha, material.thickness_m() - hi, mu));
+    core::array::from_fn(|side| {
+        absorbed * (field.endpoints[0][side] * forward + field.endpoints[1][side] * backward)
+    })
 }
 
 // Use original finite coefficients, not possibly infinite total optical depth

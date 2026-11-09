@@ -5588,6 +5588,23 @@ profiles add no inferred diffuse thermal depth distribution. Regressions compare
 the original independent dense two-stream fields, whole-layer heat, additive
 intervals, subdivision/reversal, weak narrow cells and shallow opaque profiles.
 
+`AbsorbingSlab::diffuse_depth_response` prepares `SlabDiffuseDepthResponse` for
+one caller-owned depth interval in an original physical layer. Uniform,
+unpolarized external radiance is integrated with 2 mu dmu weighting of the
+original beam fields, including all Snell/Fresnel return paths. Positive exact
+Beer interval losses retain weak and narrow-cell heating; the physical optical
+stack and source identities remain shared and unchanged. Preparation has bounded
+adaptive GL8/GL16 work and retains accepted panels, actual angular evaluations
+and front/back coefficient discrepancies. Subsequent `absorbed_flux` applications
+cost O(1), without allocation, quadrature or additional optical solves. Inputs
+are the hemispherically integrated front/back irradiances in W/m²; the result is
+interval heating in W/m², or cell-average W/m³ after division by positive cell
+thickness. Zero-width and nonabsorbing intervals need no angular evaluations.
+This response assigns only external incident absorption, not a depth profile for
+thermal emission or interlayer exchange. Regressions use independent E3 interval
+oracles, original whole-layer heat, additive spatial cells, refractive reversal,
+weak narrow and shallow opaque cells, cancellation and exhausted work controls.
+
 G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
 independent polarized boundary-return ray sweeps, isothermal subdivision,
 reversal, and equilibrium. The index source must support the layer temperature

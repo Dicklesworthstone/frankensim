@@ -37,9 +37,11 @@ use super::spectral::planck::{GL8, GL16};
 use crate::ConductionError;
 
 mod beam;
+mod diffuse;
 mod layered;
 mod refraction;
 pub use beam::{SlabBeamExchange, SlabBeamResponse};
+pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
 
 /// Maximum physical layers in one prepared slab.
 pub const MAX_SLAB_LAYERS: usize = 64;
@@ -161,6 +163,16 @@ impl Default for SlabQuadrature {
     }
 }
 
+impl SlabQuadrature {
+    fn is_valid(self) -> bool {
+        nonnegative(self.absolute_coefficient_error)
+            && nonnegative(self.relative_coefficient_error)
+            && (self.absolute_coefficient_error > 0.0 || self.relative_coefficient_error > 0.0)
+            && self.maximum_evaluations <= MAX_ANGULAR_EVALUATIONS
+            && (1..=48).contains(&self.maximum_depth)
+    }
+}
+
 /// Actual preparation work and numerical diagnostics, never a continuum certificate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlabQuadratureReport {
@@ -244,14 +256,7 @@ impl AbsorbingSlab {
     ) -> Result<Self, ConductionError> {
         checkpoint(&mut cancelled, 0)?;
         let n = layers.len();
-        if !(1..=MAX_SLAB_LAYERS).contains(&n)
-            || !nonnegative(controls.absolute_coefficient_error)
-            || !nonnegative(controls.relative_coefficient_error)
-            || (controls.absolute_coefficient_error == 0.0
-                && controls.relative_coefficient_error == 0.0)
-            || controls.maximum_evaluations > MAX_ANGULAR_EVALUATIONS
-            || !(1..=48).contains(&controls.maximum_depth)
-        {
+        if !(1..=MAX_SLAB_LAYERS).contains(&n) || !controls.is_valid() {
             return Err(invalid(
                 "invalid layer count or bounded angular quadrature controls",
             ));
