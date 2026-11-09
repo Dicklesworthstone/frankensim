@@ -18,7 +18,9 @@ pub use charge::{DeviceChargeBinding, DeviceChargeMaterial};
 
 mod gate;
 pub use gate::{
-    GateConductanceBinding, GateConductanceMaterial, GateMaterial, GateMaterialBindings,
+    GateChannelBinding, GateChannelMaterial, GateConductanceBinding, GateConductanceMaterial,
+    GateCurrentSurfaceBinding, GateCurrentSurfaceMaterial, GateCurrentThermalScale, GateMaterial,
+    GateMaterialBindings,
 };
 
 mod devices;

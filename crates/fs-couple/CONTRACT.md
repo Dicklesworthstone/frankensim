@@ -9297,42 +9297,75 @@ coordinates retain four gate charges in addition to flux, two bus charges and
 two node charges grouped with the high-side gate electrodes. All accepted
 coordinates continue through commands and thermal boundaries.
 
-`GateMaterialBindings` requires four complete intrinsic drain-source Q(V)
+`GateMaterialBindings<B>` requires four complete intrinsic drain-source Q(V)
 sources, four positive constant Cgs sources, four nonnegative constant Cgd
-sources, four complete positive G(Vgs,T) conductance lines and eight original
-on/off driver-resistance bindings. Charge, capacitance and channel response
-belong to the corresponding semiconductor package. An on/off resistor pair
-names one explicit driver-heat receiver; shared receivers sum their actual
-heats. Gate-clamped Coss is not silently reinterpreted as intrinsic Qds.
+sources, four complete channel sources and eight original on/off
+driver-resistance bindings. Its historical `channel_conductance` field defaults
+to positive G(Vgs,T) lines and also accepts `GateCurrentSurfaceBinding` for
+complete original channel-only Iref(Vds,Vgs) surfaces. Both material forms
+implement the sealed `GateChannelBinding`/`GateChannelMaterial` interface and
+share the same preparation, electrical solve, thermal iteration and accounting.
+Charge, capacitance and channel response belong to the corresponding
+semiconductor package. Each on/off resistor pair names one explicit
+driver-heat receiver; shared receivers sum their actual heats. Gate-clamped
+Coss is not silently reinterpreted as intrinsic Qds.
 
-Full typed gate-voltage support, every original conductance knot, material
-claim, package, held context and caloric applicability remain retained. The
-conductance and driver resistances refresh at the actual thermal proposal.
-Intrinsic Qds, Cgs and Cgd remain unchanged along accepted charge history;
-temperature-dependent reversible storage requires its own caloric model and
-is refused here. Unowned drain bias/frequency, changed source authority,
-reinterpreted incoming charge and incomplete receivers also refuse.
+A current binding owns two distinct existing typed voltage coordinates, an
+ampere property and a finite operating rectangle containing both drain signs.
+It retains the complete original claim and `PreparedSurfaceResponse`, including
+its original samples and triangles. The original full-rectangle envelope
+query proves continuous coverage including the interior. No conductance-grid
+conversion, I/V division, nominal drain voltage, resampling or extrapolation
+is used. Original affine cells supply current and both analytical partials;
+source-owned cutoff, saturation and passive negative differential slope are
+admitted. Same-sign drain cells, zero current on the authored zero-drain mesh
+and correctly signed vertex currents establish passivity over each original
+cell. Cells crossing zero drain bias and isolated operating samples without
+a tangent refuse. The channel excludes body-diode current, which remains with
+its original separate owner.
+
+An optional `GateCurrentThermalScale` supplies an explicitly authored positive
+dimensionless s(T,phase), giving I=s*Iref and scaling both voltage partials.
+Without it the admitted surface remains fixed. The scale may depend only on
+owned thermal coordinates and permitted fixed external conditions; evolving
+voltage response or voltage applicability cannot be frozen at a reference
+point. Both the complete current claim and any scale must qualify the actual
+thermal proposal. This separable law does not infer a three-coordinate
+response from two-coordinate data.
+
+Full typed voltage support, material claims, package, held context and caloric
+applicability remain retained. Current/scale source receipts and full-rectangle
+support refresh before numerical reuse, as do legacy conductance and driver
+resistance sources. Changed source authority, unowned bias/frequency,
+reinterpreted incoming charge and incomplete receivers refuse. Intrinsic Qds,
+Cgs and Cgd remain unchanged along accepted charge history; temperature-dependent
+reversible storage requires its own caloric model and is refused here.
 
 Every proposal uses the same native gate-controlled solve and original
-electrical/thermal loop. The numerical cache compares the complete resolved
-G(Vgs) curves and all driver coefficients in addition to the existing 33-word
-drive key. Fresh source admission and full subdivision-budget charging still
-precede reuse. Converter storage includes the separate intrinsic drain, Cgs
-and Cgd energy changes. Four signed gate-supply works and four nonnegative
-driver heats extend the original fourteen-loss physical balance; driver
-recovery does not become negative heat or an inferred battery transfer.
-The original finite coolant, contact and radiation owners transport the
-deposited physical heat.
+electrical/thermal loop. The numerical cache compares the complete current
+response axes, samples, triangulation, voltage ranges and exact scale, or the
+complete resolved legacy G(Vgs) curves, together with all driver coefficients
+and the existing 33-word drive key. Retained immutable surface data is shared;
+allocation identity alone never proves coefficient equality. Fresh source
+admission and full subdivision-budget charging precede reuse.
 
-Focused regressions define independent finite-RC/temperature feedback and
-negative gate-source recovery, full Miller/channel storage-work-heat balance,
-source/receiver/continuation refusals and two finite thermal inventories.
-The new coupled code and fixtures passed pinned Rust syntax formatting and
-an API review against the native prepared owner. Full coupled typechecking
-and execution remain unverified because the complete native dependency graph
-is unavailable. Endpoint thermal feedback requires time refinement. Synthetic
-source curves do not qualify measured devices, unresolved waveform peaks,
-saturation, reverse recovery, avalanche or finite-energy gate-rail dynamics.
+Converter storage includes the separate intrinsic drain, Cgs and Cgd energy
+changes. The same represented channel current supplies electrical flow and
+Vds*I device heat. Four signed gate-supply works and four nonnegative driver
+heats extend the original fourteen-loss physical balance; driver recovery
+does not become negative heat or an inferred battery transfer. The original
+finite coolant, contact and radiation owners transport the deposited heat.
+
+Focused G0/G1 fixtures specify source-owned current saturation/cutoff and signed
+reverse current, original-cell derivatives, explicit thermal scaling,
+full-rectangle support and source/receiver/continuation refusals, in addition
+to the existing finite-RC/temperature-feedback and Miller energy-account cases.
+The coupled extension and fixtures passed pinned Rust syntax formatting and
+source/API review. Full coupled typechecking and execution remain unverified
+because the complete native dependency graph is unavailable. Endpoint thermal
+feedback requires time refinement. Manufactured surfaces and thermal scales
+do not qualify measured devices or unresolved waveform peaks; reverse
+recovery, avalanche and finite-energy gate-rail dynamics remain separate gaps.
 
 ## Finite source impedance, regulated demand and material heat
 

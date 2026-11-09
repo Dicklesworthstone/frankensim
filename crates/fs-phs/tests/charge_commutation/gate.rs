@@ -4,7 +4,12 @@ use super::*;
 use fs_phs::circuit::converter::commutation::capacitance::PreparedGateCommutatedSwitchCycle;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::PreparedGateBatteryMotorCycle;
 use fs_phs::circuit::converter::commutation::capacitance::gate::GateCommutationParameters;
-use fs_phs::circuit::converter::commutation::gate::{GateConductanceCurve, GateDriver};
+use fs_phs::circuit::converter::commutation::gate::{
+    GateChannelResponse, GateConductanceCurve, GateDriver,
+};
+
+#[path = "gate/current.rs"]
+mod current;
 
 const GATE_CAP: [f64; 4] = [0.003, 0.004, 0.005, 0.006];
 const MILLER_CAP: [f64; 4] = [0.001, 0.002, 0.0015, 0.0025];
@@ -42,7 +47,10 @@ fn gate_parameters(cgs: [f64; 4], cgd: [f64; 4]) -> GateCommutationParameters {
 // Independent inversion of this fixture's nine original source cells per leg.
 // Eliminating a gate at fixed charge adds Cgs*Cgd/(Cgs+Cgd) to its drain
 // differential capacitance and shifts the two electrode charges reciprocally.
-fn gate_physical(p: &GateCommutationParameters, x: &[f64; 9]) -> [f64; 9] {
+fn gate_physical<C: GateChannelResponse + Clone + 'static>(
+    p: &GateCommutationParameters<C>,
+    x: &[f64; 9],
+) -> [f64; 9] {
     let mut out = [0.0; 9];
     out[0] = x[0] / p.converter.inductance_h;
     for k in 0..2 {
@@ -99,7 +107,10 @@ fn gate_physical(p: &GateCommutationParameters, x: &[f64; 9]) -> [f64; 9] {
     out
 }
 
-fn gate_parts(p: &GateCommutationParameters, x: &[f64; 9]) -> [f64; 15] {
+fn gate_parts<C: GateChannelResponse + Clone + 'static>(
+    p: &GateCommutationParameters<C>,
+    x: &[f64; 9],
+) -> [f64; 15] {
     let v = gate_physical(p, x);
     let vd = [v[1] - v[3], v[3], v[2] - v[4], v[4]];
     let mut parts = [0.0; 15];
@@ -337,9 +348,9 @@ fn a_command_edge_charges_the_gate_before_channel_conduction_changes() {
     assert!(gate_physical(&p, &split)[5] > 0.0);
 }
 
-fn gate_drive_state(
-    native: &PreparedGateBatteryMotorCycle,
-    p: &GateCommutationParameters,
+fn gate_drive_state<C: GateChannelResponse + Clone + 'static>(
+    native: &PreparedGateBatteryMotorCycle<C>,
+    p: &GateCommutationParameters<C>,
     y: [f64; 11],
     gates: [f64; 4],
 ) -> [f64; 15] {
@@ -361,7 +372,10 @@ fn gate_drive_state(
         .unwrap()
 }
 
-fn gate_drive_parts(p: &GateCommutationParameters, x: &[f64; 15]) -> [f64; 7] {
+fn gate_drive_parts<C: GateChannelResponse + Clone + 'static>(
+    p: &GateCommutationParameters<C>,
+    x: &[f64; 15],
+) -> [f64; 7] {
     let converter: [f64; 9] = x[3..12].try_into().unwrap();
     [
         12.0 * x[0],

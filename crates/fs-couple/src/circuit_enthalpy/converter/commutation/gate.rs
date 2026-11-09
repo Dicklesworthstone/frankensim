@@ -3,15 +3,52 @@
 //! The caller explicitly decomposes intrinsic drain-source Q(V), gate-source C
 //! and gate-drain C. A gate-clamped Coss measurement cannot be reused as intrinsic
 //! Qds and then receive another Miller capacitance. Storage laws stay fixed;
-//! only dissipative G(Vgs,T) and driver resistances refresh with temperature.
+//! dissipative channel laws and driver resistances refresh with temperature.
 //! Separate on/off driver resistors share one explicitly authored heat receiver.
 
 use super::capacitors::{resolve_capacitances, resolve_constant_capacitances};
 use super::charge::resolve_charge_curves;
 use super::*;
 use fs_matdb::{ClaimSelection, PropertyLineSlice};
-use fs_phs::circuit::converter::commutation::gate::{GateConductanceCurve, GateDriver};
+use fs_phs::circuit::converter::commutation::gate::{
+    GateChannelResponse, GateConductanceCurve, GateDriver,
+};
 use fs_qty::Conductance;
+
+mod current;
+pub use current::{GateCurrentSurfaceBinding, GateCurrentSurfaceMaterial, GateCurrentThermalScale};
+
+mod channel_sealed {
+    pub trait Binding {}
+    pub trait Material {}
+}
+
+/// Closed material channel sources accepted by the common gate/thermal owner.
+/// Both provided source forms retain their own complete original material data.
+pub trait GateChannelMaterial:
+    channel_sealed::Material + Clone + core::fmt::Debug + PartialEq
+{
+    type Response: GateChannelResponse + Clone + 'static;
+    fn native_response(&self) -> Self::Response;
+    #[doc(hidden)]
+    fn same_electrical_response(&self, other: &Self) -> bool;
+}
+
+/// Closed original material bindings: a gate-conductance line or a complete
+/// two-voltage current surface. This supplies no additional circuit solver.
+pub trait GateChannelBinding: channel_sealed::Binding + Sized {
+    type Material: GateChannelMaterial;
+    fn cell(&self) -> CellId;
+    #[doc(hidden)]
+    fn resolve(
+        cells: &[MaterialCell<'_>],
+        bindings: &[Self; 4],
+        thermal: &DepositionSimulation<'_>,
+        sample: &MaterialNetworkSample,
+        retained: Option<&[Self::Material; 4]>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<[Self::Material; 4], Error>;
+}
 
 /// Positive channel conductance in siemens along the owned gate-source voltage.
 /// The original context must already declare this axis in volts. Thermal
@@ -61,35 +98,70 @@ impl GateConductanceMaterial {
     }
 }
 
+impl channel_sealed::Material for GateConductanceMaterial {}
+impl GateChannelMaterial for GateConductanceMaterial {
+    type Response = GateConductanceCurve;
+    fn native_response(&self) -> Self::Response {
+        self.curve.clone()
+    }
+    fn same_electrical_response(&self, other: &Self) -> bool {
+        self.curve == other.curve
+    }
+}
+impl channel_sealed::Binding for GateConductanceBinding<'_> {}
+impl GateChannelBinding for GateConductanceBinding<'_> {
+    type Material = GateConductanceMaterial;
+    fn cell(&self) -> CellId {
+        self.cell
+    }
+    fn resolve(
+        cells: &[MaterialCell<'_>],
+        bindings: &[Self; 4],
+        thermal: &DepositionSimulation<'_>,
+        sample: &MaterialNetworkSample,
+        retained: Option<&[Self::Material; 4]>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<[Self::Material; 4], Error> {
+        resolve_conductance(cells, bindings, thermal, sample, retained, cancel)
+    }
+}
+
 /// Explicit intrinsic decomposition and separate finite gate drivers.
 /// All four-device arrays use input high/low, then output high/low order.
 /// Each driver resistor pair is [on, off]; both name the same authored receiver.
 /// Driver command voltages and current limits are external controls, not a
 /// claim that a finite gate supply reservoir has been modeled.
-#[derive(Clone, Copy)]
-pub struct GateMaterialBindings<'a> {
+pub struct GateMaterialBindings<'a, B = GateConductanceBinding<'a>> {
     pub intrinsic_drain_charge: &'a [DeviceChargeBinding<'a>; 4],
     pub gate_source_capacitance: &'a [DeviceCapacitanceBinding<'a>; 4],
     pub gate_drain_capacitance: &'a [DeviceCapacitanceBinding<'a>; 4],
-    pub channel_conductance: &'a [GateConductanceBinding<'a>; 4],
+    /// Historical field name; the binding may supply full I(Vds,Vgs) instead of G(Vgs).
+    pub channel_conductance: &'a [B; 4],
     pub driver_resistors: &'a [ConverterThermalChannel<'a>; 8],
     pub drivers: [GateDriver; 4],
 }
 
+impl<B> Copy for GateMaterialBindings<'_, B> {}
+impl<B> Clone for GateMaterialBindings<'_, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 /// Accepted complete storage, conduction and driver sources.
 /// Gate storage and the intrinsic charge laws are immutable along the history;
-/// the retained G lines and driver resistances describe its actual temperature.
+/// the retained channel response and driver resistances describe its actual temperature.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GateMaterial {
+pub struct GateMaterial<C = GateConductanceMaterial> {
     intrinsic_drain_charge: [DeviceChargeMaterial; 4],
     gate_source_capacitance: [DeviceCapacitanceMaterial; 4],
     gate_drain_capacitance: [DeviceCapacitanceMaterial; 4],
-    channel_conductance: [GateConductanceMaterial; 4],
+    channel_conductance: [C; 4],
     driver_resistors: [ConverterChannelMaterial; 8],
     authored_drivers: [GateDriver; 4],
     drivers: [GateDriver; 4],
 }
-impl GateMaterial {
+impl<C> GateMaterial<C> {
     pub const fn intrinsic_drain_charge(&self) -> &[DeviceChargeMaterial; 4] {
         &self.intrinsic_drain_charge
     }
@@ -99,7 +171,7 @@ impl GateMaterial {
     pub const fn gate_drain_capacitance(&self) -> &[DeviceCapacitanceMaterial; 4] {
         &self.gate_drain_capacitance
     }
-    pub const fn channel_conductance(&self) -> &[GateConductanceMaterial; 4] {
+    pub const fn channel_conductance(&self) -> &[C; 4] {
         &self.channel_conductance
     }
     pub const fn driver_resistors(&self) -> &[ConverterChannelMaterial; 8] {
@@ -111,6 +183,8 @@ impl GateMaterial {
     pub fn driver_cells(&self) -> [CellId; 4] {
         core::array::from_fn(|i| self.driver_resistors[2 * i].cell())
     }
+}
+impl<C: GateChannelMaterial> GateMaterial<C> {
     pub(super) fn same_electrical_coefficients(&self, other: &Self) -> bool {
         self.drivers
             .iter()
@@ -120,7 +194,7 @@ impl GateMaterial {
                 .channel_conductance
                 .iter()
                 .zip(&other.channel_conductance)
-                .all(|(a, b)| a.curve == b.curve)
+                .all(|(a, b)| a.same_electrical_response(b))
     }
 }
 
@@ -312,21 +386,21 @@ fn resolve_conductance(
         .map_err(|_| invalid("four complete gate conductance sources required"))
 }
 
-pub(super) fn resolve_gate_material(
+pub(super) fn resolve_gate_material<B: GateChannelBinding>(
     cells: &[MaterialCell<'_>],
     devices: &[DeviceConductionBinding<'_>; 4],
-    bindings: &GateMaterialBindings<'_>,
+    bindings: &GateMaterialBindings<'_, B>,
     thermal: &DepositionSimulation<'_>,
     sample: &MaterialNetworkSample,
-    retained: Option<&GateMaterial>,
+    retained: Option<&GateMaterial<B::Material>>,
     cancel: &RefCell<impl FnMut() -> bool>,
-) -> Result<GateMaterial, Error> {
+) -> Result<GateMaterial<B::Material>, Error> {
     for (i, device) in devices.iter().enumerate() {
         check(cancel)?;
         if bindings.intrinsic_drain_charge[i].cell != device.cell
             || bindings.gate_source_capacitance[i].cell != device.cell
             || bindings.gate_drain_capacitance[i].cell != device.cell
-            || bindings.channel_conductance[i].cell != device.cell
+            || bindings.channel_conductance[i].cell() != device.cell
         {
             return Err(invalid(
                 "intrinsic drain charge, gate storage, channel law and diode must share their original semiconductor package",
@@ -371,7 +445,7 @@ pub(super) fn resolve_gate_material(
         true,
         cancel,
     )?;
-    let channel_conductance = resolve_conductance(
+    let channel_conductance = B::resolve(
         cells,
         bindings.channel_conductance,
         thermal,

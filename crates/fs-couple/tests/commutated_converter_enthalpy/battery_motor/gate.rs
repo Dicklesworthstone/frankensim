@@ -1,5 +1,8 @@
 //! Finite gate-source work, original G(Vgs,T), Miller storage and distinct caloric receivers.
 use super::*;
+
+#[path = "gate/current.rs"]
+mod current;
 use fs_couple::circuit_enthalpy::converter::commutation::battery_motor::gate::*;
 use fs_phs::circuit::capacitance::CapacitorChargeCurve;
 use fs_phs::circuit::converter::commutation::{

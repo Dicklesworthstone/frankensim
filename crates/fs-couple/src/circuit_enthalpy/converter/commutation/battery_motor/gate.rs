@@ -1,7 +1,7 @@
 //! Finite gate/Miller charge with original finite battery, motor and heat owners.
 //!
 //! Fifteen authored coordinates retain grouped node and gate-charge histories.
-//! Intrinsic Qds, Cgs and Cgd stay fixed; G(Vgs,T), both driver resistances and
+//! Intrinsic Qds, Cgs and Cgd stay fixed; source-bound channel current, driver resistances and
 //! other dissipative sources refresh at each actual thermal proposal. Signed
 //! gate-port work is external supply/recovery; driver heat has its own authored
 //! receiver. No independent gate-supply reservoir is inferred.
@@ -16,24 +16,29 @@ use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
     CapacitiveBatteryMotorCycleStep, PreparedGateBatteryMotorCycle,
 };
 use fs_phs::circuit::converter::commutation::capacitance::gate::GateCommutationParameters;
+use fs_phs::circuit::converter::commutation::gate::GateChannelResponse;
 
-type GateSources = Arc<GateMaterial>;
+type GateSources<C = GateConductanceMaterial> = Arc<GateMaterial<C>>;
 
 /// Battery three, converter nine, then motor three. Converter node coordinates
 /// include their high-side gate electrode; four gate charges remain independent.
 /// Incoming grouped charges must already use the complete intrinsic storage.
-pub type MaterialGateBatteryMotorDrive = MaterialCommutatedBatteryMotorDrive<15, Arc<GateMaterial>>;
+pub type MaterialGateBatteryMotorDrive<C = GateConductanceMaterial> =
+    MaterialCommutatedBatteryMotorDrive<15, Arc<GateMaterial<C>>>;
 
-impl MaterialGateBatteryMotorDrive {
-    pub fn gate_material(&self) -> &GateMaterial {
+impl<C: GateChannelMaterial> MaterialGateBatteryMotorDrive<C> {
+    pub fn gate_material(&self) -> &GateMaterial<C> {
         &self.capacitors
     }
-    pub fn gate_parameters(&self, maximum_cells_per_chord: usize) -> GateCommutationParameters {
+    pub fn gate_parameters(
+        &self,
+        maximum_cells_per_chord: usize,
+    ) -> GateCommutationParameters<C::Response> {
         parameters(self.parameters, &self.capacitors, maximum_cells_per_chord)
     }
 }
 
-impl DriveSources for GateSources {
+impl<C: GateChannelMaterial> DriveSources for GateSources<C> {
     fn same_electrical_coefficients(&self, other: &Self) -> bool {
         self.as_ref().same_electrical_coefficients(other.as_ref())
     }
@@ -44,30 +49,34 @@ impl DriveSources for GateSources {
 
 /// Original material/caloric source plus intrinsic storage, gate response and driver sources.
 #[derive(Clone, Debug)]
-pub struct GateBatteryMotorThermalSample<S = MaterialNetworkSample> {
+pub struct GateBatteryMotorThermalSample<S = MaterialNetworkSample, C = GateConductanceMaterial> {
     pub drive: CommutatedBatteryMotorThermalSample<S>,
-    pub gate: Arc<GateMaterial>,
+    pub gate: Arc<GateMaterial<C>>,
     /// Exact chord traversal budget for this proposal; not a physical coefficient.
     pub maximum_cells_per_chord: usize,
 }
 
 #[must_use]
-pub struct GateBatteryMotorEnthalpyCandidate<'t, S = MaterialNetworkSample> {
+pub struct GateBatteryMotorEnthalpyCandidate<
+    't,
+    S = MaterialNetworkSample,
+    C = GateConductanceMaterial,
+> {
     thermal: DepositionSimulation<'t>,
-    drive: MaterialGateBatteryMotorDrive,
+    drive: MaterialGateBatteryMotorDrive<C>,
     report:
-        CircuitEnthalpyReport<GateBatteryMotorThermalSample<S>, CapacitiveBatteryMotorCycleStep>,
+        CircuitEnthalpyReport<GateBatteryMotorThermalSample<S, C>, CapacitiveBatteryMotorCycleStep>,
 }
-impl<'t, S> GateBatteryMotorEnthalpyCandidate<'t, S> {
+impl<'t, S, C> GateBatteryMotorEnthalpyCandidate<'t, S, C> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub fn drive(&self) -> &MaterialGateBatteryMotorDrive {
+    pub fn drive(&self) -> &MaterialGateBatteryMotorDrive<C> {
         &self.drive
     }
     pub fn report(
         &self,
-    ) -> &CircuitEnthalpyReport<GateBatteryMotorThermalSample<S>, CapacitiveBatteryMotorCycleStep>
+    ) -> &CircuitEnthalpyReport<GateBatteryMotorThermalSample<S, C>, CapacitiveBatteryMotorCycleStep>
     {
         &self.report
     }
@@ -75,18 +84,18 @@ impl<'t, S> GateBatteryMotorEnthalpyCandidate<'t, S> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        MaterialGateBatteryMotorDrive,
-        CircuitEnthalpyReport<GateBatteryMotorThermalSample<S>, CapacitiveBatteryMotorCycleStep>,
+        MaterialGateBatteryMotorDrive<C>,
+        CircuitEnthalpyReport<GateBatteryMotorThermalSample<S, C>, CapacitiveBatteryMotorCycleStep>,
     ) {
         (self.thermal, self.drive, self.report)
     }
 }
 
-fn parameters(
+fn parameters<C: GateChannelMaterial>(
     converter: CommutationParameters,
-    material: &GateMaterial,
+    material: &GateMaterial<C>,
     maximum_cells_per_chord: usize,
-) -> GateCommutationParameters {
+) -> GateCommutationParameters<C::Response> {
     GateCommutationParameters {
         converter,
         intrinsic_drain_charge_curves: core::array::from_fn(|i| {
@@ -99,18 +108,18 @@ fn parameters(
             material.gate_drain_capacitance()[i].capacitance_f()
         }),
         channel_conductance: core::array::from_fn(|i| {
-            material.channel_conductance()[i].curve().clone()
+            material.channel_conductance()[i].native_response()
         }),
         gate_drivers: *material.drivers(),
         maximum_cells_per_chord,
     }
 }
 
-fn admit_gate_state(
+fn admit_gate_state<C: GateChannelMaterial, P: GateChannelResponse + Clone + 'static>(
     native: &BatteryMotorDrive,
     state: &[f64; 15],
-    authored: &GateCommutationParameters,
-    sources: &GateMaterial,
+    authored: &GateCommutationParameters<P>,
+    sources: &GateMaterial<C>,
     converter: CommutationParameters,
     maximum_cells_per_chord: usize,
 ) -> Result<(), Error> {
@@ -149,10 +158,10 @@ fn admit_gate_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_gate(
+fn advance_gate<C: GateChannelMaterial>(
     original: BatteryMotorDrive,
     devices: [SwitchDevice; 4],
-    material: &GateMaterial,
+    material: &GateMaterial<C>,
     maximum_cells_per_chord: usize,
     state: &[f64; 15],
     start_s: f64,
@@ -175,7 +184,7 @@ fn advance_gate(
         material,
         maximum_cells_per_chord,
     );
-    let mut native = PreparedGateBatteryMotorCycle::new_gate_controlled(
+    let mut native = PreparedGateBatteryMotorCycle::<C::Response>::new_gate_controlled(
         original,
         gate_parameters,
         intervals,
@@ -202,16 +211,16 @@ fn advance_gate(
     Ok((next, step))
 }
 
-fn source_sample<S>(
+fn source_sample<S, C>(
     network: S,
     resistors: Arc<[ConverterChannelMaterial; DRIVE_RESISTORS]>,
     devices: Arc<[DeviceConductionMaterial; 4]>,
-    gate: GateSources,
+    gate: GateSources<C>,
     load_heat: Option<RegulatedLoadHeat>,
     motor: DcMotorParameters,
     bearing_cell: CellId,
     maximum_cells_per_chord: usize,
-) -> GateBatteryMotorThermalSample<S> {
+) -> GateBatteryMotorThermalSample<S, C> {
     GateBatteryMotorThermalSample {
         drive: CommutatedBatteryMotorThermalSample {
             network,
@@ -228,21 +237,21 @@ fn source_sample<S>(
 
 /// Original finite material network with explicit intrinsic gate storage and
 /// four independently received driver losses. Authored on/off intervals select
-/// driver voltage/resistance branches; actual Vgs drives the channel law.
-pub struct GateBatteryMotorThermalNetwork<'a> {
+/// driver voltage/resistance branches; actual Vds and Vgs drive the channel law.
+pub struct GateBatteryMotorThermalNetwork<'a, B = GateConductanceBinding<'a>> {
     pub drive: CommutatedBatteryMotorThermalNetwork<'a>,
-    pub gate: GateMaterialBindings<'a>,
+    pub gate: GateMaterialBindings<'a, B>,
     /// Bounded exact native traversal; exhaustion refuses without resampling.
     pub maximum_cells_per_chord: usize,
 }
-impl GateBatteryMotorThermalNetwork<'_> {
+impl<B: GateChannelBinding> GateBatteryMotorThermalNetwork<'_, B> {
     fn resolve_gates(
         &self,
         thermal: &DepositionSimulation<'_>,
         sample: &MaterialNetworkSample,
-        retained: Option<&MaterialGateBatteryMotorDrive>,
+        retained: Option<&MaterialGateBatteryMotorDrive<B::Material>>,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<GateSources, Error> {
+    ) -> Result<GateSources<B::Material>, Error> {
         resolve_gate_material(
             self.drive.cells,
             self.drive.devices,
@@ -258,14 +267,14 @@ impl GateBatteryMotorThermalNetwork<'_> {
     /// Incoming bus, grouped node and gate charges must already use the authored full
     /// intrinsic decomposition. The native initializer takes explicit bus/node/Vgs
     /// voltages. Material binding never resets a gate or reinterprets Coss as Qds.
-    pub fn bind(
+    pub fn bind<P: GateChannelResponse + Clone + 'static>(
         &self,
         thermal: &DepositionSimulation<'_>,
         native: &BatteryMotorDrive,
-        authored: &GateCommutationParameters,
+        authored: &GateCommutationParameters<P>,
         state: [f64; 15],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<MaterialGateBatteryMotorDrive, Error> {
+    ) -> Result<MaterialGateBatteryMotorDrive<B::Material>, Error> {
         let cancel = RefCell::new(cancelled);
         self.drive.bind_resolved(
             thermal,
@@ -279,13 +288,15 @@ impl GateBatteryMotorThermalNetwork<'_> {
                 let coefficients = prepared
                     .resolve(thermal, || (*cancel.borrow_mut())())
                     .map_err(material)?;
-                let (r, d) = self.drive.resolve_bindings::<15, GateSources>(
-                    thermal,
-                    &coefficients.source,
-                    fixed,
-                    None,
-                    &cancel,
-                )?;
+                let (r, d) = self
+                    .drive
+                    .resolve_bindings::<15, GateSources<B::Material>>(
+                        thermal,
+                        &coefficients.source,
+                        fixed,
+                        None,
+                        &cancel,
+                    )?;
                 let c = self.resolve_gates(thermal, &coefficients.source, None, &cancel)?;
                 Ok((r, d, c))
             },
@@ -304,7 +315,7 @@ impl GateBatteryMotorThermalNetwork<'_> {
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        drive: &MaterialGateBatteryMotorDrive,
+        drive: &MaterialGateBatteryMotorDrive<B::Material>,
         intervals: &[CommutationInterval],
         commands: &[BatteryMotorSwitchCommand],
         substeps_per_interval: usize,
@@ -314,7 +325,8 @@ impl GateBatteryMotorThermalNetwork<'_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<GateBatteryMotorEnthalpyCandidate<'t>, Error> {
+    ) -> Result<GateBatteryMotorEnthalpyCandidate<'t, MaterialNetworkSample, B::Material>, Error>
+    {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
@@ -391,21 +403,22 @@ impl GateBatteryMotorThermalNetwork<'_> {
 
 /// The same fifteen-state source-bound drive inside the complete existing heat
 /// assembly, including finite coolant, contact and radiation inventories.
-pub struct GateBatteryMotorHeatNetwork<'a, A: HeatAssembly + ?Sized> {
+pub struct GateBatteryMotorHeatNetwork<'a, A: HeatAssembly + ?Sized, B = GateConductanceBinding<'a>>
+{
     pub drive: CommutatedBatteryMotorHeatNetwork<'a, A>,
-    pub gate: GateMaterialBindings<'a>,
+    pub gate: GateMaterialBindings<'a, B>,
     /// Bounded exact native traversal; exhaustion refuses without resampling.
     pub maximum_cells_per_chord: usize,
 }
-impl<A: HeatAssembly + ?Sized> GateBatteryMotorHeatNetwork<'_, A> {
-    pub fn bind(
+impl<A: HeatAssembly + ?Sized, B: GateChannelBinding> GateBatteryMotorHeatNetwork<'_, A, B> {
+    pub fn bind<P: GateChannelResponse + Clone + 'static>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
         native: &BatteryMotorDrive,
-        authored: &GateCommutationParameters,
+        authored: &GateCommutationParameters<P>,
         state: [f64; 15],
-    ) -> Result<MaterialGateBatteryMotorDrive, AssemblyError<A::Error>> {
+    ) -> Result<MaterialGateBatteryMotorDrive<B::Material>, AssemblyError<A::Error>> {
         let network = GateBatteryMotorThermalNetwork {
             drive: self.drive.network(cx)?,
             gate: self.gate,
@@ -417,7 +430,7 @@ impl<A: HeatAssembly + ?Sized> GateBatteryMotorHeatNetwork<'_, A> {
             native,
             state,
             |fixed| {
-                let (coefficients, r, d) = self.drive.resolve::<15, GateSources>(
+                let (coefficients, r, d) = self.drive.resolve::<15, GateSources<B::Material>>(
                     cx,
                     &network.drive,
                     thermal,
@@ -448,7 +461,7 @@ impl<A: HeatAssembly + ?Sized> GateBatteryMotorHeatNetwork<'_, A> {
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        drive: &MaterialGateBatteryMotorDrive,
+        drive: &MaterialGateBatteryMotorDrive<B::Material>,
         intervals: &[CommutationInterval],
         commands: &[BatteryMotorSwitchCommand],
         substeps_per_interval: usize,
@@ -457,7 +470,10 @@ impl<A: HeatAssembly + ?Sized> GateBatteryMotorHeatNetwork<'_, A> {
         cycle_controls: SwitchCycleControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
-    ) -> Result<GateBatteryMotorEnthalpyCandidate<'t, A::Sample>, AssemblyError<A::Error>> {
+    ) -> Result<
+        GateBatteryMotorEnthalpyCandidate<'t, A::Sample, B::Material>,
+        AssemblyError<A::Error>,
+    > {
         cx.checkpoint()
             .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         crate::circuit_enthalpy::admit_driver_unknowns(

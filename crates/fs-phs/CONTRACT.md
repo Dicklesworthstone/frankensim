@@ -4122,6 +4122,16 @@ cancellation leave caller state and outputs unchanged. Gate supplies have
 finite resistance and audited work; no finite-energy rail inventory, carrier
 recovery or avalanche law is inferred.
 
+Focused G0 algebraic and G1 analytical/manufactured native regressions exercise
+source-owned saturation, exact cutoff,
+asymmetric reverse current and passive negative differential slope. The finite
+drive checks all fifteen state equations and eighteen physical heat terms at
+the same effort, saturated motoring and regeneration, and transactional
+rollback on late source/device/cancellation refusal. State, heat and work
+converge under 8/16/32 temporal refinement against an independently written SI
+ODE reference. These manufactured laws and bounded reference cases establish
+numerical behavior, not measured semiconductor qualification.
+
 ## Finite battery and motor shafts with device capacitor charge
 
 `commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`
