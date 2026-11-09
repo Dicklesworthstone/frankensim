@@ -1272,7 +1272,9 @@ impl MultiphysicsState {
                 }
             }
             self.lbm_free_surface.carry = 0.0;
-            self.lbm_free_surface.step();
+            let _ = self
+                .lbm_free_surface
+                .step_with_momentum(&fs_exec::CancelGate::new_clock_free());
         }
 
         // 2. Compute discrete free-surface curvature Laplacian(eta) for Young-Laplace capillary pressure
@@ -1717,8 +1719,8 @@ impl MultiphysicsState {
             .map(|vm| vm.volume_m3())
             .unwrap_or(9.2e-11);
         let poise_screw_mass_kg = 16.0 * poise_screw_vol_m3 * GOLD_18K_CARD.density_kg_m3;
-        let (air_added_mass_kg, balance_aero_drag_s_inv) =
-            GasState::try_new_moist_air(t_bal.clamp(220.0, 365.0), 101_325.0, 0.35)
+        let eval_aero = |t_k: f64| -> (f64, f64) {
+            GasState::try_new_moist_air(t_k.clamp(220.0, 365.0), 101_325.0, 0.35)
                 .ok()
                 .and_then(|air_gas| {
                     oscillating_cylinder(0.275e-3, 2.0 * std::f64::consts::PI * 2.5, &air_gas)
@@ -1728,18 +1730,23 @@ impl MultiphysicsState {
                             let added_m = cd.added_mass_kg_per_m * ring_circumference_m;
                             let drag_s_inv = (cd.resistance_n_s_per_m2 * ring_circumference_m
                                 / (0.00036 + poise_screw_mass_kg))
-                                .clamp(0.001, 2.5);
+                                * 0.05;
                             (added_m, drag_s_inv)
                         })
                 })
-                .unwrap_or((1.8e-9, 0.018));
+                .unwrap_or((1.8e-9, 0.018))
+        };
+        let (air_added_mass_now_kg, balance_aero_drag_s_inv) = eval_aero(t_bal);
+        let (air_added_mass_ref_kg, balance_aero_drag_ref_s_inv) = eval_aero(T_REF_K);
+        let delta_air_added_mass_kg = air_added_mass_now_kg - air_added_mass_ref_kg;
+        let delta_aero_drag_s_inv = (balance_aero_drag_s_inv - balance_aero_drag_ref_s_inv).max(0.0);
         let gold_on_bal_g = self.nodes[WatchNodeId::BalanceWheelRim as usize].molten_gold_g
             + self.nodes[WatchNodeId::BalanceWheelRim as usize].frozen_gold_g
             + 0.35
                 * (self.nodes[WatchNodeId::TourbillonCage as usize].molten_gold_g
                     + self.nodes[WatchNodeId::TourbillonCage as usize].frozen_gold_g);
-        let mass_loading_ratio =
-            1.0 + (gold_on_bal_g * 1.0e-3 + air_added_mass_kg) / (0.00036 + poise_screw_mass_kg);
+        let mass_loading_ratio = 1.0
+            + (gold_on_bal_g * 1.0e-3 + delta_air_added_mass_kg) / (0.00036 + poise_screw_mass_kg);
         let balance_inertia_ratio =
             ((1.0 + eps_bal) * (1.0 + eps_bal) * mass_loading_ratio).clamp(0.85, 25.0);
 
@@ -1959,7 +1966,7 @@ impl MultiphysicsState {
             + cryo_visc_damping
             + eddy_damping
             + gold_damping
-            + (balance_aero_drag_s_inv - 0.018).max(0.0);
+            + delta_aero_drag_s_inv;
 
         // 7. Forward-mode Automatic Differentiation (`fs_ad::Dual64`) for exact thermoelastic rate sensitivity d(rate)/dT
         //    and Certified Interval Arithmetic (`fs_ivl::Interval`) for worst-case manufacturing tolerance enclosure!

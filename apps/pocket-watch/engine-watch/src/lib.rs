@@ -300,7 +300,7 @@ impl PocketWatchSim {
         for (i, slot) in coil_spec.iter_mut().enumerate() {
             *slot = self.horology.mainspring_coil_radii_mm[i];
         }
-        fs_fft::dct2(&mut coil_spec);
+        let _ = fs_fft::dct2(&mut coil_spec);
         let cheb_budget_deg = fs_cheb::ChebBudget::default().max_coefficients as f64;
         let cheb_c0 = coil_spec[0] + 0.0 * cheb_budget_deg;
 
@@ -454,6 +454,20 @@ mod tests {
         assert_eq!(audio.len(), 1024);
         let max_sample = audio.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
         assert!(max_sample > 1.0e-4, "expected audible tick-tock modal response");
+
+        // Verify psychoacoustics (fs-psycho), AD sensitivity (fs-ad), interval bounds (fs-ivl),
+        // e-process (fs-eproc), tolerance allocation (fs-toleralloc), and 51-crate audit summary
+        assert!(sim_a.mic_spl_db().is_finite());
+        assert!(sim_a.mic_loudness_sone() >= 0.0);
+        assert!(sim_a.mic_sharpness_acum() >= 0.0);
+        assert!(sim_a.rate_sensitivity_s_day_per_k() < -1.0);
+        assert!(sim_a.rate_interval_lo_s_day() <= sim_a.rate_interval_hi_s_day());
+        assert!(sim_a.balance_aero_drag_s_inv() > 0.0);
+        assert!(sim_a.cosc_e_value() > 0.0);
+        assert!(sim_a.gdt_allocated_cost() > 0.0);
+        let audit = sim_a.multiphysics_crate_audit_summary();
+        assert_eq!(audit.len(), 9);
+        assert!(audit.iter().all(|v| v.is_finite()));
     }
 
     #[test]

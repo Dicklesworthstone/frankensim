@@ -424,7 +424,7 @@ impl HorologyState {
         // normalized to the factory Microstella reference amplitude (285 deg)
         let a_target_rad = 285.0 * PI / 180.0;
         let amp_now_rad = (self.balance_amplitude_deg * PI / 180.0).clamp(0.1, 6.0);
-        let beta_overcoil = 0.0012 * omega_linear * omega_linear;
+        let beta_overcoil = 0.000_002 * omega_linear * omega_linear;
         let omega_duffing_now =
             duffing_backbone_exact(omega_linear, beta_overcoil, amp_now_rad).unwrap_or(omega_linear);
         let omega_duffing_ref =
