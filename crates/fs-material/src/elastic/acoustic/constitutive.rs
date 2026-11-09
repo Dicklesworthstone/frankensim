@@ -32,6 +32,34 @@ impl ElasticAcousticState {
             .all(|v| v.is_finite() && v.abs() <= self.maximum_absolute_mandel_strain)
     }
 
+    // Linear action without strain admission: wave traces use unit amplitudes
+    // and admit their physical superposition separately. The original K/G
+    // modes also serve bulk mechanics; interfaces must not reconstruct them.
+    pub(super) fn apply_stiffness_mandel(&self, strain: &Voigt) -> Voigt {
+        if let Some((bulk, shear)) = self.isotropic_moduli_pa {
+            let lambda = self.stiffness_mandel_pa[0][1];
+            if lambda.abs() <= 0.5 * shear {
+                // Near lambda=0 an uncoupled small component must not be
+                // buried in subtraction of the spherical/deviatoric parts.
+                // This preserves exact zero normal traction at grazing
+                // incidence when the original tensor has lambda=0.
+                let (trace, _) = crate::elastic::isotropic_strain_modes(strain);
+                let coupling = lambda * trace;
+                return std::array::from_fn(|i| {
+                    (2.0 * shear).mul_add(strain[i], if i < 3 { coupling } else { 0.0 })
+                });
+            }
+            return crate::elastic::isotropic_stress_from_moduli(bulk, 2.0 * shear, strain);
+        }
+        std::array::from_fn(|i| {
+            self.stiffness_mandel_pa[i]
+                .iter()
+                .zip(strain)
+                .map(|(c, e)| c * e)
+                .sum()
+        })
+    }
+
     /// Evaluate the full anisotropic Hooke law and its recoverable energy.
     /// The original componentwise Mandel strain ceiling applies; neither
     /// normal/shear coupling nor orientation is replaced by isotropic data.
@@ -45,19 +73,20 @@ impl ElasticAcousticState {
                 "elastic response exceeds the original Mandel strain domain",
             ));
         }
-        let stress_mandel_pa: Voigt = std::array::from_fn(|i| {
-            self.stiffness_mandel_pa[i]
-                .iter()
-                .zip(strain_mandel)
-                .map(|(c, e)| c * e)
-                .sum()
-        });
-        let stored_energy_density_j_m3 = 0.5
-            * strain_mandel
+        let stress_mandel_pa = self.apply_stiffness_mandel(&strain_mandel);
+        let stored_energy_density_j_m3 = if let Some((bulk, shear)) = self.isotropic_moduli_pa {
+            let (trace, deviator) = crate::elastic::isotropic_strain_modes(&strain_mandel);
+            // Positive modal storage retains a weak isochoric/hydrostatic
+            // response instead of cancelling large, opposite stress-work terms.
+            0.5 * (bulk * trace) * trace
+                + deviator.iter().map(|e| (shear * e) * e).sum::<f64>()
+        } else {
+            0.5 * strain_mandel
                 .iter()
                 .zip(stress_mandel_pa)
                 .map(|(e, s)| e * s)
-                .sum::<f64>();
+                .sum::<f64>()
+        };
         if stress_mandel_pa.iter().any(|s| !s.is_finite())
             || !stored_energy_density_j_m3.is_finite()
             || stored_energy_density_j_m3 < 0.0

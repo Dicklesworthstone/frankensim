@@ -192,6 +192,7 @@ impl<'a> IsotropicElasticInterface<'a> {
         // grazing channel that makes the unreduced boundary matrix singular.
         if self.states[0].density_kg_m3() == self.states[1].density_kg_m3()
             && self.states[0].stiffness_mandel_pa() == self.states[1].stiffness_mandel_pa()
+            && self.states[0].isotropic_bulk_shear_pa() == self.states[1].isotropic_bulk_shear_pa()
         {
             for channel in 0..6 {
                 if result.incoming[channel].normal_power_factor_pa_s_m > 0.0 {
@@ -534,12 +535,12 @@ fn trace(
         (normal * velocity[0] + velocity[2].scale(tangential))
             .scale(-core::f64::consts::FRAC_1_SQRT_2),
     ];
-    // Use the retained stiffness directly. For example, lambda=0 at grazing
-    // P incidence has O(cosine^2) normal traction; subtracting rounded speed
-    // ratios in rho*c_P*(1-2*sin(theta_S)^2) invents a much larger stress.
-    let stress_component = |row: usize| {
-        complex_sum((0..6).map(|j| strain[j].scale(state.stiffness_mandel_pa()[row][j])))
-    };
+    // Use the original elastic action, including the retained bulk/shear
+    // modes. Its lambda=0 path preserves O(cosine^2) grazing P traction;
+    // subtracting rounded speed ratios would invent a much larger stress.
+    let real_stress = state.apply_stiffness_mandel(&strain.map(|value| value.re));
+    let imaginary_stress = state.apply_stiffness_mandel(&strain.map(|value| value.im));
+    let stress_component = |row: usize| C64::new(real_stress[row], imaginary_stress[row]);
     let traction = [
         stress_component(5).scale(core::f64::consts::FRAC_1_SQRT_2),
         stress_component(4).scale(core::f64::consts::FRAC_1_SQRT_2),

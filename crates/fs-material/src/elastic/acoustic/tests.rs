@@ -77,6 +77,136 @@ fn isotropic_waves_and_pressure_share_one_elastic_energy() {
 }
 
 #[test]
+fn g1_original_isotropic_modes_survive_extreme_bulk_shear_ratios() {
+    for scale in [1e-150, 1.0, 1e150] {
+        for (bulk, shear) in [(1e12 * scale, 1e-6 * scale), (1e-6 * scale, 1e12 * scale)] {
+            let state = ElasticAcousticState::from_bulk_and_shear(
+                2000.0, bulk, shear, identity(), 0.01,
+            )
+            .unwrap();
+            assert_eq!(state.isotropic_bulk_shear_pa(), Some((bulk, shear)));
+            assert_eq!(state.bulk_modulus_pa(), bulk);
+            near(state.compressibility_pa_inv(), bulk.recip(), 2e-15);
+            // These physically stable modes can be below the rounding
+            // resolution of the dense tensor's normal block. Their original
+            // source values, not its rounded eigenvalues, own the response.
+            let distortion = [0.004, -0.002, -0.002, 0.001, -0.003, 0.002];
+            let response = state.strain_response(distortion).unwrap();
+            for i in 0..6 {
+                near(response.stress_mandel_pa[i], 2.0 * shear * distortion[i], 4e-15);
+            }
+            near(
+                response.stored_energy_density_j_m3,
+                shear * distortion.iter().map(|e| e * e).sum::<f64>(),
+                4e-15,
+            );
+            let expansion = state
+                .strain_response([0.001, 0.001, 0.001, 0.0, 0.0, 0.0])
+                .unwrap();
+            for stress in &expansion.stress_mandel_pa[..3] {
+                near(*stress, 0.003 * bulk, 4e-15);
+            }
+            near(expansion.stored_energy_density_j_m3, 0.5 * bulk * 9e-6, 4e-15);
+            let pressure = 0.003 * bulk;
+            let compression = state.hydrostatic_response(pressure).unwrap();
+            near(compression.volumetric_strain, -0.003, 4e-15);
+            let recovered = state.strain_response(compression.strain_mandel).unwrap();
+            for stress in &recovered.stress_mandel_pa[..3] {
+                near(*stress, -pressure, 5e-15);
+            }
+            near(
+                recovered.stored_energy_density_j_m3,
+                compression.stored_energy_density_j_m3,
+                5e-15,
+            );
+            for normal in [[1.0, 0.0, 0.0], [1.0, 2.0, -3.0], [1.0; 3]] {
+                let waves = state.directional_waves(normal).unwrap();
+                for (index, modulus) in [shear, shear, bulk + (4.0 / 3.0) * shear]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mode = waves.modes[index];
+                    assert_eq!(mode.directional_modulus_pa, modulus);
+                    near(
+                        mode.phase_speed_m_s,
+                        modulus.sqrt() / 2000.0_f64.sqrt(),
+                        3e-15,
+                    );
+                    for axis in 0..3 {
+                        near(
+                            mode.energy_velocity_m_s[axis],
+                            mode.phase_speed_m_s * waves.direction[axis],
+                            2e-15,
+                        );
+                    }
+                    let norm = mode.polarization.iter().map(|v| v * v).sum::<f64>();
+                    near(norm, 1.0, 3e-15);
+                    for previous in &waves.modes[..index] {
+                        let dot = (0..3)
+                            .map(|i| previous.polarization[i] * mode.polarization[i])
+                            .sum::<f64>();
+                        assert!(dot.abs() < 3e-15);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_original_isotropic_parameters_are_not_inferred_from_generic_tensors() {
+    let law = IsotropicElastic::new(1200.0, 0.3, 0.01).unwrap();
+    let isotropic = ElasticAcousticState::from_isotropic(&law, 1000.0, identity()).unwrap();
+    let generic =
+        ElasticAcousticState::try_new_mandel(law.stiffness(), 1000.0, identity(), 0.01).unwrap();
+    assert!(isotropic.is_explicitly_isotropic());
+    assert!(!generic.is_explicitly_isotropic());
+    assert_eq!(generic.isotropic_bulk_shear_pa(), None);
+    for normal in [[1.0, 0.0, 0.0], [0.5, -0.7, 0.2]] {
+        let exact = isotropic.directional_waves(normal).unwrap();
+        let dense = generic.directional_waves(normal).unwrap();
+        for index in 0..3 {
+            near(exact.modes[index].phase_speed_m_s, dense.modes[index].phase_speed_m_s, 5e-14);
+            for axis in 0..3 {
+                near(exact.christoffel_pa[index][axis], dense.christoffel_pa[index][axis], 5e-14);
+            }
+        }
+    }
+    for poisson in [(-1.0_f64).next_up(), 0.5_f64.next_down()] {
+        let law = IsotropicElastic::new(1200.0, poisson, 0.01).unwrap();
+        let state = ElasticAcousticState::from_isotropic(&law, 1000.0, identity()).unwrap();
+        assert_eq!(
+            state.isotropic_bulk_shear_pa(),
+            Some((
+                law.youngs / (3.0 * (1.0 - 2.0 * poisson)),
+                law.youngs / (2.0 * (1.0 + poisson)),
+            )),
+        );
+        for strain in [
+            [0.001, 0.001, 0.001, 0.0, 0.0, 0.0],
+            [0.002, -0.002, 0.0, 0.0, 0.0, 0.0],
+        ] {
+            let original = crate::SmallStrainLaw::stress(&law, &strain, &());
+            let response = state.strain_response(strain).unwrap();
+            for i in 0..6 {
+                near(response.stress_mandel_pa[i], original[i], 4e-15);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_uncoupled_normal_elasticity_retains_small_transverse_traction() {
+    let state =
+        ElasticAcousticState::from_bulk_and_shear(1000.0, 2e9, 3e9, identity(), 0.01).unwrap();
+    assert_eq!(state.stiffness_mandel_pa()[0][1], 0.0);
+    let strain = [0.001, 0.0, 1e-30, 0.0, 0.0, 0.0];
+    let response = state.strain_response(strain).unwrap();
+    near(response.stress_mandel_pa[2], 6e-21, 3e-15);
+    assert_eq!(response.stress_mandel_pa[1], 0.0);
+}
+
+#[test]
 fn orthotropic_principal_and_oblique_wave_speeds_match_closed_form() {
     let law =
         OrthotropicElastic::new([120e9, 60e9, 30e9], [0.0; 3], [20e9, 10e9, 15e9], 0.002).unwrap();

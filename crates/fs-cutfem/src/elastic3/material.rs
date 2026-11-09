@@ -244,14 +244,10 @@ impl ReferenceMaterial3 {
                 bulk,
                 ..
             } => Some((*bulk, *shear)),
-            Self::Source(material) if material.state.is_explicitly_isotropic() => {
-                let tensor = material.state.stiffness_mandel_pa();
-                // Use the retained stiffness itself, not a fitted isotropic
-                // proxy or a second inversion of its compliance.
-                let bulk = tensor[0][0] / 3.0 + tensor[0][1] / 3.0 + tensor[0][2] / 3.0;
-                Some((bulk, 0.5 * tensor[3][3]))
-            }
-            Self::Source(_) => None,
+            // A dense tensor can erase the weaker bulk or shear mode before
+            // B-bar sees it. Use the original explicit moduli, never a tensor
+            // row sum or an inferred isotropic fit.
+            Self::Source(material) => material.state.isotropic_bulk_shear_pa(),
         }
     }
 }
@@ -295,5 +291,50 @@ pub(super) fn engineering_strain(g: [f64; 3], component: usize) -> [f64; 6] {
         1 => [0.0, g[1], 0.0, g[0], g[2], 0.0],
         2 => [0.0, 0.0, g[2], 0.0, g[1], g[0]],
         _ => panic!("displacement component must lie in 0..3"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_blake3::ContentHash;
+
+    #[test]
+    fn bbar_retains_original_source_moduli_across_stiffness_contrasts() {
+        for (bulk, shear) in [(2.0, 1e18), (1e18, 2.0), (40e9, 20e9)] {
+            let state = ElasticAcousticState::from_bulk_and_shear(
+                1000.0,
+                bulk,
+                shear,
+                ContentHash([91; 32]),
+                0.1,
+            )
+            .unwrap();
+            let material = ReferenceMaterial3::from_state(state).unwrap();
+            assert_eq!(material.isotropic_bulk_shear(), Some((bulk, shear)));
+        }
+    }
+
+    #[test]
+    fn a_generic_tensor_does_not_infer_an_isotropic_bbar_law() {
+        let isotropic = ElasticAcousticState::from_bulk_and_shear(
+            1000.0,
+            40e9,
+            20e9,
+            ContentHash([92; 32]),
+            0.1,
+        )
+        .unwrap();
+        // Explicit constitutive identity remains significant even when the
+        // tensor happens to have isotropic coefficients.
+        let tensor = ElasticAcousticState::try_new_mandel(
+            *isotropic.stiffness_mandel_pa(),
+            1000.0,
+            ContentHash([93; 32]),
+            0.1,
+        )
+        .unwrap();
+        let material = ReferenceMaterial3::from_state(tensor).unwrap();
+        assert_eq!(material.isotropic_bulk_shear(), None);
     }
 }

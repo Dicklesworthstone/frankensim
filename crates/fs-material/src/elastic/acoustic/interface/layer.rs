@@ -273,6 +273,7 @@ impl<'a> IsotropicElasticLayer<'a> {
         if self.exterior.states.iter().all(|state| {
             state.density_kg_m3() == self.layer.density_kg_m3()
                 && state.stiffness_mandel_pa() == self.layer.stiffness_mandel_pa()
+                && state.isotropic_bulk_shear_pa() == self.layer.isotropic_bulk_shear_pa()
         }) {
             prepared.prepare_homogeneous()?;
         } else {

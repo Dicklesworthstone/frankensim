@@ -40,7 +40,9 @@ fn invalid(what: &str) -> MaterialError {
 pub struct ElasticAcousticState {
     stiffness_mandel_pa: Tangent6,
     density_kg_m3: f64,
-    explicitly_isotropic: bool,
+    // A rounded dense tensor cannot retain both modes when K/G is extreme.
+    // These are the original independent moduli, never inferred from a tensor.
+    isotropic_moduli_pa: Option<(f64, f64)>,
     material_state_identity: ContentHash,
     maximum_absolute_mandel_strain: f64,
     hydrostatic_compliance_pa_inv: [f64; 6],
@@ -146,14 +148,14 @@ impl ElasticAcousticState {
                 "isotropic bulk and shear moduli must be finite and positive",
             ));
         }
-        let mut state = Self::try_new_mandel(
+        Self::from_isotropic_parts(
             super::bulk_shear_stiffness(bulk_modulus_pa, shear_modulus_pa),
+            bulk_modulus_pa,
+            shear_modulus_pa,
             density_kg_m3,
             material_state_identity,
             maximum_absolute_mandel_strain,
-        )?;
-        state.explicitly_isotropic = true;
-        Ok(state)
+        )
     }
 
     /// Use an existing isotropic law and its declared strain ceiling.
@@ -162,14 +164,77 @@ impl ElasticAcousticState {
         density_kg_m3: f64,
         material_state_identity: ContentHash,
     ) -> Result<Self, MaterialError> {
-        let mut state = Self::try_new_mandel(
+        // The public law may have been changed after construction.
+        super::IsotropicElastic::new(law.youngs, law.poisson, law.strain_limit)?;
+        Self::from_isotropic_parts(
             law.stiffness(),
+            law.youngs / (3.0 * (1.0 - 2.0 * law.poisson)),
+            law.youngs / (2.0 * (1.0 + law.poisson)),
             density_kg_m3,
             material_state_identity,
             law.strain_limit,
-        )?;
-        state.explicitly_isotropic = true;
-        Ok(state)
+        )
+    }
+
+    fn from_isotropic_parts(
+        stiffness_mandel_pa: Tangent6,
+        bulk: f64,
+        shear: f64,
+        density_kg_m3: f64,
+        material_state_identity: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<Self, MaterialError> {
+        if !density_kg_m3.is_finite() || density_kg_m3 <= 0.0 {
+            return Err(invalid(
+                "elastic acoustic density must be finite and positive",
+            ));
+        }
+        if !maximum_absolute_mandel_strain.is_finite() || maximum_absolute_mandel_strain <= 0.0 {
+            return Err(invalid(
+                "elastic acoustic strain ceiling must be finite and positive",
+            ));
+        }
+        if material_state_identity == ContentHash([0; 32]) {
+            return Err(invalid(
+                "elastic acoustic material identity must not be zero",
+            ));
+        }
+        // K>0 and G>0 are the exact isotropic stability conditions. Factoring
+        // the dense representation instead would reject stable soft shear or
+        // volume modes that are below its normal-block rounding resolution.
+        let compressibility_pa_inv = bulk.recip();
+        if [bulk, shear, compressibility_pa_inv]
+            .into_iter()
+            .any(|value| !value.is_finite() || value <= 0.0)
+            || stiffness_mandel_pa.iter().flatten().any(|value| !value.is_finite())
+        {
+            return Err(invalid("isotropic elastic response is unrepresentable"));
+        }
+        let stiffness_scale_pa = stiffness_mandel_pa
+            .iter()
+            .flatten()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let normal_compliance = compressibility_pa_inv / 3.0;
+        if normal_compliance == 0.0 {
+            return Err(invalid("isotropic hydrostatic compliance is unrepresentable"));
+        }
+        Ok(Self {
+            stiffness_mandel_pa,
+            density_kg_m3,
+            isotropic_moduli_pa: Some((bulk, shear)),
+            material_state_identity,
+            maximum_absolute_mandel_strain,
+            hydrostatic_compliance_pa_inv: [
+                normal_compliance,
+                normal_compliance,
+                normal_compliance,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            compressibility_pa_inv,
+            stiffness_scale_pa,
+        })
     }
 
     /// Use an existing orthotropic law in its principal frame.
@@ -269,7 +334,7 @@ impl ElasticAcousticState {
         Ok(Self {
             stiffness_mandel_pa,
             density_kg_m3,
-            explicitly_isotropic: false,
+            isotropic_moduli_pa: None,
             material_state_identity,
             maximum_absolute_mandel_strain,
             hydrostatic_compliance_pa_inv,
@@ -279,6 +344,11 @@ impl ElasticAcousticState {
     }
 
     /// Original Mandel coefficients, without symmetry projection or rotation.
+    ///
+    /// At extreme isotropic stiffness contrasts, rounding of this dense tensor
+    /// can hide the weaker bulk or shear mode. The original moduli accessor and
+    /// the constitutive, pressure and wave queries retain both modes; arbitrary
+    /// dense tensor consumers still need to account for this conditioning.
     #[must_use]
     pub const fn stiffness_mandel_pa(&self) -> &Tangent6 {
         &self.stiffness_mandel_pa
@@ -295,7 +365,16 @@ impl ElasticAcousticState {
     /// from approximately equal tensor coefficients or discard anisotropy.
     #[must_use]
     pub const fn is_explicitly_isotropic(&self) -> bool {
-        self.explicitly_isotropic
+        self.isotropic_moduli_pa.is_some()
+    }
+
+    /// Original independent `(bulk, shear)` moduli [Pa] for explicit isotropy.
+    /// Generic tensor, cubic and orthotropic constructors return `None`, even
+    /// if their rounded coefficients happen to resemble an isotropic tensor.
+    /// Consumers must not reconstruct a weak bulk mode by summing tensor rows.
+    #[must_use]
+    pub const fn isotropic_bulk_shear_pa(&self) -> Option<(f64, f64)> {
+        self.isotropic_moduli_pa
     }
 
     /// Original material-state identity, unchanged by derived queries.
@@ -319,7 +398,10 @@ impl ElasticAcousticState {
     /// Hydrostatic bulk modulus, reciprocal of volume compressibility [Pa].
     #[must_use]
     pub fn bulk_modulus_pa(&self) -> f64 {
-        self.compressibility_pa_inv.recip()
+        self.isotropic_moduli_pa.map_or_else(
+            || self.compressibility_pa_inv.recip(),
+            |(bulk, _)| bulk,
+        )
     }
 
     /// Apply hydrostatic stress `-pressure_pa*I` within the admitted strain domain.
@@ -353,9 +435,11 @@ impl ElasticAcousticState {
 
     /// Solve the Christoffel modes for any finite nonzero direction.
     ///
-    /// The existing tensor owner supplies the orthonormal Mandel basis; the
-    /// existing `fs-la` spectral owner solves the fixed 3x3 symmetric problem.
-    /// Energy transport uses the same tensor contraction, without angular
+    /// Explicitly isotropic states use the analytical longitudinal and two
+    /// transverse modes from their original bulk and shear moduli. For general
+    /// tensors, the orthonormal Mandel basis and existing `fs-la` spectral owner
+    /// solve the fixed 3x3 symmetric problem. Energy transport is analytical for
+    /// isotropy and uses the tensor contraction otherwise, without angular
     /// differencing or additional eigenproblems. This is a local infinitesimal
     /// wave query, not a propagation solver.
     pub fn directional_waves(
@@ -369,6 +453,9 @@ impl ElasticAcousticState {
         let scaled = direction.map(|value| value / scale);
         let length = det::sqrt(scaled.iter().map(|value| value * value).sum());
         let direction = scaled.map(|value| value / length);
+        if let Some((bulk, shear)) = self.isotropic_moduli_pa {
+            return self.isotropic_waves(direction, bulk, shear);
+        }
         let basis = mandel_basis();
         let projection: [[f64; 3]; 6] = core::array::from_fn(|a| {
             core::array::from_fn(|i| (0..3).map(|j| basis[a][i][j] * direction[j]).sum())
@@ -484,6 +571,85 @@ impl ElasticAcousticState {
         {
             return Err(invalid("elastic Christoffel matrix is unrepresentable"));
         }
+        Ok(DirectionalElasticWaves {
+            material_state_identity: self.material_state_identity,
+            direction,
+            christoffel_pa,
+            modes,
+        })
+    }
+    // Gamma = G I + (K + G/3) n n^T. Its two transverse eigenvalues
+    // are G and its longitudinal eigenvalue is K + 4G/3. Keep these modes
+    // directly: no dense eigensolve can recover G after it is rounded out of
+    // Gamma. The deterministic transverse basis has no unique physical axis.
+    fn isotropic_waves(
+        &self,
+        direction: [f64; 3],
+        bulk: f64,
+        shear: f64,
+    ) -> Result<DirectionalElasticWaves, MaterialError> {
+        let axis = (1..3).fold(0, |smallest, i| {
+            if direction[i].abs() < direction[smallest].abs() {
+                i
+            } else {
+                smallest
+            }
+        });
+        let mut transverse = [0.0; 3];
+        transverse[(axis + 1) % 3] = direction[(axis + 2) % 3];
+        transverse[(axis + 2) % 3] = -direction[(axis + 1) % 3];
+        let norm = det::sqrt(transverse.iter().map(|value| value * value).sum());
+        transverse = transverse.map(|value| value / norm);
+        let second = core::array::from_fn(|i| {
+            direction[(i + 1) % 3] * transverse[(i + 2) % 3]
+                - direction[(i + 2) % 3] * transverse[(i + 1) % 3]
+        });
+        let longitudinal = bulk + (4.0 / 3.0) * shear;
+        let mut modes = [ElasticWaveMode {
+            polarization: [0.0; 3],
+            directional_modulus_pa: 0.0,
+            phase_speed_m_s: 0.0,
+            impedance_pa_s_m: 0.0,
+            energy_velocity_m_s: [0.0; 3],
+        }; 3];
+        for (index, mut polarization) in [transverse, second, direction].into_iter().enumerate() {
+            let directional_modulus_pa = if index < 2 { shear } else { longitudinal };
+            let phase_speed_m_s = det::sqrt(directional_modulus_pa) / det::sqrt(self.density_kg_m3);
+            let impedance_pa_s_m = self.density_kg_m3 * phase_speed_m_s;
+            if [directional_modulus_pa, phase_speed_m_s, impedance_pa_s_m]
+                .into_iter()
+                .any(|value| !value.is_finite() || value <= 0.0)
+            {
+                return Err(invalid(
+                    "elastic wave response is nonpositive or unrepresentable",
+                ));
+            }
+            let pivot = (1..3).fold(0, |largest, i| {
+                if polarization[i].abs() > polarization[largest].abs() {
+                    i
+                } else {
+                    largest
+                }
+            });
+            if polarization[pivot] < 0.0 {
+                polarization = polarization.map(|value| -value);
+            }
+            modes[index] = ElasticWaveMode {
+                polarization,
+                directional_modulus_pa,
+                phase_speed_m_s,
+                impedance_pa_s_m,
+                energy_velocity_m_s: direction.map(|value| phase_speed_m_s * value),
+            };
+        }
+        let christoffel_pa = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                (bulk + shear / 3.0).mul_add(
+                    direction[i] * direction[j],
+                    if i == j { shear } else { 0.0 },
+                )
+            })
+        });
         Ok(DirectionalElasticWaves {
             material_state_identity: self.material_state_identity,
             direction,

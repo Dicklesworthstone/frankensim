@@ -145,24 +145,42 @@ fn apply(c: &Tangent6, strain: &Voigt) -> Voigt {
 fn isotropic_stress(youngs: f64, poisson: f64, strain: &Voigt) -> Voigt {
     let bulk = youngs / (3.0 * (1.0 - 2.0 * poisson));
     let twice_shear = youngs / (1.0 + poisson);
-    let (normal_sum, normal_error) = fs_math::eft::two_sum(strain[0], strain[1]);
-    let (trace, trace_error) = fs_math::eft::two_sum(normal_sum, strain[2]);
-    let trace_low = normal_error + trace_error;
-    let pressure = bulk * (trace + trace_low);
-    // Retain the division residual as well as the summation residual: merely
-    // subtracting a rounded mean creates spurious O(G) stress under uniform
-    // expansion when the true bulk mode is much softer than the shear mode.
-    let mean = trace / 3.0;
-    let mean_low = ((-3.0_f64).mul_add(mean, trace) + trace_low) / 3.0;
+    isotropic_stress_from_moduli(bulk, twice_shear, strain)
+}
+
+// The same spherical/deviatoric arithmetic serves tensor-Voigt and Mandel
+// coordinates: only the shear inputs' normalization changes, not 2G.
+pub(crate) fn isotropic_stress_from_moduli(
+    bulk: f64,
+    twice_shear: f64,
+    strain: &Voigt,
+) -> Voigt {
+    let (trace, deviator) = isotropic_strain_modes(strain);
+    let pressure = bulk * trace;
     let mut stress = [0.0; 6];
     for i in 0..3 {
-        let deviator = (strain[i] - mean) - mean_low;
-        stress[i] = twice_shear.mul_add(deviator, pressure);
+        stress[i] = twice_shear.mul_add(deviator[i], pressure);
     }
     for i in 3..6 {
         stress[i] = twice_shear * strain[i];
     }
     stress
+}
+
+pub(crate) fn isotropic_strain_modes(strain: &Voigt) -> (f64, Voigt) {
+    let (normal_sum, normal_error) = fs_math::eft::two_sum(strain[0], strain[1]);
+    let (trace, trace_error) = fs_math::eft::two_sum(normal_sum, strain[2]);
+    let trace_low = normal_error + trace_error;
+    // Retain the division residual as well as the summation residual: merely
+    // subtracting a rounded mean creates spurious O(G) stress under uniform
+    // expansion when the true bulk mode is much softer than the shear mode.
+    let mean = trace / 3.0;
+    let mean_low = ((-3.0_f64).mul_add(mean, trace) + trace_low) / 3.0;
+    let mut deviator = *strain;
+    for i in 0..3 {
+        deviator[i] = (strain[i] - mean) - mean_low;
+    }
+    (trace + trace_low, deviator)
 }
 
 impl SmallStrainLaw for IsotropicElastic {
