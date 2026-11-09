@@ -24,8 +24,9 @@ use super::{
 /// Local discretization, counterflow resolution and total work limits.
 #[derive(Clone, Copy, Debug)]
 pub struct RegionalCarreauResolutionControls {
-    /// Maximum full comparison interval. Retained native intervals are half
-    /// this width or smaller. Author drive discontinuities explicitly; native
+    /// Maximum full comparison interval, allowing a one-ULP endpoint snap.
+    /// Retained native intervals are half its actual width or smaller.
+    /// Author drive discontinuities explicitly; native
     /// thermal inventory events retain their separate admission.
     pub maximum_interval_s: f64,
     /// Refinement floor; a shorter event/final interval cannot refine again.
@@ -231,6 +232,10 @@ pub fn advance_resolved<'m, T, E>(
 /// The next comparison starts exactly there; no callback is queried at the
 /// discontinuity itself. Its comparison-width proposal restarts at the authored
 /// maximum, since the previous forcing's local estimate no longer applies.
+/// An endpoint exactly one floating-point successor below the next event or
+/// target snaps to that authored time; native steps and work use the actual
+/// resulting spans. This avoids a nonrepresentable final comparison without
+/// bypassing any physical or temporal acceptance check.
 /// A pressure/head jump preserves the actual velocity
 /// history. No waveform, smoothing, valve topology or impulsive state reset is
 /// inferred. Native thermal inventory events still require their own admission.
@@ -446,11 +451,17 @@ fn advance_with_driver<'m, T, E>(
             .copied()
             .unwrap_or(target_s)
             .min(target_s);
-        let end = if proposed >= segment_end - start {
+        let mut end = if proposed >= segment_end - start {
             segment_end
         } else {
             start + proposed
         };
+        // A representable decimal cap can land one ULP below its authored
+        // endpoint (for example 0.074 + 0.037 versus 0.111). Retain the actual
+        // full/fine intervals; never skip the remaining physical duration.
+        if end.next_up() == segment_end {
+            end = segment_end;
+        }
         let width = end - start;
         let middle = start + 0.5 * width;
         if !end.is_finite() || !(start < middle && middle < end) {
