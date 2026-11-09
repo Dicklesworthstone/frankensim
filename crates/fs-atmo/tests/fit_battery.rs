@@ -317,7 +317,7 @@ fn determinism_and_golden() {
         fs_blake3::hash_domain("org.frankensim.fs-atmo.v04b2-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "554158632484fb4afaf4bf909afaf7752c3cbcc6a73cb2f61a720a070c4bedc5",
+        digest, "1fbb74d5b3db7d209833ca15c9b2c0fa7be076664594d460159877f9e88f4547",
         "fit golden moved — determinism regression or an intentional \
          target/fit change requiring the golden-bump protocol"
     );

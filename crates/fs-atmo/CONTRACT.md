@@ -56,6 +56,14 @@ FetchAdjustedMassConsistent mode.
   reuses the retained stress instead of repeating the target quadrature.
   Γ = 0 fits the variances with zero cross-correlation, without dividing by a
   zero shear-stress target. Nonfinite heights/covariances/advection refuse.
+- `mann::stress_integrals` supplies those four target stresses over the declared
+  band `0.01 <= |k|L <= 1000`. A deterministic 64×48×24 Gauss–Legendre rule
+  integrates dimensionless log radius, polar angle and symmetry-reduced azimuth.
+  Eddy lifetime is evaluated once per radius; angular trigonometry is reused.
+  Compensated accumulation retains shear stress, and reflection symmetry makes
+  `uv` and `vw` exactly zero. The isotropic limit uses its analytic angular
+  integral. Dimensional scaling is `alpha_eps23 * L^(2/3)`, avoiding artificial
+  overflow from dimensional wavevector powers. No omitted-band energy is added.
 - `mann_field::{MannSpectralModel, HomogeneousMannField}` provides a separate
   homogeneous prescribed velocity field from the full Mann spectral tensor.
   Each finite-band wavevector has two transverse polarizations whose complete
@@ -231,8 +239,17 @@ divergence below 1e-14 on the fixture, gradient finite-difference order
 2 ± 0.05, read-only query/batch equivalence, bitwise checkpoint/resume, and
 velocity/gradient/air-property consistency.
 
+`tests/mann_battery.rs` checks target integration against independently converged
+high-resolution references at Γ = 0, 1, 3.9, 7 and the admitted cap 10, with
+2e-6 relative tolerance on all four nonzero stresses. An independent converging
+Simpson energy integral checks the isotropic limit. Exact tensor symmetries and
+dimensional rescaling, including otherwise ill-conditioned wavevector scales,
+are covered. These numerical checks concern the declared finite band; they do
+not establish a continuum spectral tail or empirical atmospheric calibration.
+
 `tests/fit_battery.rs` additionally checks the finite Γ = 0 limit, seed/target
-binding, input refusal, and the unchanged nonzero-shear fit golden. The
+binding, input refusal, and the nonzero-shear fit golden. The Mann-integral and
+fit goldens change with the corrected quadrature target. The
 existing per-truncation and bootstrap checks concern the fitted one-point
 stresses, not full spectral/coherence agreement.
 

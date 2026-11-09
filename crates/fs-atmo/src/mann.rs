@@ -199,38 +199,135 @@ pub fn mann_tensor(p: &MannParams, k: [f64; 3]) -> Result<[[f64; 3]; 3], Refusal
     ])
 }
 
-/// Reynolds-stress integrals ∫Φ_ij d³k by deterministic log-spherical
-/// quadrature (fixed grid — no randomness).
+/// Reynolds stresses ∫Φ_ij d³k over 0.01 ≤ |k|L ≤ 1000.
+///
+/// Fixed Gauss–Legendre quadrature in log(|k|L), polar angle and a
+/// symmetry-reduced azimuth resolves the sheared energy-containing scales.
+/// The integration is dimensionless: level and length enter only through
+/// α·ε^(2/3)·L^(2/3). The finite radial band is not extrapolated or rescaled.
 ///
 /// # Errors
-/// Tensor refusals pass through.
+/// Parameter and hypergeometric refusals pass through.
 pub fn stress_integrals(p: &MannParams) -> Result<[[f64; 3]; 3], Refusal> {
     p.admit()?;
-    let (nr, nth, nph) = (96usize, 24usize, 24usize);
-    let (r_lo, r_hi) = (1e-2 / p.length_m, 1e3 / p.length_m);
-    let lr_lo = det::ln(r_lo);
-    let lr_hi = det::ln(r_hi);
-    let dlr = (lr_hi - lr_lo) / nr as f64;
-    let dth = core::f64::consts::PI / nth as f64;
-    let dph = core::f64::consts::TAU / nph as f64;
-    let mut out = [[0.0f64; 3]; 3];
-    for ir in 0..nr {
-        let r = det::exp(lr_lo + (ir as f64 + 0.5) * dlr);
-        for it in 0..nth {
-            let th = (it as f64 + 0.5) * dth;
-            let (sth, cth) = (det::sin(th), det::cos(th));
-            for ip in 0..nph {
-                let ph = (ip as f64 + 0.5) * dph;
-                let k = [r * sth * det::cos(ph), r * sth * det::sin(ph), r * cth];
-                let phi = mann_tensor(p, k)?;
-                let w = r * r * r * sth * dlr * dth * dph; // r² sinθ · r dlr
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[i][j] += phi[i][j] * w;
-                    }
+    let radial = gauss_legendre::<64>();
+    let lr_lo = det::ln(1e-2);
+    let lr_hi = det::ln(1e3);
+    let lr_mid = 0.5 * (lr_hi + lr_lo);
+    let lr_half = 0.5 * (lr_hi - lr_lo);
+    let scale = p.alpha_eps23 * det::pow(p.length_m, 2.0 / 3.0);
+    let mut stress = [0.0; 4];
+    let mut compensation = [0.0; 4];
+
+    // For Γ = 0, the angular integral is exactly (2/3)∫E(k) dk
+    // on each diagonal. Do not manufacture small anisotropy or uw by
+    // numerically integrating an analytically isotropic angular factor.
+    if p.gamma == 0.0 {
+        for (node, weight) in radial {
+            let r = det::exp(lr_mid + lr_half * node);
+            let r2 = r * r;
+            let value =
+                weight * lr_half * (2.0 / 3.0) * r2 * r2 * r / det::pow(1.0 + r2, 17.0 / 6.0);
+            compensated_add(&mut stress[0], &mut compensation[0], value);
+        }
+        let variance = scale * stress[0];
+        return Ok([
+            [variance, 0.0, 0.0],
+            [0.0, variance, 0.0],
+            [0.0, 0.0, variance],
+        ]);
+    }
+
+    let pi = core::f64::consts::PI;
+    let polar = gauss_legendre::<48>().map(|(node, weight)| {
+        let (sin, cos) = det::sin_cos(0.5 * pi * (node + 1.0));
+        (sin, cos, weight * 0.5 * pi * sin)
+    });
+    let azimuth = gauss_legendre::<24>().map(|(node, weight)| {
+        let (sin, cos) = det::sin_cos(0.25 * pi * (node + 1.0));
+        // Φ11, Φ22, Φ33 and Φ13 are invariant under ky reflection and
+        // full k inversion. These map all azimuths onto this quadrant.
+        // Φ12 and Φ23 are odd under ky reflection and integrate to zero.
+        (sin, cos, weight * pi)
+    });
+    for (node, weight) in radial {
+        let r = det::exp(lr_mid + lr_half * node);
+        let r2 = r * r;
+        // Lifetime depends only on |k|L: evaluate its series once per
+        // radius, not once per angular point. All dimensional powers
+        // cancel before the spectral tensor is integrated.
+        let beta = p.gamma * det::pow(r, -2.0 / 3.0) / det::sqrt(hypergeom_mann(-1.0 / r2)?);
+        let radial_weight = weight * lr_half * r2 * r2 * r / (4.0 * pi);
+        for (sth, n3, polar_weight) in polar {
+            let np2 = sth * sth;
+            for (sph, cph, azimuth_weight) in azimuth {
+                let n1 = sth * cph;
+                let n2 = sth * sph;
+                let n30 = n3 + beta * n1;
+                let n0sq = np2 + n30 * n30;
+                // Same distortion algebra as mann_tensor, with |n| = 1.
+                // Interior quadrature nodes avoid both polar and n1=0
+                // singularities; sqrt(np2) is the positive polar sine.
+                let c1 = beta * n1 * n1 * (n0sq - 2.0 * n30 * n30 + beta * n1 * n30) / np2;
+                let c2 =
+                    n2 * n0sq / (np2 * sth) * det::atan2(beta * n1 * sth, n0sq - n30 * n1 * beta);
+                let z1 = c1 - n2 / n1 * c2;
+                let z2 = n2 / n1 * c1 + c2;
+                let tensor = [
+                    n0sq - n1 * n1 - 2.0 * n1 * n30 * z1 + np2 * z1 * z1,
+                    n0sq - n2 * n2 - 2.0 * n2 * n30 * z2 + np2 * z2 * z2,
+                    n0sq * n0sq * np2,
+                    n0sq * (-n1 * n30 + np2 * z1),
+                ];
+                // E(k0)/|k0|^4 cancels its (|k0|L)^4 numerator.
+                // The remaining r^5 includes the r^3 log-radius Jacobian.
+                let w = radial_weight * polar_weight * azimuth_weight
+                    / det::pow(1.0 + r2 * n0sq, 17.0 / 6.0);
+                for i in 0..4 {
+                    compensated_add(&mut stress[i], &mut compensation[i], w * tensor[i]);
                 }
             }
         }
     }
-    Ok(out)
+    let [u2, v2, w2, uw] = stress.map(|value| scale * value);
+    Ok([[u2, 0.0, uw], [0.0, v2, 0.0], [uw, 0.0, w2]])
+}
+
+fn compensated_add(sum: &mut f64, compensation: &mut f64, value: f64) {
+    let increment = value - *compensation;
+    let next = *sum + increment;
+    *compensation = (next - *sum) - increment;
+    *sum = next;
+}
+
+/// Fixed-order Gauss–Legendre nodes and weights on [-1, 1]. Newton's
+/// iteration is bounded, and each mirrored pair shares exactly one weight.
+fn gauss_legendre<const N: usize>() -> [(f64, f64); N] {
+    let polynomial = |x: f64| {
+        let (mut previous, mut value) = (1.0, x);
+        for degree in 2..=N {
+            let d = degree as f64;
+            let next = ((2.0 * d - 1.0) * x * value - (d - 1.0) * previous) / d;
+            (previous, value) = (value, next);
+        }
+        let derivative = N as f64 * (x * value - previous) / (x * x - 1.0);
+        (value, derivative)
+    };
+    let mut nodes = [(0.0, 0.0); N];
+    for i in 0..N.div_ceil(2) {
+        let mut root = det::cos(core::f64::consts::PI * (i as f64 + 0.75) / (N as f64 + 0.5));
+        for _ in 0..16 {
+            let (value, derivative) = polynomial(root);
+            let correction = value / derivative;
+            root -= correction;
+            if correction.abs() <= 2.0 * f64::EPSILON {
+                break;
+            }
+        }
+        let (_, derivative) = polynomial(root);
+        let weight = 2.0 / ((1.0 - root * root) * derivative * derivative);
+        nodes[i] = (-root, weight);
+        nodes[N - 1 - i] = (root, weight);
+    }
+    nodes
 }
