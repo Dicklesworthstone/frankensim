@@ -132,7 +132,7 @@ fn physical(error: FiniteChannelError, elapsed_s: f64, duration_s: f64) -> Error
         }
     }
 }
-fn retryable(error: &Error) -> bool {
+pub(in super::super) fn retryable(error: &Error) -> bool {
     match error {
         Error::Step {
             error: FiniteChannelError::Transport(e),
@@ -145,7 +145,7 @@ fn retryable(error: &Error) -> bool {
         _ => false,
     }
 }
-pub(super) fn ratio(
+pub(in super::super) fn ratio(
     a: f64,
     b: f64,
     scale: f64,
@@ -163,7 +163,7 @@ pub(super) fn ratio(
     }
 }
 
-fn gas_error(
+pub(in super::super) fn gas_error(
     coarse: &BTreeMap<u64, ClosedGasParcel>,
     fine: &BTreeMap<u64, ClosedGasParcel>,
     controls: EffusionAdvanceControls,
@@ -222,7 +222,7 @@ fn gas_error(
     Ok(error)
 }
 
-fn wall_error<'l, 'p>(
+pub(in super::super) fn wall_error<'l, 'p>(
     coarse: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     fine: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     controls: EffusionAdvanceControls,
@@ -431,7 +431,7 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
     })
 }
 
-pub(super) type ThermalStepParts<'l, 'p, S> = (
+pub(in super::super) type ThermalStepParts<'l, 'p, S> = (
     BTreeMap<u64, ClosedGasParcel>,
     BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     S,
@@ -439,7 +439,7 @@ pub(super) type ThermalStepParts<'l, 'p, S> = (
 
 /// Shared time integration for closed channels and finite-wall vacuum outlets.
 /// The physical step and complete-window audit retain their original owners.
-pub(super) struct ThermalHistory<'l, 'p, S> {
+pub(in super::super) struct ThermalHistory<'l, 'p, S> {
     pub parcels: BTreeMap<u64, ClosedGasParcel>,
     pub walls: BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     pub steps: Vec<S>,
@@ -450,7 +450,7 @@ pub(super) struct ThermalHistory<'l, 'p, S> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance_history<'l, 'p, S, C: FnMut() -> bool>(
+pub(in super::super) fn advance_history<'l, 'p, S, C: FnMut() -> bool>(
     parcels: &BTreeMap<u64, ClosedGasParcel>,
     walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     duration_s: f64,

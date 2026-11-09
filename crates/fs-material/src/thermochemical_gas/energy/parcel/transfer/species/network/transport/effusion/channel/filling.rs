@@ -12,6 +12,9 @@
 //! fixed vessels absorb molecular momentum without boundary work. Their motion,
 //! angular momentum, spatial filling transient and other heat paths are absent.
 
+/// Error-controlled startup and reciprocal evolution with the same finite wall.
+pub mod trajectory;
+
 pub use super::super::filling::EffusionReceiver;
 use super::thermal::{
     self, FiniteChannelError, FiniteChannelNetworkLink, FiniteChannelNetworkStep,
@@ -383,26 +386,73 @@ pub fn step_candidate<'l, 'p>(
                 .map_err(|error| endpoint(link.receiver, error))?;
         }
     }
+    let balance = audit_pair(
+        donor,
+        receiver,
+        wall,
+        &next_donor,
+        &next_receiver,
+        &next_wall,
+        link,
+        controls,
+        &mut cancelled,
+    )?;
+    poll(&mut cancelled)?;
+    Ok(FiniteChannelFillCandidate {
+        donor: next_donor,
+        receiver: next_receiver,
+        wall: next_wall,
+        step: FiniteChannelFillStep {
+            duration_s,
+            transfer,
+            balance,
+        },
+    })
+}
+
+// Shared by one physical stage and the complete accepted trajectory. The
+// original empty volume contributes no invented thermodynamic state.
+#[allow(clippy::too_many_arguments)]
+fn audit_pair(
+    donor: &ClosedGasParcel,
+    receiver: &EffusionReceiver,
+    wall: &FixedVolumeChannelWall<'_, '_>,
+    next_donor: &ClosedGasParcel,
+    next_receiver: &EffusionReceiver,
+    next_wall: &FixedVolumeChannelWall<'_, '_>,
+    link: FiniteChannelFillLink<'_>,
+    controls: GasTransportSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<FiniteChannelFillBalance, Error> {
+    poll(cancelled)?;
+    if wall.mass_kg().to_bits() != next_wall.mass_kg().to_bits()
+        || wall.volume_m3().to_bits() != next_wall.volume_m3().to_bits()
+        || wall.law().identity() != next_wall.law().identity()
+    {
+        return Err(Error::Invalid(
+            "finite filling changed its original material wall",
+        ));
+    }
     let gas = match (receiver.gas(), next_receiver.gas()) {
         (Some(before), Some(after)) => entropy::closed_inventory_change(
             [
-                (link.donor, donor, &next_donor),
+                (link.donor, donor, next_donor),
                 (link.receiver, before, after),
             ],
             controls.exchange.mass_tolerance_kg,
-            &mut cancelled,
+            &mut *cancelled,
         ),
         (None, Some(after)) => entropy::newly_filled_pair_change(
             donor,
-            (link.donor, &next_donor),
+            (link.donor, next_donor),
             (link.receiver, after),
             controls.exchange.mass_tolerance_kg,
-            &mut cancelled,
+            &mut *cancelled,
         ),
         (None, None) => entropy::closed_inventory_change(
-            [(link.donor, donor, &next_donor)],
+            [(link.donor, donor, next_donor)],
             controls.exchange.mass_tolerance_kg,
-            &mut cancelled,
+            &mut *cancelled,
         ),
         (Some(_), None) => return Err(Error::Invalid("finite receiver was silently evacuated")),
     }
@@ -458,17 +508,8 @@ pub fn step_candidate<'l, 'p>(
             tolerance_j_k: controls.entropy_tolerance_j_k,
         });
     }
-    poll(&mut cancelled)?;
-    Ok(FiniteChannelFillCandidate {
-        donor: next_donor,
-        receiver: next_receiver,
-        wall: next_wall,
-        step: FiniteChannelFillStep {
-            duration_s,
-            transfer,
-            balance,
-        },
-    })
+    poll(cancelled)?;
+    Ok(balance)
 }
 
 #[cfg(test)]

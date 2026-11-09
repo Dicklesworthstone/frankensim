@@ -23565,3 +23565,69 @@ and an unused stress-square overflow per branch.
 The new causal source/tests were not native-compiled or executed because the
 execution environment became unavailable; earlier settled tests do not prove
 this new path.
+
+
+## Adaptive evacuated-receiver filling with the original finite channel wall
+
+`species::network::transport::effusion::channel::filling::trajectory::advance_candidate`
+advances an exactly evacuated finite receiver, its original finite donor, and
+one finite material channel wall over an authored physical window. It returns
+an atomic candidate for all three endpoints together with the actual accepted
+first-fill, first reciprocal, and continuation reports. The original empty
+volume has no invented gas seed, temperature, pressure, or entropy.
+
+Startup compares one full original capture with one half capture followed
+immediately by a real reciprocal finite-wall half step. Thus the newly formed
+receiver's return beam participates in the startup error estimate; only the
+refined pair is accepted. The existing finite-wall
+`thermal::trajectory::advance_history` owns the continuation. Seven helper/type
+visibility changes expose its existing implementation to this sibling; its
+continuing adaptive algorithm is unchanged.
+
+Error estimates include the original gas temperature, pressure and species
+inventories; chamber energies relative to the original species' internal
+energies at the initial donor temperature; nonlinear wall temperature and
+storage; separate directional transmitted and gross reflected species masses;
+and positive/negative accommodation heat into each gas and the wall. Zero-mass
+species do not query inactive caloric sources. These are local temporal
+estimates, not certified global error bounds.
+
+A conservative initial pressure ceiling uses the original transmitted molar
+flux, actual receiver volume, receiver solve temperature bracket and admitted
+mouth/donor pressure. This protects the original first-fill step without
+giving vacuum a thermodynamic state. A ceiling below the authored minimum
+step returns a typed initial-pressure-limit refusal. Original source,
+composition, caloric and material-domain errors remain hard failures; only
+the original native physical/adaptive retry categories may reduce a step.
+
+Startup and continuation share attempt, accepted-interval and retained-report
+budgets. Coarse and rejected candidates count as attempted work; their
+physical reports are not accepted history. Cancellation remains typed through
+the pressure prelude, every physical probe, and final publication. The clock
+guard rejects a startup interval swallowed by the represented remaining
+duration and requires startup plus continuation to equal the authored window.
+A closed path retains the exactly empty receiver and unchanged donor/wall for
+the complete window with one inactive evaluation.
+
+The whole accepted window reuses the parent's original gas-plus-wall mass,
+source-relative energy, and entropy audit with one fixed physical budget.
+Wall mass, volume and source identity must remain unchanged. The original
+sensible-entropy material law owns finite wall entropy; the newly formed
+receiver contributes its actual gas entropy. All three final states publish
+together only after this audit succeeds.
+
+These remain quasistatic well-mixed gases in rigid vessels and a stationary
+diffuse channel. The initial non-Maxwellian filling transient and channel
+flight-time storage are outside this model.
+
+Validation evidence: the initial production trajectory and audit/helper
+changes were parsed/formatted by the pinned Rust formatter before the executor
+disconnected. Recovered final edits and four new native test groups were
+statically reviewed against immutable original APIs, but were not compiled
+or executed. Tests cover independent continuous monatomic mass/internal-energy
+balances with nonlinear wall storage, tighter-step convergence, exact accepted
+history replay, species accommodation/fractionation, formation-datum invariance,
+closed/elastic/pressure-limited startup, work/minimum-time bounds, original
+source refusals and early/final cancellation with unchanged original endpoints.
+Independent arithmetic probes support the fixtures, but do not constitute
+execution of the Rust physical owners.
