@@ -429,6 +429,67 @@ impl FlowField {
         )
     }
 
+    /// Compose independently supplied molecular bulk viscosity, resolved SGS
+    /// and the original spatial reservoir-pressure profile on one material step.
+    ///
+    /// Original transport sources supply mu and `bulk_viscosity_pa_s` supplies
+    /// zeta at the same material state. Molecular stress and physical heating
+    /// are `2 mu dev(D) + zeta div(u) I` and
+    /// `2 mu dev(D):dev(D) + zeta div(u)^2`. SGS adds only
+    /// `2 rho nu_t dev(D)` using actual `rho = M/V`; its resolved-energy
+    /// transfer remains separate from molecular heat. The independent bulk
+    /// coefficient never enters the closure or relaxes its molecular shear cap.
+    ///
+    /// The native predictor retains physical mouth half-cell inertia, zero
+    /// total normal traction and zero tangential reservoir trace. The original
+    /// pressure stage then applies the authored profile once. The same
+    /// nonlinear stress solve, total-stress harmonic mouth transmission and
+    /// accepted material routes are shared with the other entries.
+    ///
+    /// This retains the first-order frozen-source split, opposed-reservoir
+    /// scope and exploratory SGS policy. Zero model coefficients take the
+    /// exact original molecular shear/bulk reservoir path.
+    ///
+    /// # Errors
+    /// Invalid bulk/shear coefficients, boundary/profile authority, source,
+    /// model, local cap, native-work, caloric, transport or cancellation
+    /// failure publishes no candidate and leaves all inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_bulk_viscosity_sgs_and_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        sgs: FvSgsConfig,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        let axis = Self::admit_material_viscosity_pressure_mouth(
+            faces,
+            viscosity.boundaries,
+            input.boundary_velocity_m_s,
+        )?;
+        self.advance_viscous_material(
+            domain,
+            faces,
+            Some(profile),
+            Some(axis),
+            input,
+            viscosity,
+            Some(bulk_viscosity_pa_s),
+            Some(sgs),
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn advance_viscous_material(
         &self,

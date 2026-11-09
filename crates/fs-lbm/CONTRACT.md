@@ -2730,3 +2730,26 @@ nightly syntax checks, scoped formatting and independent scalar energy
 arithmetic passed. Native compilation and execution remain unverified after
 the upstream asupersync build limitation; no test-pass or performance claim is
 made for these unexecuted regressions.
+
+### Independent molecular bulk response at SGS reservoirs
+
+`FlowField::advance_material_momentum_with_bulk_viscosity_sgs_and_pressure_profile`
+adds the authored molecular bulk field to the same original material-reservoir
+composition. Molecular stress remains `2 mu dev(D) + zeta div(u) I` and its
+physical heat retains the separate `zeta div(u)^2` contribution. SGS remains
+purely deviatoric, uses actual M/V, and contributes only to its modeled-transfer
+account. Molecular shear viscosity alone constrains the SGS ratio; increasing
+bulk viscosity cannot relax that cap.
+
+Normal-traction mouths retain their actual physical half-cell inertia and
+shared two-cell shear closure. The source, predictor, pressure loading, heat
+insertion and accepted mass-route transport retain their original owners.
+Zero coefficients exactly recover the existing molecular-bulk pressure path.
+
+Three regression groups are authored: the independent nonlinear longitudinal
+mouth root for three bulk responses, bulk-independent solenoidal mouth shear,
+and all zero models plus invalid bulk/cap/refusal replay. Original molecular
+heat alone reaches enthalpy; native and original-cell energy identities include
+their distinct BE/scatter losses. Pinned syntax/scoped-format and independent
+scalar balance checks passed; native compilation/execution remains unverified
+under the dependency build limitation described above.
