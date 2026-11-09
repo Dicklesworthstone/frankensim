@@ -1161,8 +1161,10 @@ def main() -> int:
         "ab": [{"family": fid, "key": f"x-{x['id']}", "title": x["title"], "group": x["group"], "date": x["date"]}
                for fid, *_ in FAMILIES for x in extras.get(fid, []) if x.get("before_audio")],
         # Per family, its newest renders graded against a recording: when, how many notes, and the physics they switched on
-        # (in first-seen order), for the start page's "Latest renders" list. Newest family first.
-        "latest": sorted(({"family": fid, "key": new[0]["id"], "n": len(new), "when": max(p["ours"]["rendered_utc"] for p in new),
+        # (in first-seen order), for the start page's "Latest renders" list. Newest family first. The card opens the note
+        # whose render is the newest, the one its time names.
+        "latest": sorted(({"family": fid, "key": max(new, key=lambda p: p["ours"]["rendered_utc"])["id"], "n": len(new),
+                           "when": max(p["ours"]["rendered_utc"] for p in new),
                            "physics": list(dict.fromkeys(x for p in new for x in p["ours"]["physics"]))}
                           for fid, doc in family_docs.items()
                           if (new := [p for p in doc["pairs"] if p["ours"] and p["ours"].get("rendered_utc")])),
