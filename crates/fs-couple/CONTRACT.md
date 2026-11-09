@@ -9796,3 +9796,33 @@ event times are required when transport between releases matters. Focused
 cases in `tests/adhesive_snap_heat/rolling.rs` specify analytical spring release,
 actual cell/outside energy closure, fresh recontact, reversible area work with
 zero snap heat, and atomic caloric/cancellation refusal and retry.
+
+## Regional evaporation coupled to original gas transport
+
+`liquid_gas::evaporation::transport::regions` runs the existing complete
+`GasTransportPaths` network once, then supplies its actual transported parcels
+to the regional native phase or phase/sensible-heat owner. Different interfaces
+therefore see their bound region's transported composition, temperature and
+pressure. Arrivals can enter the following phase stage, while the original
+transport snapshot still forbids funding outgoing paths with those arrivals.
+All gas nodes retain their identities and fixed external volumes, including
+nodes without liquid interfaces; the native liquid advances exactly once.
+
+The actual final complete gas map must pass the original transport endpoint
+driving-force and source gates. A phase/heat-induced pressure or concentration
+reversal refuses every private gas node and native liquid together. The
+single-atmosphere and regional compositions share the original residual gate:
+absolute transport defects add to absolute native phase/heat/flow defects and
+are bounded by the complete interval's explicit allowances. Internal partial
+enthalpy, reciprocal sensible heat and latent subaccounts are not reapplied.
+Transport entropy remains a statement about its original gas-only stage.
+
+Both phase-only and sensible-heat APIs retain original source identities and
+cancellation, first-order transport/heat/phase/flow splitting, one gas region per
+liquid cell and prescribed regional membership. Refine the whole interval.
+This composition adds no resolved gas CFD, regional gas traction, pressure
+volume work, reaction stage, finite-wall/conduction stage or topology remap.
+Three focused regressions exercise real nozzle arrivals and local phase/heat
+feedback, independently reconstructed whole-system mass/species/energy, final
+pressure reversal with atomic retry, empty-path equivalence and cancellation.
+They are added but unexecuted under the existing dependency/resource build block.

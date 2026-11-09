@@ -1,5 +1,8 @@
 //! Original gas plumbing feeding native phase, heat and flow on one clock.
 
+/// Multiple local atmospheres feeding one conservative native liquid step.
+pub mod regions;
+
 use super::{
     EvaporatingLiquidGasError, LiquidGasEvaporationSurface,
     conduction::{
@@ -402,6 +405,43 @@ fn transporting_candidate<'s, 'm, 'catalog, 'b, R: PhaseAccount>(
     next_parcels.insert(atmosphere_id, next_gas);
     transport.admit_endpoint_driving_forces(&next_parcels, || gate.is_requested())?;
 
+    let account =
+        transport_phase_account(&transport, &coupled, mass_tolerance_kg, energy_tolerance_j)?;
+    poll(gate)?;
+    Ok(TransportingLiquidGasCandidate {
+        liquid: next_liquid,
+        parcels: next_parcels,
+        catalog,
+        bodies: next_bodies,
+        report: TransportingLiquidGasReport {
+            duration_s,
+            atmosphere_id,
+            transport,
+            coupled,
+            mass_residual_kg: account.mass_residual_kg,
+            absolute_mass_defect_kg: account.absolute_mass_defect_kg,
+            energy_residual_j: account.energy_residual_j,
+            absolute_energy_defect_j: account.absolute_energy_defect_j,
+        },
+    })
+}
+
+/// The transport/phase split has one account regardless of atmosphere count.
+/// Internal enthalpy transport and latent subaccounts are already in the
+/// original reports; only their residuals, never their transfers, add here.
+struct TransportPhaseAccount {
+    mass_residual_kg: f64,
+    absolute_mass_defect_kg: f64,
+    energy_residual_j: f64,
+    absolute_energy_defect_j: f64,
+}
+
+fn transport_phase_account(
+    transport: &GasTransportStep,
+    coupled: &impl PhaseAccount,
+    mass_tolerance_kg: f64,
+    energy_tolerance_j: f64,
+) -> Result<TransportPhaseAccount, Error> {
     let original = &transport.exchange;
     let transport_mass_defect = original
         .parcels
@@ -449,21 +489,10 @@ fn transporting_candidate<'s, 'm, 'catalog, 'b, R: PhaseAccount>(
             tolerance_j: energy_tolerance_j,
         });
     }
-    poll(gate)?;
-    Ok(TransportingLiquidGasCandidate {
-        liquid: next_liquid,
-        parcels: next_parcels,
-        catalog,
-        bodies: next_bodies,
-        report: TransportingLiquidGasReport {
-            duration_s,
-            atmosphere_id,
-            transport,
-            coupled,
-            mass_residual_kg,
-            absolute_mass_defect_kg,
-            energy_residual_j,
-            absolute_energy_defect_j,
-        },
+    Ok(TransportPhaseAccount {
+        mass_residual_kg,
+        absolute_mass_defect_kg,
+        energy_residual_j,
+        absolute_energy_defect_j,
     })
 }

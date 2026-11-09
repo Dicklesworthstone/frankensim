@@ -2,6 +2,9 @@
 #[path = "transport/reactive.rs"]
 mod reactive;
 
+#[path = "transport/regions.rs"]
+mod regions;
+
 use super::*;
 use crate::conduction::{film, joint_controls, thermal_controls, with_wall};
 use fs_couple::liquid_gas::evaporation::{
