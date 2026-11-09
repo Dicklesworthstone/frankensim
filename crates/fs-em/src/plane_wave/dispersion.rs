@@ -229,7 +229,7 @@ impl<'a> BulkWaveDispersion<'a> {
 
 // Shared native carrier propagation for bulk and refracted normal coordinates.
 // The caller owns the frequency path of the two ordinary k derivatives.
-fn propagation_at_distance(
+pub(in crate::plane_wave) fn propagation_at_distance(
     wave_number: C64,
     omega: f64,
     [first, second]: [C64; 2],

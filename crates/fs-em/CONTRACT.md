@@ -6814,6 +6814,48 @@ denominators have no finite bulk group vector; unrepresentable nonzero
 velocities refuse. This is local homogeneous principal-plane transport,
 not a normal-transfer phase delay or broadband propagation solver.
 
+### Local crystal normal-transfer dispersion
+
+`PrincipalPlaneUniaxialInterface::frequency_dispersion` and
+`frequency_dispersion_at_tangential_index` return a borrowed
+`UniaxialFrequencyDispersion` with the unchanged native interface carrier and
+complex first and second derivatives of the transmitted normal wavenumber.
+The caller explicitly chooses `FixedAngle` or
+`FixedTransverseWavenumber`, using the same constraint type as isotropic
+dispersion. Fixed angle retains the original incident spectral derivatives;
+fixed dimensional transverse wavenumber needs no incident-law derivative.
+Both original crystal spectra retain their own slopes, curvatures, source
+support, interpolation gaps, endpoint/cusp and loss refusals.
+
+The analytic kernel differentiates the original outgoing eigenbranch using
+fixed-size double-double contractions and one common binary index scale.
+It preserves the original carrier and performs no neighboring-frequency
+boundary solve or frequency differencing. Factored discriminant roots and the
+original incidence cosine retain matched grazing limits even when the normal
+energy contribution is smaller than the rounded tilted normal phase.
+Principal limits and common spectral scaling use original bulk wavenumber jets
+directly, preserving exact zero slope or curvature. Exactly critical or
+unresolved roots refuse the derivative query without removing the available
+native carrier.
+
+`transmitted_propagation` uses the existing signed `BulkPropagation` owner
+for the native exp(-i*kz*z) transfer, normal phase/group delay, group-delay
+dispersion and evanescent logarithmic attenuation derivatives through a
+nonnegative normal distance. A tilted branch may have negative or zero normal
+phase without being critical. The outgoing evanescent sign is retained.
+These local normal-transfer slopes are distinct from travel along the
+Poynting ray; fixed-angle queries include the changing transverse wavevector.
+Fresnel boundary phase, finite-crystal interference and broadband pulse
+evolution are outside this propagation-only result.
+
+Nine new native numerical regressions plus the 55 original principal/oriented
+carrier tests passed in a bounded build against the original `fs_math`.
+They cover constraint-dependent geometric dispersion, unequal principal
+spectral slopes, evanescent branches, tilted zero phase, matched grazing and
+exact stationary/zero-GVD bulk identities. Source-bound integration fixtures
+were added and parsed/reviewed; full `fs-em` material integration was not
+executed in this editing environment.
+
 ### Arbitrarily oriented transparent crystals
 
 `uniaxial::oriented::OrientedUniaxialInterface` retains the same original

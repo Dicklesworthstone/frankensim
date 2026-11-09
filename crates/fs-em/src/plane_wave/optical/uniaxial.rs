@@ -149,6 +149,30 @@ impl<'a> UniaxialOpticalResponse<'a> {
         Ok(indices)
     }
 
+    // The normal-wavevector owner needs both original derivative orders.
+    // Keep this internal: public results retain the complete crystal/interface
+    // source, rather than exposing detachable constitutive derivative tables.
+    pub(in crate::plane_wave) fn transparent_frequency_jets(
+        self,
+        omega_rad_s: f64,
+    ) -> Result<[super::frequency::OpticalFrequencyJet; 2], ReflectionError> {
+        let jets = [
+            self.ordinary_response.frequency_jet(omega_rad_s)?,
+            self.extraordinary_response.frequency_jet(omega_rad_s)?,
+        ];
+        if jets.iter().any(|jet| {
+            jet.epsilon.im != 0.0
+                || jet.epsilon_derivatives.iter().any(|value| value.im != 0.0)
+                || jet.first_s_m.im != 0.0
+                || jet.second_scaled_s_m.im != 0.0
+        }) {
+            return Err(ReflectionError::Invalid(
+                "transparent crystal dispersion requires lossless original second-order frequency jets",
+            ));
+        }
+        Ok(jets)
+    }
+
     /// Original principal SI permittivities N²/(mu*c0²) [F/m]. The shared
     /// scalar mu belongs to the same complete source snapshot. Negative real
     /// epsilon is admitted; positive extinction may never round to zero loss.

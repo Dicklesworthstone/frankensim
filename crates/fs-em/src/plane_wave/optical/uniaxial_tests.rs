@@ -1849,3 +1849,169 @@ fn original_homogeneous_sources_keep_grazing_phase_through_slabs_and_stacks() {
         }
     }
 }
+
+#[test]
+fn crystal_normal_frequency_jets_retain_sources_carriers_and_explicit_frequency_paths() {
+    use crate::plane_wave::dispersion::IncidenceFrequencyConstraint;
+    let outside = incident(1.1, MU);
+    let (ordinary, extraordinary) = axes([1.6; 2], [1.9; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let interface = PrincipalPlaneUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [0.8, 0.6],
+    )
+    .unwrap();
+    let omega = frequency(550.0);
+    for p in [-0.4, 0.4] {
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let carrier = interface
+                .response_at_tangential_index(omega, p, polarization)
+                .unwrap();
+            let angle = interface
+                .frequency_dispersion_at_tangential_index(
+                    omega,
+                    p,
+                    polarization,
+                    IncidenceFrequencyConstraint::FixedAngle,
+                )
+                .unwrap();
+            assert!(core::ptr::eq(angle.source(), &interface));
+            assert_eq!(angle.angular_frequency_rad_s(), omega);
+            assert_eq!(angle.carrier(), carrier);
+            assert_eq!(
+                angle.frequency_constraint(),
+                IncidenceFrequencyConstraint::FixedAngle
+            );
+            complex_near(
+                angle.transmitted_normal_wavenumber_derivative_s_m(),
+                carrier
+                    .transmitted_normal_wavenumber_rad_m
+                    .scale(1.0 / omega),
+                3e-14 / C0,
+            );
+            assert_eq!(
+                angle.transmitted_normal_wavenumber_second_derivative_s2_m(),
+                C64::ZERO
+            );
+            let distance = 1e-6;
+            let propagation = angle.transmitted_propagation(distance).unwrap();
+            let phase = carrier.transmitted_normal_wavenumber_rad_m.re * distance;
+            complex_near(
+                propagation.transfer,
+                C64::new(fs_math::det::cos(phase), -fs_math::det::sin(phase)),
+                3e-14,
+            );
+            near(
+                propagation.group_delay_s,
+                angle.transmitted_normal_wavenumber_derivative_s_m().re * distance,
+                1e-30,
+            );
+            assert_eq!(propagation.group_delay_dispersion_s2, 0.0);
+            assert!(angle.transmitted_propagation(-distance).is_err());
+        }
+        let normal = interface
+            .frequency_dispersion_at_tangential_index(
+                omega,
+                p,
+                Polarization::Te,
+                IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+            )
+            .unwrap();
+        let q = normal.carrier().transmitted_normal_wavenumber_rad_m.re;
+        let kx = normal.carrier().tangential_wavenumber_rad_m;
+        let k = omega * 1.6 / C0;
+        let first = (k / q) * (1.6 / C0);
+        let second = -(1.6 / C0).powi(2) * (kx / q).powi(2) / q;
+        near(
+            normal.transmitted_normal_wavenumber_derivative_s_m().re,
+            first,
+            4e-14 * first,
+        );
+        near(
+            normal
+                .transmitted_normal_wavenumber_second_derivative_s2_m()
+                .re,
+            second,
+            5e-14 * second.abs(),
+        );
+        assert!(second < 0.0);
+    }
+    // The carrier remains available at a source endpoint. A local frequency
+    // jet cannot invent the missing side of that original spectral domain.
+    for wavelength in [400.0, 800.0] {
+        assert!(
+            interface
+                .response(frequency(wavelength), 0.8, Polarization::Tm)
+                .is_ok()
+        );
+        assert!(
+            interface
+                .frequency_dispersion(
+                    frequency(wavelength),
+                    0.8,
+                    Polarization::Tm,
+                    IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn matched_grazing_crystal_dispersion_keeps_the_original_ordinary_bulk_slope() {
+    use crate::plane_wave::dispersion::IncidenceFrequencyConstraint;
+    let outside = incident(1.5, MU);
+    let omega = frequency(550.0);
+    let epsilon = DielectricResponse::Lossless(&outside)
+        .lossless_permittivity(omega)
+        .unwrap();
+    let ni = (C0 * fs_math::det::sqrt(MU)) * fs_math::det::sqrt(epsilon);
+    let (ordinary, extraordinary) =
+        axes([1.2, 1.4], [ni; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let interface = PrincipalPlaneUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [0.0, 1.0],
+    )
+    .unwrap();
+    let ordinary_law =
+        SpectralOpticalResponse::try_new(SpectralOpticalSource::ComplexIndex(&ordinary), SPAN)
+            .unwrap();
+    let ordinary_bulk = DielectricResponse::SpectralOptical(ordinary_law)
+        .bulk_dispersion(omega)
+        .unwrap();
+    for cosine in [1e-10, 1e-16, 1e-20] {
+        let carrier = interface.response(omega, cosine, Polarization::Tm).unwrap();
+        let jet = interface
+            .frequency_dispersion(
+                omega,
+                cosine,
+                Polarization::Tm,
+                IncidenceFrequencyConstraint::FixedAngle,
+            )
+            .unwrap();
+        assert_eq!(jet.carrier(), carrier);
+        assert_eq!(carrier.wave_kind, UniaxialWaveKind::Propagating);
+        let expected = ordinary_bulk.wavenumber_derivative_s_m().scale(cosine);
+        complex_near(
+            jet.transmitted_normal_wavenumber_derivative_s_m(),
+            expected,
+            3e-14 * expected.abs(),
+        );
+        // The original ordinary n(lambda) is linear. Its exact zero bulk
+        // curvature survives the grazing normal-coordinate projection.
+        assert_eq!(
+            jet.transmitted_normal_wavenumber_second_derivative_s2_m(),
+            C64::ZERO
+        );
+        let propagated = jet.transmitted_propagation(0.003).unwrap();
+        near(
+            propagated.group_delay_s,
+            expected.re * 0.003,
+            expected.abs() * 1e-15,
+        );
+        assert_eq!(propagated.log_amplitude_derivative_s, 0.0);
+    }
+}

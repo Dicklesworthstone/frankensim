@@ -31,6 +31,9 @@ use fs_math::det;
 mod kernel;
 pub use kernel::{UniaxialInterfaceResponse, UniaxialMode, UniaxialWaveKind};
 
+mod dispersion;
+pub use dispersion::UniaxialFrequencyDispersion;
+
 /// Coupled ordinary/extraordinary transmission for an arbitrary crystal axis.
 pub mod oriented;
 
@@ -173,7 +176,7 @@ impl<'a> PrincipalPlaneUniaxialInterface<'a> {
             kernel::Incidence::Cosine(incidence_cosine),
             polarization,
         )?;
-        self.prepare_group_response(omega_rad_s, carrier, indices)
+        self.prepare_group_response(omega_rad_s, carrier, [indices[1], indices[2]])
     }
 
     /// The same group transport with explicit signed kx/k0. Exact critical
@@ -189,7 +192,7 @@ impl<'a> PrincipalPlaneUniaxialInterface<'a> {
             kernel::Incidence::TangentialIndex(tangential_index),
             polarization,
         )?;
-        self.prepare_group_response(omega_rad_s, carrier, indices)
+        self.prepare_group_response(omega_rad_s, carrier, [indices[1], indices[2]])
     }
 
     fn prepare_group_response(
@@ -233,7 +236,7 @@ impl<'a> PrincipalPlaneUniaxialInterface<'a> {
         omega_rad_s: f64,
         incidence: kernel::Incidence,
         polarization: Polarization,
-    ) -> Result<(UniaxialInterfaceResponse, [f64; 2]), ReflectionError> {
+    ) -> Result<(UniaxialInterfaceResponse, [f64; 3]), ReflectionError> {
         let omega = positive(omega_rad_s)?;
         let incident_epsilon = self.incident.lossless_permittivity(omega)?;
         // The original incident law supplies epsilon and sourced mu; no
@@ -258,6 +261,6 @@ impl<'a> PrincipalPlaneUniaxialInterface<'a> {
             },
         })
         .map_err(ReflectionError::Invalid)?;
-        Ok((carrier, [ordinary_index, extraordinary_index]))
+        Ok((carrier, [incident_index, ordinary_index, extraordinary_index]))
     }
 }
