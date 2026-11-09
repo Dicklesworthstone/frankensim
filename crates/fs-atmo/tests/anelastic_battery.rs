@@ -1,6 +1,10 @@
 //! G0/G1/G3/G5: fixed-background mass continuity for complete modal atmospheres.
 
 use fs_atmo::fetch_mass_consistent::ExponentialDensityProfile;
+use fs_atmo::mann::MANN_TARGET_V1;
+use fs_atmo::mann_field::fixed_step::FixedStepMannField;
+use fs_atmo::mann_field::wall::MannPlaneWall;
+use fs_atmo::mann_field::{HomogeneousMannField, MannQuadrature, MannSpectralModel};
 use fs_atmo::{
     AnelasticFlowSample, Atmosphere, DEC17_AIR, FlatSiteLogLaw, FlowSample, TurbulenceField,
 };
@@ -33,6 +37,10 @@ fn same_bits(a: FlowSample, b: FlowSample) {
 }
 
 fn check_continuity(k: f64, sample: impl Fn([f64; 3]) -> AnelasticFlowSample) {
+    check_continuity_at_step(k, 1e-3, sample);
+}
+
+fn check_continuity_at_step(k: f64, step: f64, sample: impl Fn([f64; 3]) -> AnelasticFlowSample) {
     for p in [[3.7, -8.1, 4.9], [-23.0, 18.0, 33.0], [48.0, -9.0, 170.0]] {
         let s = sample(p);
         let diagonal = [s.flow.grad[0][0], s.flow.grad[1][1], s.flow.grad[2][2]];
@@ -46,7 +54,6 @@ fn check_continuity(k: f64, sample: impl Fn([f64; 3]) -> AnelasticFlowSample) {
 
         // Differentiate the reported physical flux, independently of the
         // analytic derivative and its density correction.
-        let step = 1e-3;
         let mut mass_divergence = 0.0;
         let mut mass_scale = 0.0;
         for j in 0..3 {
@@ -251,4 +258,167 @@ fn invalid_density_queries_refuse_without_changing_the_evolving_field() {
         "anelastic-flow-range"
     );
     assert_eq!(evolving.turbulence.checkpoint(), before);
+}
+
+fn mann_field() -> HomogeneousMannField {
+    let model = MannSpectralModel::build(
+        41,
+        MANN_TARGET_V1,
+        MannQuadrature {
+            n_modes: 24,
+            min_kl: 0.1,
+            max_kl: 12.0,
+        },
+        [12.0, -0.3, 0.0],
+    )
+    .unwrap();
+    HomogeneousMannField::at_anchor(model, 57, vec![0.8; 24]).unwrap()
+}
+
+#[test]
+fn full_mann_tensor_fields_conserve_mass_with_both_clocks_and_wall_observations() {
+    let mut original = mann_field();
+    original.advance_to(-3800).unwrap();
+    let mut fixed =
+        FixedStepMannField::from_snapshot(original.clone(), 123, 0.0079, 88 * 24).unwrap();
+    let k = 0.004;
+    let density = profile(1.2, k);
+    let wall = MannPlaneWall::new(3.0).unwrap();
+    for step in [0, 3] {
+        fixed.advance_to(step, 4 * 24 * 3, || false).unwrap();
+        // The canonical Mann spectrum reaches shorter wavelengths than the
+        // legacy 30 m modal basis, so resolve its gradients with a finer stencil.
+        check_continuity_at_step(k, 1e-5, |p| original.sample_anelastic(p, &density).unwrap());
+        check_continuity_at_step(k, 1e-5, |p| fixed.sample_anelastic(p, &density).unwrap());
+        check_continuity_at_step(k, 1e-5, |p| {
+            original
+                .sample_wall_blocked_anelastic(p, wall, &density)
+                .unwrap()
+        });
+        check_continuity_at_step(k, 1e-5, |p| {
+            fixed
+                .sample_wall_blocked_anelastic(p, wall, &density)
+                .unwrap()
+        });
+    }
+    // The old homogeneous velocity combined directly with this density fails
+    // the mass constraint; the product-rule term is physically necessary.
+    let p = [3.7, -8.1, 4.9];
+    let old = original.sample(p).unwrap();
+    assert!((k * density.density_kg_m3(p[2]).unwrap() * old.u[2]).abs() > 1e-5);
+}
+
+#[test]
+fn mann_density_observations_retain_uniform_bits_reference_amplitude_and_wall_flux() {
+    let original = mann_field();
+    let fixed = FixedStepMannField::from_snapshot(original.clone(), 123, 0.0079, 88 * 24).unwrap();
+    let uniform = profile(1.7, 0.0);
+    let density = profile(1.2, 0.004);
+    let heavier = profile(3.6, 0.004);
+    let wall = MannPlaneWall::new(3.0).unwrap();
+    for height in [3.0, 10.0, 33.0, 170.0] {
+        let p = [3.7, -8.1, height];
+        same_bits(
+            original.sample_anelastic(p, &uniform).unwrap().flow,
+            original.sample(p).unwrap(),
+        );
+        same_bits(
+            fixed.sample_anelastic(p, &uniform).unwrap().flow,
+            fixed.sample(p).unwrap(),
+        );
+        same_bits(
+            original
+                .sample_wall_blocked_anelastic(p, wall, &uniform)
+                .unwrap()
+                .flow,
+            original.sample_wall_blocked(p, wall).unwrap(),
+        );
+        same_bits(
+            fixed
+                .sample_wall_blocked_anelastic(p, wall, &uniform)
+                .unwrap()
+                .flow,
+            fixed.sample_wall_blocked(p, wall).unwrap(),
+        );
+        for blocked in [false, true] {
+            let observe = |rho: &ExponentialDensityProfile| {
+                if blocked {
+                    original.sample_wall_blocked_anelastic(p, wall, rho)
+                } else {
+                    original.sample_anelastic(p, rho)
+                }
+                .unwrap()
+            };
+            let a = observe(&density);
+            let b = observe(&heavier);
+            let unscaled = observe(&uniform);
+            let scale = (0.004 * (height - 10.0)).exp();
+            for i in 0..3 {
+                assert!((a.flow.u[i] - scale * unscaled.flow.u[i]).abs() < 2e-14);
+                assert!((a.flow.u[i] - b.flow.u[i]).abs() < 2e-14);
+                assert!((b.mass_flux_kg_m2_s[i] - 3.0 * a.mass_flux_kg_m2_s[i]).abs() < 4e-14);
+            }
+            if height == 10.0 {
+                assert_eq!(a.flow.u, unscaled.flow.u);
+            }
+            if blocked && height == wall.height_m() {
+                assert_eq!(a.flow.u[2], 0.0);
+                assert_eq!(a.mass_flux_kg_m2_s[2], 0.0);
+            }
+            let fixed_sample = if blocked {
+                fixed.sample_wall_blocked_anelastic(p, wall, &density)
+            } else {
+                fixed.sample_anelastic(p, &density)
+            }
+            .unwrap();
+            assert_eq!(a, fixed_sample);
+        }
+    }
+}
+
+#[test]
+fn mann_density_queries_are_read_only_replayable_and_refuse_unsupported_states() {
+    let original = mann_field();
+    let mut fixed =
+        FixedStepMannField::from_snapshot(original.clone(), 123, 0.0079, 88 * 24).unwrap();
+    fixed.advance_to(3, 4 * 24 * 3, || false).unwrap();
+    let before_original = original.checkpoint();
+    let before_fixed = fixed.checkpoint();
+    let density = profile(1.2, 0.004);
+    let wall = MannPlaneWall::new(3.0).unwrap();
+    let resumed_original = HomogeneousMannField::resume(before_original.clone()).unwrap();
+    let resumed_fixed = FixedStepMannField::resume(before_fixed.clone(), 88 * 24).unwrap();
+    let p = [3.7, -8.1, 33.0];
+    assert_eq!(
+        original.sample_anelastic(p, &density),
+        resumed_original.sample_anelastic(p, &density)
+    );
+    assert_eq!(
+        fixed.sample_wall_blocked_anelastic(p, wall, &density),
+        resumed_fixed.sample_wall_blocked_anelastic(p, wall, &density)
+    );
+    for bad in [[0.0, 0.0, 201.0], [0.0, 0.0, -1.0], [f64::NAN, 0.0, 10.0]] {
+        assert!(original.sample_anelastic(bad, &density).is_err());
+        assert!(fixed.sample_anelastic(bad, &density).is_err());
+    }
+    let below_wall = [0.0, 0.0, 2.0];
+    assert!(
+        original
+            .sample_wall_blocked_anelastic(below_wall, wall, &density)
+            .is_err()
+    );
+    assert!(
+        fixed
+            .sample_wall_blocked_anelastic(below_wall, wall, &density)
+            .is_err()
+    );
+    let extreme = ExponentialDensityProfile::new(1.0, 0.0, 3.6, [0.0, 200.0]).unwrap();
+    for failure in [
+        original.sample_anelastic([0.0, 0.0, 200.0], &extreme),
+        fixed.sample_anelastic([0.0, 0.0, 200.0], &extreme),
+    ] {
+        assert_eq!(failure.unwrap_err().code, "anelastic-flow-range");
+    }
+    assert_eq!(original.checkpoint(), before_original);
+    assert_eq!(fixed.checkpoint(), before_fixed);
 }

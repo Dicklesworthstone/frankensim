@@ -468,6 +468,29 @@ impl HomogeneousMannField {
         self.sample_with_gains(point_m, None)
     }
 
+    /// Density-bound perturbation with `div(rho * u) = 0` for an explicit
+    /// fixed background. The Mann frame's +z coordinate must be height in
+    /// the density profile's frame. The original solenoidal realization `v`
+    /// becomes `u = (rho_ref/rho) v`, with its exact product-rule gradient.
+    /// No mean wind, thermodynamic closure or buoyancy evolution is inferred.
+    ///
+    /// This changes the homogeneous velocity statistics: two-point covariance
+    /// is multiplied by the two local `rho_ref/rho` factors. The reference
+    /// height retains the original velocity amplitudes, and uniform density
+    /// retains every original velocity/gradient bit. Sampling neither advances
+    /// the clock nor draws randomness or allocates storage.
+    ///
+    /// # Errors
+    /// Original sample errors, density-domain errors and unrepresentable
+    /// rescaled velocity, gradient or mass flux.
+    pub fn sample_anelastic(
+        &self,
+        point_m: [f64; 3],
+        density: &crate::fetch_mass_consistent::ExponentialDensityProfile,
+    ) -> Result<crate::AnelasticFlowSample, Refusal> {
+        density.compose_anelastic(None, self.sample(point_m)?, point_m[2])
+    }
+
     /// Prepare one affine observation of this accepted realization. For a
     /// wall observation the anchor must lie on the plane; each subsequent
     /// point is admitted against caller-supplied spatial error budgets.
@@ -504,6 +527,24 @@ impl HomogeneousMannField {
             point_m,
             wall,
         )
+    }
+
+    /// The original slip-plane perturbation under the same anelastic mass
+    /// constraint as [`Self::sample_anelastic`]. Blocking acts on the original
+    /// solenoidal field before density rescaling, so both zero normal mass
+    /// flux at the plane and `div(rho*u) = 0` survive. The wall and density
+    /// profile use the same upward coordinate and height origin.
+    ///
+    /// # Errors
+    /// Refuses points below the plane, outside the density domain, or with
+    /// unrepresentable sample, rescaled gradient or mass flux.
+    pub fn sample_wall_blocked_anelastic(
+        &self,
+        point_m: [f64; 3],
+        wall: MannPlaneWall,
+        density: &crate::fetch_mass_consistent::ExponentialDensityProfile,
+    ) -> Result<crate::AnelasticFlowSample, Refusal> {
+        density.compose_anelastic(None, self.sample_wall_blocked(point_m, wall)?, point_m[2])
     }
 
     /// Exact box, face or line average of wall-blocked velocity and all nine

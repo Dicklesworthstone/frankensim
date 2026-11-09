@@ -475,6 +475,20 @@ differences, all nine velocity derivatives, exact uniform-density recovery,
 unchanged mean, wall condition, reference amplitude, density scaling, OU
 noninterference/replay and atomic query refusals.
 
+The full-tensor `HomogeneousMannField` and `FixedStepMannField` owners expose
+`sample_anelastic` and `sample_wall_blocked_anelastic` under the same immutable
+density profile. Their +z coordinate is the profile height, with a shared height
+origin for wall observations. The original solenoidal perturbation is rescaled
+once, after any harmonic wall blocking; the exact gradient includes the density
+product rule. Uniform-density observations preserve the original bits, and
+normal mass flux at the wall remains zero. No mean flow is added. These are
+point observations: the original homogeneous velocity covariance is multiplied
+by both local density-scale factors, and existing spatial-filter/moment APIs
+are not reinterpreted as anelastic averages. Sampling preserves both clocks,
+quadratures and checkpoints without allocation. The same fixed-background
+kinematic limitations apply. The anelastic battery covers both clocks, independent
+mass-flux differences, all gradients, wall flux, scaling, replay and refusals.
+
 ## Exact represented wall-blocked momentum and subfilter stress
 
 `mann_field::wall::filter::moments::MannWallBoxMoments` extends the same

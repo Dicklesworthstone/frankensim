@@ -488,7 +488,7 @@ impl Atmosphere {
         tick: u64,
     ) -> Result<AnelasticFlowSample, Refusal> {
         let turbulent = self.sample_turbulence(x_m, y_m, h_m, tick)?;
-        density.compose_anelastic(&self.mean, turbulent, h_m)
+        density.compose_anelastic(Some(&self.mean), turbulent, h_m)
     }
 
     fn sample_turbulence(

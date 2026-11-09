@@ -287,7 +287,7 @@ impl ExponentialDensityProfile {
         Ok(density)
     }
 
-    /// Compose the original horizontal mean with density-weighted turbulence.
+    /// Compose an optional original horizontal mean with density-weighted turbulence.
     /// For q = rho_ref * curl(psi), u' = q/rho has
     /// du'_i/dh = (rho_ref/rho) * dv_i/dh + k*u'_i. Consequently
     /// div(rho*u') = 0, while the unchanged horizontal mean separately has
@@ -296,7 +296,7 @@ impl ExponentialDensityProfile {
     /// again to an anelastic field would be physically incorrect.
     pub(crate) fn compose_anelastic(
         &self,
-        mean: &FlatSiteLogLaw,
+        mean: Option<&FlatSiteLogLaw>,
         mut turbulent: FlowSample,
         height_m: f64,
     ) -> Result<AnelasticFlowSample, Refusal> {
@@ -320,8 +320,12 @@ impl ExponentialDensityProfile {
             }
         }
         // Keep the original addition order so k=0 is bitwise legacy flow.
-        turbulent.u[0] += mean.speed(height_m);
-        turbulent.grad[0][2] += mean.dspeed_dh(height_m);
+        // Mann observations contain only the perturbation; supplying no mean
+        // also preserves signed zero and every original gradient bit when k=0.
+        if let Some(mean) = mean {
+            turbulent.u[0] += mean.speed(height_m);
+            turbulent.grad[0][2] += mean.dspeed_dh(height_m);
+        }
         let mass_flux_kg_m2_s = turbulent.u.map(|velocity| density_kg_m3 * velocity);
         if turbulent
             .u

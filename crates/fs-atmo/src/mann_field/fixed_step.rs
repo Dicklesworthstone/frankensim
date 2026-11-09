@@ -296,6 +296,22 @@ impl FixedStepMannField {
         self.sample_with_gains(point_m, None)
     }
 
+    /// Observe these accepted quadratures with the fixed-background mass
+    /// constraint of [`HomogeneousMannField::sample_anelastic`]. The original
+    /// physical phase and clock are retained, +z is profile height, and no
+    /// allocation, additional random draw or time advance occurs.
+    ///
+    /// # Errors
+    /// Original sample errors, density-domain errors and unrepresentable
+    /// rescaled velocity, gradient or mass flux.
+    pub fn sample_anelastic(
+        &self,
+        point_m: [f64; 3],
+        density: &crate::fetch_mass_consistent::ExponentialDensityProfile,
+    ) -> Result<crate::AnelasticFlowSample, Refusal> {
+        density.compose_anelastic(None, self.sample(point_m)?, point_m[2])
+    }
+
     /// Snapshot one fixed-anchor affine field with realization-specific
     /// spatial truncation bounds. Rebuild after advancing this temporal owner.
     pub fn affine_observation(
@@ -327,6 +343,23 @@ impl FixedStepMannField {
             point_m,
             wall,
         )
+    }
+
+    /// Density-bound slip-plane observation with the same semantics as
+    /// [`HomogeneousMannField::sample_wall_blocked_anelastic`], evaluated from
+    /// this owner's accepted physical time and quadratures. No mean wind,
+    /// pressure, temperature or density fluctuations are added.
+    ///
+    /// # Errors
+    /// Original wall/sample errors, density-domain errors and unrepresentable
+    /// rescaled velocity, gradient or mass flux.
+    pub fn sample_wall_blocked_anelastic(
+        &self,
+        point_m: [f64; 3],
+        wall: MannPlaneWall,
+        density: &crate::fetch_mass_consistent::ExponentialDensityProfile,
+    ) -> Result<crate::AnelasticFlowSample, Refusal> {
+        density.compose_anelastic(None, self.sample_wall_blocked(point_m, wall)?, point_m[2])
     }
 
     /// Exact finite-footprint wall-blocked observation of this accepted

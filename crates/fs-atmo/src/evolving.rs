@@ -344,7 +344,7 @@ impl EvolvingAtmosphere {
     ) -> Result<crate::AnelasticFlowSample, Refusal> {
         self.mean.admit()?;
         let turbulent = self.turbulence.sample(x_m, y_m, h_m)?;
-        density.compose_anelastic(&self.mean, turbulent, h_m)
+        density.compose_anelastic(Some(&self.mean), turbulent, h_m)
     }
 }
 
