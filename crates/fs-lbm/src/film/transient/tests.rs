@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "tests/slip.rs"]
+mod slip;
+
 const MATERIAL: FilmMaterial = FilmMaterial {
     density_kg_m3: 1000.0,
     kinematic_viscosity_m2_s: 0.03,

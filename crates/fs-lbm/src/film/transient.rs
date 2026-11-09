@@ -1,7 +1,8 @@
-//! Resolved unsteady Newtonian films on a tangentially moving, no-slip wall.
+//! Resolved unsteady Newtonian films on a tangentially moving wall.
 //!
 //! The locally parallel equation is `rho*u_t = rho*g + (mu*u_y)_y`, with
-//! `u(0)=U_wall` and `mu*u_y(h)=tau_surface`. Uniform finite volumes retain the
+//! `u(0)-U_wall=b*u_y(0)` and `mu*u_y(h)=tau_surface`. The default slip length
+//! `b=0` is no-slip. Uniform finite volumes retain the
 //! velocity through the film; implicit midpoint advances the original viscous
 //! diffusion, rather than instantaneously replacing it with a Nusselt profile.
 //! The flat-film reduction follows the tangential momentum/stress conditions
@@ -10,7 +11,9 @@
 //! Each interval holds its authored acceleration, wall speed and surface
 //! traction. For a smooth drive, supply their midpoint values and resolve its
 //! bandwidth. The discrete work identity is body + wall + surface work =
-//! kinetic change + viscous heat, up to the reported linear/roundoff residual.
+//! kinetic change + bulk viscous heat + wall slip loss, up to the reported
+//! linear/roundoff residual. Slip length is prescribed, not inferred from a
+//! liquid material or a contact angle. Interface loss is not bulk fluid heating.
 //! Heat is reported, not deposited into another material or thermal inventory.
 //!
 //! Geometry, density and viscosity are fixed. This is a laterally wide,
@@ -111,6 +114,8 @@ pub struct FilmStep {
     pub midpoint_surface_velocity_m_s: f64,
     /// Fluid-on-wall tangential traction; wall-on-fluid has the opposite sign.
     pub midpoint_wall_shear_pa: f64,
+    /// Actual fluid-side wall trace, including the admitted Navier slip jump.
+    pub midpoint_wall_fluid_velocity_m_s: f64,
     /// Change in integrated fluid momentum [kg/(m s)].
     pub momentum_change_kg_m_s: f64,
     /// Momentum change minus body and boundary impulses [kg/(m s)].
@@ -123,9 +128,13 @@ pub struct FilmStep {
     pub wall_work_j_m2: f64,
     /// Signed work of the surface traction on the liquid [J/m²].
     pub surface_work_j_m2: f64,
-    /// Nonnegative resolved viscous loss, including both boundary half-cells.
+    /// Nonnegative bulk viscous loss, including both fluid boundary half-cells.
+    /// Excludes the separate wall/fluid interfacial loss.
     pub viscous_heat_j_m2: f64,
-    /// Total input work minus kinetic change and viscous heat [J/m²].
+    /// Nonnegative interface loss tau_wall*(u_fluid_wall-U_wall)*dt [J/m²].
+    /// No fraction is automatically deposited into either adjacent material.
+    pub wall_slip_heat_j_m2: f64,
+    /// Input work minus kinetic change, bulk heat and interface loss [J/m²].
     pub work_residual_j_m2: f64,
     /// Maximum original cell momentum residual divided by cell mass [m/s].
     pub maximum_velocity_residual_m_s: f64,
@@ -139,6 +148,7 @@ pub struct TransientFilm {
     material: FilmMaterial,
     thickness: f64,
     spacing: f64,
+    wall_slip_length: f64,
     mass_per_cell_area: f64,
     shear_conductance: f64,
     diffusion_time: f64,
@@ -192,6 +202,7 @@ fn stage_cell_heat(
     midpoint: &[f64],
     duration_s: f64,
     drive: FilmDrive,
+    wall_bulk_difference: f64,
     surface_offset: f64,
     stress: impl Fn(usize) -> f64,
     heat: &mut [f64],
@@ -206,7 +217,7 @@ fn stage_cell_heat(
             Ok(value)
         }
     };
-    let mut left = segment(stress(0), midpoint[0] - drive.wall_velocity_m_s)?;
+    let mut left = segment(stress(0), wall_bulk_difference)?;
     for i in 0..n {
         if i % 128 == 0 {
             poll(cancelled)?;
@@ -263,6 +274,7 @@ impl TransientFilm {
             material,
             thickness: thickness_m,
             spacing,
+            wall_slip_length: 0.0,
             mass_per_cell_area,
             shear_conductance,
             diffusion_time,
@@ -291,6 +303,55 @@ impl TransientFilm {
     /// Uniform wall-normal control-volume width.
     pub const fn spacing_m(&self) -> f64 {
         self.spacing
+    }
+    /// Prescribed Navier length b in u_fluid_wall-U_wall = b*du/dy at the wall.
+    /// Zero retains the original no-slip arithmetic. Infinite/perfect slip is
+    /// not represented, and this value carries no material-card authority.
+    pub const fn wall_slip_length_m(&self) -> f64 {
+        self.wall_slip_length
+    }
+    /// Admit a new finite nonnegative slip length without replacing accepted
+    /// velocity or time. The next interval uses it with its original wall
+    /// speed and liquid viscosity. Refusal leaves the prior boundary intact.
+    pub fn set_wall_slip_length_m(&mut self, length_m: f64) -> Result<(), TransientFilmError> {
+        if !length_m.is_finite() || length_m < 0.0 {
+            return Err(TransientFilmError::Invalid(
+                "finite nonnegative wall slip length required",
+            ));
+        }
+        let distance = positive(0.5 * self.spacing + length_m)?;
+        positive(self.spacing / distance)?;
+        positive(self.shear_conductance * (self.spacing / distance))?;
+        self.wall_slip_length = length_m;
+        self.factored_duration = None;
+        Ok(())
+    }
+
+    fn wall_distance(&self) -> f64 {
+        0.5 * self.spacing + self.wall_slip_length
+    }
+
+    fn wall_factor(&self) -> f64 {
+        if self.wall_slip_length == 0.0 {
+            2.0
+        } else {
+            self.spacing / self.wall_distance()
+        }
+    }
+
+    // Preserve the no-slip subtraction exactly. For slip, each physical
+    // distance multiplies the SAME original wall gradient; subtracting nearly
+    // equal wall/fluid speeds must not erase a small bulk or interface loss.
+    fn wall_differences(&self, difference: f64) -> Result<[f64; 2], TransientFilmError> {
+        if self.wall_slip_length == 0.0 {
+            Ok([difference, 0.0])
+        } else {
+            let rate = finite(difference / self.wall_distance())?;
+            Ok([
+                finite((0.5 * self.spacing) * rate)?,
+                finite(self.wall_slip_length * rate)?,
+            ])
+        }
     }
     /// Physical time of the last fully admitted profile.
     pub const fn accepted_time_s(&self) -> f64 {
@@ -321,7 +382,8 @@ impl TransientFilm {
     /// Advance and export this SAME interval's viscous heat into N original
     /// wall-normal cells [J/m² of wetted wall area]. Interior shear-segment work
     /// is split equally between adjacent cells; boundary half-segments heat
-    /// only their adjacent cells. Its sum is the native work account's loss,
+    /// only their adjacent cells. Interface slip loss is reported separately
+    /// and never included in this output. Its sum is the native bulk loss,
     /// within summation roundoff. Supply the actual wall area when depositing
     /// into a caloric owner's joule inventory. Do not add mechanical work again.
     /// Failed/cancelled steps leave both accepted flow and output unchanged.
@@ -379,6 +441,8 @@ impl TransientFilm {
         let n = self.velocity.len();
         let weight = positive(duration_s / self.mass_per_cell_area)?;
         let alpha = positive(0.5 * weight * self.shear_conductance)?;
+        let wall_factor = self.wall_factor();
+        let wall_conductance = positive(wall_factor * self.shear_conductance)?;
         let body_increment = finite(duration_s * drive.acceleration_m_s2)?;
         if self.factored_duration != Some(duration_s) {
             self.factored_duration = None;
@@ -386,9 +450,9 @@ impl TransientFilm {
                 if i % 128 == 0 {
                     poll(&mut cancelled)?;
                 }
-                // Bottom wall is half a cell away; the top face has specified
-                // stress and therefore contributes no unknown to the matrix.
-                let left = if i == 0 { 2.0 } else { 1.0 };
+                // The wall half-cell and Navier length are in series. The top
+                // face has specified stress, contributing no matrix unknown.
+                let left = if i == 0 { wall_factor } else { 1.0 };
                 let right = if i + 1 == n { 0.0 } else { 1.0 };
                 self.diagonal[i] = finite(1.0 + alpha * (left + right))?;
                 if i + 1 < n {
@@ -411,7 +475,7 @@ impl TransientFilm {
                 return Err(TransientFilmError::SpeedLimit);
             }
             let left = if i == 0 {
-                2.0 * self.shear_conductance * (self.velocity[0] - drive.wall_velocity_m_s)
+                wall_conductance * (self.velocity[0] - drive.wall_velocity_m_s)
             } else {
                 self.shear_conductance * (self.velocity[i] - self.velocity[i - 1])
             };
@@ -446,7 +510,7 @@ impl TransientFilm {
             surface_offset,
             |face| {
                 if face == 0 {
-                    2.0 * self.shear_conductance * (self.midpoint[0] - drive.wall_velocity_m_s)
+                    wall_conductance * (self.midpoint[0] - drive.wall_velocity_m_s)
                 } else if face == n {
                     drive.surface_shear_pa
                 } else {
@@ -458,14 +522,17 @@ impl TransientFilm {
         if cell_heat_j_m2.is_some() {
             let conductance = self.shear_conductance;
             let midpoint = &self.midpoint;
+            let wall_bulk_difference =
+                self.wall_differences(midpoint[0] - drive.wall_velocity_m_s)?[0];
             stage_cell_heat(
                 midpoint,
                 duration_s,
                 drive,
+                wall_bulk_difference,
                 surface_offset,
                 |face| {
                     if face == 0 {
-                        2.0 * conductance * (midpoint[0] - drive.wall_velocity_m_s)
+                        wall_conductance * (midpoint[0] - drive.wall_velocity_m_s)
                     } else {
                         conductance * (midpoint[face] - midpoint[face - 1])
                     }
@@ -499,6 +566,9 @@ impl TransientFilm {
         let weight = positive(duration_s / self.mass_per_cell_area)?;
         let body_increment = finite(duration_s * drive.acceleration_m_s2)?;
         let wall_shear = finite(stress(0))?;
+        let [wall_bulk_difference, wall_slip_velocity] =
+            self.wall_differences(self.midpoint[0] - drive.wall_velocity_m_s)?;
+        let wall_fluid_velocity = finite(drive.wall_velocity_m_s + wall_slip_velocity)?;
         let surface_velocity = finite(self.midpoint[n - 1] + surface_offset)?;
         for trace in [
             finite(self.velocity[n - 1] + surface_offset)?,
@@ -509,14 +579,20 @@ impl TransientFilm {
                 return Err(TransientFilmError::SpeedLimit);
             }
         }
+        // With b>=0 the trace lies between the wall and first cell, but check
+        // its represented value at all three profiles as part of speed admission.
+        for velocity in [self.velocity[0], self.midpoint[0], self.candidate[0]] {
+            let slip = self.wall_differences(velocity - drive.wall_velocity_m_s)?[1];
+            if finite(drive.wall_velocity_m_s + slip)?.abs() > limits.maximum_speed_m_s {
+                return Err(TransientFilmError::SpeedLimit);
+            }
+        }
         let mut q = 0.0;
         let mut q_final = 0.0;
         let mut momentum = 0.0;
         let mut kinetic = 0.0;
-        let mut viscous_power = finite(
-            wall_shear * (self.midpoint[0] - drive.wall_velocity_m_s)
-                + drive.surface_shear_pa * surface_offset,
-        )?;
+        let mut viscous_power =
+            finite(wall_shear * wall_bulk_difference + drive.surface_shear_pa * surface_offset)?;
         let mut maximum_residual = 0.0_f64;
         for i in 0..n {
             if i % 128 == 0 {
@@ -545,12 +621,21 @@ impl TransientFilm {
         let wall_work = finite(-duration_s * wall_shear * drive.wall_velocity_m_s)?;
         let surface_work = finite(duration_s * drive.surface_shear_pa * surface_velocity)?;
         let heat = finite(duration_s * viscous_power)?;
+        let slip_heat = if self.wall_slip_length == 0.0 {
+            0.0
+        } else {
+            finite(duration_s * wall_shear * wall_slip_velocity)?
+        };
+        if slip_heat < 0.0 {
+            return Err(TransientFilmError::NonRepresentable);
+        }
         let receipt = FilmStep {
             duration_s,
             final_flow_per_width_m2_s: q_final,
             midpoint_flow_per_width_m2_s: q,
             midpoint_surface_velocity_m_s: surface_velocity,
             midpoint_wall_shear_pa: wall_shear,
+            midpoint_wall_fluid_velocity_m_s: wall_fluid_velocity,
             momentum_change_kg_m_s: momentum,
             momentum_residual_kg_m_s: finite(
                 momentum
@@ -564,7 +649,12 @@ impl TransientFilm {
             wall_work_j_m2: wall_work,
             surface_work_j_m2: surface_work,
             viscous_heat_j_m2: heat,
-            work_residual_j_m2: finite(((body_work + wall_work) + surface_work) - kinetic - heat)?,
+            wall_slip_heat_j_m2: slip_heat,
+            work_residual_j_m2: if self.wall_slip_length == 0.0 {
+                finite(((body_work + wall_work) + surface_work) - kinetic - heat)?
+            } else {
+                finite(((body_work + wall_work) + surface_work) - kinetic - heat - slip_heat)?
+            },
             maximum_velocity_residual_m_s: maximum_residual,
         };
         Ok(receipt)

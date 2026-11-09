@@ -335,6 +335,11 @@ impl<'m> ThermalCarreauFilm<'m> {
         if cancelled() {
             return Err(DepositionError::Cancelled.into());
         }
+        if flow.wall_slip_length_m() != 0.0 {
+            return Err(ThermalFilmError::Invalid(
+                "wall slip requires an explicit thermal loss partition",
+            ));
+        }
         let n = flow.velocities_m_s().len();
         let volume = wetted_area_m2 * flow.spacing_m();
         let mass = flow.density_kg_m3() * volume;

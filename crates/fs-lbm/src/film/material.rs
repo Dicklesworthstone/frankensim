@@ -140,6 +140,13 @@ impl<'a> MaterialTransientFilm<'a> {
         &self.flow
     }
 
+    /// Prescribe the original native Navier length without altering the liquid
+    /// source receipt. The length is authored boundary data, not inferred from
+    /// the material's viscosity, surface tension or contact angle.
+    pub fn set_wall_slip_length_m(&mut self, length_m: f64) -> Result<(), TransientFilmError> {
+        self.flow.set_wall_slip_length_m(length_m)
+    }
+
     /// Advance the same source-bound velocity history without another material
     /// selection, equilibrium reset, heat deposition or source query.
     pub fn step(

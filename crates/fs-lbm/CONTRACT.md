@@ -4820,3 +4820,32 @@ cell/link equality under nonzero loading, one molecular heat inventory, and
 late pressure/source/cancellation refusal with retry. The focused build uses
 fs-lbm without optional features; the full Cargo feature graph remains outside
 this executed proof.
+
+
+### Finite Navier slip in resolved laminar films
+
+The original Newtonian and thermal-Carreau transient film owners now admit an
+explicit finite nonnegative wall slip length `b`. Their boundary law is
+`u_fluid_wall - U_wall = b * gamma_wall`; the original liquid law still supplies
+`tau_wall = mu(T, |gamma_wall|) * gamma_wall`. A constant length is not a
+constant interfacial friction coefficient for a non-Newtonian liquid. No slip
+length is inferred from liquid viscosity, surface tension or a contact angle,
+and the material adapter retains its original source receipt.
+
+The original midpoint/tridiagonal solver sees the physical wall half-cell and
+slip length in series. The report retains actual fluid-side wall velocity,
+bulk fluid viscous heat and nonnegative interfacial slip loss separately.
+Body, moving-wall and surface work close against kinetic change plus both
+losses. Per-cell heat export contains only bulk fluid heat; an interface owner
+must explicitly identify any receiver of slip loss. Zero length takes the
+original no-slip arithmetic. Boundary rebindings preserve accepted velocity
+and time; failed inputs and cancelled steps publish no partial state/output.
+
+Seven focused Rust regression groups are authored for explicit-zero parity,
+independent Newtonian flux and two-cell transient equations, counter-moving
+wall/frame work, original nonlinear Carreau wall stress, source-temperature
+retention and rollback. Pinned nightly rustfmt parsed the changed production
+and new tests; these new Rust tests have not been compiled or executed in this
+session. No full-crate/runtime validation is claimed. At this native checkpoint,
+the existing thermal-film constructor explicitly refuses nonzero slip until
+an explicit fluid/surroundings heat partition is supplied by its integration.

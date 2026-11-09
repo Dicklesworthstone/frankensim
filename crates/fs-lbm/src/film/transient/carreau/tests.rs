@@ -8,6 +8,9 @@ use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 #[path = "tests/thermal.rs"]
 mod thermal;
 
+#[path = "tests/slip.rs"]
+mod slip;
+
 const SPEC: TransientCarreauFilmSpec = TransientCarreauFilmSpec {
     density_kg_m3: 1.0,
     thickness_m: 1.0,

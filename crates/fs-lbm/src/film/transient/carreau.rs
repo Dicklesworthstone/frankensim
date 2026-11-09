@@ -7,6 +7,9 @@
 //! The Newtonian owner supplies the same geometry, reusable storage and exact
 //! discrete work account. Temperature may vary across the original shear faces;
 //! the prescribed field, density and thickness are held during each interval.
+//! An explicitly prescribed Navier length b gives u_wall_fluid-U_wall=b*gamma.
+//! The ORIGINAL wall viscosity still depends on temperature and shear: a
+//! constant b is NOT a constant interfacial friction coefficient mu/b.
 //! This is a locally parallel generalized-Newtonian model: no elastic memory,
 //! free-surface evolution, heat deposition or turbulent-transition prediction.
 
@@ -232,6 +235,18 @@ impl TransientCarreauFilm {
     pub const fn spacing_m(&self) -> f64 {
         self.flow.spacing
     }
+    /// Prescribed finite Navier length; zero is the original no-slip boundary.
+    pub const fn wall_slip_length_m(&self) -> f64 {
+        self.flow.wall_slip_length_m()
+    }
+    /// Hold u_fluid_wall-U_wall = b*gamma_wall with the original nonlinear
+    /// constitutive stress tau=mu(T,|gamma|)*gamma. This is a prescribed length,
+    /// not a fitted/material-sourced constant friction coefficient. Changes
+    /// neither accepted momentum nor temperature preparations; refusal is atomic.
+    pub fn set_wall_slip_length_m(&mut self, length_m: f64) -> Result<(), TransientCarreauError> {
+        self.flow.set_wall_slip_length_m(length_m)?;
+        Ok(())
+    }
     pub const fn accepted_time_s(&self) -> f64 {
         self.flow.time
     }
@@ -362,7 +377,7 @@ impl TransientCarreauFilm {
                 return Err(TransientFilmError::SpeedLimit.into());
             }
             let rate = if i == 0 {
-                (velocity - drive.wall_velocity_m_s) / (0.5 * self.flow.spacing)
+                (velocity - drive.wall_velocity_m_s) / self.flow.wall_distance()
             } else {
                 (velocity - profile[i - 1]) / self.flow.spacing
             };
@@ -400,7 +415,7 @@ impl TransientCarreauFilm {
             let delta = finite(velocity - flow.velocity[i])?;
             flow.midpoint[i] = finite(0.5f64.mul_add(delta, flow.velocity[i]))?;
             let distance = if i == 0 {
-                0.5 * flow.spacing
+                flow.wall_distance()
             } else {
                 flow.spacing
             };
@@ -464,6 +479,8 @@ impl TransientCarreauFilm {
     /// Each interior shear segment contributes half its nonnegative work to
     /// each adjacent cell; boundary half-segments heat the adjacent cell only.
     /// Their sum is the flow report's viscous heat up to accumulation roundoff.
+    /// The separate wall-slip loss is not deposited in these fluid cells; its
+    /// receiver must be supplied explicitly by a thermal/interface owner.
     /// Multiply by the explicitly represented wall area before depositing into
     /// a thermal owner's joule inventory. Never deposit body/wall/traction work
     /// again: kinetic storage has already been removed from these viscous losses.
@@ -668,10 +685,14 @@ impl TransientCarreauFilm {
             surface_stress_residual_pa: surface_residual,
         };
         if cell_heat_j_m2.is_some() {
+            let wall_bulk_difference = self
+                .flow
+                .wall_differences(self.flow.midpoint[0] - drive.wall_velocity_m_s)?[0];
             stage_cell_heat(
                 &self.flow.midpoint,
                 duration_s,
                 drive,
+                wall_bulk_difference,
                 surface_offset,
                 |face| self.stress[face],
                 &mut self.flow.heat,
