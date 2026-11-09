@@ -17,12 +17,15 @@ const PAIRED: &str = include_str!("../examples/material_modal_valve/paired-dg.pe
 const WALL: &str = "dg_wall orthotropic wall.pack 293.15 1000 0.00002 strain-fixed 50 2000 1 2 proportional-kelvin-voigt normal_plane_viscosity_time\n";
 
 fn pack(values: &[(&str, Dims, f64)]) -> NormalizedMaterialCardPack {
+    pack_with_omega_limit(values, 100000.0)
+}
+fn pack_with_omega_limit(values: &[(&str, Dims, f64)], omega_max: f64) -> NormalizedMaterialCardPack {
     let artifact = fs_blake3::hash_domain("org.frankensim.test.orthotropic-wind", b"manufactured source");
     let mut claims = ClaimSet::new();
     for &(name, dims, value) in values {
         claims.insert_claim(PropertyClaim {
             key: PropertyKey::new(name, dims), value: PropertyValue::Scalar { value, dims },
-            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, 100000.0),
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, omega_max),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![], provenance: Provenance {
@@ -215,6 +218,7 @@ fn native_cli_and_attached_source_preserve_physical_pcm_and_directional_metadata
         let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
         for token in ["orthotropic-principal-local-ring-membrane", "\"hoop\":1,\"axial\":2",
             "proportional-kelvin-voigt", "C_viscous=tau*C_elastic", TIME,
+            "\"propagator\":\"original-exact-dg\"",
             &material.content_hash().to_hex()] {
             assert!(metadata.contains(token), "missing {token}: {metadata}");
         }
@@ -222,6 +226,57 @@ fn native_cli_and_attached_source_preserve_physical_pcm_and_directional_metadata
         receipts.push(metadata);
     }
     assert_eq!(receipts[0], receipts[1]);
+}
+
+#[test]
+fn reed_wind_and_ensemble_receipts_retain_the_original_wall_source() {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = Scratch(std::env::temp_dir().join(format!("fs-reed-wall-receipt-{}-{stamp}", std::process::id())));
+    std::fs::create_dir(&dir.0).unwrap();
+    let material = pack_with_omega_limit(&[
+        ("density", Density::DIMS, 1000.0),
+        ("young_modulus_1", Pressure::DIMS, 2e8),
+        ("young_modulus_2", Pressure::DIMS, 4e8),
+        ("poisson_ratio_12", Dims::NONE, 0.1),
+        (TIME, Dims([0, 0, 1, 0, 0, 0]), 2e-5),
+    ], 200000.0);
+    let wall = "bore_wall orthotropic wall.pack 300 1000 0.00001 strain-fixed 0.000001 25000 1 2 proportional-kelvin-voigt normal_plane_viscosity_time\n";
+    let source = DgMaterialWallInput::read(1,
+        &mut wall.trim_start_matches("bore_wall ").split_ascii_whitespace())
+        .unwrap().unwrap().resolve(Arc::new(material.clone()), &CancelGate::new_clock_free()).unwrap();
+    let text = include_str!("../examples/reed-baffled-mixture.performance")
+        .replace("audio 48000 4801 2", "audio 48000 4801 20000")
+        .replace("baffled_outlet 0 0 0.5 4 16 1000", "listener_m 1")
+        .replace("observer_law stokes-kirchhoff", "observer_law none")
+        .replace("compile_limits", &format!("{wall}compile_limits"));
+    let input = dir.0.join("source.performance");
+    std::fs::write(&input, text).unwrap();
+    std::fs::write(dir.0.join("wall.pack"), material.to_bytes()).unwrap();
+    for ensemble in [false, true] {
+        let output = dir.0.join(format!("out-{ensemble}.wav"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_music_render"));
+        if ensemble {
+            command.arg("ensemble").arg(&output).arg("--reed").arg(&input)
+                .args(["--full-scale-pa", "20000"]);
+        } else {
+            command.arg("wind").arg(&input).arg(&output);
+        }
+        let result = command.args(["--block", "37"]).output().unwrap();
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr));
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in [
+            "\"bore_wall\":{\"model\":\"orthotropic-principal-local-ring-membrane\"",
+            "\"pack_path\":\"wall.pack\"", "\"thickness_m\":1e-5",
+            "\"axial_constraint\":\"strain-fixed\"", "\"band_hz\":[1e-6,2.5e4]",
+            "\"hoop\":1,\"axial\":2", "proportional-kelvin-voigt", TIME,
+            "\"propagator\":\"regional-tmm-characteristic-line\"",
+            &material.content_hash().to_hex(), &source.wall().material().identity().to_hex(),
+        ] {
+            assert!(metadata.contains(token), "missing {token}: {metadata}");
+        }
+        assert!(!metadata.contains("\"propagator\":\"original-exact-dg\""), "{metadata}");
+    }
 }
 
 #[path = "orthotropic_wind_input/normal.rs"]

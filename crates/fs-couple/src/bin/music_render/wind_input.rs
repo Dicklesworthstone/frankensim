@@ -271,6 +271,14 @@ fn graph_wall_loss_metadata(
 fn dg_wall_source_metadata(
     source: &fs_couple::dg_port::input::wall::DgMaterialWallRecord,
 ) -> String {
+    material_wall_source_metadata(source, "original-exact-dg")
+}
+
+/// Original material receipt shared by acoustic owners; the caller names its propagator.
+pub(super) fn material_wall_source_metadata(
+    source: &fs_couple::dg_port::input::wall::DgMaterialWallRecord,
+    propagator: &str,
+) -> String {
     use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
     let wall = source.wall();
     let (model, directions) = wall_constitutive_metadata(wall.material(),
@@ -292,9 +300,10 @@ fn dg_wall_source_metadata(
             ("maxwell", format!(",\"maxwell_terms\":[{terms}]"))
         }
     };
-    format!("{{\"model\":\"{model}\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":\"original-exact-dg\"{relaxation}{directions}}}",
+    format!("{{\"model\":\"{model}\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":{}{relaxation}{directions}}}",
         json_string(source.path()), source.pack().content_hash().to_hex(),
-        wall.material().identity().to_hex(), wall.thickness_m(), wall.band_hz()[0], wall.band_hz()[1])
+        wall.material().identity().to_hex(), wall.thickness_m(), wall.band_hz()[0], wall.band_hz()[1],
+        json_string(propagator))
 }
 
 fn dg_wall_provenance(

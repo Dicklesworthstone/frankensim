@@ -441,6 +441,9 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
     let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
     let field = reed_field_provenance(p);
     let molecular = reed_molecular_provenance(p);
+    let wall = p.bore_wall().map_or_else(String::new, |source| format!(
+        ",\"bore_wall\":{}", super::wind_input::material_wall_source_metadata(
+            source, "regional-tmm-characteristic-line")));
     let (point, scope, observation_scope) = if p.molecular_driving_point()
         .is_some_and(|source| !source.open_hole_sites().is_empty()) && p.outlet_receiver().is_some() {
         ("baffled-openings",
@@ -455,7 +458,7 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
             "terminal and open-hole Rayleigh pressure; same regional TMM and flanged feedback load; each open or vented hole is its own baffled disk, with no scattering between mouths; finite-history sampled approximation, not a certified broadband radiation match; no jet, structural or room radiation; not measured calibration",
             "sum of terminal and all open or vented hole pressures in the bound exterior gas; each mouth uses its own range and observer filter")
     } else { (point, scope, observation_scope) };
-    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}",
+    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}{wall}",
         gas_state(p.ambient_gas()),regions.join(","))
 }
 
