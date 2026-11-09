@@ -230,3 +230,207 @@ fn native_storage_tangent_retains_nonlinear_harmonics_and_explicit_memory() {
         .unwrap();
     assert_eq!(response.coeffs, repeated.coeffs);
 }
+
+fn objective_controls() -> ForcedMeanObjectiveControls {
+    ForcedMeanObjectiveControls {
+        objective_scale: 1.0,
+        maximum_value_sampling_defect: 1e-10,
+        maximum_gradient_sampling_defect: 1e-10,
+    }
+}
+
+#[test]
+fn physical_energy_adjoint_keeps_dc_phase_and_every_forcing_harmonic() {
+    let (mass, stiffness, damping, omega) = (2.0, 10.0, 1.3, 1.1);
+    let system = fs_phs::mass_spring_damper(mass, stiffness, damping).unwrap();
+    let force = vec![
+        C64::from_re(0.4),
+        C64::new(0.5, -0.2),
+        C64::new(-0.12, 0.07),
+    ];
+    let change = vec![C64::from_re(0.3), C64::new(-0.2, 0.1), C64::new(0.08, 0.02)];
+    let input = PeriodicPortInput::new(omega, vec![force.clone()]).unwrap();
+    let port = PeriodicPortInput::new(omega, vec![change.clone()]).unwrap();
+    let orbit = solve_forced_harmonic_balance(&system, &input, 0.1, &hb(2)).unwrap();
+    let mut prepared =
+        PreparedPhsForcedSensitivity::new(&system, &input, &orbit, controls(), &scales(2), || {
+            false
+        })
+        .unwrap();
+    let objective = prepared
+        .mean_stored_energy(objective_controls(), || false)
+        .unwrap();
+    // Independent frequency-domain mechanical law and ordinary Parseval mean.
+    let (mut expected, mut source_gradient, mut stiffness_gradient, mut explicit_k) =
+        (0.0, 0.0, 0.0, 0.0);
+    for n in 0..force.len() {
+        let w = n as f64 * omega;
+        let z = C64::new(stiffness - mass * w * w, damping * w);
+        let q = force[n] / z;
+        let dq = change[n] / z;
+        let dk = q.scale(-1.0) / z;
+        let weight = if n == 0 { 0.5 } else { 1.0 };
+        let energy = stiffness + mass * w * w;
+        let norm = q.re * q.re + q.im * q.im;
+        expected += weight * energy * norm;
+        explicit_k += weight * norm;
+        source_gradient += 2.0 * weight * energy * (q.re * dq.re + q.im * dq.im);
+        stiffness_gradient += weight * norm + 2.0 * weight * energy * (q.re * dk.re + q.im * dk.im);
+    }
+    assert!((objective.value - expected).abs() < 3e-13);
+    let mut adjoint = prepared
+        .prepare_adjoint(&objective.gradient, 1.0, || false)
+        .unwrap();
+    assert!(adjoint.prepared().dual_residual < 1e-11);
+    let source = adjoint
+        .gradient_port_direction(direction(), 0.0, &port, || false)
+        .unwrap();
+    let material = adjoint
+        .gradient_storage_direction(
+            direction(),
+            explicit_k,
+            |x, out| {
+                out.copy_from_slice(&[x[0], 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    assert!((source.derivative - source_gradient).abs() < 3e-13);
+    assert!((material.derivative - stiffness_gradient).abs() < 3e-13);
+}
+
+#[test]
+fn nonlinear_memory_objective_adjoint_matches_independent_neighboring_physical_orbits() {
+    let beta = 1.4;
+    let system = memory_system(beta);
+    let input = PeriodicPortInput::new(0.85, vec![vec![C64::ZERO, C64::new(0.7, -0.2)]]).unwrap();
+    let orbit = memory_orbit(&system, &input);
+    let mut prepared =
+        PreparedPhsForcedSensitivity::new(&system, &input, &orbit, controls(), &scales(3), || {
+            false
+        })
+        .unwrap();
+    let objective = prepared
+        .mean_stored_energy(objective_controls(), || false)
+        .unwrap();
+    let samples = 1009;
+    let mean = |source: &PortHamiltonian, waveform: &HbOrbit| {
+        (0..samples)
+            .map(|j| {
+                let theta = core::f64::consts::TAU * j as f64 / samples as f64;
+                let x = [
+                    waveform.sample(0, theta),
+                    waveform.sample(1, theta),
+                    waveform.sample(2, theta),
+                ];
+                source.hamiltonian(&x)
+            })
+            .sum::<f64>()
+            / samples as f64
+    };
+    let direct = (0..samples)
+        .map(|j| {
+            let theta = core::f64::consts::TAU * j as f64 / samples as f64;
+            0.25 * orbit.sample(0, theta).powi(4)
+        })
+        .sum::<f64>()
+        / samples as f64;
+    assert!((objective.value - mean(&system, &orbit)).abs() < 2e-12);
+    let mut adjoint = prepared
+        .prepare_adjoint(&objective.gradient, 1.0, || false)
+        .unwrap();
+    let derivative = adjoint
+        .gradient_storage_direction(
+            direction(),
+            direct,
+            |x, out| {
+                out.copy_from_slice(&[x[0].powi(3), 0.0, 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let h = 1e-4;
+    let lo = memory_system(beta - h);
+    let hi = memory_system(beta + h);
+    let reference =
+        (mean(&hi, &memory_orbit(&hi, &input)) - mean(&lo, &memory_orbit(&lo, &input))) / (2.0 * h);
+    assert!((derivative.derivative - reference).abs() < 3e-9);
+    assert!(orbit.coeffs[2][3].abs() > 1e-5);
+}
+
+#[test]
+fn physical_objective_refusals_and_cancellation_leave_the_original_factor_reusable() {
+    let system = fs_phs::mass_spring_damper(2.0, 10.0, 1.3).unwrap();
+    let input = PeriodicPortInput::new(1.1, vec![vec![C64::ZERO, C64::new(0.5, -0.2)]]).unwrap();
+    let orbit = solve_forced_harmonic_balance(&system, &input, 0.1, &hb(2)).unwrap();
+    let mut prepared =
+        PreparedPhsForcedSensitivity::new(&system, &input, &orbit, controls(), &scales(2), || {
+            false
+        })
+        .unwrap();
+    assert!(
+        prepared
+            .mean_objective(
+                objective_controls(),
+                |_, _, value, _| {
+                    *value = 0.0;
+                    true
+                },
+                || false
+            )
+            .is_err()
+    );
+    let objective = prepared
+        .mean_stored_energy(objective_controls(), || false)
+        .unwrap();
+    let mut adjoint = prepared
+        .prepare_adjoint(&objective.gradient, 1.0, || false)
+        .unwrap();
+    let expected = adjoint
+        .gradient_port_direction(direction(), 0.0, &input, || false)
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        adjoint.gradient_port_direction(direction(), 0.0, &input, || {
+            polls += 1;
+            polls > 8
+        }),
+        Err(PhsForcedSensitivityError::Sensitivity(
+            ForcedSensitivityError::Cancelled
+        ))
+    ));
+    assert!(
+        adjoint
+            .gradient_storage_direction(
+                direction(),
+                0.0,
+                |_, out| {
+                    out[0] = 0.0;
+                    true
+                },
+                || false
+            )
+            .is_err()
+    );
+    let mut clock = direction();
+    clock.angular_frequency_derivative = 1.0;
+    assert!(
+        adjoint
+            .gradient_port_direction(clock, 0.0, &input, || false)
+            .is_err()
+    );
+    let wrong = input.at_frequency(1.2).unwrap();
+    assert!(
+        adjoint
+            .gradient_port_direction(direction(), 0.0, &wrong, || false)
+            .is_err()
+    );
+    assert_eq!(
+        expected,
+        adjoint
+            .gradient_port_direction(direction(), 0.0, &input, || false)
+            .unwrap()
+    );
+}

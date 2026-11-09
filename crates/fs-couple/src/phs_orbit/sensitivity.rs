@@ -5,10 +5,14 @@ use super::{
     forced_problem, tangent::StorageTangent,
 };
 use fs_orbit::sensitivity::{
-    ForcedOrbitSensitivity, ForcedSensitivityControls, ForcedSensitivityDirection,
-    ForcedSensitivityError, PreparedForcedSensitivity,
+    ForcedMeanObjective, ForcedMeanObjectiveControls, ForcedOrbitSensitivity,
+    ForcedSensitivityControls, ForcedSensitivityDirection, ForcedSensitivityError,
+    PreparedForcedSensitivity,
 };
 use fs_phs::PortHamiltonian;
+
+mod adjoint;
+pub use adjoint::PreparedPhsForcedAdjoint;
 
 /// Source admission and exact shared harmonic derivative refusals.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +125,42 @@ impl<'a> PreparedPhsForcedSensitivity<'a> {
         &self.prepared
     }
 
+    /// Sample a differentiable physical observation on the original full-state
+    /// cycle. The shared AFT owner checks both its mean and complete Fourier
+    /// gradient on independent grids. The callback writes its value and EVERY
+    /// state partial, including explicit material/controller memory coordinates.
+    /// Direct parameter and clock dependence remain separate adjoint partials.
+    pub fn mean_objective(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        observation: impl FnMut(f64, &[f64], &mut f64, &mut [f64]) -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        self.prepared
+            .mean_objective(controls, observation, cancelled)
+            .map_err(Into::into)
+    }
+
+    /// Mean ORIGINAL Hamiltonian and its complete state covector, including
+    /// nonlinear storage and explicit memory. A storage parameter's direct
+    /// `partial_p H` must still be supplied to the objective adjoint separately.
+    pub fn mean_stored_energy(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        let system = self.system;
+        self.mean_objective(
+            controls,
+            |_time, state, value, gradient| {
+                *value = system.hamiltonian(state);
+                system.storage().gradient(state, gradient);
+                value.is_finite() && gradient.iter().all(|v| v.is_finite())
+            },
+            cancelled,
+        )
+    }
+
     /// Differentiate all original physical port Fourier coefficients at once.
     ///
     /// `port_derivative` contains `du_n/dp`, with real DC and complex positive
@@ -135,29 +175,14 @@ impl<'a> PreparedPhsForcedSensitivity<'a> {
         port_derivative: &PeriodicPortInput,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity, PhsForcedSensitivityError> {
-        if port_derivative.omega_rad_s() != self.prepared.angular_frequency()
-            || port_derivative.port_count() != self.system.port_dim()
-            || port_derivative.highest_nonzero_harmonic() > self.prepared.harmonics()
-        {
-            return Err(bad(
-                "port derivative must preserve the clock, all ports and retained bandwidth",
-            )
-            .into());
-        }
-        let zero_effort = vec![0.0; self.system.state_dim()];
-        let mut ports = vec![0.0; self.system.port_dim()];
-        let system = self.system;
+        let action = port_direction(
+            self.system,
+            port_derivative,
+            self.prepared.angular_frequency(),
+            self.prepared.harmonics(),
+        )?;
         self.prepared
-            .solve_island_direction(
-                direction,
-                |time, _state, out| {
-                    port_derivative.sample_into(time, &mut ports)
-                        && system
-                            .vector_field_from_effort_into(&zero_effort, &ports, out)
-                            .is_ok()
-                },
-                cancelled,
-            )
+            .solve_island_direction(direction, action, cancelled)
             .map_err(Into::into)
     }
 
@@ -174,26 +199,59 @@ impl<'a> PreparedPhsForcedSensitivity<'a> {
     pub fn solve_storage_direction(
         &mut self,
         direction: ForcedSensitivityDirection,
-        mut effort_derivative: impl FnMut(&[f64], &mut [f64]) -> bool,
+        effort_derivative: impl FnMut(&[f64], &mut [f64]) -> bool,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity, PhsForcedSensitivityError> {
-        let mut effort = vec![f64::NAN; self.system.state_dim()];
-        let zero_ports = vec![0.0; self.system.port_dim()];
-        let system = self.system;
         self.prepared
             .solve_island_direction(
                 direction,
-                |_time, state, out| {
-                    effort.fill(f64::NAN);
-                    effort_derivative(state, &mut effort)
-                        && effort.iter().all(|value| value.is_finite())
-                        && system
-                            .vector_field_from_effort_into(&effort, &zero_ports, out)
-                            .is_ok()
-                },
+                storage_direction(self.system, effort_derivative),
                 cancelled,
             )
             .map_err(Into::into)
+    }
+}
+
+// The waveform solve and objective adjoint use the SAME original physical
+// direction. No parallel assembly of G or (J-R), and no numerical source probes.
+fn port_direction<'a>(
+    system: &'a PortHamiltonian,
+    input: &'a PeriodicPortInput,
+    omega: f64,
+    harmonics: usize,
+) -> Result<impl FnMut(f64, &[f64], &mut [f64]) -> bool + 'a, PhsForcedSensitivityError> {
+    if input.omega_rad_s() != omega
+        || input.port_count() != system.port_dim()
+        || input.highest_nonzero_harmonic() > harmonics
+    {
+        return Err(bad(
+            "port derivative must preserve the clock, all ports and retained bandwidth",
+        )
+        .into());
+    }
+    let zero_effort = vec![0.0; system.state_dim()];
+    let mut ports = vec![0.0; system.port_dim()];
+    Ok(move |time: f64, _state: &[f64], out: &mut [f64]| {
+        input.sample_into(time, &mut ports)
+            && system
+                .vector_field_from_effort_into(&zero_effort, &ports, out)
+                .is_ok()
+    })
+}
+
+fn storage_direction<'a>(
+    system: &'a PortHamiltonian,
+    mut effort_derivative: impl FnMut(&[f64], &mut [f64]) -> bool + 'a,
+) -> impl FnMut(f64, &[f64], &mut [f64]) -> bool + 'a {
+    let mut effort = vec![f64::NAN; system.state_dim()];
+    let zero_ports = vec![0.0; system.port_dim()];
+    move |_time: f64, state: &[f64], out: &mut [f64]| {
+        effort.fill(f64::NAN);
+        effort_derivative(state, &mut effort)
+            && effort.iter().all(|value| value.is_finite())
+            && system
+                .vector_field_from_effort_into(&effort, &zero_ports, out)
+                .is_ok()
     }
 }
 

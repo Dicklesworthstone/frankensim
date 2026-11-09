@@ -10288,3 +10288,21 @@ accepted-endpoint continuation and atomic current-source-bound refusal.
 Native regression execution and final formatter verification were unavailable
 after the session's executor outage; independent formula and source reviews
 do not substitute for that pending execution.
+
+
+### Physical forced-cycle objective adjoints
+
+`PreparedPhsForcedSensitivity::mean_objective` exposes the shared two-grid value
+and full-covector admission on unchanged physical state trajectories.
+`mean_stored_energy` evaluates the original nonlinear Hamiltonian and complete
+gradient, including explicit memory. `prepare_adjoint` and
+`PreparedPhsForcedAdjoint` reuse the original coupled factor and exact source
+direction owner for physical Fourier-port and storage/material gradients;
+there is no source fitting or per-parameter waveform solve. Returned derivatives
+are the direct objective partial minus the original residual-dual contraction.
+Port count, physical clock and retained bandwidth remain mandatory; local-island
+paths refuse prescribed clock changes. The author supplies direct objective
+material/clock partials separately, including `partial_p H` for a storage
+objective. Cancellation and refusal publish no result and preserve reuse.
+Finite-order/sampling evidence does not prove harmonic-tail convergence or
+stability.
