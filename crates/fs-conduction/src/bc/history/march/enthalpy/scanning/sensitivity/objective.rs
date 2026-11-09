@@ -3,8 +3,10 @@
 //! Each endpoint runs the original nonlinear scan producer once. The reverse
 //! sweep propagates the downstream enthalpy seed BEFORE adding the current
 //! observation's seed, so early heating and intermediate measurements are not
-//! lost. All sampled source gradients are contracted into the original authored
-//! constant/ramp/table/Chebyshev values, on the same side of every event.
+//! lost. Sampled source and radiative reservoir gradients are contracted into
+//! the original authored constant/ramp/table/Chebyshev values on the same side
+//! of every event. Each patch's shared emissivity receives the whole-history
+//! derivative from those same physical transpose solves.
 //!
 //! The default evaluator retains its full bounded tape; `checkpoint` adds an
 //! explicit segmented replay policy. Neither differentiates adaptive grids,
@@ -22,6 +24,8 @@ pub mod temporal;
 pub mod loss;
 /// Original physical objective without tangent construction or reverse storage.
 pub mod value;
+mod radiation;
+pub use radiation::ScanRadiationScheduleGradient;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
@@ -95,7 +99,8 @@ pub struct ScanObjectiveBudget {
     pub max_retained_vertices: usize,
     /// Endpoints times sources times mesh vertices.
     pub max_retained_source_vertices: usize,
-    /// Sum over sources of authored signal values plus their three half widths.
+    /// All authored source values/widths plus radiative reservoir values and
+    /// one shared emissivity per attached patch. Knot times are not controls.
     pub max_schedule_controls: usize,
     /// Total radiation-feedback allowance divided among all retained endpoints.
     pub max_retained_radiation_entries: usize,
@@ -113,6 +118,9 @@ pub struct ScanObjectiveEvaluation {
     pub standardized_residuals: Vec<f64>,
     /// Gradients in each source's original schedule representation and SI units.
     pub sources: Vec<MovingHeatScheduleGradient>,
+    /// Authored reservoirs and shared emissivities in patch declaration order.
+    /// Empty when no radiation is attached.
+    pub radiation: Vec<ScanRadiationScheduleGradient>,
     /// Sensitivity to the input run's initial specific enthalpy, in vertex order.
     pub initial_specific_enthalpy: Vec<f64>,
     /// Original last endpoint report, not a replacement or smoothed trajectory.
@@ -131,7 +139,9 @@ pub struct ScanObjectiveEvaluation {
 /// never change during evaluation, so sensitivities cannot be rebound to a
 /// different path, power schedule, footprint, event side or material history.
 /// Both nonlinear conductivity and attached radiation use the existing exact
-/// endpoint tangents. Background/boundary data remain fixed design inputs.
+/// endpoint tangents. Radiative reservoir values and fixed patch emissivities
+/// are returned alongside source controls; other background/boundary data remain
+/// fixed design inputs.
 ///
 /// Retains at most the explicitly admitted endpoint count and source-node shape
 /// count; each endpoint's sparse tangent follows the original mesh and interface
@@ -187,7 +197,7 @@ fn evaluate_with_tape<R, O: ScanObservationSpec>(
     Ok((ScanObjectiveEvaluation { value: measured.value, predictions: measured.predictions,
         standardized_residuals: measured.residuals,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan reverse sweep"))?,
-        initial_specific_enthalpy: reverse.seed, final_step, endpoint_count: count,
+        radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed, final_step, endpoint_count: count,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual }, extra))
 }
 
@@ -212,6 +222,9 @@ fn admit_layout<O: ScanObservationSpec>(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'
         .ok_or_else(|| invalid("scan objective retained vertex allowance exceeded"))?;
     if retained.checked_mul(run.sources().len()).is_none_or(|n| n > budget.max_retained_source_vertices) {
         return Err(invalid("scan objective retained source-vertex allowance exceeded"));
+    }
+    if radiation::control_count(cx, run)? > budget.max_schedule_controls {
+        return Err(invalid("scan objective authored-control allowance exceeded"));
     }
     let at_endpoint = value::admit_values(cx, run, endpoints, observations, value::ScanValueBudget {
         max_steps: budget.max_steps, max_observations: budget.max_observations,
@@ -252,12 +265,14 @@ fn observed(report: &ScanStep, observable: ScanObservable, vertex: usize) -> f64
 struct ReverseState {
     seed: Vec<f64>,
     sources: Option<Vec<MovingHeatScheduleGradient>>,
+    radiation: Vec<ScanRadiationScheduleGradient>,
     iterations: usize,
     residual: f64,
 }
 impl ReverseState {
     fn new(vertices: usize) -> Result<Self, ScanSensitivityError> {
-        Ok(Self { seed: zeros(vertices)?, sources: None, iterations: 0, residual: 0.0 })
+        Ok(Self { seed: zeros(vertices)?, sources: None, radiation: Vec::new(),
+            iterations: 0, residual: 0.0 })
     }
 
     fn inject_observations<O: ScanObservationSpec>(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>, endpoint: usize,
@@ -322,6 +337,8 @@ impl ReverseState {
                 }
             }
         }
+        let radiation = radiation::pullback(cx, run, binding.end_time_s(), sampling, gradient.radiation)?;
+        radiation::accumulate(cx, &mut self.radiation, radiation)?;
         self.seed = gradient.storage.transport.previous_specific_enthalpy;
         Ok(())
     }

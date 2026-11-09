@@ -73,7 +73,7 @@ impl MovingHeatSource {
     }
 }
 
-fn count(signal: &TimeSignal) -> Result<usize, ConductionError> {
+pub(crate) fn count(signal: &TimeSignal) -> Result<usize, ConductionError> {
     Ok(match signal {
         TimeSignal::Constant(_) => 1,
         TimeSignal::Chirp(_) => return Err(super::invalid(
@@ -84,8 +84,10 @@ fn count(signal: &TimeSignal) -> Result<usize, ConductionError> {
     })
 }
 
-// Derivative basis only: the primal is always evaluated by the original owner.
-fn pull_signal(cx: &Cx<'_>, signal: &TimeSignal, time: f64, left: bool, seed: f64)
+// Derivative basis only: callers must first admit the signal and sampled value
+// through their original physical owner, then pass a finite seed at the same
+// fixed time and event side. No primal evaluation is replaced by this helper.
+pub(crate) fn pull_signal(cx: &Cx<'_>, signal: &TimeSignal, time: f64, left: bool, seed: f64)
     -> Result<Vec<f64>, ConductionError>
 {
     poll(cx, 0)?;

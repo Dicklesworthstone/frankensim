@@ -95,6 +95,7 @@ fn same(a: &ScanObjectiveEvaluation, b: &ScanObjectiveEvaluation) {
     assert_eq!(a.predictions, b.predictions);
     assert_eq!(a.standardized_residuals, b.standardized_residuals);
     assert_eq!(a.sources, b.sources);
+    assert_eq!(a.radiation, b.radiation);
     assert_eq!(a.initial_specific_enthalpy, b.initial_specific_enthalpy);
     assert_eq!(a.transpose_iterations, b.transpose_iterations);
     assert_eq!(a.max_transpose_relative_residual, b.max_transpose_relative_residual);
@@ -229,6 +230,7 @@ fn g5_point_and_peak_constraints_share_replay_without_changing_their_gradients()
                     for (a,b) in full_rows.iter().zip(&replay.responses) {
                         assert_eq!(a.value.to_bits(),b.value.to_bits());
                         assert_eq!(a.sources,b.sources);
+                        assert_eq!(a.radiation,b.radiation);
                         assert_eq!(a.initial_specific_enthalpy,b.initial_specific_enthalpy);
                         assert_eq!(a.transpose_iterations,b.transpose_iterations);
                     }
@@ -238,6 +240,7 @@ fn g5_point_and_peak_constraints_share_replay_without_changing_their_gradients()
                         assert_eq!(a.smoothing_gap,b.smoothing_gap);
                         assert_eq!(a.maximum_smoothing_gap,b.maximum_smoothing_gap);
                         assert_eq!(a.sources,b.sources);
+                        assert_eq!(a.radiation,b.radiation);
                         assert_eq!(a.initial_specific_enthalpy,b.initial_specific_enthalpy);
                         assert_eq!(a.transpose_iterations,b.transpose_iterations);
                     }

@@ -12,8 +12,8 @@ pub mod peaks;
 
 use super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     ScanObjectiveSampling, ScanSensitivityError, ScanStepLinearization, ScanningEnthalpyRun,
-    MovingHeatScheduleGradient, EnthalpyStepConfig, LinearConfig, add, evaluate_with_tape,
-    finite, invalid, poll, zeros};
+    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, EnthalpyStepConfig,
+    LinearConfig, ReverseState, evaluate_with_tape, finite, invalid, poll};
 use fs_exec::Cx;
 
 /// A response in its original physical units at one supplied endpoint and vertex.
@@ -28,7 +28,7 @@ pub struct ScanResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanResponseBudget {
     pub max_responses: usize,
-    /// Responses times (all authored source controls plus mesh vertices).
+    /// Responses times (all authored source/radiation controls plus mesh vertices).
     /// A scalar shape cap, not a global allocator or byte bound.
     pub max_gradient_entries: usize,
     /// Objective endpoints plus sum(response.endpoint + 1), admitted before
@@ -43,6 +43,8 @@ pub struct ScanResponseEvaluation {
     /// Kelvin, J/kg or dimensionless mass fraction, as selected by the observable.
     pub value: f64,
     pub sources: Vec<MovingHeatScheduleGradient>,
+    /// Original patch order; empty when no radiation is attached.
+    pub radiation: Vec<ScanRadiationScheduleGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -69,12 +71,8 @@ pub fn evaluate_scan_objective_with_responses(
         return Err(invalid("scan response count exceeds its explicit allowance"));
     }
     let vertices = run.conduction().temperature().len();
-    let mut entries_per_response = vertices;
-    for (i, source) in run.sources().iter().enumerate() {
-        poll(cx, i)?;
-        entries_per_response = entries_per_response.checked_add(source.schedule_control_count()?)
-            .ok_or_else(|| invalid("scan response gradient size overflow"))?;
-    }
+    let entries_per_response = vertices.checked_add(super::radiation::control_count(cx, &run)?)
+        .ok_or_else(|| invalid("scan response gradient size overflow"))?;
     if entries_per_response.checked_mul(responses.len())
         .is_none_or(|n| n > response_budget.max_gradient_entries)
     { return Err(invalid("scan response gradients exceed their retained scalar allowance")); }
@@ -114,51 +112,17 @@ fn pull_response(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         ScanObservable::SpecificEnthalpy => solution.specific_enthalpy_j_kg[response.vertex],
         ScanObservable::LiquidMassFraction => solution.liquid_mass_fraction[response.vertex],
     })?;
-    let mut seed = zeros(solution.temperature.len())?;
-    seed[response.vertex] = 1.0;
-    let mut accumulated: Option<Vec<MovingHeatScheduleGradient>> = None;
-    let mut iterations = 0usize;
-    let mut residual = 0.0_f64;
+    let mut reverse = ReverseState::new(solution.temperature.len())?;
+    reverse.seed[response.vertex] = 1.0;
+    // Convert only the local response seed, never the carried h derivative.
+    reverse.seed = response.observable.seed_in_enthalpy(cx, &tape[response.endpoint], reverse.seed)?;
     for index in (0..=response.endpoint).rev() {
         poll(cx, index)?;
-        let binding = &tape[index];
-        // Convert only the local response seed, never the carried h derivative.
-        if index == response.endpoint {
-            seed = response.observable.seed_in_enthalpy(cx, binding, seed)?;
-        }
-        let gradient = binding.pullback(cx, &seed, transpose)?;
-        iterations = iterations.checked_add(gradient.storage.transport.iterations)
-            .ok_or_else(|| invalid("scan response transpose iteration count overflow"))?;
-        residual = residual.max(gradient.storage.transport.relative_residual);
-        if gradient.sources.len() != run.sources().len() {
-            return Err(invalid("scan response source-gradient layout changed"));
-        }
-        let mut schedules = Vec::with_capacity(gradient.sources.len());
-        for (i, (source, gradient)) in run.sources().iter().zip(gradient.sources).enumerate() {
-            poll(cx, i)?;
-            schedules.push(match sampling {
-                ScanObjectiveSampling::RightEndpoint => source.pullback_schedule_at(
-                    cx, binding.end_time_s(), gradient, max_controls)?,
-                ScanObjectiveSampling::EventLeft => source.pullback_schedule_before(
-                    cx, binding.end_time_s(), gradient, max_controls)?,
-            });
-        }
-        match &mut accumulated {
-            None => accumulated = Some(schedules),
-            Some(total) => {
-                if total.len() != schedules.len() { return Err(invalid("scan response source identity changed")); }
-                for (a, b) in total.iter_mut().zip(&schedules) {
-                    for axis in 0..3 { add(cx, &mut a.center_values_m[axis], &b.center_values_m[axis])?; }
-                    add(cx, &mut a.half_width_m, &b.half_width_m)?;
-                    add(cx, &mut a.absorbed_power_values_w, &b.absorbed_power_values_w)?;
-                }
-            }
-        }
-        seed = gradient.storage.transport.previous_specific_enthalpy;
+        reverse.pull(cx, run, &tape[index], sampling, transpose, max_controls)?;
     }
     poll(cx, response.endpoint)?;
     Ok(ScanResponseEvaluation { response, value,
-        sources: accumulated.ok_or_else(|| invalid("missing scan response sweep"))?,
-        initial_specific_enthalpy: seed, transpose_iterations: iterations,
-        max_transpose_relative_residual: residual })
+        sources: reverse.sources.ok_or_else(|| invalid("missing scan response sweep"))?,
+        radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed,
+        transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }

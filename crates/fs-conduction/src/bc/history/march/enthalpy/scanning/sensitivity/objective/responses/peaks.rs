@@ -14,8 +14,8 @@
 use super::{ScanResponse, ScanResponseBudget, ScanResponseEvaluation, pull_response};
 use super::super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     ScanObjectiveSampling, ScanSensitivityError, ScanStepLinearization, ScanningEnthalpyRun,
-    MovingHeatScheduleGradient, EnthalpyStepConfig, LinearConfig, add, evaluate_with_tape,
-    finite, invalid, poll, zeros};
+    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, EnthalpyStepConfig,
+    LinearConfig, ReverseState, add, evaluate_with_tape, finite, invalid, poll, zeros};
 use fs_exec::Cx;
 use super::super::spatial::ScanObservationSpec;
 
@@ -73,6 +73,8 @@ pub struct ScanPeakEvaluation {
     pub maximum_smoothing_gap: f64,
     pub sample_count: usize,
     pub sources: Vec<MovingHeatScheduleGradient>,
+    /// Original patch order; empty when no radiation is attached.
+    pub radiation: Vec<ScanRadiationScheduleGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -131,12 +133,8 @@ pub(crate) fn admit_rows(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         .filter(|&n| n <= response_budget.max_responses)
         .ok_or_else(|| invalid("combined scan point/peak response allowance exceeded"))?;
     let vertices = run.conduction().temperature().len();
-    let mut entries = vertices;
-    for (i, source) in run.sources().iter().enumerate() {
-        poll(cx, i)?;
-        entries = entries.checked_add(source.schedule_control_count()?)
-            .ok_or_else(|| invalid("scan peak gradient shape overflow"))?;
-    }
+    let entries = vertices.checked_add(super::super::radiation::control_count(cx, run)?)
+        .ok_or_else(|| invalid("scan peak gradient shape overflow"))?;
     if entries.checked_mul(count).is_none_or(|n| n > response_budget.max_gradient_entries) {
         return Err(invalid("combined scan point/peak gradients exceed their retained scalar allowance"));
     }
@@ -223,15 +221,12 @@ fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         sample_count, peak.smoothing_scale, |i| sample(
             &tape[peak.first_endpoint+i/peak.vertices.len()], peak.observable,
             peak.vertices[i%peak.vertices.len()]))?;
-    let mut seed = zeros(run.conduction().temperature().len())?;
-    let mut accumulated: Option<Vec<MovingHeatScheduleGradient>> = None;
-    let mut iterations = 0usize;
-    let mut residual = 0.0_f64;
+    let mut reverse = ReverseState::new(run.conduction().temperature().len())?;
     for index in (0..=peak.last_endpoint).rev() {
         poll(cx, index)?;
         let binding = &tape[index];
         if index >= peak.first_endpoint {
-            let mut local = zeros(seed.len())?;
+            let mut local = zeros(reverse.seed.len())?;
             for (i, &vertex) in peak.vertices.iter().enumerate() {
                 if i % 256 == 0 { poll(cx, i)?; }
                 local[vertex] = weight(sample(binding, peak.observable, vertex), maximum, peak.smoothing_scale) / sum;
@@ -239,38 +234,14 @@ fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
             local = peak.observable.seed_in_enthalpy(cx, binding, local)?;
             // Earlier downstream derivatives are already in enthalpy coordinates.
             // Convert only the NEW local observable seed, never the whole seed.
-            add(cx, &mut seed, &local)?;
+            add(cx, &mut reverse.seed, &local)?;
         }
-        let gradient = binding.pullback(cx, &seed, transpose)?;
-        iterations = iterations.checked_add(gradient.storage.transport.iterations)
-            .ok_or_else(|| invalid("scan peak transpose iteration count overflow"))?;
-        residual = residual.max(gradient.storage.transport.relative_residual);
-        if gradient.sources.len() != run.sources().len() { return Err(invalid("scan peak source layout changed")); }
-        let mut schedules = Vec::with_capacity(gradient.sources.len());
-        for (i, (source, gradient)) in run.sources().iter().zip(gradient.sources).enumerate() {
-            poll(cx, i)?;
-            schedules.push(match sampling {
-                ScanObjectiveSampling::RightEndpoint => source.pullback_schedule_at(cx, binding.end_time_s(), gradient, max_controls)?,
-                ScanObjectiveSampling::EventLeft => source.pullback_schedule_before(cx, binding.end_time_s(), gradient, max_controls)?,
-            });
-        }
-        match &mut accumulated {
-            None => accumulated = Some(schedules),
-            Some(total) => {
-                if total.len() != schedules.len() { return Err(invalid("scan peak source identity changed")); }
-                for (a, b) in total.iter_mut().zip(&schedules) {
-                    for axis in 0..3 { add(cx, &mut a.center_values_m[axis], &b.center_values_m[axis])?; }
-                    add(cx, &mut a.half_width_m, &b.half_width_m)?;
-                    add(cx, &mut a.absorbed_power_values_w, &b.absorbed_power_values_w)?;
-                }
-            }
-        }
-        seed = gradient.storage.transport.previous_specific_enthalpy;
+        reverse.pull(cx, run, binding, sampling, transpose, max_controls)?;
     }
     poll(cx, sample_count)?;
     Ok(ScanPeakEvaluation { peak: peak.clone(), value, sampled_maximum: maximum,
         smoothing_gap: gap, maximum_smoothing_gap: bound, sample_count,
-        sources: accumulated.ok_or_else(|| invalid("missing scan peak sweep"))?,
-        initial_specific_enthalpy: seed, transpose_iterations: iterations,
-        max_transpose_relative_residual: residual })
+        sources: reverse.sources.ok_or_else(|| invalid("missing scan peak sweep"))?,
+        radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed,
+        transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }
