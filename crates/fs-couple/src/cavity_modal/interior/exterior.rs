@@ -13,6 +13,9 @@
 //! real power-wave references are numerical coordinates, not physical loads.
 //! The native Robin-loaded FE factorization and a small port closure retain
 //! the original loaded field, including at regular loaded-cavity resonances.
+//! Original distributed volume injection and quadratic inward boundary motion
+//! enter that same loaded field and its full exterior reaction coherently.
+//! Their signed work is retained separately from driven-port work and losses.
 //!
 //! This bounded harmonic model has a rigid exterior except at the selected
 //! openings. Other FE ports are explicitly driven interior feeds, not exterior
@@ -35,6 +38,9 @@ use fs_bem::radiation_policy::GeometryPolicy;
 use fs_exec::CancelGate;
 use fs_feec::acoustics::helmholtz::AcousticFeError;
 use fs_feec::acoustics::helmholtz::boundary_layer::BoundaryLayerPower;
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    BoundaryVelocitySource, HeterogeneousError, VolumeVelocitySource,
+};
 use fs_feec::acoustics::helmholtz::multiport::{
     BoundaryMode, InteriorMultiport, InteriorPortResponse, MAX_PORT_MODES,
     PreparedInteriorScattering,
@@ -67,6 +73,7 @@ pub struct RadiationBudget {
 pub enum RadiationError {
     Invalid(&'static str),
     Interior(AcousticFeError),
+    Source(HeterogeneousError),
     Geometry(HelmholtzError),
     Exterior(ApertureError),
     Closure(LuComplexError),
@@ -81,6 +88,11 @@ impl std::error::Error for RadiationError {}
 impl From<AcousticFeError> for RadiationError {
     fn from(error: AcousticFeError) -> Self {
         Self::Interior(error)
+    }
+}
+impl From<HeterogeneousError> for RadiationError {
+    fn from(error: HeterogeneousError) -> Self {
+        Self::Source(error)
     }
 }
 fn bad(what: &'static str) -> RadiationError {
@@ -151,9 +163,20 @@ pub struct RadiationResponse {
     /// Maximum original driven-flow/opening-pressure constraint residual,
     /// scaled by the largest pressure/flow power-coordinate magnitude.
     pub port_relative_residual: f64,
-    /// Supplied source work minus exterior work and native wall losses [W].
+    /// Total driven-port, boundary and volume source work minus exterior work
+    /// and native wall losses [W].
     /// This measured solver residual is never relabeled as physical heat.
     pub power_balance_residual_w: f64,
+}
+
+impl RadiationResponse {
+    /// All signed physical excitation work, counted once on the final field.
+    /// This is an energy-balance observation, not an additional heat source.
+    pub fn total_source_power_w(&self) -> f64 {
+        self.source_power_w
+            + self.interior.boundary_source_power_w
+            + self.interior.volume_source_power_w
+    }
 }
 
 /// Shared original geometry/shape admission for harmonic and causal owners.
@@ -511,6 +534,60 @@ impl PreparedRadiatingInterior<'_, '_> {
         maximum_port_relative_residual: f64,
         gate: &CancelGate,
     ) -> Result<RadiationResponse, RadiationError> {
+        self.response_with_sources_and_tolerance(
+            driven_inward_flow_m3_s,
+            &[],
+            &[],
+            maximum_port_relative_residual,
+            gate,
+        )
+    }
+
+    /// Close original distributed injection and inward boundary motion against
+    /// the same full self/mutual exterior load as the prescribed port flows.
+    ///
+    /// Prepare each source through this model's `interior()` and its original
+    /// `HelmholtzFe`. Volume amplitudes are peak m^3/s; quadratic boundary
+    /// amplitudes are peak inward m/s, all on the FE exp(+i omega t) clock.
+    /// Native exact-owner, signed-shape, support and source-count checks apply.
+    /// Sources are admitted even when their requested amplitude is zero.
+    ///
+    /// All source columns combine before the retained loaded solve. One affine
+    /// outgoing source response enters the existing small port closure, then
+    /// the same loaded factor reconstructs the complete final pressure field.
+    /// There is no per-source factorization or exterior reassembly. Signed
+    /// source work is evaluated on that final field, including interference.
+    ///
+    /// Boundary motion represents an interior actuator/feed on non-opening
+    /// faces. The exterior remains rigid outside its declared openings; this
+    /// does not model direct exterior radiation from a moving structural wall.
+    pub fn response_with_sources(
+        &self,
+        driven_inward_flow_m3_s: &[C64],
+        boundary: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        gate: &CancelGate,
+    ) -> Result<RadiationResponse, RadiationError> {
+        self.response_with_sources_and_tolerance(
+            driven_inward_flow_m3_s,
+            boundary,
+            volume,
+            DEFAULT_PORT_RELATIVE_TOLERANCE,
+            gate,
+        )
+    }
+
+    /// Source-driven response with the original explicit physical port
+    /// residual ceiling. Refusal/cancellation publishes no partial response;
+    /// the source projections and both original factors remain reusable.
+    pub fn response_with_sources_and_tolerance(
+        &self,
+        driven_inward_flow_m3_s: &[C64],
+        boundary: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        maximum_port_relative_residual: f64,
+        gate: &CancelGate,
+    ) -> Result<RadiationResponse, RadiationError> {
         poll(gate)?;
         if !maximum_port_relative_residual.is_finite()
             || maximum_port_relative_residual <= 0.0
@@ -532,13 +609,44 @@ impl PreparedRadiatingInterior<'_, '_> {
         for (&i, &q) in self.model.driven_modes.iter().zip(driven_inward_flow_m3_s) {
             incident[i] = q.scale(self.roots[i]);
         }
+        let has_sources = !boundary.is_empty() || !volume.is_empty();
+        if has_sources {
+            let outgoing = self
+                .interior
+                .source_outgoing(boundary, volume, &cancelled)?;
+            // b = S a + e, P = sqrt(R) (a+b), Q = (a-b)/sqrt(R).
+            // Driven rows require (I-S)a = sqrt(R)Q + e. Radiating rows
+            // require [(I+S)+Zbar(I-S)]a = -e + Zbar e, Zbar=R^-1/2 Z R^-1/2.
+            // These are affine loads on the original factor, not new impedance.
+            for &i in &self.model.driven_modes {
+                poll(gate)?;
+                incident[i] = incident[i] + outgoing[i];
+            }
+            let nr = self.model.radiating_modes.len();
+            for (r, &i) in self.model.radiating_modes.iter().enumerate() {
+                poll(gate)?;
+                let mut value = -outgoing[i];
+                for (s, &k) in self.model.radiating_modes.iter().enumerate() {
+                    value = value
+                        + self.reaction_impedance[r * nr + s]
+                            .scale(self.roots[i].recip() * self.roots[k].recip())
+                            * outgoing[k];
+                }
+                incident[i] = value;
+            }
+        }
         if incident.iter().any(|&z| !finite(z)) {
             return Err(bad("source power coordinates overflow"));
         }
         self.closure
             .solve_with_cancel(&mut incident, &cancelled)
             .map_err(RadiationError::Closure)?;
-        let interior = self.interior.response(&incident, &cancelled)?;
+        let interior = if has_sources {
+            self.interior
+                .response_with_sources(&incident, boundary, volume, &cancelled)?
+        } else {
+            self.interior.response(&incident, &cancelled)?
+        };
         let outward_flow_m3_s: Vec<_> = self
             .model
             .radiating_modes
@@ -618,10 +726,11 @@ impl PreparedRadiatingInterior<'_, '_> {
             .model
             .interior
             .boundary_layer_power(self.frequency_hz, &interior.amplitudes)?;
-        let power_balance_residual_w = source_power_w
-            - radiation_power_w
-            - boundary_layer_power.viscous_w
-            - boundary_layer_power.thermal_w;
+        let power_balance_residual_w =
+            source_power_w + interior.boundary_source_power_w + interior.volume_source_power_w
+                - radiation_power_w
+                - boundary_layer_power.viscous_w
+                - boundary_layer_power.thermal_w;
         if !power_balance_residual_w.is_finite() {
             return Err(bad("physical power-balance residual overflow"));
         }

@@ -887,6 +887,51 @@ the shared execution environment became unavailable after syntax checking and
 source review. No successful native build, full test pass or physical
 validation is claimed by their addition.
 
+## Distributed interior sources under the full opening radiation load
+
+`PreparedRadiatingInterior::response_with_sources` combines original distributed
+volume injection, six-node inward boundary motion and prescribed port flows
+under the same complete self/mutual exterior reaction. Sources are prepared
+through the retained `RadiatingInterior::interior()` and its original
+`HelmholtzFe`; exact geometry/multiport identity, original quadrature and
+pressure coordinates, support exclusions and source caps remain binding.
+All amplitudes are peak phasors on the existing FE exp(+i omega t) clock:
+volume sources use m^3/s and quadratic boundary sources use inward m/s.
+
+The original loaded pressure factor supplies the coherent affine source waves
+`b = S a + e`. They enter the existing physical port closure: driven rows
+receive `sqrt(R) Q + e`, while opening rows receive `-e + Zbar e`, where
+`Zbar = R^-1/2 Z R^-1/2`. The same factor then reconstructs the full final
+pressure field. No per-source factorization, BEM reassembly, passive-matrix
+modification or equivalent piston replaces the original source/exterior owners.
+Source projection callbacks run during source preparation, not warm responses.
+
+`source_power_w` retains its existing driven-port meaning. Native boundary and
+volume source work remain separate in `interior`; `total_source_power_w()`
+adds the three signed physical contributions once. Radiation work and native
+boundary-layer losses retain their original forms. The complete power residual
+uses total source work and is never interpreted as material heat.
+
+The explicit-tolerance source API checks the same original opening-pressure and
+driven-flow residuals. Native source admission also applies at zero amplitude.
+Cancellation or refusal yields no partial response and leaves the original
+source projections and loaded factors usable. Empty source lists retain the
+original response path.
+
+Three focused native regression definitions compare the mixed source field with
+an independent full FE/BEM block and analytic source moments, exercise pure
+source emission and coherent cancellation, and check original-owner, support,
+tolerance and cancellation/retry behavior. Native Rust formatting/parsing was
+available; compilation and execution were blocked by the missing required
+sibling workspace manifest, so these definitions are not a runtime pass.
+
+The existing homogeneous gas, fixed geometry, identical planar opening triangles
+and P0 exterior trace limits remain. Boundary drives describe interior
+actuators/feeds. Exterior panels outside the declared openings remain rigid;
+direct radiation from a moving structural wall requires its own reciprocal
+coupling. Prescribed injection does not infer combustion, mean-flow sources,
+acoustic startup or a causal realization.
+
 ## Simultaneous original shell, interior pressure and exterior radiation
 
 `TensorShellInterior::prepare_with_exterior` couples the original material

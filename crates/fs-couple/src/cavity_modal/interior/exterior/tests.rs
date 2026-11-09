@@ -4,6 +4,8 @@ use fs_feec::acoustics::helmholtz::Medium as FeMedium;
 use fs_feec::fixtures::kuhn_cube;
 use fs_material::gas::GasSpec;
 
+mod sources;
+
 const LENGTH: f64 = 0.06;
 const WIDTH: f64 = 0.04;
 const FREQUENCY: f64 = 480.0;
@@ -154,7 +156,20 @@ fn direct_block(
     source: &[C64],
     z_plus: &[C64],
 ) -> Vec<C64> {
+    direct_block_with_load(fe, ports, radiating, driven, source, z_plus, None)
+}
+
+fn direct_block_with_load(
+    fe: &HelmholtzFe<'_>,
+    ports: &[BoundaryMode],
+    radiating: &[usize],
+    driven: &[usize],
+    source: &[C64],
+    z_plus: &[C64],
+    distributed: Option<&[C64]>,
+) -> Vec<C64> {
     let pressure_dofs = fe.ndof();
+    assert!(distributed.is_none_or(|load| load.len() == pressure_dofs));
     let nr = radiating.len();
     let n = pressure_dofs + nr;
     let omega = core::f64::consts::TAU * FREQUENCY;
@@ -172,6 +187,9 @@ fn direct_block(
         }
         for (&port, &q) in driven.iter().zip(source) {
             rhs[i] = rhs[i] + iwrho * q.scale(loads[port][i]);
+        }
+        if let Some(load) = distributed {
+            rhs[i] = rhs[i] + iwrho * load[i];
         }
         for (r, &port) in radiating.iter().enumerate() {
             matrix[i * n + pressure_dofs + r] = iwrho.scale(-loads[port][i]);
