@@ -11692,3 +11692,13 @@ retains its pre-format layout; no final formatting pass is asserted for those
 reconstructed blobs. Source/API/physics review is supplementary; these
 cross-crate integration tests have not been compiled or executed, and no full
 Cargo or DSR pass is claimed.
+
+## Calibrated torsion release and plastic heat in finite receivers
+
+`friction_heat::adhesive::snap::torsion::JkrTorsionHeat` carries the original calibrated torsion lifecycle into exact registered finite caloric receivers. Every ordered normal or twist segment is regenerated from sealed source history. Normal snap, remaining twist-spring release and irreversible torsional loss keep distinct ledgers. Release and plastic loss require independently declared surface/outside partitions and named noncaloric destinations; reversible storage and signed normal/stiffness work stay mechanical. The heat ledgers begin at binding without resetting the loaded spring or converting past source losses again.
+
+One caloric proposal admits all requested heat shares together through the original thermal impulse operator. It preserves actual receiver identity, material objects, body, mass and geometry. Compensated source-channel sums and the original relative caloric audit supply the signed transfer residual; separate partition, accumulation and caloric defects supply its absolute gate. Final callback, budget, source, caloric or stale-history refusal leaves source history, all loss accounts and calorics unchanged. A marginal attached state is admitted with zero twist without inventing a snap.
+
+This base path is a same-time frozen-source impulse split. It supplies no conducting area, temperature feedback, coupled mixed-mode stability or native body impulse. Normal and retained spring release follow the original prescribed mode-I fold and calibrated homogeneous twist model, with its existing mode-III applicability ceiling.
+
+Four focused integration cases cover independently derived fold twist energy and normal release, fresh recontact and retained prior loss, elastic/area work versus plastic heat, finite caloric refusal, and final cancellation/stale history with deterministic retry. Pinned `rustfmt --check` passed. The new cases were not compiled or run: DSR and RCH are unavailable and local build memory/disk headroom is exhausted.

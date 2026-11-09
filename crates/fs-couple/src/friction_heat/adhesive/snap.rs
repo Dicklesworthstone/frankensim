@@ -31,6 +31,8 @@ pub mod rolling;
 pub mod temperature;
 /// Original thermal transport between the sealed normal trajectory's events.
 pub mod timed;
+/// Calibrated twist cycles with distinct normal, spring-release and plastic heat.
+pub mod torsion;
 /// Explicit viscous-support losses on their original smooth mechanical intervals.
 pub mod viscous;
 

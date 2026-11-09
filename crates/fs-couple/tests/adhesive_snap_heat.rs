@@ -3,6 +3,8 @@
 mod common;
 #[path = "adhesive_snap_heat/rolling.rs"]
 mod rolling;
+#[path = "adhesive_snap_heat/torsion.rs"]
+mod torsion;
 
 use fs_contact::normal_patch::adhesive::{
     JkrBranch, JkrEnvelope, JkrJumpKind, JkrState, SourceJkrSphereContact,
