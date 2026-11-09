@@ -32,6 +32,10 @@ mod stabilized;
 mod stress_observation;
 pub(super) mod timed;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
+pub use coupled::inertial_walls::{
+    InertialWallLoad, InertialWallsControl, MolecularInertialWallsError,
+    MolecularInertialWallsStep, Piston, PistonError,
+};
 pub use coupled::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, MovingMolecularStepReport3d,
     StabilizedMolecularStepControl, StabilizedMolecularStepReport3d,

@@ -10,6 +10,7 @@ pub use crate::compressible::mixture::molecular::{
 
 mod moving;
 pub use moving::MovingMolecularStepReport3d;
+pub(super) mod inertial_walls;
 
 #[cfg(feature = "experimental-sgs")]
 mod lagrangian_channel;
@@ -329,7 +330,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             crate::compressible::spatial::molecular::StressField3d::mixture(
                 &self.molecular.grid,
                 self.molecular.boundaries,
-                self.accepted.time.value(),
+                self.accepted.time,
                 &self.molecular.work.primitive,
                 &self.molecular.work.flux,
                 &self.accepted.states,

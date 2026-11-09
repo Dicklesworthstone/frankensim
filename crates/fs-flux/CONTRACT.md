@@ -4713,6 +4713,54 @@ Moving chemistry, prescribed reservoirs, retained SGS and simultaneous finite
 tangential-wall inertia are not composed by this entry. Source-domain,
 species, energy-chart, parabolic and relative acoustic checks remain active.
 
+### Reciprocal molecular mixture transport with finite volumetric pistons
+
+`spatial::mixture::molecular::MolecularEuler3d::step_with_inertial_walls`
+connects the full original evolving-species molecular/ALE transaction to the
+same finite two-piston mechanics. Actual pressure-plus-viscous impulses and
+conjugate work drive both masses. Maxwell--Stefan counterdiffusion, referenced
+partial enthalpies, Fourier heat, all three momentum components and original
+calorics remain active in every fixed-duration nonlinear proposal.
+
+The mixture aliases of `MolecularInertialWallsStep` and
+`MolecularInertialWallsError` retain the original mixture report/error types
+by default. The shared mechanical report includes side-wall support impulse,
+transverse translation-guide impulses and full pressure/viscous guide torque.
+Stationary transverse walls can absorb axial viscous momentum and are counted
+as external supports in the combined axial balance.
+
+Directly integrated Fourier/Navier wall heat is separate from piston work.
+Both species-referenced and physical gas-plus-wall energies must meet the
+authored tolerance. Physical increments add each actual species-mass
+difference times its original formation reference to referenced energy,
+avoiding subtraction of large absolute chemical totals. Every species remains
+impermeable at the piston; no normalization or caloric correction is applied.
+
+All proposals reuse original field/source scratch under the complete-owner
+workspace budget. A shortened/refused proposal restarts a complete interval,
+and cells, geometry, source binding, time, loads, reports and both pistons
+publish together. Closed reflecting/periodic directions, zero authored
+tangential wall velocities, and the existing single-axis moving-volume
+domain apply. Prescribed wall temperature is an external thermal reservoir,
+without a finite wall thermal-capacity model.
+
+Four native regressions independently reconstruct all momentum components,
+side and guide reactions, heat and both energy charts on every axis; preserve
+the piston response under shifted source formation references; recover the
+original zero-transport finite-piston owner; and check refusal/cancellation
+with no partial publication or workspace growth. The six original coupled
+mixture regressions also pass, including source heat, forcing and reservoirs.
+The existing source and unequal-caloric-contact limitations remain.
+
+Finite-reservoir report storage is prepared lazily on the heap only for bound
+sides. Empty native mixture fields no longer carry two maximum-species report
+banks inline, and stage/retry/clone restoration reuses prepared report capacity.
+Actual capacities remain in the original required/retained workspace account.
+In the native 64-bit build, the combined molecular owner's inline size falls
+from 141,992 to 40,616 bytes (99 KiB less), eliminating the reproduced default
+test-stack overflow. Original finite-tank regressions and empty-owner/report
+lifecycle guards cover source transfers, publication, cancellation and reuse.
+
 ### Accelerating no-slip walls in evolving-species three-dimensional flow
 
 `spatial::mixture::molecular::WallAcceleration3d` authors a constant tangential

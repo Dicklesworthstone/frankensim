@@ -90,8 +90,12 @@ pub(in crate::compressible) struct FiniteReservoirs<const D: usize, const S: usi
     trial: [Option<Plenum>; S],
     primitive: [Option<Primitive>; S],
     trial_primitive: [Option<Primitive>; S],
-    reports: [Option<FiniteReservoirReport<D>>; S],
-    trial_reports: [Option<FiniteReservoirReport<D>>; S],
+    // Each bound side prepares one slot in each bank. A report contains four
+    // maximum-species arrays, so keeping even empty Options inline would make
+    // every accepted/trial flow owner tens of kilobytes larger on the stack.
+    // Length zero means no accepted report yet; length one stores the report.
+    reports: [Vec<FiniteReservoirReport<D>>; S],
+    trial_reports: [Vec<FiniteReservoirReport<D>>; S],
     allocated_bytes: usize,
 }
 impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
@@ -101,8 +105,8 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             trial: std::array::from_fn(|_| None),
             primitive: [None; S],
             trial_primitive: [None; S],
-            reports: [None; S],
-            trial_reports: [None; S],
+            reports: std::array::from_fn(|_| Vec::new()),
+            trial_reports: std::array::from_fn(|_| Vec::new()),
             allocated_bytes: 0,
         }
     }
@@ -117,7 +121,10 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             ));
         }
         count
-            .checked_mul(2 * gas.species_count() * size_of::<f64>())
+            .checked_mul(
+                2 * gas.species_count() * size_of::<f64>()
+                    + 2 * size_of::<FiniteReservoirReport<D>>(),
+            )
             .and_then(|bytes| bytes.checked_add(size_of::<Self>()))
             .ok_or(Error::Invalid(
                 "Cartesian finite mixture workspace overflow",
@@ -176,10 +183,28 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
         };
         let (accepted, accepted_bytes) = make()?;
         let (trial, trial_bytes) = make()?;
+        // Prepare both report buffers before publishing any binding. Every
+        // later stage, retry and accepted-state copy reuses this capacity.
+        let mut reports = Vec::<FiniteReservoirReport<D>>::new();
+        reports
+            .try_reserve_exact(1)
+            .map_err(|_| Error::Allocation)?;
+        let mut trial_reports = Vec::<FiniteReservoirReport<D>>::new();
+        trial_reports
+            .try_reserve_exact(1)
+            .map_err(|_| Error::Allocation)?;
+        let report_bytes = reports
+            .capacity()
+            .checked_add(trial_reports.capacity())
+            .and_then(|count| count.checked_mul(size_of::<FiniteReservoirReport<D>>()))
+            .ok_or(Error::Invalid(
+                "Cartesian finite mixture workspace overflow",
+            ))?;
         let bytes = self
             .allocated_bytes
             .checked_add(accepted_bytes)
             .and_then(|bytes| bytes.checked_add(trial_bytes))
+            .and_then(|bytes| bytes.checked_add(report_bytes))
             .ok_or(Error::Invalid(
                 "Cartesian finite mixture workspace overflow",
             ))?;
@@ -188,6 +213,8 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
         self.trial[slot] = Some(trial);
         self.primitive[slot] = Some(primitive);
         self.trial_primitive[slot] = Some(primitive);
+        self.reports[slot] = reports;
+        self.trial_reports[slot] = trial_reports;
         self.allocated_bytes = bytes;
         Ok(())
     }
@@ -219,7 +246,7 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
     }
 
     pub(in crate::compressible) fn report(&self, slot: usize) -> Option<&FiniteReservoirReport<D>> {
-        self.reports[slot].as_ref()
+        self.reports[slot].first()
     }
 
     /// First capture holds half the forward-Euler impulse: weight two makes the
@@ -323,7 +350,8 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
                 ));
             }
             self.trial_primitive[slot] = Some(primitive);
-            self.trial_reports[slot] = Some(FiniteReservoirReport {
+            self.trial_reports[slot].clear();
+            self.trial_reports[slot].push(FiniteReservoirReport {
                 before: before_inventory,
                 after: after_inventory,
                 transfer,
@@ -342,7 +370,7 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             if self.accepted[slot].is_some() {
                 std::mem::swap(&mut self.accepted[slot], &mut self.trial[slot]);
                 self.primitive[slot] = self.trial_primitive[slot];
-                self.reports[slot] = self.trial_reports[slot];
+                std::mem::swap(&mut self.reports[slot], &mut self.trial_reports[slot]);
             }
         }
     }
@@ -356,10 +384,10 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
         for slot in 0..S {
             if let Some(tank) = &self.accepted[slot] {
                 result.bind(gas, slot, tank.volume_m3(), tank.state(), cancelled)?;
+                result.reports[slot].extend_from_slice(&self.reports[slot]);
+                result.trial_reports[slot].extend_from_slice(&self.reports[slot]);
             }
         }
-        result.reports = self.reports;
-        result.trial_reports = self.reports;
         poll(cancelled)?;
         Ok(result)
     }
@@ -393,7 +421,8 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
                     &mut *cancelled,
                 )?;
                 self.trial_primitive[slot] = source.primitive[slot];
-                self.trial_reports[slot] = source.reports[slot];
+                self.trial_reports[slot].clear();
+                self.trial_reports[slot].extend_from_slice(&source.reports[slot]);
             }
         }
         poll(cancelled)?;
@@ -443,5 +472,113 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
         Err(Error::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g0_empty_finite_storage_keeps_large_species_reports_off_the_owner_stack() {
+        // An unused finite reservoir is embedded in every native field and
+        // both molecular split frames. Optional storage must stay small even
+        // when the public report retains the complete maximum species axis.
+        assert!(size_of::<FiniteReservoirs<3, 6>>() < 4096);
+        assert!(size_of::<FiniteReservoirs<2, 4>>() < 4096);
+        let storage = FiniteReservoirs::<3, 6>::empty();
+        assert!(!storage.has_any());
+        assert_eq!(
+            storage.workspace_bytes(),
+            size_of::<FiniteReservoirs<3, 6>>()
+        );
+        for slot in 0..6 {
+            assert_eq!(storage.reports[slot].capacity(), 0);
+            assert_eq!(storage.trial_reports[slot].capacity(), 0);
+            assert!(storage.report(slot).is_none());
+        }
+    }
+
+    #[test]
+    fn g2_finite_report_clone_and_cancelled_restore_reuse_prepared_storage() {
+        let gas = crate::compressible::mixture::tests::standard(0.2);
+        let initial = gas.conserved(&[0.6, 0.4, 0.0], 0.0, 1.0).unwrap();
+        let slot = 3;
+        let mut owner = FiniteReservoirs::<3, 6>::empty();
+        owner
+            .bind(&gas, slot, 0.7, initial.as_cell(), &mut || false)
+            .unwrap();
+        let bytes = owner.workspace_bytes();
+        assert_eq!(
+            bytes,
+            FiniteReservoirs::<3, 6>::required_bytes(&gas, 1).unwrap()
+        );
+        let faces = [0, 0, 0, 1, 0, 0];
+        let transfer = [0.001, -0.0003, 0.0, 0.005, -0.003, 0.004, 0.002];
+        owner
+            .stage(&gas, &transfer, faces, 1.0, &mut || false)
+            .unwrap();
+        assert!(owner.report(slot).is_none());
+        owner.publish();
+        let mut target = owner.try_clone(&gas, &mut || false).unwrap();
+        assert_eq!(target.report(slot), owner.report(slot));
+        assert_eq!(target.workspace_bytes(), bytes);
+        let buffers = |storage: &FiniteReservoirs<3, 6>| {
+            let mut values = [
+                storage.reports[slot].as_ptr(),
+                storage.trial_reports[slot].as_ptr(),
+            ];
+            values.sort_unstable();
+            values
+        };
+        let prepared = buffers(&target);
+        target
+            .stage(&gas, &transfer, faces, 2.0, &mut || false)
+            .unwrap();
+        target.publish();
+        let previous = *target.report(slot).unwrap();
+        let prior_state = target.inventory(slot).unwrap().state();
+        let prior_densities = prior_state.partial_densities.to_vec();
+        let prior_energy = prior_state.energy;
+        let mut probe = target.try_clone(&gas, &mut || false).unwrap();
+        let mut calls = 0;
+        probe
+            .copy_accepted_from(&gas, &owner, &mut || {
+                calls += 1;
+                false
+            })
+            .unwrap();
+        let mut seen = 0;
+        assert_eq!(
+            target.copy_accepted_from(&gas, &owner, &mut || {
+                seen += 1;
+                seen == calls
+            }),
+            Err(Error::Cancelled),
+        );
+        assert_eq!(target.report(slot), Some(&previous));
+        assert_eq!(
+            target.inventory(slot).unwrap().state().partial_densities,
+            prior_densities
+        );
+        assert_eq!(target.inventory(slot).unwrap().state().energy, prior_energy);
+        assert_eq!(buffers(&target), prepared);
+        assert_eq!(target.workspace_bytes(), bytes);
+        target
+            .copy_accepted_from(&gas, &owner, &mut || false)
+            .unwrap();
+        assert_eq!(target.report(slot), owner.report(slot));
+        assert_eq!(
+            target.inventory(slot).unwrap().state(),
+            owner.inventory(slot).unwrap().state()
+        );
+        assert_eq!(buffers(&target), prepared);
+        assert_eq!(target.workspace_bytes(), bytes);
+        for side in 0..6 {
+            if side != slot {
+                assert_eq!(target.reports[side].capacity(), 0);
+                assert_eq!(target.trial_reports[side].capacity(), 0);
+            }
+        }
     }
 }

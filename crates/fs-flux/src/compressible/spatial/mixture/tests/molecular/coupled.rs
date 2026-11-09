@@ -2,6 +2,7 @@ use super::*;
 
 mod driving;
 mod inertia;
+mod inertial_walls;
 mod moving;
 mod stabilized;
 use crate::compressible::spatial::mixture::molecular::{

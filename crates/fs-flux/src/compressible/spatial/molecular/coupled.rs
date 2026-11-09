@@ -621,7 +621,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         Ok(StressField3d::frozen(
             &self.molecular.grid,
             self.molecular.boundaries,
-            self.accepted.time.value(),
+            self.accepted.time,
             &self.molecular.work.primitive,
             &self.molecular.work.flux,
             &self.accepted.states,

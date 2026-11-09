@@ -142,6 +142,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             self.sgs.as_mut(),
             cancelled,
         )?;
-        poll(cancelled)
+        poll(cancelled).map_err(MolecularError::from)
     }
 }
+
