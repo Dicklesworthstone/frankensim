@@ -106,6 +106,11 @@ mod energy;
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
 mod flow;
+pub use flow::{
+    GasSpeciesAdvectionInlet, GasSpeciesAdvectionInput, GasSpeciesVolumeSource,
+    ThermochemicalSpeciesAdvectionControls, ThermochemicalSpeciesAdvectionReport,
+    ThermochemicalSpeciesAdvectionStep,
+};
 #[cfg(feature = "enthalpy-coupling")]
 pub use flow::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,

@@ -327,3 +327,6 @@ mod boundary_adaptive;
 #[cfg(feature = "enthalpy-coupling")]
 #[path = "species_enthalpy_gas/conduction.rs"]
 mod conduction;
+
+#[path = "species_enthalpy_gas/advection.rs"]
+mod advection;

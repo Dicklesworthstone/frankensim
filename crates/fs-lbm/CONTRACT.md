@@ -2915,3 +2915,39 @@ uniform/source/temperature-boundary limits, fixed-cell storage heat, and
 query/source-domain/cancellation refusals. Source parsing and scoped format
 checks passed; native compilation and integration execution remain unverified
 because the available filesystem is full and DSR/RCH are unavailable.
+
+### Source-bound gas stream advection
+
+`GasSpeciesEnthalpySource::advection_inlet` evaluates canonical mass fractions
+and a physical temperature once through the original full source bank and
+pressure context. Its private immutable handle binds the resulting density,
+bulk total h and composition together. Each boundary/backflow face and local
+injection retains its own explicit state; extraction uses the original donor.
+
+`FlowField::project_and_advect_thermochemical_species` admits the original
+conserved M, constituent masses and total h, checks initial source closure,
+then runs the existing projected material transport once. Constituents consume
+that accepted carrier's SAME retained mass routes and operator. Endpoint
+temperature and transport are reconstructed through the original source from
+the returned inventories; EOS density is diagnostic and cannot replace M.
+No stream heat, formation heat or pressure-flow work is deposited again.
+The source pressure remains the supplied constitutive coordinate and the
+projection's mechanical account remains separate.
+
+The entry retains the native mass, energy, partition, iteration and storage
+controls. Additional checked budgets cover lowering arrays, the endpoint
+source field and initial/endpoint caloric inversion counts. Original material
+evaluation scratch remains additional, and prebuilt inlet evaluation is a
+separate source operation. Positive constituents may not disappear through
+unrepresentable mass fractions or molar amounts. Initial and final original
+caloric residuals plus the native transport defect must fit one absolute
+joule allowance, independent of formation-energy scale. Any source, resource,
+conservation or cancellation refusal returns no partial candidate and changes
+neither the supplied inventories nor the flow.
+
+Four regression groups are authored for independent boundary/local-source
+mixing under three formation references, exact native material/species parity,
+reverse-face inflow and continuation, immutable source/context binding,
+resource/partition/cancellation refusal, exact absence and solid entries.
+Pinned source parsing and scoped formatting passed; native type checking and
+execution remain unverified under the build/storage limitation above.

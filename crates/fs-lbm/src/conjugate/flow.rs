@@ -31,6 +31,11 @@ pub use density_projection::{
     StaggeredBoundaryPressure,
 };
 mod density_transport;
+pub use density_transport::{
+    GasSpeciesAdvectionInlet, GasSpeciesAdvectionInput, GasSpeciesVolumeSource,
+    ThermochemicalSpeciesAdvectionControls, ThermochemicalSpeciesAdvectionReport,
+    ThermochemicalSpeciesAdvectionStep,
+};
 #[cfg(feature = "enthalpy-coupling")]
 pub use density_transport::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,

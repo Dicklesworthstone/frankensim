@@ -8,6 +8,11 @@ use crate::conjugate::krylov::bicgstab_ilu0;
 use fs_sparse::{Coo, Csr};
 
 mod species;
+pub use species::{
+    GasSpeciesAdvectionInlet, GasSpeciesAdvectionInput, GasSpeciesVolumeSource,
+    ThermochemicalSpeciesAdvectionControls, ThermochemicalSpeciesAdvectionReport,
+    ThermochemicalSpeciesAdvectionStep,
+};
 #[cfg(feature = "enthalpy-coupling")]
 pub use species::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,

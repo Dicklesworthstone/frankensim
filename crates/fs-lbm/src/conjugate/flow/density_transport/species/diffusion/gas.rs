@@ -20,6 +20,12 @@ use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Amount, Temperature};
 
 mod adaptive;
+mod advection;
+pub use advection::{
+    GasSpeciesAdvectionInlet, GasSpeciesAdvectionInput, GasSpeciesVolumeSource,
+    ThermochemicalSpeciesAdvectionControls, ThermochemicalSpeciesAdvectionReport,
+    ThermochemicalSpeciesAdvectionStep,
+};
 mod boundary;
 pub use boundary::{BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource};
 #[cfg(feature = "enthalpy-coupling")]
