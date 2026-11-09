@@ -13,6 +13,8 @@ pub mod parcel;
 pub mod acoustics;
 /// Original pure-fluid sensible/latent enthalpy on the finite thermal timeline.
 pub mod isobaric;
+/// Original fixed-density two-phase internal energy on the finite thermal timeline.
+pub mod isochoric;
 
 use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -329,19 +331,25 @@ impl Work {
         }
     }
 }
-enum Target {
+enum Target<'a> {
     Absolute(f64),
     Increment {
         temperature: Temperature,
         residual_u: f64,
         requested: f64,
     },
+    // A prepared source-relative target for the sealed two-phase thermal law.
+    // The original UV search, phase admission and work limits remain shared.
+    Isochoric {
+        reference: &'a fs_thermochem::eos::peng_robinson::saturation::isochoric::PengRobinsonIsochoricCaloricReferenceV1<'a>,
+        requested: f64,
+    },
 }
-impl Target {
+impl Target<'_> {
     fn requested(&self) -> f64 {
         match self {
             Self::Absolute(value) => *value,
-            Self::Increment { requested, .. } => *requested,
+            Self::Increment { requested, .. } | Self::Isochoric { requested, .. } => *requested,
         }
     }
 }
@@ -591,8 +599,10 @@ impl ThermochemicalPengRobinsonModel {
     fn evaluated_energy(
         &self,
         state: &PureFluidEquilibriumState,
-        target: &Target,
+        target: &Target<'_>,
         controls: PureFluidEquilibriumControls,
+        work: &mut Work,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, E> {
         let value = match target {
             Target::Absolute(requested) => {
@@ -623,6 +633,21 @@ impl ThermochemicalPengRobinsonModel {
                     + (state.phase.residual_u() - residual_u)
                         / self.mechanics().molar_mass().value()
             }
+            Target::Isochoric { reference, .. } => {
+                let PureFluidEquilibriumPhase::Coexistence(phase) = &state.phase else {
+                    return Err(E::Invalid("sealed two-phase storage left its admitted coexistence interval"));
+                };
+                // Count the original bounded phase-caloric algebra as well as
+                // every saturation root query. No per-trial work reset occurs.
+                let cost = if phase == reference.initial_state() { 0 } else { 4 };
+                if controls.maximum_eos_evaluations.saturating_sub(work.eos) < cost {
+                    return Err(work.exhausted());
+                }
+                work.eos += cost;
+                reference.change_to(phase, &mut *cancelled)
+                    .map_err(isochoric::caloric_error)?
+                    .specific_internal_energy_change_j_kg
+            }
         };
         if !value.is_finite() {
             return Err(E::Invalid("equilibrium energy balance is unrepresentable"));
@@ -633,7 +658,7 @@ impl ThermochemicalPengRobinsonModel {
     fn solve_pure_energy(
         &self,
         density: f64,
-        target: Target,
+        target: Target<'_>,
         controls: PureFluidEquilibriumControls,
         mut work: Work,
         cancelled: &mut impl FnMut() -> bool,
@@ -641,7 +666,9 @@ impl ThermochemicalPengRobinsonModel {
         let requested = target.requested();
         let energy_tolerance = match target {
             Target::Absolute(_) => controls.energy_tolerance_j_kg,
-            Target::Increment { .. } => controls.energy_tolerance_j_kg.min(0.5 * requested.abs()),
+            Target::Increment { .. } | Target::Isochoric { .. } => {
+                controls.energy_tolerance_j_kg.min(0.5 * requested.abs())
+            },
         };
         if !positive(energy_tolerance) {
             return Err(E::Invalid(
@@ -662,8 +689,8 @@ impl ThermochemicalPengRobinsonModel {
             &mut work,
             cancelled,
         )?;
-        let mut lower_value = self.evaluated_energy(&lower, &target, controls)?;
-        let mut upper_value = self.evaluated_energy(&upper, &target, controls)?;
+        let mut lower_value = self.evaluated_energy(&lower, &target, controls, &mut work, cancelled)?;
+        let mut upper_value = self.evaluated_energy(&upper, &target, controls, &mut work, cancelled)?;
         if lower_value >= upper_value {
             return Err(E::Invalid(
                 "represented equilibrium energy must increase across the admitted temperature interval",
@@ -679,7 +706,7 @@ impl ThermochemicalPengRobinsonModel {
         let publish = |state, value: f64, work: &Work| PureFluidEquilibriumEnergySolution {
             state,
             residual_j_kg: value - requested,
-            accepted_increment_j_kg: if matches!(target, Target::Increment { .. }) {
+            accepted_increment_j_kg: if !matches!(target, Target::Absolute(_)) {
                 Some(value)
             } else {
                 None
@@ -734,7 +761,7 @@ impl ThermochemicalPengRobinsonModel {
                 &mut work,
                 cancelled,
             )?;
-            let value = self.evaluated_energy(&sample, &target, controls)?;
+            let value = self.evaluated_energy(&sample, &target, controls, &mut work, cancelled)?;
             residual = value - requested;
             if closed(&sample, value, hi - lo) {
                 poll(cancelled)?;

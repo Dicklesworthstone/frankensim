@@ -31,3 +31,36 @@ The shared temporal library and material projection/window test graph compile
 with warnings denied. The full native workspace and public TensorProny
 integration suite were not run. Finite-mode tail bounds exclude roundoff and
 do not certify relative error at arbitrary cancellation nulls.
+
+### Sealed pure-fluid PR coexistence thermal storage
+
+`thermochemical_gas::nonideal::equilibrium::isochoric::PureFluidIsochoricThermalStorage`
+connects one original pure PR/NASA source to the existing thermal timeline
+using INTERNAL ENERGY at fixed density. u=0 is the prepared cold endpoint.
+The original UV solver selects temperature, saturation pressure and phase
+amount with a private prepared source-relative target. Every trial retains
+original coexistence, volume, source and whole-call work admission, including
+four homogeneous caloric evaluations per nonidentical source increment.
+
+Only an interior two-phase subcritical interval is admitted. Original
+nonnegative kappa below Tc gives nonpositive attraction derivative, decreasing
+p_T(v), nested saturation volumes and nonnegative residual/moving-phase Cv.
+The analytic NASA Cv floor supplies the global inverse-temperature bound.
+Frozen quality and an isothermal plateau do not replace this response.
+Complete original phase/material receipts and source entropy remain available.
+Thermal entropy additionally checks direct local U closure and the actual
+endpoint reciprocal-temperature interval; unresolved intervals refuse.
+
+Cell admission requires m=rho*V within the original 128-epsilon relative volume
+allowance. Fixed density and its identically zero energy derivative use only
+coordinate-domain admission, avoiding unnecessary UV inversions; actual
+temperature, pressure and phase queries retain the native solve. The implicit
+adapter requires explicit bulk k(T), reports phase fraction, and refuses known
+conductivity derivative corners for harmonic use.
+
+No second heat integrator, boundary-work debit, phase kinetics,
+morphology/transport averaging or open-stream datum is inferred. Five
+original-material regressions cover UV responses, sealed heating/cooling,
+implicit derivatives and entropy, large formation references, and
+source/phase/work/cancellation refusal. They are authored but uncompiled and
+unexecuted during the development environment outage.
