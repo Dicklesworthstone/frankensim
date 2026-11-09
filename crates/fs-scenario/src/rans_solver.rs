@@ -1,12 +1,13 @@
 //! Low-Re forced-convection RANS solver implementation (bead `frankensim-extreal-program-f85xj.5.8.2`).
 //!
-//! Implements steady low-Re Launder-Sharma k-epsilon equations with:
+//! Frozen-turbulence one-dimensional mean-flow/scalar screen with:
+//! `k` and modified dissipation are supplied fields, not transported unknowns.
+//! This is not a validated two-equation RANS solver; see the crate contract.
 //! - Viscous sublayer resolution ($y^+ < 1$)
 //! - Scalar thermal transport and conjugate heat transfer boundary coupling
 //! - Darcy-Forchheimer porous medium sink terms ($S_p = -\frac{\mu}{\kappa} u - \frac{1}{2} C_F \rho |u| u$)
 //! - Boussinesq buoyancy source term ($S_b = \beta g (T - T_{\text{ref}})$)
 //! - Deterministic reductions and residual history reporting
-//! - Cancellation-aware execution
 
 use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSink, RansModelCard};
 
@@ -89,7 +90,7 @@ pub struct RansFieldState {
     pub u: Vec<f64>,
     /// Turbulent kinetic energy $k(y)$ [m²/s²].
     pub k: Vec<f64>,
-    /// Turbulent dissipation rate $\varepsilon(y)$ [m²/s³].
+    /// Frozen modified LS dissipation $\widetilde\varepsilon(y)$ [m²/s³].
     pub eps: Vec<f64>,
     /// Eddy viscosity $\nu_t(y)$ [m²/s].
     pub nu_t: Vec<f64>,
@@ -147,14 +148,16 @@ impl RansSolver {
     /// Create a new solver bound to an admitted RansModelCard.
     #[must_use]
     pub fn new(card: RansModelCard) -> Self {
+        let coeffs = *card.coefficients();
+        let pr_turbulent = card.turbulent_prandtl();
         Self {
             card,
-            coeffs: LaunderSharmaCoefficients::launder_sharma_1974(),
+            coeffs,
             nu_laminar: 1.5e-5, // Air at room temp m²/s
             rho: 1.2,           // kg/m³
             cp: 1005.0,         // J/(kg*K)
             k_thermal: 0.026,   // W/(m*K)
-            pr_turbulent: 0.85,
+            pr_turbulent,
         }
     }
 
@@ -227,12 +230,23 @@ impl RansSolver {
 
             // 1. Update eddy viscosity with Launder-Sharma damping f_mu
             for i in 1..n {
-                let y = grid.y_nodes[i];
-                let re_y = (state.k[i].sqrt() * y) / (self.nu_laminar + 1e-12);
-                let f_mu = (-3.4 / (1.0 + re_y / 50.0).powi(2)).exp();
-                let nu_t =
-                    self.coeffs.c_mu * f_mu * (state.k[i] * state.k[i]) / (state.eps[i] + 1e-12);
-                if !nu_t.is_finite() || nu_t < 0.0 {
+                // LS uses the turbulent Reynolds number k²/(nu * eps),
+                // not sqrt(k)*y/nu. NASA TM-110446, Part B §3.
+                // Exact laminar/disabled controls need no dimensional floors.
+                let k2_over_eps = if state.k[i] == 0.0 || self.coeffs.c_mu == 0.0 {
+                    0.0
+                } else {
+                    if state.eps[i] == 0.0 {
+                        return Err(RansTerminationReason::Diverged);
+                    }
+                    state.k[i] * (state.k[i] / state.eps[i])
+                };
+                let re_t = k2_over_eps / self.nu_laminar;
+                // An overflowing Re_t has the finite high-Re limit f_mu = 1.
+                let inverse = 1.0 / (1.0 + re_t / 50.0);
+                let f_mu = (-3.4 * inverse * inverse).exp();
+                let nu_t = self.coeffs.c_mu * f_mu * k2_over_eps;
+                if !k2_over_eps.is_finite() || !nu_t.is_finite() || nu_t < 0.0 {
                     return Err(RansTerminationReason::Diverged);
                 }
                 state.nu_t[i] = nu_t;
@@ -340,5 +354,96 @@ impl RansSolver {
             conservation_imbalance: (momentum_res + energy_res) * 0.5,
             reason,
         })
+    }
+}
+
+#[cfg(test)]
+mod turbulence_closure_regressions {
+    use super::*;
+    use crate::rans_card::RansCardDraft;
+
+    fn sample_card() -> RansModelCard {
+        RansCardDraft::launder_sharma_channel("electronics-cooling/e10-rans")
+            .freeze()
+            .unwrap()
+    }
+
+    #[test]
+    fn solver_uses_the_admitted_turbulence_coefficients_and_prandtl_number() {
+        let mut draft = RansCardDraft::launder_sharma_channel("electronics-cooling/custom-rans");
+        draft.coefficients.c_mu = 0.095;
+        draft.coefficients.c_eps_1 = 1.5;
+        draft.coefficients.c_eps_2 = 1.9;
+        draft.coefficients.sigma_k = 1.2;
+        draft.coefficients.sigma_eps = 1.4;
+        draft.turbulent_prandtl = 0.7;
+        let solver = RansSolver::new(draft.freeze().unwrap());
+        assert_eq!(solver.coeffs.c_mu, 0.095);
+        assert_eq!(solver.coeffs.c_eps_1, 1.5);
+        assert_eq!(solver.coeffs.c_eps_2, 1.9);
+        assert_eq!(solver.coeffs.sigma_k, 1.2);
+        assert_eq!(solver.coeffs.sigma_eps, 1.4);
+        assert_eq!(solver.pr_turbulent, 0.7);
+    }
+    
+    #[test]
+    fn ls_viscosity_uses_turbulent_reynolds_number_independently_of_wall_distance() {
+        let grid = RansChannelGrid::new_stretched(8, 1.0, 1.12);
+        let solver = RansSolver::new(sample_card());
+        let mut state = RansFieldState::new_initial(&grid, 0.0, 300.0);
+        for i in 1..=grid.num_cells {
+            state.k[i] = 3e-6;
+            state.eps[i] = 2e-8;
+        }
+        solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12).unwrap();
+        // Independent literal equation: Re_t=30, not a wall-distance Reynolds number.
+        let expected = 0.09 * (-3.4_f64 / 1.6_f64.powi(2)).exp() * 4.5e-4;
+        for &actual in &state.nu_t[1..] {
+            assert!((actual / expected - 1.0).abs() < 1e-13);
+        }
+    }
+    
+    #[test]
+    fn viscosity_is_invariant_under_consistent_length_and_time_unit_rescaling() {
+        let base_grid = RansChannelGrid::new_stretched(8, 1.0, 1.0);
+        let solver = RansSolver::new(sample_card());
+        let mut base = RansFieldState::new_initial(&base_grid, 0.0, 300.0);
+        base.k.fill(3e-6);
+        base.eps.fill(2e-8);
+        solver.solve(&base_grid, &mut base, 0.0, 0.0, None, None, 1, 1e-12).unwrap();
+        for (length, time) in [(1e-3_f64, 1e3_f64), (1e3, 1e-3)] {
+            let grid = RansChannelGrid::new_stretched(8, length, 1.0);
+            let mut scaled_solver = RansSolver::new(sample_card());
+            scaled_solver.nu_laminar *= length * length / time;
+            let mut scaled = RansFieldState::new_initial(&grid, 0.0, 300.0);
+            scaled.k.fill(3e-6 * (length / time).powi(2));
+            scaled.eps.fill(2e-8 * length.powi(2) / time.powi(3));
+            scaled_solver.solve(&grid, &mut scaled, 0.0, 0.0, None, None, 1, 1e-12).unwrap();
+            for (&original, &actual) in base.nu_t[1..].iter().zip(&scaled.nu_t[1..]) {
+                assert!((actual / (original * length * length / time) - 1.0).abs() < 1e-13);
+            }
+        }
+    }
+    
+    #[test]
+    fn zero_turbulence_and_disabled_closure_are_exact_without_epsilon_floors() {
+        let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+        for disabled in [false, true] {
+            let mut solver = RansSolver::new(sample_card());
+            let mut state = RansFieldState::new_initial(&grid, 0.0, 300.0);
+            state.k.fill(if disabled { 1.0 } else { 0.0 });
+            state.eps.fill(0.0);
+            if disabled { solver.coeffs.c_mu = 0.0; }
+            solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12).unwrap();
+            assert!(state.nu_t[1..].iter().all(|&value| value == 0.0));
+        }
+        let solver = RansSolver::new(sample_card());
+        let mut state = RansFieldState::new_initial(&grid, 0.0, 300.0);
+        state.k[1] = 1e-6;
+        state.eps[1] = 0.0;
+        assert_eq!(
+            solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12),
+            Err(RansTerminationReason::Diverged),
+        );
     }
 }
