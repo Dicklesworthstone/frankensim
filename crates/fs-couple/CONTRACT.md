@@ -226,6 +226,35 @@ The dry-contact regressions specify analytical Robin cooling with partial
 coverage, lift, recontact and bow migration, plus temperature-dependent
 friction feedback and a late source refusal preserving both physical owners.
 
+## Original fluid materials in hybrid pressure and resolved interiors
+
+`cavity_modal::interior::hybrid::HybridInterior<'a, 'c, S = GasState>`
+binds the pressure region to the same original `ThermoviscousFluid` retained
+by the resolved interior. Material liquids and other admitted fluid sources
+carry their actual density, adiabatic sound speed, Cp/Cv and transport through
+the existing geometry-verified modal interface. The resolved mixed equations
+retain their original signed thermal expansion and isothermal compressibility;
+equilibrium pressure is never substituted for the fluid's acoustic stiffness.
+The pressure region remains the adiabatic pressure approximation with its
+explicitly declared thin-wall law. Full viscous/thermal fields and bulk viscous
+stress remain in the resolved region, without an inferred pressure-volume loss.
+
+Admission checks pressure density/sound speed and optional thin-wall transport
+against the same source snapshot, and resolved density/Cp/viscosity/conductivity
+against its already assembled coefficients. The default gas type, original
+molecular reservoirs, full pressure and resolved fields, finite solid walls and
+duct convention remain on the existing owners. Preparation uses the original
+resolved Cp without resampling material properties per scattering column.
+Frequency, cancellation, coordinate and physical interface refusals remain
+explicit. This adds no liquid relaxation, cavitation, phase change or background
+flow model; modal trace convergence and the insulated, free-tangential-traction
+interface assumptions remain unchanged.
+
+Native regression definitions exercise an original liquid material card,
+signed expansion, original-owner parity, fields/work, duct conjugation
+and source mismatch refusals. The executor was unavailable for this extension;
+native parsing, formatting, compilation and test execution remain pending.
+
 ## Resolved interior acoustic absorption on the native thermal timeline
 
 `porous_heating::interior::InteriorAcousticHeating` binds every original

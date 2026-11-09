@@ -68,7 +68,7 @@ fn point() -> QueryPoint {
 }
 
 // Manufactured complete source cards, never measured water/rosin constants.
-pub(super) fn liquid(
+pub(in crate::cavity_modal::interior) fn liquid(
     alpha: Option<f64>,
     viscosity: f64,
     cv_scale: f64,

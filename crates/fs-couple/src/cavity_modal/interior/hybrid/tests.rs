@@ -16,6 +16,8 @@ use fs_material::relaxation::{RelaxationState, RelaxingMedium, input::read_relax
 use fs_math::c64::C64;
 use fs_rep_mesh::TetComplex;
 
+mod fluid;
+
 const H_LENGTH: f64 = 0.04;
 const L_LENGTH: f64 = 0.015;
 const HEIGHT: f64 = 0.002;

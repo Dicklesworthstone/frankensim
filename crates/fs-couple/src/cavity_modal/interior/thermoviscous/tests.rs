@@ -9,7 +9,7 @@ use fs_material::gas::GasSpec;
 use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 use fs_rep_mesh::TetComplex;
 
-mod fluid;
+pub(in crate::cavity_modal::interior) mod fluid;
 mod heat_source;
 mod volume_source;
 mod time;

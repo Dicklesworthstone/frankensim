@@ -1,9 +1,13 @@
-//! One original source gas across pressure and resolved thermoviscous regions.
+//! One original source fluid across pressure and resolved thermoviscous regions.
 //!
-//! The pressure FE uses the source gas's equilibrium density and sound speed;
-//! the resolved owner retains its original gas/solid material sources. Both
-//! regions meet through the original geometry-verified modal traction/flow
-//! interface. The source frequency band remains explicit.
+//! The pressure FE uses the source's actual density and adiabatic sound speed;
+//! the resolved owner retains its original fluid/solid material sources and
+//! full thermal expansion/compressibility closure. Gases and liquids meet
+//! through the same geometry-verified modal traction/flow interface. Neither
+//! sound speed nor thermal expansion is replaced by an ideal-gas assumption.
+//! The pressure region retains its adiabatic pressure approximation and any
+//! explicitly declared thin-wall law; full viscous/thermal fields belong to
+//! the resolved region. The source frequency band remains explicit.
 //!
 //! An original molecular source is evaluated once per frequency. Its complex
 //! bulk modulus enters pressure-region compression and its cp enters the
@@ -20,7 +24,8 @@ use super::thermoviscous::ThermoviscousInterior;
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::helmholtz::multiport::InteriorMultiport;
 use fs_feec::acoustics::hybrid::{HybridError, HybridInterior as SpatialHybrid, PreparedHybrid};
-use fs_material::MaterialError;
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+use fs_material::{MaterialError, gas::GasState};
 use fs_math::c64::C64;
 
 /// Source admission and original finite-element/duct failures remain distinct.
@@ -60,51 +65,81 @@ impl From<DuctError> for HybridSourceError {
 
 /// Borrowed source materials and original spatial solvers. No acoustic field,
 /// finite wall, retained mode or source identity is replaced by this adapter.
-pub struct HybridInterior<'a, 'c> {
-    source: &'a ThermoviscousInterior<'c>,
+pub struct HybridInterior<'a, 'c, S = GasState> {
+    source: &'a ThermoviscousInterior<'c, S>,
     model: SpatialHybrid<'a, 'c>,
     helmholtz_port_count: usize,
 }
 
-impl<'a, 'c> HybridInterior<'a, 'c> {
-    /// Bind the same original equilibrium gas to both owners. Selected
-    /// interface modes are verified from their original physical traces.
+impl<'a, 'c, S: ThermoviscousFluid> HybridInterior<'a, 'c, S> {
+    /// Bind the same original equilibrium fluid to both owners. Density,
+    /// adiabatic sound speed and any pressure-wall transport must match the
+    /// original material snapshot exactly. The resolved source has already
+    /// admitted the full EOS derivatives through its own constructor.
+    /// Selected interface modes are verified from their physical traces.
     /// External ordering is unselected pressure modes then unselected resolved
     /// modes, preserving each owner's original order.
     pub fn new(
         helmholtz: &'a InteriorMultiport,
-        source: &'a ThermoviscousInterior<'c>,
+        source: &'a ThermoviscousInterior<'c, S>,
         helmholtz_modes: &[usize],
         thermoviscous_modes: &[usize],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, HybridSourceError> {
+        if cancelled() {
+            return Err(HybridError::Cancelled.into());
+        }
         if source.relaxation().is_some() && helmholtz.boundary_layer_transport().is_some() {
             return Err(HybridSourceError::InvalidInput(
                 "molecular pressure region cannot also use an independent boundary-layer overlay",
             ));
         }
+        let fluid = source.material_source().thermoviscous_state()?;
+        let acoustic = fluid.acoustic();
+        let transport = fluid.transport();
         let medium = helmholtz.medium();
-        let gas = source.gas();
-        if medium.density_kg_m3.to_bits() != gas.density.to_bits()
-            || medium.sound_speed_m_s.to_bits() != gas.sound_speed.to_bits()
+        if medium.density_kg_m3.to_bits() != acoustic.density_kg_m3().to_bits()
+            || medium.sound_speed_m_s.to_bits() != acoustic.sound_speed_m_s().to_bits()
         {
             return Err(HybridSourceError::InvalidInput(
-                "hybrid pressure region differs from the original source gas",
+                "hybrid pressure region differs from the original source fluid",
             ));
         }
-        if let Some(transport) = helmholtz.boundary_layer_transport() {
+        let resolved = source.inner().medium();
+        for (actual, expected) in [
+            (resolved.density_kg_m3, acoustic.density_kg_m3()),
+            (resolved.cp_j_kg_k, transport.specific_heat_j_kg_k()),
+            (
+                resolved.dynamic_viscosity_pa_s,
+                transport.dynamic_viscosity_pa_s(),
+            ),
+            (
+                resolved.thermal_conductivity_w_m_k,
+                transport.thermal_conductivity_w_m_k(),
+            ),
+        ] {
+            if actual.to_bits() != expected.to_bits() {
+                return Err(HybridSourceError::InvalidInput(
+                    "hybrid resolved region differs from the original source fluid",
+                ));
+            }
+        }
+        if let Some(wall) = helmholtz.boundary_layer_transport() {
             for (actual, expected) in [
-                (transport.dynamic_viscosity_pa_s, gas.dynamic_viscosity),
                 (
-                    transport.thermal_conductivity_w_m_k,
-                    gas.thermal_conductivity,
+                    wall.dynamic_viscosity_pa_s,
+                    transport.dynamic_viscosity_pa_s(),
                 ),
-                (transport.cp_j_kg_k, gas.specific_heat_cp),
-                (transport.heat_capacity_ratio, gas.gamma),
+                (
+                    wall.thermal_conductivity_w_m_k,
+                    transport.thermal_conductivity_w_m_k(),
+                ),
+                (wall.cp_j_kg_k, transport.specific_heat_j_kg_k()),
+                (wall.heat_capacity_ratio, fluid.heat_capacity_ratio()),
             ] {
                 if actual.to_bits() != expected.to_bits() {
                     return Err(HybridSourceError::InvalidInput(
-                        "hybrid pressure-wall transport differs from the original source gas",
+                        "hybrid pressure-wall transport differs from the original source fluid",
                     ));
                 }
             }
@@ -122,8 +157,11 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
             helmholtz_port_count: helmholtz.port_mode_count(),
         })
     }
+}
 
-    pub fn source(&self) -> &ThermoviscousInterior<'c> {
+impl<'a, 'c, S> HybridInterior<'a, 'c, S> {
+    /// Original fluid source and complete resolved material/field owner.
+    pub fn source(&self) -> &ThermoviscousInterior<'c, S> {
         self.source
     }
 
@@ -165,7 +203,7 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
             }
             None => Ok(self.model.prepare(
                 frequency_hz,
-                C64::from_re(self.source.gas().specific_heat_cp),
+                C64::from_re(self.source.inner().medium().cp_j_kg_k),
                 helmholtz_reference,
                 thermoviscous_reference,
                 cancelled,

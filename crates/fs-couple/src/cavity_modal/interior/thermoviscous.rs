@@ -740,4 +740,4 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::cavity_modal::interior) mod tests;
