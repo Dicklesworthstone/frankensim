@@ -24890,3 +24890,39 @@ refusals. Source and API review was completed against the current original
 owners. The executor became unavailable before this new component could be
 compiled, formatted or tested; no new runtime result or full-workspace pass
 is asserted for this checkpoint.
+
+## Complete-network droplet time accuracy and physical windows
+
+The material droplet adaptive network module supplies shared accuracy and
+accepted-transfer accounting for one droplet cloud coupled to an entire original
+finite gas network. Every parcel participates, including idle and droplet-free
+volumes. Numerical controls and explicit parcel/species work ceilings are admitted
+without querying liquid or transport sources.
+
+The local coarse/fine norm retains the original first-order component scaling.
+It covers droplet enthalpy, temperature, mass and radius, and each gas parcel's
+temperature, total mass and union of species inventories. Relative scales use
+changes from the original comparison state. Initial liquid temperature and
+geometry come from the original coarse interval's receipts; an external source
+is not sampled before the enclosing transport-then-phase owner admits it.
+
+GasDropletNetworkWindow records only consecutive accepted original intervals.
+It retains sparse per-parcel species accounts and the final liquid states,
+with no trajectory history. Each record consumes the previous account, so a
+refused partially accumulated account cannot be reused. Original transport,
+joint sensible heat and phase caloric defects share one noncancelling mass and
+energy allowance for the complete window. Formation-reference totals are not
+subtracted to manufacture a new energy residual, and latent energy remains a
+subaccount of the original phase exchange.
+
+Final actual inventories are checked independently for every droplet, gas
+parcel and species, plus global gas/liquid mass and species closure. New arrivals
+consume the same explicit retained-species work allowance. Closed internal gas
+transport and its original molecular energy corrections are supported; external
+gas streams or external heat need their opposite physical owner and are refused.
+A gas-only entropy receipt is not a coupled liquid/gas passivity certificate.
+
+Focused regressions exercise remote-parcel and newly arriving species error,
+manual original-interval composition, and independent whole-window balances.
+Compilation, runtime tests and rustfmt were unavailable after the execution
+workspace disconnected; no executable validation pass is claimed.
