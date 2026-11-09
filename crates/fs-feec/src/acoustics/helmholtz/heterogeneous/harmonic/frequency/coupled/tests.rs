@@ -18,6 +18,7 @@ fn scalar_wall(mass: f64, stiffness: f64, resistance: f64) -> Wall {
     Wall {
         dofs: vec![0],
         mass: matrix(&[1.0], 1),
+        area_m2: 1.0,
         surface_density: mass,
         stiffness,
         resistance,
@@ -188,6 +189,7 @@ fn complete_original_maxwell_states_slopes_storage_and_reciprocal_work_agree() {
         let wall = Wall {
             dofs: vec![0, 1],
             mass: matrix(&W, 2),
+            area_m2: W.iter().sum(),
             surface_density: 0.7,
             stiffness: 2.5,
             resistance: 0.03,
@@ -210,6 +212,18 @@ fn complete_original_maxwell_states_slopes_storage_and_reciprocal_work_agree() {
             .frequency_derivative(&x.pressure, &input, &slope, &mut || false)
             .unwrap();
         let (walls, account) = pencil.wall_fields(&x.pressure, &mut || false).unwrap();
+        let powers = pencil.wall_dissipation(&walls, &mut || false).unwrap();
+        assert_eq!(powers.len(), 1);
+        assert_eq!(powers[0].area_m2, W.iter().sum::<f64>());
+        assert_eq!(powers[0].mass_kg, 0.7 * W.iter().sum::<f64>());
+        assert_eq!(
+            powers[0].resistance_dissipation_w,
+            account.resistance_dissipation_w
+        );
+        assert_eq!(
+            powers[0].relaxation_dissipation_w,
+            account.relaxation_dissipation_w
+        );
         let derivatives = pencil
             .wall_derivatives(&x.pressure, &dx.pressure, &mut || false)
             .unwrap();
@@ -232,6 +246,14 @@ fn complete_original_maxwell_states_slopes_storage_and_reciprocal_work_agree() {
                 3e-11,
             );
             for arm in 0..2 {
+                assert_eq!(
+                    walls[0].relaxation_extension[arm][i],
+                    x.pressure[6 + 2 * arm + i]
+                );
+                assert_eq!(
+                    derivatives[0].relaxation_extension_per_rad_s[arm][i],
+                    dx.pressure[6 + 2 * arm + i]
+                );
                 near(
                     walls[0].relaxation_memory[arm][i],
                     exact[4 + 2 * arm + i],
@@ -321,6 +343,7 @@ fn exact_pressure_release_retains_all_wall_coordinates_and_complete_resource_lim
     let wall = || Wall {
         dofs: vec![0, 1],
         mass: matrix(&W, 2),
+        area_m2: W.iter().sum(),
         surface_density: 0.7,
         stiffness: 2.5,
         resistance: 0.1,
@@ -391,5 +414,68 @@ fn exact_pressure_release_retains_all_wall_coordinates_and_complete_resource_lim
     assert_eq!(
         tangent.backward_error.to_bits(),
         replay.backward_error.to_bits()
+    );
+}
+
+#[test]
+fn resolved_fast_relaxation_heat_survives_rounded_displacement_memory_cancellation() {
+    let fluid = [
+        matrix(&[0.0], 1),
+        matrix(&[1.0], 1),
+        matrix(&[0.0], 1),
+        matrix(&[0.0], 1),
+    ];
+    let mut wall = scalar_wall(1.0, 1.0, 0.0);
+    let coupling = 1e20;
+    let rate = 1e20;
+    wall.arms.push((coupling, rate));
+    let pencil = CoupledPencil::prepare(
+        1.0,
+        fluid.each_ref(),
+        &[0],
+        vec![wall],
+        MechanicalHarmonicLimits::default(),
+        &mut || false,
+    )
+    .unwrap();
+    let solution = pencil.solve(&[C64::new(0.3, -0.2)], &mut || false).unwrap();
+    let (fields, account) = pencil
+        .wall_fields(&solution.pressure, &mut || false)
+        .unwrap();
+    let extension = fields[0].relaxation_extension[0][0];
+    assert_eq!(extension, solution.pressure[3]);
+    assert!(extension.abs() > 0.0);
+    // The physical extension is twenty orders smaller than c*w and z, so
+    // subtracting those rounded OUTPUT phasors discards its nonzero heat.
+    let recovered = fields[0].displacement_m[0].scale(coupling) - fields[0].relaxation_memory[0][0];
+    assert_eq!(recovered, C64::ZERO);
+    let power = pencil.wall_dissipation(&fields, &mut || false).unwrap()[0];
+    let expected = 0.5 * rate * extension.norm_sq();
+    assert!(expected > 0.0);
+    assert!((power.relaxation_dissipation_w - expected).abs() < 2e-12 * expected);
+    assert_eq!(
+        power.relaxation_dissipation_w,
+        account.relaxation_dissipation_w
+    );
+    assert_eq!(power.resistance_dissipation_w, 0.0);
+    let mut broken = fields.clone();
+    broken[0].relaxation_extension.clear();
+    assert!(matches!(
+        pencil.wall_dissipation(&broken, &mut || false),
+        Err(PressureError::Invalid(_))
+    ));
+    broken = fields.clone();
+    broken[0].relaxation_extension[0][0].re = f64::NAN;
+    assert!(matches!(
+        pencil.wall_dissipation(&broken, &mut || false),
+        Err(PressureError::Invalid(_))
+    ));
+    assert!(matches!(
+        pencil.wall_dissipation(&fields, &mut || true),
+        Err(PressureError::Cancelled)
+    ));
+    assert_eq!(
+        pencil.wall_dissipation(&fields, &mut || false).unwrap()[0],
+        power
     );
 }

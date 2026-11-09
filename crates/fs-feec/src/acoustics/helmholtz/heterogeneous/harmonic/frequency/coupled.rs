@@ -42,6 +42,10 @@ pub struct MechanicalWallPhasors {
     pub normal_velocity_m_s: Vec<C64>,
     /// Original energy-normalized z_j, with e_j=sqrt(k_j) w-z_j.
     pub relaxation_memory: Vec<Vec<C64>>,
+    /// Original solved e_j coordinates, in the same arm/DOF order. These are
+    /// retained directly: subtracting rounded sqrt(k_j)*w and z_j can erase
+    /// small but physically dissipative relaxation extensions.
+    pub relaxation_extension: Vec<Vec<C64>>,
 }
 
 /// Analytic derivatives of the same original wall phasors per rad/s.
@@ -50,6 +54,8 @@ pub struct MechanicalWallFrequencyDerivative {
     pub displacement_m_per_rad_s: Vec<C64>,
     pub normal_velocity_m_s_per_rad_s: Vec<C64>,
     pub relaxation_memory_per_rad_s: Vec<Vec<C64>>,
+    /// Derivative of the retained native e_j coordinates, without subtraction.
+    pub relaxation_extension_per_rad_s: Vec<Vec<C64>>,
 }
 
 /// Time-averaged wall storage, irreversible heat and signed fluid-to-wall work.
@@ -83,9 +89,31 @@ impl MechanicalWallAccounting {
     }
 }
 
+/// Independently integrated absorption and original physical size of one wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MechanicalWallPower {
+    /// Complete original patch area from its physical consistent trace matrix.
+    pub area_m2: f64,
+    /// Original surface density times complete patch area, with no added fluid mass.
+    pub mass_kg: f64,
+    /// Cycle-averaged R*v^H*W*v/2 [W].
+    pub resistance_dissipation_w: f64,
+    /// Cycle-averaged sum_j e_j^H*W*e_j/(2*tau_j) [W].
+    pub relaxation_dissipation_w: f64,
+}
+
+impl MechanicalWallPower {
+    #[must_use]
+    pub fn total_dissipation_w(self) -> f64 {
+        self.resistance_dissipation_w + self.relaxation_dissipation_w
+    }
+}
+
 pub(crate) struct Wall {
     pub(crate) dofs: Vec<usize>,
     pub(crate) mass: Csr,
+    /// Integral of the constant trace, not a sum over hierarchical bubble DOFs.
+    pub(crate) area_m2: f64,
     pub(crate) surface_density: f64,
     pub(crate) stiffness: f64,
     pub(crate) resistance: f64,
@@ -153,9 +181,14 @@ impl CoupledPencil {
                 || wall.mass.ncols() != n
                 || wall.dofs.iter().any(|&i| i >= fluid_dofs)
                 || wall.dofs.windows(2).any(|ij| ij[0] >= ij[1])
-                || ![wall.surface_density, wall.stiffness]
-                    .iter()
-                    .all(|x| x.is_finite() && *x > 0.0)
+                || ![
+                    wall.surface_density,
+                    wall.stiffness,
+                    wall.area_m2,
+                    wall.area_m2 * wall.surface_density,
+                ]
+                .iter()
+                .all(|x| x.is_finite() && *x > 0.0)
                 || !wall.resistance.is_finite()
                 || wall.resistance < 0.0
                 || wall.arms.iter().any(|&(c, rate)| {
@@ -505,6 +538,28 @@ impl CoupledPencil {
             .frequency_derivative_rhs(state, forcing, cancelled)
     }
 
+    /// Re-evaluate the original positive forms, without trusting a mutable
+    /// aggregate heat receipt or subtracting pressure/traction exchange work.
+    pub(crate) fn wall_dissipation(
+        &self,
+        fields: &[MechanicalWallPhasors],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<MechanicalWallPower>, PressureError> {
+        poll(cancelled)?;
+        if fields.len() != self.walls.len() {
+            return Err(PressureError::Invalid(
+                "one native state per original mechanical wall required",
+            ));
+        }
+        let mut powers = Vec::with_capacity(self.walls.len());
+        for (wall, field) in self.walls.iter().zip(fields) {
+            poll(cancelled)?;
+            powers.push(wall_heat_forms(wall, field, cancelled)?.power(wall));
+        }
+        poll(cancelled)?;
+        Ok(powers)
+    }
+
     pub(crate) fn wall_fields(
         &self,
         state: &[C64],
@@ -523,20 +578,12 @@ impl CoupledPencil {
             let displacement = &state[offset..offset + n];
             let velocity = &state[offset + n..offset + 2 * n];
             let pressure: Vec<_> = wall.dofs.iter().map(|&i| state[i]).collect();
-            let vv = quadratic_nonnegative(&wall.mass, velocity, cancelled)?;
-            let ww = quadratic_nonnegative(&wall.mass, displacement, cancelled)?;
-            account[0] = account[0] + Dd::from_f64(0.25 * wall.surface_density) * Dd::from_f64(vv);
-            account[1] = account[1] + Dd::from_f64(0.25 * wall.stiffness) * Dd::from_f64(ww);
-            account[3] = account[3] + Dd::from_f64(0.5 * wall.resistance) * Dd::from_f64(vv);
-            account[5] = account[5]
-                + Dd::from_f64(0.5 * real_form(&wall.mass, &pressure, velocity, cancelled)?.0);
             let mut memories = Vec::with_capacity(wall.arms.len());
+            let mut extensions = Vec::with_capacity(wall.arms.len());
             for (arm, &(coupling, rate)) in wall.arms.iter().enumerate() {
                 let start = offset + (2 + arm) * n;
                 let extension = &state[start..start + n];
-                let ee = quadratic_nonnegative(&wall.mass, extension, cancelled)?;
-                account[2] = account[2] + Dd::from_f64(0.25 * ee);
-                account[4] = account[4] + Dd::from_f64(0.5 * rate) * Dd::from_f64(ee);
+                extensions.push(extension.to_vec());
                 memories.push(if self.omega > rate {
                     extension
                         .iter()
@@ -546,18 +593,26 @@ impl CoupledPencil {
                     original_memory(displacement, extension, coupling)
                 });
             }
-            fields.push(MechanicalWallPhasors {
+            let field = MechanicalWallPhasors {
                 displacement_m: displacement.to_vec(),
                 normal_velocity_m_s: velocity.to_vec(),
                 relaxation_memory: memories,
-            });
+                relaxation_extension: extensions,
+            };
+            let forms = wall_heat_forms(wall, &field, cancelled)?;
+            let ww = quadratic_nonnegative(&wall.mass, displacement, cancelled)?;
+            account[0] = account[0]
+                + Dd::from_f64(0.25 * wall.surface_density) * Dd::from_f64(forms.velocity_squared);
+            account[1] = account[1] + Dd::from_f64(0.25 * wall.stiffness) * Dd::from_f64(ww);
+            account[2] = account[2] + forms.relaxation_energy_j;
+            account[3] = account[3] + forms.resistance_dissipation_w;
+            account[4] = account[4] + forms.relaxation_dissipation_w;
+            account[5] = account[5]
+                + Dd::from_f64(0.5 * real_form(&wall.mass, &pressure, velocity, cancelled)?.0);
+            fields.push(field);
         }
         let a = account.map(Dd::to_f64);
-        if a.iter().any(|v| !v.is_finite())
-            || fields
-                .iter()
-                .any(|w| w.relaxation_memory.iter().flatten().any(|&v| !finite(v)))
-        {
+        if a.iter().any(|v| !v.is_finite()) {
             return Err(PressureError::Invalid(
                 "unrepresentable mechanical wall storage, heat or memory",
             ));
@@ -597,8 +652,10 @@ impl CoupledPencil {
             let n = wall.dofs.len();
             let displacement = &tangent[offset..offset + n];
             let mut memories = Vec::with_capacity(wall.arms.len());
+            let mut extensions = Vec::with_capacity(wall.arms.len());
             for (arm, &(coupling, rate)) in wall.arms.iter().enumerate() {
                 let start = offset + (2 + arm) * n;
+                extensions.push(tangent[start..start + n].to_vec());
                 let memory = if self.omega > rate {
                     tangent[start..start + n]
                         .iter()
@@ -626,11 +683,94 @@ impl CoupledPencil {
                 displacement_m_per_rad_s: displacement.to_vec(),
                 normal_velocity_m_s_per_rad_s: tangent[offset + n..offset + 2 * n].to_vec(),
                 relaxation_memory_per_rad_s: memories,
+                relaxation_extension_per_rad_s: extensions,
             });
         }
         poll(cancelled)?;
         Ok(fields)
     }
+}
+
+struct WallHeatForms {
+    velocity_squared: f64,
+    relaxation_energy_j: Dd,
+    resistance_dissipation_w: Dd,
+    relaxation_dissipation_w: Dd,
+}
+
+impl WallHeatForms {
+    fn power(&self, wall: &Wall) -> MechanicalWallPower {
+        MechanicalWallPower {
+            area_m2: wall.area_m2,
+            mass_kg: wall.area_m2 * wall.surface_density,
+            resistance_dissipation_w: self.resistance_dissipation_w.to_f64(),
+            relaxation_dissipation_w: self.relaxation_dissipation_w.to_f64(),
+        }
+    }
+}
+
+/// One implementation of the original dissipative forms for both reporting
+/// and thermal sources. The exact extension coordinates are indispensable.
+fn wall_heat_forms(
+    wall: &Wall,
+    field: &MechanicalWallPhasors,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<WallHeatForms, PressureError> {
+    poll(cancelled)?;
+    let n = wall.dofs.len();
+    if field.displacement_m.len() != n
+        || field.normal_velocity_m_s.len() != n
+        || field.relaxation_memory.len() != wall.arms.len()
+        || field.relaxation_extension.len() != wall.arms.len()
+        || field
+            .relaxation_memory
+            .iter()
+            .chain(&field.relaxation_extension)
+            .any(|arm| arm.len() != n)
+        || field
+            .displacement_m
+            .iter()
+            .chain(&field.normal_velocity_m_s)
+            .chain(field.relaxation_memory.iter().flatten())
+            .chain(field.relaxation_extension.iter().flatten())
+            .any(|&v| !finite(v))
+    {
+        return Err(PressureError::Invalid(
+            "complete finite original wall phasors and relaxed extensions required",
+        ));
+    }
+    let velocity_squared =
+        quadratic_nonnegative(&wall.mass, &field.normal_velocity_m_s, cancelled)?;
+    let resistance_dissipation_w =
+        Dd::from_f64(0.5 * wall.resistance) * Dd::from_f64(velocity_squared);
+    let mut relaxation_energy_j = Dd::ZERO;
+    let mut relaxation_dissipation_w = Dd::ZERO;
+    for ((_, rate), extension) in wall.arms.iter().zip(&field.relaxation_extension) {
+        poll(cancelled)?;
+        let ee = quadratic_nonnegative(&wall.mass, extension, cancelled)?;
+        relaxation_energy_j = relaxation_energy_j + Dd::from_f64(0.25 * ee);
+        relaxation_dissipation_w =
+            relaxation_dissipation_w + Dd::from_f64(0.5 * rate) * Dd::from_f64(ee);
+    }
+    if [
+        relaxation_energy_j,
+        resistance_dissipation_w,
+        relaxation_dissipation_w,
+        resistance_dissipation_w + relaxation_dissipation_w,
+    ]
+    .iter()
+    .any(|v| !v.to_f64().is_finite())
+    {
+        return Err(PressureError::Invalid(
+            "unrepresentable original mechanical wall absorption",
+        ));
+    }
+    Ok(WallHeatForms {
+        velocity_squared,
+        relaxation_energy_j,
+        resistance_dissipation_w,
+        relaxation_dissipation_w,
+    })
 }
 
 // For omega*tau>1, z=c*w-e cancels nearly equal phasors. The original

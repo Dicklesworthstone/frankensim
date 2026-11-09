@@ -53,6 +53,7 @@ pub use harmonic::{
     HeterogeneousFrequencyResponse, HeterogeneousPressureField, MAX_HARMONIC_DOFS,
     MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
     MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
+    MechanicalWallPower,
     PreparedHeterogeneous, PreparedMechanicalHarmonic, ResonanceSurvey, ResonanceSurveyControls,
     ResonanceSurveyError, VelocityTrace,
 };

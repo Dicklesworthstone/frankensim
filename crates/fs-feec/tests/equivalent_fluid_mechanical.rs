@@ -469,6 +469,18 @@ fn lossless_volume_agrees_with_original_mechanical_owner_and_adjacent_release() 
         expected.wall_accounting.dissipation_w(),
         2e-11,
     );
+    let original_heat = original
+        .wall_dissipation(&expected.walls, &mut || false)
+        .unwrap();
+    let actual_heat = prepared
+        .wall_dissipation(&actual.walls, &mut || false)
+        .unwrap();
+    scalar_close(actual_heat[0].area_m2, original_heat[0].area_m2, 2e-13);
+    scalar_close(
+        actual_heat[0].total_dissipation_w(),
+        original_heat[0].total_dissipation_w(),
+        2e-11,
+    );
     assert_eq!(actual.density_dissipation_w, 0.0);
     assert_eq!(actual.compressional_dissipation_w, 0.0);
 }
@@ -515,4 +527,138 @@ fn complete_state_and_dense_limits_and_face_conflicts_precede_material_queries()
     );
     assert!(result.is_err());
     assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn original_patch_area_mass_and_positive_heat_keep_hierarchical_and_local_identity() {
+    let (mesh, points) = brick(2);
+    let geometry = HelmholtzFe::new(&mesh, &points, 2, MEDIUM).unwrap();
+    let side_faces = geometry
+        .boundary_faces()
+        .into_iter()
+        .filter(|face| face.iter().all(|&v| points[v as usize][1] == 0.0))
+        .collect();
+    let mut side = wall(side_faces);
+    side.wall.surface_density = 0.9;
+    side.wall.resistance = 0.8;
+    let boundaries = [wall(plane(&geometry, 1.0)), side];
+    let prepared = PreparedEquivalentFluid::new_with_coupled_mechanical_walls(
+        &geometry,
+        OMEGA / core::f64::consts::TAU,
+        &[],
+        &boundaries,
+        &[],
+        EquivalentFluidControls::default(),
+        &mut |_, _| Ok::<_, HeterogeneousError>(MATERIAL),
+        &mut || false,
+    )
+    .unwrap();
+    let response = prepared
+        .solve(&velocity(&geometry, C64::ONE), &mut || false)
+        .unwrap();
+    let native = prepared
+        .wall_dissipation(&response.walls, &mut || false)
+        .unwrap();
+    let areas = [AREA, 0.3];
+    for (index, power) in native.iter().enumerate() {
+        scalar_close(power.area_m2, areas[index], 2e-13);
+        scalar_close(
+            power.mass_kg,
+            areas[index] * boundaries[index].wall.surface_density,
+            2e-13,
+        );
+        assert!(power.resistance_dissipation_w > 0.0 && power.relaxation_dissipation_w > 0.0);
+    }
+    scalar_close(
+        native.iter().map(|p| p.resistance_dissipation_w).sum(),
+        response.wall_accounting.resistance_dissipation_w,
+        2e-13,
+    );
+    scalar_close(
+        native.iter().map(|p| p.relaxation_dissipation_w).sum(),
+        response.wall_accounting.relaxation_dissipation_w,
+        2e-13,
+    );
+
+    // Authored coherent constant motion has vertex coefficients only. Check
+    // each wall's physical loss against its area and independent local law;
+    // hierarchical bubble coordinates must not contribute a spurious area.
+    let velocities = [C64::new(0.2, -0.3), C64::new(-0.4, 0.1)];
+    let mut fields = response.walls.clone();
+    for (index, field) in fields.iter_mut().enumerate() {
+        for (local, &global) in prepared.wall_dofs(index).unwrap().iter().enumerate() {
+            let v = if global < points.len() {
+                velocities[index]
+            } else {
+                C64::ZERO
+            };
+            let displacement = v / C64::new(0.0, OMEGA);
+            field.normal_velocity_m_s[local] = v;
+            field.displacement_m[local] = displacement;
+            for (arm, law) in boundaries[index].relaxation.iter().enumerate() {
+                let coupling = law.stiffness_per_area.sqrt();
+                let e = v.scale(coupling) / C64::new(1.0 / law.relaxation_time_s, OMEGA);
+                field.relaxation_extension[arm][local] = e;
+                field.relaxation_memory[arm][local] = displacement.scale(coupling) - e;
+            }
+        }
+    }
+    let powers = prepared.wall_dissipation(&fields, &mut || false).unwrap();
+    for (index, power) in powers.iter().enumerate() {
+        let mean_velocity_squared = 0.5 * areas[index] * velocities[index].norm_sq();
+        let relaxation: f64 = boundaries[index]
+            .relaxation
+            .iter()
+            .map(|arm| {
+                let rate = 1.0 / arm.relaxation_time_s;
+                arm.stiffness_per_area * rate / (rate * rate + OMEGA * OMEGA)
+            })
+            .sum();
+        scalar_close(
+            power.resistance_dissipation_w,
+            mean_velocity_squared * boundaries[index].wall.resistance,
+            2e-13,
+        );
+        scalar_close(
+            power.relaxation_dissipation_w,
+            mean_velocity_squared * relaxation,
+            2e-13,
+        );
+    }
+    let mut transformed = fields.clone();
+    let field = &mut transformed[0];
+    for value in field
+        .displacement_m
+        .iter_mut()
+        .chain(&mut field.normal_velocity_m_s)
+        .chain(field.relaxation_memory.iter_mut().flatten())
+        .chain(field.relaxation_extension.iter_mut().flatten())
+    {
+        *value = *value * C64::new(0.0, 2.0);
+    }
+    let changed = prepared
+        .wall_dissipation(&transformed, &mut || false)
+        .unwrap();
+    scalar_close(
+        changed[0].total_dissipation_w(),
+        4.0 * powers[0].total_dissipation_w(),
+        2e-13,
+    );
+    assert_eq!(changed[1], powers[1]);
+    assert!(
+        prepared
+            .wall_dissipation(&fields[..1], &mut || false)
+            .is_err()
+    );
+    let mut broken = fields.clone();
+    broken[0].normal_velocity_m_s.pop();
+    assert!(prepared.wall_dissipation(&broken, &mut || false).is_err());
+    assert!(matches!(
+        prepared.wall_dissipation(&fields, &mut || true),
+        Err(HeterogeneousError::Cancelled)
+    ));
+    assert_eq!(
+        prepared.wall_dissipation(&fields, &mut || false).unwrap(),
+        powers
+    );
 }

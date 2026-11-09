@@ -30,6 +30,7 @@ pub use mechanical::{
     MechanicalSpectrumOptions,
     MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
     MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
+    MechanicalWallPower,
     PreparedMechanicalHarmonic,
 };
 mod resonance;

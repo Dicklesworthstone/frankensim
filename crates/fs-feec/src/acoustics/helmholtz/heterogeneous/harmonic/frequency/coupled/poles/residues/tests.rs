@@ -37,7 +37,7 @@ fn close(actual: C64, expected: C64) {
 fn cavity(omega: f64, k: f64, c: f64, arms: Vec<(f64, f64)>) -> CoupledPencil {
     let fluid = [scalar(0.0), scalar(1.0), scalar(0.0), scalar(0.0)];
     CoupledPencil::prepare(omega, fluid.each_ref(), &[0], vec![Wall {
-        dofs: vec![0], mass: scalar(1.0), surface_density: 1.0,
+        dofs: vec![0], mass: scalar(1.0), area_m2: 1.0, surface_density: 1.0,
         stiffness: k, resistance: c, arms,
     }], MechanicalHarmonicLimits::default(), &mut || false).unwrap()
 }

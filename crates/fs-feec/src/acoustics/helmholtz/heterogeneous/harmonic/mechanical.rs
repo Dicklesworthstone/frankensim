@@ -17,20 +17,20 @@ use super::{
 use frequency::coupled::{CoupledPencil, Wall, WallTraction};
 pub use frequency::coupled::{
     MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
-    MechanicalWallPhasors,
+    MechanicalWallPhasors, MechanicalWallPower,
 };
+use fs_math::dd::Dd;
 use fs_phs::RelaxationBranch;
 use fs_phs::harmonic::resonance::{ResonanceSearchError, survey_resonances};
 
 mod poles;
 pub use poles::{
-    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
-    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
-    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
-    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
+    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions,
+    MechanicalPoleResponseOptions, MechanicalPoleWall, MechanicalRelaxationParameterDirection,
+    MechanicalResonanceParameterDerivative, MechanicalResonancePole, MechanicalResonanceRegion,
+    MechanicalResonanceResidue, MechanicalResonanceResponseError, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions, MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     MechanicalWallResidue, PreparedMechanicalResonance,
-    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
-    MechanicalSpectrumOptions,
 };
 
 /// Original acoustic pressure together with every distributed causal wall state.
@@ -344,11 +344,19 @@ pub(super) fn mechanical_walls_for(
             });
         }
         let mut local = Coo::new(dofs.len(), dofs.len());
+        let mut area = Dd::ZERO;
         for (row, &global_row) in dofs.iter().enumerate() {
             poll(cancelled)?;
             let (cols, values) = global.row(global_row);
             for (&col, &value) in cols.iter().zip(values) {
                 if value != 0.0 {
+                    // The original hierarchical H1 constant trace has one on
+                    // vertex DOFs and zero on all edge/face bubbles. Thus its
+                    // quadratic form is the physical area, including curved
+                    // face weights; summing every matrix entry would be wrong.
+                    if global_row < geometry.space.edge_off && col < geometry.space.edge_off {
+                        area = area + Dd::from_f64(value);
+                    }
                     let col = dofs
                         .binary_search(&col)
                         .map_err(|_| invalid("incomplete original mechanical trace support"))?;
@@ -356,9 +364,17 @@ pub(super) fn mechanical_walls_for(
                 }
             }
         }
+        let area_m2 = area.to_f64();
+        let mass_kg = area_m2 * boundary.wall.surface_density;
+        if !area_m2.is_finite() || area_m2 <= 0.0 || !mass_kg.is_finite() || mass_kg <= 0.0 {
+            return Err(
+                invalid("original mechanical wall area and mass must be representable").into(),
+            );
+        }
         walls.push(Wall {
             dofs,
             mass: local.assemble(),
+            area_m2,
             surface_density: boundary.wall.surface_density,
             stiffness: boundary.wall.stiffness_per_area,
             resistance: boundary.wall.resistance,
@@ -384,6 +400,18 @@ impl<'m, 'f, 'c> PreparedMechanicalHarmonic<'m, 'f, 'c> {
     #[must_use]
     pub fn wall_dofs(&self, wall: usize) -> Option<&[usize]> {
         self.pencil.wall_dofs(wall)
+    }
+
+    /// Independent positive resistance/Maxwell absorption on each original wall.
+    /// The caller binds these coherent phasors to this owner and frequency.
+    /// Exact native relaxation extensions are required; pressure/traction work
+    /// and mutable aggregate heat receipts are not inputs to this calculation.
+    pub fn wall_dissipation(
+        &self,
+        walls: &[MechanicalWallPhasors],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<MechanicalWallPower>, HeterogeneousError> {
+        Ok(self.pencil.wall_dissipation(walls, cancelled)?)
     }
 
     /// Project an original wall shape once. All mechanical coordinates survive

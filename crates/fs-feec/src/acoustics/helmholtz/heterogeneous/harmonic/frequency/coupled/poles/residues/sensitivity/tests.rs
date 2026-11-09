@@ -26,6 +26,7 @@ fn owner(reference: f64, k: f64, r: f64, sigma: f64, arms: Vec<(f64, f64)>) -> C
         vec![Wall {
             dofs: vec![0],
             mass: scalar(1.0),
+            area_m2: 1.0,
             surface_density: sigma,
             stiffness: k,
             resistance: r,

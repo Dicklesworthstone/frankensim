@@ -20,7 +20,7 @@ use super::super::MAX_QUADRATURE_ORDER;
 use super::super::time::mechanical::{MechanicalBoundary, traction::WallTractionProfile};
 use super::frequency::coupled::{
     CoupledPencil, MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallPhasors,
-    WallTraction,
+    MechanicalWallPower, WallTraction,
 };
 use super::mechanical::mechanical_walls_for;
 use super::{
@@ -550,6 +550,23 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
     #[must_use]
     pub fn wall_dofs(&self, wall: usize) -> Option<&[usize]> {
         self.pencil.wall_dofs(wall)
+    }
+
+    /// Recompute separate positive resistance and Maxwell absorption in original
+    /// wall order, with each patch's complete physical area and surface mass.
+    ///
+    /// The coherent wall phasors must belong to THIS geometry, wall order and
+    /// frequency; the caller owns that binding, as for `element_dissipation`.
+    /// Native relaxed extensions are retained directly so tiny physical heat
+    /// survives cancellation in `sqrt(k)*displacement - memory`. Complete state
+    /// dimensions and finite values are checked. Pressure exchange, boundary
+    /// Robin loss, bulk heat and aggregate power receipts never enter these forms.
+    pub fn wall_dissipation(
+        &self,
+        walls: &[MechanicalWallPhasors],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<MechanicalWallPower>, HeterogeneousError> {
+        Ok(self.pencil.wall_dissipation(walls, cancelled)?)
     }
 
     /// Project an applied mechanical traction shape once on this exact owner.

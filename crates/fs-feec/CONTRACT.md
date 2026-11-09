@@ -1799,11 +1799,31 @@ no dispersive bulk stored energy or frequency derivative is inferred from a
 single-frequency rho/K sample. Original rigid porous frames remain rigid; the
 added boundary motion is not an elastic Biot interior or a moving pore skeleton.
 
+Both prepared harmonic owners expose `wall_dissipation` in original patch order.
+`MechanicalWallPhasors` retains each solved energy-normalized extension
+`e_j = sqrt(k_j)*w - z_j` directly, as does its analytic frequency tangent.
+Independent wall heat reuses the original positive forms `R*v^H*W*v/2` and
+`sum_j e_j^H*W*e_j/(2*tau_j)` used by the native aggregate accounting; it never
+reconstructs a tiny extension by subtracting rounded displacement and memory.
+Complete state/branch dimensions and finite values are checked, and cancellation
+returns no partial heat table. The caller owns coherent state/frequency binding.
+
+Each `MechanicalWallPower` retains the original complete patch area and
+`surface_density*area` mass. Area is the same physical trace quadratic form on
+the hierarchical constant: one on vertex DOFs, zero on all edge/face bubbles.
+This includes original curved-face weights and avoids the incorrect sum over
+every hierarchical matrix entry. Pressure exchange, applied traction, Robin
+loss, bulk heat and aggregate work residuals do not supply wall heat. Thermal
+receivers still require an explicit physical mapping and original caloric law.
+
 `tests/equivalent_fluid_mechanical.rs` specifies G1 lossy-layer convergence to
 independent continuum pressure, wall motion/memory and heat integrals; G3
 coherent fluid/traction work and lossless agreement with the original wall owner;
 and G0/G4 local zero-impedance, adjacent pressure-release, source binding,
-complete-state admission and cancellation behavior.
+complete-state admission and cancellation behavior. Its original-patch heat
+case specifies high-order area/mass normalization and local coherent scaling;
+native `frequency/coupled/tests.rs` specifies heat that remains positive when
+rounded displacement/memory subtraction erases the physical extension.
 
 ## Heterogeneous resolved pressure acoustics
 
