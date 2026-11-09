@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	bsc21-bork99-rosewood-c3	Rosewood of a C3 marimba bar (Bork et al. 1999, "a real marimba bar of note C3" per Beaton 2022 pp.10-11), as Beaton and Scavone 2021 print it for their marimba F3 bar model; species, moisture and specimen not printed	Printed constants, second hand: Beaton and Scavone 2021 Table II "Rosewood properties are adopted from the literature (Bork et al., 1999)"; how Bork et al. obtained each constant (measured, taken or adjusted) is not readable here, because Acustica (ingentaconnect) and AIP answered 403 to the project client on 2026-11-08	Printed in bar axes, x length, y width, z thickness (Fig. 3 caption): rho 1080 kg/m3; E_x 23.0, E_y 2.3, E_z 1.15 GPa; nu xy 0.30, yz 0.60, xz 0.45; G xy 3.0, yz 1.0, xz 3.0 GPa. One nu per plane is printed; this pack reads the first index as the loaded direction (nu_lt = nu_xy, nu_lr = nu_xz, nu_tr = nu_yz), the only reading whose compliance is positive definite. Ratios are to E_x in the bar_strike slots: et_over_el = E_y/E_x (width), er_over_el = E_z/E_x (thickness), glt_over_el = G_xy/E_x, grt_over_el = G_yz/E_x, glr_over_el = G_xz/E_x. Which of width and thickness is the wood's radial direction is not printed; the slots follow the bar axes. No uncertainty printed
+scalar	density	bsc21-bork99-rosewood-c3	density	1080	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal	bsc21-bork99-rosewood-c3	young_modulus_longitudinal	23.0	GPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content_known	0	0	1
+scalar	et-over-el	bsc21-bork99-rosewood-c3	et_over_el	0.1	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	moisture_content_known	0	0	1
+scalar	er-over-el	bsc21-bork99-rosewood-c3	er_over_el	0.05	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	moisture_content_known	0	0	1
+scalar	glt-over-el	bsc21-bork99-rosewood-c3	glt_over_el	0.13043478260869565	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	moisture_content_known	0	0	1
+scalar	grt-over-el	bsc21-bork99-rosewood-c3	grt_over_el	0.043478260869565217	1	constant
+uncertainty	grt-over-el	unstated	-	-	-	-
+validity	grt-over-el	moisture_content_known	0	0	1
+scalar	glr-over-el	bsc21-bork99-rosewood-c3	glr_over_el	0.13043478260869565	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	moisture_content_known	0	0	1
+scalar	nu-lt	bsc21-bork99-rosewood-c3	nu_lt	0.3	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	moisture_content_known	0	0	1
+scalar	nu-lr	bsc21-bork99-rosewood-c3	nu_lr	0.45	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	moisture_content_known	0	0	1
+scalar	nu-tr	bsc21-bork99-rosewood-c3	nu_tr	0.6	1	constant
+uncertainty	nu-tr	unstated	-	-	-	-
+validity	nu-tr	moisture_content_known	0	0	1

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	rosewood-marimba-bar-bork1999-beaton2021
+redistribution	permitted	Numerical values retained as scientific facts with attribution; no article text, figure or table layout is reproduced; the ratios are the pack author's arithmetic on the printed moduli
+citation	Beaton D., Scavone G. (2021), Three-dimensional tuning of idiophone bar modes via finite element analysis, J. Acoust. Soc. Am. 149(6):3758, doi 10.1121/10.0005062: Table II p.3760 and Fig. 3 caption p.3761 (author copy at caml.music.mcgill.ca); the same set is Table 3.1 of Beaton D. (2022), PhD thesis, McGill University; both state it is adopted from Bork I., Chaigne A., Trebuchet L.-C., Kosfelder M., Pillot D. (1999), Comparison between modal analysis and finite element modelling of a marimba bar, Acta Acust. Acust. 85(2):258-266, which was not read (403 to the project client)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
