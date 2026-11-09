@@ -221,12 +221,13 @@ impl ReferenceMaterial3 {
         }
     }
 
-    /// The original isotropic card limits the Frobenius tensor norm, not each
-    /// Mandel component independently. Keep that distinction from source tensors.
+    /// Preserve the original material's tensor-norm domain, including native
+    /// isotropic and orthotropic laws carried through a source-state adapter.
+    /// Explicit Mandel-component boxes continue through their own admission.
     pub(super) fn frobenius_strain_limit(&self) -> Option<f64> {
         match self {
             Self::Legacy { strain_limit, .. } => Some(*strain_limit),
-            Self::Source(_) => None,
+            Self::Source(material) => material.state.frobenius_strain_limit(),
         }
     }
 

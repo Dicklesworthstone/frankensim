@@ -1,6 +1,8 @@
 //! Original isotropic strain ceilings must survive CutFEM preparation and solves.
 use std::ops::ControlFlow;
 
+use fs_blake3::ContentHash;
+use fs_cutfem::elastic3::ElasticMaterialField3;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::{
     CutElasticity3, ElasticityError3, ElasticityFormulation3, ElasticityOptions3,
@@ -10,6 +12,7 @@ use fs_cutfem::quad3::{QuadratureControl3, QuadratureOptions3};
 use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
+use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_solver::LinearOp;
 
 struct Full;
@@ -237,4 +240,132 @@ fn isotropic_admission_removes_rigid_translation_before_differentiating() {
         && point.constitutive_strain == [0.0; 6]
         && point.response.stress == [0.0; 6]
         && point.energy_density == 0.0));
+}
+
+fn adapted_material(box_domain: bool) -> ElasticAcousticState {
+    let law = IsotropicElastic::new(10.0, 0.0, 0.1).unwrap();
+    if box_domain {
+        ElasticAcousticState::from_bulk_and_shear(
+            1000.0,
+            law.youngs / 3.0,
+            law.youngs / 2.0,
+            ContentHash([81; 32]),
+            law.strain_limit,
+        )
+        .unwrap()
+    } else {
+        ElasticAcousticState::from_isotropic(&law, 1000.0, ContentHash([82; 32])).unwrap()
+    }
+}
+
+macro_rules! source_domain_checks {
+    ($op:expr, $box_domain:expr) => {{
+        let op = $op;
+        let box_domain = $box_domain;
+        // Each normal component fits 0.1, but their tensor norm exceeds it.
+        let excessive = field(op.nodes(), |p| [0.08 * p[0], 0.08 * p[1], 0.0]);
+        let admitted = field(op.nodes(), |p| [0.06 * p[0], 0.06 * p[1], 0.0]);
+        op.admit_material_domain(&admitted, poll).unwrap();
+        assert_eq!(
+            op.admit_material_domain(&excessive, poll).is_ok(),
+            box_domain
+        );
+        assert_eq!(
+            op.bulk_stress(&excessive, 100_000, poll).is_ok(),
+            box_domain
+        );
+        assert_eq!(
+            op.bulk_strain_stress(&excessive, 100_000, poll).is_ok(),
+            box_domain,
+        );
+        // The complete offset-plus-unit-ball family also retains the domain:
+        // sqrt(0.06^2 + 0.09^2) > 0.1, though every component fits its box.
+        let offset = field(op.nodes(), |p| [0.06 * p[0], 0.0, 0.0]);
+        let direction = field(op.nodes(), |p| [0.0, 0.09 * p[1], 0.0]);
+        assert_eq!(
+            op.admit_affine_material_domain(&offset, &[&direction], poll)
+                .is_ok(),
+            box_domain,
+        );
+        assert_eq!(
+            op.affine_bulk_stress(&offset, &[&direction], 100_000, poll)
+                .is_ok(),
+            box_domain,
+        );
+        // The retained material domain belongs to elastic strain, separately
+        // from total displacement strain: zero motion cannot conceal free strain.
+        let prepared = op
+            .prepare_eigenstrain(&|_, _| Ok([0.08, 0.08, 0.0, 0.0, 0.0, 0.0]), 100_000, poll)
+            .unwrap();
+        assert_eq!(
+            op.eigenstrain_response(&prepared, &vec![0.0; op.n()], 0.2, 100_000, poll)
+                .is_ok(),
+            box_domain,
+        );
+    }};
+}
+
+#[test]
+fn source_conversion_preserves_tensor_norm_and_explicit_box_domains() {
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        for box_domain in [false, true] {
+            let material = adapted_material(box_domain);
+            let mut checkpoint = |_| poll();
+            let mut control = QuadratureControl3::new(Default::default(), &mut checkpoint).unwrap();
+            let op = CutElasticity3::build_with_material_field(
+                HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
+                [1; 3],
+                &Full,
+                ElasticMaterialField3::Uniform(&material),
+                &|p| p == [0.0; 3],
+                options(formulation),
+                &mut control,
+            )
+            .unwrap();
+            source_domain_checks!(op, box_domain);
+        }
+    }
+}
+
+#[test]
+fn source_tensor_norm_survives_adaptive_reconstruction_and_eigenstrain() {
+    let tree = Octree3::uniform(1, 3, 128).unwrap();
+    let mark = *tree
+        .leaves()
+        .iter()
+        .find(|c| c.index() == [1, 0, 0])
+        .unwrap();
+    let tree = tree.refined(&[mark], poll).unwrap();
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        for box_domain in [false, true] {
+            let material = adapted_material(box_domain);
+            let mut checkpoint = |_| poll();
+            let mut control = QuadratureControl3::new(
+                QuadratureOptions3 {
+                    depth: 0,
+                    ..Default::default()
+                },
+                &mut checkpoint,
+            )
+            .unwrap();
+            let op = AdaptiveElasticity3::build_with_material_field(
+                HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
+                &tree,
+                &Full,
+                ElasticMaterialField3::Uniform(&material),
+                &|p| p == [0.0; 3],
+                options(formulation),
+                &mut control,
+            )
+            .unwrap();
+            assert!(op.physical_nodes().len() > op.nodes().len());
+            source_domain_checks!(op, box_domain);
+        }
+    }
 }

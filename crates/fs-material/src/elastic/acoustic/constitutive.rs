@@ -7,8 +7,8 @@
 //! derivation in <https://csmbrannon.net/tag/mandel-notation/>.
 
 use super::{ElasticAcousticState, invalid};
-use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use crate::tensor::{from_mandel, mandel_stiffness_to_voigt, to_mandel};
+use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
@@ -26,10 +26,15 @@ pub struct ElasticStrainResponse {
 }
 
 impl ElasticAcousticState {
-    fn admits_mandel_strain(&self, strain: &Voigt) -> bool {
-        strain
-            .iter()
-            .all(|v| v.is_finite() && v.abs() <= self.maximum_absolute_mandel_strain)
+    fn admits_tensor_strain(&self, strain: &Voigt) -> bool {
+        if let Some(limit) = self.frobenius_strain_limit() {
+            // Use the source law's arithmetic on native tensor components.
+            // An extra Mandel conversion can round an inclusive boundary
+            // outward, so do not re-admit that converted strain afterward.
+            crate::elastic::admits_elastic_strain(strain, limit)
+        } else {
+            self.admits_mandel_strain(&to_mandel(strain))
+        }
     }
 
     // Linear action without strain admission: wave traces use unit amplitudes
@@ -61,8 +66,8 @@ impl ElasticAcousticState {
     }
 
     /// Evaluate the full anisotropic Hooke law and its recoverable energy.
-    /// The original componentwise Mandel strain ceiling applies; neither
-    /// normal/shear coupling nor orientation is replaced by isotropic data.
+    /// The original strain domain applies, including a native law's Frobenius
+    /// norm bound. Normal/shear coupling and orientation are retained.
     /// No allocation, factorization or source lookup occurs during evaluation.
     pub fn strain_response(
         &self,
@@ -73,13 +78,19 @@ impl ElasticAcousticState {
                 "elastic response exceeds the original Mandel strain domain",
             ));
         }
+        self.strain_response_admitted(strain_mandel)
+    }
+
+    fn strain_response_admitted(
+        &self,
+        strain_mandel: Voigt,
+    ) -> Result<ElasticStrainResponse, MaterialError> {
         let stress_mandel_pa = self.apply_stiffness_mandel(&strain_mandel);
         let stored_energy_density_j_m3 = if let Some((bulk, shear)) = self.isotropic_moduli_pa {
             let (trace, deviator) = crate::elastic::isotropic_strain_modes(&strain_mandel);
             // Positive modal storage retains a weak isochoric/hydrostatic
             // response instead of cancelling large, opposite stress-work terms.
-            0.5 * (bulk * trace) * trace
-                + deviator.iter().map(|e| (shear * e) * e).sum::<f64>()
+            0.5 * (bulk * trace) * trace + deviator.iter().map(|e| (shear * e) * e).sum::<f64>()
         } else {
             0.5 * strain_mandel
                 .iter()
@@ -118,14 +129,17 @@ impl SmallStrainLaw for ElasticAcousticState {
     fn initial_state(&self) {}
 
     fn stress(&self, strain: &Voigt, (): &Self::State) -> Voigt {
-        match self.strain_response(to_mandel(strain)) {
+        if !self.admits_tensor_strain(strain) {
+            return [f64::NAN; 6];
+        }
+        match self.strain_response_admitted(to_mandel(strain)) {
             Ok(response) => from_mandel(&response.stress_mandel_pa),
             Err(_) => [f64::NAN; 6],
         }
     }
 
     fn tangent(&self, strain: &Voigt, (): &Self::State) -> Tangent6 {
-        if !self.admits_mandel_strain(&to_mandel(strain)) {
+        if !self.admits_tensor_strain(strain) {
             return [[f64::NAN; 6]; 6];
         }
         mandel_stiffness_to_voigt(&self.stiffness_mandel_pa)
@@ -134,7 +148,7 @@ impl SmallStrainLaw for ElasticAcousticState {
     fn update_state(&self, _strain: &Voigt, (): &Self::State) {}
 
     fn admits_strain(&self, strain: &Voigt) -> bool {
-        self.admits_mandel_strain(&to_mandel(strain))
+        self.admits_tensor_strain(strain)
     }
 
     fn admissibility(&self) -> MaterialAdmissibility {
@@ -143,7 +157,7 @@ impl SmallStrainLaw for ElasticAcousticState {
             dissipation_nonnegative: true,
             polyconvex: Some(true),
             tangent_symmetric: true, // symmetric under tensor double contraction
-            failure_envelope: "original Mandel strain ceiling; no yield or damage law",
+            failure_envelope: "original elastic strain domain; no yield or damage law",
         }
     }
 
@@ -156,8 +170,8 @@ impl SmallStrainLaw for ElasticAcousticState {
                 "frozen symmetric positive-definite elastic tensor; infinitesimal strain".into(),
                 format!("original material state {:?}", self.material_state_identity),
             ],
-            // A Frobenius-norm ball of this radius lies inside the original
-            // Mandel-component box. Checked kernels retain that exact box.
+            // Exact for a native law's Frobenius ball, otherwise an inscribed
+            // ball. Checked kernels retain the original domain shape.
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
                 0.0,

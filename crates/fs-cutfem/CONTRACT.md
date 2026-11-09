@@ -158,8 +158,9 @@ same certified cuts; its constitutive parameters come from
 `elastic3::ElasticMaterialField3` binds the existing admitted
 `fs_material::elastic::acoustic::ElasticAcousticState` to Cartesian or adaptive
 Q1 cut cells, uniformly or by physical background-cell bounds. The full global
-Mandel tensor, density, source identity and explicit strain ceiling remain
-attached to each cell. Bulk stiffness, Nitsche tractions and lifting, reactions,
+Mandel tensor, density, source identity and original strain-domain shape remain
+attached to each cell. Native isotropic/orthotropic adapters retain their
+Frobenius ball; explicitly declared Mandel-component boxes retain that box. Bulk stiffness, Nitsche tractions and lifting, reactions,
 stress observations and their pullbacks consume that same reference law.
 Uniform fields share a prepared engineering tensor; no new material resolver,
 constitutive admission or isotropic proxy is introduced.
@@ -404,8 +405,9 @@ retains local dilatation; only the constitutive strain uses the same
 physical-cell mean dilatation as the operator. Storage is one half of their
 work-conjugate stress/constitutive-strain contraction, including both shear
 entries and current material scaling. It excludes stabilization and boundary
-work. Both strain families obey the original isotropic Frobenius or source
-Mandel-component strain domain.
+work. Both strain families obey the original material domain: a Frobenius
+ball for native isotropic/orthotropic laws, including their source-state
+adapters, or an explicitly declared Mandel-component box.
 
 Every Cartesian stress/strain observation and its stress transpose removes
 a common nodal translation before differentiation. Adaptive strain recovery
@@ -423,16 +425,17 @@ they do not bound unsampled extrema or certify continuum error.
 directions on those same points. It shares native Mandel-strain extraction and
 constitutive action with ordinary stress observations, and stores reference
 stress columns in original field/point order. Coordinate columns are not
-independent physical load cases. For every sourced material and Mandel component
-it checks `abs(epsilon0) + ||epsilon_basis||_2` against the retained strain ceiling,
+independent physical load cases. For an original Mandel-component box it checks
+`abs(epsilon0) + ||epsilon_basis||_2` against each retained component ceiling,
 which admits the complete coefficient unit ball in real arithmetic. The scaled
 norm avoids squaring large or tiny components; computed admission is numerical,
-not an interval enclosure. Isotropic constructors retain the supplied
-`IsotropicElastic::strain_limit` and enforce it as the full Frobenius tensor
-norm, including both symmetric shear entries. They do not reinterpret it as
-six independent component limits. Rigid translation is subtracted before the
-isotropic strain check; stiffness interpolation never widens this domain.
-For an isotropic affine family, the owner normalizes by that original ceiling
+not an interval enclosure. Native isotropic and orthotropic constructors retain
+the supplied tensor Frobenius strain ceiling, including both symmetric shear
+entries, even after conversion through `ElasticAcousticState`. Explicit bulk/shear,
+cubic and generic Mandel constructors keep their declared component boxes.
+Rigid translation is subtracted before the strain check; stiffness interpolation
+never widens either domain. For a tensor-norm affine family, the owner normalizes
+by that original ceiling
 and accumulates a six-dimensional Gram matrix and offset coupling with constant
 storage. A rotation-invariant spectral-moment bound admits the complete
 coefficient ball without an eigensolve. Admission is exact in real arithmetic

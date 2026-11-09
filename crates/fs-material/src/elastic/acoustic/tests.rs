@@ -13,6 +13,173 @@ fn identity() -> ContentHash {
 }
 
 #[test]
+fn g3_native_elastic_adapters_preserve_objective_strain_domains() {
+    use crate::SmallStrainLaw;
+
+    let limit = 1.0 / 1024.0;
+    let isotropic = IsotropicElastic::new(1200.0, 0.25, limit).unwrap();
+    let orthotropic =
+        OrthotropicElastic::new([1200.0, 800.0, 600.0], [0.0; 3], [300.0; 3], limit).unwrap();
+    let rotation = crate::tensor::mandel_rotation(crate::tensor::rotation(
+        [0.0, 0.0, 1.0],
+        core::f64::consts::FRAC_PI_4,
+    ));
+    for state in [
+        ElasticAcousticState::from_isotropic(&isotropic, 1000.0, identity()).unwrap(),
+        ElasticAcousticState::from_orthotropic(&orthotropic, 1000.0, identity()).unwrap(),
+    ] {
+        assert_eq!(state.frobenius_strain_limit(), Some(limit));
+        assert_eq!(state.clone(), state);
+        assert_eq!(state.material_state_identity(), identity());
+        for component in 0..6 {
+            let mut boundary = [0.0; 6];
+            boundary[component] = limit;
+            assert!(state.admits_mandel_strain(&boundary));
+            assert!(state.strain_response(boundary).is_ok());
+            boundary[component] = limit.next_up();
+            assert!(!state.admits_mandel_strain(&boundary));
+        }
+        for (strain, expected) in [
+            ([0.5 * limit, -0.5 * limit, 0.0, 0.0, 0.0, 0.0], true),
+            (
+                [0.75 * limit, 0.75 * limit, 0.75 * limit, 0.0, 0.0, 0.0],
+                false,
+            ),
+            ([0.0, 0.0, 0.0, 0.75 * limit, 0.75 * limit, 0.0], false),
+        ] {
+            let rotated =
+                std::array::from_fn(|i| rotation[i].iter().zip(strain).map(|(q, e)| q * e).sum());
+            for strain in [strain, rotated] {
+                assert_eq!(state.admits_mandel_strain(&strain), expected);
+                assert_eq!(state.strain_response(strain).is_ok(), expected);
+                let tensor = crate::tensor::from_mandel(&strain);
+                assert_eq!(state.admits_strain(&tensor), expected);
+                assert_eq!(
+                    state.stress(&tensor, &()).iter().all(|v| v.is_finite()),
+                    expected
+                );
+                assert_eq!(
+                    state
+                        .tangent(&tensor, &())
+                        .iter()
+                        .flatten()
+                        .all(|v| v.is_finite()),
+                    expected,
+                );
+            }
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let strain = [invalid, 0.0, 0.0, 0.0, 0.0, 0.0];
+            assert!(!state.admits_mandel_strain(&strain));
+            assert!(!state.admits_strain(&strain));
+        }
+    }
+}
+
+#[test]
+fn g3_native_tensor_boundary_is_admitted_before_mandel_rounding() {
+    use crate::SmallStrainLaw;
+
+    for strain in [
+        [0.001, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.001, 0.0, 0.0],
+        [0.0001, -0.0002, 0.0003, 0.0004, -0.0005, 0.0006],
+    ] {
+        let limit = crate::tensor::frobenius_norm(&strain);
+        let isotropic = IsotropicElastic::new(1200.0, 0.25, limit).unwrap();
+        let orthotropic =
+            OrthotropicElastic::new([1200.0, 800.0, 600.0], [0.0; 3], [300.0; 3], limit).unwrap();
+        assert!(isotropic.admits_strain(&strain));
+        assert!(orthotropic.admits_strain(&strain));
+        for state in [
+            ElasticAcousticState::from_isotropic(&isotropic, 1000.0, identity()).unwrap(),
+            ElasticAcousticState::from_orthotropic(&orthotropic, 1000.0, identity()).unwrap(),
+        ] {
+            assert!(state.admits_strain(&strain));
+            assert!(state.stress(&strain, &()).iter().all(|v| v.is_finite()));
+            assert!(
+                state
+                    .tangent(&strain, &())
+                    .iter()
+                    .flatten()
+                    .all(|v| v.is_finite())
+            );
+            assert!(!state.admits_strain(&strain.map(|e| e * (1.0 + 1e-12))));
+        }
+    }
+    for limit in [1e-250, 1e250] {
+        let law = IsotropicElastic::new(1200.0, 0.25, limit).unwrap();
+        let state = ElasticAcousticState::from_isotropic(&law, 1000.0, identity()).unwrap();
+        for (strain, expected) in [
+            ([limit, 0.0, 0.0, 0.0, 0.0, 0.0], true),
+            ([0.75 * limit, 0.75 * limit, 0.0, 0.0, 0.0, 0.0], false),
+        ] {
+            assert_eq!(state.admits_mandel_strain(&strain), expected);
+            assert_eq!(state.admits_strain(&strain), law.admits_strain(&strain));
+        }
+    }
+}
+
+#[test]
+fn g3_pressure_preserves_native_ball_and_explicit_component_boxes() {
+    let limit = 1.0 / 1024.0;
+    let youngs = 1200.0;
+    let isotropic = IsotropicElastic::new(youngs, 0.0, limit).unwrap();
+    let orthotropic =
+        OrthotropicElastic::new([youngs; 3], [0.0; 3], [youngs / 2.0; 3], limit).unwrap();
+    let native = ElasticAcousticState::from_orthotropic(&orthotropic, 1000.0, identity()).unwrap();
+    let generic =
+        ElasticAcousticState::try_new_mandel(orthotropic.stiffness(), 1000.0, identity(), limit)
+            .unwrap();
+    assert_eq!(native.stiffness_mandel_pa(), generic.stiffness_mandel_pa());
+    assert_eq!(
+        native.material_state_identity(),
+        generic.material_state_identity()
+    );
+    assert_ne!(native, generic); // Equal coefficients do not imply equal domains.
+    for state in [
+        ElasticAcousticState::from_isotropic(&isotropic, 1000.0, identity()).unwrap(),
+        native,
+    ] {
+        for sign in [-1.0, 1.0] {
+            let response = state
+                .hydrostatic_response(sign * 0.5 * youngs * limit)
+                .unwrap();
+            assert!(state.admits_mandel_strain(&response.strain_mandel));
+            assert!(state.strain_response(response.strain_mandel).is_ok());
+            // Every component is below the old ceiling, but the total
+            // objective strain is sqrt(3)*0.75*limit, outside the source law.
+            assert!(
+                state
+                    .hydrostatic_response(sign * 0.75 * youngs * limit)
+                    .is_err()
+            );
+        }
+    }
+    for state in [
+        generic,
+        ElasticAcousticState::from_bulk_and_shear(
+            1000.0,
+            youngs / 3.0,
+            youngs / 2.0,
+            identity(),
+            limit,
+        )
+        .unwrap(),
+        ElasticAcousticState::from_cubic(1000.0, youngs, 0.0, youngs / 2.0, identity(), limit)
+            .unwrap(),
+    ] {
+        assert_eq!(state.frobenius_strain_limit(), None);
+        let strain = [0.75 * limit, 0.75 * limit, 0.75 * limit, 0.0, 0.0, 0.0];
+        assert!(state.admits_mandel_strain(&strain));
+        assert!(state.strain_response(strain).is_ok());
+        let response = state.hydrostatic_response(0.75 * youngs * limit).unwrap();
+        assert!(state.admits_mandel_strain(&response.strain_mandel));
+        assert!(state.strain_response(response.strain_mandel).is_ok());
+    }
+}
+
+#[test]
 fn isotropic_waves_and_pressure_share_one_elastic_energy() {
     let law = IsotropicElastic::new(210e9, 0.3, 0.001).unwrap();
     let rho = 7800.0;
@@ -80,10 +247,9 @@ fn isotropic_waves_and_pressure_share_one_elastic_energy() {
 fn g1_original_isotropic_modes_survive_extreme_bulk_shear_ratios() {
     for scale in [1e-150, 1.0, 1e150] {
         for (bulk, shear) in [(1e12 * scale, 1e-6 * scale), (1e-6 * scale, 1e12 * scale)] {
-            let state = ElasticAcousticState::from_bulk_and_shear(
-                2000.0, bulk, shear, identity(), 0.01,
-            )
-            .unwrap();
+            let state =
+                ElasticAcousticState::from_bulk_and_shear(2000.0, bulk, shear, identity(), 0.01)
+                    .unwrap();
             assert_eq!(state.isotropic_bulk_shear_pa(), Some((bulk, shear)));
             assert_eq!(state.bulk_modulus_pa(), bulk);
             near(state.compressibility_pa_inv(), bulk.recip(), 2e-15);
@@ -93,7 +259,11 @@ fn g1_original_isotropic_modes_survive_extreme_bulk_shear_ratios() {
             let distortion = [0.004, -0.002, -0.002, 0.001, -0.003, 0.002];
             let response = state.strain_response(distortion).unwrap();
             for i in 0..6 {
-                near(response.stress_mandel_pa[i], 2.0 * shear * distortion[i], 4e-15);
+                near(
+                    response.stress_mandel_pa[i],
+                    2.0 * shear * distortion[i],
+                    4e-15,
+                );
             }
             near(
                 response.stored_energy_density_j_m3,
@@ -106,7 +276,11 @@ fn g1_original_isotropic_modes_survive_extreme_bulk_shear_ratios() {
             for stress in &expansion.stress_mandel_pa[..3] {
                 near(*stress, 0.003 * bulk, 4e-15);
             }
-            near(expansion.stored_energy_density_j_m3, 0.5 * bulk * 9e-6, 4e-15);
+            near(
+                expansion.stored_energy_density_j_m3,
+                0.5 * bulk * 9e-6,
+                4e-15,
+            );
             let pressure = 0.003 * bulk;
             let compression = state.hydrostatic_response(pressure).unwrap();
             near(compression.volumetric_strain, -0.003, 4e-15);
@@ -166,9 +340,17 @@ fn g3_original_isotropic_parameters_are_not_inferred_from_generic_tensors() {
         let exact = isotropic.directional_waves(normal).unwrap();
         let dense = generic.directional_waves(normal).unwrap();
         for index in 0..3 {
-            near(exact.modes[index].phase_speed_m_s, dense.modes[index].phase_speed_m_s, 5e-14);
+            near(
+                exact.modes[index].phase_speed_m_s,
+                dense.modes[index].phase_speed_m_s,
+                5e-14,
+            );
             for axis in 0..3 {
-                near(exact.christoffel_pa[index][axis], dense.christoffel_pa[index][axis], 5e-14);
+                near(
+                    exact.christoffel_pa[index][axis],
+                    dense.christoffel_pa[index][axis],
+                    5e-14,
+                );
             }
         }
     }

@@ -11,7 +11,7 @@
 //! ultrasonic authority. Attenuation, dispersion, prestress, finite strain and
 //! thermoelastic relaxation require their respective constitutive owners.
 
-use crate::{MaterialError, Tangent6, tensor::mandel_basis};
+use crate::{MaterialError, Tangent6, Voigt, tensor::mandel_basis};
 use fs_blake3::ContentHash;
 use fs_la::{eigen::jacobi_eigh, factor::cholesky};
 use fs_math::det;
@@ -35,6 +35,14 @@ fn invalid(what: &str) -> MaterialError {
     }
 }
 
+// A native law's objective strain ball must not become a larger component
+// box merely because the acoustic adapter uses Mandel coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElasticStrainDomain {
+    MandelComponents,
+    TensorFrobenius,
+}
+
 /// Frozen elastic state shared by wave and pressure queries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElasticAcousticState {
@@ -45,6 +53,7 @@ pub struct ElasticAcousticState {
     isotropic_moduli_pa: Option<(f64, f64)>,
     material_state_identity: ContentHash,
     maximum_absolute_mandel_strain: f64,
+    strain_domain: ElasticStrainDomain,
     hydrostatic_compliance_pa_inv: [f64; 6],
     compressibility_pa_inv: f64,
     stiffness_scale_pa: f64,
@@ -158,7 +167,7 @@ impl ElasticAcousticState {
         )
     }
 
-    /// Use an existing isotropic law and its declared strain ceiling.
+    /// Use an existing isotropic law and preserve its tensor Frobenius strain ball.
     pub fn from_isotropic(
         law: &super::IsotropicElastic,
         density_kg_m3: f64,
@@ -166,14 +175,16 @@ impl ElasticAcousticState {
     ) -> Result<Self, MaterialError> {
         // The public law may have been changed after construction.
         super::IsotropicElastic::new(law.youngs, law.poisson, law.strain_limit)?;
-        Self::from_isotropic_parts(
+        let mut state = Self::from_isotropic_parts(
             law.stiffness(),
             law.youngs / (3.0 * (1.0 - 2.0 * law.poisson)),
             law.youngs / (2.0 * (1.0 + law.poisson)),
             density_kg_m3,
             material_state_identity,
             law.strain_limit,
-        )
+        )?;
+        state.strain_domain = ElasticStrainDomain::TensorFrobenius;
+        Ok(state)
     }
 
     fn from_isotropic_parts(
@@ -206,7 +217,10 @@ impl ElasticAcousticState {
         if [bulk, shear, compressibility_pa_inv]
             .into_iter()
             .any(|value| !value.is_finite() || value <= 0.0)
-            || stiffness_mandel_pa.iter().flatten().any(|value| !value.is_finite())
+            || stiffness_mandel_pa
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
         {
             return Err(invalid("isotropic elastic response is unrepresentable"));
         }
@@ -216,7 +230,9 @@ impl ElasticAcousticState {
             .fold(0.0_f64, |scale, value| scale.max(value.abs()));
         let normal_compliance = compressibility_pa_inv / 3.0;
         if normal_compliance == 0.0 {
-            return Err(invalid("isotropic hydrostatic compliance is unrepresentable"));
+            return Err(invalid(
+                "isotropic hydrostatic compliance is unrepresentable",
+            ));
         }
         Ok(Self {
             stiffness_mandel_pa,
@@ -224,6 +240,7 @@ impl ElasticAcousticState {
             isotropic_moduli_pa: Some((bulk, shear)),
             material_state_identity,
             maximum_absolute_mandel_strain,
+            strain_domain: ElasticStrainDomain::MandelComponents,
             hydrostatic_compliance_pa_inv: [
                 normal_compliance,
                 normal_compliance,
@@ -237,19 +254,22 @@ impl ElasticAcousticState {
         })
     }
 
-    /// Use an existing orthotropic law in its principal frame.
-    /// Oriented consumers pass their already transformed Mandel tensor instead.
+    /// Use an existing orthotropic law in its principal frame, preserving its
+    /// tensor Frobenius strain ball. Oriented consumers passing a transformed
+    /// tensor to `try_new_mandel` must declare that tensor's strain domain.
     pub fn from_orthotropic(
         law: &super::OrthotropicElastic,
         density_kg_m3: f64,
         material_state_identity: ContentHash,
     ) -> Result<Self, MaterialError> {
-        Self::try_new_mandel(
+        let mut state = Self::try_new_mandel(
             law.stiffness(),
             density_kg_m3,
             material_state_identity,
             law.strain_limit,
-        )
+        )?;
+        state.strain_domain = ElasticStrainDomain::TensorFrobenius;
+        Ok(state)
     }
 
     /// Admit an exact symmetric positive-definite Mandel tensor and density.
@@ -337,6 +357,7 @@ impl ElasticAcousticState {
             isotropic_moduli_pa: None,
             material_state_identity,
             maximum_absolute_mandel_strain,
+            strain_domain: ElasticStrainDomain::MandelComponents,
             hydrostatic_compliance_pa_inv,
             compressibility_pa_inv,
             stiffness_scale_pa,
@@ -383,10 +404,54 @@ impl ElasticAcousticState {
         self.material_state_identity
     }
 
-    /// Admitted absolute ceiling for each Mandel strain component.
+    /// Absolute ceiling for each Mandel strain component.
+    ///
+    /// Native isotropic/orthotropic adapters also retain their Frobenius norm
+    /// bound: satisfying each component ceiling alone does not admit a strain.
+    /// A Mandel norm no greater than this value is sufficient for either shape.
+    /// Use `admits_mandel_strain` for the complete original domain.
     #[must_use]
     pub const fn maximum_absolute_mandel_strain(&self) -> f64 {
         self.maximum_absolute_mandel_strain
+    }
+
+    /// Original tensor Frobenius strain limit for a native elastic-law adapter.
+    ///
+    /// The Mandel Euclidean norm equals the physical tensor Frobenius norm.
+    /// Explicit bulk/shear, cubic and generic Mandel constructors declare
+    /// componentwise boxes and return `None`; no norm bound is inferred.
+    #[must_use]
+    pub const fn frobenius_strain_limit(&self) -> Option<f64> {
+        match self.strain_domain {
+            ElasticStrainDomain::TensorFrobenius => Some(self.maximum_absolute_mandel_strain),
+            ElasticStrainDomain::MandelComponents => None,
+        }
+    }
+
+    /// Admit a finite Mandel strain against the original domain, inclusively.
+    /// Native elastic laws retain their objective Frobenius ball; explicitly
+    /// declared componentwise domains retain their box. No allocation occurs.
+    #[must_use]
+    pub fn admits_mandel_strain(&self, strain: &Voigt) -> bool {
+        if strain.iter().any(|value| !value.is_finite()) {
+            return false;
+        }
+        let scale = strain.iter().fold(0.0_f64, |s, value| s.max(value.abs()));
+        if scale > self.maximum_absolute_mandel_strain {
+            return false;
+        }
+        match self.strain_domain {
+            ElasticStrainDomain::MandelComponents => true,
+            ElasticStrainDomain::TensorFrobenius => {
+                if scale == 0.0 {
+                    return true;
+                }
+                // Normalize before squaring: tiny/large finite calibrated
+                // bounds must not underflow/overflow into a different domain.
+                let squared_norm = strain.iter().map(|value| (value / scale).powi(2)).sum();
+                scale * det::sqrt(squared_norm) <= self.maximum_absolute_mandel_strain
+            }
+        }
     }
 
     /// Hydrostatic volume compressibility `I:C^-1:I` [1/Pa].
@@ -398,10 +463,8 @@ impl ElasticAcousticState {
     /// Hydrostatic bulk modulus, reciprocal of volume compressibility [Pa].
     #[must_use]
     pub fn bulk_modulus_pa(&self) -> f64 {
-        self.isotropic_moduli_pa.map_or_else(
-            || self.compressibility_pa_inv.recip(),
-            |(bulk, _)| bulk,
-        )
+        self.isotropic_moduli_pa
+            .map_or_else(|| self.compressibility_pa_inv.recip(), |(bulk, _)| bulk)
     }
 
     /// Apply hydrostatic stress `-pressure_pa*I` within the admitted strain domain.
@@ -413,9 +476,7 @@ impl ElasticAcousticState {
         let volumetric_strain = strain_mandel[..3].iter().sum::<f64>();
         let stored_energy_density_j_m3 = -0.5 * pressure_pa * volumetric_strain;
         if !pressure_pa.is_finite()
-            || strain_mandel.iter().any(|value| {
-                !value.is_finite() || value.abs() > self.maximum_absolute_mandel_strain
-            })
+            || !self.admits_mandel_strain(&strain_mandel)
             || !volumetric_strain.is_finite()
             || !stored_energy_density_j_m3.is_finite()
             || stored_energy_density_j_m3 < 0.0
