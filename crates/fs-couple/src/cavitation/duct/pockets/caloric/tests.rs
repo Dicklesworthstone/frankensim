@@ -240,6 +240,11 @@ fn near(a: f64, b: f64, tolerance: f64) {
 
 #[test]
 fn held_drive_and_original_caloric_heat_share_exact_isobaric_work() {
+    exact_driven_isobaric_work(false);
+    exact_driven_isobaric_work(true);
+}
+
+fn exact_driven_isobaric_work(pressure_feedback: bool) {
     let gas = parcel(0.002, 0.0, 2000.0);
     let mass = gas.mass_kg();
     let duct = DgDuct::from_material(
@@ -282,9 +287,25 @@ fn held_drive_and_original_caloric_heat_share_exact_isobaric_work() {
     let heat = |_: f64, gas: &CaloricGasObservation| {
         Ok(-gas.gas_pressure_pa * (1.0 + gas.cv_j_kg_k / gas_constant()) * inflow)
     };
-    let step = coupled
-        .advance_with_port_flow_and_gas_heat(duration, &numerics(), inflow, &heat, &mut || false)
-        .unwrap();
+    let step = if pressure_feedback {
+        let flow = |_: f64, pressure: f64| Ok(inflow + 1e-10 * (REFERENCE - pressure));
+        coupled.advance_with_port_flow_law_and_gas_heat(
+            duration,
+            &numerics(),
+            &flow,
+            &heat,
+            &mut || false,
+        )
+    } else {
+        coupled.advance_with_port_flow_and_gas_heat(
+            duration,
+            &numerics(),
+            inflow,
+            &heat,
+            &mut || false,
+        )
+    }
+    .unwrap();
     let expected_volume = VOLUME - inflow * duration;
     let endpoint = coupled.caloric_gas(PortId(8)).unwrap();
     assert_eq!(endpoint.mass_kg(), mass);

@@ -106,7 +106,13 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         Heat: Fn(f64, &CaloricGasObservation) -> Result<f64, DuctCavityError>,
         Cancel: FnMut() -> bool,
     {
-        self.advance_kernel(end_time_s, numerics, heat, 0.0, cancelled)
+        self.advance_kernel(
+            end_time_s,
+            numerics,
+            heat,
+            driven::DriveSignal::Held(0.0),
+            cancelled,
+        )
     }
 
     pub(super) fn prepare_caloric(
@@ -169,7 +175,9 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 "missing original caloric branch",
             ))?;
             let sample = branch
-                .sample_density_internal_energy_increment(
+                // The RK energy coordinate retains any sub-temperature-ulp
+                // increment. Endpoint reconstruction remains source-strict.
+                .sample_density_internal_energy_coordinate(
                     pocket.gas.point(),
                     density,
                     increment,

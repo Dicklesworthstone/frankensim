@@ -9315,3 +9315,56 @@ refusals, and inconsistent mass/volume/expansion admission. Pinned Rustfmt and
 whitespace checks pass. Native fs-couple integration is unexecuted: DSR/RCH are
 unavailable and shared build storage cannot support the required dependencies.
 Related broader porous/capillary transport scope remains open.
+
+## Pressure-dependent hydraulic ports and passive reservoirs
+
+`cavitation::duct::pockets::CavitatingDuctPockets` accepts a smooth deterministic
+`Q(time_s, absolute_port_pressure_pa)` boundary through
+`advance_with_port_flow_law[_and_gas_heat]`. Initial contact selection, every
+native RK stage, localized rupture/collapse event and final observation sample
+the actual current port pressure. The existing DG liquid, active-set pocket
+constraints and original gas inventories keep one accepted trajectory; no
+pressure clamp or separately advanced boundary state is introduced.
+
+The declared endpoint is positive INTO the duct at either end. Actual signed
+transported volume and acoustic pressure work are integrated as `integral Q dt`
+and `integral p' Q dt`. Reports distinguish initial, endpoint and mean flow;
+endpoint flow times duration is not used for a varying drive. Existing held
+flow retains its original adaptive dimensions/tolerances and exact `Q*dt`
+volume. Feedback adds one scalar volume coordinate, and a reservoir adds one
+loss coordinate, without per-stage allocation. Gas caloric stages retain the
+same conservative energy coordinate through the source-owned sub-quantum
+sampler; original-source endpoint reconstruction remains strict.
+
+`DuctReservoirResistance` provides the explicit quasi-steady law
+`Q=(p_res-p_port)/R` for the same frozen liquid with positive supplied R.
+Signed reverse flow is retained. Reservoir pressure must stay above the
+original vapor pressure and within the retained liquid's strain bound.
+The original liquid/cavity/Mach/domain limits remain active at every stage.
+
+The same trajectory independently integrates `integral R Q^2 dt`. Before
+publication, reservoir work, native acoustic work and this nonnegative loss
+must close their balance. Reference-pressure transport work is reported
+separately from the acoustic Hamiltonian. External resistance heat is a
+reported port; it is not silently deposited in the isothermal liquid. Callback
+failure, invalid physical state, work exhaustion or cancellation preserves
+all accepted liquid, pocket and gas state. Callbacks must be side-effect-free
+and valid at rejected trial states; their bandwidth needs resolved time steps,
+and known discontinuities must be split at an accepted endpoint.
+
+The IF97-water `cavitating_reservoir` example switches between withdrawal and
+supply reservoirs and exports physical pressure/flow, cavity volume and events,
+transported volume, reservoir/native work, resistance loss and both residuals.
+Run `cargo run -p fs-couple --features cavitation --example cavitating_reservoir`.
+Its geometry, initial field and resistance are demonstration inputs, not a
+measured valve calibration. No valve inertia, finite reservoir thermal state,
+vapor mass/latent heat, nucleation delay, pump curve or moving-mesh model is
+claimed.
+
+Focused regressions specify an independent acoustic polynomial with Q(t,p),
+a distributed reservoir decay and lumped RC limit, signed work, cavity
+rupture/collapse, variable-Cv gas heat plus feedback, and transactional failure.
+The changed source passed rustfmt/whitespace checks and review against the
+original DG/event APIs and balance identities. These DG tests and the new
+example have NOT been executed in the constrained dependency environment;
+no hydraulic runtime, full-workspace or performance result is claimed.
