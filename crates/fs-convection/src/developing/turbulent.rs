@@ -16,6 +16,11 @@ use crate::{
 
 const CARD: CorrelationId = CorrelationId::GnielinskiDeveloping;
 
+mod properties;
+pub use properties::TurbulentTubePropertyCorrection;
+
+const CONSTANT_PROPERTY_ASSUMPTION: &str = "bulk transport properties are held constant and the paper's property correction K is exactly one; no wall-viscosity or gas-temperature correction is implied";
+
 fn friction_root_inverse(reynolds: f64) -> f64 {
     1.8_f64.mul_add(det::ln(reynolds) / core::f64::consts::LN_10, -1.5)
 }
@@ -85,7 +90,7 @@ pub(crate) fn card() -> CorrelationCard {
             [
                 "mean forced heat transfer from the shared physical heated entrance of a smooth straight circular tube",
                 "single-phase Newtonian turbulent flow; no roughness or buoyancy correction",
-                "bulk transport properties are held constant and the paper's property correction K is exactly one; no wall-viscosity or gas-temperature correction is implied",
+                CONSTANT_PROPERTY_ASSUMPTION,
                 "the length multiplier includes developing hydraulic and thermal boundary layers; L is heated distance from the inlet, never mesh-cell width",
                 "Darcy friction factor is [1.8 log10(Re)-1.5]^-2 from corrected Eq. (6); it is not the older fully-developed card's friction fit",
                 "Re in [1e4,1e6], Pr in [0.5,200], L/D in [10,1e6] are conservative implementation admissions, not a source-published jointly validated range",
@@ -117,6 +122,7 @@ pub struct TurbulentCircularDuctSection {
     upstream: Option<NusseltEvaluation>,
     downstream: NusseltEvaluation,
     nusselt: f64,
+    property_correction: Option<properties::PreparedCorrection>,
 }
 
 impl TurbulentCircularDuctSection {
@@ -126,10 +132,12 @@ impl TurbulentCircularDuctSection {
     pub const fn end_over_diameter(&self) -> f64 {
         self.end_over_diameter
     }
-    /// Original upstream mean, absent only at the exact physical entrance.
+    /// Original K=1 upstream mean, absent only at the exact physical entrance.
     pub const fn upstream(&self) -> Option<&NusseltEvaluation> {
         self.upstream.as_ref()
     }
+    /// Original K=1 downstream mean. Any explicit wall-property correction
+    /// belongs to the section's actual Nusselt number and coefficient evidence.
     pub const fn downstream(&self) -> &NusseltEvaluation {
         &self.downstream
     }
@@ -138,9 +146,58 @@ impl TurbulentCircularDuctSection {
         self.nusselt
     }
 
+    /// The explicitly selected wall-property model, or `None` for original K=1.
+    pub const fn property_correction(&self) -> Option<TurbulentTubePropertyCorrection> {
+        match self.property_correction {
+            Some(correction) => Some(correction.input),
+            None => None,
+        }
+    }
+
+    /// Apply Gnielinski's liquid Prandtl-ratio or air temperature-ratio
+    /// correction to this same physical section.
+    ///
+    /// The original Reynolds, bulk Prandtl and endpoint-length admissions
+    /// remain active. Properties belong to the SAME fluid at the actual bulk
+    /// and wall states. One held correction multiplies the integrated section;
+    /// it does not restart the entrance or resolve a variable-property boundary
+    /// layer. Repeated calls replace the correction from the original formula,
+    /// never compound two empirical multipliers.
+    ///
+    /// The two original K=1 means remain unmodified. Actual `nusselt()` and
+    /// coefficient evidence compose that baseline with the explicit correction
+    /// model. This is also the property-corrected whole mean when start is zero.
+    pub fn with_property_correction(
+        mut self,
+        correction: TurbulentTubePropertyCorrection,
+    ) -> Result<Self, CorrelationError> {
+        let prepared = properties::PreparedCorrection::new(
+            correction, self.downstream.groups()["Pr"],
+        )?;
+        let original = if self.property_correction.is_none() {
+            self.nusselt
+        } else if self.upstream.is_none() {
+            self.downstream.evidence().value
+        } else {
+            section_nusselt(
+                self.downstream.groups()["Re"], self.downstream.groups()["Pr"],
+                self.start_over_diameter, self.end_over_diameter,
+            )
+        };
+        self.nusselt = original * prepared.factor();
+        if !self.nusselt.is_finite() || self.nusselt <= 0.0 {
+            return Err(CorrelationError::NonFiniteResult {
+                stage: "property-corrected turbulent section Nusselt number",
+                value_bits: self.nusselt.to_bits(),
+            });
+        }
+        self.property_correction = Some(prepared);
+        Ok(self)
+    }
+
     /// Move out both physical endpoint ratios, original cumulative evaluations
-    /// and the derived section value, in that order. The downstream evaluation
-    /// remains an original mean; it is never relabeled as the section value.
+    /// and the actual section value, in that order. The downstream evaluation
+    /// remains an original K=1 mean; it is never relabeled as the section value.
     /// Compute the coefficient first to retain the section's complete evidence.
     #[must_use]
     pub fn into_parts(self) -> (f64, f64, Option<NusseltEvaluation>, NusseltEvaluation, f64) {
@@ -155,7 +212,9 @@ impl TurbulentCircularDuctSection {
 
     /// Convert using the same bulk-fluid conductivity and tube diameter.
     ///
-    /// A section beginning at zero retains the original mean evidence exactly.
+    /// A section beginning at zero with no explicit property correction retains
+    /// the original mean evidence exactly. With a correction, the actual value
+    /// and evidence include its source law and held bulk/wall state.
     /// A positive-start section retains both mean evaluations, but its model
     /// discrepancy is unbounded: the original mean allowance does not validate
     /// a derived local heat-transfer profile. This primal-only conversion
@@ -168,9 +227,9 @@ impl TurbulentCircularDuctSection {
         let mut evidence = self
             .downstream
             .heat_transfer_coefficient(conductivity, diameter)?;
-        let Some(upstream) = &self.upstream else {
+        if self.upstream.is_none() && self.property_correction.is_none() {
             return Ok(evidence);
-        };
+        }
         let value = self.nusselt * conductivity.value() / diameter.value();
         if !value.is_finite() || value <= 0.0 {
             return Err(CorrelationError::NonFiniteResult {
@@ -181,10 +240,12 @@ impl TurbulentCircularDuctSection {
         evidence.value = HeatTransferCoefficient::new(value);
         evidence.qoi = value;
         evidence.numerical = NumericalCertificate::estimate(value, value);
-        evidence.model.discrepancy_rel = f64::INFINITY;
-        evidence.model.assumptions.push(
-            "section integral of the held-property Gnielinski (2013) developing-tube mean; original mean allowance does not bound section discrepancy".into(),
-        );
+        if self.upstream.is_some() {
+            evidence.model.discrepancy_rel = f64::INFINITY;
+            evidence.model.assumptions.push(
+                "section integral of the held-property Gnielinski (2013) developing-tube mean; original mean allowance does not bound section discrepancy".into(),
+            );
+        }
         evidence.model.assumptions.sort_unstable();
         evidence.model.assumptions.dedup();
         evidence.sensitivity = SensitivitySummary::default();
@@ -200,11 +261,15 @@ impl TurbulentCircularDuctSection {
         evidence.provenance = ProvenanceHash::chain(
             "convection-turbulent-section-nu-to-h-v1",
             &[
-                upstream.evidence().provenance,
+                self.upstream.as_ref().map_or(self.downstream.evidence().provenance,
+                    |mean| mean.evidence().provenance),
                 self.downstream.evidence().provenance,
                 ProvenanceHash::of_bytes(&values),
             ],
         );
+        if let Some(correction) = self.property_correction {
+            correction.attach_evidence(&mut evidence);
+        }
         Ok(evidence)
     }
 
@@ -213,7 +278,11 @@ impl TurbulentCircularDuctSection {
     /// convention as [`NusseltEvaluation::heat_transfer_coefficient_with_sensitivities`].
     /// `L` is the diameter. The two inlet-distance/diameter ratios and other
     /// independent inputs stay fixed; no endpoint or total geometry derivative
-    /// is implied. Re/Pr partials scale the actual section coefficient, whose
+    /// is implied. An attached liquid correction additionally supplies
+    /// `Pr_wall`; `Pr` then holds wall Pr fixed. An air correction supplies
+    /// `T_bulk` and `T_wall` per kelvin, holding transport groups fixed.
+    /// Property-ratio endpoints omit only partials that move that ratio.
+    /// Re/Pr partials scale the actual section coefficient, whose
     /// geometry factor differs from the downstream cumulative mean.
     ///
     /// A partial is absent at its source-domain endpoint; an unrelated fixed
@@ -227,10 +296,13 @@ impl TurbulentCircularDuctSection {
         diameter: Length,
     ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
         let mut coefficient = self.heat_transfer_coefficient(conductivity, diameter)?;
-        let elasticities = transport_elasticities(
+        let mut elasticities = transport_elasticities(
             self.downstream.groups()["Re"],
             self.downstream.groups()["Pr"],
         );
+        if let Some(correction) = self.property_correction {
+            elasticities[1] += correction.bulk_prandtl_elasticity();
+        }
         attach_section_sensitivities(
             &mut coefficient,
             self.nusselt,
@@ -239,6 +311,9 @@ impl TurbulentCircularDuctSection {
             (self.upstream.as_ref(), &self.downstream),
             elasticities,
         )?;
+        if let Some(correction) = self.property_correction {
+            correction.attach_sensitivities(&mut coefficient.sensitivity, coefficient.qoi)?;
+        }
         Ok(coefficient)
     }
 
@@ -333,5 +408,6 @@ pub fn evaluate_turbulent_circular_duct_section(
         upstream,
         downstream,
         nusselt,
+        property_correction: None,
     })
 }

@@ -753,3 +753,42 @@ elasticity is 0.14; their moving coupled validity boundary is retained.
 heating/cooling and length scaling, coupled-domain refusals, finite-difference
 partial checks, deterministic replay and typed Robin integration. These tests
 verify implementation of the empirical relation, not new experimental evidence.
+
+## Wall properties in developing turbulent tubes
+
+`TurbulentCircularDuctSection::with_property_correction` applies the explicit
+liquid or air correction of [Gnielinski (2013), Eqs. (3) and (4)](https://doi.org/10.1016/j.ijheatmasstransfer.2013.04.015)
+to the original developing-tube integral. Liquids use
+`K=(Pr_bulk/Pr_wall)^0.11`, with the same fluid evaluated at the actual wall
+temperature. Air uses `K=(T_bulk/T_wall)^0.45`, with positive absolute kelvin
+temperatures. The air exponent is not a generic gas model, and wall viscosity
+alone cannot replace wall Prandtl number. Bulk Re, Pr and conductivity retain
+their original source state.
+
+The original K=1 constructor is unchanged. The retained upstream/downstream
+means remain original K=1 evaluations; `nusselt()` and the coefficient carry the
+actual corrected section result. Start zero supplies the corrected whole mean.
+Repeated attachment replaces the factor from the original value instead of
+compounding empirical corrections. A held correction preserves subdivision
+additivity; applying different properties to each section is a local
+approximation, not an exact variable-property boundary-layer solution.
+
+Liquid ratios in [0.05,20] and air temperature ratios in [0.5,1.5] are explicit
+implementation admissions, not joint validation ranges published in the paper.
+Original Re, Pr and positive-endpoint length limits remain active. The final
+coefficient composes both model identities, ratio domain, source assumptions
+and exact input provenance. Its model discrepancy is unbounded; the K=1
+engineering allowance does not validate the corrected mean or local profile.
+
+Analytic coefficient partials retain Re, bulk Pr, conductivity and diameter.
+Liquid bulk-Pr differentiation holds wall Pr fixed and includes the +0.11
+elasticity; `Pr_wall` supplies the corresponding negative wall partial.
+Air supplies `T_bulk` and `T_wall` per kelvin at fixed transport inputs.
+Only directions that move a validity endpoint are omitted. The same corrected
+coefficient reaches the existing Robin boundary without another heat credit.
+
+Five focused regression definitions in `tests/turbulent_properties.rs` cover
+independent 80-digit formula values, original-entrance heat additivity, factor
+replacement, complete liquid/air tangents, coordinate provenance and domain
+refusals. These are arithmetic and conservation checks; they do not establish
+experimental validation or a numerical/model error enclosure.

@@ -17,7 +17,10 @@ pub(super) use flat_plate::{flat_plate_laminar_mean, flat_plate_turbulent_mean};
 mod rectangular;
 pub(super) use rectangular::mean_nusselt as rectangular_mean_nusselt;
 mod turbulent;
-pub use turbulent::{TurbulentCircularDuctSection, evaluate_turbulent_circular_duct_section};
+pub use turbulent::{
+    TurbulentCircularDuctSection, TurbulentTubePropertyCorrection,
+    evaluate_turbulent_circular_duct_section,
+};
 pub(super) use turbulent::{
     card as turbulent_card, elasticity as turbulent_elasticity,
     mean_nusselt as turbulent_mean_nusselt,
