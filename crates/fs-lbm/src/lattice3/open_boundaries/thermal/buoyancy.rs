@@ -22,6 +22,7 @@ use crate::thermal::boundary::ThermalWall;
 use crate::thermal::boundary::conduction::{WallConductionControls, WallConductionLink};
 pub use crate::thermal::open::buoyancy::{BoussinesqLaw3, BoussinesqLawError3};
 use crate::thermal::open::immersed::ImmersedThermalBody3;
+use crate::thermal::open::immersed::conduction::ImmersedConductionLink3;
 use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3};
 use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
@@ -317,6 +318,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     ) -> Result<(), ThermalOpenError3> {
         self.thermal
             .set_immersed_thermal_bodies(bodies, maximum_storage_bytes)
+    }
+
+    /// Install reciprocal solid conduction and original immersed thermal nodes
+    /// together, including interior nodes without fluid interfaces. Native
+    /// heat/flow publication and fluid-side buoyancy admission remain joint.
+    pub fn set_immersed_thermal_network(
+        &mut self,
+        nodes: &[ImmersedThermalBody3<'_>],
+        links: &[ImmersedConductionLink3],
+        maximum_storage_bytes: usize,
+        controls: WallConductionControls,
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal
+            .set_immersed_thermal_network(nodes, links, maximum_storage_bytes, controls)
     }
 
     /// Change the heat supplied to one whole immersed body without detaching

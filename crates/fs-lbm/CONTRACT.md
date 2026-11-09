@@ -79,7 +79,7 @@ thermal populations/history and native flow. Interface lists are prepared in
 streaming order, with explicit additional storage bounds and no step allocation
 or geometry lookup.
 
-This is an isothermal-interior approximation with fixed heat capacity and a
+The independent-body installer uses an isothermal-interior approximation with fixed heat capacity and a
 common authored bulk-to-surface resistance per exposed link. Its applicability
 requires negligible internal temperature gradients; it does not resolve solid
 diffusion, body contact, moving interfaces, variable caloric properties or
@@ -87,6 +87,37 @@ surface-area error of stair-stepped native voxels. Focused regressions check
 the analytic ten-face/two-voxel step, capacity-weighted closed-box equilibrium,
 separate hot/cold body inventories, periodic seams, exact refused-step retry,
 and ownership, storage-budget and temperature-domain admission.
+
+## Spatial immersed-solid conduction in native convection
+
+`set_immersed_thermal_network` installs original immersed thermal nodes and
+authored reciprocal conductances together. Different nodes retain distinct
+temperatures, capacities and sources; a fully buried node may have zero fluid
+interfaces. Each positive-conductance component must reach an exposed node.
+The same installation is available through `BoussinesqOpenGrid3` without
+detaching its force history or thermal publication.
+
+One simultaneous backward-Euler solve couples all node storage, external
+sources, solid conduction and actual post-collision fluid traces. The existing
+`fs-sparse` LDLT implementation factors the diagonally scaled operator once;
+later steps reuse the factor and retained linear workspace. No temperature
+copy becomes a separate physical owner. Each graph edge supplies the same
+endpoint heat with opposite signs to its two original nodes. Actual reflected
+fluid heat, original capacity times representable temperature change, source
+and conductive heat must close per node and over the complete graph. The
+existing final thermal/flow publication is the only acceptance point.
+
+Node/interface and graph/factor storage have separate explicit budgets.
+Repeated undirected paths must be combined before installation; invalid
+graphs, exhausted factor budgets, unsupported temperatures, numerical balance
+failure and cancellation preserve the previous accepted state and receipts.
+Geometry and fixed material/contact conductances remain caller-owned. This is
+spatial lumped-cell conduction with first-order solid time accuracy; it does
+not introduce nonlinear caloric laws, moving geometry, an automatic accuracy
+certificate or a new stability guarantee for the fluid scheme. Focused tests
+cover independent two-node balances including stiff coupling, heat release
+from a fully buried core through an exposed shell, whole-capacity equilibrium,
+late cancellation/exact retry and graph admission.
 
 ## Spatial finite-wall conduction on native thermal slabs
 

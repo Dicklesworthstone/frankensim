@@ -9,11 +9,16 @@
 //! One scalar backward-Euler solve advances each body; every link then uses
 //! the SAME endpoint. Capacity and the external source are counted once.
 //!
-//! This is an explicitly isothermal interior approximation, appropriate only
-//! when internal temperature gradients can be neglected. It does not resolve
-//! solid diffusion, contact between bodies or moving geometry. There is no
-//! empirical convection coefficient: heat transport in the surrounding fluid
-//! remains the original D3Q7 field driven by native flow.
+//! Each node has an explicitly isothermal interior. The optional reciprocal
+//! conduction graph resolves temperature differences between nodes, including
+//! fully buried solid nodes without fluid interfaces. The independent-body
+//! path remains appropriate when internal gradients can be neglected. Moving
+//! geometry and nonlinear caloric properties are not represented. There is no
+//! empirical convection coefficient: surrounding fluid heat transport remains
+//! the original D3Q7 field driven by native flow.
+
+/// Reciprocal solid conduction on the original immersed thermal nodes.
+pub mod conduction;
 
 use super::{
     D3Q7, FiniteThermalWallExchange, Sum, ThermalOpenError3, ThermalOpenFace3, ThermalOpenField3,
@@ -49,6 +54,7 @@ struct Body {
     trial_temperature: f64,
     mean_trace: Sum,
     heat: Sum,
+    conducted: Sum,
     trial_exchange: FiniteThermalWallExchange,
 }
 
@@ -63,6 +69,7 @@ pub(super) struct ImmersedBodies3 {
     // Sorted in original streaming order: a linear cursor replaces a dense
     // per-cell map or a geometry search in the hot boundary loop.
     links: Vec<Link>,
+    conduction: Option<conduction::ImmersedConduction3>,
 }
 
 fn visit_links(field: &ThermalOpenField3, solid_cell: usize, mut visit: impl FnMut(usize, usize)) {
@@ -116,6 +123,17 @@ impl ThermalOpenField3 {
         declarations: &[ImmersedThermalBody3<'_>],
         maximum_storage_bytes: usize,
     ) -> Result<(), ThermalOpenError3> {
+        let prepared = self.prepare_immersed_bodies(declarations, maximum_storage_bytes, false)?;
+        self.immersed = Some(prepared);
+        Ok(())
+    }
+
+    fn prepare_immersed_bodies(
+        &self,
+        declarations: &[ImmersedThermalBody3<'_>],
+        maximum_storage_bytes: usize,
+        allow_interior: bool,
+    ) -> Result<ImmersedBodies3, ThermalOpenError3> {
         if declarations.is_empty() || declarations.len() > self.solid.len() {
             return Err(invalid(
                 "immersed bodies require a nonempty bounded declaration",
@@ -144,7 +162,7 @@ impl ThermalOpenField3 {
                 }
                 visit_links(self, cell, |_, _| exposed += 1);
             }
-            if exposed == 0 {
+            if exposed == 0 && !allow_interior {
                 return Err(invalid(
                     "each immersed body needs an exposed fluid interface",
                 ));
@@ -186,6 +204,7 @@ impl ThermalOpenField3 {
         let mut prepared = ImmersedBodies3 {
             bodies: Vec::new(),
             links: Vec::new(),
+            conduction: None,
         };
         prepared
             .bodies
@@ -216,14 +235,14 @@ impl ThermalOpenField3 {
                 trial_temperature: declaration.solid.temperature,
                 mean_trace: Sum::default(),
                 heat: Sum::default(),
+                conducted: Sum::default(),
                 trial_exchange: FiniteThermalWallExchange::default(),
             });
         }
         prepared
             .links
             .sort_unstable_by_key(|link| (link.cell, link.incoming));
-        self.immersed = Some(prepared);
-        Ok(())
+        Ok(prepared)
     }
 
     /// Accepted state in declaration order; refused steps never alter it.
@@ -292,6 +311,7 @@ impl ImmersedBodies3 {
             }
             body.mean_trace = Sum::default();
             body.heat = Sum::default();
+            body.conducted = Sum::default();
         }
         for (i, link) in self.links.iter().enumerate() {
             if i % 64 == 0 {
@@ -306,59 +326,63 @@ impl ImmersedBodies3 {
             body.mean_trace
                 .add(trace / body.accepted.interface_links as f64);
         }
-        for (i, body) in self.bodies.iter_mut().enumerate() {
-            if i % 64 == 0 {
-                poll()?;
-            }
-            let solid = body.accepted.solid;
-            let conductance = body.conductance * body.accepted.interface_links as f64;
-            if !conductance.is_finite() || conductance <= 0.0 {
-                return Err(invalid("unrepresentable immersed interface conductance").into());
-            }
-            // Normalize by the larger coefficient. Never form C + sum K;
-            // the bounded ratio also preserves a tiny capacity or exchange
-            // coefficient without constructing an overflowing reciprocal.
-            let (old_weight, fluid_weight, scale, dominant_weight) =
-                if solid.heat_capacity <= conductance {
-                    let ratio = solid.heat_capacity / conductance;
-                    let fluid_weight = 1.0 / (1.0 + ratio);
-                    (
-                        ratio * fluid_weight,
-                        fluid_weight,
-                        conductance,
-                        fluid_weight,
-                    )
-                } else {
-                    let ratio = conductance / solid.heat_capacity;
-                    let old_weight = 1.0 / (1.0 + ratio);
-                    (
-                        old_weight,
-                        ratio * old_weight,
-                        solid.heat_capacity,
-                        old_weight,
-                    )
-                };
-            let source_ratio = solid.heat_per_step / scale;
-            let source_temperature = if source_ratio.is_finite() {
-                source_ratio * dominant_weight
-            } else {
-                // Scaling first recovers finite quotients where Q/scale
-                // overflows although Q/(C+sum K) remains representable.
-                (solid.heat_per_step * dominant_weight) / scale
-            };
-            let mean = body.mean_trace.total();
-            let difference = mean - solid.temperature;
-            let retained = if difference.is_finite() {
-                if fluid_weight <= old_weight {
-                    fluid_weight.mul_add(difference, solid.temperature)
-                } else {
-                    (-old_weight).mul_add(difference, mean)
+        if let Some(conduction) = &mut self.conduction {
+            conduction.solve(&mut self.bodies, limits, &mut poll)?;
+        } else {
+            for (i, body) in self.bodies.iter_mut().enumerate() {
+                if i % 64 == 0 {
+                    poll()?;
                 }
-            } else {
-                old_weight.mul_add(solid.temperature, fluid_weight * mean)
-            };
-            body.trial_temperature = retained + source_temperature;
-            check_boundary_temperature(6, body.trial_temperature, limits)?;
+                let solid = body.accepted.solid;
+                let conductance = body.conductance * body.accepted.interface_links as f64;
+                if !conductance.is_finite() || conductance <= 0.0 {
+                    return Err(invalid("unrepresentable immersed interface conductance").into());
+                }
+                // Normalize by the larger coefficient. Never form C + sum K;
+                // the bounded ratio also preserves a tiny capacity or exchange
+                // coefficient without constructing an overflowing reciprocal.
+                let (old_weight, fluid_weight, scale, dominant_weight) =
+                    if solid.heat_capacity <= conductance {
+                        let ratio = solid.heat_capacity / conductance;
+                        let fluid_weight = 1.0 / (1.0 + ratio);
+                        (
+                            ratio * fluid_weight,
+                            fluid_weight,
+                            conductance,
+                            fluid_weight,
+                        )
+                    } else {
+                        let ratio = conductance / solid.heat_capacity;
+                        let old_weight = 1.0 / (1.0 + ratio);
+                        (
+                            old_weight,
+                            ratio * old_weight,
+                            solid.heat_capacity,
+                            old_weight,
+                        )
+                    };
+                let source_ratio = solid.heat_per_step / scale;
+                let source_temperature = if source_ratio.is_finite() {
+                    source_ratio * dominant_weight
+                } else {
+                    // Scaling first recovers finite quotients where Q/scale
+                    // overflows although Q/(C+sum K) remains representable.
+                    (solid.heat_per_step * dominant_weight) / scale
+                };
+                let mean = body.mean_trace.total();
+                let difference = mean - solid.temperature;
+                let retained = if difference.is_finite() {
+                    if fluid_weight <= old_weight {
+                        fluid_weight.mul_add(difference, solid.temperature)
+                    } else {
+                        (-old_weight).mul_add(difference, mean)
+                    }
+                } else {
+                    old_weight.mul_add(solid.temperature, fluid_weight * mean)
+                };
+                body.trial_temperature = retained + source_temperature;
+                check_boundary_temperature(6, body.trial_temperature, limits)?;
+            }
         }
         for (i, link) in self.links.iter().enumerate() {
             if i % 64 == 0 {
@@ -370,6 +394,14 @@ impl ImmersedBodies3 {
             check_wall_response(6, &response, limits)?;
             body.heat.add(response.incoming - outgoing);
         }
+        let tolerance = self
+            .conduction
+            .as_ref()
+            .map_or(limits.balance_tolerance, |graph| {
+                limits.balance_tolerance.min(graph.balance_tolerance())
+            });
+        let mut total_defect = Sum::default();
+        let mut total_conducted = Sum::default();
         for (i, body) in self.bodies.iter_mut().enumerate() {
             if i % 64 == 0 {
                 poll()?;
@@ -379,14 +411,24 @@ impl ImmersedBodies3 {
                 heat_in: body.heat.total(),
                 stored_change: solid.heat_capacity * (body.trial_temperature - solid.temperature),
                 source: solid.heat_per_step,
+                conducted_in: body.conducted.total(),
                 ..FiniteThermalWallExchange::default()
             };
             let defect = exchange.defect();
-            if !defect.is_finite() || defect.abs() > limits.balance_tolerance {
+            if !defect.is_finite() || defect.abs() > tolerance {
                 return Err(ThermalOpenError3::Balance { defect }.into());
             }
+            total_defect.add(defect);
+            total_conducted.add(exchange.conducted_in);
             exchange.maximum_link_defect = defect.abs();
             body.trial_exchange = exchange;
+        }
+        if self.conduction.is_some() {
+            for defect in [total_defect.total(), total_conducted.total()] {
+                if !defect.is_finite() || defect.abs() > tolerance {
+                    return Err(ThermalOpenError3::Balance { defect }.into());
+                }
+            }
         }
         Ok(())
     }
