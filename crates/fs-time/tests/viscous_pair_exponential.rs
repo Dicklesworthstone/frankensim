@@ -293,3 +293,195 @@ fn inertia_weighted_heat_does_not_require_representable_raw_spin_squares() {
         );
     }
 }
+
+#[test]
+fn stiff_counterrotation_retains_exponential_tails_and_time_partition() {
+    // Total momentum is exactly zero. Both finite bodies must keep their
+    // opposite exponentially small momenta rather than rounding a nearly
+    // complete reciprocal impulse to artificial rest or a residual spin.
+    let duration = 0.1;
+    for moments in [[2.0_f64, 2.0_f64], [2.0, 5.0]] {
+        let inertia = moments.map(sphere);
+        let mobility = moments[0].recip() + moments[1].recip();
+        for relaxation in [20.0_f64, 80.0, 200.0, 700.0] {
+            let damping = diagonal(0.0, 0.0, relaxation / (duration * mobility));
+            let whole = ViscousPairStepper::new_exponential(inertia, damping, duration).unwrap();
+            let part =
+                ViscousPairStepper::new_exponential(inertia, damping, duration / 8.0).unwrap();
+            for sign in [-1.0, 1.0] {
+                let initial = [
+                    Vec3::new(0.0, 0.0, sign * 6.0),
+                    Vec3::new(0.0, 0.0, -sign * 6.0),
+                ];
+                let drives = [HeldTorque::Body(Vec3::default()); 2];
+                let result = whole.step([So3::identity(); 2], initial, drives).unwrap();
+                let expected = sign * 6.0 * (-relaxation).exp();
+                for (body, target) in [expected, -expected].into_iter().enumerate() {
+                    close(
+                        result.bodies[body].momentum_after_body.z,
+                        target,
+                        target.abs() * 3e-12,
+                    );
+                }
+                close(
+                    result.dissipated_energy_j,
+                    18.0 * mobility * -(-2.0 * relaxation).exp_m1(),
+                    2e-12,
+                );
+                balances(result, 2e-12);
+                let mut rotations = [So3::identity(); 2];
+                let mut momenta = initial;
+                for _ in 0..8 {
+                    let split = part.step(rotations, momenta, drives).unwrap();
+                    rotations = split.bodies.map(|body| body.rotation_after);
+                    momenta = split.bodies.map(|body| body.momentum_after_body);
+                }
+                close(momenta[0].z, expected, expected.abs() * 1e-11);
+                close(momenta[1].z, -expected, expected.abs() * 1e-11);
+            }
+        }
+    }
+}
+
+#[test]
+fn stiff_opposed_drives_keep_the_small_terminal_momentum_from_rest() {
+    // The constant source impulse can nearly cancel the integrated drag
+    // even when the initial momentum is zero. The endpoint must then use
+    // phi_1 directly, not the difference of those much larger impulses.
+    let duration = 0.1;
+    let moments = [2.0_f64, 5.0_f64];
+    let mobility = moments[0].recip() + moments[1].recip();
+    for damping in [1e6_f64, 1e20] {
+        let rate = damping * mobility;
+        let stepper = ViscousPairStepper::new_exponential(
+            moments.map(sphere),
+            diagonal(0.0, 0.0, damping),
+            duration,
+        )
+        .unwrap();
+        for drive in [-1e6_f64, -1e-6, 1e-6, 1e6] {
+            let result = stepper
+                .step(
+                    [So3::identity(); 2],
+                    [Vec3::default(); 2],
+                    [
+                        HeldTorque::Body(Vec3::new(0.0, 0.0, drive)),
+                        HeldTorque::Body(Vec3::new(0.0, 0.0, -drive)),
+                    ],
+                )
+                .unwrap();
+            let expected = (drive / rate) * -(-rate * duration).exp_m1();
+            close(
+                result.bodies[0].momentum_after_body.z,
+                expected,
+                expected.abs() * 3e-12,
+            );
+            close(
+                result.bodies[1].momentum_after_body.z,
+                -expected,
+                expected.abs() * 3e-12,
+            );
+            assert_eq!(
+                result.bodies[0].momentum_after_body + result.bodies[1].momentum_after_body,
+                Vec3::default(),
+            );
+            let fraction = -(-rate * duration).exp_m1();
+            let integrated_momentum = (drive / rate) * (duration - fraction / rate);
+            let heat = drive * drive / damping
+                * (duration - (2.0 * fraction + 0.5 * (-2.0 * rate * duration).exp_m1()) / rate);
+            close(result.dissipated_energy_j, heat, heat.abs() * 3e-12);
+            close(result.work_energy_residual_j, 0.0, heat.abs() * 3e-12);
+            for (body, moment) in result.bodies.into_iter().zip(moments) {
+                let work = (drive / moment) * integrated_momentum;
+                close(body.drive_work_j, work, work.abs() * 3e-12);
+                close(body.work_energy_residual_j, 0.0, work.abs() * 3e-12);
+                assert!(
+                    body.angular_momentum_residual_space.norm() < (drive * duration).abs() * 3e-12,
+                );
+            }
+            assert_eq!(
+                result.bodies[0].coupling_angular_impulse_space
+                    + result.bodies[1].coupling_angular_impulse_space,
+                Vec3::default(),
+            );
+            assert!(
+                result.angular_momentum_residual_space.norm() < (drive * duration).abs() * 3e-12,
+            );
+        }
+    }
+}
+
+#[test]
+fn stiff_coupled_eigenaxis_preserves_common_spin_under_world_and_material_rotation() {
+    // A rank-one tensor has a non-coordinate active eigenvector and two exact
+    // undamped directions. Independent material/world frames exercise both
+    // transforms used to recover each body's momentum from the conserved sum.
+    let moments = [2.0_f64, 5.0_f64];
+    let duration = 0.1;
+    let relaxation = 20.0_f64;
+    let mobility = moments[0].recip() + moments[1].recip();
+    let coefficient = relaxation / (2.0 * mobility * duration);
+    let damping = Mat3 {
+        m: [
+            coefficient,
+            coefficient,
+            0.0,
+            coefficient,
+            coefficient,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+    };
+    let axis = Vec3::new(1.0, 1.0, 0.0);
+    let second_frame = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.2, 0.4))).unwrap();
+    let second_axis = second_frame.inverse().rotate(axis).unwrap();
+    let world = So3::exp(So3Tangent::new(Vec3::new(-0.4, 0.3, 0.2))).unwrap();
+    let amplitudes = [6.0_f64, -6.0 + 1e-5];
+    let mean = (amplitudes[0] + amplitudes[1]) / (moments[0] + moments[1]);
+    let slip = (amplitudes[0] / moments[0] - amplitudes[1] / moments[1]) * (-relaxation).exp();
+    let expected = [
+        axis.scale(moments[0] * (mean + moments[1] / (moments[0] + moments[1]) * slip)),
+        second_axis.scale(moments[1] * (mean - moments[0] / (moments[0] + moments[1]) * slip)),
+    ];
+    let result = ViscousPairStepper::new_exponential(moments.map(sphere), damping, duration)
+        .unwrap()
+        .step(
+            [world, world.compose(second_frame).unwrap()],
+            [axis.scale(amplitudes[0]), second_axis.scale(amplitudes[1])],
+            [HeldTorque::Body(Vec3::default()); 2],
+        )
+        .unwrap();
+    for (body, target) in result.bodies.into_iter().zip(expected) {
+        assert!((body.momentum_after_body - target).norm() < 5e-13);
+    }
+    balances(result, 4e-12);
+}
+
+#[test]
+fn stiff_drag_preserves_exact_driven_cancellation_in_an_undamped_component() {
+    // Only z is damped, while a body-held x drive removes body 0's entire
+    // initial x momentum. Reconstructing that lossless zero through the
+    // finite-precision modal dual basis can invent a residual transverse spin.
+    let result = ViscousPairStepper::new_exponential(
+        [sphere(2.0), sphere(5.0)],
+        diagonal(0.0, 0.0, 1000.0),
+        0.125,
+    )
+    .unwrap()
+    .step(
+        [So3::identity(); 2],
+        [Vec3::new(1.0, 0.0, 6.0), Vec3::new(2.0, 0.0, -6.0)],
+        [
+            HeldTorque::Body(Vec3::new(-8.0, 0.0, 0.0)),
+            HeldTorque::Body(Vec3::default()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(result.bodies[0].momentum_after_body.x, 0.0);
+    assert_eq!(result.bodies[0].momentum_after_body.y, 0.0);
+    close(result.bodies[0].drive_work_j, -0.25, 2e-13);
+    assert!(result.dissipated_energy_j > 0.0);
+    balances(result, 4e-12);
+}

@@ -3,7 +3,7 @@
 
 use super::super::exponential::Response;
 use super::{
-    Dd, HeldTorque, LieStepError, Mat3, PairStage, So3, Vector, ViscousPairStepper, apply,
+    Dd, HeldTorque, LieStepError, Mat3, PairStage, So3, Vector, ViscousPairStepper, add, apply,
     cholesky, compensated, dd, dot, drive_at, energy_change, invalid, scalar, slip, subtract,
     to_space, velocity,
 };
@@ -110,6 +110,51 @@ impl PreparedExchange {
             phi3,
         })
     }
+
+    fn momenta_from_slip_modes(
+        &self,
+        owner: &ViscousPairStepper,
+        rotations: [So3; 2],
+        total: Vector,
+        relative: Vector,
+    ) -> Result<[Vector; 2], LieStepError> {
+        // All formulas below are in body 0's frame: r = K L0 - I1^-1 P,
+        // K = I0^-1 + I1^-1. The conserved total P and retained slip give
+        // L0 = K^-1(r + I1^-1 P), L1 = K^-1(I0^-1 P - r). This also holds
+        // for time averages because inertia and attitude are fixed here.
+        // K^-1 = I_ref U U^T uses the already prepared dual basis, without
+        // another solve, an almost complete impulse subtraction or projection.
+        let total_second =
+            compensated::spatial_vector_to_body(rotations[1], to_space(rotations[0], total)?)?;
+        let offset = [
+            compensated::spatial_vector_to_body(
+                rotations[0],
+                to_space(rotations[1], velocity(owner.inertia[1], total_second)?)?,
+            )?,
+            velocity(owner.inertia[0], total)?,
+        ];
+        let mut result = [[Dd::ZERO; 3]; 2];
+        for body in 0..2 {
+            let background = apply(self.dual_modes.transpose(), offset[body])?;
+            let modes: Vector = core::array::from_fn(|i| {
+                background[i] + if body == 0 { relative[i] } else { -relative[i] }
+            });
+            for (i, value) in result[body].iter_mut().enumerate() {
+                for (j, mode) in modes.iter().enumerate() {
+                    *value = *value
+                        + (dd(owner.reference_moment) * dd(self.dual_modes.m[3 * i + j])) * *mode;
+                }
+                *value = compensated::checked(*value, "exponential pair retained momentum")?;
+            }
+            if body == 1 {
+                result[body] = compensated::spatial_vector_to_body(
+                    rotations[1],
+                    to_space(rotations[0], result[body])?,
+                )?;
+            }
+        }
+        Ok(result)
+    }
 }
 
 impl ViscousPairStepper {
@@ -191,11 +236,6 @@ impl ViscousPairStepper {
             compensated::spatial_vector_to_body(rotations[1], weighted_space)?.map(|v| -v),
         ];
         let mut after = momentum;
-        let mut actual_change = [[Dd::ZERO; 3]; 2];
-        let mut coupling_change = [[Dd::ZERO; 3]; 2];
-        let mut drive_work = [Dd::ZERO; 2];
-        let mut coupling_work = [Dd::ZERO; 2];
-        let mut work_scale = heat.to_f64().abs();
         for body in 0..2 {
             for i in 0..3 {
                 after[body][i] = compensated::checked(
@@ -203,21 +243,110 @@ impl ViscousPairStepper {
                     "exponential pair kicked momentum",
                 )?;
             }
+        }
+        let needs_endpoint: [[bool; 3]; 2] = core::array::from_fn(|body| {
+            core::array::from_fn(|i| {
+                let scale = momentum[body][i]
+                    .to_f64()
+                    .abs()
+                    .max(drive_impulse[body][i].to_f64().abs());
+                // A lossless source cancellation must keep its original
+                // impulse arithmetic; only drag-dominated cancellation needs
+                // the modal reconstruction.
+                scale != 0.0
+                    && after[body][i].to_f64().abs() < scale / 256.0
+                    && coupling[body][i].to_f64().abs() > scale / 256.0
+            })
+        });
+        let mut retained_average = None;
+        if needs_endpoint.into_iter().flatten().any(|needed| needed) {
+            // Nearly complete reciprocal impulses lose finite counterrotation
+            // tails and small driven terminal speeds, even with DD momentum.
+            let total_before = add(
+                momentum[0],
+                compensated::spatial_vector_to_body(
+                    rotations[0],
+                    to_space(rotations[1], momentum[1])?,
+                )?,
+            );
+            let total_drive = add(
+                drive_impulse[0],
+                compensated::spatial_vector_to_body(
+                    rotations[0],
+                    to_space(rotations[1], drive_impulse[1])?,
+                )?,
+            );
+            let retained: Vector = core::array::from_fn(|i| {
+                let response = prepared.response[i];
+                response.retain(initial[i]) + dd(response.response) * source[i]
+            });
+            let direct = prepared.momenta_from_slip_modes(
+                self,
+                rotations,
+                add(total_before, total_drive),
+                retained,
+            )?;
+            for body in 0..2 {
+                for i in 0..3 {
+                    if needs_endpoint[body][i] {
+                        after[body][i] = direct[body][i];
+                    }
+                }
+            }
+            // The average spin has the same cancellation risk as the endpoint
+            // when a large drive impulse is balanced by stiff drag. Integrate
+            // the slip directly and use the exact affine total momentum.
+            let mean = prepared.momenta_from_slip_modes(
+                self,
+                rotations,
+                add(total_before, total_drive.map(|value| dd(0.5) * value)),
+                integral,
+            )?;
+            retained_average = Some([
+                velocity(self.inertia[0], mean[0])?,
+                velocity(self.inertia[1], mean[1])?,
+            ]);
+        }
+        let mut actual_change = [[Dd::ZERO; 3]; 2];
+        let mut coupling_change = [[Dd::ZERO; 3]; 2];
+        let mut drive_work = [Dd::ZERO; 2];
+        let mut coupling_work = [Dd::ZERO; 2];
+        let mut work_scale = heat.to_f64().abs();
+        for body in 0..2 {
             let actual = subtract(after[body], momentum[body]);
             actual_change[body] = velocity(self.inertia[body], actual)?;
             coupling_change[body] = velocity(self.inertia[body], coupling[body])?;
             let weighted_change = velocity(self.inertia[body], weighted[body])?;
-            let average = core::array::from_fn(|i| {
-                before[body][i] + dd(0.5) * drive_change[body][i] + weighted_change[i]
-            });
-            let transfer_rate =
-                core::array::from_fn(|i| before[body][i] + dd(0.5) * coupling_change[body][i]);
+            let average = retained_average.map_or_else(
+                || {
+                    core::array::from_fn(|i| {
+                        before[body][i] + dd(0.5) * drive_change[body][i] + weighted_change[i]
+                    })
+                },
+                |mean| mean[body],
+            );
+            let transfer_rate = if retained_average.is_some() {
+                let endpoint = velocity(self.inertia[body], after[body])?;
+                core::array::from_fn(|i| dd(0.5) * before[body][i] + dd(0.5) * endpoint[i])
+            } else {
+                core::array::from_fn(|i| before[body][i] + dd(0.5) * coupling_change[body][i])
+            };
             let time_moment = subtract(coupling[body], weighted[body]);
+            let source_transfer: Vector = core::array::from_fn(|i| {
+                if retained_average.is_some() {
+                    drive_impulse[body][i] * (transfer_rate[i] - average[i])
+                } else {
+                    drive_change[body][i] * time_moment[i]
+                }
+            });
             drive_work[body] = dot(drive_impulse[body], average);
             // Integrate omega(t).j'(t) using p(t)=p0+t*drive+j(t).
             // The quadratic impulse primitive is exact for constant full inertia.
-            coupling_work[body] =
-                dot(coupling[body], transfer_rate) + dot(drive_change[body], time_moment);
+            // In the stiff branch, the equivalent J.omega_mid +
+            // drive_impulse.(omega_mid-omega_mean) avoids opposing O(drive^2)
+            // terms; heat still comes only from the independent slip integral.
+            coupling_work[body] = dot(coupling[body], transfer_rate)
+                + (source_transfer[0] + source_transfer[1] + source_transfer[2]);
             let kinetic = energy_change(self.inertia[body], momentum[body], after[body])?;
             let mut body_scale = kinetic
                 .to_f64()
@@ -228,7 +357,7 @@ impl ViscousPairStepper {
                 for work in [
                     drive_impulse[body][i] * average[i],
                     coupling[body][i] * transfer_rate[i],
-                    drive_change[body][i] * time_moment[i],
+                    source_transfer[i],
                 ] {
                     body_scale = body_scale
                         .max(scalar(work.to_f64(), "exponential pair component work")?.abs());

@@ -658,6 +658,13 @@ where claimed below.
   or exponential function. Reciprocal impulses, both held-drive works and
   signed transfer works use the integrated response. Independent positive-square
   slip heat is weighted before squaring to retain finite extreme-scale work.
+  When reciprocal impulses nearly cancel an original or driven momentum,
+  endpoint and interval-mean momenta are recovered from the conserved total
+  momentum and the exact retained relative motion using the same cached dual
+  modes. Resolved counterrotation tails and small driven terminal velocities
+  therefore survive stiff relaxation; drive and transfer work use the actual
+  interval-mean motion. This adds no factorization or exponential evaluation
+  to a prepared stage, and physical heat remains independently integrated.
   Native free rotations and numerical energy defects remain separate. The
   outer composition is second order and still requires attitude/tumbling
   refinement. Fifteen pair tests cover stiff analytic recoil/work/heat, full
