@@ -11,9 +11,10 @@ use super::response::{AffineResponseEvaluation3, AffineResponseLimits3, measure_
 use super::stress::refinement::{self as stress_refinement, AffineStressRefinement3};
 use super::{AffineLoadSpace3, AffineLoadSpaceGrid3, RobustOptions3};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
-use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3, Sdf3Elasticity};
+use crate::sdf3::response::limits::refinement::ReferenceBoundedResponse3;
+use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3, Sdf3Elasticity, failure};
 use crate::sdf3_goal::{GoalRefinementError3, controlled_goal3, prepare_material_goal3};
-use crate::{SolveControl, SolveWork};
+use crate::{EvaluationStop, SolveControl, SolveWork};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::elastic3::surface::{ReferenceLoad3, SurfaceForce3};
 use fs_cutfem::octree3::Octant3;
@@ -316,7 +317,7 @@ impl AffineLoadSpaceRefinement3 {
     // Original physical bounds and normalized residuals use the SAME goal.
     // Checking physical volume before division prevents rounding from excusing
     // a cap excess. The compliance reference is only a scale in volume mode.
-    fn base_constraints(&self) -> Option<[f64; 2]> {
+    fn base_constraints(&self, require_feasible: bool) -> Option<[f64; 2]> {
         if !self.goal_matches_inventory()
             || [&self.coarse, &self.fine].iter().any(|grid| {
                 !grid.maximum.is_finite()
@@ -336,7 +337,7 @@ impl AffineLoadSpaceRefinement3 {
                 ];
                 if volumes
                     .iter()
-                    .any(|v| !v.is_finite() || *v < 0.0 || *v > volume_limit)
+                    .any(|v| !v.is_finite() || *v < 0.0 || (require_feasible && *v > volume_limit))
                 {
                     return None;
                 }
@@ -346,14 +347,69 @@ impl AffineLoadSpaceRefinement3 {
                 ])
             }
             _ => {
-                if [&self.coarse, &self.fine].iter().any(|grid| {
-                    grid.maximum > 1.0 || grid.worst_compliance > self.policy.reference()
-                }) {
+                if require_feasible
+                    && [&self.coarse, &self.fine].iter().any(|grid| {
+                        grid.maximum > 1.0 || grid.worst_compliance > self.policy.reference()
+                    })
+                {
                     return None;
                 }
                 Some([self.coarse.maximum - 1.0, self.fine.maximum - 1.0])
             }
         }
+    }
+
+    /// Original normalized joint constraints in [coarse, fine] order, using
+    /// the same upper aggregate as optimization. Positive values remain
+    /// available for physically infeasible grids; this is not a feasibility
+    /// verdict. Refuse inconsistent goals or missing/changed constraint families.
+    pub fn joint_constraints(&self) -> Result<[f64; 2], EvaluationStop> {
+        let invalid = || failure("sdf3-affine-refinement-constraint-binding");
+        let base = self.base_constraints(false).ok_or_else(invalid)?;
+        if self.responses.as_ref().is_some_and(|responses| {
+            responses.coarse.witnesses.len() != responses.fine.witnesses.len()
+                || responses.coarse.witnesses.is_empty()
+                || responses
+                    .coarse
+                    .witnesses
+                    .iter()
+                    .zip(&responses.fine.witnesses)
+                    .any(|(a, b)| {
+                        a.bound != b.bound
+                            || a.scale != b.scale
+                            || a.sense != b.sense
+                            || a.basis_responses.len() != self.policy.dimension()
+                            || b.basis_responses.len() != self.policy.dimension()
+                    })
+        }) {
+            return Err(invalid());
+        }
+        let mut values = [0.0; 2];
+        for (index, (responses, stress)) in [
+            (
+                self.responses.as_ref().map(|r| &r.coarse),
+                self.stress.as_ref().map(|s| &s.coarse),
+            ),
+            (
+                self.responses.as_ref().map(|r| &r.fine),
+                self.stress.as_ref().map(|s| &s.fine),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if !self.constraints.matches_components(responses, stress) {
+                return Err(invalid());
+            }
+            values[index] = super::constraints::aggregate(
+                base[index],
+                responses.map(|r| r.constraint),
+                stress.map(|s| s.constraint),
+                self.constraints.sharpness,
+            )?
+            .0;
+        }
+        Ok(values)
     }
 
     /// Resolve the full load model and the original physical constraints on
@@ -391,9 +447,9 @@ impl AffineLoadSpaceRefinement3 {
         response_tolerance: f64,
         stress_tolerance: f64,
     ) -> bool {
-        let Some(base) = self.base_constraints() else {
+        if self.base_constraints(true).is_none() {
             return false;
-        };
+        }
         change_tolerance.is_finite()
             && change_tolerance >= 0.0
             && self.normalized_model_change.is_finite()
@@ -407,29 +463,45 @@ impl AffineLoadSpaceRefinement3 {
                 .stress
                 .as_ref()
                 .is_none_or(|s| s.stable_and_feasible(stress_tolerance))
-            && [
-                (
-                    self.responses.as_ref().map(|r| &r.coarse),
-                    self.stress.as_ref().map(|s| &s.coarse),
-                ),
-                (
-                    self.responses.as_ref().map(|r| &r.fine),
-                    self.stress.as_ref().map(|s| &s.fine),
-                ),
-            ]
-            .into_iter()
-            .zip(base)
-            .all(|((responses, stress), base)| {
-                self.constraints.matches_components(responses, stress)
-                    && super::constraints::aggregate(
-                        base,
-                        responses.map(|r| r.constraint),
-                        stress.map(|s| s.constraint),
-                        self.constraints.sharpness,
-                    )
-                    .is_ok_and(|(value, _)| value <= 0.0)
-            })
+            && self
+                .joint_constraints()
+                .is_ok_and(|values| values.into_iter().all(|v| v <= 0.0))
     }
+}
+
+fn admit_grid_constraints(
+    coarse: ReferenceAffineLoadSpaceConstraints3<'_>,
+    fine: ReferenceAffineLoadSpaceConstraints3<'_>,
+) -> Result<(), GoalRefinementError3> {
+    let same = coarse.policy() == fine.policy()
+        && match (coarse.responses, fine.responses) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.limits.len() == b.limits.len()
+                    && a.limits.iter().zip(b.limits).all(|(a, b)| {
+                        a.bound == b.bound
+                            && a.scale == b.scale
+                            && a.sense == b.sense
+                            && matches!(
+                                (a.response, b.response),
+                                (
+                                    ReferenceBoundedResponse3::Displacement(_),
+                                    ReferenceBoundedResponse3::Displacement(_)
+                                ) | (
+                                    ReferenceBoundedResponse3::Reaction(_),
+                                    ReferenceBoundedResponse3::Reaction(_)
+                                )
+                            )
+                    })
+            }
+            _ => false,
+        };
+    if !same {
+        return Err(GoalRefinementError3::Invalid(
+            "coarse/fine affine constraint declarations differ",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,10 +511,11 @@ fn assess_responses<O: AdaptiveSdf3Elasticity, F: AdaptiveSdf3Elasticity>(
     coarse_grid: &AffineLoadSpaceGrid3,
     fine_grid: &AffineLoadSpaceGrid3,
     family: ReferenceAffineResponseLimits3<'_>,
+    fine_family: ReferenceAffineResponseLimits3<'_>,
     control: &mut SolveControl<'_>,
 ) -> Result<AffineResponseRefinement3, GoalRefinementError3> {
     let coarse_observations = response_reference::assemble(coarse_operator, family, control)?;
-    let fine_observations = response_reference::assemble(fine_operator, family, control)?;
+    let fine_observations = response_reference::assemble(fine_operator, fine_family, control)?;
     let coarse_limits = coarse_observations.limits();
     let fine_limits = fine_observations.limits();
     let coarse = measure_affine_responses(
@@ -459,7 +532,7 @@ fn assess_responses<O: AdaptiveSdf3Elasticity, F: AdaptiveSdf3Elasticity>(
         fine_grid,
         AffineResponseLimits3 {
             limits: &fine_limits,
-            options: family.options,
+            options: fine_family.options,
         },
         control,
     )?;
@@ -651,6 +724,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             policy,
             None,
             ReferenceAffineLoadSpaceConstraints3::default(),
+            ReferenceAffineLoadSpaceConstraints3::default(),
             options,
             control,
         )
@@ -689,6 +763,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 objective,
                 volume_scale,
             }),
+            ReferenceAffineLoadSpaceConstraints3::default(),
             ReferenceAffineLoadSpaceConstraints3::default(),
             options,
             control,
@@ -760,6 +835,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 volume_scale,
             }),
             constraints,
+            constraints,
             options,
             control,
         )
@@ -794,6 +870,45 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             policy,
             Some(goal),
             constraints,
+            constraints,
+            options,
+            control,
+        )
+    }
+
+    /// Assess one physical constraint family with its reference observations
+    /// independently normalized on the two actual grids. For example, a volume
+    /// mean may divide by each grid's own numerical cut measure. The caller
+    /// preserves the physical patch, axis and reaction law; bounds, senses,
+    /// scales, ordered observation kinds and complete policies must match.
+    /// Both variants share the same solves, material transfer and assessment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_affine_load_space_enrichment_for_goal_with_grid_constraints<
+        F: AdaptiveSdf3Elasticity,
+    >(
+        &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        goal: AffineLoadSpaceDesignGoal3,
+        coarse_constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        fine_constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.affine_load_space_enrichment(
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            Some(goal),
+            coarse_constraints,
+            fine_constraints,
             options,
             control,
         )
@@ -810,11 +925,13 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         policy: &AffineLoadSpace3,
         goal: Option<AffineLoadSpaceDesignGoal3>,
         constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        fine_constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
         // Admit the original goal before filtering or spending solver work.
         let inventory_policy = goal.map(goal_inventory).transpose()?;
+        admit_grid_constraints(constraints, fine_constraints)?;
         control.checkpoint("sdf3-affine-goal-start")?;
         self.require_material_body_recipe("sdf3-affine-goal-material-recipe")?;
         if !robustness.valid(self.params)
@@ -854,7 +971,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 "affine stress field allowance exhausted",
             ));
         }
-        if let Some(family) = constraints.responses {
+        if let Some(family) = fine_constraints.responses {
             response_reference::admit(&enriched, family)?;
         }
         let filtered = self.filter_apply(rho, control)?;
@@ -1010,7 +1127,17 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let responses = constraints
                 .responses
                 .map(|family| {
-                    assess_responses(&self.operator, &enriched, &coarse, &fine, family, control)
+                    assess_responses(
+                        &self.operator,
+                        &enriched,
+                        &coarse,
+                        &fine,
+                        family,
+                        fine_constraints
+                            .responses
+                            .expect("paired response family admitted"),
+                        control,
+                    )
                 })
                 .transpose()?;
             let stress = constraints

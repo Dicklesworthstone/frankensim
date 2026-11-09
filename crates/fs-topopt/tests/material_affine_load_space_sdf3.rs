@@ -13,6 +13,9 @@ mod stress_refinement;
 #[path = "material_affine_load_space_sdf3/material_domain.rs"]
 mod material_domain;
 
+#[path = "material_affine_load_space_sdf3/grid_response_normalization.rs"]
+mod grid_response_normalization;
+
 use fs_ascent::quadratic_ball::QuadraticBallBranch;
 use fs_blake3::ContentHash;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
