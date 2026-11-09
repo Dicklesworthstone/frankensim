@@ -16,6 +16,7 @@ pub use adjoint::PreparedPhsForcedAdjoint;
 mod parameter;
 pub(super) mod power;
 pub use parameter::PhsForcedParameterDirection;
+pub(super) use parameter::ode_clock_column;
 pub use power::{PhsPowerObjective, PreparedPhsForcedPowerAdjoint};
 
 /// Source admission and exact shared harmonic derivative refusals.

@@ -66,7 +66,7 @@ impl PreparedPhsForcedSensitivity<'_> {
     }
 }
 
-pub(super) fn ode_clock_column(
+pub(in crate::phs_orbit) fn ode_clock_column(
     n: usize,
     omega_derivative: f64,
     point: ForcedParameterPoint<'_>,

@@ -12661,3 +12661,43 @@ recursive parsing and independent source review passed. These new cross-crate
 tests were not compiled or executed because the session's dependency build
 was blocked by exhausted memory/disk; the separate 20-test production angular
 leaf harness passed and does not substitute for integrated execution.
+
+### Complete sensitivities and pump-work objectives for modulated Hamiltonians
+
+`ParametricHamiltonian::prepare_sensitivity` binds the original
+`H0(x)+x^T Q(theta) x/2`, drive, complete H0 tangent and physical clock to the
+shared fs-orbit factor and independent cached AFT trajectories.
+`PreparedParametricSensitivity::solve_parameter` accepts simultaneous original
+J/R/G/H0, symmetric Fourier Q, input Fourier and clock directions. Its effort
+partial is `H0_xp+Q_p*x` at fixed phase; fs-phs owns the physical contractions,
+and the existing sI clock column contributes `i*n*Omega_p*X_n` once. Pump/input
+direction dimensions, original clock and retained bandwidth are admitted.
+Directions may introduce pump harmonics above the base pump bandwidth when
+retained by the orbit. Maximum direction matrix/phase/state scratch is reserved
+before generic numerical preparation; existing source/callback storage/work
+exclusions and hard modulation bounds remain explicit. No finite-difference
+or quadratic-storage replacement is introduced.
+
+`power_objective` and `prepare_power_adjoint` expose six independent original
+accounts: mean pump/port/resistance power and corresponding energy per actual
+cycle. Pump is `x^T Qdot x/2`, with full state gradient `Qdot*x`; port/loss use
+`e=grad(H0)+Q*x` and the full Hessian `H0_xx+Q`. Generic two-grid checks cover
+value and complete covector in the selected power/energy units, then each grid
+combines its own direct objective mean with the cached dual. Automatic complete
+directions retain signed pump, port and resistance laws separately. The mean-pump
+explicit clock derivative is `(Omega_p/Omega)*P`; for pump energy per cycle it
+cancels the explicit period derivative analytically. The solved waveform clock
+chain remains. Port/loss work includes its ordinary period derivative.
+Parameter queries reuse the original factor/dual without fresh objective
+Hessians, orbit solves or waveform-direction solves; original source/parameter
+laws still evaluate the cached states.
+
+Three new focused groups and all seven original parametric tests pass natively.
+The new evidence compares complete nonlinear-memory and off-diagonal phased-pump
+directions with independently rebuilt neighboring HB sources and an independent
+physical ODE integrator; evaluates six separate power/work neighbor oracles;
+checks the isolated-clock identity and changing-period counterexample; admits a
+new retained pump harmonic; and checks original-clock/bandwidth rejection,
+bounded scratch refusal, incomplete material actions and cancellation/retry.
+These fixed-order derivatives and accounts do not certify infinite harmonic
+resolution, stability, passivity or a heat destination.
