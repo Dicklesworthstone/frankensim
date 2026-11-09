@@ -7642,7 +7642,7 @@ conditional rate-tail bounds and estimated temporal errors remain distinct.
 `multicomponent::IsothermalMixtureGravity` prepares an original-species
 isothermal atmosphere on a stationary constant-area mesh.
 `MixtureEuler1d::step_with_isothermal_gravity` advances the existing species,
-momentum and energy coordinates with reflecting ends and explicit first-order
+momentum and energy coordinates with reflecting ends and first-order or MUSCL
 spatial reconstruction. The reference retains its original species/caloric
 bank, canonical mass fractions, physical mesh, temperature, pressure datum and
 signed acceleration. Species densities remain dynamic; density is their
@@ -7655,6 +7655,17 @@ Subtracting the same reference tractions before differencing preserves
 reference rest, while the density perturbation supplies the actual buoyancy
 force. The report separates physical gravity impulse from the represented
 reference-traction balance defect.
+
+MUSCL reconstructs density and pressure relative to the integrated reference
+cell averages, with physical velocity and the existing common mass-fraction
+limiter. Both actual physical-face traces are admitted through the original
+composition-dependent caloric source before accepting a slope. The same
+contraction applies to every reconstruction coordinate, retaining linear
+composition constraints and exact-zero species without clipping or reseeding.
+An unchanged three-cell reference stencil has exactly zero perturbation slopes;
+a neighboring disturbance still enters the original conservative Riemann solve.
+The original first-order path remains the native fallback, and the higher-order
+path reuses the existing slope and stage storage without additional allocation.
 
 Gravitational work uses the same species mass fluxes as each native SSP-RK2
 stage. The potential convention is phi=-g*(x-x0), with the explicit discrete
@@ -7671,11 +7682,20 @@ stages remain private scratch. Zero gravity delegates the original unforced
 entry, preserving its bits. Preparation owns the added buffers; successful
 steps add no scratch allocation.
 
-The scope excludes tapered/moving meshes, open reservoirs, higher-order
-reconstruction, self-gravity, species diffusion and a jointly advanced chemistry
+The scope excludes tapered/moving meshes, open reservoirs, self-gravity,
+species diffusion and a jointly advanced chemistry
 model. Uniform reference composition is a common-velocity Euler atmosphere,
 not a claim of molecular diffusive equilibrium. The broad conservative gas
 control-volume bead remains open.
+
+The MUSCL regressions exercise exact stratified rest on a stretched mesh for
+both reconstruction orders, real composition-driven buoyancy, source/formation
+invariance, species and gas-plus-potential conservation, original CFL/caloric
+retries, late cancellation and zero-gravity bit parity. Independent uniform
+free fall checks actual acceleration, temperature and composition; an integrated
+analytic small-pressure perturbation checks second-order momentum-response
+convergence under mesh refinement. This is not a general convergence or entropy
+theorem.
 
 Four new integration tests cover analytical reference rest, composition-driven
 buoyancy, species and combined-energy conservation, formation-gauge invariance,

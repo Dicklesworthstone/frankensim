@@ -1234,11 +1234,15 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
         if k < n {
             states[i * m + k] / primitive[i].density
         } else if k == n {
-            primitive[i].density
+            gravity.map_or(primitive[i].density, |reference| {
+                reference.relative_density(i, primitive[i].density)
+            })
         } else if k == n + 1 {
             primitive[i].velocity
         } else {
-            primitive[i].pressure
+            gravity.map_or(primitive[i].pressure, |reference| {
+                reference.relative_pressure(i, primitive[i].pressure)
+            })
         }
     };
     let center =
@@ -1259,6 +1263,16 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
         } else {
             (i - 1, i + 1)
         };
+        if gravity.is_some_and(|reference| {
+            [prev, i, next]
+                .into_iter()
+                .all(|cell| reference.is_reference_cell(cell, &states[cell * m..(cell + 1) * m]))
+        }) {
+            // Exact equilibrium has no perturbation slope. In particular,
+            // density-dependent division roundoff in a constant mass fraction
+            // must not create a composition wave in an unchanged atmosphere.
+            continue;
+        }
         let length = mesh.positions()[count] - mesh.positions()[0];
         let x = center(i);
         let xl = center(prev) - if i == 0 { length } else { 0.0 };
@@ -1288,14 +1302,19 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
                 for k in 0..primitive_width {
                     trial[k] = value(i, k) + sign * scale * row[k];
                 }
-                for k in 0..n {
-                    densities[k] = trial[n] * trial[k];
-                }
-                if !positive(trial[n])
-                    || gas
-                        .state_at(&densities[..n], trial[n + 1], trial[n + 2], &mut out[..m])
-                        .is_err()
-                {
+                let admitted = if let Some(reference) = gravity {
+                    reference.reconstruct_values(
+                        if sign < 0.0 { i } else { i + 1 },
+                        &trial[..primitive_width],
+                        &mut out[..m],
+                    )
+                } else {
+                    for k in 0..n {
+                        densities[k] = trial[n] * trial[k];
+                    }
+                    gas.state_at(&densities[..n], trial[n + 1], trial[n + 2], &mut out[..m])
+                };
+                if !positive(trial[n]) || admitted.is_err() {
                     valid = false;
                     break;
                 }
@@ -1313,13 +1332,24 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
         }
     }
     let reconstruct = |i: usize, sign: f64, target: &mut [f64]| -> Result<Primitive, Error> {
-        if let Some(reference) = gravity {
-            return reference.reconstruct(
-                i, if sign < 0.0 { i } else { i + 1 },
-                &states[i * m..(i + 1) * m], primitive[i], target,
-            );
-        }
         let row = &slopes[i * primitive_width..(i + 1) * primitive_width];
+        if let Some(reference) = gravity {
+            let face = if sign < 0.0 { i } else { i + 1 };
+            if row.iter().all(|x| *x == 0.0) {
+                return reference.reconstruct(
+                    i,
+                    face,
+                    &states[i * m..(i + 1) * m],
+                    primitive[i],
+                    target,
+                );
+            }
+            let mut values = [0.0; MAX_COMPONENTS + 1];
+            for k in 0..primitive_width {
+                values[k] = value(i, k) + sign * row[k];
+            }
+            return reference.reconstruct_values(face, &values[..primitive_width], target);
+        }
         if row.iter().all(|x| *x == 0.0) {
             target.copy_from_slice(&states[i * m..(i + 1) * m]);
             return Ok(primitive[i]);

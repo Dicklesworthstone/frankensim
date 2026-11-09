@@ -2,9 +2,11 @@
 //!
 //! The reference has uniform composition and temperature. Perturbations retain
 //! every species equation and the original composition-dependent calorics.
-//! Only a stationary constant-area mesh, reflecting ends and first-order space
-//! are admitted. This supplies no molecular diffusive equilibrium, chemistry,
-//! moving boundary, reservoir potential convention or higher-order reconstruction.
+//! A stationary constant-area mesh and reflecting ends are required. MUSCL
+//! reconstructs density and pressure relative to the retained atmosphere, with
+//! the original common mass-fraction limiter and source-admitted face states.
+//! This supplies no molecular diffusive equilibrium, chemistry, moving boundary
+//! or reservoir potential convention.
 //!
 //! Momentum subtracts the same original reference face tractions before
 //! differencing, then adds g*(rho-rho_ref) with rho=sum(rho_species). Energy
@@ -308,12 +310,56 @@ impl IsothermalMixtureGravity {
         guess: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Primitive, Error> {
-        let width = self.gas.species_count() + 2;
-        if q == &self.cells[i * width..(i + 1) * width] {
+        poll(cancelled)?;
+        if self.is_reference_cell(i, q) {
             Ok(self.cell_primitive[i])
         } else {
             self.gas.decode(q, Some(guess), cancelled)
         }
+    }
+
+    pub(super) fn is_reference_cell(&self, i: usize, q: &[f64]) -> bool {
+        let width = self.gas.species_count() + 2;
+        q == &self.cells[i * width..(i + 1) * width]
+    }
+
+    pub(super) fn relative_density(&self, i: usize, density: f64) -> f64 {
+        density / self.cell_primitive[i].density
+    }
+
+    pub(super) fn relative_pressure(&self, i: usize, pressure: f64) -> f64 {
+        pressure / self.cell_primitive[i].pressure
+    }
+
+    /// The limiter and the face solve must admit the SAME physical trace.
+    /// Layout is Y_species, rho/rho_ref, velocity, p/p_ref. One common slope
+    /// contraction preserves the original composition constraints and zeros.
+    pub(super) fn reconstruct_values(
+        &self,
+        face: usize,
+        values: &[f64],
+        out: &mut [f64],
+    ) -> Result<Primitive, Error> {
+        let n = self.gas.species_count();
+        let reference = self.face_primitive[face];
+        let density = values[n] * reference.density;
+        let pressure = values[n + 2] * reference.pressure;
+        if !positive(density) || !positive(pressure) {
+            return Err(Error::Invalid(
+                "mixture gravity reconstructed density or pressure",
+            ));
+        }
+        let mut densities = [0.0; MAX_SPECIES];
+        for k in 0..n {
+            densities[k] = density * values[k];
+            if values[k] > 0.0 && densities[k] == 0.0 {
+                return Err(Error::Invalid(
+                    "mixture gravity face lost a positive species",
+                ));
+            }
+        }
+        self.gas
+            .state_at(&densities[..n], values[n + 1], pressure, out)
     }
 
     pub(super) fn reconstruct(
@@ -326,7 +372,7 @@ impl IsothermalMixtureGravity {
     ) -> Result<Primitive, Error> {
         let n = self.gas.species_count();
         let width = n + 2;
-        if q == &self.cells[i * width..(i + 1) * width] {
+        if self.is_reference_cell(i, q) {
             out.copy_from_slice(&self.faces[face * width..(face + 1) * width]);
             return Ok(self.face_primitive[face]);
         }
@@ -505,8 +551,12 @@ impl Exchange {
 impl MixtureEuler1d {
     /// Advance actual species, momentum and energy under the prepared gravity.
     ///
-    /// Requires the same source and stationary geometry, reflecting ends and
-    /// explicit FirstOrder reconstruction. Ordinary stepping and held forcing
+    /// Requires the same source and stationary geometry and reflecting ends.
+    /// FirstOrder and MUSCL share the original source-owned face solve. MUSCL
+    /// limits atmospheric-relative density/pressure and the common composition
+    /// slope, admitting both physical faces through the original caloric law.
+    /// Exact reference stencils retain zero slopes; real perturbations are
+    /// evolved, never projected back to equilibrium. Ordinary stepping and held forcing
     /// are separate entry points; no persistent gravity mode is inferred.
     /// Native EOS, CFL and atomic retry/cancellation gates remain authoritative.
     pub fn step_with_isothermal_gravity(
@@ -517,11 +567,6 @@ impl MixtureEuler1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MixtureGravityStep, Error> {
         gravity.admit(self, &mut cancelled)?;
-        if controls.reconstruction != Reconstruction::FirstOrder {
-            return Err(Error::Invalid(
-                "mixture gravity currently requires explicit FirstOrder reconstruction",
-            ));
-        }
         let mut balance = Balance::default();
         let transport = if gravity.reference.acceleration.value() == 0.0 {
             let step = self.step(maximum_duration, controls, &mut cancelled)?;

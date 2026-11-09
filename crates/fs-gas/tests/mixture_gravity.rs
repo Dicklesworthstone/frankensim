@@ -131,10 +131,7 @@ fn gravity(n: usize, g: f64, formation: f64) -> IsothermalMixtureGravity {
 }
 
 fn control() -> StepControl {
-    StepControl {
-        reconstruction: Reconstruction::FirstOrder,
-        ..StepControl::default()
-    }
+    StepControl::default()
 }
 
 fn snapshot(flow: &MixtureEuler1d) -> Vec<f64> {
@@ -196,50 +193,60 @@ fn near(a: f64, b: f64, scale: f64, relative: f64) {
 
 #[test]
 fn g1_integrated_original_composition_atmosphere_remains_at_exact_discrete_rest() {
-    for g in [-4.0, 4.0, 0.0, 1e-9] {
-        let reference = gravity(19, g, 1e12);
-        assert_eq!(reference.reference_mass_fractions(), &[0.4, 0.6, 0.0]);
-        let mut flow = reference.initial_flow(|| false).unwrap();
-        let initial = snapshot(&flow);
-        let beta = g / 1.4;
-        let expected_mass = 0.7
-            * (3.0 / 1.4)
-            * if beta == 0.0 {
-                1.0
-            } else {
-                beta.exp_m1() / beta
-            };
-        near(flow.totals().mass(), expected_mass, expected_mass, 5e-14);
-        for i in 0..flow.cell_count() {
-            let (q, p) = reference.reference_cell(i).unwrap();
-            let left = flow.mesh().positions()[i];
-            let dx = flow.mesh().positions()[i + 1] - left;
-            let expected = (3.0 / 1.4)
-                * (beta * left).exp()
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        for g in [-4.0, 4.0, 0.0, 1e-9] {
+            let reference = gravity(19, g, 1e12);
+            assert_eq!(reference.reference_mass_fractions(), &[0.4, 0.6, 0.0]);
+            let mut flow = reference.initial_flow(|| false).unwrap();
+            let initial = snapshot(&flow);
+            let beta = g / 1.4;
+            let expected_mass = 0.7
+                * (3.0 / 1.4)
                 * if beta == 0.0 {
                     1.0
                 } else {
-                    (beta * dx).exp_m1() / (beta * dx)
+                    beta.exp_m1() / beta
                 };
-            near(q.density(), expected, expected, 5e-14);
-            near(p.temperature, 2.0, 2.0, 2e-13);
-            assert_eq!(q.partial_densities[2], 0.0);
-        }
-        for _ in 0..48 {
-            let step = flow
-                .step_with_isothermal_gravity(Time::new(0.02), control(), &reference, || false)
-                .unwrap();
-            assert_eq!(snapshot(&flow), initial);
-            assert_eq!(step.transport.source_change.work, 0.0);
-            assert_eq!(step.potential_energy_change_j, 0.0);
-            assert_eq!(step.total_energy_residual_j, 0.0);
-            near(
-                step.transport.source_change.impulse,
-                step.physical_gravity_impulse_kg_m_s
-                    + step.reference_traction_impulse_defect_kg_m_s,
-                step.transport.source_change.impulse.abs(),
-                3e-14,
-            );
+            near(flow.totals().mass(), expected_mass, expected_mass, 5e-14);
+            for i in 0..flow.cell_count() {
+                let (q, p) = reference.reference_cell(i).unwrap();
+                let left = flow.mesh().positions()[i];
+                let dx = flow.mesh().positions()[i + 1] - left;
+                let expected = (3.0 / 1.4)
+                    * (beta * left).exp()
+                    * if beta == 0.0 {
+                        1.0
+                    } else {
+                        (beta * dx).exp_m1() / (beta * dx)
+                    };
+                near(q.density(), expected, expected, 5e-14);
+                near(p.temperature, 2.0, 2.0, 2e-13);
+                assert_eq!(q.partial_densities[2], 0.0);
+            }
+            for _ in 0..48 {
+                let step = flow
+                    .step_with_isothermal_gravity(
+                        Time::new(0.02),
+                        StepControl {
+                            reconstruction,
+                            ..control()
+                        },
+                        &reference,
+                        || false,
+                    )
+                    .unwrap();
+                assert_eq!(snapshot(&flow), initial);
+                assert_eq!(step.transport.source_change.work, 0.0);
+                assert_eq!(step.potential_energy_change_j, 0.0);
+                assert_eq!(step.total_energy_residual_j, 0.0);
+                near(
+                    step.transport.source_change.impulse,
+                    step.physical_gravity_impulse_kg_m_s
+                        + step.reference_traction_impulse_defect_kg_m_s,
+                    step.transport.source_change.impulse.abs(),
+                    3e-14,
+                );
+            }
         }
     }
 }
@@ -361,7 +368,7 @@ fn g0_original_cfl_caloric_retries_and_late_cancellation_remain_atomic() {
     assert_eq!(snapshot(&cancelled), initial);
     assert_eq!(cancelled.time(), initial_time);
     let bad = StepControl {
-        reconstruction: Reconstruction::Muscl,
+        cfl: 0.0,
         ..control()
     };
     assert!(
@@ -396,18 +403,22 @@ fn g0_original_cfl_caloric_retries_and_late_cancellation_remain_atomic() {
 #[test]
 fn g0_zero_gravity_preserves_native_unforced_bits_and_unsupported_geometry_refuses() {
     let reference = gravity(12, 0.0, 0.0);
-    let mut ordinary = disturbed(&reference, false);
-    let mut selected = disturbed(&reference, false);
-    let a = ordinary
-        .step(Time::new(0.001), control(), || false)
-        .unwrap();
-    let b = selected
-        .step_with_isothermal_gravity(Time::new(0.001), control(), &reference, || false)
-        .unwrap();
-    assert_eq!(a, b.transport);
-    assert_eq!(snapshot(&ordinary), snapshot(&selected));
-    assert_eq!(b.potential_energy_before_j, 0.0);
-    assert_eq!(b.potential_energy_after_j, 0.0);
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        let controls = StepControl {
+            reconstruction,
+            ..control()
+        };
+        let mut ordinary = disturbed(&reference, false);
+        let mut selected = disturbed(&reference, false);
+        let a = ordinary.step(Time::new(0.001), controls, || false).unwrap();
+        let b = selected
+            .step_with_isothermal_gravity(Time::new(0.001), controls, &reference, || false)
+            .unwrap();
+        assert_eq!(a, b.transport);
+        assert_eq!(snapshot(&ordinary), snapshot(&selected));
+        assert_eq!(b.potential_energy_before_j, 0.0);
+        assert_eq!(b.potential_energy_after_j, 0.0);
+    }
     for fractions in [[0.4, 0.4, 0.0], [0.4, -0.1, 0.7], [f64::NAN, 0.6, 0.0]] {
         assert!(
             IsothermalMixtureGravity::try_new(
@@ -435,4 +446,126 @@ fn g0_zero_gravity_preserves_native_unforced_bits_and_unsupported_geometry_refus
             .is_err()
         );
     }
+}
+
+#[test]
+fn g1_muscl_gravity_resolves_uniform_free_fall_without_changing_composition() {
+    // An initially uniform, non-hydrostatic gas has the exact interior solution
+    // rho_i(t)=rho_i(0), u=g*t and constant original internal energy. This
+    // independent nonlinear solution probes the reconstructed perturbation,
+    // not a comparison against another implementation of atmosphere balance.
+    let mut errors = Vec::new();
+    for n in [20, 40, 80] {
+        let mesh = Mesh1d::uniform(n, Length::new(1.0 / n as f64), 0.7).unwrap();
+        let reference = IsothermalMixtureGravity::try_new(
+            material(1e12),
+            mesh.clone(),
+            reference(-2.0, 0.0),
+            &[0.4, 0.6, 0.0],
+            || false,
+        )
+        .unwrap();
+        let q = reference
+            .gas()
+            .conserved(&[0.6, 0.9, 0.0], 0.0, 2.1)
+            .unwrap();
+        let mut flow =
+            MixtureEuler1d::new_on_mesh(reference.gas().clone(), mesh, vec![q; n], CLOSED, || {
+                false
+            })
+            .unwrap();
+        let end = 0.005;
+        while flow.time().value() < end {
+            let report = flow
+                .step_with_isothermal_gravity(
+                    Time::new(end - flow.time().value()),
+                    control(),
+                    &reference,
+                    || false,
+                )
+                .unwrap();
+            assert!(!report.transport.first_order_retry);
+            near(
+                report.total_energy_residual_j,
+                0.0,
+                report.transport.before.energy,
+                3e-12,
+            );
+        }
+        let mut error = 0.0;
+        for i in n / 4..3 * n / 4 {
+            let q = flow.cell(i).unwrap();
+            let p = flow.gas().primitive(q, || false).unwrap();
+            error += (p.velocity - (-2.0 * end)).abs();
+            near(p.temperature, 2.0, 2.0, 2e-5);
+            near(q.partial_densities[0] / p.density, 0.4, 1.0, 4e-14);
+            assert_eq!(q.partial_densities[2], 0.0);
+        }
+        errors.push(error / (n / 2) as f64);
+    }
+    assert!(errors[2] < 2e-6, "free-fall velocity errors: {errors:?}");
+}
+
+#[test]
+fn g1_muscl_resolves_small_atmospheric_pressure_perturbations_at_second_order() {
+    // At t=0, u=0 and rho is the original atmosphere, while
+    // p(x)=p_ref(x)*(1+a*x^2). Integrating the continuum momentum equation
+    // gives d(rho*u)_i/dt=-a*[p_ref(x)*x^2]_left^right/dx exactly.
+    // Both density and pressure use their actual exponential cell averages.
+    // A short complete native RK2 step measures this independent physical RHS.
+    let beta: f64 = -2.0 / 1.4;
+    let amplitude = 1e-3;
+    let integral = |x: f64| {
+        (beta * x).exp() * (x * x / beta - 2.0 * x / beta.powi(2) + 2.0 / beta.powi(3))
+    };
+    let mut errors = Vec::new();
+    for n in [20, 40, 80] {
+        let dx = 1.0 / n as f64;
+        let mesh = Mesh1d::uniform(n, Length::new(dx), 0.7).unwrap();
+        let reference = IsothermalMixtureGravity::try_new(
+            material(1e12),
+            mesh.clone(),
+            reference(-2.0, 0.0),
+            &[0.4, 0.6, 0.0],
+            || false,
+        )
+        .unwrap();
+        let initial = (0..n)
+            .map(|i| {
+                let (q, p) = reference.reference_cell(i).unwrap();
+                let left = i as f64 * dx;
+                let right = (i + 1) as f64 * dx;
+                let pressure =
+                    p.pressure + 3.0 * amplitude * (integral(right) - integral(left)) / dx;
+                reference
+                    .gas()
+                    .conserved(q.partial_densities, 0.0, pressure)
+                    .unwrap()
+            })
+            .collect();
+        let mut flow =
+            MixtureEuler1d::new_on_mesh(reference.gas().clone(), mesh, initial, CLOSED, || false)
+                .unwrap();
+        let report = flow
+            .step_with_isothermal_gravity(Time::new(1e-5), control(), &reference, || false)
+            .unwrap();
+        assert!(!report.transport.first_order_retry);
+        let dt = report.transport.elapsed.value();
+        let mut error = 0.0;
+        for i in n / 4..3 * n / 4 {
+            let left = i as f64 * dx;
+            let right = (i + 1) as f64 * dx;
+            let exact = -3.0
+                * amplitude
+                * ((beta * right).exp() * right * right - (beta * left).exp() * left * left)
+                / dx;
+            error += (flow.cell(i).unwrap().momentum / dt - exact).abs();
+        }
+        errors.push(error / (n / 2) as f64);
+    }
+    assert!(errors[2] < 2e-7, "pressure-perturbation errors: {errors:?}");
+    assert!(
+        errors[0] > 3.0 * errors[1] && errors[1] > 3.0 * errors[2],
+        "pressure-perturbation errors: {errors:?}"
+    );
 }
