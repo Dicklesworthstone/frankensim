@@ -5,8 +5,8 @@
 //! algebraic reactions and internal memory are never eliminated or refitted.
 
 use super::{
-    C64, HarmonicError, HarmonicFactor, HarmonicModel, HarmonicResponse, Sum, finite,
-    invalid, poll, resource_bounds,
+    C64, HarmonicError, HarmonicFactor, HarmonicModel, HarmonicResponse, Sum, finite, invalid,
+    poll, resource_bounds,
 };
 
 /// Derivatives per unit of ONE caller-declared real parameter, evaluated at the
@@ -118,7 +118,7 @@ pub(super) fn generator_action(
     for i in 0..model.n_diff {
         poll(cancelled)?;
         if let Some(dq) = direction.storage {
-            let row = super::input_row_sums(&dq[i*n..i*n+model.n_diff], |j| state[j])?;
+            let row = super::input_row_sums(&dq[i * n..i * n + model.n_diff], |j| state[j])?;
             storage[i] = super::input_value(row, C64::ZERO)?;
         }
         for j in 0..model.n_diff {
@@ -284,7 +284,7 @@ impl HarmonicFactor<'_> {
     ) -> Result<HarmonicParameterResponse, HarmonicError> {
         poll(&mut cancelled)?;
         let model = self.model;
-        let (n, m) = (model.n, model.m);
+        let m = model.m;
         if input_derivative
             .is_some_and(|values| values.len() != m || values.iter().any(|&value| !finite(value)))
         {
@@ -295,6 +295,27 @@ impl HarmonicFactor<'_> {
         admit_response(model)?;
         direction.validate(model, &mut cancelled)?;
         let response = self.response(input, &mut cancelled)?;
+        self.response_parameter_from_primal(
+            input,
+            direction,
+            input_derivative,
+            response,
+            &mut cancelled,
+        )
+    }
+
+    // Caller has admitted the complete operation and validated the direction.
+    // Reuse its identical primal response so a mixed jet needs five solves.
+    pub(super) fn response_parameter_from_primal(
+        &self,
+        input: &[C64],
+        direction: HarmonicParameterDirection<'_>,
+        input_derivative: Option<&[C64]>,
+        response: HarmonicResponse,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicParameterResponse, HarmonicError> {
+        let model = self.model;
+        let (n, m) = (model.n, model.m);
         let action = generator_action(
             model,
             &direction,
@@ -305,9 +326,14 @@ impl HarmonicFactor<'_> {
         let mut rhs = action.generator.clone();
         for i in 0..n {
             poll(&mut cancelled)?;
-            let range = i*m..(i+1)*m;
-            let terms = super::input_tangent_sums(&model.g[range.clone()],
-                direction.ports.map(|dg| &dg[range]), input, input_derivative, |_| true)?;
+            let range = i * m..(i + 1) * m;
+            let terms = super::input_tangent_sums(
+                &model.g[range.clone()],
+                direction.ports.map(|dg| &dg[range]),
+                input,
+                input_derivative,
+                |_| true,
+            )?;
             rhs[i] = super::input_value(terms, rhs[i])?;
         }
         let (state_derivative, relative_derivative_residual) =
@@ -321,7 +347,15 @@ impl HarmonicFactor<'_> {
             relative_derivative_residual,
             &mut cancelled,
         )?;
-        finish_response(model, direction.ports, response, observed, input, input_derivative, &mut cancelled)
+        finish_response(
+            model,
+            direction.ports,
+            response,
+            observed,
+            input,
+            input_derivative,
+            &mut cancelled,
+        )
     }
 }
 
@@ -345,31 +379,50 @@ pub(super) fn observe_state(
         // The action's dQ*x vector was rounded for the generator. Reapply its
         // original row here so Q*dx and dQ*x cancel before effort/energy rounding.
         let original = super::storage_row(model, i, &response.state)?;
-        let derivative = super::storage_tangent_row(model, i, &response.state,
-            &state_derivative, direction.storage)?;
+        let derivative = super::storage_tangent_row(
+            model,
+            i,
+            &response.state,
+            &state_derivative,
+            direction.storage,
+        )?;
         effort_derivative[i] = super::input_value(derivative, C64::ZERO)?;
         super::add_stored_work(&mut energy_derivative, original, state_derivative[i])?;
         super::add_stored_work(&mut energy_derivative, derivative, response.state[i])?;
     }
-    let energy_derivative = energy_derivative.value()
+    let energy_derivative = energy_derivative
+        .value()
         .ok_or_else(|| invalid("stored-energy tangent is not representable"))?;
     let mut output_derivative = vec![C64::ZERO; m];
     for (p, value) in output_derivative.iter_mut().enumerate() {
         poll(&mut cancelled)?;
         *value = super::port_output_tangent(
-            &model.g, m, p, &effort_derivative, direction.ports, &response.effort,
+            &model.g,
+            m,
+            p,
+            &effort_derivative,
+            direction.ports,
+            &response.effort,
         )?;
     }
     let mut loss_derivative = Sum::default();
     for i in 0..n {
         poll(&mut cancelled)?;
         let original = super::resisting_row(model, i, &response.state, &response.effort)?;
-        let derivative = super::resisting_tangent_row(model, i, &response.state,
-            &response.effort, &state_derivative, &effort_derivative, direction)?;
+        let derivative = super::resisting_tangent_row(
+            model,
+            i,
+            &response.state,
+            &response.effort,
+            &state_derivative,
+            &effort_derivative,
+            direction,
+        )?;
         super::add_dissipative_work(&mut loss_derivative, original, effort_derivative[i])?;
         super::add_dissipative_work(&mut loss_derivative, derivative, response.effort[i])?;
     }
-    let loss_derivative = loss_derivative.value()
+    let loss_derivative = loss_derivative
+        .value()
         .ok_or_else(|| invalid("dissipative-power tangent is not representable"))?;
     if effort_derivative
         .iter()
@@ -413,12 +466,23 @@ pub(super) fn finish_response(
     let mut port_power_derivative = Vec::with_capacity(m);
     for p in 0..m {
         poll(&mut cancelled)?;
-        let derivative = super::peak_power_tangent(input[p], response.output[p],
-            input_derivative.map(|du| du[p]), output_derivative[p])?;
+        let derivative = super::peak_power_tangent(
+            input[p],
+            response.output[p],
+            input_derivative.map(|du| du[p]),
+            output_derivative[p],
+        )?;
         port_power_derivative.push(derivative);
     }
-    let supply_derivative = super::physical_power_tangent(model, input, input_derivative,
-        &response.effort, &effort_derivative, port_derivative, &mut cancelled)?;
+    let supply_derivative = super::physical_power_tangent(
+        model,
+        input,
+        input_derivative,
+        &response.effort,
+        &effort_derivative,
+        port_derivative,
+        &mut cancelled,
+    )?;
     let balance_derivative = loss_derivative - supply_derivative;
     if effort_derivative
         .iter()
