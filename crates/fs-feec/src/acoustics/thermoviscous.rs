@@ -358,7 +358,7 @@ pub struct PreparedThermoviscousScattering<'a, 'c> {
 /// Cycle-averaged work [W]; no clipping of loss or residual is performed.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermoviscousPower {
-    /// Total work entering through traction, structural forces and volume sources.
+    /// Total work through traction, structural forces and volume/surface sources.
     pub input_w: f64,
     /// Mechanical work Re(integral(conj(v) . f dV))/2 [W] from original
     /// distributed fluid forces. Included in input_w, with no density scaling.

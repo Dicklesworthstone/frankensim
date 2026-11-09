@@ -11,7 +11,7 @@
 //! finite-wall conduction, original structural damping and passive structural
 //! relaxation heat are integrated
 //! along that SAME trajectory.
-//! Pressure, structural-force, body-force and volumetric-heat work use their actual
+//! Pressure, structural-force, body-force and volume/surface-heat work use their actual
 //! interval-integrated dual flows on that same trajectory.
 //! No response curve, fitted decay or endpoint-loss approximation is involved.
 //!
@@ -518,7 +518,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 input[row * ports + mechanical_ports + source_index] = coefficient / scale[row];
             }
         }
-        // Original weak volumetric heating belongs only on translational
+        // Original weak volume/surface heating belongs only on translational
         // temperature rows. The SAME full mixed mass inverse then supplies the
         // pressure/thermal response, molecular exchange and wall reaction.
         for (source_index, source) in heat_sources.iter().enumerate() {

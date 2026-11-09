@@ -1588,6 +1588,39 @@ Three new pressure tests pass: exact complex closed-volume compression/work in a
 
 Final focused native verification on the completed extensions: 25 distinct cases PASS across selected invocations, 14 new and 11 retained. Pressure multiport 7; resolved LNS/wall 7; FE hybrid 3; source hybrid 3; source finite walls 2; retained resolved source/duct 3. All newly added cases executed. Rust 1.100.0-nightly (2026-08-19); FE tests use the original-source Cargo seam. A redundant complete material rebuild was killed by memory pressure; coupled tests then compiled current FE/source files against the already verified complete original dependency artifacts from the same compiler, with coherent split-metadata/rlib pairs. No numerical substitutes or production dependency changes. DSR/RCH, the pinned toolchain and the canonical sibling constellation remain unavailable; this is not a full-workspace or instrument-render qualification.
 
+## External surface heat forcing on original wall traces
+
+`ThermoviscousFe::surface_heat_source` projects a signed original P2 surface
+density [m^-2] through the same physical boundary mass used by conductive walls.
+A drive [W] supplies inward heat flux [W/m^2]. All global hierarchical
+coefficients, including edge bubbles and zero-net spatial shapes, survive;
+midpoint samples are not substituted for hierarchical coefficients. Original
+curved geometry and declared surface quadrature supply the physical measure.
+The dimensionless shape integral uses the full vertex partition of unity,
+independently of eliminated temperature coordinates; no area normalization occurs.
+
+The source is the existing `ThermoviscousHeatSource` bound to the exact FE owner.
+Harmonic, loaded-scattering, conforming-interface and causal source paths reuse
+its cached weak load, the existing complete mixed operator and original signed
+`theta*q` work, with `theta=T'/T0`. Harmonic peak work has the factor one-half;
+causal work integrates the actual trajectory. Neither acoustic available-energy
+input nor first-order supplied heat is inferred from a residual or deposited
+as mean caloric heat. Original volume, solid and structural losses stay separate.
+
+Faces must be unique original no-slip walls and may carry the existing full
+structural motion. Exact isothermal faces, completely constrained temperature
+traces, nonfinite coefficients and nonzero support outside the selection refuse.
+On a conductive wall the source supplies additional heat at the common fluid/solid
+interface; the original passive solid and its temperatures remain. This does not
+prescribe a remote backing temperature, infer a heat-production law, evolve the
+mean equilibrium or move the reference geometry. Per-face assembly bounds
+cancellation latency and temporary storage; no source sampling enters warm solves.
+
+Five focused regressions specify independent P2 and curved surface moments,
+signed Fourier flux and absolute work on three original mesh rungs, thermally
+generated sound under independently closed acoustic loads, full molecular/solid/
+moving-wall trajectory subdivision, source binding and transactional refusal.
+
 ## Finite solid heat fields in resolved thermoviscous time evolution
 
 `ThermoviscousFe::prepare_time_with_thermal_fields` retains the actual finite

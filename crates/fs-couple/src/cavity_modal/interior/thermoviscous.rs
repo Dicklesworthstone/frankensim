@@ -343,6 +343,24 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
             .volume_heat_source(quadrature_order, density_per_m3, cancelled)?)
     }
 
+    /// Integrate imposed inward wall heat flux on the original P2 trace.
+    /// The full global hierarchical coefficients are a signed density [m^-2];
+    /// a harmonic or causal drive [W] gives the physical flux [W/m^2].
+    /// Original curved surface measure, thermal constraints and material owner
+    /// remain bound to the returned source. It uses the same heat-source APIs
+    /// as volume release, without volume smearing or shape normalization.
+    /// This is first-order acoustic forcing, not mean caloric deposition.
+    pub fn surface_heat_source<'a>(
+        &'a self,
+        faces: &[[u32; 3]],
+        density_per_m2: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousHeatSource<'a, 'c>, ThermoviscousSourceError> {
+        Ok(self
+            .fe
+            .surface_heat_source(faces, density_per_m2, cancelled)?)
+    }
+
     /// Causal full-field motion and work with this SAME immutable fluid source.
     /// The borrow retains the source, FE and structural model for every step.
     /// Original molecular capacities and rates own full P2 internal-temperature

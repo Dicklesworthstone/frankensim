@@ -1,6 +1,6 @@
-//! Causal volumetric heat release on the original complete thermoviscous state.
+//! Causal volume/surface heating on the original complete thermoviscous state.
 //!
-//! Spatial heat loads are the SAME original P2 weak integrals as the harmonic
+//! Spatial heat loads are the SAME original P2 volume/surface integrals as the harmonic
 //! heat-source owner. Real held amplitudes [W] enter the translational thermal
 //! equation before the full mixed mass inverse is applied. No fitted source
 //! response, reduced state, endpoint loss or prescribed pressure increment is
@@ -35,7 +35,7 @@ pub struct ThermoviscousHeatTimeStep {
 }
 
 impl<'c> ThermoviscousFe<'c> {
-    /// Prepare real held volumetric heating alongside every original field.
+    /// Prepare real held volume or surface heating alongside every original field.
     ///
     /// Sources must be nonempty and belong to this exact FE owner. Their order,
     /// sign and normalization are retained. The original weak loads are copied
@@ -146,7 +146,7 @@ impl<'c> PreparedThermoviscousHeatTime<'_, 'c> {
 
     /// One complete candidate under real held pressure, force and heat drives.
     ///
-    /// Heat amplitudes [W] multiply the original spatial densities [m^-3].
+    /// Heat amplitudes [W] multiply original volume [m^-3] or surface [m^-2] shapes.
     /// Source work uses the exact interval integral of the resolved temperature
     /// observation, with NO harmonic factor of one-half. It is acoustic
     /// available-energy input, not the first-order enthalpy supplied to the
@@ -199,7 +199,7 @@ impl<'c> PreparedThermoviscousHeatTime<'_, 'c> {
             .iter()
             .any(|work| !work.is_finite())
         {
-            return Err(invalid("nonfinite original volumetric heat-source work"));
+            return Err(invalid("nonfinite original heat-source work"));
         }
         let heat_source_work_j = heat_source_work_by_source_j
             .iter()

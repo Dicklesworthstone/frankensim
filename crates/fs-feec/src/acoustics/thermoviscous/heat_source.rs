@@ -1,6 +1,7 @@
 //! Heat-release forcing of the ORIGINAL resolved fluid equations.
 //!
-//! A prescribed volumetric heat rate q' [W/m^3] enters the temperature equation
+//! A prescribed volume heat rate q' [W/m^3] or inward surface flux [W/m^2]
+//! enters the temperature equation through its original volume or surface measure
 //! before eliminating either pressure or temperature. Thus expansion, thermal
 //! diffusion, molecular relaxation, viscous losses and moving-wall reaction all
 //! follow the existing mixed operator. For exp(+i omega t), acoustic thermal
@@ -12,9 +13,12 @@ use super::super::helmholtz::heterogeneous::MAX_QUADRATURE_ORDER;
 use super::body_force::ThermoviscousBodyForceSource;
 use super::*;
 
-/// An original-volume spatial heat distribution, evaluated once during setup.
+mod surface;
+
+/// An original spatial heat distribution, projected once during setup.
 ///
-/// Source density is in m^-3, so a drive amplitude in W produces W/m^3.
+/// Volume density is in m^-3; surface density is in m^-2. A drive amplitude
+/// in W produces volumetric heating [W/m^3] or inward surface flux [W/m^2].
 /// The integral need not be one: no normalization, clipping or replacement of
 /// a signed heating/cooling distribution is performed. The retained model
 /// identity prevents reusing a source on a different mesh or thermal trace.
@@ -25,8 +29,8 @@ pub struct ThermoviscousHeatSource<'a, 'c> {
 }
 
 impl ThermoviscousHeatSource<'_, '_> {
-    /// Dimensionless integral of the original source shape over fluid volume.
-    /// Multiply by the drive amplitude [W] for the heat-release phasor [W].
+    /// Dimensionless integral over the original fluid volume or selected surface.
+    /// Multiply by the drive amplitude [W] for the supplied heat phasor [W].
     #[must_use]
     pub fn integrated_shape(&self) -> f64 {
         self.integral

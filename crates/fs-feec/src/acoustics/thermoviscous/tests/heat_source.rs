@@ -1,5 +1,7 @@
 use super::*;
 
+mod surface;
+
 fn sealed(mesh: &TetComplex, positions: &[[f64; 3]], size: [f64; 3]) -> ThermoviscousBoundary {
     let mut boundary = boundaries(mesh, positions, size, false);
     for port in boundary.ports.drain(..) {

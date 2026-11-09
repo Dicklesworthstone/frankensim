@@ -3,7 +3,7 @@
 //! The harmonic source owners provide the original weak spatial loads. Held
 //! real force amplitudes [N] enter the vector momentum equations, including
 //! the constrained moving-wall rows, before the SAME full mixed mass inverse.
-//! Heating [W] enters the translational thermal rows. Every pressure, velocity,
+//! Volume or surface heating [W] enters the translational thermal rows. Every pressure, velocity,
 //! temperature, molecular, finite-wall and structural coordinate is retained.
 //!
 //! Source work is integrated along that same prepared trajectory:
@@ -56,7 +56,8 @@ pub struct ThermoviscousVolumeTimeStep {
 impl<'c> ThermoviscousFe<'c> {
     /// Prepare held original body forces and heating with every resolved field.
     ///
-    /// At least one volume source is required. Sources must belong to this
+    /// At least one force or heat source is required, including surface heat.
+    /// Sources must belong to this
     /// exact fluid/structure owner; their order, sign and normalization survive.
     /// Original callbacks are never invoked during preparation or warm steps.
     /// Force-source count and the complete prepared port/state/work budgets
