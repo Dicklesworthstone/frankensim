@@ -84,6 +84,11 @@
 //! uniform pressure model may add the native compact inner-end correction. Pressure and flow are solved
 //! together without dividing by a neck or cavity resonance. Their mutual
 //! radiation can reinforce or cancel; no independent-source power sum is used.
+//! [`DistributedCavityOpeningRadiation`] retains finite-cylinder scattering
+//! and distinct inner/outer flows, including duct compression and thermal
+//! loss. Its molecular route binds the SAME original reservoir law to the
+//! cavity. No compact approximation, growing transfer matrix or inverse at
+//! a pressure/flow node replaces that native two-ended response.
 //!
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
@@ -128,7 +133,8 @@ mod relaxation;
 pub use relaxation::ModalStructuralRelaxation;
 mod openings;
 pub use openings::{
-    CavityOpeningRadiation, CavityOpeningResponse, CylindricalCavityNeck, MAX_CAVITY_OPENINGS,
+    CavityOpeningRadiation, CavityOpeningResponse, CylindricalCavityNeck,
+    DistributedCavityOpeningRadiation, DistributedOpeningControls, MAX_CAVITY_OPENINGS,
 };
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
@@ -696,8 +702,9 @@ pub struct PowerBreakdown {
     /// Signed work leaving the cavity through explicit openings [W].
     /// This is an internal transfer, not a second total-system debit.
     pub cavity_openings: f64,
-    /// Positive internal-neck viscous heat [W], excluding exterior radiation.
-    /// Separate from bulk/local-wall `cavity` loss and debited once.
+    /// Internal neck/duct absorption [W], excluding exterior radiation.
+    /// Distributed ducts retain viscous, thermal and molecular work, including
+    /// signed numerical roundoff. Separate from `cavity` loss and debited once.
     pub opening_necks: f64,
     /// Exterior radiated power `1/2 Re (v^H Zm v)` (zero without a
     /// radiation matrix). With openings this is the COMPLETE joint wall/mouth
@@ -747,8 +754,9 @@ pub struct ConvergedResponse {
     /// changes and conservative resonances are visible even at zero active
     /// power. See [`VibroacousticModel::frf_with_convergence`] for the metric.
     pub energy_norm_delta: f64,
-    /// Relative complex opening-flow vector change, with all original openings
-    /// retained in both solves; zero without explicit openings.
+    /// Largest relative complex flow-vector change at the inner or outer
+    /// opening faces, retaining every original duct in both solves.
+    /// Zero without explicit openings.
     pub opening_flow_delta: f64,
     /// Mode counts used: (structure full, cavity full, structure half,
     /// cavity half).
@@ -772,6 +780,7 @@ pub struct VibroacousticModel {
     coupling: Vec<f64>,
     z_modal: Option<ModalRadiationLoading>,
     openings: Option<CavityOpeningRadiation>,
+    distributed_openings: Option<DistributedCavityOpeningRadiation>,
 }
 
 impl VibroacousticModel {
@@ -884,6 +893,7 @@ impl VibroacousticModel {
             coupling,
             z_modal,
             openings: None,
+            distributed_openings: None,
         })
     }
 
@@ -987,6 +997,13 @@ impl VibroacousticModel {
         {
             return Err(VibroError::BadParameter {
                 what: "cavity basis and molecular law must use the same gas density and sound speed",
+            });
+        }
+        if self.distributed_openings.as_ref().is_some_and(|openings|
+            openings.molecular_state() != Some(&relaxation))
+        {
+            return Err(VibroError::BadParameter {
+                what: "distributed opening and cavity compression must retain the same original molecular state",
             });
         }
         if self.eta_a != 0.0 {
@@ -1201,8 +1218,14 @@ impl VibroacousticModel {
             .as_ref()
             .map(|loading| loading.at_omega(omega))
             .transpose()?;
-        let opening_frequency = self.openings.as_ref()
-            .map(|openings| openings.at_frequency(omega)).transpose()?;
+        let opening_frequency = match (&self.openings, &self.distributed_openings) {
+            (Some(law), None) => Some(openings::CoupledOpeningFrequency::Compact(law.at_frequency(omega)?)),
+            (None, Some(law)) => Some(openings::CoupledOpeningFrequency::Distributed(law.at_frequency(omega)?)),
+            (None, None) => None,
+            _ => return Err(VibroError::BadParameter {
+                what: "compact and distributed openings cannot duplicate one exterior",
+            }),
+        };
         let relaxation = self.structural_relaxation.as_ref()
             .map(|material| material.at_frequency(omega)).transpose()?;
         let n_s_full = self.omegas_s.len();
@@ -1231,8 +1254,8 @@ impl VibroacousticModel {
                 what: "retained mode counts must be in 1..=basis size",
             });
         }
-        let opening_count = opening_frequency.as_ref().map_or(0, |openings| openings.count());
-        let n = keep_s + keep_a + opening_count;
+        let opening_unknowns = opening_frequency.as_ref().map_or(0, |openings| openings.unknown_count());
+        let n = keep_s + keep_a + opening_unknowns;
         let w2 = omega * omega;
         if !w2.is_finite() || w2 == 0.0 {
             return Err(VibroError::BadParameter {
@@ -1471,7 +1494,8 @@ impl VibroacousticModel {
     /// bases. Attached dispersive materials/boundaries and exterior radiation
     /// retain their own storage: this fixed reference norm is not a claim
     /// about their additional stored energy. Explicit openings remain in both
-    /// solves and also compare their complete complex volume-flow vector.
+    /// solves and also compare their complete complex volume-flow vectors
+    /// separately at their inner and outer faces.
     ///
     /// [ANSYS Theory Reference]: https://ansyshelp.ansys.com/public/Views/Secured/corp/v252/en/ans_thry/thyacous_aoq.html
     ///
@@ -2209,6 +2233,7 @@ mod review_regressions {
             coupling,
             z_modal: None,
             openings: None,
+            distributed_openings: None,
         }
     }
 

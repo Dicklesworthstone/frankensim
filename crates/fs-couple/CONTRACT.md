@@ -11359,3 +11359,75 @@ conversion, original one/two-layer material sources against an independent
 80-digit physical transfer/positive-work reference, area and reactive limits,
 and original domain/budget/cancellation admission. Native Rust execution and
 formatting status are reported separately.
+
+## Distributed opening ducts in the joint vibroacoustic response
+
+`vibroacoustic::DistributedCavityOpeningRadiation` extends the joint wall/mouth
+loading owner to finite cylindrical ducts. The original sealed-cavity pressure
+basis still starts with its uniform zero mode; cavity volume/modal norms exclude
+the physical duct volume. `with_distributed_cavity_openings` is exclusive with
+compact opening or structural-only exterior loading. One complete original
+exterior impedance retains every wall/mouth and mouth/mouth interference term,
+its original source declaration, exact frequency grid, basis and physical units.
+The original full structural indices remain fixed under modal truncation.
+
+Each duct retains two distinct physical unknowns: flow from cavity into duct
+and flow from duct into exterior. The native `fs_duct::compose::TwoPort`
+scattering equations enter the same simultaneous structure/pressure/flow solve.
+Only inner flow enters the cavity weak equation; only outer flow excites the
+joint exterior. No division by transmission, duct admittance, cavity resonance
+or pressure-node determinant occurs. Native decaying-wave construction retains
+finite-length resonances, compressibility and attenuation without a growing
+ABCD transfer matrix. Each native cylinder is prepared once and its original
+response reused over the declared exterior samples.
+
+The equilibrium constructor uses native Bessel viscous/thermal propagation.
+The molecular constructor uses the original `MolecularDuct`, retaining the
+complete `RelaxationState` and explicitly chosen wall-diffusion resolution.
+It binds that same state to cavity compression or requires exact equality with
+an existing law; either attachment order refuses equilibrium substitution or
+replacement of the molecular reservoirs. `Some(wall)` retains the original
+joint thermal/molecular law and its admitted frequency band; `None` explicitly
+selects adiabatic slip walls. No parallel equilibrium-Cp thermal shunt or
+empirical molecular attenuation is added. Original scalar cavity-loss exclusion
+continues to apply to molecular cavities.
+
+Controls independently declare the reference transverse domain
+`omega * radius / sqrt(R_specific * T) <= maximum_isothermal_ka <= 1`, native
+entrance-composition conditioning, and scattering-face/work residual tolerance.
+There is no compact axial `k*length` ceiling. Optional native inner-end inertia
+is still exclusive to ONE uniform pressure mode with reference radius ka <= 0.25;
+a resolved multimode cavity
+uses no added entrance correction. The exterior owns the outer end exactly
+once. This is frozen, linear, quiescent, plane-pressure gas propagation through
+straight mechanically rigid ducts. The reference transverse bound and native
+sampled wall-error admission are approximation domains, not a continuum error
+certificate. Transverse modes, mean flow, evolving gas, nonlinear edge jets,
+and compliant or spatially varying duct walls are outside this attachment.
+
+The response exposes both flow vectors and native two-sided `TwoPortPower`
+observations. Native right-face inward flow is the negative of exterior flow.
+Original scattering fields are checked against solved physical face pressures
+and flows, and absorption is checked independently against signed
+`Re(p_inner conj(Q_inner) - p_outer conj(Q_outer))/2`. Materially active or
+inconsistent work refuses; signed numerical roundoff is retained. Internal
+viscous/thermal/molecular duct absorption is debited once as `opening_necks`;
+joint exterior work is debited once as `radiated`. Cavity outward opening work
+is an internal transfer. Modal convergence compares inner and outer flow
+vectors separately in addition to the existing modal response metric.
+
+Focused verification: eight native physical tests passed with the pinned July
+2026 compiler using real `fs-math`, original `fs-la` complex LU, native
+`TwoPort` constitutive/composition/power methods, and the exact numeric source
+leaves. Four existing compact tests still pass. New tests cover independent
+quarter/half/full-wave continuum transfer under three scattering references
+with and without the original series entrance,
+opaque transmission with finite absorption, signed cavity-basis invariance and
+complete mutual wall/cavity/duct work, and truncation at original exterior
+indices while retaining both end flows. Three additional public integration
+tests cover native Bessel/Rayleigh/structural relaxation composition, the same
+molecular duct and complex cavity compliance, and physical/source admission.
+Those public tests were source/API reviewed and syntax parsed, but full Cargo
+execution remains unavailable in this session because sibling workspace
+sources and writable dependency/build storage are unavailable. The native
+source-slice result does not claim a whole-workspace build.

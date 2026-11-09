@@ -1,7 +1,7 @@
 //! Joint radiation of the moving structure and actual cavity openings.
 //!
 //! A rigid-wall pressure basis retains its uniform compression mode. Each
-//! opening adds an outward volume-flow unknown, not a second Helmholtz mode.
+//! opening retains physical end-flow unknowns, not a second Helmholtz mode.
 //! The exterior sees [original structural velocities, opening volume flows]
 //! through ONE complete sampled impedance. The reciprocal cavity map supplies
 //! both opening pressure and outward flow in the acoustic weak equations.
@@ -14,11 +14,56 @@ mod physics;
 pub use physics::CavityOpeningResponse;
 use physics::OpeningFrequency;
 pub(super) use physics::flow_delta;
+mod distributed;
+pub use distributed::{DistributedCavityOpeningRadiation, DistributedOpeningControls};
 
-/// Maximum number of explicitly retained compact openings.
+/// Same coupled solve; the finite duct retains both of its physical end flows.
+pub(super) enum CoupledOpeningFrequency<'a> {
+    Compact(OpeningFrequency<'a>),
+    Distributed(distributed::DistributedOpeningFrequency<'a>),
+}
+impl CoupledOpeningFrequency<'_> {
+    pub(super) fn unknown_count(&self) -> usize {
+        match self {
+            Self::Compact(law) => law.count(),
+            Self::Distributed(law) => law.unknown_count(),
+        }
+    }
+    pub(super) fn add_operator(
+        &self,
+        omega: f64,
+        bulk: f64,
+        lambdas: &[f64],
+        matrix: &mut [C64],
+        keep_s: usize,
+        keep_a: usize,
+    ) -> Result<(), VibroError> {
+        match self {
+            Self::Compact(law) => law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a),
+            Self::Distributed(law) => {
+                law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a)
+            }
+        }
+    }
+    pub(super) fn response(
+        &self,
+        omega: f64,
+        displacement: &[C64],
+        pressure: &[C64],
+        flow: &[C64],
+    ) -> Result<CavityOpeningResponse, VibroError> {
+        match self {
+            Self::Compact(law) => law.response(omega, displacement, pressure, flow),
+            Self::Distributed(law) => law.response(omega, displacement, pressure, flow),
+        }
+    }
+}
+
+/// Maximum number of explicitly retained compact or distributed openings.
 pub const MAX_CAVITY_OPENINGS: usize = 64;
 
-/// A short straight cylindrical neck inside the exterior radiation boundary.
+/// A straight cylindrical neck inside the exterior radiation boundary.
+/// Compact and distributed owners impose their own axial propagation domains.
 ///
 /// The exterior matrix contains the OUTER end, including radiation mass and
 /// loss, exactly once. The inner entrance either belongs to the resolved cavity
@@ -271,7 +316,8 @@ impl VibroacousticModel {
                 what: "cavity openings must retain the original structural and pressure bases",
             });
         }
-        if self.z_modal.is_some() || self.openings.is_some() {
+        if self.z_modal.is_some() || self.openings.is_some() || self.distributed_openings.is_some()
+        {
             return Err(invalid(
                 "one complete joint exterior replaces separate structural radiation",
             ));
