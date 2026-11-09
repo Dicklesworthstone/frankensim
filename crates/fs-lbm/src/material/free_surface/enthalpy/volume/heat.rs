@@ -507,6 +507,18 @@ impl<'a, 's, 'm> SlabHeatState<'a, 's, 'm> {
         gate: &CancelGate,
         cx: &Cx<'_>,
     ) -> Result<balance::Response, Error> {
+        self.state_and_pressure_response(increment, gate, cx)
+            .map(|(_, response)| response)
+    }
+
+    // Coupled contact reuses the very same original caloric endpoint and
+    // pressure response, without inverting or hashing the liquid state twice.
+    fn state_and_pressure_response(
+        &self,
+        increment: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<(EquilibriumPhaseState, balance::Response), Error> {
         checkpoint(gate, cx)?;
         let next = self
             .original
@@ -542,11 +554,14 @@ impl<'a, 's, 'm> SlabHeatState<'a, 's, 'm> {
                 "slab heat density/velocity response is unrepresentable",
             ));
         }
-        Ok(balance::pressure_response(
-            self.inertia,
-            speed,
-            self.incoming_speed,
-            speed_slope,
+        Ok((
+            next,
+            balance::pressure_response(
+                self.inertia,
+                speed,
+                self.incoming_speed,
+                speed_slope,
+            ),
         ))
     }
 

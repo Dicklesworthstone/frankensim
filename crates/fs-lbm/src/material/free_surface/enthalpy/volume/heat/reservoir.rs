@@ -6,6 +6,9 @@ use fs_material::phase::exchange::pair::{
     exchange_with_checkpoint,
 };
 
+/// Simultaneous endpoint contact and native mechanical-work balance.
+pub mod coupled;
+
 /// Independent source-trajectory, represented-storage and native moving gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceSlabReservoirHeatControls {

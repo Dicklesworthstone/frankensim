@@ -6,6 +6,9 @@ use fs_lbm::material::free_surface::enthalpy::volume::heat::reservoir::{
 };
 use fs_material::phase::exchange::pair::{FinitePhaseBody, FinitePhaseExchangeControls};
 
+#[path = "reservoir/coupled.rs"]
+mod coupled;
+
 const DT: f64 = 0.001;
 const HEIGHT: f64 = 0.002;
 const CP: f64 = 2000.0;
