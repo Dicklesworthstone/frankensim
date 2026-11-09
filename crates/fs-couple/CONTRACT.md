@@ -10324,3 +10324,27 @@ no waveform-direction solve, source perturbation, refit or state reduction per
 objective parameter query. Existing physical source refusals, cancellation,
 budgets and two-grid direction admission remain. This is a local finite-harmonic
 fixed-phase derivative, not a proof of stability or harmonic-tail convergence.
+
+
+### Shared intrinsic creep in piano hammer and damper contacts
+
+The grand-piano `felt_relaxation` adapter delegates Prony conversion, prepared
+Kelvin histories and positive heat to
+`fs_material::fiber::felt_rate::CreepSpectrum`. It supplies only the
+work-conjugate area/thickness map; mechanical Memory stays in metres.
+Hammer and finite-gap damper forces retain the original simultaneous contact
+solve and WoolFelt discrete-gradient quadrature. Reference acceptance
+propagates `try_advance` refusal through existing frame transactions; the
+live path include retains its admitted-history compatibility entry point.
+
+Zero-arm compliance, memory and heat stay exact zero. Resolvable weak arms
+formerly discarded by the example cutoff and representable long recovery
+tails are now retained. Rate-enabled audio is a declared numerical/physical
+change; unchanged rendered audio and measured calibration are not claimed.
+
+Seven focused adapter groups pass natively against the actual shared source:
+original complex compliance, analytic SI creep/recovery, held-force work/heat,
+area partition, weak loss/tails, zero arms and refusal/retry. The combined
+source run passes all 24 shared-kernel, original felt/Prony and adapter groups.
+Full reference rendering and engine-piano integration remain unrun. Generic
+DrivenBody assembly and the remaining felt-adapter unification remain open.

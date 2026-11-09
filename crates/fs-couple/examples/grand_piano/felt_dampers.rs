@@ -697,7 +697,7 @@ impl Prepared {
                 let old = &self.history[i];
                 let force = self.force[i];
                 let overlap = self.sites[i].projection.position(q) - group.next_height;
-                let (memory, viscous) = group.material.advance(&old.memory, force);
+                let (memory, viscous) = group.material.try_advance(&old.memory, force)?;
                 let start = old.overlap - group.material.deformation(&old.memory);
                 let end = overlap - group.material.deformation(&memory);
                 if !overlap.is_finite()

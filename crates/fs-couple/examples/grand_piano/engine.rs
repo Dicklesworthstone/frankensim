@@ -605,7 +605,7 @@ impl Instrument {
             let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
             let end=self.contact_hammer_projection[i]*self.hammer_models[ci].position(&self.hammer_next[ci].motion)-positions[i]-self.contact_recession_m[i];
             let material=&self.creep[i];let old=&self.contacts[i];
-            let (memory,viscous)=material.advance(&old.memory,0.0);
+            let (memory,viscous)=material.try_advance(&old.memory,0.0).map_err(Error::Contact)?;
             relaxation_loss+=viscous;felt_loss+=viscous;
             if old.enabled {
                 let start_elastic=old.overlap-material.deformation(&old.memory);
@@ -895,7 +895,7 @@ impl Instrument {
             let ci=self.bank.strings[self.bank.contact_strings[i]].course;let thickness=self.contact_thickness_m[i];
             let end=self.contact_hammer_projection[i]*self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q)-self.contact_recession_m[i];
             let material=&self.creep[i];let old=&self.contacts[i];
-            let (memory,viscous)=material.advance(&old.memory,self.force[i]);
+            let (memory,viscous)=material.try_advance(&old.memory,self.force[i]).map_err(Error::Contact)?;
             relaxation_loss+=viscous;felt_loss+=viscous;
             if old.enabled {
                 let start_elastic=old.overlap-material.deformation(&old.memory);
