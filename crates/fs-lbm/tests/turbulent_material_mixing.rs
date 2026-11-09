@@ -4,6 +4,12 @@
 #[path = "nsf3_thermochemical/source.rs"]
 mod source;
 
+#[path = "turbulent_material_mixing/heat.rs"]
+mod heat;
+
+#[path = "turbulent_material_mixing/adaptive.rs"]
+mod adaptive;
+
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     DensityProjectionControls, FlowFace, FlowField, FluidProperties, FvBoundary, FvFlow,

@@ -17,7 +17,7 @@ use crate::conjugate::{
 use fs_exec::CancelGate;
 
 mod thermochemical;
-pub use thermochemical::TurbulentGasSpeciesStep;
+pub use thermochemical::{TurbulentGasSpeciesAdvance, TurbulentGasSpeciesStep};
 
 fn refuse(reason: &str) -> ChtError {
     ChtError::InvalidInput {

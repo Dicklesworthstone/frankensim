@@ -1441,3 +1441,52 @@ The existing implicit-viscosity policy requires a Newtonian law and explicitly
 refuses the Carreau selection. Temperature does not evolve, loss is not deposited
 as heat, and there is no elastic memory or independently calibrated extensional
 response. Original slenderness/resolution limits and pre-pinch stopping remain.
+
+## Adaptive source-owned turbulent gas heat and species transport
+
+`FvFlow::advance_turbulent_gas_species` advances a complete physical window
+through the original material network's coarse-versus-two-half-step controller.
+Native geometry, accepted carrier masses and momentum `nu_t/Sc_t` face
+conductances remain fixed for that flow epoch. Every probe refreshes actual
+composition, donor partial enthalpy and the original caloric/EOS/transport
+endpoint. Only accepted fine steps contribute to the compensated stream ledger.
+The result `TurbulentGasSpeciesAdvance` retains local species/temperature error
+ratios, bounded work and accepted-step statistics, original-to-final physical
+audits and carrier drift against the same original accepted masses.
+
+`diffuse_turbulent_gas_transport` and `advance_turbulent_gas_transport` add
+turbulent heat to the snapshot and adaptive entries respectively. Source-derived
+`k_t = rho cp(T,Y) nu_t,heat / Pr_t` uses the retained thermal eddy field and
+positive Prandtl number; momentum `nu_t/Sc_t` remains the independent species
+law. Graded half-cell series resistances give antisymmetric internal heat
+`Q = dt K (T_left - T_right)`. Each probe samples heat and species from the
+same original state and sends both to one material reconstruction. Donor partial
+enthalpy and formation references are carried once; additional heat has its own
+accepted-only signed ledger. Solid, exterior and zero-conductivity faces supply
+no heat in this component. Molecular conduction and external wall heat retain
+their separate owners.
+
+The original 256-parcel and 4096-stream bounds apply; heat and species share the
+stream/whole-window report bound. Typed withdrawal and caloric-bracket overshoot
+may shorten adaptive trials. Other source-domain errors are fatal. Local-error,
+step and evaluation limits bound refinement; rejection/cancellation never
+publishes a partial candidate. Fixed whole-window mass, each-species, actual
+source-relative energy and endpoint entropy budgets are never multiplied by
+the number of accepted steps. The source-relative energy audit removes common
+formation references before arithmetic. Carrier drift is also measured against
+the initial flow state, not reset after every substep.
+
+Snapshots and the retained adaptive fine path remain first order in time.
+Local control is not a global-error or turbulence-model validation certificate.
+The held eddy/geometry epoch does not refresh pressure or momentum; subsequent
+flow consumers must use the returned material endpoints. The original planar
+or finite-volume turbulence closure limitations remain.
+
+Focused regressions are authored for analytic species relaxation, refreshed
+partial enthalpy, typed withdrawal recovery, variable-heat-capacity heat
+exchange, formation-reference invariance, an independent combined RK4
+reference, accepted-only heat accounting, independent Prandtl/Schmidt response,
+thermal-bracket recovery and atomic late work/source/cancellation failure.
+Scoped pinned formatting and whitespace checks passed. Full native integration
+execution remains blocked by the pinned asupersync dependency exceeding this
+environment's build resources before the changed crates compile.

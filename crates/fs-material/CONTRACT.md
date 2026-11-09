@@ -23189,3 +23189,36 @@ cancellation, complete strain admission and dispersive plane-stress recovery.
 Donor, receiver and material wall are immutable until one candidate passes the original gross-withdrawal, caloric, transport and active species wall-support gates. Common and species-specific accommodation use the same channel helper. Actual source-relative gas storage plus finite material storage must close under the fixed species/mass/energy budgets. Original gas entropy, including newly occupied volume and mixing, plus the material's authored sensible entropy must satisfy the complete closed-system entropy budget. No entropy or thermal state is assigned to the initial vacuum.
 
 This is an explicitly first-order quasistatic step for well-mixed ideal gases in fixed rigid vessels, a stationary diffuse channel and negligible flight time. Fixed vessel supports absorb momentum without boundary work; moving/rotating receivers, spatial filling transients and additional heat paths require their own owners. Six focused tests cover wall-controlled first-fill temperature and pressure, reciprocal continuation, closed/elastic limits, species fractionation and accommodation, caloric reference invariance, and atomic late source/inventory/cancellation refusal. Full material-owner test execution remains pending the complete dependency build.
+
+## Original gas candidates in the adaptive network owner
+
+`species::network::advance_candidate_adaptive` accepts original
+`SpeciesNetworkCandidate` probes through the existing bounded full-step versus
+two-half-step temporal owner. The public controls, report and candidate aliases
+retain that owner; no second integrator or caloric solver is introduced.
+Callbacks must use the supplied current snapshot, physical duration and original
+endpoint/physical controls. Closed-window admission refuses changed parcel
+identities, external species paths and external heat. The original source audit
+retains fixed volumes, canonical species and caloric/transport authorities.
+
+Only accepted fine candidates enter the compensated mass/partial-enthalpy
+ledger. `DiffusionNetworkAdvanceReport::heat` separately integrates canonical
+paired heat, including its sign; existing molecular/binary kernels report an
+empty heat list. Species and heat rows share the original 4096-row window bound.
+Probe energy residuals and actual original-to-final source-relative internal
+energy remain independent checks. Each species, total mass, energy and actual
+endpoint entropy uses the same fixed physical allowance for the entire window.
+
+Only this callback path adds typed `GasEnergyError::OutsideBracket` recovery,
+alongside the existing typed withdrawal, local-error and entropy refinement.
+It cannot convert arbitrary source/domain failures into retries. Existing
+molecular and binary retry behavior is unchanged. Rejected probes consume their
+work budget but cannot contribute heat, enthalpy or accepted state. No
+extrapolated source state or second-order/global-error guarantee is supplied.
+
+The native turbulent gas regressions exercise this adapter through source-owned
+variable-Cp heat/species mixing, independent time-refinement references,
+formation-reference invariance, accepted-only heat accounting, typed
+thermal/withdrawal recovery and transactional failure. Scoped pinned formatting
+and static review passed; native integration execution is pending the complete
+pinned dependency build.

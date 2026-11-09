@@ -6,14 +6,14 @@
 
 use super::{CancelGate, ChtError, FvFlow, MaterialAdvectionStep, VoxelDomain, poll};
 use fs_material::thermochemical_gas::energy::{
-    GasEnergySolve,
+    GasEnergyError, GasEnergySolve,
     parcel::{
         ClosedGasParcel,
         transfer::{
             snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS},
             species::network::{
-                self, SpeciesNetworkCandidate, SpeciesNetworkError, SpeciesNetworkSolve,
-                SpeciesNetworkTransfer,
+                self, SpeciesNetworkCandidate, SpeciesNetworkError, SpeciesNetworkHeatTransfer,
+                SpeciesNetworkSolve, SpeciesNetworkTransfer,
             },
         },
     },
@@ -21,6 +21,10 @@ use fs_material::thermochemical_gas::energy::{
 use fs_math::dd::Dd;
 use fs_qty::chemistry::SpeciesId;
 use std::collections::BTreeMap;
+
+mod adaptive;
+mod heat;
+pub use adaptive::TurbulentGasSpeciesAdvance;
 
 /// One complete frozen turbulent-mixing snapshot and its original gas states.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,7 +46,6 @@ pub struct TurbulentGasSpeciesStep {
 }
 
 struct PreparedCell {
-    diffusivity_m2_s: f64,
     /// Original typed basis conversion in the model's canonical species order.
     mass_fractions: Vec<f64>,
 }
@@ -50,6 +53,15 @@ struct PreparedCell {
 struct Face {
     cells: [u64; 2],
     conductance_kg_s: f64,
+}
+
+/// Frozen native geometry and turbulent coefficients for one physical window.
+/// Source composition, temperature and partial enthalpy refresh at every probe.
+struct PreparedTurbulentGasMixing<'a> {
+    pub(super) domain: &'a VoxelDomain,
+    pub(super) carrier: &'a MaterialAdvectionStep,
+    faces: Vec<Face>,
+    parcel_count: usize,
 }
 
 fn refuse(reason: &str) -> ChtError {
@@ -61,6 +73,18 @@ fn refuse(reason: &str) -> ChtError {
 
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
+}
+
+fn invalid(reason: &'static str) -> SpeciesNetworkError {
+    SpeciesNetworkError::Invalid(reason)
+}
+
+fn check(cancelled: &mut dyn FnMut() -> bool) -> Result<(), SpeciesNetworkError> {
+    if cancelled() {
+        Err(SpeciesNetworkError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn material_error(error: SpeciesNetworkError) -> ChtError {
@@ -78,8 +102,8 @@ fn visit_face(
     parcels: &BTreeMap<u64, ClosedGasParcel>,
     prepared: &BTreeMap<u64, PreparedCell>,
     duration_s: f64,
-    mut visit: impl FnMut(&SpeciesId, f64) -> Result<(), ChtError>,
-) -> Result<f64, ChtError> {
+    mut visit: impl FnMut(&SpeciesId, f64) -> Result<(), SpeciesNetworkError>,
+) -> Result<f64, SpeciesNetworkError> {
     let [left, right] = face.cells;
     let a = parcels[&left].model();
     let b = parcels[&right].model();
@@ -93,7 +117,7 @@ fn visit_face(
         let (species, fraction_a, fraction_b) = match (sources_a.get(i), sources_b.get(j)) {
             (Some(x), Some(y)) if x.species() == y.species() => {
                 if x != y || a.transport_materials()[i] != b.transport_materials()[j] {
-                    return Err(refuse(
+                    return Err(invalid(
                         "shared species has conflicting original caloric or transport sources",
                     ));
                 }
@@ -125,7 +149,7 @@ fn visit_face(
         }
         let mass = (face.conductance_kg_s * duration_s) * gradient;
         if !mass.is_finite() || mass == 0.0 {
-            return Err(refuse(
+            return Err(invalid(
                 "nonzero turbulent species transfer is unrepresentable",
             ));
         }
@@ -134,7 +158,7 @@ fn visit_face(
     }
     let net = net.to_f64();
     if !net.is_finite() {
-        return Err(refuse(
+        return Err(invalid(
             "turbulent face mass-frame account is unrepresentable",
         ));
     }
@@ -200,10 +224,41 @@ impl FvFlow {
         controls: SpeciesNetworkSolve,
         gate: &CancelGate,
     ) -> Result<TurbulentGasSpeciesStep, ChtError> {
+        if !positive(duration_s) {
+            return Err(refuse("positive turbulent mixing duration required"));
+        }
+        PreparedTurbulentGasMixing::new(
+            self,
+            domain,
+            carrier,
+            parcels,
+            turbulent_schmidt,
+            endpoints,
+            controls,
+            gate,
+        )?
+        .step_candidate(parcels, duration_s, endpoints, controls, &[], &mut || {
+            gate.is_requested()
+        })
+        .map_err(material_error)
+    }
+}
+
+impl<'a> PreparedTurbulentGasMixing<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        flow: &FvFlow,
+        domain: &'a VoxelDomain,
+        carrier: &'a MaterialAdvectionStep,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        turbulent_schmidt: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: SpeciesNetworkSolve,
+        gate: &CancelGate,
+    ) -> Result<Self, ChtError> {
         poll(gate)?;
         let cells = domain.cell_count();
         if !positive(turbulent_schmidt)
-            || !positive(duration_s)
             || !positive(controls.maximum_species_fraction)
             || controls.maximum_species_fraction >= 1.0
             || !positive(controls.mass_tolerance_kg)
@@ -212,8 +267,8 @@ impl FvFlow {
             || parcels.len() > MAX_SNAPSHOT_PARCELS
             || parcels.len() != domain.fluid_count()
             || !parcels.keys().eq(endpoints.keys())
-            || self.field.dims() != domain.dims()
-            || self.eddy_viscosity_m2_s.len() != cells
+            || flow.field.dims() != domain.dims()
+            || flow.eddy_viscosity_m2_s.len() != cells
         {
             return Err(refuse(
                 "bounded gas/flow shape and positive mixing controls required",
@@ -222,7 +277,7 @@ impl FvFlow {
         carrier.validate_diffusion_carrier(domain, gate)?;
         // Check all source-to-carrier bindings and solid entries before preparing
         // any new workspace. Original source objects remain borrowed throughout.
-        for (cell, &eddy) in self.eddy_viscosity_m2_s.iter().enumerate() {
+        for (cell, &eddy) in flow.eddy_viscosity_m2_s.iter().enumerate() {
             if cell % 256 == 0 {
                 poll(gate)?;
             }
@@ -245,59 +300,23 @@ impl FvFlow {
                 ));
             }
         }
-        let mut prepared = BTreeMap::new();
-        let mut partition = Dd::ZERO;
-        for (&id, parcel) in parcels {
+        let mut diffusivities = BTreeMap::new();
+        for &id in parcels.keys() {
             poll(gate)?;
-            let eddy = self.eddy_viscosity_m2_s[id as usize];
+            let eddy = flow.eddy_viscosity_m2_s[id as usize];
             let diffusivity = eddy / turbulent_schmidt;
             if !diffusivity.is_finite() || (eddy > 0.0 && diffusivity == 0.0) {
                 return Err(refuse("positive turbulent diffusivity is unrepresentable"));
             }
-            let thermo = parcel.model().thermodynamics();
-            let molar_masses: Vec<_> = thermo.components().iter().map(|s| s.molar_mass()).collect();
-            let composition = thermo
-                .mole_composition()
-                .to_mass_fractions(&molar_masses)
-                .map_err(|error| {
-                    refuse(&format!(
-                        "original species basis conversion refused: {error}"
-                    ))
-                })?;
-            let mut cell_partition = -Dd::from_f64(parcel.mass_kg());
-            for &fraction in composition.fractions() {
-                let mass = parcel.mass_kg() * fraction;
-                if !positive(fraction) || fraction > 1.0 || !positive(mass) {
-                    return Err(refuse(
-                        "original positive species inventory is unrepresentable",
-                    ));
-                }
-                cell_partition = cell_partition + Dd::from_f64(mass);
-            }
-            partition = partition + cell_partition.abs();
-            prepared.insert(
-                id,
-                PreparedCell {
-                    diffusivity_m2_s: diffusivity,
-                    mass_fractions: composition.fractions().to_vec(),
-                },
-            );
-        }
-        let partition = partition.to_f64();
-        if !partition.is_finite() || partition > controls.mass_tolerance_kg {
-            return Err(refuse(
-                "original source species do not partition the accepted carrier mass",
-            ));
+            diffusivities.insert(id, diffusivity);
         }
         let mut faces = Vec::new();
         faces
             .try_reserve_exact(3 * parcels.len())
             .map_err(|_| refuse("unable to allocate turbulent gas faces"))?;
-        let mut transfer_count = 0usize;
-        let mut maximum_face_mass_defect_kg: f64 = 0.0;
-        for (&id, cell) in &prepared {
+        for (&id, &diffusivity) in &diffusivities {
             poll(gate)?;
-            if cell.diffusivity_m2_s == 0.0 {
+            if diffusivity == 0.0 {
                 continue;
             }
             for side in [1, 3, 5] {
@@ -307,47 +326,113 @@ impl FvFlow {
                 else {
                     continue;
                 };
-                let next_id = next as u64;
-                let next_diffusivity = prepared[&next_id].diffusivity_m2_s;
+                let next_diffusivity = diffusivities[&(next as u64)];
                 if next_diffusivity == 0.0 {
                     continue;
                 }
-                let face = Face {
-                    cells: [id, next_id],
+                faces.push(Face {
+                    cells: [id, next as u64],
                     conductance_kg_s: carrier.diffusion_face_conductance(
                         domain,
                         [id as usize, next],
                         side / 2,
-                        [cell.diffusivity_m2_s, next_diffusivity],
+                        [diffusivity, next_diffusivity],
                     )?,
-                };
-                let defect = visit_face(&face, parcels, &prepared, duration_s, |_, _| {
-                    if transfer_count == MAX_SNAPSHOT_TRANSFERS {
-                        return Err(refuse(
-                            "turbulent species streams exceed the original snapshot bound",
-                        ));
-                    }
-                    transfer_count += 1;
-                    Ok(())
-                })?
-                .abs();
-                if defect > controls.mass_tolerance_kg {
-                    return Err(refuse(
-                        "turbulent face streams violate the zero-net-mass allowance",
+                });
+            }
+        }
+        poll(gate)?;
+        Ok(Self {
+            domain,
+            carrier,
+            faces,
+            parcel_count: parcels.len(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_candidate(
+        &self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: SpeciesNetworkSolve,
+        heat: &[SpeciesNetworkHeatTransfer],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<TurbulentGasSpeciesStep, SpeciesNetworkError> {
+        check(cancelled)?;
+        if !positive(duration_s) || heat.len() > MAX_SNAPSHOT_TRANSFERS {
+            return Err(invalid(
+                "positive mixing duration and bounded heat rows required",
+            ));
+        }
+        self.audit_carrier(parcels, controls.mass_tolerance_kg, cancelled)?;
+        let mut prepared = BTreeMap::new();
+        let mut partition = Dd::ZERO;
+        for (&id, parcel) in parcels {
+            check(cancelled)?;
+            let thermo = parcel.model().thermodynamics();
+            let molar_masses: Vec<_> = thermo.components().iter().map(|s| s.molar_mass()).collect();
+            let composition = thermo
+                .mole_composition()
+                .to_mass_fractions(&molar_masses)
+                .map_err(|_| SpeciesNetworkError::Parcel {
+                    id,
+                    error: GasEnergyError::Invalid("original species basis conversion refused"),
+                })?;
+            let mut cell_partition = -Dd::from_f64(parcel.mass_kg());
+            for &fraction in composition.fractions() {
+                let mass = parcel.mass_kg() * fraction;
+                if !positive(fraction) || fraction > 1.0 || !positive(mass) {
+                    return Err(invalid(
+                        "original positive species inventory is unrepresentable",
                     ));
                 }
-                maximum_face_mass_defect_kg = maximum_face_mass_defect_kg.max(defect);
-                faces.push(face);
+                cell_partition = cell_partition + Dd::from_f64(mass);
             }
+            partition = partition + cell_partition.abs();
+            prepared.insert(
+                id,
+                PreparedCell {
+                    mass_fractions: composition.fractions().to_vec(),
+                },
+            );
+        }
+        let partition = partition.to_f64();
+        if !partition.is_finite() || partition > controls.mass_tolerance_kg {
+            return Err(invalid(
+                "original source species do not partition the accepted carrier mass",
+            ));
+        }
+        let mut transfer_count = 0usize;
+        let mut maximum_face_mass_defect_kg: f64 = 0.0;
+        for face in &self.faces {
+            check(cancelled)?;
+            let defect = visit_face(face, parcels, &prepared, duration_s, |_, _| {
+                if transfer_count + heat.len() == MAX_SNAPSHOT_TRANSFERS {
+                    return Err(invalid(
+                        "turbulent species/heat streams exceed the original snapshot bound",
+                    ));
+                }
+                transfer_count += 1;
+                Ok(())
+            })?
+            .abs();
+            if defect > controls.mass_tolerance_kg {
+                return Err(invalid(
+                    "turbulent face streams violate the zero-net-mass allowance",
+                ));
+            }
+            maximum_face_mass_defect_kg = maximum_face_mass_defect_kg.max(defect);
         }
         // Count and admit the original streams before allocating their payload.
         // Face coefficients and typed compositions are already prepared once.
         let mut transfers = Vec::new();
         transfers
             .try_reserve_exact(transfer_count)
-            .map_err(|_| refuse("unable to allocate turbulent species streams"))?;
-        for face in &faces {
-            poll(gate)?;
+            .map_err(|_| invalid("unable to allocate turbulent species streams"))?;
+        for face in &self.faces {
+            check(cancelled)?;
             visit_face(face, parcels, &prepared, duration_s, |species, mass| {
                 let [left, right] = face.cells;
                 let (donor, receiver) = if mass > 0.0 {
@@ -364,36 +449,70 @@ impl FvFlow {
                 Ok(())
             })?;
         }
-        let exchange =
-            network::exchange_candidate(parcels, &transfers, endpoints, controls, || {
-                gate.is_requested()
-            })
-            .map_err(material_error)?;
-        let mut maximum_carrier_mass_defect_kg: f64 = 0.0;
-        let mut carrier_defect = Dd::ZERO;
-        for (&id, parcel) in exchange.parcels() {
-            poll(gate)?;
-            let defect = (parcel.mass_kg() - carrier.mass_kg[id as usize]).abs();
-            maximum_carrier_mass_defect_kg = maximum_carrier_mass_defect_kg.max(defect);
-            carrier_defect = carrier_defect + Dd::from_f64(defect);
-        }
-        let absolute_carrier_mass_defect_kg = carrier_defect.to_f64();
-        if !absolute_carrier_mass_defect_kg.is_finite()
-            || absolute_carrier_mass_defect_kg > controls.mass_tolerance_kg
-        {
-            return Err(refuse(
-                "turbulent gas endpoints violate the fixed carrier-mass allowance",
-            ));
-        }
-        poll(gate)?;
+        let exchange = network::exchange_candidate_with_heat(
+            parcels,
+            &transfers,
+            heat,
+            endpoints,
+            controls,
+            &mut *cancelled,
+        )?;
+        let (maximum_carrier_mass_defect_kg, absolute_carrier_mass_defect_kg) =
+            self.audit_carrier(exchange.parcels(), controls.mass_tolerance_kg, cancelled)?;
+        check(cancelled)?;
         Ok(TurbulentGasSpeciesStep {
             exchange,
             duration_s,
-            conducting_faces: faces.len(),
+            conducting_faces: self.faces.len(),
             maximum_face_mass_defect_kg,
             initial_carrier_partition_defect_kg: partition,
             maximum_carrier_mass_defect_kg,
             absolute_carrier_mass_defect_kg,
         })
+    }
+
+    /// Intermediate and final probes retain the SAME original fixed carrier.
+    /// Existing representational mass defects are admitted, never reset to zero.
+    fn audit_carrier(
+        &self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        mass_tolerance_kg: f64,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(f64, f64), SpeciesNetworkError> {
+        check(cancelled)?;
+        if parcels.len() != self.parcel_count || !positive(mass_tolerance_kg) {
+            return Err(invalid(
+                "original gas parcel count and positive mass budget required",
+            ));
+        }
+        let mut maximum_carrier_mass_defect_kg: f64 = 0.0;
+        let mut carrier_defect = Dd::ZERO;
+        for (&id, parcel) in parcels {
+            check(cancelled)?;
+            let cell = usize::try_from(id).map_err(|_| invalid("parcel cell ID overflows"))?;
+            if cell >= self.domain.cell_count()
+                || !self.domain.is_fluid(cell)
+                || parcel.volume_m3() != self.domain.volume(cell)
+            {
+                return Err(invalid(
+                    "gas probe changed its original cell identity or volume",
+                ));
+            }
+            let defect = (parcel.mass_kg() - self.carrier.mass_kg[cell]).abs();
+            maximum_carrier_mass_defect_kg = maximum_carrier_mass_defect_kg.max(defect);
+            carrier_defect = carrier_defect + Dd::from_f64(defect);
+        }
+        let absolute_carrier_mass_defect_kg = carrier_defect.to_f64();
+        if !absolute_carrier_mass_defect_kg.is_finite()
+            || absolute_carrier_mass_defect_kg > mass_tolerance_kg
+        {
+            return Err(invalid(
+                "turbulent gas endpoints violate the fixed carrier-mass allowance",
+            ));
+        }
+        Ok((
+            maximum_carrier_mass_defect_kg,
+            absolute_carrier_mass_defect_kg,
+        ))
     }
 }

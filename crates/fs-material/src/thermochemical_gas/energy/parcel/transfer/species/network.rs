@@ -6,6 +6,18 @@ pub mod transport;
 /// External phases share the original gas budgets and caloric reconstruction.
 pub mod boundary;
 
+pub use super::diffusion::network::adaptive::{
+    DiffusionNetworkAdvanceControls as SpeciesNetworkAdvanceControls,
+    DiffusionNetworkAdvanceError as SpeciesNetworkAdvanceError,
+    advance_species_candidate as advance_candidate_adaptive,
+};
+/// Original source-owned adaptive states and accepted-transfer accounting.
+pub type SpeciesNetworkAdvanceCandidate =
+    super::diffusion::network::adaptive::DiffusionNetworkAdvanceCandidate<SpeciesNetworkStep>;
+/// Whole-window physical balances and the last original species snapshot.
+pub type SpeciesNetworkAdvanceReport =
+    super::diffusion::network::adaptive::DiffusionNetworkAdvanceReport<SpeciesNetworkStep>;
+
 use super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::{
     ClosedGasParcel, GasEnergyError, GasEnergySolve, SpeciesId, Sum, ThermochemicalGasModel,

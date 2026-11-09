@@ -11,6 +11,9 @@ use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TR
 use super::super::super::network::transport::{
     GasTransportError, GasTransportSolve, audit_closed_window,
 };
+use super::super::super::network::{
+    SpeciesNetworkCandidate, SpeciesNetworkHeatTransfer, SpeciesNetworkStep,
+};
 use super::super::super::{SPECIES_WITHDRAWAL_REFUSAL, SpeciesId, Sum, inventory};
 use super::super::DIFFUSION_ENTROPY_REFUSAL;
 use super::binary::{
@@ -75,6 +78,9 @@ pub struct DiffusionNetworkAdvanceReport<Step = DiffusionNetworkStep> {
     pub maximum_species_error_ratio: f64,
     pub maximum_temperature_error_ratio: f64,
     pub transfers: Vec<DiffusionNetworkIntegratedTransfer>,
+    /// Integrated additional heat from accepted fine steps only. Canonical
+    /// endpoints fix its sign; original species enthalpy stays in transfers.
+    pub heat: Vec<SpeciesNetworkHeatTransfer>,
     /// Actual final-minus-original total mass [kg].
     pub total_mass_residual_kg: f64,
     /// Largest actual final-minus-original species mass over the closed graph.
@@ -164,6 +170,9 @@ use DiffusionNetworkAdvanceError as Error;
 
 enum TrialFailure {
     Physical(DiffusionNetworkError),
+    /// Only the source-callback path may shrink an otherwise admitted thermal
+    /// trial whose requested endpoint energy lies outside its original bracket.
+    SourceEndpoint(DiffusionNetworkError),
     Binary(BinaryDiffusionNetworkError),
     Entropy(f64),
     Work,
@@ -191,7 +200,42 @@ trait Candidate {
     fn entropy_change(&self) -> f64;
     fn energy_residual(&self) -> f64;
     fn transfers(&self) -> impl Iterator<Item = Transfer<'_>>;
+    fn heat(&self) -> &[SpeciesNetworkHeatTransfer] {
+        &[]
+    }
     fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt);
+}
+
+struct SpeciesCandidate {
+    candidate: SpeciesNetworkCandidate,
+    entropy_change_j_k: f64,
+}
+impl Candidate for SpeciesCandidate {
+    type Receipt = SpeciesNetworkStep;
+    fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
+        self.candidate.parcels()
+    }
+    fn entropy_change(&self) -> f64 {
+        self.entropy_change_j_k
+    }
+    fn energy_residual(&self) -> f64 {
+        self.candidate.step().total_energy_residual_j
+    }
+    fn transfers(&self) -> impl Iterator<Item = Transfer<'_>> {
+        self.candidate.step().fluxes.iter().map(|row| Transfer {
+            donor: row.transfer.donor,
+            receiver: row.transfer.receiver,
+            species: &row.transfer.species,
+            mass_kg: row.transfer.mass_kg,
+            enthalpy_j: row.carried_enthalpy_j,
+        })
+    }
+    fn heat(&self) -> &[SpeciesNetworkHeatTransfer] {
+        &self.candidate.step().heat
+    }
+    fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt) {
+        self.candidate.into_parts()
+    }
 }
 impl Candidate for DiffusionNetworkCandidate {
     type Receipt = DiffusionNetworkStep;
@@ -355,6 +399,7 @@ fn error_ratios(
 struct Ledger {
     energy: Sum,
     transfers: BTreeMap<(u64, u64, SpeciesId), (Sum, Sum)>,
+    heat: BTreeMap<(u64, u64), Sum>,
 }
 impl Ledger {
     fn record<C: Candidate>(
@@ -368,7 +413,8 @@ impl Ledger {
         for row in step.transfers() {
             poll(cancelled)?;
             let key = (row.donor, row.receiver, row.species.clone());
-            if !self.transfers.contains_key(&key) && self.transfers.len() == MAX_SNAPSHOT_TRANSFERS
+            if !self.transfers.contains_key(&key)
+                && self.transfers.len() + self.heat.len() == MAX_SNAPSHOT_TRANSFERS
             {
                 return Err(Error::Invalid(
                     "whole-window diffusion transfer report exceeds its work bound",
@@ -378,8 +424,111 @@ impl Ledger {
             totals.0.add(row.mass_kg).map_err(arithmetic)?;
             totals.1.add(row.enthalpy_j).map_err(arithmetic)?;
         }
+        for row in step.heat() {
+            poll(cancelled)?;
+            let key = (row.parcels[0], row.parcels[1]);
+            if !self.heat.contains_key(&key)
+                && self.transfers.len() + self.heat.len() == MAX_SNAPSHOT_TRANSFERS
+            {
+                return Err(Error::Invalid(
+                    "whole-window gas transfer/heat report exceeds its bound",
+                ));
+            }
+            self.heat
+                .entry(key)
+                .or_default()
+                .add(row.heat_left_to_right_j)
+                .map_err(arithmetic)?;
+        }
         Ok(())
     }
+}
+
+/// Advance original source-owned gas candidates with the shared temporal owner.
+///
+/// The callback must return a complete candidate from the existing species
+/// network owner for the supplied original snapshot and physical duration.
+/// It may combine internal species streams and additional paired heat before
+/// ONE caloric reconstruction. It must retain the original parcel IDs, volumes
+/// and constitutive sources, and use the supplied endpoint/physical budgets.
+/// No external storage, reaction or boundary work belongs to this closed window.
+///
+/// Every probe refreshes the callback from its own immutable source state.
+/// Only the two fine candidates contribute inventory, species enthalpy or heat.
+/// Typed withdrawal or endpoint-energy bracket refusal, local error and actual
+/// source entropy admission can shorten the interval; other source/domain
+/// failures are fatal. The existing
+/// original-to-final audit independently checks mass, each species and internal
+/// energy with formation references removed BEFORE arithmetic. Its actual
+/// endpoint entropy check is not a constitutive entropy-production theorem.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_species_candidate(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: GasTransportSolve,
+    controls: DiffusionNetworkAdvanceControls,
+    mut evaluate: impl FnMut(
+        &BTreeMap<u64, ClosedGasParcel>,
+        f64,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<SpeciesNetworkCandidate, SpeciesNetworkError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiffusionNetworkAdvanceCandidate<SpeciesNetworkStep>, Error> {
+    if !super::positive(physical.entropy_tolerance_j_k)
+        || !super::positive(physical.exchange.mass_tolerance_kg)
+        || !super::positive(physical.exchange.energy_tolerance_j)
+        || !super::positive(physical.exchange.maximum_species_fraction)
+        || physical.exchange.maximum_species_fraction >= 1.0
+    {
+        return Err(Error::Invalid(
+            "positive original gas physical budgets required",
+        ));
+    }
+    advance_with_kernel(
+        original,
+        &[],
+        duration_s,
+        endpoints,
+        DiffusionNetworkSolve {
+            exchange: physical.exchange,
+            entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
+        },
+        controls,
+        None,
+        |state, dt, _, cancelled| {
+            let candidate = evaluate(state, dt, cancelled).map_err(|error| match error {
+                SpeciesNetworkError::Cancelled => {
+                    TrialFailure::Physical(DiffusionNetworkError::Cancelled)
+                }
+                error @ SpeciesNetworkError::Parcel {
+                    error: GasEnergyError::OutsideBracket { .. },
+                    ..
+                } => TrialFailure::SourceEndpoint(DiffusionNetworkError::Exchange(error)),
+                other => TrialFailure::Physical(DiffusionNetworkError::Exchange(other)),
+            })?;
+            if !state.keys().eq(candidate.parcels().keys())
+                || !candidate.step().boundaries.is_empty()
+                || !candidate.step().external_heat.is_empty()
+            {
+                return Err(TrialFailure::Physical(DiffusionNetworkError::Invalid(
+                    "adaptive closed gas candidate changed identities or added an external path",
+                )));
+            }
+            let entropy_change_j_k = super::entropy_change(
+                state,
+                candidate.parcels(),
+                physical.exchange.mass_tolerance_kg,
+                cancelled,
+            )
+            .map_err(TrialFailure::Physical)?;
+            Ok(SpeciesCandidate {
+                candidate,
+                entropy_change_j_k,
+            })
+        },
+        cancelled,
+    )
 }
 
 /// Advance an arbitrary branching/cyclic molecular network through exactly the
@@ -648,6 +797,7 @@ fn advance_with_kernel<C: Candidate>(
                 }
                 error
             }
+            Err(TrialFailure::SourceEndpoint(error)) => physical_error(error, elapsed, dt),
             Err(TrialFailure::Entropy(change_j_k)) => Error::Entropy {
                 elapsed_s: elapsed,
                 step_s: dt,
@@ -756,6 +906,14 @@ fn advance_with_kernel<C: Candidate>(
             maximum_species_error_ratio: max_species_error,
             maximum_temperature_error_ratio: max_temperature_error,
             transfers,
+            heat: ledger
+                .heat
+                .into_iter()
+                .map(|((left, right), energy)| SpeciesNetworkHeatTransfer {
+                    parcels: [left, right],
+                    heat_left_to_right_j: energy.value,
+                })
+                .collect(),
             total_mass_residual_kg: audit.total_mass_residual_kg,
             maximum_species_mass_residual_kg: audit.maximum_species_mass_residual_kg,
             total_energy_residual_j: ledger.energy.value,
