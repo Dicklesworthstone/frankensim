@@ -13,7 +13,9 @@
 //! [`FetchAdjustedAnelastic`] additionally preserves mass continuity for an explicit
 //! height-dependent density profile; the original mode assumes constant density.
 
-use crate::{KAPPA, MAX_Z0_M, MIN_Z0_M, Refusal, refuse};
+use crate::{
+    AnelasticFlowSample, FlatSiteLogLaw, FlowSample, KAPPA, MAX_Z0_M, MIN_Z0_M, Refusal, refuse,
+};
 use fs_math::det;
 
 /// Model identifier for the fetch-adjusted mass-consistent atmosphere mode.
@@ -283,6 +285,62 @@ impl ExponentialDensityProfile {
             ));
         }
         Ok(density)
+    }
+
+    /// Compose the original horizontal mean with density-weighted turbulence.
+    /// For q = rho_ref * curl(psi), u' = q/rho has
+    /// du'_i/dh = (rho_ref/rho) * dv_i/dh + k*u'_i. Consequently
+    /// div(rho*u') = 0, while the unchanged horizontal mean separately has
+    /// zero mass divergence because rho and its speed depend only on height.
+    /// Only the known solenoidal modal owners call this helper; applying it
+    /// again to an anelastic field would be physically incorrect.
+    pub(crate) fn compose_anelastic(
+        &self,
+        mean: &FlatSiteLogLaw,
+        mut turbulent: FlowSample,
+        height_m: f64,
+    ) -> Result<AnelasticFlowSample, Refusal> {
+        let density_kg_m3 = self.density_kg_m3(height_m)?;
+        let k = self.inverse_scale_height_per_m;
+        if k != 0.0 {
+            let scale = self.reference_density_kg_m3 / density_kg_m3;
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(refuse(
+                    "anelastic-flow-range",
+                    "turbulent density scale is not representable".into(),
+                    "reduce the density contrast over the observation interval",
+                ));
+            }
+            for (velocity, gradient) in turbulent.u.iter_mut().zip(&mut turbulent.grad) {
+                *velocity *= scale;
+                for derivative in &mut *gradient {
+                    *derivative *= scale;
+                }
+                gradient[2] += k * *velocity;
+            }
+        }
+        // Keep the original addition order so k=0 is bitwise legacy flow.
+        turbulent.u[0] += mean.speed(height_m);
+        turbulent.grad[0][2] += mean.dspeed_dh(height_m);
+        let mass_flux_kg_m2_s = turbulent.u.map(|velocity| density_kg_m3 * velocity);
+        if turbulent
+            .u
+            .iter()
+            .chain(turbulent.grad.iter().flatten())
+            .chain(mass_flux_kg_m2_s.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(refuse(
+                "anelastic-flow-range",
+                "velocity, gradient or mass flux is not representable".into(),
+                "reduce the density contrast, wind speed or modal amplitude",
+            ));
+        }
+        Ok(AnelasticFlowSample {
+            density_kg_m3,
+            flow: turbulent,
+            mass_flux_kg_m2_s,
+        })
     }
 }
 

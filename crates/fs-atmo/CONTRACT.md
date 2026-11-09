@@ -449,6 +449,32 @@ existing fetch battery checks independent finite-difference mass continuity for
 both roughness-gradient signs, nonzero velocity divergence, constant/weak-density
 limits, impermeability, density-scale invariance and domain/overflow refusals.
 
+`Atmosphere::sample_anelastic_flow` and
+`EvolvingAtmosphere::sample_anelastic_flow` additionally compose the original
+horizontal log-law mean with the original frozen or OU-evolving modal
+turbulence under that same explicitly prescribed density profile. If `v` is
+the original solenoidal turbulence, the new perturbation is
+`u' = (rho_ref/rho) v`. Thus `rho*u'` is solenoidal and the complete field
+satisfies `div(rho*u) = 0`; the unmodified horizontal mean independently
+satisfies that constraint. The exact gradient adds `k*u'_i` to each vertical
+derivative after rescaling. Wall impermeability survives. Reference-height
+velocity amplitudes and the constant-density field are retained exactly;
+away from that height the velocity covariance scales with `(rho_ref/rho)^2`.
+
+`AnelasticFlowSample` returns the actual background density, complete velocity
+and gradient, and complete mass flux together. It does not reuse the constant
+`AirScenario` thermodynamic values or assert an equation of state for the
+authored profile. Querying allocates nothing and consumes no random draws or
+clock advances. The existing fetch correction is not applied again. This is
+an opt-in kinematic realization of the background mass constraint, as stated
+by Bannon et al. (2006), <https://doi.org/10.1175/MWR3228.1>; it supplies no
+stratified momentum/energy evolution, buoyancy, pressure response, density
+fluctuations or empirical turbulence calibration. The dedicated anelastic
+battery checks full frozen/evolving mass-flux divergence by independent
+differences, all nine velocity derivatives, exact uniform-density recovery,
+unchanged mean, wall condition, reference amplitude, density scaling, OU
+noninterference/replay and atomic query refusals.
+
 ## Exact represented wall-blocked momentum and subfilter stress
 
 `mann_field::wall::filter::moments::MannWallBoxMoments` extends the same

@@ -325,6 +325,27 @@ impl EvolvingAtmosphere {
         grad[0][2] += self.mean.dspeed_dh(h_m);
         Ok(FlowSample { u: velocity, grad })
     }
+
+    /// Density-bound mean and current turbulence with zero background mass
+    /// divergence, using the same construction as
+    /// [`Atmosphere::sample_anelastic_flow`]. The profile is fixed in time;
+    /// density fluctuations and their thermodynamics are not supplied. The
+    /// original OU state, clock, draws and horizontal mean are unchanged.
+    /// This read-only query allocates no storage.
+    ///
+    /// # Errors
+    /// Mean-law, spatial-query, density-domain or representability refusals.
+    pub fn sample_anelastic_flow(
+        &self,
+        density: &crate::fetch_mass_consistent::ExponentialDensityProfile,
+        x_m: f64,
+        y_m: f64,
+        h_m: f64,
+    ) -> Result<crate::AnelasticFlowSample, Refusal> {
+        self.mean.admit()?;
+        let turbulent = self.turbulence.sample(x_m, y_m, h_m)?;
+        density.compose_anelastic(&self.mean, turbulent, h_m)
+    }
 }
 
 #[cfg(test)]

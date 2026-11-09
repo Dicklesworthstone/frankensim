@@ -394,6 +394,21 @@ impl AirState {
     }
 }
 
+/// Density-bound mean wind and turbulence in the `[x, y, upward]` frame.
+///
+/// The density is an explicitly prescribed, time-independent background. It
+/// replaces the atmosphere's constant air scenario for this kinematic sample;
+/// no pressure, temperature, viscosity or gas equation of state is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnelasticFlowSample {
+    /// Background density at the observation height [kg/m³].
+    pub density_kg_m3: f64,
+    /// Total velocity [m/s] and its exact analytic spatial gradient [1/s].
+    pub flow: FlowSample,
+    /// Total advective mass flux `density * flow.u` [kg/(m² s)].
+    pub mass_flux_kg_m2_s: [f64; 3],
+}
+
 /// The E3.3a atmosphere: mean law + turbulence + air scenario.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Atmosphere {
@@ -441,6 +456,48 @@ impl Atmosphere {
         h_m: f64,
         tick: u64,
     ) -> Result<FlowSample, Refusal> {
+        let turb = self.sample_turbulence(x_m, y_m, h_m, tick)?;
+        let mut velocity = turb.u;
+        velocity[0] += self.mean.speed(h_m);
+        let mut grad = turb.grad;
+        grad[0][2] += self.mean.dspeed_dh(h_m);
+        Ok(FlowSample { u: velocity, grad })
+    }
+
+    /// Sample a fixed-density anelastic flow with `div(rho * velocity) = 0`.
+    ///
+    /// The existing horizontal log-law mean is retained. Turbulent mass flux
+    /// is the original solenoidal turbulence multiplied by the profile's
+    /// reference density, so velocity amplitudes match the original field at
+    /// its reference height and scale as `rho_ref/rho` elsewhere. The exact
+    /// gradient includes the height derivative of that scale. This is an
+    /// explicit kinematic construction, not a stratified momentum or energy
+    /// solution, and does not preserve the original velocity covariance away
+    /// from the reference height. The constant-density limit is bitwise the
+    /// original [`Self::sample_flow`]. Sampling allocates no storage.
+    ///
+    /// # Errors
+    /// Original wind/query refusals, or an unsupported density height or
+    /// unrepresentable density scaling, velocity, gradient or mass flux.
+    pub fn sample_anelastic_flow(
+        &self,
+        density: &fetch_mass_consistent::ExponentialDensityProfile,
+        x_m: f64,
+        y_m: f64,
+        h_m: f64,
+        tick: u64,
+    ) -> Result<AnelasticFlowSample, Refusal> {
+        let turbulent = self.sample_turbulence(x_m, y_m, h_m, tick)?;
+        density.compose_anelastic(&self.mean, turbulent, h_m)
+    }
+
+    fn sample_turbulence(
+        &self,
+        x_m: f64,
+        y_m: f64,
+        h_m: f64,
+        tick: u64,
+    ) -> Result<FlowSample, Refusal> {
         if !(x_m.is_finite() && y_m.is_finite() && h_m.is_finite()) {
             return Err(refuse(
                 "non-finite-input",
@@ -456,11 +513,6 @@ impl Atmosphere {
             ));
         }
         self.mean.admit()?;
-        let turb = self.turbulence.sample(x_m, y_m, h_m, tick);
-        let mut velocity = turb.u;
-        velocity[0] += self.mean.speed(h_m);
-        let mut grad = turb.grad;
-        grad[0][2] += self.mean.dspeed_dh(h_m);
-        Ok(FlowSample { u: velocity, grad })
+        Ok(self.turbulence.sample(x_m, y_m, h_m, tick))
     }
 }
