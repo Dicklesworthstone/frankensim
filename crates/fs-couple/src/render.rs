@@ -35,6 +35,7 @@ pub mod plate;
 /// Realized resolution and explicit solver-tolerance study seams.
 pub mod ladder;
 mod scattering;
+pub mod player_tract;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
@@ -291,6 +292,9 @@ pub struct ReedBoreVoice {
     /// Opt-in duct-constriction noise on the reed channel (`set_constriction_noise`): a series pressure source on the
     /// mouth side, the brass lip's law carried to the reed slit. `None` is the original voice, bit for bit.
     constriction_noise: Option<crate::turbulence_noise::ConstrictionNoise>,
+    /// Opt-in player's tract upstream of the reed (`set_player_tract`): a measured airway between the card's blowing
+    /// pressure and the reed junction (`player_tract`). `None` is the original voice, bit for bit.
+    player_tract: Option<player_tract::PlayerTract>,
     rho: f64,
     jet_observer: CompactForceObserver,
     zc: f64,
@@ -714,6 +718,7 @@ impl ReedBoreVoice {
             staple_recovery: None,
             jet_contraction: None,
             constriction_noise: None,
+            player_tract: None,
             rho: gas.density,
             jet_observer,
             zc,
@@ -1069,15 +1074,25 @@ impl ReedBoreVoice {
                 );
             boundary.history += shunt_incoming;
             let u_body = self.plates.volume_velocity();
+            // The opt-in player's tract folds its same-sample impedance into the bore's boundary (`player_tract`): the reed
+            // solves against `junction` and `p_junction`, and `tract_step` unfolds the outgoing wave. Without a tract both are
+            // the bore's boundary and `p_m`, unchanged.
+            let (junction, p_junction, tract_step) = match self.player_tract.as_mut() {
+                Some(tract) => {
+                    let (folded, mouth_pa, step) = tract.fold(p_blow, p_series, boundary, self.zc, u_body)?;
+                    (folded, mouth_pa, Some(step))
+                }
+                None => (boundary, p_m, None),
+            };
             let p_plus = if self.reed.mass_kg > 0.0 {
-                let (pp, y, v) = self.step_massive_scattering(boundary, p_m, u_body)?;
+                let (pp, y, v) = self.step_massive_scattering(junction, p_junction, u_body)?;
                 self.reed_y = y;
                 self.reed_v = v;
                 pp
             } else if let Some(slit) = self.viscous_slit {
                 let outgoing = crate::reed_bore::solve_reed_wave_viscous(
-                    self.reed, self.rho, self.zc, boundary.direct, boundary.history,
-                    p_m, self.p_plus_prev, u_body, slit,
+                    self.reed, self.rho, self.zc, junction.direct, junction.history,
+                    p_junction, self.p_plus_prev, u_body, slit,
                 )?;
                 if self.solver_mode == ReedSolverMode::FastNewton {
                     // The old Newton Jacobian describes inviscid flow only.
@@ -1091,9 +1106,9 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        boundary.direct,
-                        boundary.history,
-                        p_m,
+                        junction.direct,
+                        junction.history,
+                        p_junction,
                         self.p_plus_prev,
                         u_body,
                     )?,
@@ -1101,9 +1116,9 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        boundary.direct,
-                        boundary.history,
-                        p_m,
+                        junction.direct,
+                        junction.history,
+                        p_junction,
                         self.p_plus_prev,
                         u_body,
                         &mut self.fast_stats,
@@ -1111,20 +1126,25 @@ impl ReedBoreVoice {
                     )?,
                 }
             };
-            self.p_plus_prev = p_plus;
             if self.reed.mass_kg == 0.0 {
                 let residual = match self.viscous_slit {
                     Some(slit) => crate::reed_bore::reed_viscous_flow_mismatch(
-                        self.reed, self.rho, self.zc, boundary.direct, boundary.history,
-                        p_m, p_plus, u_body, slit,
+                        self.reed, self.rho, self.zc, junction.direct, junction.history,
+                        p_junction, p_plus, u_body, slit,
                     )?,
                     None => crate::reed_bore::reed_flow_mismatch(
-                        self.reed, self.rho, self.zc, boundary.direct, boundary.history,
-                        p_m, p_plus, u_body,
+                        self.reed, self.rho, self.zc, junction.direct, junction.history,
+                        p_junction, p_plus, u_body,
                     ),
                 }.abs();
                 self.junction_residual_max = Some(self.junction_residual_max.unwrap_or(0.0).max(residual));
             }
+            let p_plus = match tract_step {
+                Some(step) => step.unfold(p_plus),
+                None => p_plus,
+            };
+            // Bore (unfolded) coordinates; with a tract it is only the next folded solve's bracket centre.
+            self.p_plus_prev = p_plus;
             let p_minus_now = self
                 .line
                 .push(p_plus)
@@ -1135,6 +1155,12 @@ impl ReedBoreVoice {
             if let Some(source) = self.constriction_noise.as_mut() {
                 source.record((p_plus - p_minus_now) / self.zc);
             }
+            // With a tract, the flow into it is the bore's minus the plates' (`player_tract`), and the reed's opening and
+            // jet force below read the mouth pressure the airway then holds at the reed.
+            let p_m = match (tract_step, self.player_tract.as_mut()) {
+                (Some(step), Some(tract)) => tract.commit(step, (p_plus - p_minus_now) / self.zc - u_body)?,
+                _ => p_m,
+            };
             if let Some(shunt) = &mut self.register_shunt {
                 shunt.step(p_plus).map_err(|_| AcousticRealizeError::Reed {
                     what: "register-hole orifice shunt left the finite set",

@@ -70,6 +70,17 @@
 //! `gas_field continuous` binding; a molecular bore and a midpoint (segment-gas) `gas_field` refuse. On a field each
 //! hole's orifice reads its own local gas; under `open_hole_interaction` the orifice ports sit on the COUPLED network (the one the
 //! flows and the reed's reflectance come from: `fs_duct::interaction::port_admittance`), not on independent chimneys.
+//! Optional `player_tract mouth TAU_S` or `player_tract lung` after `line_ladder`, before `compile_limits`, puts a player's
+//! tract upstream of the reed (`crate::render::player_tract`). One or more `player_tract_section LENGTH_M AREA_M2` rows follow,
+//! valve side first, each a cylinder of that area, the glottis a section of its own. Then come an optional
+//! `player_tract_wall SURFACE_DENSITY STIFFNESS RESISTANCE`, every tube's locally reacting wall (rigid without it), and an
+//! optional `player_airway weibel-1963 saab-2021-table-1-B GENERATIONS`, the first generations of Weibel's tree beyond the
+//! last section. The card says where its blowing pressure was measured. With `lung`, the pressure is the source at the far
+//! end and the reed sees the whole airway. With `mouth`, the airway's DC resistance comes out at DC only, through a one-pole
+//! of time constant `TAU_S` on the flow into the tract; `TAU_S` has no default, being a numerical regulation constant and not
+//! a measurement. The steady mouth pressure is then the card's, and the voice refuses a tract whose mouth-pressure load is
+//! active on any bin. The airway takes the voice's inlet gas and its own default convergence ladder, not `line_ladder`'s.
+//! A card without the rows is unchanged to the bit.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -126,6 +137,8 @@ const MAX_SEGMENTS: usize = 256;
 const MAX_EVENTS: usize = 16_384;
 const MAX_CONTROLS: usize = 262_144;
 const MAX_WORK: u64 = 16_777_216;
+/// `player_tract_section` rows: a measured area function, its glottis among them, with room to spare.
+const MAX_PLAYER_TRACT_SECTIONS: usize = 256;
 
 /// Syntax, model and scheduling refusals retain their owning diagnostics.
 #[derive(Debug)]
@@ -1044,7 +1057,7 @@ impl ReedPerformance {
             ports
         } else { 1 };
         // `line_ladder TAIL_TOL MAX_TAPS`: the convergence ladder of the characteristic line (default: tail energy 1e-10, ceiling 65536 taps; the peak-shift tolerance stays at its default). Both fields required, no default,
-        // once only, after the hole rows and before `compile_limits`; the ceiling a power of two in [256, 131072] (the code's own bounds).
+        // once only, after the hole rows and before `compile_limits`; the ceiling a power of two in [256, 131072] (this row's own bound, checked at the parse below).
         let line_ladder = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("line_ladder") {
             let mut row = r.row("line_ladder")?;
@@ -1062,6 +1075,81 @@ impl ReedPerformance {
                 return Err(bad(line, "line_ladder needs a tap ceiling that is a power of two in [256, 131072]"));
             }
             Some(crate::driving_point::LineLadder { tail_tol, max_taps, ..crate::driving_point::LineLadder::default() })
+        } else { None };
+        // `player_tract mouth TAU_S` or `player_tract lung`, its `player_tract_section` rows, an optional `player_tract_wall`
+        // and an optional `player_airway`: the player's tract upstream of the reed (module doc). Once only, after `line_ladder`
+        // and before `compile_limits`; the chain is built here, so a malformed tract refuses at the parse.
+        let player_tract = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract") {
+            use crate::render::player_tract::TractPressure;
+            use crate::upstream_airway::{AirwayChain, AirwaySection, WEIBEL_SAAB_2021_TABLE_1_B_MM};
+            let mut row = r.row("player_tract")?;
+            let line = row.line;
+            let pressure = match row.word()? {
+                "mouth" => TractPressure::Mouth { tau_s: row.positive()? },
+                "lung" => TractPressure::Lung,
+                _ => return Err(bad(line, "player_tract takes `mouth TAU_S` or `lung`")),
+            };
+            row.finish()?;
+            let mut sections = Vec::new();
+            while r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract_section") {
+                let mut row = r.row("player_tract_section")?;
+                let section_line = row.line;
+                let length_m = row.positive()?;
+                let area_m2 = row.positive()?;
+                row.finish()?;
+                if sections.len() == MAX_PLAYER_TRACT_SECTIONS {
+                    return Err(bad(section_line, "player_tract takes at most 256 sections"));
+                }
+                sections.push((length_m, area_m2));
+            }
+            if sections.is_empty() {
+                return Err(bad(line, "player_tract needs at least one player_tract_section row"));
+            }
+            let wall = if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_tract_wall") {
+                let mut row = r.row("player_tract_wall")?;
+                let wall_line = row.line;
+                let pin = fs_phs::WallPin {
+                    surface_density: row.positive()?,
+                    stiffness_per_area: row.scalar()?,
+                    resistance: row.scalar()?,
+                };
+                row.finish()?;
+                if pin.stiffness_per_area < 0.0 || pin.resistance < 0.0 {
+                    return Err(bad(wall_line, "player_tract_wall needs a nonnegative stiffness and resistance"));
+                }
+                Some(pin)
+            } else { None };
+            let generations = if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("player_airway") {
+                let mut row = r.row("player_airway")?;
+                let airway_line = row.line;
+                if row.word()? != "weibel-1963" || row.word()? != "saab-2021-table-1-B" {
+                    return Err(bad(airway_line, "player_airway takes `weibel-1963 saab-2021-table-1-B GENERATIONS`"));
+                }
+                let generations = row.count(WEIBEL_SAAB_2021_TABLE_1_B_MM.len())?;
+                row.finish()?;
+                if generations == 0 {
+                    return Err(bad(airway_line, "player_airway takes 1 to 24 generations"));
+                }
+                Some(generations)
+            } else { None };
+            let tubes = sections
+                .iter()
+                .map(|&(length_m, area_m2)| AirwaySection::from_area(length_m, area_m2, 1, wall))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| bad(line, "player_tract sections need positive finite lengths and areas"))?;
+            let chain = AirwayChain::new(tubes, fs_duct::LossModel::Bessel)
+                .map_err(|_| bad(line, "player_tract sections did not form an airway"))?;
+            let chain = match generations {
+                Some(generations) => AirwayChain::weibel_saab_2021_b(generations, wall)
+                    .and_then(|tree| chain.ahead_of(&tree))
+                    .map_err(|_| bad(line, "player_airway did not join the tract"))?,
+                None => chain,
+            };
+            Some((chain, pressure))
         } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
@@ -1288,6 +1376,11 @@ impl ReedPerformance {
         if let Some(card) = constriction_noise {
             voice.set_constriction_noise(card).map_err(ReedPerformanceError::Model)?;
         }
+        if let Some((chain, pressure)) = &player_tract {
+            voice
+                .set_player_tract(chain, *pressure, rate, &crate::driving_point::LineLadder::default())
+                .map_err(ReedPerformanceError::Model)?;
+        }
         // The outlet builds use `samples` only to bound the round-trip delay,
         // so a card `latency` samples longer builds the same voice and grid.
         let outlet_latency_discard = match (outlet_latency, &terminal) {
@@ -1411,6 +1504,10 @@ impl ReedPerformance {
     /// The selected reed jet contraction coefficient, if the card has a `contraction` row with `C_c` below one.
     pub fn jet_contraction(&self) -> Option<f64> {
         self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::jet_contraction)
+    }
+    /// The player's tract upstream of the reed, if the card has a `player_tract` block.
+    pub fn player_tract(&self) -> Option<&crate::render::player_tract::PlayerTract> {
+        self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::player_tract)
     }
     /// Original molecular gas, wall and geometry owner used for both bore
     /// feedback and physical outlet pressure. None preserves the existing
