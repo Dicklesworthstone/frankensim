@@ -309,8 +309,9 @@ pub fn printed_shell_t60(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &Printe
 }
 
 /// The shell `c` with its T60 pair from print and the row's receipt as its provenance, and one
-/// receipt line with the numbers (what each point holds and the pair it replaces). The shell's
-/// own alloy (`c.elastic`) must be the row's.
+/// receipt line with the numbers (what each point holds and the pair it replaces) and the shell's
+/// own receipt without its clause that keeps the declared T60s ([`without_declared_t60`]). The
+/// shell's own alloy (`c.elastic`) must be the row's.
 ///
 /// # Errors
 /// A row of another alloy than the shell's; otherwise as [`printed_shell_t60`].
@@ -333,9 +334,17 @@ pub fn with_printed_shell_loss(c: &CymbalSpec, loss: &PrintedShellLoss) -> Resul
     let line = format!(
         "{}: shell loss {} at the free edge, {:.3} mm: T60 {}; replaces the declared {} s at {:.0} Hz and {} s at {:.0} Hz; shell: {}",
         c.name, loss.label, h * 1e3, parts.join(", "), c.t60[0].1, c.t60[0].0, c.t60[1].1, c.t60[1].0,
-        c.provenance.unwrap_or("the preset's"),
+        c.provenance.map_or_else(|| "the preset's".to_owned(), without_declared_t60),
     );
     Ok((CymbalSpec { t60, provenance: Some(loss.receipt), ..*c }, line))
+}
+
+/// The shell receipt `p` as a printed T60 pair's line carries it: without the clause that keeps the
+/// shell's declared T60s ("the 500 Hz and 10 kHz T60s, 10 s and 2 s, stay declared"; the card crash,
+/// ride and hi-hat receipts each hold one), since the line replaces that pair. A receipt without
+/// such a clause is carried whole.
+fn without_declared_t60(p: &str) -> String {
+    p.split("; ").filter(|clause| !(clause.contains("T60s") && clause.contains("stay declared"))).collect::<Vec<_>>().join("; ")
 }
 
 #[cfg(test)]
@@ -453,6 +462,35 @@ mod tests {
         assert!(CUSN8_RECEIPT.contains("Radiation loss missing") && CUSN8_RECEIPT.contains("No anelastic loss"));
         assert!(CUSN8_ETA_RECEIPT.contains("borrowed") && CUSN8_ETA_RECEIPT.contains("possibly counted twice"));
         assert!(cusn8("b20").is_none() && super::row("cusn9").is_none());
+    }
+
+    #[test]
+    fn the_line_carries_the_shell_receipt_without_the_declared_t60s_it_replaces() {
+        // MB 17766: the card receipts keep their T60 pair declared; a printed pair replaces it, so the line leaves that
+        // one clause out and carries the rest of the receipt word for word
+        let (hat_top, hat_bottom) = card_hihat_spec();
+        let ride_receipt = card_ride().provenance.expect("the card ride's receipt");
+        let cases = [
+            (card_crash(), "cusn8-eta", crate::kit::CARD_CRASH_RECEIPT, "; the 500 Hz and 10 kHz T60s, 10 s and 2 s, stay declared"),
+            (card_ride(), "cusn8-eta", ride_receipt, "; the 500 Hz and 10 kHz T60s, 14 s and 3.0 s, stay declared estimates (88cccbb78)"),
+            (hat_top, "b20", crate::kit::CARD_HIHAT_RECEIPT, "; the 500 Hz and 10 kHz T60s, 8 s and 1.5 s, stay declared"),
+            (hat_bottom, "b20", crate::kit::CARD_HIHAT_RECEIPT, "; the 500 Hz and 10 kHz T60s, 8 s and 1.5 s, stay declared"),
+        ];
+        for (spec, label, receipt, clause) in cases {
+            assert_eq!(spec.provenance, Some(receipt));
+            assert_eq!(receipt.matches(clause).count(), 1, "{}: {receipt}", spec.name);
+            let carried = receipt.replacen(clause, "", 1);
+            assert_eq!(without_declared_t60(receipt), carried);
+            let (_, line) = with_printed_shell_loss(&spec, &super::row(label).unwrap()).unwrap();
+            assert!(line.ends_with(&format!("; shell: {carried}")), "{line}");
+            assert!(line.contains("replaces the declared ") && !line.contains("T60s") && !line.contains("stay declared estimates"), "{line}");
+        }
+        // receipts that hold no such clause are carried whole: the alloy's, and the preset ride's fitted note
+        for p in [crate::kit::CUSN8_SHELL_RECEIPT, crate::kit::ride().provenance.unwrap(), B20_RECEIPT] {
+            assert_eq!(without_declared_t60(p), p);
+        }
+        let (_, line) = with_printed_shell_loss(&crash(), &row("b20")).unwrap();
+        assert!(line.ends_with("; shell: the preset's"), "{line}");
     }
 
     #[test]
