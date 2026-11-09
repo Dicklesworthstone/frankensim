@@ -14,14 +14,15 @@
 //! viscosity preserve the circular geometry. Mass-consistent upwind
 //! momentum transport uses a minmod-limited linear reconstruction and exposes
 //! its numerical dissipation. Explicit SSPRK3 is the default; optional IMEX
-//! treats Newtonian viscosity implicitly. Adaptive steps retain advection, drainage and
+//! treats viscosity implicitly with converged original-law nonlinear stages.
+//! Adaptive steps retain advection, drainage and
 //! capillary-Jacobian bounds; explicit mode also limits viscous diffusion. Smooth transport, capillary and viscous
 //! terms are second order in space; the limiter reduces order at extrema.
 //!
 //! Density and surface tension are constant. Viscosity is Newtonian by default;
 //! [`CarreauSlenderJetParameters`] selects the original material Carreau-Yasuda
 //! law at fixed temperature. This generalized-Newtonian path uses the physical
-//! extensional invariant and explicit SSPRK3, without fitted constant viscosity
+//! extensional invariant with explicit SSPRK3 or implicit IMEX, without fitted constant viscosity
 //! or lattice-relaxation clipping. The liquid is incompressible, its exterior
 //! has negligible inertia/viscosity, and the domain is periodic.
 //! No nozzle, stretching imposed by gravity, heat, gas drag, breakup topology,
@@ -30,7 +31,8 @@
 //! leaving the admitted model. They are not error certificates.
 //!
 //! Eleven reusable f64 arrays give O(N) storage in explicit mode. Selecting
-//! implicit viscosity prepares twelve additional arrays once; stepping allocates nothing.
+//! implicit viscosity prepares twelve additional arrays once; a non-Newtonian
+//! Carreau law needs five more. Successful stepping reuses all arrays.
 //! Fixed serial order and the original deterministic material math retain
 //! repeatable evaluations on the same ISA.
 //! Cancellation is polled every 256 cells and immediately before publication.
@@ -41,7 +43,9 @@ mod carreau;
 pub use carreau::CarreauSlenderJetParameters;
 
 mod implicit;
-pub use implicit::{SlenderJetIntegrationMethod, SlenderJetTemporalError};
+pub use implicit::{
+    SlenderJetImplicitControls, SlenderJetIntegrationMethod, SlenderJetTemporalError,
+};
 
 /// Constant SI properties of an explicitly Newtonian liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,6 +153,12 @@ pub enum NonlinearJetError {
     Allocation,
     Cancelled,
     SubstepBudget,
+    /// A nonlinear implicit stage exhausted its correction or line-search budget.
+    ImplicitViscosity {
+        iterations: usize,
+        backtracks: usize,
+        relative_residual: f64,
+    },
     /// Constructor refusal. During advance this becomes a normal DomainLimit.
     InitialDomain(SlenderJetViolation),
     /// Original material refusal, preserving its source-domain diagnostic.
@@ -224,6 +234,7 @@ pub struct PeriodicSlenderJet {
     spatial: Spatial,
     diagnostics: SlenderJetDiagnostics,
     integration_method: SlenderJetIntegrationMethod,
+    implicit_controls: SlenderJetImplicitControls,
     implicit_workspace: Option<implicit::Workspace>,
 }
 
@@ -240,7 +251,13 @@ impl PeriodicSlenderJet {
         gate: &CancelGate,
     ) -> Result<Self, NonlinearJetError> {
         Self::new_constitutive(
-            parameters, None, length_m, radii_m, velocities_m_s, limits, gate,
+            parameters,
+            None,
+            length_m,
+            radii_m,
+            velocities_m_s,
+            limits,
+            gate,
         )
     }
 
@@ -314,6 +331,7 @@ impl PeriodicSlenderJet {
             spatial,
             diagnostics: initial.diagnostics,
             integration_method: SlenderJetIntegrationMethod::ExplicitSspRk3,
+            implicit_controls: SlenderJetImplicitControls::default(),
             implicit_workspace: None,
         })
     }
@@ -467,10 +485,12 @@ impl PeriodicSlenderJet {
                             "implicit workspace is absent",
                         ))?,
                     self.parameters,
+                    self.carreau.as_ref(),
                     self.limits,
                     self.spacing_m,
                     dt,
                     budget.cfl,
+                    self.implicit_controls,
                     gate,
                 )
             };
@@ -677,6 +697,7 @@ fn evaluate(
     evaluate_split(fields, p, limits, dx, spatial, rhs, true, gate)
 }
 
+#[cfg(test)]
 fn evaluate_split(
     fields: &Fields,
     p: SlenderJetParameters,
@@ -688,7 +709,15 @@ fn evaluate_split(
     gate: &CancelGate,
 ) -> Result<Evaluation, NonlinearJetError> {
     evaluate_constitutive(
-        fields, p, None, limits, dx, spatial, rhs, explicit_viscosity, gate,
+        fields,
+        p,
+        None,
+        limits,
+        dx,
+        spatial,
+        rhs,
+        explicit_viscosity,
+        gate,
     )
 }
 

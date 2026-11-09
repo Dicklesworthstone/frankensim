@@ -7,7 +7,10 @@ fn law(parameters: [f64; 5], support: [f64; 2]) -> ThermalCarreauYasuda {
     ThermalCarreauYasuda::new(
         CarreauYasuda::new(mu0, mu_inf, time, n, a, support).unwrap(),
         TemperatureShift::new(
-            TemperatureShiftModel::WilliamsLandelFerry { c1: 1.0, c2_k: 100.0 },
+            TemperatureShiftModel::WilliamsLandelFerry {
+                c1: 1.0,
+                c2_k: 100.0,
+            },
             300.0,
             [280.0, 360.0],
         )
@@ -66,21 +69,37 @@ fn g1_newtonian_limits_reproduce_the_original_trajectory_and_shifted_viscosity()
             let mut p = parameters(law(curve, [0.0, 1000.0]));
             p.temperature_k = temperature_k;
             p.surface_tension_n_m = 1.0;
-            let mut actual = PeriodicSlenderJet::new_carreau(
-                p, 8.0, &radius, &velocity, limits(), &gate,
-            )
-            .unwrap();
-            let shift = p.rheology.temperature_shift().evaluate(temperature_k).unwrap().factor();
-            near(actual.parameters().kinematic_viscosity_m2_s, 0.4 * shift / 2.0, 1e-15);
+            let mut actual =
+                PeriodicSlenderJet::new_carreau(p, 8.0, &radius, &velocity, limits(), &gate)
+                    .unwrap();
+            let shift = p
+                .rheology
+                .temperature_shift()
+                .evaluate(temperature_k)
+                .unwrap()
+                .factor();
+            near(
+                actual.parameters().kinematic_viscosity_m2_s,
+                0.4 * shift / 2.0,
+                1e-15,
+            );
             let mut reference = PeriodicSlenderJet::new(
-                actual.parameters(), 8.0, &radius, &velocity, limits(), &gate,
+                actual.parameters(),
+                8.0,
+                &radius,
+                &velocity,
+                limits(),
+                &gate,
             )
             .unwrap();
             let report = actual.advance(0.01, budget(0.001), &gate).unwrap();
             let native = reference.advance(0.01, budget(0.001), &gate).unwrap();
             assert_eq!(report, native);
             assert_eq!(actual.radius_squared_m2(), reference.radius_squared_m2());
-            assert_eq!(actual.radius_squared_flux_m3_s(), reference.radius_squared_flux_m3_s());
+            assert_eq!(
+                actual.radius_squared_flux_m3_s(),
+                reference.radius_squared_flux_m3_s()
+            );
             assert_eq!(actual.carreau_parameters(), Some(&p));
             assert!(reference.carreau_sample_at(0).unwrap().is_none());
         }
@@ -92,11 +111,11 @@ fn g1_extensional_tensor_stress_heat_and_cfl_match_independent_carreau_algebra()
     let gate = CancelGate::new_clock_free();
     let p = parameters(law([0.4, 0.005, 20.0, 0.5, 2.0], [0.0, 1000.0]));
     let n = 16;
-    let velocity: Vec<_> = (0..n).map(|i| if i % 2 == 0 { 0.125 } else { -0.125 }).collect();
-    let mut jet = PeriodicSlenderJet::new_carreau(
-        p, 4.0, &[1.0; 16], &velocity, limits(), &gate,
-    )
-    .unwrap();
+    let velocity: Vec<_> = (0..n)
+        .map(|i| if i % 2 == 0 { 0.125 } else { -0.125 })
+        .collect();
+    let mut jet =
+        PeriodicSlenderJet::new_carreau(p, 4.0, &[1.0; 16], &velocity, limits(), &gate).unwrap();
     let actual = evaluate_constitutive(
         &jet.accepted,
         jet.parameters,
@@ -113,7 +132,10 @@ fn g1_extensional_tensor_stress_heat_and_cfl_match_independent_carreau_algebra()
     let mut inviscid_rhs = Fields::zeros(n, &gate).unwrap();
     let inviscid = evaluate(
         &jet.accepted,
-        SlenderJetParameters { kinematic_viscosity_m2_s: 0.0, ..jet.parameters },
+        SlenderJetParameters {
+            kinematic_viscosity_m2_s: 0.0,
+            ..jet.parameters
+        },
         jet.limits,
         jet.spacing_m,
         &mut jet.spatial,
@@ -166,14 +188,23 @@ fn g1_extensional_tensor_stress_heat_and_cfl_match_independent_carreau_algebra()
 fn g1_g3_strong_thinning_remains_dissipative_and_changes_the_real_evolution() {
     let gate = CancelGate::new_clock_free();
     let p = parameters(law([100.0, 0.0, 100.0, 0.02, 2.0], [0.0, 1000.0]));
-    let velocity: Vec<_> = (0..16).map(|i| if i % 2 == 0 { 0.125 } else { -0.125 }).collect();
-    let mut actual = PeriodicSlenderJet::new_carreau(
-        p, 4.0, &[1.0; 16], &velocity, limits(), &gate,
-    )
-    .unwrap();
-    let initial_mu = actual.carreau_sample_at(0).unwrap().unwrap().dynamic_viscosity_pa_s();
+    let velocity: Vec<_> = (0..16)
+        .map(|i| if i % 2 == 0 { 0.125 } else { -0.125 })
+        .collect();
+    let mut actual =
+        PeriodicSlenderJet::new_carreau(p, 4.0, &[1.0; 16], &velocity, limits(), &gate).unwrap();
+    let initial_mu = actual
+        .carreau_sample_at(0)
+        .unwrap()
+        .unwrap()
+        .dynamic_viscosity_pa_s();
     let mut frozen = PeriodicSlenderJet::new(
-        actual.parameters(), 4.0, &[1.0; 16], &velocity, limits(), &gate,
+        actual.parameters(),
+        4.0,
+        &[1.0; 16],
+        &velocity,
+        limits(),
+        &gate,
     )
     .unwrap();
     let report = actual.advance(0.005, budget(1.0), &gate).unwrap();
@@ -182,32 +213,43 @@ fn g1_g3_strong_thinning_remains_dissipative_and_changes_the_real_evolution() {
     assert!(report.viscous_dissipation_j > 0.0);
     assert!(report.after.kinetic_energy_j < report.before.kinetic_energy_j);
     assert!(report.viscous_dissipation_j < 0.6 * newtonian.viscous_dissipation_j);
-    assert_ne!(actual.radius_squared_flux_m3_s(), frozen.radius_squared_flux_m3_s());
+    assert_ne!(
+        actual.radius_squared_flux_m3_s(),
+        frozen.radius_squared_flux_m3_s()
+    );
     near(report.after.volume_m3, report.before.volume_m3, 3e-12);
     assert!(report.after.axial_momentum_kg_m_s.abs() < 1e-12);
-    assert!(actual.carreau_sample_at(0).unwrap().unwrap().dynamic_viscosity_pa_s() > initial_mu);
+    assert!(
+        actual
+            .carreau_sample_at(0)
+            .unwrap()
+            .unwrap()
+            .dynamic_viscosity_pa_s()
+            > initial_mu
+    );
 }
 
 #[test]
-fn g0_g4_source_failure_and_unsupported_implicit_policy_preserve_accepted_state() {
+fn g0_g4_source_failure_and_policy_selection_preserve_accepted_state() {
     let gate = CancelGate::new_clock_free();
     let mut p = parameters(law([0.4, 0.005, 20.0, 0.5, 2.0], [0.0, 1e-12]));
     p.surface_tension_n_m = 1.0;
     let radius: Vec<_> = (0..32)
         .map(|i| 1.0 + 0.05 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / 32.0))
         .collect();
-    let mut jet = PeriodicSlenderJet::new_carreau(
-        p, 8.0, &radius, &[0.0; 32], limits(), &gate,
-    )
-    .unwrap();
+    let mut jet =
+        PeriodicSlenderJet::new_carreau(p, 8.0, &radius, &[0.0; 32], limits(), &gate).unwrap();
     let area = jet.radius_squared_m2().to_vec();
     let flux = jet.radius_squared_flux_m3_s().to_vec();
     let diagnostics = jet.diagnostics();
-    assert!(matches!(
-        jet.set_integration_method(SlenderJetIntegrationMethod::ImplicitViscosity, &gate),
-        Err(NonlinearJetError::InvalidInput(_))
-    ));
-    assert_eq!(jet.integration_method(), SlenderJetIntegrationMethod::ExplicitSspRk3);
+    jet.set_integration_method(SlenderJetIntegrationMethod::ImplicitViscosity, &gate)
+        .unwrap();
+    assert_eq!(
+        jet.integration_method(),
+        SlenderJetIntegrationMethod::ImplicitViscosity
+    );
+    jet.set_integration_method(SlenderJetIntegrationMethod::ExplicitSspRk3, &gate)
+        .unwrap();
     assert!(matches!(
         jet.advance(0.01, budget(0.001), &gate),
         Err(NonlinearJetError::Rheology { cell: Some(_), .. })
@@ -217,12 +259,18 @@ fn g0_g4_source_failure_and_unsupported_implicit_policy_preserve_accepted_state(
     assert_eq!(jet.diagnostics(), diagnostics);
     assert_eq!(jet.time_s(), 0.0);
     assert_eq!(jet.carreau_parameters(), Some(&p));
-    assert_eq!(jet.advance(0.0, budget(0.001), &gate).unwrap().after, diagnostics);
+    assert_eq!(
+        jet.advance(0.0, budget(0.001), &gate).unwrap().after,
+        diagnostics
+    );
     assert!(jet.carreau_sample_at(32).is_err());
 
     let cancelled = CancelGate::new_clock_free();
     cancelled.request();
-    assert_eq!(jet.advance(0.01, budget(0.001), &cancelled), Err(NonlinearJetError::Cancelled));
+    assert_eq!(
+        jet.advance(0.01, budget(0.001), &cancelled),
+        Err(NonlinearJetError::Cancelled)
+    );
     p.temperature_k = 400.0;
     assert!(matches!(
         PeriodicSlenderJet::new_carreau(p, 8.0, &radius, &[0.0; 32], limits(), &gate),

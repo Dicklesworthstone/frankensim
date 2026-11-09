@@ -1628,7 +1628,7 @@ replace temporal or spatial resolution checks for the forcing bandwidth.
 
 `PeriodicSlenderJet::new_carreau` retains an original
 `ThermalCarreauYasuda` law and fixed physical temperature, density and surface
-tension. Each original SSPRK3 stage queries the material at
+tension. Each actual explicit or implicit RK stage queries the material at
 `gamma=sqrt(3)*|du/dz|`, the invariant of incompressible uniaxial extension.
 The conservative axial stress is `3*mu*du/dz`; the same sample supplies
 `3*mu*(du/dz)^2` to the existing integrated viscous-loss account. No lattice
@@ -1637,9 +1637,9 @@ tau cap, fitted Newtonian substitute or second constitutive implementation enter
 The explicit viscous step bound retains both apparent and differential
 viscosity. The apparent conductance is necessary near strongly thinning states:
 a small tangent alone can allow an Euler stage to overshoot through zero strain.
-Every trial stage rechecks the bound and the original source support. Source
-refusal or cancellation preserves accepted area, momentum, geometry and time.
-The native numerical workspace is reused without additional per-cell arrays.
+Every explicit trial stage rechecks the bound and the original source support.
+Source refusal or cancellation preserves accepted area, momentum, geometry and
+time. The explicit path retains its original numerical workspace.
 
 Regression definitions cover exact Newtonian-degeneracy trajectories, shifted
 temperature, independent tensor stress and heat, conservative momentum/volume,
@@ -1647,10 +1647,36 @@ strong-thinning dissipation, the viscous timestep bound, and refusal/rollback.
 These definitions require execution in the repository's Rust validation lane;
 they are not a claim that a new convergence or performance campaign has run.
 
-The existing implicit-viscosity policy requires a Newtonian law and explicitly
-refuses the Carreau selection. Temperature does not evolve, loss is not deposited
-as heat, and there is no elastic memory or independently calibrated extensional
-response. Original slenderness/resolution limits and pre-pinch stopping remain.
+`ImplicitViscosity` retains the original IMEX-SSP3(4,3,3) tableau for Carreau
+jets. Each fixed-area nonlinear stage solves the original conservative stress
+with its exact positive differential tangent. The native cyclic LDL/rank-one
+kernel resolves the symmetric positive definite Newton Jacobian in O(N) work.
+Five additional arrays are prepared once for a non-Newtonian selection; successful
+stepping allocates nothing. Exact Newtonian degeneracies retain the native direct
+solve and arithmetic. `SlenderJetImplicitControls` bounds corrections, backtracks
+and relative stage residual; the outer step budget bounds the number of stages.
+
+The source-weighted mean is separated before nonlinear residual scaling, so a
+uniform translation does not become the convergence tolerance for weak shear.
+Backtracking re-queries the same original material; unsupported algebraic trial
+rates may be rejected without clipping or extending source support. A search
+with no supported candidate preserves its original source diagnostic. Actual RK
+stage refusal, exhausted nonlinear work and cancellation roll back the full
+advance. Returned momentum and source rates are rechecked after mean restoration.
+
+Positive RK weights integrate physical viscous loss at the solved stage rates.
+The fixed-stage kinetic balance distinguishes molecular loss from implicit
+numerical damping; full IMEX endpoints retain a signed truncation remainder.
+Third-order temporal behavior requires resolved dynamics and nonlinear residual
+error below time-discretization error. The embedded second-order estimate remains
+a local indicator, not an unconditional accuracy or monotonic-energy guarantee.
+Focused regressions use an independent nonlinear alternating-face decay law,
+original-stress/tangent differences, stage energy balance, large translations,
+stiff shear-thinning evolution, source-domain backtracking and transactional retry.
+
+Temperature does not evolve, loss is not deposited as heat, and there is no
+elastic memory or independently calibrated extensional response. Original
+slenderness/resolution limits and pre-pinch stopping remain.
 
 ## Adaptive source-owned turbulent gas heat and species transport
 

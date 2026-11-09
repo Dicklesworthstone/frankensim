@@ -12,10 +12,12 @@
 //! difference is a diagnostic, not a global error certificate. Authored
 //! maximum_step_s remains necessary to resolve dynamics of interest.
 //!
-//! Each stage has a known area field, so the viscous equation is linear in
-//! face velocity. Its symmetric positive definite matrix is a tridiagonal
-//! path plus the positive rank-one periodic edge. A direct LDL solve and
-//! Sherman-Morrison correction are O(N), with bounded cancellation polls.
+//! Each stage has a known area field. Newtonian viscosity gives a linear
+//! face-velocity solve; Carreau viscosity uses bounded damped Newton with its
+//! original positive differential stress. Both use the same cyclic positive
+//! definite Jacobian: a tridiagonal path plus one positive rank-one edge.
+//! Direct LDL and Sherman-Morrison work is O(N) per correction, with bounded
+//! cancellation polls. Nonlinear residual error must resolve temporal error.
 //! The constant-velocity nullspace is restored to roundoff after the solve;
 //! a componentwise residual check refuses a numerically failed solve.
 //!
@@ -25,12 +27,16 @@
 
 use super::*;
 
+mod nonlinear;
+use nonlinear::ConstitutiveSolve;
+pub use nonlinear::SlenderJetImplicitControls;
+
 /// Time integration policy; changing it does not change any physical coefficient.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SlenderJetIntegrationMethod {
     #[default]
     ExplicitSspRk3,
-    /// Third-order IMEX-SSP3(4,3,3), with implicit Newtonian viscosity.
+    /// Third-order IMEX-SSP3(4,3,3), with converged implicit viscous stages.
     ImplicitViscosity,
 }
 
@@ -58,6 +64,7 @@ pub(super) struct Workspace {
     g3: Vec<f64>,
     g4: Vec<f64>,
     solve: CyclicSolve,
+    nonlinear: Option<ConstitutiveSolve>,
 }
 impl Workspace {
     fn new(n: usize, gate: &CancelGate) -> Result<Self, NonlinearJetError> {
@@ -74,7 +81,35 @@ impl Workspace {
                 z: zeros(n, gate)?,
                 rhs: zeros(n, gate)?,
             },
+            nonlinear: None,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        state: &mut Fields,
+        p: SlenderJetParameters,
+        carreau: Option<&CarreauSlenderJetParameters>,
+        dx: f64,
+        dt: f64,
+        controls: SlenderJetImplicitControls,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        if let Some(law) = carreau.filter(|law| !law.is_newtonian()) {
+            self.nonlinear
+                .as_mut()
+                .ok_or(NonlinearJetError::InvalidState(
+                    "nonlinear viscosity workspace is absent",
+                ))?
+                .apply(&mut self.solve, state, law, dx, dt, controls, gate)
+                .map(|_| ())
+        } else {
+            // Exact degenerate source laws share the original linear arithmetic.
+            // The enclosing evaluator still queries their original rate support.
+            self.solve
+                .apply(state, p.kinematic_viscosity_m2_s, dx, dt, gate)
+        }
     }
 }
 
@@ -82,6 +117,26 @@ impl PeriodicSlenderJet {
     #[must_use]
     pub const fn integration_method(&self) -> SlenderJetIntegrationMethod {
         self.integration_method
+    }
+
+    #[must_use]
+    pub const fn implicit_viscosity_controls(&self) -> SlenderJetImplicitControls {
+        self.implicit_controls
+    }
+
+    /// Bound the original-law nonlinear work in each implicit RK stage.
+    /// Newtonian/degenerate linear stages retain their native direct solve.
+    /// This changes no accepted field, source, geometry, time or policy.
+    pub fn set_implicit_viscosity_controls(
+        &mut self,
+        controls: SlenderJetImplicitControls,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        poll(gate)?;
+        controls.validate()?;
+        poll(gate)?;
+        self.implicit_controls = controls;
+        Ok(())
     }
 
     /// Select a numerical policy without modifying accepted state, source
@@ -94,15 +149,13 @@ impl PeriodicSlenderJet {
         gate: &CancelGate,
     ) -> Result<(), NonlinearJetError> {
         poll(gate)?;
-        if method == SlenderJetIntegrationMethod::ImplicitViscosity && self.carreau.is_some() {
-            return Err(NonlinearJetError::InvalidInput(
-                "Carreau viscosity requires explicit SSPRK3; the implicit solver is Newtonian",
-            ));
-        }
         if method == SlenderJetIntegrationMethod::ImplicitViscosity
             && self.implicit_workspace.is_none()
         {
-            let workspace = Workspace::new(self.accepted.a.len(), gate)?;
+            let mut workspace = Workspace::new(self.accepted.a.len(), gate)?;
+            if self.carreau.as_ref().is_some_and(|law| !law.is_newtonian()) {
+                workspace.nonlinear = Some(ConstitutiveSolve::new(self.accepted.a.len(), gate)?);
+            }
             poll(gate)?;
             self.implicit_workspace = Some(workspace);
         }
@@ -122,10 +175,12 @@ pub(super) fn step(
     spatial: &mut Spatial,
     work: &mut Workspace,
     p: SlenderJetParameters,
+    carreau: Option<&CarreauSlenderJetParameters>,
     limits: SlenderJetLimits,
     dx: f64,
     dt: f64,
     cfl: f64,
+    controls: SlenderJetImplicitControls,
     gate: &CancelGate,
 ) -> Result<Attempt, NonlinearJetError> {
     let n = base.a.len();
@@ -133,62 +188,38 @@ pub(super) fn step(
     // Implicit rows: [a,0,0,0], [-a,a,0,0], [0,1-a,a,0],
     // [b,eta,1/2-b-eta-a,a]. Both final weights are [0,1/6,1/6,2/3].
     copy_fields(stage, base, gate)?;
-    work.solve
-        .apply(stage, p.kinematic_viscosity_m2_s, dx, ALPHA * dt, gate)?;
-    let first = evaluate_split(stage, p, limits, dx, spatial, rhs, false, gate)?;
+    work.apply(stage, p, carreau, dx, ALPHA * dt, controls, gate)?;
+    let first = evaluate_constitutive(stage, p, carreau, limits, dx, spatial, rhs, false, gate)?;
     if dt > stable_step(first.rate_per_s, cfl) {
         return Ok(None);
     }
-    viscous_rhs(
-        stage,
-        spatial,
-        p.kinematic_viscosity_m2_s,
-        dx,
-        &mut work.g1,
-        gate,
-    )?;
+    viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g1, gate)?;
 
     for i in 0..n {
         poll_at(gate, i)?;
         stage.a[i] = base.a[i];
         stage.q[i] = base.q[i] - (ALPHA * dt) * work.g1[i];
     }
-    work.solve
-        .apply(stage, p.kinematic_viscosity_m2_s, dx, ALPHA * dt, gate)?;
-    let second = evaluate_split(stage, p, limits, dx, spatial, rhs, false, gate)?;
+    work.apply(stage, p, carreau, dx, ALPHA * dt, controls, gate)?;
+    let second = evaluate_constitutive(stage, p, carreau, limits, dx, spatial, rhs, false, gate)?;
     if dt > stable_step(second.rate_per_s, cfl) {
         return Ok(None);
     }
     copy_fields(&mut work.f2, rhs, gate)?;
-    viscous_rhs(
-        stage,
-        spatial,
-        p.kinematic_viscosity_m2_s,
-        dx,
-        &mut work.g2,
-        gate,
-    )?;
+    viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g2, gate)?;
 
     for i in 0..n {
         poll_at(gate, i)?;
         stage.a[i] = base.a[i] + dt * work.f2.a[i];
         stage.q[i] = base.q[i] + dt * (work.f2.q[i] + (1.0 - ALPHA) * work.g2[i]);
     }
-    work.solve
-        .apply(stage, p.kinematic_viscosity_m2_s, dx, ALPHA * dt, gate)?;
-    let third = evaluate_split(stage, p, limits, dx, spatial, rhs, false, gate)?;
+    work.apply(stage, p, carreau, dx, ALPHA * dt, controls, gate)?;
+    let third = evaluate_constitutive(stage, p, carreau, limits, dx, spatial, rhs, false, gate)?;
     if dt > stable_step(third.rate_per_s, cfl) {
         return Ok(None);
     }
     copy_fields(&mut work.f3, rhs, gate)?;
-    viscous_rhs(
-        stage,
-        spatial,
-        p.kinematic_viscosity_m2_s,
-        dx,
-        &mut work.g3,
-        gate,
-    )?;
+    viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g3, gate)?;
 
     for i in 0..n {
         poll_at(gate, i)?;
@@ -199,20 +230,12 @@ pub(super) fn step(
                 + ETA * work.g2[i]
                 + GAMMA * work.g3[i]);
     }
-    work.solve
-        .apply(stage, p.kinematic_viscosity_m2_s, dx, ALPHA * dt, gate)?;
-    let fourth = evaluate_split(stage, p, limits, dx, spatial, rhs, false, gate)?;
+    work.apply(stage, p, carreau, dx, ALPHA * dt, controls, gate)?;
+    let fourth = evaluate_constitutive(stage, p, carreau, limits, dx, spatial, rhs, false, gate)?;
     if dt > stable_step(fourth.rate_per_s, cfl) {
         return Ok(None);
     }
-    viscous_rhs(
-        stage,
-        spatial,
-        p.kinematic_viscosity_m2_s,
-        dx,
-        &mut work.g4,
-        gate,
-    )?;
+    viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g4, gate)?;
 
     // Publish the RK weighted state, NOT the last implicit stage.
     for i in 0..n {
@@ -223,7 +246,7 @@ pub(super) fn step(
             + dt * ((work.f2.q[i] + work.g2[i] + work.f3.q[i] + work.g3[i]) / 6.0
                 + (2.0 / 3.0) * (rhs.q[i] + work.g4[i]));
     }
-    let end = evaluate_split(stage, p, limits, dx, spatial, rhs, false, gate)?;
+    let end = evaluate_constitutive(stage, p, carreau, limits, dx, spatial, rhs, false, gate)?;
     if dt > stable_step(end.rate_per_s, cfl) {
         return Ok(None);
     }
@@ -271,16 +294,36 @@ fn copy_fields(to: &mut Fields, from: &Fields, gate: &CancelGate) -> Result<(), 
     Ok(())
 }
 
-/// Same centered conservative Newtonian stress used by the parent operator.
+/// Same centered conservative constitutive stress used by the parent operator.
 fn viscous_rhs(
     state: &Fields,
     spatial: &Spatial,
-    nu: f64,
+    p: SlenderJetParameters,
+    carreau: Option<&CarreauSlenderJetParameters>,
     dx: f64,
     result: &mut [f64],
     gate: &CancelGate,
 ) -> Result<(), NonlinearJetError> {
     let n = state.a.len();
+    if let Some(law) = carreau.filter(|law| !law.is_newtonian()) {
+        // Reuse the output for one source sample per cell, then differentiate
+        // those SAME stresses in place. Retain the periodic wrap before writes.
+        for i in 0..n {
+            poll_at(gate, i)?;
+            let strain = (spatial.u[i] - spatial.u[previous(i, n)]) / dx;
+            let sample = law.sample(strain, Some(i))?;
+            let nu = positive(sample.dynamic_viscosity_pa_s() / p.density_kg_m3)?;
+            result[i] = finite(3.0 * nu * state.a[i] * strain)?;
+        }
+        let first = result[0];
+        for i in 0..n {
+            poll_at(gate, i)?;
+            let right = if i + 1 == n { first } else { result[i + 1] };
+            result[i] = finite((right - result[i]) / dx)?;
+        }
+        return Ok(());
+    }
+    let nu = p.kinematic_viscosity_m2_s;
     for i in 0..n {
         poll_at(gate, i)?;
         let l = previous(i, n);
@@ -341,61 +384,11 @@ impl CyclicSolve {
         }
         let mass_sum = positive(total_mass.total())?;
         let mean = finite(total_rhs.total() / mass_sum)?;
-        let edge = finite(coefficient * state.a[0])?;
-        for i in 0..n {
-            poll_at(gate, i)?;
-            let mass = average(state.a[i], state.a[next(i, n)]);
-            // Remove only the periodic spring to form a strictly positive
-            // tridiagonal matrix T. The full B=T+edge*v*v^T, v=e0-eN.
-            let left = if i == 0 {
-                0.0
-            } else {
-                coefficient * state.a[i]
-            };
-            let right = if i + 1 == n {
-                0.0
-            } else {
-                coefficient * state.a[i + 1]
-            };
-            let diagonal = finite(mass + left + right)?;
-            let source = finite(self.rhs[i] - mass * mean)?;
-            let basis = if i == 0 {
-                1.0
-            } else if i + 1 == n {
-                -1.0
-            } else {
-                0.0
-            };
-            if i == 0 {
-                self.diagonal[i] = positive(diagonal)?;
-                self.y[i] = source;
-                self.z[i] = basis;
-            } else {
-                let off = -left;
-                let factor = finite(off / self.diagonal[i - 1])?;
-                self.diagonal[i] = positive(diagonal - factor * off)?;
-                self.y[i] = finite(source - factor * self.y[i - 1])?;
-                self.z[i] = finite(basis - factor * self.z[i - 1])?;
-            }
-        }
-        for i in (0..n).rev() {
-            poll_at(gate, i)?;
-            let off = if i + 1 == n {
-                0.0
-            } else {
-                -coefficient * state.a[i + 1]
-            };
-            let next_y = if i + 1 == n { 0.0 } else { self.y[i + 1] };
-            let next_z = if i + 1 == n { 0.0 } else { self.z[i + 1] };
-            self.y[i] = finite((self.y[i] - off * next_y) / self.diagonal[i])?;
-            self.z[i] = finite((self.z[i] - off * next_z) / self.diagonal[i])?;
-        }
-        let denominator = positive(1.0 + edge * (self.z[0] - self.z[n - 1]))?;
-        let factor = finite(edge * (self.y[0] - self.y[n - 1]) / denominator)?;
+        self.solve_edges(&state.a, &|i| coefficient * state.a[i], mean, gate)?;
         let mut solved_momentum = Sum::default();
         for i in 0..n {
             poll_at(gate, i)?;
-            let u = finite(self.y[i] - factor * self.z[i] + mean)?;
+            let u = self.y[i];
             let mass = average(state.a[i], state.a[next(i, n)]);
             state.q[i] = finite(mass * u)?;
             solved_momentum.add(state.q[i]);
@@ -425,6 +418,62 @@ impl CyclicSolve {
             }
         }
         poll(gate)
+    }
+
+    /// Solve (M + periodic weighted springs)*u = rhs. The same operation
+    /// order is retained for constant-viscosity stages; nonlinear corrections
+    /// supply the original differential stress at each edge.
+    fn solve_edges(
+        &mut self,
+        area: &[f64],
+        coupling: &impl Fn(usize) -> f64,
+        mean: f64,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        let n = area.len();
+        let edge = finite(coupling(0))?;
+        for i in 0..n {
+            poll_at(gate, i)?;
+            let mass = average(area[i], area[next(i, n)]);
+            // Remove only the periodic spring: B=T+edge*v*v^T, v=e0-eN.
+            let left = if i == 0 { 0.0 } else { coupling(i) };
+            let right = if i + 1 == n { 0.0 } else { coupling(i + 1) };
+            let diagonal = finite(mass + left + right)?;
+            let source = finite(self.rhs[i] - mass * mean)?;
+            let basis = if i == 0 {
+                1.0
+            } else if i + 1 == n {
+                -1.0
+            } else {
+                0.0
+            };
+            if i == 0 {
+                self.diagonal[i] = positive(diagonal)?;
+                self.y[i] = source;
+                self.z[i] = basis;
+            } else {
+                let off = -left;
+                let factor = finite(off / self.diagonal[i - 1])?;
+                self.diagonal[i] = positive(diagonal - factor * off)?;
+                self.y[i] = finite(source - factor * self.y[i - 1])?;
+                self.z[i] = finite(basis - factor * self.z[i - 1])?;
+            }
+        }
+        for i in (0..n).rev() {
+            poll_at(gate, i)?;
+            let off = if i + 1 == n { 0.0 } else { -coupling(i + 1) };
+            let next_y = if i + 1 == n { 0.0 } else { self.y[i + 1] };
+            let next_z = if i + 1 == n { 0.0 } else { self.z[i + 1] };
+            self.y[i] = finite((self.y[i] - off * next_y) / self.diagonal[i])?;
+            self.z[i] = finite((self.z[i] - off * next_z) / self.diagonal[i])?;
+        }
+        let denominator = positive(1.0 + edge * (self.z[0] - self.z[n - 1]))?;
+        let factor = finite(edge * (self.y[0] - self.y[n - 1]) / denominator)?;
+        for i in 0..n {
+            poll_at(gate, i)?;
+            self.y[i] = finite(self.y[i] - factor * self.z[i] + mean)?;
+        }
+        Ok(())
     }
 }
 

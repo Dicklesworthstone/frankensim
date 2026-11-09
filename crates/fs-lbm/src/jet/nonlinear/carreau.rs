@@ -26,6 +26,11 @@ pub struct CarreauSlenderJetParameters {
 }
 
 impl CarreauSlenderJetParameters {
+    pub(super) fn is_newtonian(&self) -> bool {
+        let [mu0, mu_inf, time, index, _] = self.rheology.curve().parameters();
+        time == 0.0 || index == 1.0 || mu0 == mu_inf
+    }
+
     pub(super) fn sample(
         &self,
         axial_rate_per_s: f64,
@@ -43,15 +48,18 @@ impl PeriodicSlenderJet {
     ///
     /// Every stress and loss evaluates the original law at the local
     /// sqrt(3)*|du/dz|, in inverse seconds. The source must support zero rate
-    /// and every initial/trial strain at this fixed temperature. Its original
-    /// refusal rolls an entire advance back without clipping a rate or
-    /// substituting another viscosity. Density and surface tension are
+    /// and every actual RK stage at this fixed temperature. Unsupported
+    /// algebraic Newton line-search candidates may backtrack within the work
+    /// budget; source refusal of an actual stage rolls the entire advance back.
+    /// Neither path clips a rate or substitutes another viscosity. Density and surface tension are
     /// authored constants; this owner adds no caloric evolution, gravity,
     /// viscoelastic stress, gas drag or continuation through pinch-off.
     ///
-    /// The native SSPRK3 workspace and conservative flux are reused with no
-    /// additional arrays or allocation in successful steps. The existing implicit
-    /// Newtonian viscosity policy is refused for this nonlinear law.
+    /// The native conservative flux supports explicit SSPRK3 and the original
+    /// third-order IMEX viscosity policy. Nonlinear implicit stages retain the
+    /// original material stress and differential tangent, with bounded Newton
+    /// work selected by [`Self::set_implicit_viscosity_controls`]. Scratch is
+    /// prepared on policy selection and reused by successful steps.
     pub fn new_carreau(
         parameters: CarreauSlenderJetParameters,
         length_m: f64,
@@ -66,7 +74,9 @@ impl PeriodicSlenderJet {
             || !parameters.surface_tension_n_m.is_finite()
             || parameters.surface_tension_n_m < 0.0
         {
-            return Err(NonlinearJetError::InvalidInput("Carreau liquid coefficients"));
+            return Err(NonlinearJetError::InvalidInput(
+                "Carreau liquid coefficients",
+            ));
         }
         let reference = parameters.sample(0.0, None)?;
         let native = SlenderJetParameters {
@@ -108,10 +118,8 @@ impl PeriodicSlenderJet {
             return Ok(None);
         };
         let left = previous(cell, n);
-        let velocity = |i| {
-            self.accepted.q[i]
-                / average(self.accepted.a[i], self.accepted.a[next(i, n)])
-        };
+        let velocity =
+            |i| self.accepted.q[i] / average(self.accepted.a[i], self.accepted.a[next(i, n)]);
         let strain = finite((velocity(cell) - velocity(left)) / self.spacing_m)?;
         parameters.sample(strain, Some(cell)).map(Some)
     }
