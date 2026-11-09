@@ -122,6 +122,33 @@ impl<C: PlanarOhmicResponse> AxisymmetricConduction<C> {
         })
     }
 
+    /// Direct simultaneous voltage, total-current and floating electrodes.
+    /// The original swept operator identifies ideal electrode coordinates and
+    /// solves once at actual drive. Every terminal needs positive swept area;
+    /// its local current distribution and exact bulk/contact heat are recovered.
+    pub fn solve_terminals(
+        &self,
+        terminals: &[&[usize]],
+        control: super::terminals::ConductionTerminalControl<'_>,
+        limits: super::terminals::ConductionTerminalLimits,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(
+        AxisymmetricConductionField<'_, C>,
+        super::terminals::ConductionTerminalReport,
+    )> {
+        let (field, report) = self
+            .core
+            .solve_terminals(terminals, control, limits, controls, cancelled)?;
+        Ok((
+            AxisymmetricConductionField {
+                problem: self,
+                field,
+            },
+            report,
+        ))
+    }
+
     /// Native resistance between two disjoint complete physical electrodes.
     /// Use the returned response for voltage, total-current or power drives.
     pub fn resistance(
@@ -171,7 +198,7 @@ impl<C: PlanarOhmicResponse> AxisymmetricConduction<C> {
 
 // Validate every electrode separately: an axis-only terminal must not borrow
 // positive area from the neighboring edge of another electrode.
-fn admit_terminal_traces(
+pub(super) fn admit_terminal_traces(
     mesh: &TriComplex2,
     terminals: &[&[usize]],
     cancelled: &mut impl FnMut() -> bool,

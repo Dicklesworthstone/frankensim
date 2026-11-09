@@ -31,6 +31,8 @@ pub use matrix::{
 pub mod motion;
 /// Memoryless source response at the actual spatial electric/current fields.
 pub mod response;
+/// Direct simultaneous ideal-terminal controls on the original sparse operator.
+pub mod terminals;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},

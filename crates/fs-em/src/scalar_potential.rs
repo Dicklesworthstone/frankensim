@@ -4,6 +4,8 @@
 //! Hodge operator and load, then recovers its own charge/energy or current/heat.
 //! Conductivity must never be passed off as dielectric permittivity.
 
+mod grouped;
+
 use fs_rep_mesh::TriComplex2;
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, SolveReport, checked_cg};
 use fs_sparse::{Csr, precond::Precond};
@@ -247,6 +249,53 @@ pub(crate) fn solve_relative(
         relative,
         references,
         report,
+    })
+}
+
+/// Identify ideal equipotential coordinates, then use the existing checked
+/// sparse solve on the original difference-form operator. The lifting retains
+/// component references separately from physically meaningful small drops.
+pub(crate) fn solve_grouped_relative(
+    stiffness: &Csr,
+    groups: &[usize],
+    rhs: &[f64],
+    prescribed: &[Option<f64>],
+    controls: CheckedCgConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RelativePotential, PotentialError> {
+    poll(cancelled)?;
+    if stiffness.ncols() != stiffness.nrows()
+        || groups.len() != stiffness.nrows()
+        || prescribed.len() != rhs.len()
+    {
+        return Err(PotentialError::Invalid(
+            "matching grouped potential coordinates required",
+        ));
+    }
+    let matrix = grouped::condense(groups, rhs.len(), |vertex| stiffness.row(vertex), cancelled)
+        .map_err(|error| match error {
+            grouped::GroupedError::Invalid(reason) => PotentialError::Invalid(reason),
+            grouped::GroupedError::Cancelled => PotentialError::Cancelled,
+        })?;
+    let matrix = Csr::from_parts(
+        rhs.len(),
+        rhs.len(),
+        matrix.row_ptr,
+        matrix.columns,
+        matrix.values,
+    );
+    let solved = solve_relative(&matrix, rhs, prescribed, controls, cancelled)?;
+    let mut relative = Vec::with_capacity(groups.len());
+    let mut references = Vec::with_capacity(groups.len());
+    for &group in groups {
+        poll(cancelled)?;
+        relative.push(solved.relative[group]);
+        references.push(solved.references[group]);
+    }
+    Ok(RelativePotential {
+        relative,
+        references,
+        report: solved.report,
     })
 }
 

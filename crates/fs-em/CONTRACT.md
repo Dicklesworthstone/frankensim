@@ -1538,6 +1538,42 @@ and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQ
 and source-domain limits apply; native test execution is a separate requirement
 where the workspace dependency repositories are available.
 
+## Direct sparse multi-terminal conduction
+
+`PlanarConduction::solve_terminals` and its axisymmetric counterpart solve
+simultaneous electrode voltages, conserved total currents or mixed controls
+through the original sparse conductivity operator. Complete exterior vertices
+of each ideal electrode share one unknown. A floating zero-current electrode
+can transfer current between separate physical faces. Unlisted surfaces
+insulate; all terminals require one conducting connection through bulk,
+original finite contacts or shared electrodes, and each swept electrode needs
+its own positive physical area.
+
+Sparse coordinate identification uses the original difference-form couplings.
+Internal ideal-electrode terms vanish before summation, preserving small
+external connections beside large internal conductances. Signed off-diagonal
+entries remain intact. The original checked Jacobi-CG solve runs once at actual
+drive; no artificial material-domain probe or dense terminal factor is needed.
+The existing reusable conductance-matrix API remains available for frozen
+operator response extraction. No wall-clock speedup is claimed.
+
+`ConductionTerminalLimits` bounds terminal count and conservatively admits
+extra scalar/index workspace before allocation. Native source-domain,
+free-current, total-current and heat/work gates remain active. The returned
+`ConductionTerminalReport` retains ordered physical potential differences and
+reactions. Independent source work uses authored current controls and native
+voltage-source reactions, once each, with double-double physical differences
+before rounding. A large common reference remains separate from local fields
+and contact jumps. Refusal and cancellation leave the original owner reusable.
+
+Five executed G0/G1/G3/G4 sparse-identification kernel tests cover floating
+transfer and energy, signed couplings, strong internal versus small external
+conductance, malformed arithmetic and cancellation/retry. Full native
+regression definitions additionally cover all control modes, common references,
+terminal reordering, exact swept disk reactions, local heat, source work and
+admission. Those new native integration regressions have not been executed in
+the current dependency environment.
+
 ## Axisymmetric nonlinear scalar conduction
 
 `conduction::axisymmetric::response::AxisymmetricConductionResponse` closes

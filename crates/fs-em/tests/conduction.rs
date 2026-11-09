@@ -13,6 +13,8 @@ mod contacts;
 mod matrix;
 #[path = "conduction/response.rs"]
 mod response;
+#[path = "conduction/terminals.rs"]
+mod terminals;
 
 use common::{config, ends, layered, limits, near};
 use fs_em::conduction::{
