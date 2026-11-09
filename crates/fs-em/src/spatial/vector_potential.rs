@@ -380,6 +380,16 @@ impl SpatialVectorMagnetostatics {
         }
         Some(result)
     }
+
+    /// Outward unit normal of an original exterior face in mesh coordinates.
+    /// Interior and unknown face identities have no exterior normal.
+    pub fn exterior_normal(&self, face: usize) -> Option<[f64; 3]> {
+        self.geometry
+            .faces
+            .get(face)
+            .filter(|face| face.cells.len() == 1)
+            .map(|face| face.outward_normal)
+    }
     /// Solve the authored static current and boundary problem. Natural faces
     /// cannot carry impressed current through the exterior; potential faces
     /// may, with compatibility checked against the actual relative curl kernel.

@@ -15,6 +15,21 @@ moving media or an infinite-domain certificate. The G1/G3/G4 regressions in
 `tests/scenario_magnetic.rs` exercise IR round trips, analytical B/H and energy,
 normal-sign reversal, native compatibility refusal and cancellation.
 
+`vector_potential_boundary_at` and `solve_vector_potential3` also connect
+canonical A histories to the original current-carrying Whitney edge owner.
+Explicit bindings distinguish uniform patch values from authored line-average
+vectors on each canonical edge. The adapter rotates polar vectors once and
+forms A_average dot (x_b-x_a) in webers. It never invents a spatial profile:
+uniform vectors have zero face circulation, while independent edge averages
+can impose nonzero magnetic flux. Original shared-edge compatibility, current
+continuity, topology, gauge and energy checks remain native.
+
+Fixed geometry uses WORLD Cartesian coordinates. Invalid metadata, duplicate
+or interior faces, nonfinite edge arithmetic and cancellation refuse. These
+boundaries can also feed the original induction owner. Focused native
+regressions cover rotated pure gauges, exact nonzero uniform B/H and energy
+from affine line averages, shared-edge conflict and interior-face refusal.
+
 ## Time-resolved Hertz friction and finite-cell cooling
 
 `friction_heat::hertz::march` composes the original exact or curved native,

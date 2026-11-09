@@ -1,6 +1,8 @@
 //! G1/G3/G4: canonical magnetic histories reach the original material fields.
 #[path = "../../fs-em/tests/common/mod.rs"]
 mod common;
+#[path = "scenario_magnetic/vector.rs"]
+mod vector;
 
 use common::{material, near};
 use fs_couple::scenario_magnetic::{
