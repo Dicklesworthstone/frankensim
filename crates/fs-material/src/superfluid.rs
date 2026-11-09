@@ -47,6 +47,9 @@ pub use normal_spectrum::{
     PreparedNormalViscousSpectrum,
 };
 
+/// Reciprocal longitudinal viscosities and irreversible Fourier heat transport.
+pub mod transport;
+
 /// Explicit SI properties at ONE equilibrium state; no material-name defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TwoFluidProperties {

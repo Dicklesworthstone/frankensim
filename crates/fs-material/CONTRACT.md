@@ -1957,6 +1957,35 @@ separately control its time error. `tests/superfluid_viscosity.rs` checks
 Poiseuille resistance, component and wall impulses, heat balance, coflow versus
 superflow, semigroup/rotation, weak/stiff limits and finite-domain refusal.
 
+## Longitudinal Landau–Khalatnikov transport
+
+`superfluid::transport::LongitudinalTransport` retains the original
+`TwoFluidState`, its normal shear viscosity, explicit Fourier conductivity and
+immutable `SecondViscosities`. The signed cross coefficient satisfies
+`zeta4=zeta1`; exact binary64 product comparison admits only `zeta2,zeta3>=0`
+and `zeta1²<=zeta2*zeta3`, including semidefinite limits without a tolerance.
+The constitutive form follows Nikuni–Griffin, Phys. Rev. A 63, 033608 (2001),
+equations (86)–(87), and Escobedo et al., Phys. Rev. A 79, 063623 (2009),
+equations (8)–(15). No measured transport values are inferred.
+
+With `q0=rho_s(v_s-v_n)`, the scalar longitudinal stress is
+`(4 eta/3+zeta2)*div(v_n)+zeta1*div(q0)` and the specific chemical-potential
+correction is `-zeta1*div(v_n)-zeta3*div(q0)`. Cached symmetric resistance and
+kinetic-energy-normalized diffusion matrices preserve the original total and
+reduced component densities. Factored local viscous dissipation stays
+nonnegative near rank-deficient coefficients. Conductive temperature diffusion
+uses `kappa/(rho Cv)`; Fourier entropy flux and availability destruction are
+separate from physical viscous heat, so a thermal consumer must not deposit
+conductive availability loss as additional Joules.
+
+Evaluation allocates nothing, uses bounded constant work and refuses nonfinite
+or unrepresentable responses. The law has no spatial boundary conditions,
+frequency-dependent relaxation, microscopic fit, wall/vortex double counting,
+phase transition or nonlinear temperature feedback. G0/G1/G3 regressions in
+`tests/superfluid_transport.rs` cover exact PSD admission at overflow/underflow
+scales, signed reciprocal coupling, independent stress/chemical-potential work,
+the correct density bases, null directions and Fourier entropy accounting.
+
 ## Authored Kapitza solid/helium thermal interfaces
 
 `superfluid::kapitza::KapitzaInterface` evaluates the explicit surface law
