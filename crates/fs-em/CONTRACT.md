@@ -8747,3 +8747,39 @@ work, exact query counts, budgets, cancellation and continuing source policy.
 The rule remains a caller-refined discretization, not a quadrature-error or
 measured-material certificate. Moving/sliding contact surfaces and interface
 electrical memory remain outside this memoryless fixed-geometry law.
+
+## Sampled-volume reversible film energy and stable storage changes
+
+The original prepared exposure layer now exposes `volume_energy` on explicit
+`AngularSpectrumEnergyVolumeSample` quadrature: original grid index, depth in
+the selected film and nonnegative physical volume in cubic metres. The retained
+owner reports electromagnetic, polarization restoring, polarization kinetic and
+total energy in joules, or signed analytic endpoint changes on the original DD
+source clock. It shares the point observer's original normalized material
+coordinates, real/proper ensemble law and binary-scaled field products.
+
+Preparation groups positive-weight samples deterministically by depth, sharing
+each original source-bank frequency reconstruction across all selected points
+and reservoirs at that depth. Limits admit authored samples (including zero
+weights, hard cap65,536), active depths, original line/FFT work, retained coordinate
+terms and explicit workspace before reconstruction. Every authored entry is
+validated. The original layer and quadrature remain borrowed; repeated queries
+allocate no heap and perform no field/material solve. Volume and constitutive
+scales meet original field products before restoration to DD range. Analytic
+field increments retain finite changes when bright endpoint energies overflow.
+
+This is sampled physical volume quadrature, not a certificate of spatial
+resolution, a continuous Fourier-cell integral, an enclosing force surface,
+thermal storage or switch-on dynamics. Original prescribed settled fields and
+material ownership remain authoritative.
+
+Validation: five new actual numerical volume tests and seven existing point
+energy tests pass. Independent mixed-source ensemble and nonuniform volume
+checks cover deep real/proper cancellation, every energy account, extreme
+physical scales, signed spatial exchange, precise clocks and partitioned changes.
+Four additional narrow adapter checks execute the complete preparation body
+against manufactured original frequency fields: batching, point/volume agreement,
+all work/memory refusals before reconstruction, zero-weight validation, and late
+cancellation/reuse. The adapter preserves the callable owner shape but does not
+execute the native Maxwell/material/FFT pipeline. That full pipeline and the
+native workspace suite remain unrun here.

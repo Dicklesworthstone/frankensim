@@ -27,8 +27,10 @@ mod temporal_moments;
 
 mod energy;
 pub use energy::{
+    AngularSpectrumEnergyVolumeLimits, AngularSpectrumEnergyVolumeSample,
     AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumExposureLayerEnergyLimits,
-    PreparedAngularSpectrumExposureLayerEnergy,
+    AngularSpectrumExposureLayerVolumeEnergy, PreparedAngularSpectrumExposureLayerEnergy,
+    PreparedAngularSpectrumExposureLayerVolumeEnergy,
 };
 
 mod integrated_heat;
@@ -1122,3 +1124,4 @@ mod tests {
         assert!((heat + storage - electrical_work).to_f64().abs() < 2e-14);
     }
 }
+
