@@ -11,8 +11,10 @@ mod vibration;
 pub use vibration::GasMembraneVibration;
 mod motion;
 pub use motion::{GasMembraneMotion, GasMembraneMotionControls, GasMembraneMotionError, GasMembraneMotionStep};
-pub use motion::{GasMembraneThermalControls, GasMembraneThermalEvaluation,
-    GasMembraneThermalMotion, GasMembraneThermalStep};
+pub use motion::{
+    GasMembraneDiscreteGradientStep, GasMembraneHeatVolumeStep, GasMembraneThermalControls,
+    GasMembraneThermalEvaluation, GasMembraneThermalMotion, GasMembraneThermalStep,
+};
 mod exterior;
 pub use exterior::{ExteriorGasEvaluation, SealedMembraneExterior};
 use exterior::Exterior;

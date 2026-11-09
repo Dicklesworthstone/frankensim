@@ -3,7 +3,7 @@ use super::*;
 use fs_time::galpha::{SecondOrderOperatorWeights, SecondOrderProblem};
 use std::cell::{Cell, RefCell};
 
-pub(super) struct ThermalOperator<'a, 'p, C> {
+pub(super) struct ThermalOperator<'a, 'p, R: gas::HeatVolumeLaw, C> {
     model: &'a GasMembrane<'p>,
     masses: &'a [f64],
     initial: &'a GasMembraneThermalEvaluation,
@@ -14,11 +14,11 @@ pub(super) struct ThermalOperator<'a, 'p, C> {
     cancel: RefCell<C>,
     stop: RefCell<Option<GasMembraneMotionError>>,
     failure: RefCell<Option<GasMembraneMotionError>>,
-    cache: RefCell<Option<gas::Trial>>,
+    cache: RefCell<Option<gas::Trial<R>>>,
     evaluations: Cell<usize>,
     gas_trials: Cell<usize>,
 }
-impl<'a, 'p, C: FnMut() -> bool> ThermalOperator<'a, 'p, C> {
+impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, R, C> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         model: &'a GasMembrane<'p>,
@@ -96,9 +96,13 @@ impl<'a, 'p, C: FnMut() -> bool> ThermalOperator<'a, 'p, C> {
                 .zip(q)
                 .all(|(&i, &value)| geometry.displacement[i / 3][i % 3] == value)
     }
-    fn fresh(&self, stage: &[f64], endpoint: &[f64]) -> Result<gas::Trial, GasMembraneMotionError> {
+    fn fresh(
+        &self,
+        stage: &[f64],
+        endpoint: &[f64],
+    ) -> Result<gas::Trial<R>, GasMembraneMotionError> {
         self.gas_trials.set(self.gas_trials.get() + 1);
-        gas::Trial::new(
+        gas::Trial::<R>::new(
             self.model,
             self.initial,
             stage,
@@ -144,7 +148,7 @@ impl<'a, 'p, C: FnMut() -> bool> ThermalOperator<'a, 'p, C> {
     pub(super) fn final_trial(
         &self,
         endpoint: &[f64],
-    ) -> Result<gas::Trial, GasMembraneMotionError> {
+    ) -> Result<gas::Trial<R>, GasMembraneMotionError> {
         if !self.begin() {
             return Err(self.take_stop().expect("stopped operator"));
         }
@@ -158,7 +162,9 @@ impl<'a, 'p, C: FnMut() -> bool> ThermalOperator<'a, 'p, C> {
     }
 }
 
-impl<C: FnMut() -> bool> SecondOrderProblem for ThermalOperator<'_, '_, C> {
+impl<R: gas::HeatVolumeLaw, C: FnMut() -> bool> SecondOrderProblem
+    for ThermalOperator<'_, '_, R, C>
+{
     fn dimension(&self) -> usize {
         self.masses.len()
     }

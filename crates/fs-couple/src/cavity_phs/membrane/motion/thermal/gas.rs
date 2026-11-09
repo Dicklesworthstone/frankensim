@@ -1,45 +1,132 @@
-//! Original caloric midpoint candidates pulled through native membrane geometry.
+//! Original caloric candidates pulled through native membrane geometry.
 use super::*;
 
-pub(super) struct GasStep {
+pub(super) struct GasStep<R> {
     pub endpoint: MembraneGas,
-    pub midpoint_pressure_pa: f64,
-    pub report: GasHeatVolumeStep,
+    pub work_pressure_pa: f64,
+    pub sampling_temperature_k: f64,
+    pub sampling_pressure_pa: f64,
+    pub report: R,
 }
 
-fn heat_volume(
-    gas: &MembraneGas,
-    volume: f64,
-    heat: f64,
-    controls: GasEnergySolve,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<GasStep, GasMembraneMotionError> {
-    let (endpoint, midpoint_pressure_pa, report) = match gas {
-        MembraneGas::Ideal(gas) => {
-            let candidate = gas.midpoint_heat_volume(volume, heat, controls, cancelled)?;
-            let pressure = candidate.midpoint().state().pressure;
-            let (endpoint, report) = candidate.into_parts();
-            (MembraneGas::Ideal(endpoint), pressure, report)
-        }
-        MembraneGas::PengRobinson(gas) => {
-            let candidate = gas
-                .clone()
-                .into_isochoric()
-                .midpoint_heat_volume(volume, heat, controls, cancelled)?;
-            let pressure = candidate.midpoint().pressure_pa();
-            let (endpoint, report) = candidate.into_parts();
-            (
-                MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(endpoint)),
-                pressure,
-                report,
-            )
-        }
-    };
-    Ok(GasStep {
-        endpoint,
-        midpoint_pressure_pa,
-        report,
-    })
+/// Only the original source receipt selects its heat/volume law. Mechanics,
+/// geometry, Newton actions and publication remain shared and monomorphized.
+pub(super) trait HeatVolumeLaw: Copy {
+    fn heat_volume(
+        gas: &MembraneGas,
+        volume: f64,
+        heat: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasStep<Self>, GasMembraneMotionError>;
+    fn stored_energy_change_j(self) -> f64;
+    fn work_by_gas_j(self) -> f64;
+    fn pressure_final_volume_derivative_pa_m3(self) -> f64;
+}
+
+impl HeatVolumeLaw for GasHeatVolumeStep {
+    fn heat_volume(
+        gas: &MembraneGas,
+        volume: f64,
+        heat: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasStep<Self>, GasMembraneMotionError> {
+        let (endpoint, temperature, pressure, report) = match gas {
+            MembraneGas::Ideal(gas) => {
+                let candidate = gas.midpoint_heat_volume(volume, heat, controls, cancelled)?;
+                let temperature = candidate.midpoint().state().temperature;
+                let pressure = candidate.midpoint().state().pressure;
+                let (endpoint, report) = candidate.into_parts();
+                (MembraneGas::Ideal(endpoint), temperature, pressure, report)
+            }
+            MembraneGas::PengRobinson(gas) => {
+                let candidate = gas
+                    .clone()
+                    .into_isochoric()
+                    .midpoint_heat_volume(volume, heat, controls, cancelled)?;
+                let temperature = candidate.midpoint().temperature_k();
+                let pressure = candidate.midpoint().pressure_pa();
+                let (endpoint, report) = candidate.into_parts();
+                (
+                    MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(endpoint)),
+                    temperature,
+                    pressure,
+                    report,
+                )
+            }
+        };
+        Ok(GasStep {
+            endpoint,
+            work_pressure_pa: pressure,
+            sampling_temperature_k: temperature,
+            sampling_pressure_pa: pressure,
+            report,
+        })
+    }
+    fn stored_energy_change_j(self) -> f64 {
+        self.stored_energy_change_j
+    }
+    fn work_by_gas_j(self) -> f64 {
+        self.work_by_gas_j
+    }
+    fn pressure_final_volume_derivative_pa_m3(self) -> f64 {
+        self.pressure_final_volume_derivative_pa_m3
+    }
+}
+
+impl HeatVolumeLaw for GasDiscreteGradientStep {
+    fn heat_volume(
+        gas: &MembraneGas,
+        volume: f64,
+        heat: f64,
+        controls: GasEnergySolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasStep<Self>, GasMembraneMotionError> {
+        let (endpoint, temperature, pressure, report) = match gas {
+            MembraneGas::Ideal(gas) => {
+                let candidate =
+                    gas.discrete_gradient_heat_volume(volume, heat, controls, cancelled)?;
+                let temperature = candidate.thermodynamic_mean().state().temperature;
+                let pressure = candidate.thermodynamic_mean().state().pressure;
+                let (endpoint, report) = candidate.into_parts();
+                (MembraneGas::Ideal(endpoint), temperature, pressure, report)
+            }
+            MembraneGas::PengRobinson(gas) => {
+                let candidate = gas
+                    .clone()
+                    .into_isochoric()
+                    .discrete_gradient_heat_volume(volume, heat, controls, cancelled)?;
+                let temperature = candidate.thermodynamic_mean().temperature_k();
+                let pressure = candidate.thermodynamic_mean().pressure_pa();
+                let (endpoint, report) = candidate.into_parts();
+                (
+                    MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(endpoint)),
+                    temperature,
+                    pressure,
+                    report,
+                )
+            }
+        };
+        Ok(GasStep {
+            endpoint,
+            // The PR material sampling state's EOS pressure is not the
+            // discrete Gibbs effort. Only the source receipt drives momentum.
+            work_pressure_pa: report.work_pressure_pa,
+            sampling_temperature_k: temperature,
+            sampling_pressure_pa: pressure,
+            report,
+        })
+    }
+    fn stored_energy_change_j(self) -> f64 {
+        self.stored_energy_change_j
+    }
+    fn work_by_gas_j(self) -> f64 {
+        self.work_by_gas_j
+    }
+    fn pressure_final_volume_derivative_pa_m3(self) -> f64 {
+        self.pressure_final_volume_derivative_pa_m3
+    }
 }
 
 pub(super) struct Geometry {
@@ -95,20 +182,20 @@ pub(super) fn geometry(
     })
 }
 
-pub(super) struct Trial {
+pub(super) struct Trial<R = GasHeatVolumeStep> {
     pub stage: Geometry,
     pub endpoint: Geometry,
     /// Exact path mean of grad(V), work-conjugate to the complete displacement.
     pub mean_volume_gradient: Vec<[f64; 3]>,
     /// Endpoint gradient for the native gas derivative and physical readback.
     pub endpoint_volume_gradient: Vec<[f64; 3]>,
-    pub gas: GasStep,
-    pub exterior: Option<GasStep>,
-    pub exterior_midpoint_pa: f64,
+    pub gas: GasStep<R>,
+    pub exterior: Option<GasStep<R>>,
+    pub exterior_work_pressure_pa: f64,
     pub net_pressure_pa: f64,
 }
 
-impl Trial {
+impl<R: HeatVolumeLaw> Trial<R> {
     pub(super) fn new(
         model: &GasMembrane<'_>,
         initial: &GasMembraneThermalEvaluation,
@@ -131,7 +218,7 @@ impl Trial {
             model
                 .patch
                 .pressure_load_n(&endpoint.displacement, 1.0, &mut *cancelled)?;
-        let gas = heat_volume(
+        let gas = R::heat_volume(
             &initial.gas,
             endpoint.volume,
             heat,
@@ -139,7 +226,7 @@ impl Trial {
             &mut *cancelled,
         )?;
         let exterior = if let Some(old) = &initial.exterior_gas {
-            Some(heat_volume(
+            Some(R::heat_volume(
                 old,
                 endpoint.exterior_volume.expect("sealed volume"),
                 exterior_heat.expect("admitted exterior heat"),
@@ -149,10 +236,10 @@ impl Trial {
         } else {
             None
         };
-        let exterior_midpoint_pa = exterior
+        let exterior_work_pressure_pa = exterior
             .as_ref()
-            .map_or(initial.exterior_pressure_pa, |gas| gas.midpoint_pressure_pa);
-        let net_pressure_pa = gas.midpoint_pressure_pa - exterior_midpoint_pa;
+            .map_or(initial.exterior_pressure_pa, |gas| gas.work_pressure_pa);
+        let net_pressure_pa = gas.work_pressure_pa - exterior_work_pressure_pa;
         Ok(Self {
             stage,
             endpoint,
@@ -160,7 +247,7 @@ impl Trial {
             endpoint_volume_gradient,
             gas,
             exterior,
-            exterior_midpoint_pa,
+            exterior_work_pressure_pa,
             net_pressure_pa,
         })
     }
@@ -193,11 +280,10 @@ impl Trial {
         for (&dof, &d) in model.free_dofs.iter().zip(direction) {
             dv = dv + Dd::from_f64(self.endpoint_volume_gradient[dof / 3][dof % 3] * d);
         }
-        let derivative = self.gas.report.pressure_final_volume_derivative_pa_m3
-            + self
-                .exterior
-                .as_ref()
-                .map_or(0.0, |gas| gas.report.pressure_final_volume_derivative_pa_m3);
+        let derivative = self.gas.report.pressure_final_volume_derivative_pa_m3()
+            + self.exterior.as_ref().map_or(0.0, |gas| {
+                gas.report.pressure_final_volume_derivative_pa_m3()
+            });
         // The source derivative holds interval heat fixed. q1=2*q_stage-q_old,
         // so BOTH endpoint-volume and mean-geometry derivatives receive a factor
         // of two. The pressure force uses the exact path mean of grad(V).
@@ -236,7 +322,7 @@ impl Trial {
                     .map_err(GasMembraneError::from)?
                     .pressure_pa
             }
-            None => self.exterior_midpoint_pa,
+            None => self.exterior_work_pressure_pa,
         };
         let mut residual_n = self.endpoint.internal;
         for ((row, gradient), loads) in residual_n

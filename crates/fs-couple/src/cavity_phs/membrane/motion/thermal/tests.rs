@@ -152,7 +152,7 @@ fn curved_heated_tangent_uses_native_ideal_and_pr_discrete_derivatives() {
             .collect::<Vec<_>>()
     };
     let trial_at = |stage: &[f64]| {
-        gas::Trial::new(
+        gas::Trial::<GasHeatVolumeStep>::new(
             &model,
             motion.accepted(),
             stage,
@@ -541,4 +541,522 @@ fn source_and_late_work_energy_cancel_refusals_preserve_both_gases_and_history()
         .unwrap();
     assert_eq!(motion.state(), probe.state());
     assert_eq!(motion.accepted(), probe.accepted());
+}
+
+#[test]
+fn g1_gibbs_curved_tangent_retains_original_ideal_and_pr_work_efforts() {
+    let (patch, reference, fixed, _) = curved_geometry();
+    let model = GasMembrane::with_sealed_exterior(
+        &patch,
+        source_gas(0.75, 0.002),
+        &reference,
+        &fixed,
+        [0.0007, 0.0015],
+        SealedMembraneExterior {
+            gas: real_gas().into(),
+            volume_interval_m3: [0.0007, 0.0015],
+            entropy: GasEntropySolve {
+                minimum_temperature_k: 280.0,
+                maximum_temperature_k: 330.0,
+                ..motion_controls().gas
+            },
+        },
+        || false,
+    )
+    .unwrap();
+    let zero = vec![[0.0; 3]; reference.len()];
+    let motion =
+        GasMembraneMotion::new(&model, &reference, &zero, &zero, motion_controls(), || {
+            false
+        })
+        .unwrap()
+        .into_thermal();
+    let settings = GasMembraneThermalControls {
+        gas: GasEnergySolve {
+            minimum_temperature_k: 390.0,
+            maximum_temperature_k: 450.0,
+            ..controls().gas
+        },
+        exterior_gas: Some(GasEnergySolve {
+            minimum_temperature_k: 280.0,
+            maximum_temperature_k: 330.0,
+            ..controls().gas
+        }),
+        ..controls()
+    };
+    let direction = [
+        0.4, -0.3, 0.2, -0.2, 0.1, -0.5, 0.3, 0.2, -0.4, -0.1, 0.5, 0.3,
+    ];
+    let stage: Vec<_> = motion
+        .state()
+        .q
+        .iter()
+        .zip(direction)
+        .map(|(&q, d)| q + 0.003 * d)
+        .collect();
+    let trial_at = |stage: &[f64]| {
+        let endpoint: Vec<_> = motion
+            .state()
+            .q
+            .iter()
+            .zip(stage)
+            .map(|(&q, &s)| q + 2.0 * (s - q))
+            .collect();
+        gas::Trial::<GasDiscreteGradientStep>::new(
+            &model,
+            motion.accepted(),
+            stage,
+            &endpoint,
+            0.2,
+            Some(-0.1),
+            settings,
+            &mut || false,
+        )
+        .unwrap()
+    };
+    let trial = trial_at(&stage);
+    let MembraneGas::Ideal(first) = &motion.accepted().gas else {
+        panic!("ideal source")
+    };
+    let native = first
+        .discrete_gradient_heat_volume(trial.endpoint.volume, 0.2, settings.gas, || false)
+        .unwrap();
+    assert_eq!(
+        trial.gas.endpoint,
+        MembraneGas::Ideal(native.endpoint().clone())
+    );
+    assert_eq!(trial.gas.report, *native.step());
+    assert_eq!(trial.gas.work_pressure_pa, native.step().work_pressure_pa);
+    assert_eq!(
+        trial.gas.sampling_temperature_k,
+        native.thermodynamic_mean().state().temperature
+    );
+    assert_eq!(
+        trial.gas.sampling_pressure_pa,
+        native.thermodynamic_mean().state().pressure
+    );
+    let MembraneGas::PengRobinson(second) = motion.accepted().exterior_gas.as_ref().unwrap() else {
+        panic!("original PR source")
+    };
+    let native = second
+        .clone()
+        .into_isochoric()
+        .discrete_gradient_heat_volume(
+            trial.endpoint.exterior_volume.unwrap(),
+            -0.1,
+            settings.exterior_gas.unwrap(),
+            || false,
+        )
+        .unwrap();
+    let exterior = trial.exterior.as_ref().unwrap();
+    assert_eq!(
+        exterior.endpoint,
+        MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(
+            native.endpoint().clone()
+        ))
+    );
+    assert_eq!(exterior.report, *native.step());
+    assert_eq!(exterior.work_pressure_pa, native.step().work_pressure_pa);
+    assert_eq!(
+        exterior.sampling_pressure_pa,
+        native.thermodynamic_mean().pressure_pa()
+    );
+    assert_eq!(
+        exterior.sampling_temperature_k,
+        native.thermodynamic_mean().temperature_k()
+    );
+    assert!(
+        (exterior.work_pressure_pa - exterior.sampling_pressure_pa).abs() > 1e-5,
+        "the PR fixture must distinguish EOS sample and discrete work pressure"
+    );
+    assert_eq!(
+        trial.net_pressure_pa,
+        trial.gas.work_pressure_pa - exterior.work_pressure_pa
+    );
+    let h = 2e-7;
+    let low: Vec<_> = stage
+        .iter()
+        .zip(direction)
+        .map(|(&q, d)| q - h * d)
+        .collect();
+    let high: Vec<_> = stage
+        .iter()
+        .zip(direction)
+        .map(|(&q, d)| q + h * d)
+        .collect();
+    let (a, b) = (trial_at(&low), trial_at(&high));
+    let tangent = trial
+        .tangent(
+            &model,
+            &motion.accepted().displacement_m,
+            &direction,
+            &mut || false,
+        )
+        .unwrap();
+    for (&dof, action) in model.free_dofs().iter().zip(tangent) {
+        let force = |t: &gas::Trial<GasDiscreteGradientStep>| {
+            t.stage.internal[dof / 3][dof % 3]
+                - t.net_pressure_pa * t.mean_volume_gradient[dof / 3][dof % 3]
+        };
+        near(action, (force(&b) - force(&a)) / (2.0 * h), 3e-2, 8e-6);
+    }
+}
+
+#[test]
+fn g1_gibbs_membrane_motion_exchanges_heat_and_preserves_adiabatic_entropy() {
+    let (patch, reference, fixed, velocity) = curved_geometry();
+    let model = GasMembrane::with_sealed_exterior(
+        &patch,
+        source_gas(0.75, 0.002),
+        &reference,
+        &fixed,
+        [0.0007, 0.0015],
+        backing(),
+        || false,
+    )
+    .unwrap();
+    let zero = vec![[0.0; 3]; reference.len()];
+    let loads = model
+        .evaluate(&reference, &zero, motion_controls().gas, || false)
+        .unwrap()
+        .residual_n;
+    let settings = GasMembraneThermalControls {
+        exterior_gas: Some(controls().gas),
+        pressure_work_tolerance_j: 1e-11,
+        ..controls()
+    };
+    let mut motion = GasMembraneMotion::new(
+        &model,
+        &reference,
+        &velocity,
+        &loads,
+        motion_controls(),
+        || false,
+    )
+    .unwrap()
+    .into_thermal();
+    // Continue a genuine accepted midpoint trajectory through the new law.
+    motion
+        .step(1e-5, &loads, 0.01, Some(-0.002), settings, || false)
+        .unwrap();
+    let prefix = motion.state().clone();
+    for (heat, exterior_heat) in [(0.0, 0.0), (0.04, -0.01), (-0.02, 0.005), (0.0, 0.0)] {
+        let before = motion.accepted().clone();
+        let old_kinetic = motion.kinetic_energy_j().unwrap();
+        let frame = motion
+            .step_discrete_gradient(1e-5, &loads, heat, Some(exterior_heat), settings, || false)
+            .unwrap();
+        let after = motion.accepted();
+        let native = frame.exterior_gas.unwrap();
+        for (old, new, receipt, theta, supplied) in [
+            (
+                &before.gas,
+                &after.gas,
+                frame.gas,
+                frame.gas_sampling_temperature_k,
+                heat,
+            ),
+            (
+                before.exterior_gas.as_ref().unwrap(),
+                after.exterior_gas.as_ref().unwrap(),
+                native,
+                frame.exterior_sampling_temperature_k.unwrap(),
+                exterior_heat,
+            ),
+        ] {
+            let (MembraneGas::Ideal(a), MembraneGas::Ideal(b)) = (old, new) else {
+                panic!("variable-Cv ideal source fixture")
+            };
+            let (t0, t1) = (a.state().state().temperature, b.state().state().temperature);
+            let r = a.state().state().specific_gas_constant;
+            let energy = analytic_energy(old, new);
+            // Independent integral of Cv(T)/T for the original 75:25 NASA fixture.
+            let entropy = a.mass_kg()
+                * r
+                * (2.25 * (t1 / t0).ln()
+                    + 0.0015 * (t1 - t0)
+                    + (b.volume_m3() / a.volume_m3()).ln());
+            let allowance = a.mass_kg() * settings.gas.energy_tolerance_j_kg;
+            near(receipt.stored_energy_change_j, energy, 1e-9, 1e-8);
+            near(receipt.entropy_change_j_k, entropy, 1e-12, 1e-7);
+            near(receipt.entropy_transfer_j_k, supplied / theta, 1e-15, 1e-13);
+            assert!(receipt.entropy_residual_j_k.abs() <= allowance / theta);
+            assert!(receipt.gibbs_residual_j.abs() <= allowance);
+            assert!(receipt.energy_residual_j.abs() <= allowance);
+            if supplied == 0.0 {
+                assert_eq!(receipt.entropy_transfer_j_k, 0.0);
+                assert!(entropy.abs() <= allowance / theta + 1e-12);
+            }
+            assert_eq!(old.mass_kg(), new.mass_kg());
+        }
+        assert_eq!(frame.work_pressure_pa, frame.gas.work_pressure_pa);
+        assert_eq!(frame.exterior_work_pressure_pa, native.work_pressure_pa);
+        near(
+            after.gas.volume_m3() + after.exterior_gas.as_ref().unwrap().volume_m3(),
+            0.0022,
+            1e-18,
+            0.0,
+        );
+        let work: f64 = loads
+            .iter()
+            .zip(&before.displacement_m)
+            .zip(&after.displacement_m)
+            .flat_map(|((f, a), b)| (0..3).map(move |i| f[i] * (b[i] - a[i])))
+            .sum();
+        let balance = motion.kinetic_energy_j().unwrap() - old_kinetic + after.strain_energy_j
+            - before.strain_energy_j
+            + analytic_energy(&before.gas, &after.gas)
+            + analytic_energy(
+                before.exterior_gas.as_ref().unwrap(),
+                after.exterior_gas.as_ref().unwrap(),
+            )
+            - work
+            - heat
+            - exterior_heat;
+        near(frame.integration_defect_j, balance, 3e-9, 1e-7);
+        assert!(frame.pressure_work_defect_j.abs() < 1e-11);
+    }
+    assert_eq!(motion.state().steps, prefix.steps + 4);
+    assert_eq!(
+        &motion.state().history[..prefix.history.len()],
+        prefix.history.as_slice()
+    );
+    // Scheme selection never resets storage or the original mechanical history.
+    let last = motion.state().clone();
+    motion
+        .step(1e-5, &loads, 0.0, Some(0.0), settings, || false)
+        .unwrap();
+    assert_eq!(motion.state().steps, last.steps + 1);
+    assert_eq!(
+        &motion.state().history[..last.history.len()],
+        last.history.as_slice()
+    );
+}
+
+#[test]
+fn g4_gibbs_membrane_source_energy_and_late_cancel_refusals_are_atomic() {
+    let (patch, reference, fixed, velocity) = curved_geometry();
+    let model = GasMembrane::with_sealed_exterior(
+        &patch,
+        source_gas(0.75, 0.002),
+        &reference,
+        &fixed,
+        [0.0007, 0.0015],
+        backing(),
+        || false,
+    )
+    .unwrap();
+    let zero = vec![[0.0; 3]; reference.len()];
+    let loads = model
+        .evaluate(&reference, &zero, motion_controls().gas, || false)
+        .unwrap()
+        .residual_n;
+    let settings = GasMembraneThermalControls {
+        exterior_gas: Some(controls().gas),
+        ..controls()
+    };
+    let mut motion = GasMembraneMotion::new(
+        &model,
+        &reference,
+        &velocity,
+        &loads,
+        motion_controls(),
+        || false,
+    )
+    .unwrap()
+    .into_thermal();
+    motion
+        .step_discrete_gradient(1e-5, &loads, 0.02, Some(-0.005), settings, || false)
+        .unwrap();
+    let state = motion.state().clone();
+    let accepted = motion.accepted().clone();
+    let unchanged = |motion: &GasMembraneThermalMotion<'_, '_>| {
+        assert_eq!(motion.state(), &state);
+        assert_eq!(motion.accepted(), &accepted);
+    };
+    let mut reference_run = motion.clone();
+    let mut polls = 0;
+    let reference_step = reference_run
+        .step_discrete_gradient(1e-5, &loads, 0.02, Some(-0.005), settings, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    assert!(
+        reference_step.integration_defect_j != 0.0,
+        "curved midpoint material force must exercise the independent energy gate"
+    );
+    assert!(matches!(
+        motion.step_discrete_gradient(
+            1e-5,
+            &loads,
+            0.02,
+            Some(-0.005),
+            GasMembraneThermalControls {
+                energy_tolerance_j: 0.0,
+                ..settings
+            },
+            || false,
+        ),
+        Err(GasMembraneMotionError::Energy { .. })
+    ));
+    unchanged(&motion);
+    if reference_step.pressure_work_defect_j != 0.0 {
+        assert!(matches!(
+            motion.step_discrete_gradient(
+                1e-5,
+                &loads,
+                0.02,
+                Some(-0.005),
+                GasMembraneThermalControls {
+                    pressure_work_tolerance_j: 0.5 * reference_step.pressure_work_defect_j.abs(),
+                    ..settings
+                },
+                || false,
+            ),
+            Err(GasMembraneMotionError::PressureWork { .. })
+        ));
+        unchanged(&motion);
+    }
+    let MembraneGas::Ideal(back) = accepted.exterior_gas.as_ref().unwrap() else {
+        panic!("ideal exterior")
+    };
+    let t = back.state().state().temperature;
+    assert!(matches!(
+        motion.step_discrete_gradient(
+            1e-5,
+            &loads,
+            0.02,
+            Some(100.0),
+            GasMembraneThermalControls {
+                exterior_gas: Some(GasEnergySolve {
+                    minimum_temperature_k: t - 1e-6,
+                    maximum_temperature_k: t + 1e-6,
+                    ..settings.gas
+                }),
+                ..settings
+            },
+            || false,
+        ),
+        Err(GasMembraneMotionError::Heat(_))
+    ));
+    unchanged(&motion);
+    let mut count = 0;
+    assert!(matches!(
+        motion.step_discrete_gradient(1e-5, &loads, 0.02, Some(-0.005), settings, || {
+            count += 1;
+            count >= polls
+        },),
+        Err(GasMembraneMotionError::Cancelled)
+    ));
+    unchanged(&motion);
+    let retry = motion
+        .step_discrete_gradient(1e-5, &loads, 0.02, Some(-0.005), settings, || false)
+        .unwrap();
+    assert_eq!(motion.state(), reference_run.state());
+    assert_eq!(motion.accepted(), reference_run.accepted());
+    assert_eq!(retry.gas, reference_step.gas);
+    assert_eq!(retry.exterior_gas, reference_step.exterior_gas);
+    assert_eq!(retry.work_pressure_pa, reference_step.work_pressure_pa);
+}
+
+#[test]
+fn g1_gibbs_pr_membrane_impulse_uses_work_pressure_and_true_endpoint_readback() {
+    let (patch, reference, fixed) = pyramid();
+    let source = real_gas();
+    let exterior = source.pressure_response().unwrap().pressure_pa;
+    let model = GasMembrane::new(
+        &patch,
+        source.clone(),
+        &reference,
+        &fixed,
+        exterior,
+        [0.0007, 0.0015],
+        || false,
+    )
+    .unwrap();
+    let mut velocity = [[0.0; 3]; 5];
+    velocity[0][2] = 0.3;
+    let loads = [[0.0; 3]; 5];
+    let mut motion = GasMembraneMotion::new(
+        &model,
+        &reference,
+        &velocity,
+        &loads,
+        motion_controls(),
+        || false,
+    )
+    .unwrap()
+    .into_thermal();
+    let settings = GasMembraneThermalControls {
+        gas: GasEnergySolve {
+            minimum_temperature_k: 280.0,
+            maximum_temperature_k: 330.0,
+            ..controls().gas
+        },
+        ..controls()
+    };
+    let old = motion.state().clone();
+    let dt = 2e-5;
+    let frame = motion
+        .step_discrete_gradient(dt, &loads, 20.0, None, settings, || false)
+        .unwrap();
+    let native = source
+        .clone()
+        .into_isochoric()
+        .discrete_gradient_heat_volume(
+            motion.accepted().gas.volume_m3(),
+            20.0,
+            settings.gas,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(frame.gas, *native.step());
+    assert_eq!(frame.work_pressure_pa, native.step().work_pressure_pa);
+    assert_eq!(
+        frame.gas_sampling_pressure_pa,
+        native.thermodynamic_mean().pressure_pa()
+    );
+    assert_eq!(
+        frame.gas_sampling_temperature_k,
+        native.thermodynamic_mean().temperature_k()
+    );
+    assert!(frame.exterior_gas.is_none());
+    assert!(frame.exterior_sampling_pressure_pa.is_none());
+    assert!(frame.exterior_sampling_temperature_k.is_none());
+    assert_eq!(frame.exterior_work_pressure_pa, exterior);
+    assert!((frame.work_pressure_pa - frame.gas_sampling_pressure_pa).abs() > 1e-4);
+    let mut midpoint = reference.clone();
+    midpoint[0][2] = 0.5 * (old.q[0] + motion.state().q[0]);
+    let internal = patch
+        .evaluate(&midpoint, || false)
+        .unwrap()
+        .internal_gradient_n[0][2];
+    let gradient = patch
+        .pressure_segment_load_n(&reference, &motion.accepted().displacement_m, 1.0, || false)
+        .unwrap()[0][2];
+    near(
+        patch.nodal_mass_kg()[0] * (motion.state().v[0] - old.v[0]) / dt + internal
+            - (frame.work_pressure_pa - exterior) * gradient,
+        0.0,
+        5e-7,
+        0.0,
+    );
+    let accepted = motion.accepted();
+    let actual_pressure = accepted.gas.pressure_response().unwrap().pressure_pa;
+    assert_eq!(accepted.pressure.pressure_pa, actual_pressure);
+    let endpoint_internal = patch
+        .evaluate(&accepted.displacement_m, || false)
+        .unwrap()
+        .internal_gradient_n[0][2];
+    let endpoint_gradient = patch
+        .pressure_load_n(&accepted.displacement_m, 1.0, || false)
+        .unwrap()[0][2];
+    near(
+        accepted.residual_n[0][2],
+        endpoint_internal - (actual_pressure - exterior) * endpoint_gradient,
+        1e-10,
+        1e-12,
+    );
+    assert!(frame.pressure_work_defect_j.abs() < 1e-8);
 }

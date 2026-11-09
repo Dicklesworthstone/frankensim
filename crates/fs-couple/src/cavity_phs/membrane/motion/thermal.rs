@@ -6,6 +6,7 @@ mod tests;
 
 use super::*;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
+use fs_material::thermochemical_gas::energy::parcel::discrete_gradient::GasDiscreteGradientStep;
 use fs_material::thermochemical_gas::energy::parcel::midpoint::GasHeatVolumeStep;
 use operator::ThermalOperator;
 
@@ -90,13 +91,55 @@ pub struct GasMembraneThermalStep {
     pub gas_trials: usize,
 }
 
+/// Source-typed interval accounting; supplied heat is counted once per chamber.
+/// Mechanics and calorics retain independent error accounts for either gas law.
+#[derive(Clone, Debug)]
+pub struct GasMembraneHeatVolumeStep<R> {
+    pub time: ImplicitStepTelemetry,
+    /// Original heat, work, storage, entropy and discrete derivative receipt.
+    pub gas: R,
+    pub exterior_gas: Option<R>,
+    /// Pressure effort used in BOTH mechanical impulse and gas boundary work.
+    /// This is midpoint pressure for `step`, discrete Gibbs pressure for
+    /// `step_discrete_gradient`. It need not be a sampled PR EOS pressure.
+    pub work_pressure_pa: f64,
+    /// Opposing work effort, or the held exterior reservoir pressure.
+    pub exterior_work_pressure_pa: f64,
+    /// Original material sample: energy/volume midpoint for `step`, the
+    /// entropy-conjugate mean temperature for `step_discrete_gradient`.
+    /// Neither value is the physical endpoint temperature.
+    pub gas_sampling_temperature_k: f64,
+    /// Original EOS pressure at that sample, kept distinct from the work effort.
+    pub gas_sampling_pressure_pa: f64,
+    /// Opposing original sample; absent for a held-pressure reservoir.
+    pub exterior_sampling_temperature_k: Option<f64>,
+    pub exterior_sampling_pressure_pa: Option<f64>,
+    pub kinetic_energy_change_j: f64,
+    pub membrane_energy_change_j: f64,
+    pub swept_volume_change_m3: f64,
+    pub exterior_pressure_work_j: f64,
+    pub dead_load_work_j: f64,
+    /// Path-mean traction work minus native gas work plus held-reservoir work.
+    pub pressure_work_defect_j: f64,
+    /// Delta K + Delta E_membrane + both Delta U + reservoir work - dead work - heat.
+    pub integration_defect_j: f64,
+    pub evaluations: usize,
+    /// Coupled proposals using one original source candidate per sealed chamber.
+    pub gas_trials: usize,
+}
+
+/// Accepted interval with the original discrete Gibbs energy/entropy receipt.
+pub type GasMembraneDiscreteGradientStep = GasMembraneHeatVolumeStep<GasDiscreteGradientStep>;
+
 /// Existing structural trajectory continued with prescribed signed interval heat.
 ///
-/// The native gas owner uses midpoint in (internal energy, volume), while native
-/// generalized-alpha at rho_inf=1 uses midpoint mechanical coordinates. For a
-/// curved chart, V(q_mid) need not equal (V_old+V_new)/2. Pressure therefore
+/// `step` retains the native midpoint gas law in (internal energy, volume).
+/// `step_discrete_gradient` selects the original discrete Gibbs law, including
+/// its entropy-conjugate temperature and mechanical work pressure. Both use the
+/// same native generalized-alpha trajectory at rho_inf=1. For a curved chart,
+/// V(q_mid) need not equal (V_old+V_new)/2. The selected work pressure therefore
 /// multiplies the exact path mean of the original volume gradient, whose work
-/// is p_mid*(V_new-V_old). The same geometric derivative enters native Newton
+/// is p_work*(V_new-V_old). The same geometric derivative enters native Newton
 /// actions. Pressure-transfer roundoff and the remaining mechanical integration
 /// defect are measured independently and gated; neither becomes heat or damping.
 /// Material forces still use midpoint coordinates. Time refinement is required.
@@ -162,8 +205,76 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         heat_j: f64,
         exterior_heat_j: Option<f64>,
         controls: GasMembraneThermalControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<GasMembraneThermalStep, GasMembraneMotionError> {
+        let frame = self.step_with_law::<GasHeatVolumeStep>(
+            duration_s,
+            dead_load_n,
+            heat_j,
+            exterior_heat_j,
+            controls,
+            cancelled,
+        )?;
+        Ok(GasMembraneThermalStep {
+            time: frame.time,
+            gas: frame.gas,
+            exterior_gas: frame.exterior_gas,
+            midpoint_pressure_pa: frame.work_pressure_pa,
+            exterior_midpoint_pressure_pa: frame.exterior_work_pressure_pa,
+            kinetic_energy_change_j: frame.kinetic_energy_change_j,
+            membrane_energy_change_j: frame.membrane_energy_change_j,
+            swept_volume_change_m3: frame.swept_volume_change_m3,
+            exterior_pressure_work_j: frame.exterior_pressure_work_j,
+            dead_load_work_j: frame.dead_load_work_j,
+            pressure_work_defect_j: frame.pressure_work_defect_j,
+            integration_defect_j: frame.integration_defect_j,
+            evaluations: frame.evaluations,
+            gas_trials: frame.gas_trials,
+        })
+    }
+
+    /// Advance with the original ideal/PR discrete Gibbs heat/volume law.
+    ///
+    /// Its work pressure drives the same exact path-mean traction and the native
+    /// derivative drives Newton. Each gas returns independent energy, Gibbs and
+    /// entropy-transfer residuals; at zero heat, its entropy change meets the
+    /// original source budget. The PR thermodynamic sample retains its true EOS
+    /// pressure even when it differs from the mechanical work effort.
+    ///
+    /// The fixed-perimeter membrane still uses midpoint material forces, so
+    /// structural energy error remains separately gated and needs refinement.
+    /// Supplied heat is prescribed energy: gas-side Q/theta is not a complete
+    /// bath or finite-body entropy balance and no heat-transfer law is inferred.
+    /// This may continue either existing thermal scheme without resetting gas,
+    /// mechanics, physical time or accepted native history.
+    pub fn step_discrete_gradient(
+        &mut self,
+        duration_s: f64,
+        dead_load_n: &[[f64; 3]],
+        heat_j: f64,
+        exterior_heat_j: Option<f64>,
+        controls: GasMembraneThermalControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasMembraneDiscreteGradientStep, GasMembraneMotionError> {
+        self.step_with_law::<GasDiscreteGradientStep>(
+            duration_s,
+            dead_load_n,
+            heat_j,
+            exterior_heat_j,
+            controls,
+            cancelled,
+        )
+    }
+
+    fn step_with_law<R: gas::HeatVolumeLaw>(
+        &mut self,
+        duration_s: f64,
+        dead_load_n: &[[f64; 3]],
+        heat_j: f64,
+        exterior_heat_j: Option<f64>,
+        controls: GasMembraneThermalControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasMembraneHeatVolumeStep<R>, GasMembraneMotionError> {
         poll(&mut cancelled)?;
         controls.validate()?;
         if self.state.steps >= controls.maximum_steps {
@@ -182,7 +293,7 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
                 "positive interval, finite loads/heat and matching exterior heat controls required",
             ));
         }
-        let operator = ThermalOperator::new(
+        let operator = ThermalOperator::<R, _>::new(
             self.model,
             &self.masses_kg,
             &self.accepted,
@@ -238,28 +349,38 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         )?;
         let reservoir_work = self.model.exterior.reservoir_work_j(swept);
         let opposing = trial.exterior.as_ref().map(|gas| gas.report);
-        let extra_storage = opposing.map_or(0.0, |gas| gas.stored_energy_change_j);
-        let extra_work = opposing.map_or(0.0, |gas| gas.work_by_gas_j);
+        let extra_storage = opposing.map_or(0.0, |gas| gas.stored_energy_change_j());
+        let extra_work = opposing.map_or(0.0, |gas| gas.work_by_gas_j());
         let pressure_defect = (Dd::from_f64(trial.net_pressure_pa * pressure_volume_work.to_f64())
-            - Dd::from_f64(trial.gas.report.work_by_gas_j)
+            - Dd::from_f64(trial.gas.report.work_by_gas_j())
             - Dd::from_f64(extra_work)
             + Dd::from_f64(reservoir_work))
         .to_f64();
         let defect = (kinetic_change
             + membrane_change
-            + Dd::from_f64(trial.gas.report.stored_energy_change_j)
+            + Dd::from_f64(trial.gas.report.stored_energy_change_j())
             + Dd::from_f64(extra_storage)
             + Dd::from_f64(reservoir_work)
             - dead_work
             - Dd::from_f64(heat_j)
             - Dd::from_f64(exterior_heat_j.unwrap_or(0.0)))
         .to_f64();
-        let frame = GasMembraneThermalStep {
+        let frame = GasMembraneHeatVolumeStep {
             time,
             gas: trial.gas.report,
             exterior_gas: opposing,
-            midpoint_pressure_pa: trial.gas.midpoint_pressure_pa,
-            exterior_midpoint_pressure_pa: trial.exterior_midpoint_pa,
+            work_pressure_pa: trial.gas.work_pressure_pa,
+            exterior_work_pressure_pa: trial.exterior_work_pressure_pa,
+            gas_sampling_temperature_k: trial.gas.sampling_temperature_k,
+            gas_sampling_pressure_pa: trial.gas.sampling_pressure_pa,
+            exterior_sampling_temperature_k: trial
+                .exterior
+                .as_ref()
+                .map(|gas| gas.sampling_temperature_k),
+            exterior_sampling_pressure_pa: trial
+                .exterior
+                .as_ref()
+                .map(|gas| gas.sampling_pressure_pa),
             kinetic_energy_change_j: kinetic_change.to_f64(),
             membrane_energy_change_j: membrane_change.to_f64(),
             swept_volume_change_m3: swept,

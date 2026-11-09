@@ -7,8 +7,10 @@
 
 mod operator;
 mod thermal;
-pub use thermal::{GasMembraneThermalControls, GasMembraneThermalEvaluation,
-    GasMembraneThermalMotion, GasMembraneThermalStep};
+pub use thermal::{
+    GasMembraneDiscreteGradientStep, GasMembraneHeatVolumeStep, GasMembraneThermalControls,
+    GasMembraneThermalEvaluation, GasMembraneThermalMotion, GasMembraneThermalStep,
+};
 
 use super::*;
 use fs_math::dd::Dd;

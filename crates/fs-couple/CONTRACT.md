@@ -26,6 +26,44 @@ incompatibility, late failure/cancellation, work-budget refusal and exact retry.
 All six plus the five original Hertz heat regressions pass in the bounded
 actual-source closure; full workspace proof remains separate.
 
+## Discrete Gibbs pressure in native nonlinear membrane motion
+
+`GasMembraneThermalMotion::step_discrete_gradient` connects the original ideal
+and homogeneous Peng--Robinson discrete Gibbs heat/volume laws to the existing
+matrix-free nonlinear membrane trajectory. The source's mechanical work pressure
+multiplies the exact path-mean volume gradient; its original fixed-heat pressure
+derivative and the same endpoint geometry derivative supply Newton actions.
+Both first and opposing sealed chambers use their actual accepted inventories,
+independent source controls and native calorics. No gas law, entropy correction,
+pressure fit or replacement structural integrator is introduced.
+
+`GasMembraneDiscreteGradientStep` retains the original
+`GasDiscreteGradientStep` receipts, including independent energy, Gibbs and
+entropy-transfer residuals. Work pressure is distinct from the source sampling
+EOS pressure; for PR these generally differ. The reported sampling temperature
+is the source's entropy-conjugate mean, while accepted source states and physical
+endpoint pressure/residual remain endpoint quantities. At zero supplied heat,
+each gas's entropy change is bounded by its original source allowance. Prescribed
+heat contributes gas-side `Q/theta`; this is not a complete external bath/body
+entropy account or a heat-transfer law.
+
+The same native owner may continue between midpoint and Gibbs steps without
+resetting mechanics, gas storage, clock or history. The original midpoint API,
+report type and midpoint field names remain unchanged. Private source-typed
+proposals share the original geometry, force/tangent, work gates and final
+publication; no additional trajectory storage or numerical solve is introduced.
+The finite-strain material force still uses midpoint coordinates. Its integration
+error stays in the enclosing energy defect, separate from gas Gibbs closure and
+pressure-transfer roundoff, and remains subject to time refinement.
+
+Four focused G1/G4 regression definitions cover original mixed ideal/PR
+receipts and curved force derivatives, signed heat and independent variable-Cv
+entropy/storage balances in two chambers, PR work-pressure impulse versus true
+endpoint readback, and source/work/energy/late-cancellation rollback with exact
+retry. The changed Rust sources pass parsing/formatting; the full coupled tests
+were not compiled or executed in this dependency-limited environment. These
+definitions do not establish full coupled validation or continuum accuracy.
+
 ## Work-consistent gas pressure on nonlinear heated membranes
 
 The existing `GasMembraneThermalMotion` couples each original ideal or
