@@ -13,6 +13,8 @@ mod coating;
 mod oriented;
 #[path = "elastic_reflection/transient.rs"]
 mod transient;
+#[path = "elastic_reflection/viscoelastic.rs"]
+mod viscoelastic;
 
 fn solid(scale: f64) -> ElasticAcousticState {
     ElasticAcousticState::from_bulk_and_shear(

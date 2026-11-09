@@ -378,7 +378,7 @@ fn g1_weak_intrinsic_heat_and_opaque_shielding_are_not_flux_deficits() {
     .unwrap();
     let driven = prepared.drive(C64::ONE, 1.0, &mut || false).unwrap();
     let power = driven.power();
-    // For k*d=4e-8, p=2+O((k*d)^2) and |strain|^2=4/100^2.
+    // For k*d=4e-8, |p|^2=4+O((k*d)^2) and |strain|^2=4/100^2.
     let bulk_reference = 20.0 * bulk.modulus(20.0).1 * 4.0 * 1.0e-8 / (2.0 * 10000.0);
     let shear_reference =
         (2.0 / 3.0) * 20.0 * shear.modulus(20.0).1 * 4.0 * 1.0e-8 / 10000.0;

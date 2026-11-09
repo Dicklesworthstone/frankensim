@@ -14,6 +14,8 @@
 //! fields; the pins themselves do not imply a measured material or finite shell.
 //! The normal-incidence transient owner evolves their original displacement and
 //! velocity, including causal re-emission and integrated physical work.
+//! The viscoelastic coating owner also retains original bulk/shear material heat
+//! and converts the pin phasor convention explicitly for native fluid incidence.
 
 mod coating;
 pub use coating::{OscillatorBackedElasticCoating, SupportedElasticCoatingResponse};
@@ -28,10 +30,13 @@ pub use transient::{
     TransientElasticReflectionWork, TransientElasticReflectionWorkspace,
     TransientElasticSupportEnergy, TransientElasticSupportState,
 };
+mod viscoelastic;
+pub use viscoelastic::{OscillatorBackedViscoelasticLayers, SupportedViscoelasticResponse};
 
 use fs_material::MaterialError;
 use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_material::elastic::acoustic::interface::ElasticMode;
+use fs_material::elastic::acoustic::viscoelastic::ViscoelasticSlabError;
 use fs_material::elastic::acoustic::interface::surface::{
     ElasticSurfaceCondition, ElasticSurfaceImpedance, ElasticSurfaceResponse,
     IsotropicElasticSurface, PreparedElasticSurface,
@@ -43,6 +48,7 @@ use fs_phs::{PhsError, WallPin, wall_specific_impedance};
 #[derive(Debug)]
 pub enum ElasticSupportError {
     Material(MaterialError),
+    Viscoelastic(ViscoelasticSlabError),
     Support(PhsError),
     Cancelled,
     NumericalRange,
@@ -51,6 +57,11 @@ pub enum ElasticSupportError {
 impl From<MaterialError> for ElasticSupportError {
     fn from(error: MaterialError) -> Self {
         Self::Material(error)
+    }
+}
+impl From<ViscoelasticSlabError> for ElasticSupportError {
+    fn from(error: ViscoelasticSlabError) -> Self {
+        Self::Viscoelastic(error)
     }
 }
 impl From<PhsError> for ElasticSupportError {
@@ -62,6 +73,7 @@ impl core::fmt::Display for ElasticSupportError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Material(error) => write!(f, "elastic support material: {error}"),
+            Self::Viscoelastic(error) => write!(f, "elastic support coating: {error}"),
             Self::Support(error) => write!(f, "elastic support mechanics: {error}"),
             Self::Cancelled => f.write_str("elastic support preparation cancelled"),
             Self::NumericalRange => f.write_str("elastic support storage is unrepresentable"),

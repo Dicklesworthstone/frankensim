@@ -11332,3 +11332,30 @@ and native events with late refusal/retry. An independent scalar calculation
 gives feedback error ratios 1.99746 and 1.99883; work/heat balance stays below
 3.5e-15 J in that calculation. Pinned rustfmt passes. Full fs-couple integration
 execution remains outstanding under the existing dependency resource limit.
+
+## Original wall mechanics behind dissipative solid coatings
+
+`elastic_reflection::OscillatorBackedViscoelasticLayers` joins the original
+incident fluid and bonded viscoelastic sources to the original normal
+`WallPin` mass, spring and resistance. The native material owner retains
+every layer's bulk/shear Maxwell spectra, frequency/strain limits, resolved
+fields and positive constitutive heat. The adapter passes the same physical
+support impedance at the same angular frequency, with explicit conjugation
+from the pin's `exp(-i omega t)` convention to the stack's `exp(+i omega t)`.
+
+Actual rear velocity determines backing displacement `x = -i v / omega` and
+the original cycle-mean kinetic/spring storage. Both per-area storage and total
+storage over the drive's positive area are returned. The native material
+response keeps total intrinsic bulk heat, intrinsic shear heat and backing
+resistance work separate; pin storage is never counted as heat or coating
+storage. An empty coating recovers the original direct fluid/pin boundary.
+Prepared drives allocate nothing and query no constitutive source again.
+
+This owner is a stationary harmonic normal-longitudinal model, with no
+fluid-shear input, oblique conversion, thermal time advance or transient
+realization inferred from a frequency snapshot. Four focused G1/G3/G4
+regression definitions cover the direct analytic pin response and phasor
+conversion, original one/two-layer material sources against an independent
+80-digit physical transfer/positive-work reference, area and reactive limits,
+and original domain/budget/cancellation admission. Native Rust execution and
+formatting status are reported separately.
