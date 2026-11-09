@@ -1167,3 +1167,35 @@ fn network_passivity_keeps_lossless_and_scaled_rank_deficient_loads() {
     .validate()
     .unwrap();
 }
+
+// G0: exact dark-port work cannot disappear through subnormal averaging.
+#[test]
+fn network_passivity_rejects_half_subnormal_work_on_zero_diagonals() {
+    let delta = f64::from_bits(1);
+    let reactive = C64::new(0.0, 1.0);
+    let real = C64::from_re(delta);
+    let imaginary = C64::new(0.0, delta);
+    for (upper, lower, flow) in [
+        (real, C64::ZERO, [C64::ONE, C64::from_re(-4.0)]),
+        (C64::ZERO, real, [C64::ONE, C64::from_re(-4.0)]),
+        (imaginary, C64::ZERO, [C64::ONE, C64::new(0.0, 4.0)]),
+        (C64::ZERO, imaginary, [C64::ONE, C64::new(0.0, -4.0)]),
+    ] {
+        let z = vec![reactive, upper, lower, reactive];
+        let effort = [
+            z[0] * flow[0] + z[1] * flow[1],
+            z[2] * flow[0] + z[3] * flow[1],
+        ];
+        let work = 0.5 * (flow[0].conj() * effort[0] + flow[1].conj() * effort[1]).re;
+        assert_eq!(work, -f64::from_bits(2));
+        assert!(impedance_fixture(z.clone()).validate().is_err());
+        assert!(admit_multiport(&admittance_fixture(z)).is_err());
+    }
+
+    // Exact source cancellation still admits genuinely lossless coupling.
+    for (upper, lower) in [(real, -real), (imaginary, imaginary)] {
+        let z = vec![reactive, upper, lower, reactive];
+        impedance_fixture(z.clone()).validate().unwrap();
+        admit_multiport(&admittance_fixture(z)).unwrap();
+    }
+}

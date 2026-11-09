@@ -208,7 +208,9 @@ fn admit_passive_matrix(matrix: &[C64], n: usize) -> Result<(), DuctError> {
             if roots[i] == 0.0 || roots[j] == 0.0 {
                 // PSD with an exact zero diagonal requires a zero work row.
                 // Lossless skew-Hermitian mutual terms remain admissible.
-                if work.re != 0.0 || work.im != 0.0 {
+                // Test cancellation before averaging: nonzero half-subnormal
+                // work can round to zero in the stored Hermitian entry.
+                if forward.re != -reverse.re || forward.im != reverse.im {
                     return Err(active());
                 }
                 continue;
