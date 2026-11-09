@@ -1,6 +1,8 @@
 use super::*;
 use crate::rans_card::RansCardDraft;
 
+mod conjugate;
+
 fn solver() -> RansSolver {
     let card = RansCardDraft::launder_sharma_channel("adaptive-transport-regression")
         .freeze()

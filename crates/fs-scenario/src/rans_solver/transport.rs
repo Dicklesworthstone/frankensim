@@ -24,7 +24,8 @@ pub use thermal::{
 mod adaptive;
 pub use adaptive::{
     RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
-    RansAdaptiveWorkspace, RansFieldTolerances,
+    RansAdaptiveWallBalance, RansAdaptiveWorkspace, RansConjugateAdaptiveReport,
+    RansConjugateAdaptiveWorkspace, RansFieldTolerances,
 };
 
 /// A refused step leaves every accepted field untouched.

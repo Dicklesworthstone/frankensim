@@ -1865,11 +1865,11 @@ the focused pinned native build with original card/BLAKE3 code. The existing
 thermal and adaptive routes also passed their unchanged behavior checks.
 
 This remains constant-property one-dimensional stationary-wall conduction
-coupled to the existing first-order segregated RANS screen. The new entry
-advances one authored physical interval; it does not extend adaptive window
-control to wall state, infer temperature-dependent material properties,
-supply thermal/buoyancy feedback, contact resistance, radiation, phase change
-or axial heat removal. No full-workspace, empirical conjugate turbulent heat
+coupled to the existing first-order segregated RANS screen. The single-step entry advances one authored physical interval; the joint
+adaptive entry described below controls complete wall/fluid windows. Neither
+entry infers temperature-dependent material properties, supplies thermal or
+buoyancy feedback, contact resistance, radiation, phase change or axial heat
+removal. No full-workspace, empirical conjugate turbulent heat
 transfer or three-dimensional turbulence validation is claimed.
 
 ## Typed scalar thermal boundary execution
@@ -1918,3 +1918,52 @@ components, wrong rank/dimensions/frame/parity/role and cancelled sampling.
 Native conduction/history regressions cover multiple face normals and actual
 endpoint heat accounting. The changed source and tests pass pinned Rust syntax
 parsing; compilation and runtime tests have not run in this environment.
+
+## Adaptive coupled-wall turbulence windows
+
+`RansSolver::advance_launder_sharma_conjugate_adaptive` advances the existing
+transported channel and finite conducting wall over one complete constant-load
+window. A shared internal controller drives both this path and the original
+fluid-only adaptive entry. It compares one full native step with two native
+half steps and includes every solid temperature in the local error and change
+checks. The temperature absolute allowance, common relative allowance, interval
+bounds and attempt cap remain explicit in `RansAdaptiveControls`.
+
+Each trial uses the original monolithic solid/fluid heat solve. The newly
+prepared turbulence and optional physical dissipation-to-heat sources refresh
+at each half step. No temperature extrapolation, clipping, inventory repair or
+extra constitutive model is introduced. The wall material is bound exactly to
+the workspace; caller temperatures may change between windows.
+
+Only accepted fine half steps enter the compensated mechanical, fluid-heat,
+solid-heat and interface accounts. `RansConjugateAdaptiveReport::fluid` retains
+the original adaptive diagnostics and the fluid's eliminated interface heat
+input. Its `wall` account independently retains solid storage, exterior and
+volumetric input, actual interface heat, interface-equation defect, solid
+balance defect and combined thermal defect. Exterior and interface heat are
+distinct quantities; internal heat exchange is never counted as an external
+source. Reported balance defects are diagnostics rather than enforced bounds.
+
+`RansConjugateAdaptiveWorkspace` retains 24 f64 fields per fluid node and ten
+f64 values per wall layer, including one private copy of the three material
+properties. Fluid-node and wall-layer ceilings precede allocation. Material
+is retained once, and three temperature images serve accepted, full and
+refined trajectories. Trials allocate no numerical buffers and invoke at most
+three original native steps. Cancellation, exhausted attempts, unrefinable
+intervals and late failures preserve both caller-owned physical states over
+the entire window; retry reuses the same workspace.
+
+Six new native groups check an independently assembled thermal-generator
+matrix exponential and temporal refinement, a fast wall mode that would pass
+fluid-only error checks, exact two-half-step state and account replay, rejection
+of trial heat from accepted budgets, joint mechanical/thermal energy accounting,
+every cancellation poll with exact retry, material binding and work/refinement
+refusal. All 49 RANS module tests and eight integration tests passed with the
+original card and BLAKE3 implementation. Full Cargo/workspace validation was
+not run.
+
+Local step doubling does not certify global error, resolve forcing events or
+establish empirical model accuracy. Relative temperature allowances scale with
+absolute temperature; callers must supply absolute tolerances appropriate to
+the thermal contrasts they need to resolve. The original stationary,
+constant-property, one-dimensional wall/channel assumptions remain unchanged.

@@ -9,6 +9,11 @@ use super::{
     RansTransportError, RansTransportReport, RansTransportWorkspace, checkpoint,
 };
 
+mod conjugate;
+pub use conjugate::{
+    RansAdaptiveWallBalance, RansConjugateAdaptiveReport, RansConjugateAdaptiveWorkspace,
+};
+
 /// Absolute local-error allowances, in the physical units of each field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RansFieldTolerances {
@@ -126,28 +131,11 @@ impl RansAdaptiveWorkspace {
         }
         n.checked_mul(24 * core::mem::size_of::<f64>())
             .ok_or(RansTransportError::Allocation)?;
-        let field = || {
-            let mut values = Vec::new();
-            values
-                .try_reserve_exact(n)
-                .map_err(|_| RansTransportError::Allocation)?;
-            values.resize(n, 0.0);
-            Ok::<_, RansTransportError>(values)
-        };
-        let state = || {
-            Ok::<_, RansTransportError>(RansFieldState {
-                u: field()?,
-                k: field()?,
-                eps: field()?,
-                nu_t: field()?,
-                temp_k: field()?,
-            })
-        };
         Ok(Self {
             kernel: RansTransportWorkspace::try_new(grid, maximum_nodes)?,
-            accepted: state()?,
-            coarse: state()?,
-            fine: state()?,
+            accepted: state_image(n)?,
+            coarse: state_image(n)?,
+            fine: state_image(n)?,
         })
     }
 
@@ -212,6 +200,99 @@ pub struct RansAdaptiveReport {
 struct Step {
     mechanical: RansTransportReport,
     heat: Option<RansThermalTransportReport>,
+    wall: Option<super::RansConjugateReport>,
+}
+
+fn field_image(n: usize) -> Result<Vec<f64>, RansTransportError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(n)
+        .map_err(|_| RansTransportError::Allocation)?;
+    values.resize(n, 0.0);
+    Ok(values)
+}
+
+fn state_image(n: usize) -> Result<RansFieldState, RansTransportError> {
+    Ok(RansFieldState {
+        u: field_image(n)?,
+        k: field_image(n)?,
+        eps: field_image(n)?,
+        nu_t: field_image(n)?,
+        temp_k: field_image(n)?,
+    })
+}
+
+// One controller owns trial timing, acceptance and fluid error estimates for
+// both native kernels. Extra wall state participates at the same boundaries.
+trait WindowStepper {
+    fn heat(&self) -> bool;
+    fn step(
+        &mut self,
+        state: &mut RansFieldState,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Step, RansTransportError>;
+    fn coarse(&mut self, _: &mut impl FnMut() -> bool) -> Result<(), RansTransportError> {
+        Ok(())
+    }
+    fn fine(&mut self, _: &mut impl FnMut() -> bool) -> Result<(), RansTransportError> {
+        Ok(())
+    }
+    fn change(
+        &self,
+        _: RansAdaptiveControls,
+        _: &mut impl FnMut() -> bool,
+    ) -> Result<f64, RansTransportError> {
+        Ok(0.0)
+    }
+    fn error(
+        &self,
+        _: RansAdaptiveControls,
+        _: &mut impl FnMut() -> bool,
+    ) -> Result<f64, RansTransportError> {
+        Ok(0.0)
+    }
+    fn accept(
+        &mut self,
+        _: Step,
+        _: Step,
+        _: f64,
+        _: &mut impl FnMut() -> bool,
+    ) -> Result<(), RansTransportError> {
+        Ok(())
+    }
+}
+
+struct FluidStepper<'a> {
+    solver: &'a RansSolver,
+    grid: &'a RansChannelGrid,
+    pressure: f64,
+    heat: Option<RansHeatLoad<'a>>,
+    kernel: &'a mut RansTransportWorkspace,
+}
+
+impl WindowStepper for FluidStepper<'_> {
+    fn heat(&self) -> bool {
+        self.heat.is_some()
+    }
+
+    fn step(
+        &mut self,
+        state: &mut RansFieldState,
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Step, RansTransportError> {
+        native_step(
+            self.solver,
+            self.grid,
+            state,
+            self.pressure,
+            dt,
+            self.heat,
+            self.kernel,
+            cancelled,
+        )
+    }
 }
 
 impl RansSolver {
@@ -249,177 +330,179 @@ impl RansSolver {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RansAdaptiveReport, RansAdaptiveError> {
         checkpoint(0, &mut cancelled)?;
-        validate(grid, state, duration_s, controls, work)?;
-        copy_state(&mut work.accepted, state, &mut cancelled)?;
-        let mut elapsed = 0.0;
-        let mut proposal = controls.initial_interval_s;
-        let mut attempts = 0;
-        let mut accepted = 0;
-        let mut rejected = 0;
-        let mut evaluations = 0;
-        let mut max_error = 0.0_f64;
-        let mut max_change = 0.0_f64;
-        let mut min_interval = f64::INFINITY;
-        let mut max_interval = 0.0_f64;
-        let mut account = Account::default();
-        while elapsed < duration_s {
-            checkpoint(0, &mut cancelled)?;
-            if attempts == controls.maximum_attempts {
-                return Err(RansAdaptiveError::AttemptBudget {
-                    attempts,
-                    elapsed_s: elapsed,
-                });
-            }
-            let remaining = duration_s - elapsed;
-            let h = proposal.min(remaining);
-            let end = if h == remaining {
-                duration_s
-            } else {
-                elapsed + h
-            };
-            let half = 0.5 * h;
-            if !end.is_finite() || end <= elapsed || half <= 0.0 {
-                return Err(RansAdaptiveError::MinimumInterval {
-                    elapsed_s: elapsed,
-                    interval_s: h,
-                    indicator: f64::INFINITY,
-                });
-            }
-            attempts += 1;
-            let trial = (|| {
-                copy_state(&mut work.coarse, &work.accepted, &mut cancelled)?;
-                native_step(
-                    self,
-                    grid,
-                    &mut work.coarse,
-                    pressure_gradient_pa_m,
-                    h,
-                    heat,
-                    &mut work.kernel,
-                    &mut evaluations,
-                    &mut cancelled,
-                )?;
-                copy_state(&mut work.fine, &work.accepted, &mut cancelled)?;
-                let first = native_step(
-                    self,
-                    grid,
-                    &mut work.fine,
-                    pressure_gradient_pa_m,
-                    half,
-                    heat,
-                    &mut work.kernel,
-                    &mut evaluations,
-                    &mut cancelled,
-                )?;
-                let mid_change = change_ratio(
-                    &work.accepted,
-                    &work.fine,
-                    controls,
-                    heat.is_some(),
-                    &mut cancelled,
-                )?;
-                let second = native_step(
-                    self,
-                    grid,
-                    &mut work.fine,
-                    pressure_gradient_pa_m,
-                    half,
-                    heat,
-                    &mut work.kernel,
-                    &mut evaluations,
-                    &mut cancelled,
-                )?;
-                let change = mid_change.max(change_ratio(
-                    &work.accepted,
-                    &work.fine,
-                    controls,
-                    heat.is_some(),
-                    &mut cancelled,
-                )?);
-                let error = error_ratio(
-                    &work.accepted,
-                    &work.coarse,
-                    &work.fine,
-                    controls,
-                    heat.is_some(),
-                    &mut cancelled,
-                )?;
-                Ok::<_, RansTransportError>((first, second, error, change))
-            })();
-            let (factor, indicator, success) = match trial {
-                Ok((first, second, error, change)) => {
-                    let error_factor = if error == 0.0 {
-                        2.0
-                    } else {
-                        0.9 / error.sqrt()
-                    };
-                    let change_factor = if change == 0.0 {
-                        2.0
-                    } else {
-                        0.9 * controls.maximum_fractional_change / change
-                    };
-                    let success = error <= 1.0 && change <= controls.maximum_fractional_change;
-                    if success {
-                        account.add(first, half)?;
-                        account.add(second, half)?;
-                        core::mem::swap(&mut work.accepted, &mut work.fine);
-                        elapsed = end;
-                        accepted += 1;
-                        max_error = max_error.max(error);
-                        max_change = max_change.max(change);
-                        min_interval = min_interval.min(h);
-                        max_interval = max_interval.max(h);
-                    }
-                    (
-                        error_factor.min(change_factor).clamp(0.2, 2.0),
-                        error.max(change / controls.maximum_fractional_change),
-                        success,
-                    )
-                }
-                Err(RansTransportError::Arithmetic { .. }) => (0.25, f64::INFINITY, false),
-                Err(error) => return Err(error.into()),
-            };
-            if !success {
-                rejected += 1;
-            }
-            if elapsed == duration_s {
-                break;
-            }
-            let next = (h * factor).min(controls.maximum_interval_s);
-            if !success
-                && (next < controls.minimum_interval_s || next >= h || elapsed + next == elapsed)
-            {
-                return Err(RansAdaptiveError::MinimumInterval {
-                    elapsed_s: elapsed,
-                    interval_s: h,
-                    indicator,
-                });
-            }
-            proposal = next.max(controls.minimum_interval_s);
-        }
-        let (mechanical, heat) = account.finish(duration_s)?;
-        let report = RansAdaptiveReport {
-            duration_s,
-            attempts,
-            accepted_intervals: accepted,
-            rejected_intervals: rejected,
-            step_evaluations: evaluations,
-            maximum_accepted_error_ratio: max_error,
-            maximum_accepted_fractional_change: max_change,
-            minimum_accepted_interval_s: min_interval,
-            maximum_accepted_interval_s: max_interval,
-            mechanical,
+        validate(grid, state, duration_s, controls, work.accepted.u.len())?;
+        let mut stepper = FluidStepper {
+            solver: self,
+            grid,
+            pressure: pressure_gradient_pa_m,
             heat,
+            kernel: &mut work.kernel,
         };
-        checkpoint(0, &mut cancelled)?;
-        // All fallible work precedes this indivisible publication boundary.
-        state.u.copy_from_slice(&work.accepted.u);
-        state.k.copy_from_slice(&work.accepted.k);
-        state.eps.copy_from_slice(&work.accepted.eps);
-        state.nu_t.copy_from_slice(&work.accepted.nu_t);
-        state.temp_k.copy_from_slice(&work.accepted.temp_k);
+        let report = advance_window(
+            state,
+            duration_s,
+            controls,
+            &mut work.accepted,
+            &mut work.coarse,
+            &mut work.fine,
+            &mut stepper,
+            &mut cancelled,
+        )?;
+        publish_state(state, &work.accepted);
         Ok(report)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_window(
+    state: &RansFieldState,
+    duration_s: f64,
+    controls: RansAdaptiveControls,
+    accepted_state: &mut RansFieldState,
+    coarse: &mut RansFieldState,
+    fine: &mut RansFieldState,
+    stepper: &mut impl WindowStepper,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RansAdaptiveReport, RansAdaptiveError> {
+    copy_state(accepted_state, state, &mut cancelled)?;
+    let heat = stepper.heat();
+    let mut elapsed = 0.0;
+    let mut proposal = controls.initial_interval_s;
+    let mut attempts = 0;
+    let mut accepted = 0;
+    let mut rejected = 0;
+    let mut evaluations = 0;
+    let mut max_error = 0.0_f64;
+    let mut max_change = 0.0_f64;
+    let mut min_interval = f64::INFINITY;
+    let mut max_interval = 0.0_f64;
+    let mut account = Account::default();
+    while elapsed < duration_s {
+        checkpoint(0, &mut cancelled)?;
+        if attempts == controls.maximum_attempts {
+            return Err(RansAdaptiveError::AttemptBudget {
+                attempts,
+                elapsed_s: elapsed,
+            });
+        }
+        let remaining = duration_s - elapsed;
+        let h = proposal.min(remaining);
+        let end = if h == remaining {
+            duration_s
+        } else {
+            elapsed + h
+        };
+        let half = 0.5 * h;
+        if !end.is_finite() || end <= elapsed || half <= 0.0 {
+            return Err(RansAdaptiveError::MinimumInterval {
+                elapsed_s: elapsed,
+                interval_s: h,
+                indicator: f64::INFINITY,
+            });
+        }
+        attempts += 1;
+        let trial = (|| {
+            copy_state(coarse, accepted_state, &mut cancelled)?;
+            stepper.coarse(&mut cancelled)?;
+            evaluations += 1;
+            stepper.step(coarse, h, &mut cancelled)?;
+            copy_state(fine, accepted_state, &mut cancelled)?;
+            stepper.fine(&mut cancelled)?;
+            evaluations += 1;
+            let first = stepper.step(fine, half, &mut cancelled)?;
+            let mid_change = change_ratio(accepted_state, fine, controls, heat, &mut cancelled)?
+                .max(stepper.change(controls, &mut cancelled)?);
+            evaluations += 1;
+            let second = stepper.step(fine, half, &mut cancelled)?;
+            let change = mid_change
+                .max(change_ratio(
+                    accepted_state,
+                    fine,
+                    controls,
+                    heat,
+                    &mut cancelled,
+                )?)
+                .max(stepper.change(controls, &mut cancelled)?);
+            let error = error_ratio(accepted_state, coarse, fine, controls, heat, &mut cancelled)?
+                .max(stepper.error(controls, &mut cancelled)?);
+            Ok::<_, RansTransportError>((first, second, error, change))
+        })();
+        let (factor, indicator, success) = match trial {
+            Ok((first, second, error, change)) => {
+                let error_factor = if error == 0.0 {
+                    2.0
+                } else {
+                    0.9 / error.sqrt()
+                };
+                let change_factor = if change == 0.0 {
+                    2.0
+                } else {
+                    0.9 * controls.maximum_fractional_change / change
+                };
+                let success = error <= 1.0 && change <= controls.maximum_fractional_change;
+                if success {
+                    account.add(first, half)?;
+                    account.add(second, half)?;
+                    stepper.accept(first, second, half, &mut cancelled)?;
+                    core::mem::swap(accepted_state, fine);
+                    elapsed = end;
+                    accepted += 1;
+                    max_error = max_error.max(error);
+                    max_change = max_change.max(change);
+                    min_interval = min_interval.min(h);
+                    max_interval = max_interval.max(h);
+                }
+                (
+                    error_factor.min(change_factor).clamp(0.2, 2.0),
+                    error.max(change / controls.maximum_fractional_change),
+                    success,
+                )
+            }
+            Err(RansTransportError::Arithmetic { .. }) => (0.25, f64::INFINITY, false),
+            Err(error) => return Err(error.into()),
+        };
+        if !success {
+            rejected += 1;
+        }
+        if elapsed == duration_s {
+            break;
+        }
+        let next = (h * factor).min(controls.maximum_interval_s);
+        if !success
+            && (next < controls.minimum_interval_s || next >= h || elapsed + next == elapsed)
+        {
+            return Err(RansAdaptiveError::MinimumInterval {
+                elapsed_s: elapsed,
+                interval_s: h,
+                indicator,
+            });
+        }
+        proposal = next.max(controls.minimum_interval_s);
+    }
+    let (mechanical, heat) = account.finish(duration_s)?;
+    let report = RansAdaptiveReport {
+        duration_s,
+        attempts,
+        accepted_intervals: accepted,
+        rejected_intervals: rejected,
+        step_evaluations: evaluations,
+        maximum_accepted_error_ratio: max_error,
+        maximum_accepted_fractional_change: max_change,
+        minimum_accepted_interval_s: min_interval,
+        maximum_accepted_interval_s: max_interval,
+        mechanical,
+        heat,
+    };
+    checkpoint(0, &mut cancelled)?;
+    Ok(report)
+}
+
+fn publish_state(to: &mut RansFieldState, from: &RansFieldState) {
+    to.u.copy_from_slice(&from.u);
+    to.k.copy_from_slice(&from.k);
+    to.eps.copy_from_slice(&from.eps);
+    to.nu_t.copy_from_slice(&from.nu_t);
+    to.temp_k.copy_from_slice(&from.temp_k);
 }
 
 fn validate(
@@ -427,13 +510,13 @@ fn validate(
     state: &RansFieldState,
     duration: f64,
     c: RansAdaptiveControls,
-    work: &RansAdaptiveWorkspace,
+    work_nodes: usize,
 ) -> Result<(), RansAdaptiveError> {
     let n = grid
         .num_cells
         .checked_add(1)
         .ok_or(RansAdaptiveError::InvalidInput("node count overflow"))?;
-    if n < 5 || work.accepted.u.len() != n || fields(state).iter().any(|s| s.len() != n) {
+    if n < 5 || work_nodes != n || fields(state).iter().any(|s| s.len() != n) {
         return Err(RansAdaptiveError::InvalidInput(
             "grid/state/workspace shape mismatch",
         ));
@@ -496,22 +579,22 @@ fn native_step(
     dt: f64,
     heat: Option<RansHeatLoad<'_>>,
     work: &mut RansTransportWorkspace,
-    evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Step, RansTransportError> {
-    *evaluations += 1;
     if let Some(load) = heat {
         let report = solver
             .advance_launder_sharma_with_heat(grid, state, pressure, dt, load, work, cancelled)?;
         Ok(Step {
             mechanical: report.mechanical,
             heat: Some(report),
+            wall: None,
         })
     } else {
         let report = solver.advance_launder_sharma(grid, state, pressure, dt, work, cancelled)?;
         Ok(Step {
             mechanical: report,
             heat: None,
+            wall: None,
         })
     }
 }

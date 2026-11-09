@@ -9,7 +9,9 @@
 //! `advance_launder_sharma_with_conjugate_wall` jointly solves finite conducting
 //! solid layers and the original fluid heat equation over the same interval.
 //! `advance_launder_sharma_adaptive` controls local temporal error over a
-//! bounded constant-forcing physical window, with optional passive heat.
+//! bounded constant-forcing physical window, with optional heat. The
+//! `advance_launder_sharma_conjugate_adaptive` entry includes every wall
+//! temperature and integrates the accepted solid/fluid energy exchanges.
 //! These bounded entry points do not imply empirically validated general RANS;
 //! see the method and crate contracts.
 //! - Explicit stretched-grid wall-normal transport; wall resolution is caller supplied
@@ -26,7 +28,8 @@ use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSin
 mod transport;
 pub use transport::{
     RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
-    RansAdaptiveWorkspace, RansConjugateHeatLoad, RansConjugateReport, RansConjugateWall,
+    RansAdaptiveWallBalance, RansAdaptiveWorkspace, RansConjugateAdaptiveReport,
+    RansConjugateAdaptiveWorkspace, RansConjugateHeatLoad, RansConjugateReport, RansConjugateWall,
     RansConjugateWorkspace, RansFieldTolerances, RansHeatCoupling, RansHeatLoad,
     RansThermalTransportReport, RansTransportError, RansTransportReport, RansTransportWorkspace,
     RansWallLayer,

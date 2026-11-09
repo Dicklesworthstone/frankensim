@@ -110,6 +110,17 @@ impl RansConjugateWall {
         &self.temperature_k
     }
 
+    // Adaptive trials own a private wall image; only the completed physical
+    // window may copy its admitted temperatures back to the caller's wall.
+    pub(in crate::rans_solver::transport) fn temperatures_mut(&mut self) -> &mut [f64] {
+        &mut self.temperature_k
+    }
+
+    pub(in crate::rans_solver::transport) fn numerical_bytes(&self) -> usize {
+        self.layers.capacity() * core::mem::size_of::<RansWallLayer>()
+            + self.temperature_k.capacity() * core::mem::size_of::<f64>()
+    }
+
     // Conductance from layer i to i+1, or to the fluid interface at the end.
     fn conductance(&self, i: usize) -> f64 {
         1.0 / (self.layers[i].half_resistance()
