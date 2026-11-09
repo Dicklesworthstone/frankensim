@@ -14,7 +14,7 @@ use std::cell::Cell;
 #[path = "boundary/reaction.rs"]
 pub(super) mod reaction;
 pub use reaction::{
-    BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryWrench,
+    BoundaryLoad, BoundaryPower, BoundaryReactionOwner, BoundaryReactions, BoundaryWrench,
     DiscreteBoundaryReaction,
 };
 #[path = "boundary/transport.rs"]

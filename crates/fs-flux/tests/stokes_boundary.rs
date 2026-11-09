@@ -10,6 +10,8 @@ use std::cell::Cell;
 mod flow_control;
 #[path = "stokes_boundary/navier_stokes.rs"]
 mod navier_stokes;
+#[path = "stokes_boundary/power.rs"]
+mod power;
 #[path = "stokes_boundary/reaction.rs"]
 mod reaction;
 #[path = "stokes_boundary/transient.rs"]

@@ -18,6 +18,8 @@ mod density;
 mod navier_stokes;
 #[path = "material_flow/newton.rs"]
 mod newton;
+#[path = "material_flow/power.rs"]
+mod power;
 
 fn mesh() -> TriMesh {
     TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3))

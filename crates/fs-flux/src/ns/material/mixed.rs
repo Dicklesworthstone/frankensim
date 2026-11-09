@@ -29,6 +29,10 @@ pub use windkessel::{
     MaterialStokesWindkesselSolution,
 };
 pub(crate) use windkessel::{physical_windkessel, with_kinematic_windkessel};
+#[path = "mixed/power.rs"]
+mod power;
+pub use power::MaterialBoundaryPower;
+use power::physical_boundary_power;
 
 /// Conservative evolving density and native IMEX momentum on one fixed mesh.
 #[path = "mixed/density_transport.rs"]

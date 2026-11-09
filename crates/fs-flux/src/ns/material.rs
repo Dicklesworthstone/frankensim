@@ -46,12 +46,12 @@ mod rheology;
 #[path = "material/sgs.rs"]
 mod sgs;
 pub use mixed::{
-    MaterialBoundaryLoad, MaterialBoundarySlipPower, MaterialBoundaryTransport,
-    MaterialBoundaryWrench, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
-    MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
-    MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
-    MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
-    MaterialStokesWindkesselSolution,
+    MaterialBoundaryLoad, MaterialBoundaryPower, MaterialBoundarySlipPower,
+    MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialStokesBoundary, MaterialStokesCell,
+    MaterialStokesField, MaterialStokesFieldSolution, MaterialStokesFlowControlSolution,
+    MaterialStokesResistancePort, MaterialStokesResistanceSolution, MaterialStokesRheologySolution,
+    MaterialStokesSolution, MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory,
+    MaterialStokesWindkesselPort, MaterialStokesWindkesselSolution,
 };
 pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{

@@ -77,15 +77,15 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialBoundaryLoad, MaterialBoundarySlipHeat, MaterialBoundarySlipPower,
-    MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialBrinkmanDragExchange,
-    MaterialBrinkmanSolution, MaterialDissipatedHeat, MaterialFluxError, MaterialFluxNewtonStep,
-    MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
-    MaterialFluxRheologyStep, MaterialFluxSdirk2Step, MaterialFluxSolution, MaterialFluxSystem,
-    MaterialFluxViscosityTangent, MaterialForchheimerSolution, MaterialNavierStokesBoundary,
-    MaterialNavierStokesNewtonStep, MaterialNavierStokesRheologyStep,
-    MaterialNavierStokesSdirk2Step, MaterialNavierStokesStep, MaterialStokesBoundary,
-    MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
+    MaterialBoundaryLoad, MaterialBoundaryPower, MaterialBoundarySlipHeat,
+    MaterialBoundarySlipPower, MaterialBoundaryTransport, MaterialBoundaryWrench,
+    MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialDissipatedHeat,
+    MaterialFluxError, MaterialFluxNewtonStep, MaterialFluxNumerics, MaterialFluxRheologyPoint,
+    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSdirk2Step,
+    MaterialFluxSolution, MaterialFluxSystem, MaterialFluxViscosityTangent,
+    MaterialForchheimerSolution, MaterialNavierStokesBoundary, MaterialNavierStokesNewtonStep,
+    MaterialNavierStokesRheologyStep, MaterialNavierStokesSdirk2Step, MaterialNavierStokesStep,
+    MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
     MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
     MaterialStokesResistanceSolution, MaterialStokesRheologyNewtonSolution,
     MaterialStokesRheologySolution, MaterialStokesSolution, MaterialStokesWindkesselBalance,
@@ -96,13 +96,14 @@ pub use material::{
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
 #[cfg(feature = "continuum")]
 pub use ns::boundary::{
-    BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryTransport, BoundaryWrench,
-    DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls, NavierStokesStep,
-    OpenBoundaryPolicy, PreparedStokesFlowControl, PreparedStokesPressureResponse, StokesAssembly,
-    StokesBoundary, StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference,
-    StokesResistancePort, StokesResistanceSolution, StokesRheologyControls,
-    StokesRheologyNewtonSolution, StokesRheologySolution, StokesSolution, StokesWindkesselBalance,
-    StokesWindkesselHistory, StokesWindkesselPort, StokesWindkesselSolution,
+    BoundaryLoad, BoundaryPower, BoundaryReactionOwner, BoundaryReactions, BoundaryTransport,
+    BoundaryWrench, DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls,
+    NavierStokesStep, OpenBoundaryPolicy, PreparedStokesFlowControl,
+    PreparedStokesPressureResponse, StokesAssembly, StokesBoundary, StokesBoundaryError,
+    StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
+    StokesResistanceSolution, StokesRheologyControls, StokesRheologyNewtonSolution,
+    StokesRheologySolution, StokesSolution, StokesWindkesselBalance, StokesWindkesselHistory,
+    StokesWindkesselPort, StokesWindkesselSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{

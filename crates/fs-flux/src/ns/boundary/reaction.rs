@@ -11,6 +11,10 @@ use crate::ns::{
 };
 use fs_sparse::{Coo, Csr};
 
+#[path = "reaction/power.rs"]
+mod power;
+pub use power::BoundaryPower;
+
 /// What the flow boundary actually prescribes; velocity does not imply a wall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryReactionOwner {
@@ -150,6 +154,9 @@ pub struct DiscreteBoundaryReaction {
     normal_measure: [f64; 2],
     normal_moment_measure: f64,
     transport: TransportQuadrature,
+    // Prescribed, supplied and backflow powers ON the fluid, then prescribed
+    // and fluid normal-volume traces for their distinct pressure shifts.
+    power: [f64; 5],
 }
 
 impl DiscreteBoundaryReaction {
@@ -255,6 +262,10 @@ impl BoundaryReactions {
                 };
                 face.load.stress.add(increment);
                 face.load.imposed.add(increment);
+                // A controlled pressure contributes -p*n to the ORIGINAL
+                // supplied traction. Use the accepted fluid trace, not the
+                // retained convective advector (which can differ in Oseen).
+                face.power[1] -= pressure * face.power[4];
                 if !face.load.finite() {
                     return Err(invalid("unrepresentable controlled-pressure reaction"));
                 }
@@ -553,6 +564,7 @@ impl ReactionOperator {
             let a = system.mesh.verts[edge.verts.0];
             let b = system.mesh.verts[edge.verts.1];
             let mut load = BoundaryLoad::default();
+            let mut power = Sums::<5>::new();
             let owner = match face.samples {
                 Samples::Velocity(prescribed) => {
                     let residual: [f64; 2] = core::array::from_fn(|k| {
@@ -571,6 +583,24 @@ impl ReactionOperator {
                         )
                     });
                     row += 2;
+                    // Work conjugate to the ACTUAL admitted velocity data.
+                    // These are precisely the strong BDM normal moments used
+                    // by assembly, including non-rigid/nonuniform motion.
+                    let mut moments = Sums::<2>::new();
+                    for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
+                        let normal =
+                            prescribed[q][0] * edge.normal[0] + prescribed[q][1] * edge.normal[1];
+                        let s = ((point[0] - a[0]) * (b[0] - a[0])
+                            + (point[1] - a[1]) * (b[1] - a[1]))
+                            / (edge.len * edge.len)
+                            - 0.5;
+                        moments.add([weight * normal / edge.len, weight * normal * s / edge.len]);
+                        power.add([0.0, 0.0, 0.0, weight * normal, 0.0]);
+                    }
+                    let moments = moments.values();
+                    for k in 0..2 {
+                        power.add([residual[k] * moments[k], 0.0, 0.0, 0.0, 0.0]);
+                    }
                     // m0(v)=mean(v.n), m1(v)=mean(s*v.n), s in [-1/2,1/2].
                     // For rigid rotation the second moment is (b-a) cross n / 12.
                     load.stress.force =
@@ -592,6 +622,9 @@ impl ReactionOperator {
                                 let effort = weight * beta * slip;
                                 load.stress.sample(point, tangent.map(|t| effort * t));
                                 load.slip_dissipation += effort * slip;
+                                let wall_t =
+                                    prescribed[q][0] * tangent[0] + prescribed[q][1] * tangent[1];
+                                power.add([-effort * wall_t, 0.0, 0.0, 0.0, 0.0]);
                             }
                         }
                         BoundaryReactionOwner::NavierSlip
@@ -617,6 +650,13 @@ impl ReactionOperator {
                                         - face.penalty[q] * (u[axis] - prescribed[q][axis]))
                             });
                             load.stress.sample(point, force);
+                            power.add([
+                                -force[0] * prescribed[q][0] - force[1] * prescribed[q][1],
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                            ]);
                         }
                         BoundaryReactionOwner::VelocityConstraint
                     }
@@ -625,6 +665,14 @@ impl ReactionOperator {
                     for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
                         load.imposed
                             .sample(point, prescribed[q].map(|t| -weight * t));
+                        let u = velocity(system, cell, point, &field.x);
+                        power.add([
+                            0.0,
+                            weight * (prescribed[q][0] * u[0] + prescribed[q][1] * u[1]),
+                            0.0,
+                            0.0,
+                            weight * (u[0] * edge.normal[0] + u[1] * edge.normal[1]),
+                        ]);
                     }
                     load.stress = load.imposed;
                     if face.reservoir.is_some() {
@@ -665,6 +713,13 @@ impl ReactionOperator {
                     if face.policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
                         load.backflow
                             .sample(point, u.map(|v| -weight * wn.min(0.0) * v));
+                        power.add([
+                            0.0,
+                            0.0,
+                            weight * wn.min(0.0) * (u[0] * u[0] + u[1] * u[1]),
+                            0.0,
+                            0.0,
+                        ]);
                     }
                 }
                 load.stress.add(load.backflow);
@@ -695,6 +750,13 @@ impl ReactionOperator {
                     if face.policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
                         load.backflow
                             .sample(sample.point_m, u.map(|v| -mass_rate.min(0.0) * v));
+                        power.add([
+                            0.0,
+                            0.0,
+                            mass_rate.min(0.0) * (u[0] * u[0] + u[1] * u[1]),
+                            0.0,
+                            0.0,
+                        ]);
                     }
                 }
                 load.stress.add(load.backflow);
@@ -716,6 +778,7 @@ impl ReactionOperator {
                 normal_measure: edge.normal.map(|n| edge.len * n),
                 normal_moment_measure: edge.len * cross(edge.mid, edge.normal),
                 transport,
+                power: power.values(),
             });
         }
         Ok(BoundaryReactions {

@@ -12003,3 +12003,58 @@ binding, reports, face loads and both piston states. The original source and
 transport workspaces are reused without per-proposal full-field allocation.
 Coefficients remain held in original cell order, and the existing moving-domain
 and single-axis deformation limits continue to apply.
+
+
+## Generalized prescribed-boundary source work
+
+The original mixed reaction owner now retains `BoundaryPower` at the accepted
+native endpoint. Its sign is explicitly power supplied BY the exterior TO the
+fluid, opposite to the existing fluid-on-exterior wrench. On a prescribed
+velocity face, the work is `R0*m0(g)+R1*m1(g)` plus the FULL retained numerical
+Nitsche flux `(2*nu*D(u)*n-eta*(u-g)).g`, integrated with the original admitted
+samples. This is the discrete work conjugate to the prescribed data; all
+adjoint-consistency, pressure, history, convection and drag terms stay in the
+original discarded-row residual. Arbitrary nonuniform motion is not replaced
+with a rigid wrench or average velocity. No primal operator or boundary law
+changes.
+
+Navier-slip faces instead contract the original physical Robin effort with
+the actual wall velocity. The separate nonnegative `beta*|(u-g)_t|^2` receipt
+continues to describe relative slip dissipation, not a second wall-work term.
+Supplied open traction contracts the accepted fluid trace. A resolved original
+pressure port updates that work with `-p*Q`, where Q is its accepted fluid
+normal flux, never a possibly different Oseen advector. Dissipative-backflow
+stress work is retained separately with its nonpositive sign, using the SAME
+original reversing-face convection quadrature or conservative relative-mass
+samples as the operator. Natural traction and supplied reservoir momentum do
+not invent this resistance. Transported kinetic energy and numerical upwind
+loss keep their original independent meanings.
+
+Per-edge and canonical selected-edge queries reuse retained scalars, with
+compensated sums and no source, material or boundary requery. Mean-zero
+components require an explicit pressure offset, including zero; traction
+datums require None. A pressure offset changes prescribed power by
+`-delta_p*integral(g.n)`. This matters for a selected inlet/outlet even when
+the complete sealed-component work is gauge independent. Invalid selections,
+incompatible references and unrepresentable observations refuse.
+
+Native powers are per-depth divided by the reference density, in m4/s3.
+`MaterialBoundaryPower` and homogeneous, nonlinear-rheology and heterogeneous
+field accessors use the SAME retained reference density for kinematic
+pressure and W/m conversion. Heterogeneous cells do not apply local-density
+rescaling to pressure or work. A consumer supplies physical extrusion depth
+and duration when forming joules. The result is a source-work observation,
+not a pointwise Cauchy-stress estimate, a full discrete energy/passivity
+certificate, a moving-domain update or an automatic heat source.
+
+Independent regression definitions cover nonrigid affine strain with a linear
+pressure field (including the edge pressure/velocity covariance missed by a
+midpoint-force proxy), signed work and explicit pressure shifts; moving finite
+Navier-slip walls with separate bulk/slip losses; exact cubic backflow work on
+a reversing original frozen advector; resolved pressure-port work under flow
+reversal; and original-source retention plus homogeneous/heterogeneous SI
+density swaps. All thirteen changed Rust files parsed with the pinned
+formatter. The ten production/test owners outside the three narrow existing
+registration/export parents passed rustfmt --check; those parents retain
+unrelated pre-existing formatting differences. Native FEM/material test
+execution remains unverified in the current restored environment.

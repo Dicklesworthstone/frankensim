@@ -76,6 +76,11 @@ fn resistance_ports_close_transient_momentum_and_external_power_under_reversal()
                 .resultant(&inlet, [0.0; 2], &[None])
                 .unwrap();
             assert!((reaction.imposed.force[0] + height * length * speed / dt).abs() < 2e-10);
+            let power = solved.flow.reactions.power(&inlet, &[None]).unwrap();
+            assert!((power.imposed_traction + length * speed / dt * q).abs() < 2e-10);
+            assert!((power.imposed_traction - 2.0 * kinetic_rate).abs() < 2e-10);
+            assert_eq!(power.prescribed_velocity, 0.0);
+            assert_eq!(power.backflow_resistance, 0.0);
         }
     }
 }

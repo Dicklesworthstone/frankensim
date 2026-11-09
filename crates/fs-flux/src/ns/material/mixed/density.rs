@@ -650,4 +650,23 @@ impl<G> MaterialStokesFieldSolution<G> {
             pressure_offsets_pa,
         )
     }
+
+    /// Native boundary source powers in W/m, converted with the SAME fixed
+    /// reference density as the heterogeneous momentum operator and pressure.
+    /// No cellwise division, material requery or source work reconstruction.
+    ///
+    /// # Errors
+    /// Preserves native edge/datum admission and rejects SI conversion overflow.
+    pub fn boundary_power(
+        &self,
+        edges: &[usize],
+        pressure_offsets_pa: &[Option<f64>],
+    ) -> Result<super::MaterialBoundaryPower, MaterialFluxError> {
+        super::physical_boundary_power(
+            &self.flow,
+            self.reference_density_kg_m3,
+            edges,
+            pressure_offsets_pa,
+        )
+    }
 }
