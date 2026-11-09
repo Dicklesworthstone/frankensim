@@ -54,6 +54,9 @@ pub mod coated_diffuse;
 /// Direction-conditioned polarized radiance response and native surface proposals.
 pub mod connection;
 
+/// Height-resolved Smith/GGX inter-facet reflections for rough opaque metals.
+pub mod microsurface;
+
 /// Admission or representability refusal. Failed operations leave the beam unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeamError {

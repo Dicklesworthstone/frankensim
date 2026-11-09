@@ -17,6 +17,7 @@ use fs_geom::Vec3;
 use fs_rand::philox::philox4x32_10;
 
 use super::mirrors::ConductorBeamError;
+use super::transport::microsurface::{SmithBeamError, SmithWalkSettings};
 use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricGlass, DielectricSurface};
@@ -32,6 +33,17 @@ fn path_draw(seed: u64, path_id: u64, event: u32) -> [f64; 3] {
     let block = philox4x32_10(
         [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c31],
         [seed as u32, (seed >> 32) as u32],
+    );
+    core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
+}
+
+// The extra microscopic coordinates have their own Philox key domain. Surface
+// event and facet event are separate counters; no variable-length walk shifts
+// another geometric hit's original random stream.
+fn smith_draw(seed: u64, path_id: u64, surface_event: u32, facet_event: u32) -> [f64; 3] {
+    let block = philox4x32_10(
+        [path_id as u32, (path_id >> 32) as u32, surface_event, facet_event],
+        [seed as u32 ^ 0x736d_6974, (seed >> 32) as u32 ^ 0x6867_6778],
     );
     core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
 }
@@ -69,7 +81,9 @@ pub enum Interaction {
     /// front/back coatings require distinct geometry bindings. No roughness or
     /// transmission into the opaque substrate is inferred.
     SmoothConductor { optics: usize, medium: usize },
-    /// Two-sided isotropic single-scattering GGX metal. Optical constants and
+    /// Two-sided isotropic GGX metal, single scattering by default. The explicit
+    /// Smith multiple-scattering trace follows internal facet returns instead.
+    /// Optical constants and
     /// coherent coatings remain in the shared table, independent of roughness.
     /// Native rejected microfacet samples terminate without resampling. This
     /// does not model anisotropic brushing or a tilted shading normal.
@@ -147,6 +161,8 @@ pub enum SceneError {
     Geometry(InstanceError),
     Beam(BeamError),
     Conductor(ConductorBeamError),
+    /// A microscopic path failed or exceeded its explicit facet budget.
+    Smith(SmithBeamError),
     #[cfg(feature = "volumes")]
     Scattering(crate::volumes::transport::scattering::polarized::PolarizedScatteringError),
     Cancelled,
@@ -161,6 +177,11 @@ impl From<BeamError> for SceneError {
 }
 impl From<ConductorBeamError> for SceneError {
     fn from(error: ConductorBeamError) -> Self { Self::Conductor(error) }
+}
+impl From<SmithBeamError> for SceneError {
+    fn from(error: SmithBeamError) -> Self {
+        match error { SmithBeamError::Cancelled => Self::Cancelled, other => Self::Smith(other) }
+    }
 }
 impl From<fs_exec::Cancelled> for SceneError {
     fn from(_: fs_exec::Cancelled) -> Self { Self::Cancelled }
@@ -298,6 +319,26 @@ impl<'a> PolarizedScene<'a> {
             |event| path_draw(seed, path_id, event))
     }
 
+    /// Forward polarized transport with full Smith/GGX internal reflections at
+    /// every `RoughConductor` hit. Each geometric hit has an independent facet
+    /// budget and random stream. Existing smooth, brushed, dielectric and volume
+    /// laws are unchanged; this entry point uses homogeneous straight segments.
+    ///
+    /// Microscopic reflections retain local complex Fresnel phase and coatings.
+    /// They do not add metric distance or claim resolved groove geometry. A
+    /// facet limit returns an error, never fabricated absorption. This forward
+    /// power sampler supplies no outgoing marginal PDF for camera/BDPT MIS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_with_smith_multiple_scattering(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: TraceSettings, microsurface: SmithWalkSettings, seed: u64, path_id: u64,
+    ) -> Result<PathResult, SceneError> {
+        self.trace_segments_with_smith(cx, beam, initial_medium, settings,
+            |event| path_draw(seed, path_id, event),
+            |beam, _, distance| SegmentProgress::homogeneous(beam, distance),
+            None, Some((microsurface, seed, path_id)))
+    }
+
     /// Trace with externally supplied `[microfacet_u, microfacet_v, event]`
     /// samples. The callback receives the zero-based surface-event index and
     /// is called only for dielectric, rough or brushed conductor hits, after
@@ -327,9 +368,25 @@ impl<'a> PolarizedScene<'a> {
         beam: PolarizedBeam,
         initial_medium: usize,
         settings: TraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+        propagate: impl FnMut(PolarizedBeam, usize, f64) -> Result<SegmentProgress, SceneError>,
+        mirror_interactions: Option<&mut Vec<MirrorInteraction>>,
+    ) -> Result<PathResult, SceneError> {
+        self.trace_segments_with_smith(cx, beam, initial_medium, settings, samples,
+            propagate, mirror_interactions, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_segments_with_smith(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: TraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
         mut propagate: impl FnMut(PolarizedBeam, usize, f64) -> Result<SegmentProgress, SceneError>,
         mut mirror_interactions: Option<&mut Vec<MirrorInteraction>>,
+        microsurface: Option<(SmithWalkSettings, u64, u64)>,
     ) -> Result<PathResult, SceneError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -483,14 +540,21 @@ impl<'a> PolarizedScene<'a> {
                         });
                     }
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
-                    let draw = samples(event);
-                    let Some(next) = result.beam.sample_rough_conductor(
-                        normal, &self.conductors[optics], surface, [draw[0], draw[1]],
-                    )? else {
-                        result.termination = PathTermination::RejectedMicrofacet;
-                        return finish(cx, result);
+                    result.beam = if let Some((limits, seed, path_id)) = microsurface {
+                        result.beam.sample_smith_conductor(
+                            cx, normal, &self.conductors[optics], surface, limits,
+                            |facet| smith_draw(seed, path_id, event, facet),
+                        )?.beam()
+                    } else {
+                        let draw = samples(event);
+                        let Some(next) = result.beam.sample_rough_conductor(
+                            normal, &self.conductors[optics], surface, [draw[0], draw[1]],
+                        )? else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            return finish(cx, result);
+                        };
+                        next.beam
                     };
-                    result.beam = next.beam;
                     offset = settings.query_offset_m;
                 }
                 Interaction::BrushedConductor { optics, medium, detail } => {
@@ -695,6 +759,9 @@ mod anisotropic_tests;
 
 #[cfg(test)]
 mod brushed_tests;
+
+#[cfg(test)]
+mod microsurface_tests;
 
 #[cfg(test)]
 mod conductor_tests {

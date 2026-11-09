@@ -14,6 +14,9 @@ use fs_math::det;
 
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
+/// Height-resolved multiple-reflection geometry for explicit forward transport.
+pub mod microsurface;
+
 mod thin_film;
 pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
 mod absorbing_film;
