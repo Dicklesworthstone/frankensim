@@ -75,7 +75,7 @@
 use super::{ModalMouthImpedance, ModalResponse, bessel_j0_certified, j1_roots_unchecked, mat_inv};
 use crate::profile::{RadiusProfile, RiccatiSteps};
 use crate::{
-    DuctError, LossModel, TabulatedLoad, Termination, segment_wave, termination_impedance,
+    DuctError, LossModel, SegmentWave, TabulatedLoad, Termination, segment_wave, termination_impedance,
 };
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
@@ -84,7 +84,7 @@ use fs_math::det;
 mod source;
 pub use source::{ModalSourceField, PreparedModalProfile};
 mod gas_field;
-pub use gas_field::ModalGasFieldProfile;
+pub use gas_field::{ModalGasFieldProfile, MolecularModalGasFieldProfile};
 
 /// Upper end of the Bessel range certified for continuous propagation.
 pub const BESSEL_CERTIFIED_X: f64 = 64.0;
@@ -310,9 +310,21 @@ fn generator_at_radius(
     radius: f64,
     flare: f64,
 ) -> Result<Local, DuctError> {
+    let wave = segment_wave(state, radius, omega, loss)?;
+    generator_from_wave(&wave, basis, zref, radius, flare)
+}
+
+/// The same geometric/radial generator for any source-bound local plane law.
+/// Both k and Zc must come from that one constitutive evaluation.
+fn generator_from_wave(
+    wave: &SegmentWave,
+    basis: &Basis,
+    zref: f64,
+    radius: f64,
+    flare: f64,
+) -> Result<Local, DuctError> {
     let n = basis.n;
     let w = 2 * n;
-    let wave = segment_wave(state, radius, omega, loss)?;
     let (k0, zc0) = (wave.wavenumber, wave.characteristic_impedance);
     let k0zc0 = k0 * zc0;
     if k0zc0.abs() == 0.0 || !finite(k0zc0) {
@@ -431,24 +443,37 @@ fn propagate_controlled<'a>(
 ) -> Result<Propagated, DuctError> {
     poll(cancelled, 0)?;
     steps.validate()?;
-    let length = profile.length();
-    let h = -length / steps.0 as f64;
-    let root3 = det::sqrt(3.0);
-    let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
+    let coordinates = uniform_step_coordinates(profile.length(), steps);
     propagate_resolved(
-        profile, state, state, omega, loss, load.into(), n, steps.0,
+        profile, state, state, omega, loss, None, load.into(), n, steps.0,
         track_flow, cancelled, &mut |j, basis, zref| {
-            let x0 = length + j as f64 * h;
+            let (h, left_m, positions) = coordinates(j);
             Ok(PropagationStep {
                 h,
-                left_m: if j + 1 == steps.0 { 0.0 } else { length + (j + 1) as f64 * h },
+                left_m,
                 local: [
-                    generator(profile, state, omega, loss, basis, zref, x0 + c1 * h)?,
-                    generator(profile, state, omega, loss, basis, zref, x0 + c2 * h)?,
+                    generator(profile, state, omega, loss, basis, zref, positions[0])?,
+                    generator(profile, state, omega, loss, basis, zref, positions[1])?,
                 ],
             })
         },
     )
+}
+
+/// Original uniform-background mesh, shared with molecular source binding.
+/// Constants are evaluated once when preparing the mesh.
+fn uniform_step_coordinates(
+    length: f64,
+    steps: RiccatiSteps,
+) -> impl Fn(usize) -> (f64, f64, [f64; 2]) {
+    let h = -length / steps.0 as f64;
+    let root3 = det::sqrt(3.0);
+    let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
+    move |j| {
+        let x0 = length + j as f64 * h;
+        let left = if j + 1 == steps.0 { 0.0 } else { length + (j + 1) as f64 * h };
+        (h, left, [x0 + c1 * h, x0 + c2 * h])
+    }
 }
 
 /// One original two-node Magnus span. The source binding chooses material
@@ -466,6 +491,7 @@ fn propagate_resolved(
     outlet: &GasState,
     omega: f64,
     loss: LossModel,
+    mouth_wave: Option<SegmentWave>,
     load: ProfileLoad<'_>,
     n: usize,
     steps: usize,
@@ -502,7 +528,10 @@ fn propagate_resolved(
             {
                 None
             } else {
-                Some(segment_wave(outlet, r_mouth, omega, loss)?)
+                Some(match mouth_wave {
+                    Some(wave) => wave,
+                    None => segment_wave(outlet, r_mouth, omega, loss)?,
+                })
             };
             let (plane, ka) = match load {
                 MouthLoad::Analytic(t) => termination_impedance(t, outlet, r_mouth, omega)?,

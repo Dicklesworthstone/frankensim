@@ -36,7 +36,9 @@
 //! Exterior radiation is explicit, never inferred from the bore gas.
 
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
-use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave};
+use crate::{ConeSlices, Duct, DuctError, Segment, SegmentWave};
+#[cfg(test)]
+use crate::LossModel;
 use fs_material::MaterialError;
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
@@ -47,6 +49,8 @@ mod holes;
 pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 mod field;
 pub use field::MolecularFieldTravel;
+pub(crate) use field::{gas_key, state_key};
+pub(crate) mod local;
 mod exterior;
 pub use exterior::{MolecularExteriorResponse, MolecularPortScattering};
 mod compliant_wall;
@@ -391,61 +395,9 @@ impl MolecularDuct {
     ) -> Result<SegmentWave, MolecularDuctError> {
         let point = &self.points[index];
         let state = self.state_at_point(index);
-        let gas = state.gas();
-        let area = core::f64::consts::PI * point.radius * point.radius;
-        if point.wall.is_none() {
-            if state.processes().is_empty() {
-                return Ok(crate::segment_wave(
-                    gas,
-                    point.radius,
-                    omega,
-                    LossModel::Lossless,
-                )?);
-            }
-            let k = relaxing_k;
-            let z = C64::from_re(omega * gas.density) / k;
-            return Ok(SegmentWave {
-                wavenumber: k,
-                characteristic_impedance: z.scale(1.0 / area),
-                specific_impedance: z,
-                shear_number: f64::INFINITY,
-            });
-        }
-        let model = point.wall.as_ref().expect("checked above");
-        let (series, equilibrium_shunt) =
-            model
-                .response_at(omega)
-                .map_err(|reason| DuctError::WallDiffusionUnresolved {
-                    reason,
-                    radius_m: point.radius,
-                    x_m: point.x_m,
-                })?;
-        let z_plus = series.scale(gas.density / area);
-        let y_plus = if state.processes().is_empty() {
-            equilibrium_shunt.scale(area / (gas.density * gas.sound_speed * gas.sound_speed))
-        } else {
-            let mut temperature = C64::ZERO;
-            for term in model.shunt_terms() {
-                let weight = term.gain_per_s / (term.rate_per_s * (gas.gamma - 1.0));
-                // s/(s cp+d) = 1/(cp+i d/omega), avoiding large s*cp.
-                let denominator =
-                    cp + C64::new(0.0, gas.specific_heat_cp * (term.rate_per_s / omega));
-                temperature = temperature + denominator.recip().scale(weight);
-            }
-            let kappa = (C64::ONE - temperature.scale(gas.specific_gas_constant))
-                .scale(1.0 / (gas.density * gas.specific_gas_constant * gas.temperature));
-            (C64::new(0.0, -omega) * kappa.scale(area)).conj()
-        };
-        let (k, zc) = crate::helmholtz_wave_from_telegraph(z_plus, y_plus);
-        if !finite(k) || k.re <= 0.0 || k.im < 0.0 || !finite(zc) || zc.re <= 0.0 {
-            return Err(bad("molecular duct wave is not finite, forward and passive").into());
-        }
-        Ok(SegmentWave {
-            wavenumber: k,
-            characteristic_impedance: zc,
-            specific_impedance: zc.scale(area),
-            shear_number: point.radius * det::sqrt(gas.density * omega / gas.dynamic_viscosity),
-        })
+        Ok(local::wave(
+            state, point.radius, point.x_m, point.wall.as_ref(), omega, cp, relaxing_k,
+        )?)
     }
 
     /// Retain the solved two-ports for existing graph or scattering consumers.
@@ -539,24 +491,15 @@ impl MolecularDuct {
         if !positive(omega) {
             return Err(bad("molecular duct frequency must be positive and finite").into());
         }
-        let caloric = |state: &RelaxationState| -> Result<(C64, C64), MolecularDuctError> {
-            let response = state.caloric_response(omega)?;
-            let k = response.bulk_modulus_pa.scale(1.0 / state.gas().density)
-                .sqrt().recip().scale(omega);
-            if !finite(k) || k.re <= 0.0 || k.im < 0.0 {
-                return Err(bad("molecular duct material wavenumber is unrepresentable").into());
-            }
-            Ok((response.cp_j_kg_k, k))
-        };
         // Preserve one evaluation and the original operation order for a
         // homogeneous duct. Varying fields evaluate each cached local state.
-        let uniform = caloric(&self.state)?;
+        let uniform = local::caloric(&self.state, omega)?;
         let mut local = Vec::new();
         if let Some(binding) = &self.field_binding {
             local.reserve(binding.states.len());
             for (index, state) in binding.states.iter().enumerate() {
                 poll(cancelled, 0)?;
-                local.push(if index == 0 { uniform } else { caloric(state)? });
+                local.push(if index == 0 { uniform } else { local::caloric(state, omega)? });
             }
         }
         let mut waves = Vec::with_capacity(self.points.len());

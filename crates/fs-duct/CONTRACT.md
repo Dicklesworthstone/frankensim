@@ -5082,3 +5082,50 @@ Port-response observations and native interior-field spectrum observations share
 The factor admits 3–64 proper tones or 3–32 actual-real tones within the shared short uniform-window domain, with at most 17 modes. Other observations retain the original pair kernels. Existing supplied-line/squared-line caps remain structural source bounds, and the bounded temporal scratch adds no heap allocation to the query. Cancellation discards the local result and leaves the prepared owner reusable. This does not certify relative accuracy at arbitrary coherent nulls or change the original network, propagation, material, source or probe owners.
 
 `tests/network_short_band.rs` covers real means and fourth/sixth-order nulls, native high-carrier proper factors, independent-source power, negative directed work, representable extreme proper power, cancellation and original source caps. An additional focused execution exercised the actual interior spectral preparation/contraction/observation path with explicit source-to-field fixtures, including DD source cancellation, three local areas, quadrature flow and mixed statistics; the full network/material solver suite was not executed for this change.
+
+## Molecular refraction in the continuous multimodal frequency-domain field
+
+`ModalGasFieldProfile::with_molecular_relaxation` binds the original
+`RelaxationAbsorption` to the existing physical gas-field quadrature and
+outlet, returning `MolecularModalGasFieldProfile`. Original primitive
+temperature/composition sources, exact material stations, spline knots,
+continuous geometry and radial basis remain with their existing owners.
+Uniform backgrounds use the same original uniform mesh. Equal evaluated
+states and exact state/radius pairs share preparation without quantization;
+distinct reservoir identities remain distinct. One dimensionless circular
+diffusion eigensystem is shared when wall heat/shear exchange is requested.
+
+The existing molecular duct and this modal owner now share the same local
+caloric/wall response. Each distinct original state evaluates its dynamic Cp
+once per frequency; every local complex k and momentum impedance comes from
+that same response. Molecular and wall thermal attenuation are not summed.
+The native radial generator retains k_n squared = k_0 squared - (gamma_n/R)
+squared, all signed geometric mode conversion, bounded Magnus propagation,
+and the existing regular pressure/flow reflection chart. Every matched
+terminal mode uses the actual outlet molecular/wall response. Explicit full
+mouth matrices keep their signed mutual terms and original exterior source.
+Analytic radiation retains the existing nondispersive outlet-gas exterior
+assumption; interior molecular absorption is not extended into free space.
+
+Physical source drives and all reconstructed modal pressure/volume-flow fields
+reuse the same prepared maps. The prepared owner retains an Arc-shared original
+molecular binding after the caller releases its initial handle. Empty reservoirs
+without walls delegate the original lossless field and reflection operations
+exactly; with walls they retain the original native equilibrium diffusion
+response. Source-domain, wall-band/resolution, mode/step/evanescence and
+cancellation refusals return no partially prepared field.
+
+This is frozen-background, axisymmetric harmonic acoustics. The optional
+higher-mode wall closure remains the original local plane-ZK approximation,
+not a resolved radial thermoviscous solution. It adds no independent
+Stokes--Kirchhoff attenuation, mean flow, evolving species/thermal state,
+mechanical wall motion, continuum mode-truncation certificate or source fit.
+
+Four G1/G3/G4 regression groups in `tests/modal_gas_field/molecular.rs`
+specify independent reservoir-eliminated modal phase and positive volume heat,
+two-medium coherent modal refraction, shared native molecular/wall plane
+recovery and complete exterior-matrix fields, plus exact inactive recovery and
+source/band/cancellation refusals. These native tests are authored but not
+executed: the dependency build was previously killed before physics crates
+compiled, and the executor became unavailable during this increment.
+Final formatter/compiler execution is therefore unverified.

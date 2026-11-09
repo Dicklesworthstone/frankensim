@@ -441,3 +441,6 @@ fn cellwise_interfaces_remain_explicit_and_refusals_do_not_publish_partial_bindi
             .is_err()
     );
 }
+
+#[path = "modal_gas_field/molecular.rs"]
+mod molecular;

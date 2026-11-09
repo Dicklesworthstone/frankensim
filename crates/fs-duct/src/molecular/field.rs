@@ -21,10 +21,10 @@ pub(super) struct FieldBinding {
 // Exact bit keys, never rounded bins. The common declared source/law survives
 // in FieldBinding. Reservoir identities are retained even when two responses
 // happen to coincide numerically, so source distinctions cannot disappear.
-type GasKey = [u64; 12];
-type StateKey = (GasKey, u64, Vec<(String, usize, u64, u64)>);
+pub(crate) type GasKey = [u64; 12];
+pub(crate) type StateKey = (GasKey, u64, Vec<(String, usize, u64, u64)>);
 
-fn gas_key(gas: &GasState) -> GasKey {
+pub(crate) fn gas_key(gas: &GasState) -> GasKey {
     [
         gas.temperature,
         gas.pressure,
@@ -42,7 +42,7 @@ fn gas_key(gas: &GasState) -> GasKey {
     .map(f64::to_bits)
 }
 
-fn state_key(state: &RelaxationState) -> StateKey {
+pub(crate) fn state_key(state: &RelaxationState) -> StateKey {
     (
         gas_key(state.gas()),
         state.frozen_cv_j_kg_k().to_bits(),

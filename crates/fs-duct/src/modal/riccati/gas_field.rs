@@ -14,8 +14,12 @@ use crate::profile::gas_field::GasFieldDuctError;
 use fs_material::gas_field::AxialGasField;
 use std::sync::Arc;
 
+mod molecular;
+pub use molecular::MolecularModalGasFieldProfile;
+
 #[derive(Clone, Debug)]
 struct QuadraturePoint {
+    x_m: f64,
     gas: GasState,
     radius: f64,
     flare: f64,
@@ -135,7 +139,7 @@ impl ModalGasFieldProfile {
                     if !flare.is_finite() {
                         return Err(bad("modal gas-field geometric coupling is not finite").into());
                     }
-                    Ok(QuadraturePoint { gas, radius, flare })
+                    Ok(QuadraturePoint { x_m: x, gas, radius, flare })
                 };
                 result.quadrature.push(FieldStep {
                     h,
@@ -251,6 +255,7 @@ impl ModalGasFieldProfile {
                 &self.outlet,
                 omega,
                 loss,
+                None,
                 load,
                 modes.0,
                 self.quadrature.len(),

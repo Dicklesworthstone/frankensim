@@ -34,6 +34,7 @@ pub struct PreparedModalProfile {
     gas: GasState,
     outlet_gas: GasState,
     gas_field: Option<Arc<AxialGasField>>,
+    molecular_field: Option<MolecularModalGasFieldProfile>,
     omega: f64,
     zref: f64,
     min_shear: f64,
@@ -151,6 +152,7 @@ impl PreparedModalProfile {
             gas: *inlet,
             outlet_gas: *outlet,
             gas_field,
+            molecular_field: None,
             omega,
             zref: run.zref,
             min_shear: run.min_shear,
@@ -171,6 +173,17 @@ impl PreparedModalProfile {
     /// profile was prepared through [`ModalGasFieldProfile`].
     pub fn gas_field(&self) -> Option<&AxialGasField> {
         self.gas_field.as_deref()
+    }
+
+    /// Original molecular law, physical quadrature states and optional shared
+    /// circular wall response used to prepare this exact modal field.
+    pub fn molecular_field(&self) -> Option<&MolecularModalGasFieldProfile> {
+        self.molecular_field.as_ref()
+    }
+
+    pub(super) fn retain_molecular_field(mut self, source: MolecularModalGasFieldProfile) -> Self {
+        self.molecular_field = Some(source);
+        self
     }
     /// Frozen positive angular frequency [rad/s].
     pub const fn omega_rad_s(&self) -> f64 {
