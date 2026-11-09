@@ -304,6 +304,35 @@ impl PlanarConductionResponse {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(ConductionResponseError::Invalid(
+                "planar source response requires a planar metric",
+            ));
+        }
+        Self::from_metric_contact_response(
+            mesh,
+            sources,
+            contacts,
+            contact_laws,
+            contact_controls,
+            limits,
+            cancelled,
+        )
+    }
+
+    // Geometry-specific facades admit their metric before entering the same
+    // original contact ordering, source closure and finite field owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_metric_contact_response(
+        mesh: TriComplex2,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<ConductionContact>,
+        contact_laws: Vec<ScalarElectricalInterfaceResponse>,
+        contact_controls: ContactResponseControls,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
+        poll(cancelled)?;
         if contacts.len() != contact_laws.len() || contacts.len() > limits.max_triplets / 16 {
             return Err(ConductionResponseError::Invalid(
                 "complete bounded interface response coverage required",
@@ -323,7 +352,7 @@ impl PlanarConductionResponse {
             .map(|law| law.liquid_mass_fraction_axes().clone())
             .collect();
         let bindings = ContactResponseSources::new(laws, contact_controls)?;
-        Self::from_bindings(
+        Self::from_metric_bindings(
             mesh,
             sources,
             contacts,
@@ -345,6 +374,35 @@ impl PlanarConductionResponse {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(ConductionResponseError::Invalid(
+                "planar source response requires a planar metric",
+            ));
+        }
+        Self::from_metric_bindings(
+            mesh,
+            sources,
+            contacts,
+            liquid_mass_fraction_axes,
+            contact_sources,
+            limits,
+            cancelled,
+        )
+    }
+
+    // Only the metric changes between planar and meridional facades. Their
+    // source response, native field and constitutive residual owner are shared.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_metric_bindings(
+        mesh: TriComplex2,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        contact_sources: Option<ContactResponseSources>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
+        poll(cancelled)?;
         if sources.len() != mesh.faces().len() || sources.len() > limits.max_cells {
             return Err(ConductionResponseError::Invalid(
                 "one bounded source response per triangle",
@@ -356,7 +414,7 @@ impl PlanarConductionResponse {
             source.admit(source.original())?;
             conductors.push(source.original().clone());
         }
-        let native = PlanarConduction::assemble_with_admitted_contacts(
+        let native = PlanarConduction::assemble_metric_with_admitted_contacts(
             mesh,
             conductors,
             contacts,
@@ -848,7 +906,7 @@ impl PlanarConductionResponse {
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
             poll(cancelled).map_err(ConductionResponseError::from)?;
-            let native = PlanarConduction::assemble_with_admitted_contacts(
+            let native = PlanarConduction::assemble_metric_with_admitted_contacts(
                 self.mesh().clone(),
                 applied,
                 applied_contacts,

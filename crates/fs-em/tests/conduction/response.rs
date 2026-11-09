@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "response/adaptive.rs"]
 mod adaptive;
+#[path = "response/axisymmetric.rs"]
+mod axisymmetric;
 #[path = "response/contacts.rs"]
 mod contacts;
 #[path = "response/current.rs"]

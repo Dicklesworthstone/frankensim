@@ -18,6 +18,8 @@
 //! scalar core cannot escape through the planar motion or contact APIs.
 
 mod contact;
+/// Scalar source response at the actual meridional electric and current fields.
+pub mod response;
 
 use super::{
     ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField,

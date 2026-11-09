@@ -1538,6 +1538,42 @@ and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQ
 and source-domain limits apply; native test execution is a separate requirement
 where the workspace dependency repositories are available.
 
+## Axisymmetric nonlinear scalar conduction
+
+`conduction::axisymmetric::response::AxisymmetricConductionResponse` closes
+complete original scalar conductivity/resistivity laws at actual meridional
+|E| and |J|. Its private shared response engine retains the native swept-volume
+operator, exact radial boundary/contact moments, source selections, and separate
+algebraic/current/work and constitutive residual gates. Prescribed voltage and
+current-density traces, signed total-current electrodes, and regulated-power
+drives all solve at actual amplitude within the existing bounded iteration.
+Every current/power terminal must have its own positive-area physical trace.
+
+Static/phase contacts retain the native nonuniform P1 surface response.
+Electrically varying interface laws bind their original temperature, phase and
+electrical coordinates; their endpoint voltage jumps and normal densities must
+be uniform within declared gates. A varying trace refuses rather than using a
+surface-average constitutive law. Exact surface losses remain separate from
+bulk cell powers and enter total power once.
+
+Refreshed bulk/contact seed APIs let an outer owner supply its actual thermal
+context while preserving geometry, source identities, coordinate roles and
+phase ownership. Fixed or bounded adaptive source-coordinate relaxation carries
+through accepted candidates. No frozen linear operator, scalable nonlinear
+resistance or planar motion API escapes this facade; continuation retains the
+axisymmetric model and its actual-field report together. Rejected domains,
+budgets, nonconvergence and cancellation leave the input owner unchanged.
+
+Focused G1/G3/G4 regression definitions cover heterogeneous axial transport,
+radial nonlinear refinement against an independent coaxial law, angular-span
+scaling, exact axis endpoint loads, local heat, voltage/current/power controls,
+strong-law relaxation, source-dependent interface heat and context refresh,
+nonuniform-contact and zero-area-terminal refusal, and cancellation/retry.
+The new full native integration regressions have not been executed in the
+current dependency environment. The same fixed-geometry, scalar memoryless
+model boundaries apply; positivity does not establish convergence, uniqueness,
+dynamic stability or measured-material qualification.
+
 ## Axisymmetric Ohmic conduction and radial current moments
 
 `conduction::axisymmetric::AxisymmetricConduction` reuses the native scalar
