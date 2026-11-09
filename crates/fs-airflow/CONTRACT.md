@@ -562,6 +562,57 @@ advection, backward-Euler, checked-CG and Newton/Krylov numerical code. The
 execution context and unrelated module namespaces were isolated to avoid the
 unavailable full dependency build; this is not a full-crate/runtime test pass.
 
+## Transient radial Carreau momentum with regional enthalpy transport
+
+With `transient-transport`,
+`graph::thermal::transport::transient::carreau::transient::TransientRegionalCarreauTransport`
+composes the original retained radial `TransientCarreauGraph` with the regional
+finite-inventory binding above. The constructor requires the same original
+pipe topology, source laws, rate ceilings, geometry and reference density.
+Every hydraulic compliance is explicitly refused: fixed thermal cell masses
+cannot absorb pressure-dependent storage volume. The separate one-inventory
+thermal owner remains the compliant-network path.
+
+Every native backward-Euler thermal trial starts from the SAME accepted radial
+histories. Each original pipe is prepared at its own candidate ENDPOINT
+temperature, then its original midpoint momentum step resolves pressures,
+annular velocities and integrated irreversible heat. This is endpoint-held
+rheology with midpoint momentum, first order in coupled time; no midpoint
+temperature is substituted or claimed. Native midpoint quadrature of mean
+volume flow drives conservative signed junction/pipe enthalpy transport.
+Only original integrated viscous heat divided by the interval duration enters
+each pipe cell's heat source. Steady `dp*Q`, pressure work, kinetic-energy
+change and hydraulic numerical residuals are never substituted for that heat.
+
+Explicit external streams use the actual native mean rates. Pure callbacks
+receive original old, mean and final flow diagnostics to admit source-dependent
+exchange. The original native external-power routine evaluates other authored,
+ambient and reservoir heat before advection or viscous heat is added.
+Independent thermal and mechanical gates precede the combined
+`delta(thermal + kinetic) - reservoir - injection - head work - stream enthalpy - other heat`
+check. Reports keep all those physical terms, native numerical residuals and
+aggregate branch-solve counts separate. Initial physical clocks must agree;
+the next prepared owner, complete radial state and native thermal timeline
+are returned together. Source, inventory, stream, clock, work and cancellation
+refusals preserve both accepted physical inputs; reusable workspaces remain
+scratch and can be retried.
+
+Each developed section remains thermally mixed and fixed in geometry/density.
+The native mean is a midpoint quadrature, not an exact continuous trajectory
+integral. Within-interval reversal times and opposing traversals are unresolved;
+time refinement is required for their residence and heat transport. The original
+developed radial model still omits axial momentum/kinetic-energy convection,
+junction kinetic losses, thermal expansion and radial thermal gradients.
+No compressible or changing-mass interpretation is implied.
+
+Six new regression sources cover an independent two-annulus momentum and
+regional caloric root during startup/coastdown/recovering head work, distinct
+nonlinear regional source temperatures, zero/steady limits, equal initial mean
+flow with different retained radial heating, refusal/retry and cancellation.
+The executor became unavailable before this extension's compile/runtime check
+could complete. These new regression sources are unexecuted; the earlier
+54-test result above applies to the preceding quasi-steady regional delivery.
+
 ## Steady shear-thinning hydraulic networks
 
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`

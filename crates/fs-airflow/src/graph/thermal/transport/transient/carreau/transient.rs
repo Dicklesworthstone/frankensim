@@ -1,0 +1,340 @@
+//! Retained original radial momentum with regional native enthalpy transport.
+//!
+//! Every thermal endpoint trial restarts the SAME accepted radial histories.
+//! Original local viscosity is held at each trial endpoint temperature during
+//! the native midpoint momentum interval. Its midpoint quadrature of mean flow
+//! drives native upwind enthalpy transport, and ONLY its integrated viscous heat
+//! is deposited locally. This endpoint-thermal/midpoint-momentum composition is
+//! first order in coupled time; it is not a midpoint-temperature source model.
+//!
+//! Fixed regional masses cannot absorb hydraulic compliance. This owner admits
+//! only rigid incompressible pressure junctions; the separate one-inventory
+//! thermal owner remains available for explicitly compliant networks.
+
+use std::cell::{Cell, RefCell};
+
+use fs_exec::Cx;
+use fs_qty::Pressure;
+use fs_thermal::enthalpy::DepositionSimulation;
+
+use super::{CarreauTransportExchange, RegionalCarreauTransport, thermal_checkpoint};
+use super::super::nonlinear::{
+    ImplicitTransportControls, ImplicitTransportError, ImplicitTransportReport,
+    advance_endpoint_transport,
+};
+use crate::graph::{FixedPressure, Sum};
+use crate::graph::rheology::FlowInjection;
+use crate::graph::rheology::transient::{
+    TransientCarreauControls, TransientCarreauError, TransientCarreauGraph,
+    TransientCarreauState, TransientCarreauStep, TransientCarreauWorkspace,
+};
+
+/// Original rigid radial owner and the unchanged finite thermal inventory.
+#[derive(Clone)]
+pub struct TransientRegionalCarreauTransport {
+    momentum: TransientCarreauGraph,
+    regional: RegionalCarreauTransport,
+}
+
+/// Native accuracy controls and aggregate nonlinear work/energy bounds.
+#[derive(Clone, Copy, Debug)]
+pub struct TransientRegionalCarreauControls {
+    pub hydraulics: TransientCarreauControls,
+    pub thermal: ImplicitTransportControls,
+    /// Counts every native branch solve across all thermal residuals, numerical
+    /// derivative probes and final acceptance, including rejected pressure trials.
+    pub maximum_total_branch_solves: u64,
+    /// Independent bound on pressure/head work minus kinetic change and native
+    /// viscous heat. Numerical mechanical residuals never become thermal heat.
+    pub mechanical_energy_tolerance_j: f64,
+}
+
+#[derive(Debug)]
+pub enum TransientCarreauTransportError<E> {
+    Momentum(TransientCarreauError),
+    Exchange(E),
+    MechanicalEnergy { residual_j: f64, tolerance_j: f64 },
+    CombinedEnergy { residual_j: f64, tolerance_j: f64 },
+}
+impl<E: core::fmt::Debug> core::fmt::Display for TransientCarreauTransportError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "transient regional Carreau transport: {self:?}")
+    }
+}
+impl<E: core::fmt::Debug> std::error::Error for TransientCarreauTransportError<E> {}
+
+/// Original work and heat accounts from one jointly accepted endpoint.
+#[derive(Debug)]
+pub struct TransientRegionalCarreauReport<T> {
+    /// Original annular velocities, mean-flow quadrature, kinetic change,
+    /// viscous heat, pressure/head work and numerical residuals stay distinct.
+    pub hydraulics: TransientCarreauStep,
+    /// Native stored energy, external heat and independent local/global gates.
+    /// Its heat payload is the caller's exchange result at this same endpoint.
+    pub thermal: ImplicitTransportReport<T>,
+    pub external_stream_enthalpy_j: f64,
+    /// Native ambient, reservoir and authored/callback source heat, evaluated
+    /// directly before adding advection or viscous heat; internal links cancel.
+    pub other_heat_j: f64,
+    /// Delta(thermal + kinetic) - reservoir - injection - head work
+    /// - other heat - external stream enthalpy. No residual is deposited.
+    pub combined_energy_residual_j: f64,
+    /// Native thermal and mechanical tolerances plus arithmetic roundoff.
+    pub combined_energy_tolerance_j: f64,
+    pub total_branch_solves: u64,
+}
+
+/// All physical owners advance together, or no replacement is returned.
+pub struct TransientRegionalCarreauStep<'m, T> {
+    pub next: TransientRegionalCarreauTransport,
+    pub momentum: TransientCarreauState,
+    pub thermal: DepositionSimulation<'m>,
+    pub report: TransientRegionalCarreauReport<T>,
+}
+
+struct Prepared<T> {
+    source: TransientCarreauGraph,
+    state: TransientCarreauState,
+    hydraulics: TransientCarreauStep,
+    exchange: T,
+    external_stream_enthalpy_j: f64,
+    other_heat_j: f64,
+}
+
+impl TransientRegionalCarreauTransport {
+    /// Compose the already admitted regional inventory with its original
+    /// transient pipe discretization. No hydraulic node may carry compliance.
+    /// Original topology, pipe names/orientations, source laws, geometry, rate
+    /// ceilings and reference density must agree. Existing radial histories
+    /// and workspaces keep their original compatibility identities.
+    pub fn new(
+        cx: &Cx<'_>,
+        regional: RegionalCarreauTransport,
+        momentum: TransientCarreauGraph,
+    ) -> Result<Self, ImplicitTransportError<TransientCarreauError>> {
+        thermal_checkpoint(cx)?;
+        if momentum.storage().iter().any(Option::is_some) {
+            return Err(ImplicitTransportError::Invalid(
+                "fixed regional thermal masses require zero hydraulic compliance",
+            ));
+        }
+        if momentum.graph().node_count() != regional.graph().node_count()
+            || momentum.pipes().len() != regional.pipe_cells().len()
+            || momentum.pipes().iter().any(|pipe| pipe.density_kg_m3() != regional.reference_density().value())
+        {
+            return Err(ImplicitTransportError::Invalid("regional and radial topology or reference density disagree"));
+        }
+        let temperatures: Vec<_> = regional.graph().branches().iter()
+            .map(|branch| branch.pipe.temperature_k()).collect();
+        let momentum = momentum.at_temperatures(&temperatures, cx).map_err(ImplicitTransportError::Resolve)?;
+        if momentum.graph().branches() != regional.graph().branches() {
+            return Err(ImplicitTransportError::Invalid("regional and original radial pipe sources or geometry disagree"));
+        }
+        thermal_checkpoint(cx)?;
+        Ok(Self { momentum, regional })
+    }
+
+    pub fn momentum(&self) -> &TransientCarreauGraph { &self.momentum }
+    pub fn regional(&self) -> &RegionalCarreauTransport { &self.regional }
+
+    /// Advance the original radial histories and native regional heat together.
+    /// Initial momentum and thermal clocks must match exactly. The original
+    /// pressure/injection data are held for this interval. Zero-compliance
+    /// nodes retain native initial, mean and final flow-continuity admission.
+    ///
+    /// Each thermal trial freezes its OWN endpoint pipe temperatures, clones
+    /// the SAME accepted momentum history, then runs native midpoint momentum.
+    /// The exchange callback is pure and receives actual native mean/old/new
+    /// flows and source heat for that candidate. It supplies explicit balanced
+    /// streams and nonadvective heat only. No pressure datum supplies enthalpy.
+    ///
+    /// The mean rate is the original midpoint quadrature, not an exact integral
+    /// of the continuous trajectory. Native upwinding uses that signed mean and
+    /// endpoint donor enthalpy. A reversal within the interval is not located;
+    /// refine time to resolve counterflow and residence. This is first order in
+    /// coupled time and retains the developed radial model's omission of axial
+    /// momentum/kinetic-energy convection and junction kinetic losses.
+    ///
+    /// Native caloric, rate, work, energy and cancellation gates remain active.
+    /// Source refusal or failed acceptance preserves BOTH physical inputs and
+    /// permits retry; the caller's reusable workspace is scratch and may change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance<'m, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        exchange: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &TransientCarreauStep)
+            -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<TransientRegionalCarreauStep<'m, T>, ImplicitTransportError<TransientCarreauTransportError<E>>> {
+        self.advance_impl(cx, thermal, state, workspace, target_s, boundaries, injections,
+            None, controls, energy_guess_j, exchange)
+    }
+
+    /// Same atomic step with original held branch pressure rises. Recovering
+    /// head work remains signed mechanical exchange, never negative viscous heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_heads<'m, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        branch_heads: &[Pressure],
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        exchange: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &TransientCarreauStep)
+            -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<TransientRegionalCarreauStep<'m, T>, ImplicitTransportError<TransientCarreauTransportError<E>>> {
+        self.advance_impl(cx, thermal, state, workspace, target_s, boundaries, injections,
+            Some(branch_heads), controls, energy_guess_j, exchange)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_impl<'m, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        branch_heads: Option<&[Pressure]>,
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        exchange: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &TransientCarreauStep)
+            -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<TransientRegionalCarreauStep<'m, T>, ImplicitTransportError<TransientCarreauTransportError<E>>> {
+        thermal_checkpoint(cx)?;
+        let duration_s = target_s - thermal.time_s();
+        if state.accepted_time_s() != thermal.time_s()
+            || !duration_s.is_finite() || duration_s <= 0.0
+            || controls.maximum_total_branch_solves == 0
+            || !controls.mechanical_energy_tolerance_j.is_finite()
+            || controls.mechanical_energy_tolerance_j < 0.0
+        {
+            return Err(ImplicitTransportError::Invalid("matching physical clocks, positive interval and finite transient regional budgets required"));
+        }
+        self.regional.inventory.validate_storage(cx, thermal)?;
+        let total_branch_solves = Cell::new(0_u64);
+        let workspace = RefCell::new(workspace);
+        let (next_thermal, thermal_report) = advance_endpoint_transport(
+            cx, thermal, target_s, controls.thermal, energy_guess_j, |cx, candidate| {
+                self.regional.inventory.validate_storage(cx, candidate)?;
+                let momentum_error = |error| ImplicitTransportError::Resolve(TransientCarreauTransportError::Momentum(error));
+                let remaining = controls.maximum_total_branch_solves - total_branch_solves.get();
+                if remaining == 0 {
+                    return Err(momentum_error(TransientCarreauError::BranchSolveBudget));
+                }
+                let mut temperatures = Vec::with_capacity(self.regional.pipe_cells.len());
+                for &id in self.regional.pipe_cells() {
+                    thermal_checkpoint(cx)?;
+                    temperatures.push(candidate.temperature_k(id)?);
+                }
+                // Endpoint-held rheology is part of this first-order coupled
+                // residual. It never resets or replaces the accepted velocities.
+                let source = self.momentum.at_temperatures(&temperatures, cx).map_err(momentum_error)?;
+                let mut proposed = state.clone();
+                let hydraulic_controls = TransientCarreauControls {
+                    maximum_branch_solves: controls.hydraulics.maximum_branch_solves.min(remaining),
+                    ..controls.hydraulics
+                };
+                let hydraulics = {
+                    let mut scratch = workspace.borrow_mut();
+                    match branch_heads {
+                        Some(heads) => source.step_with_heads(&mut proposed, &mut scratch, boundaries,
+                            injections, heads, duration_s, hydraulic_controls, cx),
+                        None => source.step(&mut proposed, &mut scratch, boundaries,
+                            injections, duration_s, hydraulic_controls, cx),
+                    }.map_err(momentum_error)?
+                };
+                if hydraulics.branch_solves > remaining {
+                    return Err(momentum_error(TransientCarreauError::BranchSolveBudget));
+                }
+                total_branch_solves.set(total_branch_solves.get() + hydraulics.branch_solves);
+                if proposed.accepted_time_s() != target_s {
+                    return Err(ImplicitTransportError::Invalid("native momentum and thermal endpoint clocks disagree"));
+                }
+                if hydraulics.physical_work_residual_j.abs() > controls.mechanical_energy_tolerance_j {
+                    return Err(ImplicitTransportError::Resolve(TransientCarreauTransportError::MechanicalEnergy {
+                        residual_j: hydraulics.physical_work_residual_j, tolerance_j: controls.mechanical_energy_tolerance_j,
+                    }));
+                }
+                let response = exchange(cx, candidate, &hydraulics).map_err(|error|
+                    ImplicitTransportError::Resolve(TransientCarreauTransportError::Exchange(error)))?;
+                thermal_checkpoint(cx)?;
+                // Measure the original nonadvective external source before
+                // local dissipation/stream enthalpy are installed. Internal
+                // reciprocal heat links remain internal to the native timeline.
+                let other_power_w = candidate.external_step_power_with_boundary_conductances(
+                    &response.heat.bulk.sources_w, &response.heat.bulk.conductances_w_k,
+                    &response.heat.boundaries, || thermal_checkpoint(cx),
+                )?;
+                let other_heat_j = finite(other_power_w * duration_s)?;
+                let rates: Vec<_> = hydraulics.branches.iter().map(|branch| branch.midpoint_volume_flow_m3_s).collect();
+                let heat_w: Vec<_> = hydraulics.branches.iter().map(|branch| branch.viscous_heat_j / duration_s).collect();
+                self.regional.endpoint_coefficients(cx, candidate, &rates, heat_w, response,
+                    |payload, stream_w, _| Prepared {
+                        source, state: proposed, hydraulics, exchange: payload,
+                        external_stream_enthalpy_j: stream_w * duration_s, other_heat_j,
+                    })
+            },
+        )?;
+        let ImplicitTransportReport {
+            heat: prepared, thermal: audit, maximum_cell_residual_j, endpoint_evaluations, nonlinear,
+        } = thermal_report;
+        let terms = [audit.stored_energy_change_j, prepared.hydraulics.kinetic_energy_change_j,
+            -prepared.hydraulics.reservoir_work_j, -prepared.hydraulics.injection_work_j,
+            -prepared.hydraulics.branch_head_work_j, -prepared.external_stream_enthalpy_j, -prepared.other_heat_j];
+        let combined = sum(&terms)?;
+        let scale = sum(&terms.map(f64::abs))?;
+        let allowance = finite(controls.thermal.total_tolerance_j + controls.mechanical_energy_tolerance_j
+            + 64.0 * f64::EPSILON * scale)?;
+        if combined.abs() > allowance {
+            return Err(ImplicitTransportError::Resolve(TransientCarreauTransportError::CombinedEnergy {
+                residual_j: combined, tolerance_j: allowance,
+            }));
+        }
+        let mut next_regional = self.regional.clone();
+        next_regional.graph = prepared.source.graph().clone();
+        thermal_checkpoint(cx)?;
+        Ok(TransientRegionalCarreauStep {
+            next: Self { momentum: prepared.source, regional: next_regional },
+            momentum: prepared.state,
+            thermal: next_thermal,
+            report: TransientRegionalCarreauReport {
+                hydraulics: prepared.hydraulics,
+                thermal: ImplicitTransportReport { heat: prepared.exchange, thermal: audit,
+                    maximum_cell_residual_j, endpoint_evaluations, nonlinear },
+                external_stream_enthalpy_j: prepared.external_stream_enthalpy_j,
+                other_heat_j: prepared.other_heat_j,
+                combined_energy_residual_j: combined, combined_energy_tolerance_j: allowance,
+                total_branch_solves: total_branch_solves.get(),
+            },
+        })
+    }
+}
+
+fn finite<E>(value: f64) -> Result<f64, ImplicitTransportError<E>> {
+    if value.is_finite() { Ok(value) }
+    else { Err(ImplicitTransportError::Invalid("unrepresentable transient regional Carreau energy")) }
+}
+fn sum<E>(terms: &[f64]) -> Result<f64, ImplicitTransportError<E>> {
+    let mut sum = Sum::default();
+    let error = |_| ImplicitTransportError::Invalid("unrepresentable transient regional Carreau energy sum");
+    for &term in terms { sum.add(term).map_err(error)?; }
+    sum.value().map_err(error)
+}
+
+#[cfg(test)]
+mod tests;

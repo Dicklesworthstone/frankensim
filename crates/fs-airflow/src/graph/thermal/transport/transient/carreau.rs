@@ -8,10 +8,12 @@
 //! without discarding fluid already stored in the pipe. Only each original
 //! steady profile's viscous dissipation is deposited as local fluid heat.
 
+pub mod transient;
+
 use fs_exec::Cx;
 use fs_qty::Density;
 use fs_thermal::enthalpy::advection::MassBoundary;
-use fs_thermal::enthalpy::backward_euler::{BoundaryStepCoefficients, StepCoefficients};
+use fs_thermal::enthalpy::backward_euler::{BoundaryStepCoefficients, StepCoefficients, TransportStepCoefficients};
 use fs_thermal::enthalpy::{CellId, DepositionSimulation};
 
 use super::distributed::MAX_DISTRIBUTED_FLUID_CELLS;
@@ -288,87 +290,82 @@ impl RegionalCarreauTransport {
                     ImplicitTransportError::Resolve(CarreauTransportError::Exchange(error))
                 })?;
                 thermal_checkpoint(cx)?;
-                for boundary in &response.mass_boundaries {
-                    let cell = match boundary {
-                        MassBoundary::Inlet { cell, .. } | MassBoundary::Outlet { cell, .. } => {
-                            cell
-                        }
-                    };
-                    if !self.node_cells.contains(cell) {
-                        return Err(ImplicitTransportError::Invalid(
-                            "external Carreau streams must attach to original junction cells",
-                        ));
-                    }
-                }
-                let binding = GraphEnthalpyTransport::bind(
-                    cx,
-                    self.inventory.node_cells().len(),
-                    None,
-                    (0..hydraulics.branches.len() * 2).map(|index| {
-                        let branch = &hydraulics.branches[index / 2];
-                        let pipe = self.node_cells.len() + index / 2;
-                        let q = branch.profile.flow().volumetric_flow_m3_s;
-                        if index % 2 == 0 {
-                            (branch.from, pipe, q)
-                        } else {
-                            (pipe, branch.to, q)
-                        }
-                    }),
-                    self.reference_density,
-                    self.inventory.node_cells(),
-                    candidate,
-                    response.mass_boundaries,
-                    self.maximum_connections,
-                )?;
-                let advected = binding.endpoint_transport(cx, candidate)?;
-                let mut stream = crate::graph::Sum::default();
-                for &watts in advected.heat.bulk.sources_w.values() {
-                    stream
-                        .add(watts)
-                        .map_err(|error| hydraulic_error(error.into()))?;
-                }
-                let external_stream_enthalpy_w = stream
-                    .value()
-                    .map_err(|error| hydraulic_error(error.into()))?;
-                let BoundaryStepCoefficients { bulk, boundaries } = response.heat;
-                let StepCoefficients {
-                    mut sources_w,
-                    conductances_w_k,
-                    payload,
-                } = bulk;
-                let mut branch_viscous_heat_w = Vec::with_capacity(self.pipe_cells.len());
-                for (&cell, branch) in self.pipe_cells.iter().zip(&hydraulics.branches) {
-                    thermal_checkpoint(cx)?;
-                    let heat = branch.profile.flow().dissipated_power_w;
-                    let total = sources_w.entry(cell).or_insert(0.0);
-                    *total += heat;
-                    if !heat.is_finite() || heat < 0.0 || !total.is_finite() {
-                        return Err(ImplicitTransportError::Invalid(
-                            "unrepresentable original Carreau viscous heat",
-                        ));
-                    }
-                    branch_viscous_heat_w.push(heat);
-                }
-                combine_endpoint_heat(
-                    cx,
-                    advected,
-                    BoundaryStepCoefficients {
-                        bulk: StepCoefficients {
-                            sources_w,
-                            conductances_w_k,
-                            payload: CarreauTransportEndpoint {
-                                hydraulics,
-                                exchange: payload,
-                                branch_viscous_heat_w,
-                                external_stream_enthalpy_w,
-                            },
-                        },
-                        boundaries,
-                    },
-                )
+                let rates: Vec<_> = hydraulics.branches.iter()
+                    .map(|branch| branch.profile.flow().volumetric_flow_m3_s).collect();
+                let viscous_heat_w: Vec<_> = hydraulics.branches.iter()
+                    .map(|branch| branch.profile.flow().dissipated_power_w).collect();
+                self.endpoint_coefficients(cx, candidate, &rates, viscous_heat_w, response,
+                    |payload, external_stream_enthalpy_w, branch_viscous_heat_w| CarreauTransportEndpoint {
+                        hydraulics, exchange: payload, branch_viscous_heat_w, external_stream_enthalpy_w,
+                    })
             },
         )
     }
+    /// Shared original inventory, signed mass binding and local heat deposit.
+    /// The momentum owner supplies the actual rates and irreversible losses;
+    /// this adapter does not assume a steady pressure-flow identity.
+    #[allow(clippy::too_many_arguments)]
+    fn endpoint_coefficients<T, P, E>(
+        &self,
+        cx: &Cx<'_>,
+        candidate: &DepositionSimulation<'_>,
+        signed_volume_flows_m3_s: &[f64],
+        branch_viscous_heat_w: Vec<f64>,
+        response: CarreauTransportExchange<T>,
+        finish: impl FnOnce(T, f64, Vec<f64>) -> P,
+    ) -> Result<TransportStepCoefficients<P>, ImplicitTransportError<E>> {
+        self.inventory.validate_storage(cx, candidate)?;
+        if signed_volume_flows_m3_s.len() != self.pipe_cells.len()
+            || branch_viscous_heat_w.len() != self.pipe_cells.len()
+        {
+            return Err(ImplicitTransportError::Invalid("one actual flow and viscous heat per original Carreau pipe required"));
+        }
+        for boundary in &response.mass_boundaries {
+            thermal_checkpoint(cx)?;
+            let cell = match boundary {
+                MassBoundary::Inlet { cell, .. } | MassBoundary::Outlet { cell, .. } => cell,
+            };
+            if !self.node_cells.contains(cell) {
+                return Err(ImplicitTransportError::Invalid("external Carreau streams must attach to original junction cells"));
+            }
+        }
+        let binding = GraphEnthalpyTransport::bind(
+            cx, self.inventory.node_cells().len(), None,
+            (0..self.pipe_cells.len() * 2).map(|index| {
+                let branch = &self.graph.branches()[index / 2];
+                let pipe = self.node_cells.len() + index / 2;
+                let q = signed_volume_flows_m3_s[index / 2];
+                if index % 2 == 0 { (branch.from, pipe, q) } else { (pipe, branch.to, q) }
+            }),
+            self.reference_density, self.inventory.node_cells(), candidate,
+            response.mass_boundaries, self.maximum_connections,
+        )?;
+        let advected = binding.endpoint_transport(cx, candidate)?;
+        let mut stream = crate::graph::Sum::default();
+        let arithmetic = |_| ImplicitTransportError::Invalid("unrepresentable native external-stream enthalpy");
+        for &watts in advected.heat.bulk.sources_w.values() {
+            stream.add(watts).map_err(arithmetic)?;
+        }
+        let external_stream_enthalpy_w = stream.value().map_err(arithmetic)?;
+        let BoundaryStepCoefficients { bulk, boundaries } = response.heat;
+        let StepCoefficients { mut sources_w, conductances_w_k, payload } = bulk;
+        for (&cell, &heat) in self.pipe_cells.iter().zip(&branch_viscous_heat_w) {
+            thermal_checkpoint(cx)?;
+            let total = sources_w.entry(cell).or_insert(0.0);
+            *total += heat;
+            if !heat.is_finite() || heat < 0.0 || !total.is_finite() {
+                return Err(ImplicitTransportError::Invalid("unrepresentable original Carreau viscous heat"));
+            }
+        }
+        combine_endpoint_heat(cx, advected, BoundaryStepCoefficients {
+            bulk: StepCoefficients {
+                sources_w, conductances_w_k,
+                payload: finish(payload, external_stream_enthalpy_w, branch_viscous_heat_w),
+            },
+            boundaries,
+        })
+    }
+
 }
 
 fn same_positive(a: f64, b: f64) -> bool {
