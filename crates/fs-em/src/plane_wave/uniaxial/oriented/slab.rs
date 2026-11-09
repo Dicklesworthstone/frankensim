@@ -26,6 +26,9 @@ pub use kernel::{SlabRegion, SlabWave, UniaxialSlabResponse};
 mod spectrum;
 pub use spectrum::PreparedUniaxialSlabSpectrum;
 
+mod thickness;
+pub use thickness::{SlabFieldThicknessJet, UniaxialSlabThicknessDerivatives};
+
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;
 
@@ -89,6 +92,44 @@ impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
         incident_tangential_e_v_m: [C64; 2],
     ) -> Result<UniaxialSlabResponse> {
         kernel::solve(
+            self.resolve_frequency(omega_rad_s)?,
+            Incidence::TangentialIndex(tangential_phase_index),
+            incident_tangential_e_v_m,
+        )
+        .map_err(ReflectionError::Invalid)
+    }
+
+    /// Analytic first and second derivatives with respect to the physical
+    /// thickness [m], holding the original frequency, material laws, optic
+    /// axis, incident cosine and complex tangential incident E fixed.
+    ///
+    /// Both moving-face internal reflections participate. Transmitted fields
+    /// and backward internal amplitudes remain anchored to the moving exit
+    /// z=d, exactly as in `response`; these are not fixed-observer derivatives.
+    /// One native boundary factorization serves the carrier and both jets.
+    pub fn thickness_derivatives(
+        &self,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<UniaxialSlabThicknessDerivatives> {
+        kernel::solve_thickness(
+            self.resolve_frequency(omega_rad_s)?,
+            Incidence::Cosine(incidence_cosine),
+            incident_tangential_e_v_m,
+        )
+        .map_err(ReflectionError::Invalid)
+    }
+
+    /// Thickness jets at the original signed conserved kx/k0. Frequency is
+    /// fixed, so this also holds the physical transverse wavenumber fixed.
+    pub fn thickness_derivatives_at_tangential_index(
+        &self,
+        omega_rad_s: f64,
+        tangential_phase_index: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<UniaxialSlabThicknessDerivatives> {
+        kernel::solve_thickness(
             self.resolve_frequency(omega_rad_s)?,
             Incidence::TangentialIndex(tangential_phase_index),
             incident_tangential_e_v_m,

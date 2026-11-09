@@ -225,6 +225,28 @@ pub(super) fn solve(
     incidence: Incidence,
     electric: [C64; 2],
 ) -> Result<UniaxialSlabResponse> {
+    solve_with_witness(data, incidence, electric, None)
+}
+
+pub(super) fn solve_thickness(
+    data: Input,
+    incidence: Incidence,
+    electric: [C64; 2],
+) -> Result<super::UniaxialSlabThicknessDerivatives> {
+    let mut witness = None;
+    let response = solve_with_witness(data, incidence, electric, Some(&mut witness))?;
+    super::thickness::differentiate(
+        response,
+        witness.ok_or("missing original slab boundary factorization")?,
+    )
+}
+
+fn solve_with_witness(
+    data: Input,
+    incidence: Incidence,
+    electric: [C64; 2],
+    witness: Option<&mut Option<super::thickness::BoundaryWitness>>,
+) -> Result<UniaxialSlabResponse> {
     let depth = positive(data.thickness_m)?;
     if electric.iter().any(|&v| !finite(v)) {
         return Err("finite incident slab fields required");
@@ -318,7 +340,22 @@ pub(super) fn solve(
             matrix[row + 4][mode + 6] = -t[row];
         }
     }
-    let coefficients = solve_boundary(matrix, rhs)?;
+    let factorization = BoundaryFactorization::new(matrix)?;
+    let coefficients = factorization.solve(rhs)?;
+    if let Some(witness) = witness {
+        *witness = Some(super::thickness::BoundaryWitness {
+            factorization,
+            coefficients,
+            reflected,
+            forward,
+            backward,
+            exit,
+            phase_forward,
+            phase_backward,
+            amplitude,
+            incoming,
+        });
+    }
     let (re, rh) = combine(reflected, [coefficients[0], coefficients[1]]);
     let (te, th) = combine(exit, [coefficients[6], coefficients[7]]);
     for m in 0..2 {
@@ -473,8 +510,12 @@ pub(in super::super) fn exit_basis_from_incidence(
     }
     let scale = binary_scale(positive(index)?.max(incident_index));
     let n = positive(index / scale)?;
-    let (p, p_squared, incident_normal) =
-        incident_coordinates(incident_index, scale, positive(incident_index / scale)?, incidence)?;
+    let (p, p_squared, incident_normal) = incident_coordinates(
+        incident_index,
+        scale,
+        positive(incident_index / scale)?,
+        incidence,
+    )?;
     let (q, kind) = if index == incident_index {
         // Keep the original positive cosine even below the precision of its
         // square. Equal phase indices share the same normal wavevector;
@@ -487,7 +528,12 @@ pub(in super::super) fn exit_basis_from_incidence(
     exit_fields(omega, scale, p, n, q, kind, mu)
 }
 
-pub(in super::super) fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> Result<[SlabWave; 2]> {
+pub(in super::super) fn exit_basis(
+    omega: f64,
+    p: f64,
+    index: f64,
+    mu: f64,
+) -> Result<[SlabWave; 2]> {
     let scale = binary_scale(index.max(p.abs()));
     let n = positive(index / scale)?;
     if p != 0.0 && p / scale == 0.0 {
@@ -534,49 +580,96 @@ fn exit_fields(
 /// Row scaling and partial pivoting; an unresolved pivot is a refusal, never
 /// a fabricated zero mode or a regularized material. All work is fixed-size.
 pub(in super::super) fn solve_boundary<const N: usize>(
-    mut a: [[C64; N]; N], mut b: [C64; N],
+    a: [[C64; N]; N],
+    b: [C64; N],
 ) -> Result<[C64; N]> {
-    for row in 0..N {
-        let scale = positive(a[row].iter().fold(0.0_f64, |v, z| v.max(z.abs())))?;
-        if a[row].iter().any(|&z| !finite(z)) || !finite(b[row]) {
-            return Err("finite slab boundary data required");
+    BoundaryFactorization::new(a)?.solve(b)
+}
+
+/// The original row-scaled pivoted system, reusable for physical derivatives.
+/// Multipliers are retained in the lower triangle. Right-hand sides use the
+/// same operation order as the original single-solve elimination.
+pub(super) struct BoundaryFactorization<const N: usize> {
+    factors: [[C64; N]; N],
+    row_scales: [f64; N],
+    pivots: [usize; N],
+}
+
+impl<const N: usize> BoundaryFactorization<N> {
+    pub(super) fn new(mut a: [[C64; N]; N]) -> Result<Self> {
+        let mut row_scales = [0.0; N];
+        for row in 0..N {
+            let scale = positive(a[row].iter().fold(0.0_f64, |v, z| v.max(z.abs())))?;
+            if a[row].iter().any(|&z| !finite(z)) {
+                return Err("finite slab boundary data required");
+            }
+            row_scales[row] = scale;
+            a[row] = a[row].map(|v| C64::new(v.re / scale, v.im / scale));
         }
-        a[row] = a[row].map(|v| C64::new(v.re / scale, v.im / scale));
-        b[row] = C64::new(b[row].re / scale, b[row].im / scale);
-    }
-    for column in 0..N {
-        let mut pivot = column;
-        for row in column + 1..N {
-            if a[row][column].abs() > a[pivot][column].abs() {
-                pivot = row;
+        let mut pivots = [0; N];
+        for column in 0..N {
+            let mut pivot = column;
+            for row in column + 1..N {
+                if a[row][column].abs() > a[pivot][column].abs() {
+                    pivot = row;
+                }
+            }
+            if !finite(a[pivot][column]) || a[pivot][column].abs() <= 64.0 * f64::EPSILON {
+                return Err("uniaxial slab boundary system is numerically unresolved");
+            }
+            pivots[column] = pivot;
+            // Previous lower-triangle multipliers belong to their ORIGINAL
+            // elimination step. Keep them in place while swapping the active
+            // suffix; solve() applies these same row swaps to each new RHS.
+            for j in column..N {
+                let value = a[column][j];
+                a[column][j] = a[pivot][j];
+                a[pivot][j] = value;
+            }
+            for row in column + 1..N {
+                let factor = a[row][column] / a[column][column];
+                a[row][column] = factor;
+                for j in column + 1..N {
+                    a[row][j] = a[row][j] - factor * a[column][j];
+                }
             }
         }
-        if !finite(a[pivot][column]) || a[pivot][column].abs() <= 64.0 * f64::EPSILON {
-            return Err("uniaxial slab boundary system is numerically unresolved");
-        }
-        a.swap(pivot, column);
-        b.swap(pivot, column);
-        for row in column + 1..N {
-            let factor = a[row][column] / a[column][column];
-            a[row][column] = C64::ZERO;
-            for j in column + 1..N {
-                a[row][j] = a[row][j] - factor * a[column][j];
+        Ok(Self {
+            factors: a,
+            row_scales,
+            pivots,
+        })
+    }
+
+    pub(super) fn solve(&self, mut b: [C64; N]) -> Result<[C64; N]> {
+        for (row, value) in b.iter_mut().enumerate() {
+            if !finite(*value) {
+                return Err("finite slab boundary data required");
             }
-            b[row] = b[row] - factor * b[column];
+            *value = C64::new(
+                value.re / self.row_scales[row],
+                value.im / self.row_scales[row],
+            );
         }
+        for column in 0..N {
+            b.swap(self.pivots[column], column);
+            for row in column + 1..N {
+                b[row] = b[row] - self.factors[row][column] * b[column];
+            }
+        }
+        let mut x = [C64::ZERO; N];
+        for row in (0..N).rev() {
+            let mut rhs = b[row];
+            for j in row + 1..N {
+                rhs = rhs - self.factors[row][j] * x[j];
+            }
+            x[row] = rhs / self.factors[row][row];
+            if !finite(x[row]) {
+                return Err("uniaxial slab amplitudes are unrepresentable");
+            }
+        }
+        Ok(x)
     }
-    let mut x = [C64::ZERO; N];
-    for row in (0..N).rev() {
-        let mut rhs = b[row];
-        for j in row + 1..N {
-            rhs = rhs - a[row][j] * x[j];
-        }
-        x[row] = rhs / a[row][row];
-        if !finite(x[row]) {
-            return Err("uniaxial slab amplitudes are unrepresentable");
-        }
-    }
-    Ok(x)
 }
 
 fn boundary_gate(r: &UniaxialSlabResponse, admittance: f64) -> Result<()> {

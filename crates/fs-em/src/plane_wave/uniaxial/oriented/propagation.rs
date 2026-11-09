@@ -2,8 +2,11 @@
 use super::{OrientedCrystalResponse, Result, Vector};
 use fs_math::{c64::C64, dd::Dd, decay, det};
 
+#[path = "propagation/frequency.rs"]
 mod frequency;
-pub(super) use frequency::{FrequencyWave, field_frequency_derivatives};
+pub(in crate::plane_wave::uniaxial::oriented) use frequency::{
+    FrequencyWave, field_frequency_derivatives,
+};
 
 /// Components selected at one physical point. The interface is z=0, with the
 /// original incident medium at z<0 and the transparent crystal at z>0.

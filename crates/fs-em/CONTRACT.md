@@ -7367,6 +7367,40 @@ power. Existing half-space critical support remains unchanged. Absorbing
 anisotropy, crystal multilayer stacks, varying optic axes and causal transient
 reservoirs remain outside this capability.
 
+### Analytic thickness sensitivity of coherent crystal slabs
+
+`OrientedUniaxialSlab::thickness_derivatives` and its signed-tangential-index
+counterpart differentiate the original two-face Maxwell system at fixed
+frequency, material laws, optic axis, incidence and complex incident tangential
+E. The result retains the unchanged native carrier and first/second ordinary
+derivatives of Cartesian reflected, transmitted and all four internal E/H
+fields, together with normal reflected/transmitted power derivatives. The
+entrance stays at z=0; transmitted and backward amplitudes follow the moving
+exit z=d. These are not fixed-global-observer derivatives.
+
+The original row-scaled pivoted 8x8 factorization serves the carrier and both
+derivative right-hand sides, A c'=-A'c and A c''=-A''c-2A'c'. Only the original
+bounded forward/backward propagation factors vary. Dimensionless thickness
+coordinates keep wave-number scales outside the boundary solves; DD
+contractions retain coherent vector products and normal power derivatives
+before SI scaling. There are no neighboring material queries, finite-difference
+production solves or heap allocations. A reflected carrier zero can retain a
+nonzero complex field slope and positive power curvature. Critical/evanescent
+isotropic exit normal power remains identically zero.
+
+Fifteen exact native slab numerical tests passed, including four new thickness
+tests covering independent five-point carrier controls, homogeneous
+moving-exit phase, tilted-axis polarization coupling, signed incidence,
+frustrated total reflection, resonance curvature, opaque but representable
+tunneling, amplitude scaling and physical units. The additional original-source
+spectral-endpoint fixture is authored but unexecuted; full workspace/material
+resolver validation remains outstanding. Original internal critical-mode,
+boundary-conditioning and carrier-power gates remain authoritative.
+Underflowed propagation factors and unrepresentable derivative arithmetic
+explicitly refuse instead of fabricating zero sensitivity. This capability
+does not differentiate material frequency, optic-axis orientation, multilayer
+stack parameters or fixed global field points.
+
 ### Coherent stacks of arbitrarily oriented transparent crystals
 
 `uniaxial::oriented::stack::OrientedUniaxialStack` retains the original
