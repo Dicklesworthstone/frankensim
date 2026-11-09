@@ -772,7 +772,7 @@ value per wet layer and add no work or retained storage to time stepping.
 ## Conservative streamwise laminar-film evolution
 
 With `thin-film-evolution`, `film::evolution::ThinFilmLine` advances actual
-strictly wet cell thickness by `h_t + q_x = 0` on a uniform periodic or closed
+strictly wet cell thickness by `h_t + q_x = 0` on a uniform
 line. The face force combines held tangential gravity with the gradient of
 `p = rho*g_normal*h - sigma*h_xx`. Original Newtonian `ShearedFilm` or prepared
 thermal Carreau-Yasuda slit profiles supply the flux, surface speed, wall
@@ -826,6 +826,50 @@ The numerical source-linked build executes the original material, math and
 solver implementations; runtime-context paths are uninhabitable in that
 projection. The source-bound liquid integration regression is added but its
 full native crate/dependency execution is not claimed.
+
+### Open film connections with original viscous losses
+
+`ThinFilmBoundary::Open` and `ThinFilmLine::advance_open` admit two explicitly
+held hydraulic pressure potentials and surface tractions. Each physical end
+uses the adjacent accepted thickness and the original profile over half a cell:
+`F_left = rho*g_t - (p_first-P_left)/(dx/2)` and
+`F_right = rho*g_t - (P_right-p_last)/(dx/2)`. Natural capillary end slopes
+remain zero. Boundary pressures use the same gravity/capillary potential datum
+as the cell energy; they are not arbitrary gauge offsets or inferred inputs.
+
+These two half-cell connections complete the physical domain length and carry
+their own original viscous heat, body work and surface work. Their signed flows
+enter the boundary cells' finite-volume equations. The independent volume gate
+is `Delta V - dt*(q_left-q_right)`. The energy gate additionally subtracts the
+actual reservoir work `dt*(P_left*q_left-P_right*q_right)`. Positive flow is +x
+at both ends, so either end may supply or remove liquid. No prescribed-flux
+shortcut, unmodeled boundary resistance or residual-to-heat conversion enters.
+
+`ThinFilmProfile` is the common physical response for interior and boundary
+connections. `ThinFilmFace` retains its from/to cells and this profile;
+`ThinFilmOpenReport` retains both original end profiles and their authored
+pressures/tractions. Volume change and volume balance residual remain distinct.
+Each original Carreau source is still prepared once: an open N-cell line needs
+N+1 authored temperatures ordered left end, N-1 interior faces, right end.
+End temperatures are never inferred from an interior source. `face_count()`
+counts interior links and `profile_source_count()` includes the two open ends.
+
+The same source support, profile-extremum inertia admission, bounded numerical
+work and final cancellation gate apply to both ends. Missing/invalid end data,
+unsupported sources, unresolved equations or failed accounts preserve accepted
+heights/time. `MaterialThinFilmLine::advance_open` delegates through the same
+original liquid binding and preserves its source receipts. The open extension
+retains first-order quasi-steady long-wave scope; it does not resolve wetting,
+contact lines, entrance development or the downstream free jet.
+
+Focused open-film regressions cover uniform forward/reverse throughflow over
+the complete domain length, independently manufactured nonuniform endpoints
+with pressure work and capillarity, original nonlinear Carreau end profiles,
+and atomic source/control/cancellation refusal. They accompany the existing
+closed/periodic physical cases without changing their acceptance tolerances.
+All nine evolution cases passed in the existing build of original numerical
+sources; no compiler warnings were emitted. This does not establish the full
+asynchronous runtime or original liquid-source adapter integration.
 
 ## Original-law shear-free Carreau film base
 

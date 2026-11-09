@@ -12,7 +12,8 @@ use super::{FilmError, FilmMaterial, NusseltFilm, ShearedFilm};
 
 #[cfg(feature = "thin-film-evolution")]
 use super::evolution::{
-    ThinFilmControls, ThinFilmError, ThinFilmGeometry, ThinFilmLimits, ThinFilmLine, ThinFilmStep,
+    ThinFilmControls, ThinFilmError, ThinFilmGeometry, ThinFilmLimits, ThinFilmLine,
+    ThinFilmOpenEnds, ThinFilmStep,
 };
 
 /// Evolving longitudinal thickness retaining the exact admitted Newtonian
@@ -55,6 +56,33 @@ impl<'a> MaterialThinFilmLine<'a> {
             target_s,
             acceleration_m_s2,
             surface_shear_pa,
+            limits,
+            controls,
+            height_guess_m,
+            cancelled,
+        )
+    }
+
+    /// Advance both native pressure-driven open connections with this same
+    /// original liquid source. Native half-cell loss, reservoir work and signed
+    /// volume transport are admitted together; all source receipts are retained.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_open(
+        &mut self,
+        target_s: f64,
+        acceleration_m_s2: f64,
+        interior_surface_shear_pa: &[f64],
+        ends: ThinFilmOpenEnds,
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        height_guess_m: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmStep, ThinFilmError> {
+        self.flow.advance_open(
+            target_s,
+            acceleration_m_s2,
+            interior_surface_shear_pa,
+            ends,
             limits,
             controls,
             height_guess_m,

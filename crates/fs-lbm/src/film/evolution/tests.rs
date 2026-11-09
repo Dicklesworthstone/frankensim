@@ -5,6 +5,9 @@ use super::*;
 use fs_material::fluid_transport::rheology::{CarreauYasuda, ViscosityShiftMode};
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
+#[path = "tests/open.rs"]
+mod open;
+
 fn geometry(boundary: ThinFilmBoundary, normal: f64) -> ThinFilmGeometry {
     ThinFilmGeometry {
         spacing_m: 0.5,
@@ -263,6 +266,7 @@ fn original_carreau_sources_recover_newtonian_motion_and_resolve_true_thermal_sh
             near(x, y, 8e-11);
         }
         for (x, y) in a.faces.iter().zip(&b.faces) {
+            let (x, y) = (&x.profile, &y.profile);
             near(x.flow_per_width_m2_s, y.flow_per_width_m2_s, 2e-10);
             near(x.viscous_dissipation_w_m2, y.viscous_dissipation_w_m2, 2e-9);
         }
@@ -287,6 +291,7 @@ fn original_carreau_sources_recover_newtonian_motion_and_resolve_true_thermal_sh
             .unwrap();
         let reference = original_profile(law, temperature, 0.1, 4.0, 0.1);
         for face in &report.faces {
+            let face = &face.profile;
             near(face.thickness_m, 0.1, 2e-12);
             near(face.flow_per_width_m2_s, reference[0], 2e-9 * reference[0]);
             near(face.surface_velocity_m_s, reference[1], 2e-9 * reference[1]);
@@ -297,7 +302,7 @@ fn original_carreau_sources_recover_newtonian_motion_and_resolve_true_thermal_sh
             );
         }
         near(4.0 * reference[0] + 0.1 * reference[1], reference[2], 2e-12);
-        fluxes.push(report.faces[0].flow_per_width_m2_s);
+        fluxes.push(report.faces[0].profile.flow_per_width_m2_s);
     }
     assert!(fluxes[1] > 1.05 * fluxes[0]);
 }
@@ -332,6 +337,7 @@ fn opposing_body_and_surface_forces_select_the_interior_godunov_extremum_under_r
         let expected_u = -force * hstar * hstar / (2.0 * mu);
         let mut extrema = 0;
         for face in &report.faces {
+            let face = &face.profile;
             if (face.thickness_m - hstar).abs() < 1e-12 {
                 extrema += 1;
                 near(face.flow_per_width_m2_s, expected_q, 2e-14);

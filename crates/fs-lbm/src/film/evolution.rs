@@ -27,11 +27,28 @@ use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport
 
 use super::{FilmError, FilmMaterial, ShearedFilm};
 
-/// Periodic cells, or a closed film with natural zero-slope ends and no flux.
+/// Streamwise topology. Nonperiodic ends have natural zero-slope capillarity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThinFilmBoundary {
     Periodic,
     Closed,
+    /// Explicit hydraulic pressure potentials drive original half-cell profiles.
+    Open,
+}
+
+/// Held pressure potential and surface traction at one physical open end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThinFilmOpenEnd {
+    /// Pa, in the same potential datum as rho*g_normal*h - sigma*h_xx.
+    /// Includes gravitational head; an arbitrary mechanical gauge is not valid.
+    pub pressure_pa: f64,
+    pub surface_shear_pa: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThinFilmOpenEnds {
+    pub left: ThinFilmOpenEnd,
+    pub right: ThinFilmOpenEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,12 +158,9 @@ enum Source {
     Carreau(Vec<LaminarCarreauSlit>),
 }
 
-/// Original steady profile at the accepted finite-volume face.
+/// Original steady profile shared by interior faces and physical open ends.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ThinFilmFace {
-    pub from: usize,
-    pub to: usize,
-    /// Godunov state selected from the two cells or the physical turning point.
+pub struct ThinFilmProfile {
     pub thickness_m: f64,
     pub flow_per_width_m2_s: f64,
     pub surface_velocity_m_s: f64,
@@ -159,13 +173,36 @@ pub struct ThinFilmFace {
     pub maximum_shear_rate_per_s: f64,
 }
 
+/// Original interior face, with a Godunov thickness selected from its two
+/// cells or the original flux's physical turning point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThinFilmFace {
+    pub from: usize,
+    pub to: usize,
+    pub profile: ThinFilmProfile,
+}
+
+/// Both physical half-cell connections use the adjacent accepted thickness.
+/// Flows are signed in +x: positive left flow enters, positive right flow exits.
+/// Each profile's heat and work acts over spacing_m/2, not a full interior link.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThinFilmOpenReport {
+    pub ends: ThinFilmOpenEnds,
+    pub left: ThinFilmProfile,
+    pub right: ThinFilmProfile,
+}
+
 /// Physical and numerical energy accounts per unit out-of-plane width.
 #[derive(Debug)]
 pub struct ThinFilmStep {
     pub time_s: f64,
     pub duration_s: f64,
     pub faces: Vec<ThinFilmFace>,
+    pub open_ends: Option<ThinFilmOpenReport>,
+    /// Actual volume change, including signed transport through open ends.
     pub volume_change_m2: f64,
+    /// Actual change minus dt*(left flow - right flow), or change when closed.
+    pub volume_balance_residual_m2: f64,
     pub maximum_cell_residual_m: f64,
     pub stored_energy_change_j_per_m: f64,
     /// E(h_new-h_old), nonnegative for the admitted gravity/capillarity.
@@ -174,7 +211,9 @@ pub struct ThinFilmStep {
     pub viscous_heat_j_per_m: f64,
     pub body_work_j_per_m: f64,
     pub surface_work_j_per_m: f64,
-    /// Delta E + BE defect + physical heat - body work - surface work.
+    /// dt*(left pressure*left flow - right pressure*right flow).
+    pub boundary_work_j_per_m: f64,
+    /// Delta E + BE defect + physical heat - body/surface/boundary work.
     pub energy_residual_j_per_m: f64,
     pub maximum_slope: f64,
     pub maximum_height_to_length: f64,
@@ -199,6 +238,7 @@ struct Evaluation {
     heights: Vec<f64>,
     residual: Vec<f64>,
     faces: Vec<ThinFilmFace>,
+    open_ends: Option<ThinFilmOpenReport>,
     slope: f64,
     aspect: f64,
     reynolds: f64,
@@ -225,7 +265,9 @@ impl ThinFilmLine {
     }
 
     /// Prepare each original face temperature once; all later thickness trials
-    /// reuse its native constitutive preparation through with_gap.
+    /// reuse its native constitutive preparation through with_gap. Open lines
+    /// need N+1 explicit temperatures: left end, N-1 interior faces, right end.
+    /// Other topologies need one per interior face; no end source is inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn carreau(
         law: ThermalCarreauYasuda,
@@ -238,7 +280,12 @@ impl ThinFilmLine {
         time_s: f64,
     ) -> Result<Self, ThinFilmError> {
         Self::admit_geometry(geometry, &heights, time_s)?;
-        let count = faces(geometry.boundary, heights.len());
+        let count = faces(geometry.boundary, heights.len())
+            + if geometry.boundary == ThinFilmBoundary::Open {
+                2
+            } else {
+                0
+            };
         if !positive(density_kg_m3)
             || !nonnegative(surface_tension_n_m)
             || face_temperatures_k.len() != count
@@ -301,8 +348,19 @@ impl ThinFilmLine {
     pub const fn surface_tension_n_m(&self) -> f64 {
         self.tension
     }
+    /// Number of interior neighbor links, excluding physical open half-cells.
     pub fn face_count(&self) -> usize {
         faces(self.geometry.boundary, self.heights.len())
+    }
+
+    /// Number of independently authored original face temperatures.
+    pub fn profile_source_count(&self) -> usize {
+        self.face_count()
+            + if self.geometry.boundary == ThinFilmBoundary::Open {
+                2
+            } else {
+                0
+            }
     }
 
     /// Conservative backward Euler, with original nonlinear face profiles.
@@ -328,6 +386,64 @@ impl ThinFilmLine {
         height_guess_m: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<ThinFilmStep, ThinFilmError> {
+        self.advance_with_ends(
+            target_s,
+            acceleration_m_s2,
+            surface_shear_pa,
+            None,
+            limits,
+            controls,
+            height_guess_m,
+            cancelled,
+        )
+    }
+
+    /// Advance a strictly wet open film with explicit pressure potentials.
+    /// Each end solves the same original profile over a half-cell, including
+    /// its physical viscous loss, body work and surface-traction work. This
+    /// supplies both signed volume transport and reservoir pressure work;
+    /// no arbitrary flow or unmodeled boundary resistance is substituted.
+    ///
+    /// End capillary slopes are zero. Pressure/traction are held over the step;
+    /// all pressures use the physical datum of the stored gravity/capillary
+    /// energy. This is not a contact-line, free-jet or entrance-region model.
+    /// Interior tractions have length face_count(); end tractions are explicit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_open(
+        &mut self,
+        target_s: f64,
+        acceleration_m_s2: f64,
+        interior_surface_shear_pa: &[f64],
+        ends: ThinFilmOpenEnds,
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        height_guess_m: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmStep, ThinFilmError> {
+        self.advance_with_ends(
+            target_s,
+            acceleration_m_s2,
+            interior_surface_shear_pa,
+            Some(ends),
+            limits,
+            controls,
+            height_guess_m,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_ends(
+        &mut self,
+        target_s: f64,
+        acceleration_m_s2: f64,
+        surface_shear_pa: &[f64],
+        ends: Option<ThinFilmOpenEnds>,
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        height_guess_m: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmStep, ThinFilmError> {
         let checkpoint = RefCell::new(cancelled);
         let stopped = Cell::new(false);
         let check = || {
@@ -341,6 +457,22 @@ impl ThinFilmLine {
         check()?;
         let dt = target_s - self.time;
         admit(limits, controls)?;
+        if (self.geometry.boundary == ThinFilmBoundary::Open) != ends.is_some()
+            || ends.is_some_and(|e| {
+                [
+                    e.left.pressure_pa,
+                    e.right.pressure_pa,
+                    e.left.surface_shear_pa,
+                    e.right.surface_shear_pa,
+                ]
+                .iter()
+                .any(|x| !x.is_finite())
+            })
+        {
+            return Err(ThinFilmError::Invalid(
+                "open films require two explicit finite pressure/traction ends",
+            ));
+        }
         if !positive(dt)
             || !target_s.is_finite()
             || !acceleration_m_s2.is_finite()
@@ -358,6 +490,14 @@ impl ThinFilmLine {
         let count = self.heights.len();
         let evaluations = Cell::new(0usize);
         let profiles = Cell::new(0u64);
+        let profile = |source, height, force, traction| {
+            check()?;
+            if profiles.get() >= controls.maximum_profile_evaluations {
+                return Err(ThinFilmError::ProfileBudget);
+            }
+            profiles.set(profiles.get() + 1);
+            self.profile(source, height, force, traction, controls.slit, &check)
+        };
         let evaluate = |x: &[f64]| -> Result<Evaluation, ThinFilmError> {
             check()?;
             if evaluations.get() >= controls.maximum_endpoint_evaluations {
@@ -395,16 +535,10 @@ impl ThinFilmLine {
                 check()?;
                 let j = (i + 1) % count;
                 let force = finite(body - (pressure[j] - pressure[i]) / dx)?;
-                let profile = |height| {
-                    if profiles.get() >= controls.maximum_profile_evaluations {
-                        return Err(ThinFilmError::ProfileBudget);
-                    }
-                    profiles.set(profiles.get() + 1);
-                    self.profile(i, j, height, force, traction, controls.slit, &check)
-                };
-                let mut chosen = profile(h[i])?;
+                let source = i + usize::from(ends.is_some());
+                let mut chosen = profile(source, h[i], force, traction)?;
                 let minimum = h[i] <= h[j];
-                let prefer = |a: &ThinFilmFace, b: &ThinFilmFace| {
+                let prefer = |a: &ThinFilmProfile, b: &ThinFilmProfile| {
                     if minimum {
                         a.flow_per_width_m2_s < b.flow_per_width_m2_s
                     } else {
@@ -412,7 +546,7 @@ impl ThinFilmLine {
                     }
                 };
                 if h[i] != h[j] {
-                    let other = profile(h[j])?;
+                    let other = profile(source, h[j], force, traction)?;
                     if prefer(&other, &chosen) {
                         chosen = other;
                     }
@@ -421,33 +555,55 @@ impl ThinFilmLine {
                     if force != 0.0 {
                         let turning = -traction / force;
                         if turning > h[i].min(h[j]) && turning < h[i].max(h[j]) {
-                            let other = profile(turning)?;
+                            let other = profile(source, turning, force, traction)?;
                             if prefer(&other, &chosen) {
                                 chosen = other;
                             }
                         }
                     }
                 }
-                let re = finite(
-                    self.density * chosen.peak_speed_m_s * chosen.thickness_m
-                        / chosen.minimum_viscosity_pa_s
-                        * (chosen.thickness_m / limits.characteristic_length_m),
-                )?;
-                if re > limits.maximum_reduced_reynolds {
-                    return Err(ThinFilmError::OutsideRegime(
-                        "reduced inertia exceeds long-wave budget",
-                    ));
-                }
-                reynolds = reynolds.max(re);
+                reynolds = reynolds.max(self.admit_profile(&chosen, limits)?);
                 let transferred = finite(dt * chosen.flow_per_width_m2_s / dx)?;
                 residual[i] = finite(residual[i] + transferred)?;
                 residual[j] = finite(residual[j] - transferred)?;
-                selected.push(chosen);
+                selected.push(ThinFilmFace {
+                    from: i,
+                    to: j,
+                    profile: chosen,
+                });
             }
+            let open_ends = if let Some(ends) = ends {
+                // The pressure array has a removed constant datum. Shift the
+                // authored end potentials by the same amount before forming
+                // either gradient; reservoir work below retains actual Pa.
+                let datum = finite(gravity * self.heights[0])?;
+                let half = 0.5 * dx;
+                let left_force =
+                    finite(body - (pressure[0] - (ends.left.pressure_pa - datum)) / half)?;
+                let right_force =
+                    finite(body - ((ends.right.pressure_pa - datum) - pressure[count - 1]) / half)?;
+                let left = profile(0, h[0], left_force, ends.left.surface_shear_pa)?;
+                let right = profile(
+                    count,
+                    h[count - 1],
+                    right_force,
+                    ends.right.surface_shear_pa,
+                )?;
+                reynolds = reynolds
+                    .max(self.admit_profile(&left, limits)?)
+                    .max(self.admit_profile(&right, limits)?);
+                residual[0] = finite(residual[0] - finite(dt * left.flow_per_width_m2_s / dx)?)?;
+                residual[count - 1] =
+                    finite(residual[count - 1] + finite(dt * right.flow_per_width_m2_s / dx)?)?;
+                Some(ThinFilmOpenReport { ends, left, right })
+            } else {
+                None
+            };
             Ok(Evaluation {
                 heights: h,
                 residual,
                 faces: selected,
+                open_ends,
                 slope,
                 aspect,
                 reynolds,
@@ -505,9 +661,18 @@ impl ThinFilmLine {
             .map(|(a, b)| a - b)
             .collect();
         let volume_change_m2 = total(delta.iter().map(|&h| h * dx))?;
-        if volume_change_m2.abs() > controls.volume_tolerance_m2 {
+        let volume_balance_residual_m2 = if let Some(ends) = &accepted.open_ends {
+            total([
+                volume_change_m2,
+                -dt * ends.left.flow_per_width_m2_s,
+                dt * ends.right.flow_per_width_m2_s,
+            ])?
+        } else {
+            volume_change_m2
+        };
+        if volume_balance_residual_m2.abs() > controls.volume_tolerance_m2 {
             return Err(ThinFilmError::VolumeResidual {
-                residual_m2: volume_change_m2,
+                residual_m2: volume_balance_residual_m2,
                 tolerance_m2: controls.volume_tolerance_m2,
             });
         }
@@ -533,30 +698,40 @@ impl ThinFilmLine {
         }
         let stored_energy_change_j_per_m = finite(change.to_f64())?;
         let backward_euler_energy_defect_j_per_m = finite(defect.to_f64())?;
-        let viscous_heat_j_per_m = total(
-            accepted
-                .faces
-                .iter()
-                .map(|f| dt * dx * f.viscous_dissipation_w_m2),
-        )?;
+        // Open half-cells complete the physical length: (N-1)*dx+2*(dx/2).
+        // Their original losses/work must accompany their pressure-driven flux.
+        let weighted_profiles = || {
+            accepted.faces.iter().map(|f| (&f.profile, dx)).chain(
+                accepted
+                    .open_ends
+                    .iter()
+                    .flat_map(|e| [(&e.left, 0.5 * dx), (&e.right, 0.5 * dx)]),
+            )
+        };
+        let viscous_heat_j_per_m =
+            total(weighted_profiles().map(|(f, length)| dt * length * f.viscous_dissipation_w_m2))?;
         let body_work_j_per_m = total(
-            accepted
-                .faces
-                .iter()
-                .map(|f| dt * dx * body * f.flow_per_width_m2_s),
+            weighted_profiles().map(|(f, length)| dt * length * body * f.flow_per_width_m2_s),
         )?;
         let surface_work_j_per_m = total(
-            accepted
-                .faces
-                .iter()
-                .map(|f| dt * dx * f.surface_shear_pa * f.surface_velocity_m_s),
+            weighted_profiles()
+                .map(|(f, length)| dt * length * f.surface_shear_pa * f.surface_velocity_m_s),
         )?;
+        let boundary_work_j_per_m = if let Some(e) = &accepted.open_ends {
+            total([
+                dt * e.ends.left.pressure_pa * e.left.flow_per_width_m2_s,
+                -dt * e.ends.right.pressure_pa * e.right.flow_per_width_m2_s,
+            ])?
+        } else {
+            0.0
+        };
         let energy_residual_j_per_m = total([
             stored_energy_change_j_per_m,
             backward_euler_energy_defect_j_per_m,
             viscous_heat_j_per_m,
             -body_work_j_per_m,
             -surface_work_j_per_m,
+            -boundary_work_j_per_m,
         ])?;
         if energy_residual_j_per_m.abs() > controls.energy_tolerance_j_per_m {
             return Err(ThinFilmError::EnergyResidual {
@@ -569,13 +744,16 @@ impl ThinFilmLine {
             time_s: target_s,
             duration_s: dt,
             faces: accepted.faces,
+            open_ends: accepted.open_ends,
             volume_change_m2,
+            volume_balance_residual_m2,
             maximum_cell_residual_m,
             stored_energy_change_j_per_m,
             backward_euler_energy_defect_j_per_m,
             viscous_heat_j_per_m,
             body_work_j_per_m,
             surface_work_j_per_m,
+            boundary_work_j_per_m,
             energy_residual_j_per_m,
             maximum_slope: accepted.slope,
             maximum_height_to_length: accepted.aspect,
@@ -627,14 +805,13 @@ impl ThinFilmLine {
     #[allow(clippy::too_many_arguments)]
     fn profile(
         &self,
-        from: usize,
-        to: usize,
+        source: usize,
         height: f64,
         force: f64,
         traction: f64,
         controls: CarreauSlitControls,
         check: &dyn Fn() -> Result<(), ThinFilmError>,
-    ) -> Result<ThinFilmFace, ThinFilmError> {
+    ) -> Result<ThinFilmProfile, ThinFilmError> {
         check()?;
         let turning_y = if force == 0.0 {
             f64::NAN
@@ -660,7 +837,7 @@ impl ThinFilmLine {
                 )
             }
             Source::Carreau(sources) => {
-                let slit = sources[from].with_gap(height)?;
+                let slit = sources[source].with_gap(height)?;
                 let interrupted = Cell::new(false);
                 let native_check = || {
                     if check().is_err() {
@@ -724,9 +901,7 @@ impl ThinFilmLine {
             ));
         }
         check()?;
-        Ok(ThinFilmFace {
-            from,
-            to,
+        Ok(ThinFilmProfile {
             thickness_m: height,
             flow_per_width_m2_s: q,
             surface_velocity_m_s: surface,
@@ -739,12 +914,30 @@ impl ThinFilmLine {
             maximum_shear_rate_per_s: shear,
         })
     }
+
+    fn admit_profile(
+        &self,
+        profile: &ThinFilmProfile,
+        limits: ThinFilmLimits,
+    ) -> Result<f64, ThinFilmError> {
+        let re = finite(
+            self.density * profile.peak_speed_m_s * profile.thickness_m
+                / profile.minimum_viscosity_pa_s
+                * (profile.thickness_m / limits.characteristic_length_m),
+        )?;
+        if re > limits.maximum_reduced_reynolds {
+            return Err(ThinFilmError::OutsideRegime(
+                "reduced inertia exceeds long-wave budget",
+            ));
+        }
+        Ok(re)
+    }
 }
 
 fn faces(boundary: ThinFilmBoundary, cells: usize) -> usize {
     match boundary {
         ThinFilmBoundary::Periodic => cells,
-        ThinFilmBoundary::Closed => cells - 1,
+        ThinFilmBoundary::Closed | ThinFilmBoundary::Open => cells - 1,
     }
 }
 fn positive(x: f64) -> bool {
