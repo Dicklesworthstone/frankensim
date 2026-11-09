@@ -217,12 +217,16 @@ pub struct Energy {
     pub mechanical_work: f64,
     pub thermal_strain_work: f64,
     pub modulus_work: f64,
+    /// Constitutive storage increment evaluated before rounding endpoint
+    /// snapshots. A weak relaxation release can remain resolved even when
+    /// the two reported absolute spring energies round to the same value.
     pub stored_change: f64,
     /// Nonnegative physical dashpot dissipation of the selected history update.
     pub dissipated: f64,
     /// Nonnegative algorithmic dissipation; zero for exact strain ramps.
     pub numerical_dissipation: f64,
-    /// Storage + both dissipations - all three work contributions.
+    /// Storage + both dissipations - all three work contributions, evaluated
+    /// with common modulus work removed and strain work combined first.
     pub residual: f64,
 }
 
@@ -360,6 +364,10 @@ impl<'a> Point<'a> {
         let mut numerical = 0.0;
         let mut mean_stress = self.law.equilibrium_pa*(e_old+0.5*(e_new-e_old));
         let mut exact_tangent = self.law.equilibrium_pa;
+        // Difference the quadratic spring potentials locally, not the total
+        // endpoint energies. A stationary equilibrium spring must not erase
+        // a much smaller physical release from its Maxwell branches.
+        let mut storage_change = 0.5*self.law.equilibrium_pa*(e_new-e_old)*(e_new+e_old);
         match self.law.history_integration {
             HistoryIntegration::BackwardEuler => {
                 numerical = 0.5*self.law.equilibrium_pa*de*de;
@@ -368,7 +376,8 @@ impl<'a> Point<'a> {
                     let drive = self.q[j] + (e_new-e_old);
                     next.q[j] = finite(a*drive)?;
                     dissipated += (e*a*drive)*(b*drive);
-                    let dq = next.q[j]-self.q[j];
+                    let dq = a*(e_new-e_old)-b*self.q[j];
+                    storage_change += 0.5*e*dq*(next.q[j]+self.q[j]);
                     numerical += 0.5*e*dq*dq;
                 }
             }
@@ -377,6 +386,8 @@ impl<'a> Point<'a> {
                     let ramp = crate::visco::PronyRamp::new(duration_s/(tau*thermal.relaxation_scale));
                     let (q, mean, heat) = ramp.apply(self.q[j], e_new-e_old);
                     next.q[j] = finite(q)?;
+                    let dq = ramp.spring_increment(self.q[j], e_new-e_old);
+                    storage_change += 0.5*e*dq*(q+self.q[j]);
                     exact_tangent += e*ramp.apply(0.0, 1.0).0;
                     mean_stress += e*mean;
                     dissipated += e*heat;
@@ -393,17 +404,22 @@ impl<'a> Point<'a> {
             None => finite(thermal.modulus_scale*exact_tangent)?,
         };
         positive(tangent_pa)?;
+        let storage_change = finite(thermal.modulus_scale*storage_change)?;
+        let modulus_work = finite((thermal.modulus_scale-old.modulus_scale)*self.unscaled_storage())?;
         let mut energy = Energy {
             mechanical_work: finite(work_stress*d_total)?,
             thermal_strain_work: finite(-work_stress*d_thermal)?,
-            modulus_work: finite((thermal.modulus_scale-old.modulus_scale)*self.unscaled_storage())?,
-            stored_change: finite(next.stored_energy_j_m3()-self.stored_energy_j_m3())?,
+            modulus_work,
+            stored_change: finite(storage_change+modulus_work)?,
             dissipated: finite(thermal.modulus_scale*dissipated)?,
             numerical_dissipation: finite(thermal.modulus_scale*numerical)?,
             residual: 0.0,
         };
-        energy.residual = finite(energy.stored_change+energy.dissipated+energy.numerical_dissipation
-            -energy.mechanical_work-energy.thermal_strain_work-energy.modulus_work)?;
+        // The same held-history coefficient work occurs on both sides of
+        // the balance. Cancel it algebraically, and combine total/eigenstrain
+        // work before rounding, so neither can hide weak dashpot heat.
+        energy.residual = finite(storage_change+energy.dissipated+energy.numerical_dissipation
+            -finite(work_stress*de)?)?;
         if energy.residual.abs() > energy_tolerance_j_m3 {
             return Err(Error::Energy(energy.residual));
         }
@@ -632,5 +648,69 @@ mod tests {
         assert!(point.advance(400.0, 0.04, 1.0, 1e-7).is_err());
         assert!(point.advance(400.0, 0.01, 1e-8, 1e-7).is_err());
         assert_eq!(point, original);
+    }
+
+    #[test]
+    fn damping_storage_release_survives_a_stiff_equilibrium_background() {
+        for integration in [HistoryIntegration::BackwardEuler, HistoryIntegration::ExactStrainRamp] {
+            let law = ThermoMaxwell::new(70e9, vec![(1e6, 1.0)], vec![
+                ThermalKnot { temperature_k: 300.0, modulus_scale: 1.0, relaxation_scale: 1.0, free_strain: 0.0 },
+                ThermalKnot { temperature_k: 500.0, modulus_scale: 1.0, relaxation_scale: 1.0, free_strain: 0.0 },
+            ], Limits { max_strain: 0.03, max_strain_rate_s: 10.0 }).unwrap()
+                .with_history_integration(integration);
+            let loaded = law.birth(300.0, 0.0).unwrap()
+                .advance(300.0, 0.001, 0.001, 1e-7).unwrap().point;
+            let initial_branch_energy = 0.5 * 1e6 * loaded.q[0] * loaded.q[0];
+            for dt in [1e-18_f64, 1e-8, 0.1, 1.0, 40.0] {
+                // Independent closed-form held-strain decay, including the
+                // physical/numerical split of backward Euler. Absolute stored
+                // energy is ~35 kJ/m3; it cannot resolve the weakest losses.
+                let (heat, numerical) = match integration {
+                    HistoryIntegration::ExactStrainRamp =>
+                        (-initial_branch_energy * (-2.0 * dt).exp_m1(), 0.0),
+                    HistoryIntegration::BackwardEuler => (
+                        2.0 * initial_branch_energy * (dt / (1.0 + dt)) / (1.0 + dt),
+                        initial_branch_energy * (dt / (1.0 + dt)).powi(2),
+                    ),
+                };
+                let tolerance = 1e-13 * (heat + numerical);
+                let step = loaded.advance(300.0, 0.001, dt, tolerance).unwrap();
+                close(step.energy.dissipated, heat, tolerance);
+                close(step.energy.numerical_dissipation, numerical, tolerance);
+                close(step.energy.stored_change, -heat - numerical, tolerance);
+                assert!(step.energy.residual.abs() <= tolerance);
+                assert_eq!(step.energy.mechanical_work, 0.0);
+                if dt == 1e-18 {
+                    assert_eq!(step.point.q[0], loaded.q[0]);
+                    assert_eq!(step.point.stored_energy_j_m3(), loaded.stored_energy_j_m3());
+                    assert!(step.energy.stored_change < 0.0 && step.energy.dissipated > 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thermal_coefficient_work_does_not_hide_local_damping_balance() {
+        let law = ThermoMaxwell::new(70e9, vec![(1e6, 1.0)], vec![
+            ThermalKnot { temperature_k: 300.0, modulus_scale: 1.0, relaxation_scale: 1.0, free_strain: 0.0 },
+            ThermalKnot { temperature_k: 500.0, modulus_scale: 0.5, relaxation_scale: 1.0, free_strain: 0.0 },
+        ], Limits { max_strain: 0.03, max_strain_rate_s: 10.0 }).unwrap()
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let loaded = law.birth(300.0, 0.0).unwrap()
+            .advance(300.0, 0.001, 0.001, 1e-7).unwrap().point;
+        let saved = loaded.clone();
+        let dt = 1e-8_f64;
+        let heat = -0.5 * 1e6 * loaded.q[0] * loaded.q[0] * (-2.0 * dt).exp_m1() * 0.75;
+        let tolerance = 1e-13 * heat;
+        // All strains are held while the stiffness coefficient changes.
+        // Modulus work stays separate from the independently resolved heat.
+        let step = loaded.advance(400.0, 0.001, dt, tolerance).unwrap();
+        close(step.energy.dissipated, heat, tolerance);
+        assert_eq!(step.energy.modulus_work, -0.25 * loaded.stored_energy_j_m3());
+        assert_eq!(step.energy.mechanical_work, 0.0);
+        assert_eq!(step.energy.thermal_strain_work, 0.0);
+        assert_eq!(step.energy.numerical_dissipation, 0.0);
+        assert!(step.energy.residual.abs() <= tolerance);
+        assert_eq!(loaded, saved);
     }
 }

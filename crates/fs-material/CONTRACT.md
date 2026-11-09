@@ -7239,6 +7239,18 @@ tests cover scalar-Prony parity, partition-invariant isothermal decay, thermal
 work and endpoint tangents, unchanged state on refusal, source selection and
 prescribed-strain caloric feedback.
 
+The thermovisco `Energy::stored_change` uses local quadratic constitutive
+increments. Exact ramps reuse `PronyRamp::spring_increment`; backward Euler
+uses its complementary relaxation factors for both storage and numerical loss.
+The balance removes common held-history modulus work algebraically and combines
+total/eigenstrain work before rounding. A weak dashpot release can therefore
+remain resolved beside a much larger stationary spring energy or coefficient
+work, including when absolute endpoint-energy snapshots round equally. Physical
+heat, numerical loss and modulus work stay independently reported. This local
+accounting does not add compensated branch-state memory or guarantee the
+accumulation of sub-ULP state changes over arbitrarily many intervals. Focused
+regressions cover both history integrators and a changing-modulus hold.
+
 Hyperelastic, hereditary and J2 source bindings share a single
 fixed-external-coordinate policy. Typed pressure, composition, moisture and
 concentration may describe fixed external conditions. Evolving mechanical
