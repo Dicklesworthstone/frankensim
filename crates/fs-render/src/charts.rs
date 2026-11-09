@@ -2604,6 +2604,20 @@ impl TriMesh {
         {
             return None;
         }
+        // The outward-rounded BVH admits rays within one ulp of a face. At
+        // an exactly zero plane that can mean only a subnormal separation;
+        // cancellation in the sheared parameter can then invent a positive
+        // hit behind a departing ray. An original-coordinate separating plane
+        // proves exclusion without a distance epsilon or primitive skip. Keep
+        // this check after edge/parameter admission so rejected triangles do
+        // not pay for it, and retain arbitrarily nearby surfaces ahead.
+        for axis in 0..3 {
+            if (d[axis] < 0.0 && o[axis] <= a[axis] && o[axis] <= b[axis] && o[axis] <= c[axis])
+                || (d[axis] > 0.0 && o[axis] >= a[axis] && o[axis] >= b[axis] && o[axis] >= c[axis])
+            {
+                return None;
+            }
+        }
         let inverse_determinant = 1.0 / determinant;
         let tt = scaled_t * inverse_determinant;
         let barycentric = [
@@ -2844,6 +2858,54 @@ pub fn trace_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oblique_mesh_departure_excludes_behind_plane_and_retains_nearby_return() {
+        // A tangentially dominant ray makes the shear-space parameter cancel
+        // large terms. One ulp outside z=0 is only MIN_SUBNORMAL, so an exact
+        // coordinate-side witness must survive that cancellation. Permute the
+        // axes and reverse both departure side and triangle winding.
+        for axis in 0..3 {
+            let permute = |point: [f64; 3]| {
+                let mut result = [0.0; 3];
+                for i in 0..3 {
+                    result[(i + axis) % 3] = point[i];
+                }
+                result
+            };
+            for side in [-1.0, 1.0] {
+                for triangle in [[0, 2, 1], [0, 1, 2]] {
+                    let vertices = [[-6.0, -6.0, 0.0], [6.0, -6.0, 0.0], [6.0, 6.0, 0.0]];
+                    let origin = permute([2.25_f64.next_down(), 0.0, side * f64::from_bits(1)]);
+                    let direction = permute([1.0, 0.0, side * (4.0 / 9.0)]);
+                    let ray = Ray {
+                        origin: Point3::new(origin[0], origin[1], origin[2]),
+                        dir: Vec3::new(direction[0], direction[1], direction[2]),
+                    };
+                    let mesh = TriMesh::new(vertices.map(permute).to_vec(), vec![triangle]);
+                    assert!(mesh.intersect_surface(&ray).is_none());
+                    assert!(mesh.intersect_surface_bruteforce(&ray).is_none());
+
+                    // A genuine return in the same object only a picometre
+                    // ahead must remain visible. The exclusion is per triangle,
+                    // never per primitive or a fixed near-hit distance cutoff.
+                    let gap = 1e-12;
+                    let mut with_return = vertices.map(permute).to_vec();
+                    with_return.extend(vertices.map(|[x, y, _]| permute([x, y, side * gap])));
+                    let mesh =
+                        TriMesh::new(with_return, vec![triangle, triangle.map(|index| index + 3)]);
+                    for hit in [
+                        mesh.intersect_surface(&ray),
+                        mesh.intersect_surface_bruteforce(&ray),
+                    ] {
+                        let hit = hit.expect("the nearby original triangle remains visible");
+                        assert_eq!(hit.triangle_index, 1);
+                        assert!(hit.hit.t > 0.0 && hit.hit.t < 3.0 * gap);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn ranked_nurbs_seeds_match_stable_full_sort_with_bounded_capacity() {

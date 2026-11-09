@@ -34,7 +34,13 @@ fn g1_reflected_axial_series_includes_front_mirror_internal_returns_and_retrorec
                     face(),
                     receiver,
                     TransportOptions::default(),
-                    precise(),
+                    SlabHistoryOptions {
+                        // A fixed per-bin spectral allowance can exceed the
+                        // relative lux accuracy below for this dim reflection.
+                        // Request the corresponding relative-only solve.
+                        absolute_tolerance_w_m2_nm: 0.0,
+                        ..precise()
+                    },
                 )
                 .unwrap();
             assert_eq!(result.family(), SlabHistoryFamily::Reflected);
