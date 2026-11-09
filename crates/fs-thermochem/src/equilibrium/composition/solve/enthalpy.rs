@@ -14,6 +14,9 @@
 use super::expansion::path::Reference;
 use super::*;
 
+/// Repeatable fixed-pressure calorics for original heat-storage consumers.
+pub mod isobaric;
+
 /// Allocation-free result of one original-source pressure/enthalpy query.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumEnthalpyPressureSampleV1 {
@@ -192,14 +195,65 @@ impl<'a> EquilibriumEnthalpyPressurePathV1<'a> {
                 &mut cancelled,
                 |work, t, cancel| reference.enthalpy_change(owner, work, t, cancel),
             )?;
-        let response = self.work.response(
-            owner,
-            temperature,
-            self.controls.equilibrium,
-            &mut cancelled,
+        self.finish_sample(
+            temperature, Some(enthalpy_change), composition_iterations,
+            temperature_iterations, &mut cancelled,
+        )
+    }
+
+    /// Original reacting H-H_reference and response at a prescribed T,p.
+    ///
+    /// This is the forward caloric law, not an enthalpy inverse. Temperature
+    /// must remain within the same fully admitted source bracket. One bounded
+    /// composition solve supplies both H and reacting Cp; no source receipt
+    /// is allocated until explicit publication. Failed queries invalidate it.
+    pub fn sample_temperature(
+        &mut self,
+        temperature: Temperature,
+        pressure: Pressure,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EquilibriumEnthalpyPressureSampleV1, EquilibriumExpansionErrorV1> {
+        let previous = self.current.take();
+        poll(&mut cancelled)?;
+        if !pressure.value().is_finite() || pressure.value() <= 0.0
+            || !temperature.value().is_finite()
+            || !(self.controls.minimum_temperature_k..=self.controls.maximum_temperature_k)
+                .contains(&temperature.value())
+        {
+            return Err(E::Invalid("prescribed temperature or pressure outside the admitted PH path").into());
+        }
+        if let Some(mut same) = previous.filter(|s| s.temperature == temperature && s.pressure == pressure) {
+            same.target_enthalpy_change_j = same.enthalpy_change_j;
+            same.enthalpy_residual_j = 0.0;
+            same.composition_iterations = 0;
+            same.temperature_iterations = 0;
+            poll(&mut cancelled)?;
+            self.current = Some(same);
+            return Ok(same);
+        }
+        self.work.pressure = pressure;
+        self.work.log_pressure_ratio = crate::entropy::log_ratio(
+            pressure.value(), self.owner.convention.reference_pressure().value(),
+        );
+        let iterations = self.work.solve(
+            self.owner, temperature, self.controls.equilibrium, &mut cancelled,
         )?;
-        let dh = reference.enthalpy_change(owner, &self.work, temperature, &mut cancelled)?;
-        let ds = reference.entropy_change(owner, &self.work, temperature, &mut cancelled)?;
+        self.finish_sample(temperature, None, iterations, 0, &mut cancelled)
+    }
+
+    fn finish_sample(
+        &mut self,
+        temperature: Temperature,
+        target: Option<Energy>,
+        composition_iterations: usize,
+        temperature_iterations: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EquilibriumEnthalpyPressureSampleV1, EquilibriumExpansionErrorV1> {
+        let owner = self.owner;
+        let reference = &self.reference;
+        let response = self.work.response(owner, temperature, self.controls.equilibrium, cancelled)?;
+        let dh = reference.enthalpy_change(owner, &self.work, temperature, cancelled)?;
+        let ds = reference.entropy_change(owner, &self.work, temperature, cancelled)?;
         let mut mass = Sum::default();
         for &i in &self.work.active {
             mass.add(self.work.n[i] * owner.models[i].molar_mass().value());
@@ -208,24 +262,20 @@ impl<'a> EquilibriumEnthalpyPressurePathV1<'a> {
         if !mass_residual.is_finite()
             || mass_residual.abs() > self.controls.equilibrium.relative_balance_tolerance
         {
-            return Err(E::MassBalance {
-                relative_residual: mass_residual,
-            }
-            .into());
+            return Err(E::MassBalance { relative_residual: mass_residual }.into());
         }
-        let residual = dh - enthalpy_change.value();
+        let target_enthalpy_change_j = target.map_or(dh, |h| h.value());
+        let residual = dh - target_enthalpy_change_j;
         if !residual.is_finite() || residual.abs() > self.controls.enthalpy_tolerance_j {
             return Err(E::EnthalpyNoConvergence {
-                iterations: temperature_iterations,
-                residual_j: residual,
-            }
-            .into());
+                iterations: temperature_iterations, residual_j: residual,
+            }.into());
         }
         let sample = EquilibriumEnthalpyPressureSampleV1 {
             temperature,
-            pressure,
+            pressure: self.work.pressure,
             response,
-            target_enthalpy_change_j: enthalpy_change.value(),
+            target_enthalpy_change_j,
             enthalpy_change_j: dh,
             enthalpy_residual_j: residual,
             entropy_change_j_k: ds,
@@ -233,7 +283,7 @@ impl<'a> EquilibriumEnthalpyPressurePathV1<'a> {
             composition_iterations,
             temperature_iterations,
         };
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         self.current = Some(sample);
         Ok(sample)
     }

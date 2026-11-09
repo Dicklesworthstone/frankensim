@@ -4274,3 +4274,12 @@ incomplete-gamma moments, recover shifted-onset totals through composite Simpson
 refinement, and exercise original-domain, zero-law and underflow behavior.
 Manufactured source agreement is numerical verification, not experimental
 recombination validation.
+
+
+### Repeatable reacting isobaric caloric storage
+
+`composition::enthalpy::isobaric::EquilibriumIsobaricCaloricV1` prepares the original neutral ideal-gas Gibbs/HP owner at fixed pressure and conserved element ratios. Its closed-storage coordinate is `(H-H_cold)/feed_mass`; zero is the admitted lower-temperature equilibrium and is not an independently compatible flow-stream enthalpy datum. The complete original source bracket, hot equilibrium, and original bounded inverse at the exact advertised inclusive upper specific-enthalpy endpoint are admitted before construction succeeds. No tolerance is widened to accommodate coordinate rounding.
+
+Every forward or inverse query restores one bounded original numerical anchor, including caloric source evaluations, so accepted constitutive values and publication do not depend on query order or failed trials. Original reacting Cp, density, composition, source receipts, work limits, and cancellation remain authoritative. Failed queries clear publication. Direct changes between two storage states use a fresh local original-source reference, retaining small enthalpy and entropy increments far from the cold datum; requested stored heat and actual bounded-solve enthalpy changes remain separately observable.
+
+This native law supplies reacting calorics only. The material/thermal adapter owns global slope certification, transport admission, finite heat transfers, and the fixed-pressure enthalpy/pressure-work convention; no sampled caloric surrogate, frozen-Cp substitute, or second heat integrator is introduced. Five added regressions cover analytical isomer/dissociation calorics, mixing entropy, molecular-count response, canonical repeatability, small offset-invariant heat increments, bounds, work limits, and cancellation. They are authored but unexecuted after executor/resource failure; prior native runs predate this extension.
