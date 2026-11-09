@@ -1,3 +1,35 @@
+## Plane-wall Mann turbulence at native D3Q19 inlets
+
+With `turbulent-inflow`, `BoundaryMannInflow3::new_with_plane_wall` binds the
+existing harmonic Mann slip-plane observation to the native D3Q19 velocity
+profile. Point samples and exact face averages consume the complete corrected
+field, including its evanescent wall term. Frozen snapshots, accepted OU
+endpoints and exact accepted interval means retain the atmosphere owner's
+modes, stochastic path and clock; applying a profile never advances the source.
+
+The corrected field is divergence-free and has zero wall-normal velocity at
+the authored plane. Mean flow and frozen translation must be tangent to that
+plane. A mean-normal inlet-flux correction is admitted only when its direction
+is also tangent. Every complete sampling footprint must remain above the
+plane. Failed geometry, source matching, work/storage admission or cancellation
+preserves the previously accepted profile.
+
+Only one complete spatial filter is retained: point observations allocate no
+gain array; finite faces store the original filter's required per-mode gains.
+The same accepted profile feeds the original ordinary, pooled and SGS boundary
+stepping. `spatial_filter()` now returns `Option<&MannBoxFilter>`; wall
+observations instead expose `wall_spatial_filter()` for their complete
+two-position covariance operator. A homogeneous sinc filter alone does not
+represent wall-blocked covariance.
+
+Focused regressions cover wall no-penetration and divergence through native
+SGS stepping, independent spatial quadrature of finite faces, original OU
+endpoint/interval clocks, and atomic refusal. This is outer-flow slip-plane
+blocking, not a viscous no-slip layer or a wall-generated spectrum. Spatial
+and temporal averages apply to velocity, not nonlinear momentum/energy fluxes.
+The native low-Mach boundary and the authored turbulence model retain their
+original resolution and applicability limits.
+
 ## Spatial body acceleration on native dense D3Q19
 
 `BoundaryGrid3::rebind_body_acceleration_field` selects a prescribed local

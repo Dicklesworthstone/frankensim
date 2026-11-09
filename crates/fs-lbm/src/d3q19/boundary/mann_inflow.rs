@@ -13,6 +13,7 @@ use super::{
 };
 use fs_atmo::mann_field::filter::MannBoxFilter;
 use fs_atmo::mann_field::fixed_step::{FixedStepMannField, MannStepAverage};
+use fs_atmo::mann_field::wall::{MannPlaneWall, filter::MannWallBoxFilter};
 use fs_atmo::mann_field::{HomogeneousMannField, MannSpectralModel};
 use fs_exec::CancelGate;
 use fs_math::det;
@@ -110,14 +111,21 @@ pub struct BoundaryMannReport3 {
 
 /// Reusable observation bound to the complete immutable Mann model.
 /// Point sampling stores no numerical gains; face sampling stores one gain
-/// per wavevector. The existing boundary owner retains its two plane buffers.
+/// per wavevector, or four when a wall footprint has vertical extent. The
+/// existing boundary owner retains its two plane buffers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundaryMannInflow3 {
     config: BoundaryMannConfig3,
-    filter: MannBoxFilter,
+    filter: SpatialFilter,
     mode_count: usize,
     velocity_scale: f64,
     spatial_phase_bound_rad: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SpatialFilter {
+    Homogeneous(MannBoxFilter),
+    Wall(MannWallBoxFilter),
 }
 
 fn poll(gate: &CancelGate) -> Result<(), BoundaryMannError3> {
@@ -149,6 +157,45 @@ impl BoundaryMannInflow3 {
         model: &MannSpectralModel,
         config: BoundaryMannConfig3,
         observation: BoundaryMannObservation3,
+        maximum_filter_bytes: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, BoundaryMannError3> {
+        Self::prepare(model, config, observation, None, maximum_filter_bytes, gate)
+    }
+
+    /// Observe the same Mann modes above a stationary slip plane in their
+    /// original physical frame. The corrected turbulence preserves divergence
+    /// and has zero normal velocity at the plane; it is not a no-slip
+    /// layer, a wall-generated spectrum or a change to the CFD wall geometry.
+    ///
+    /// Mean velocity and a later frozen-snapshot translation must be tangent
+    /// to the plane. Every complete point/face footprint must be above it.
+    /// Face averages integrate the evanescent correction as well as the bulk
+    /// modes; applying only the homogeneous sinc gain would be incorrect.
+    /// The byte budget covers the single selected complete filter's gains.
+    pub fn new_with_plane_wall(
+        model: &MannSpectralModel,
+        config: BoundaryMannConfig3,
+        observation: BoundaryMannObservation3,
+        wall: MannPlaneWall,
+        maximum_filter_bytes: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, BoundaryMannError3> {
+        Self::prepare(
+            model,
+            config,
+            observation,
+            Some(wall),
+            maximum_filter_bytes,
+            gate,
+        )
+    }
+
+    fn prepare(
+        model: &MannSpectralModel,
+        config: BoundaryMannConfig3,
+        observation: BoundaryMannObservation3,
+        wall: Option<MannPlaneWall>,
         maximum_filter_bytes: usize,
         gate: &CancelGate,
     ) -> Result<Self, BoundaryMannError3> {
@@ -206,9 +253,23 @@ impl BoundaryMannInflow3 {
                 rotation[axis].map(|v| v * (0.5 * config.dx_m))
             }
         });
-        let filter = MannBoxFilter::prepare(model, half_edges, maximum_filter_bytes, || {
-            gate.is_requested()
-        })?;
+        let filter = if let Some(wall) = wall {
+            admit_wall_tangent(config.field_to_grid, config.mean_velocity_m_s)?;
+            SpatialFilter::Wall(MannWallBoxFilter::prepare(
+                model,
+                wall,
+                half_edges,
+                maximum_filter_bytes,
+                || gate.is_requested(),
+            )?)
+        } else {
+            SpatialFilter::Homogeneous(MannBoxFilter::prepare(
+                model,
+                half_edges,
+                maximum_filter_bytes,
+                || gate.is_requested(),
+            )?)
+        };
         Ok(Self {
             config,
             filter,
@@ -222,9 +283,30 @@ impl BoundaryMannInflow3 {
         self.config
     }
 
-    /// Original point/face observation, also usable by the source's covariance API.
-    pub const fn spatial_filter(&self) -> &MannBoxFilter {
-        &self.filter
+    /// Original homogeneous observation, also usable by its covariance API.
+    /// Plane-blocked observations expose their complete operator separately.
+    pub const fn spatial_filter(&self) -> Option<&MannBoxFilter> {
+        match &self.filter {
+            SpatialFilter::Homogeneous(filter) => Some(filter),
+            SpatialFilter::Wall(_) => None,
+        }
+    }
+
+    /// The complete wall observation, for represented two-point covariance
+    /// with both physical positions. Normal homogeneity is lost at the plane.
+    pub const fn wall_spatial_filter(&self) -> Option<&MannWallBoxFilter> {
+        match &self.filter {
+            SpatialFilter::Homogeneous(_) => None,
+            SpatialFilter::Wall(filter) => Some(filter),
+        }
+    }
+
+    /// Actual numerical gain capacity; point observations require no storage.
+    pub fn workspace_bytes(&self) -> usize {
+        match &self.filter {
+            SpatialFilter::Homogeneous(filter) => filter.workspace_bytes(),
+            SpatialFilter::Wall(filter) => filter.workspace_bytes(),
+        }
     }
 
     /// Publish a resolved trace at the caller-selected source endpoint/interval.
@@ -245,6 +327,13 @@ impl BoundaryMannInflow3 {
         gate: &CancelGate,
     ) -> Result<BoundaryMannReport3, BoundaryMannError3> {
         poll(gate)?;
+        if self.wall_spatial_filter().is_some() && matches!(flux, InletFlux3::MeanNormal(_)) {
+            // An inlet-flux correction acts along the CFD face normal. Do
+            // not let it inject a normal component through the authored plane.
+            let mut normal = [0.0; 3];
+            normal[self.config.face.axis()] = 1.0;
+            admit_wall_tangent(self.config.field_to_grid, normal)?;
+        }
         let (interval, displacement, advection) = match source {
             BoundaryMannSource3::Frozen {
                 time_s,
@@ -261,6 +350,12 @@ impl BoundaryMannInflow3 {
                     return Err(BoundaryMannError3::Input(
                         "invalid frozen time or convection velocity",
                     ));
+                }
+                if self.wall_spatial_filter().is_some() {
+                    // A normal translation would move the wall in physical
+                    // coordinates. Evolving sources instead apply the wall
+                    // correction at their actual fixed plane and source time.
+                    admit_wall_tangent(self.config.field_to_grid, convection_velocity_m_s)?;
                 }
                 (
                     [time_s; 2],
@@ -357,15 +452,26 @@ impl BoundaryMannInflow3 {
                         .map(|i| self.config.field_to_grid[i][a] * point_grid[i])
                         .sum::<f64>()
             });
-            let sampled = match source {
-                BoundaryMannSource3::Frozen { source, .. } => {
-                    source.sample_filtered(point_field, &self.filter)
+            let sampled = match (&self.filter, source) {
+                (
+                    SpatialFilter::Homogeneous(filter),
+                    BoundaryMannSource3::Frozen { source, .. },
+                ) => source.sample_filtered(point_field, filter),
+                (SpatialFilter::Homogeneous(filter), BoundaryMannSource3::Evolving(source)) => {
+                    source.sample_filtered(point_field, filter)
                 }
-                BoundaryMannSource3::Evolving(source) => {
-                    source.sample_filtered(point_field, &self.filter)
+                (
+                    SpatialFilter::Homogeneous(filter),
+                    BoundaryMannSource3::StepAverage { average, .. },
+                ) => average.sample_filtered(point_field, filter),
+                (SpatialFilter::Wall(filter), BoundaryMannSource3::Frozen { source, .. }) => {
+                    source.sample_wall_blocked_filtered(point_field, filter)
                 }
-                BoundaryMannSource3::StepAverage { average, .. } => {
-                    average.sample_filtered(point_field, &self.filter)
+                (SpatialFilter::Wall(filter), BoundaryMannSource3::Evolving(source)) => {
+                    source.sample_wall_blocked_filtered(point_field, filter)
+                }
+                (SpatialFilter::Wall(filter), BoundaryMannSource3::StepAverage { average, .. }) => {
+                    average.sample_wall_blocked_filtered(point_field, filter)
                 }
             };
             match sampled {
@@ -398,4 +504,22 @@ impl BoundaryMannInflow3 {
             advective_phase_bound_rad,
         })
     }
+}
+
+// Project after the authored rotation, with the frame's roundoff tolerance.
+// Scaling first avoids overflowing a finite mean or convection velocity.
+fn admit_wall_tangent(
+    rotation: [[f64; 3]; 3],
+    velocity: [f64; 3],
+) -> Result<(), BoundaryMannError3> {
+    let scale = velocity.iter().fold(0.0_f64, |m, u| m.max(u.abs()));
+    if scale != 0.0 {
+        let normal: f64 = (0..3).map(|i| rotation[i][2] * (velocity[i] / scale)).sum();
+        if normal.abs() > 256.0 * f64::EPSILON {
+            return Err(BoundaryMannError3::Input(
+                "wall-blocked inlet mean, frozen translation and flux correction must be tangent to its plane",
+            ));
+        }
+    }
+    Ok(())
 }

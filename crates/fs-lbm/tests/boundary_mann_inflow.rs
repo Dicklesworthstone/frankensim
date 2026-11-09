@@ -13,6 +13,9 @@ use fs_lbm::d3q19::{
 };
 use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 
+#[path = "boundary_mann_inflow/wall.rs"]
+mod wall;
+
 fn snapshot(seed: u64) -> HomogeneousMannField {
     let model = MannSpectralModel::build(
         seed,
@@ -219,7 +222,7 @@ fn evolving_endpoints_and_exact_interval_means_use_the_original_source_without_a
         &gate,
     )
     .unwrap();
-    assert_eq!(inlet.spatial_filter().workspace_bytes(), 0);
+    assert_eq!(inlet.spatial_filter().unwrap().workspace_bytes(), 0);
     let mut source =
         FixedStepMannField::from_snapshot(frozen_field, 83, settings.dt_s, 1 << 20).unwrap();
     let mut average = MannStepAverage::prepare(&source, 1 << 20, || false).unwrap();
