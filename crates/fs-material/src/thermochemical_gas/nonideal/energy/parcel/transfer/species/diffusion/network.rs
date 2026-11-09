@@ -5,15 +5,22 @@
 //! partial PR enthalpies already contain flow work. Local friction entropy is
 //! not added as heat and does not replace the actual endpoint entropy audit.
 
+/// Complete real-gas windows on the shared conservative temporal controller.
+pub mod adaptive;
+
 use super::super::network::{
     self as exchange, RealGasSpeciesNetworkStep, SpeciesNetworkError, SpeciesNetworkSolve,
     SpeciesNetworkTransfer,
 };
 use super::super::{GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, positive};
-use super::{RealGasDiffusionFlux, RealGasDiffusionModel, RealGasDiffusionSolve};
+use super::{
+    RealGasDiffusionFlux, RealGasDiffusionModel, RealGasDiffusionSolve, RealGasDiffusionWorkspace,
+};
 use crate::thermochemical_gas::energy::parcel::transfer::{
     snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS},
-    species::{diffusion::GasDiffusionGeometry, entropy},
+    species::{
+        diffusion::GasDiffusionGeometry, entropy, network::transport::GasTransportWindowAudit,
+    },
 };
 use fs_math::dd::Dd;
 use std::collections::BTreeMap;
@@ -80,11 +87,28 @@ impl RealGasDiffusionNetworkCandidate {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RealGasDiffusionNetworkError {
     Invalid(&'static str),
-    Face { id: u64, error: GasEnergyError },
-    Parcel { id: u64, error: GasEnergyError },
+    Face {
+        id: u64,
+        error: GasEnergyError,
+    },
+    Parcel {
+        id: u64,
+        error: GasEnergyError,
+    },
     Exchange(SpeciesNetworkError),
-    Energy { change_j: f64, tolerance_j: f64 },
-    Entropy { change_j_k: f64, tolerance_j_k: f64 },
+    Energy {
+        change_j: f64,
+        tolerance_j: f64,
+    },
+    Entropy {
+        change_j_k: f64,
+        tolerance_j_k: f64,
+    },
+    /// Counted adaptive probes exhausted their original face-call budget.
+    FaceWorkLimit {
+        face_evaluations: usize,
+        maximum_face_evaluations: usize,
+    },
     Cancelled,
 }
 impl core::fmt::Display for RealGasDiffusionNetworkError {
@@ -120,6 +144,34 @@ pub fn step_candidate(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: RealGasDiffusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasDiffusionNetworkCandidate, Error> {
+    step_counted_candidate(
+        parcels,
+        links,
+        duration_s,
+        endpoints,
+        controls,
+        &mut BTreeMap::new(),
+        &mut 0,
+        usize::MAX,
+        cancelled,
+    )
+}
+
+// One original face/update path serves finite and adaptive transport. Work is
+// spent immediately before every actual constitutive call, including failures.
+// Scratch survives coarse/fine/rejected probes, never their physical states.
+#[allow(clippy::too_many_arguments)]
+fn step_counted_candidate(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    links: &[RealGasDiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: RealGasDiffusionNetworkSolve,
+    work: &mut BTreeMap<usize, RealGasDiffusionWorkspace>,
+    face_evaluations: &mut usize,
+    maximum_face_evaluations: usize,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RealGasDiffusionNetworkCandidate, Error> {
     poll(&mut cancelled)?;
@@ -164,15 +216,18 @@ pub fn step_candidate(
     }
     let mut transfers = Vec::new();
     let mut steps = Vec::with_capacity(links.len());
-    // Matrix scratch is reused across faces with the same catalog size. It
-    // retains no source, coefficient or physical state between evaluations.
-    let mut work = BTreeMap::new();
     for (&id, link) in &ordered {
         poll(&mut cancelled)?;
         let [left, right] = link.parcels;
         let flux = if link.geometry.area_m2 == 0.0 {
             None
         } else {
+            if *face_evaluations == maximum_face_evaluations {
+                return Err(Error::FaceWorkLimit {
+                    face_evaluations: *face_evaluations,
+                    maximum_face_evaluations,
+                });
+            }
             let n = link.model.species().len();
             if let std::collections::btree_map::Entry::Vacant(entry) = work.entry(n) {
                 entry.insert(
@@ -181,6 +236,7 @@ pub fn step_candidate(
                         .map_err(|error| face_error(id, error))?,
                 );
             }
+            *face_evaluations += 1;
             let flux = link
                 .model
                 .face_flux(
@@ -256,8 +312,7 @@ pub fn step_candidate(
                 .map_err(|error| face_error(link.id, error))?;
         }
     }
-    let (energy_change_j, entropy_change_j_k) =
-        audit(parcels, candidate.parcels(), controls, &mut cancelled)?;
+    let audit = audit(parcels, candidate.parcels(), controls, &mut cancelled)?;
     poll(&mut cancelled)?;
     let (parcels, exchange) = candidate.into_parts();
     Ok(RealGasDiffusionNetworkCandidate {
@@ -266,8 +321,8 @@ pub fn step_candidate(
             duration_s,
             links: steps,
             exchange,
-            energy_change_j,
-            entropy_change_j_k,
+            energy_change_j: audit.energy_change_j,
+            entropy_change_j_k: audit.entropy_change_j_k,
         },
     })
 }
@@ -293,7 +348,7 @@ fn audit(
     next: &BTreeMap<u64, IsochoricRealGasParcel>,
     controls: RealGasDiffusionNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(f64, f64), Error> {
+) -> Result<GasTransportWindowAudit, Error> {
     if !original.keys().eq(next.keys()) {
         return Err(Error::Invalid(
             "real-gas diffusion changed physical owner identities",
@@ -368,5 +423,10 @@ fn audit(
             tolerance_j_k: controls.entropy_tolerance_j_k,
         });
     }
-    Ok((energy_change, entropy_change))
+    Ok(GasTransportWindowAudit {
+        total_mass_residual_kg: ideal.total_mass_residual_kg,
+        maximum_species_mass_residual_kg: ideal.maximum_species_mass_residual_kg,
+        energy_change_j: energy_change,
+        entropy_change_j_k: entropy_change,
+    })
 }

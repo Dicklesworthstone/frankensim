@@ -22220,6 +22220,48 @@ reference/order invariance and atomic refusal; they remain unexecuted because
 the full dependency build is blocked before fs-material. All changed Rust
 sources parsed; this is not a full crate type-check.
 
+### Adaptive source-bound real-gas diffusion windows
+
+`nonideal::energy::parcel::transfer::species::diffusion::network::adaptive`
+advances complete finite PR networks through the original gas step-doubling
+controller. A narrow inventory/candidate type parameter preserves the ideal,
+binary and source-conjugate thermal paths' arithmetic and accepted ledger.
+Real-gas probes retain the original PR endpoint reconstruction, source
+qualification and finite-interval audit; no second integrator or EOS is used.
+
+Each original species' actual extensive mass and the original PR endpoint
+temperature are compared between one full step and two half steps. Only the
+two-half solution is accepted, with first-order local error divisor one and
+no extrapolated state or trace floor. Temperature control avoids error scales
+dominated by arbitrary formation-energy references. The estimate is local,
+not a global temporal or spatial accuracy certificate.
+
+Accepted gross species/partial-enthalpy transfers are accumulated in canonical
+physical-edge order; reverse flow owns a separate row. Rejected probes change
+no accepted inventory. Original source data and fugacity are refreshed on
+every probe. Matrix scratch is reused without retaining a physical state.
+Both complete candidate evaluations and actual real-gas face calls have
+cumulative finite budgets, including rejected, failed and partially sampled
+probes. Geometrically closed faces consume no constitutive calls.
+Cancellation and any terminal refusal return no partially advanced network.
+
+Only typed gross withdrawal, endpoint caloric-bracket and finite-step entropy
+refusals may shorten a trial. Source/domain, mechanical/phase, conservation and
+nonconvergence refusals remain fatal. The accepted source-relative energy
+ledger AND independent original-to-final species/U/S audit must satisfy the
+same fixed budgets, never allowances multiplied by step count. The original
+PR density-chart energy/entropy departures and species-reference cancellation
+are retained. The local isothermal-face approximation, positive common
+species support and T/p-only binary coefficient qualification still apply;
+no implicit stability, Soret/Fourier law or phase-stability claim is added.
+
+Five G1/G3/G4 integration groups cover native fine-state/enthalpy equivalence,
+reference invariance, refined species/temperature convergence, actual rejected
+work, fatal-source separation and late cancellation. They are authored but
+unexecuted while the full dependency graph remains blocked before fs-material.
+All six changed Rust sources passed pinned-toolchain format/syntax checks;
+this is not a full crate type-check.
+
 ### Source-conjugate gas thermodiffusion
 
 `thermochemical_gas::energy::parcel::transfer::species::diffusion::thermal` prepares an original NASA species catalog and complete pinned binary-diffusivity, mass-specific heat-of-transport and zero-diffusive-flux conductivity sources. Actual traces and the central face requery those same claims. Only owned canonical temperature/pressure dependence is admitted. A reusable Maxwell–Stefan workspace supplies the mass-average molecular flux; centered heat-of-transport coefficients couple Soret forcing to reciprocal heat. Original NASA enthalpy/entropy increments form divided caloric enthalpies, so heat added to existing donor-enthalpy transport includes the finite-distance caloric correction without subtracting arbitrary formation references. Common exact zeros stay absent, positive trace species are retained, and one-sided logarithmic zeros refuse.

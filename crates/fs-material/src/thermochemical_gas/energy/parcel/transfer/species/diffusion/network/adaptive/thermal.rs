@@ -23,6 +23,7 @@ struct ThermalCandidate {
 }
 
 impl Candidate for ThermalCandidate {
+    type Parcel = ClosedGasParcel;
     type Receipt = GasThermodiffusionNetworkStep;
     fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
         self.candidate.parcels()
@@ -165,7 +166,7 @@ pub(crate) fn advance_candidate(
     }
     advance_with_kernel(
         original,
-        &[],
+        0,
         duration_s,
         endpoints,
         DiffusionNetworkSolve {
@@ -173,6 +174,7 @@ pub(crate) fn advance_candidate(
             entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
         },
         controls.temporal,
+        None,
         None,
         |state, dt, _, cancelled| {
             network::step_candidate(

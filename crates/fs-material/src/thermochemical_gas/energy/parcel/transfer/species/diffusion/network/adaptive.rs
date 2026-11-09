@@ -3,15 +3,16 @@
 //! One full step estimates the error of two half steps; only the fine path can
 //! be accepted. The same controller, physical inventory comparisons, accepted
 //! transfer ledger and final audit serve the original explicit snapshot and the
-//! exponential binary sweep. Conservative first-order step-doubling scaling is
-//! used for both. The local estimate is not a global error certificate or a
+//! exponential binary sweep, source-conjugate thermal exchange and original
+//! real-gas inventories. Conservative first-order step-doubling scaling is
+//! shared. The local estimate is not a global error certificate or a
 //! license to leave the selected molecular closure's constitutive domain.
 
 pub(crate) mod thermal;
 
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::super::super::network::transport::{
-    GasTransportError, GasTransportSolve, audit_closed_window,
+    GasTransportError, GasTransportSolve, GasTransportWindowAudit, audit_closed_window,
 };
 use super::super::super::network::{
     SpeciesNetworkCandidate, SpeciesNetworkHeatTransfer, SpeciesNetworkStep,
@@ -28,6 +29,7 @@ use super::{
     DiffusionNetworkSolve, DiffusionNetworkStep, GasDiffusionDriving, GasEnergyError,
     GasEnergySolve, SpeciesNetworkError, candidate_before_entropy_gate, check,
 };
+use crate::thermochemical_gas::nonideal::energy::parcel::transfer::species::diffusion::network::RealGasDiffusionNetworkError;
 use std::collections::BTreeMap;
 
 /// Local accuracy and finite work; these never replace physical exchange gates.
@@ -38,7 +40,7 @@ pub struct DiffusionNetworkAdvanceControls {
     /// Smallest retry interval [s]. A shorter final remainder may be attempted.
     pub minimum_step_s: f64,
     /// Complete candidate evaluations, including rejected coarse and fine probes.
-    /// The binary owner additionally bounds actual pair calls separately.
+    /// Binary and real-gas owners additionally bound actual constitutive calls.
     /// At least three are required; the hard bound is 100,000.
     pub maximum_evaluations: usize,
     /// Per-parcel, per-species absolute inventory error allowance [kg].
@@ -75,6 +77,9 @@ pub struct DiffusionNetworkAdvanceReport<Step = DiffusionNetworkStep> {
     /// Actual exponential pair calls, including rejected/failed probes.
     /// Zero for the explicit snapshot entry points.
     pub pair_evaluations: usize,
+    /// Actual real-gas molecular face calls, including rejected/failed probes.
+    /// Zero for entry points that do not use the real-gas face owner.
+    pub face_evaluations: usize,
     pub minimum_accepted_substep_s: f64,
     pub maximum_accepted_substep_s: f64,
     pub maximum_species_error_ratio: f64,
@@ -104,23 +109,18 @@ pub struct DiffusionNetworkAdvanceReport<Step = DiffusionNetworkStep> {
 
 /// Complete proposed network and accounting, published together after all gates.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiffusionNetworkAdvanceCandidate<Step = DiffusionNetworkStep> {
-    parcels: BTreeMap<u64, ClosedGasParcel>,
+pub struct DiffusionNetworkAdvanceCandidate<Step = DiffusionNetworkStep, Parcel = ClosedGasParcel> {
+    parcels: BTreeMap<u64, Parcel>,
     report: DiffusionNetworkAdvanceReport<Step>,
 }
-impl<Step> DiffusionNetworkAdvanceCandidate<Step> {
-    pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
+impl<Step, Parcel> DiffusionNetworkAdvanceCandidate<Step, Parcel> {
+    pub fn parcels(&self) -> &BTreeMap<u64, Parcel> {
         &self.parcels
     }
     pub const fn report(&self) -> &DiffusionNetworkAdvanceReport<Step> {
         &self.report
     }
-    pub fn into_parts(
-        self,
-    ) -> (
-        BTreeMap<u64, ClosedGasParcel>,
-        DiffusionNetworkAdvanceReport<Step>,
-    ) {
+    pub fn into_parts(self) -> (BTreeMap<u64, Parcel>, DiffusionNetworkAdvanceReport<Step>) {
         (self.parcels, self.report)
     }
 }
@@ -146,11 +146,24 @@ pub enum DiffusionNetworkAdvanceError {
         step_s: f64,
         error: super::super::thermal::network::GasThermodiffusionNetworkError,
     },
+    RealGasStep {
+        elapsed_s: f64,
+        step_s: f64,
+        error: RealGasDiffusionNetworkError,
+    },
+    /// Actual original-to-final PR inventory, energy or entropy refusal.
+    RealGasWindow(RealGasDiffusionNetworkError),
     PairWorkLimit {
         elapsed_s: f64,
         accepted_intervals: usize,
         pair_evaluations: usize,
         maximum_pair_evaluations: usize,
+    },
+    FaceWorkLimit {
+        elapsed_s: f64,
+        accepted_intervals: usize,
+        face_evaluations: usize,
+        maximum_face_evaluations: usize,
     },
     Accuracy {
         elapsed_s: f64,
@@ -179,36 +192,90 @@ impl core::fmt::Display for DiffusionNetworkAdvanceError {
 impl std::error::Error for DiffusionNetworkAdvanceError {}
 use DiffusionNetworkAdvanceError as Error;
 
-enum TrialFailure {
+pub(in crate::thermochemical_gas) enum TrialFailure {
     Physical(DiffusionNetworkError),
     /// Only the source-callback path may shrink an otherwise admitted thermal
     /// trial whose requested endpoint energy lies outside its original bracket.
     SourceEndpoint(DiffusionNetworkError),
     Binary(BinaryDiffusionNetworkError),
     Thermal(super::super::thermal::network::GasThermodiffusionNetworkError),
+    RealGas(RealGasDiffusionNetworkError),
     Entropy(f64),
     Work,
     PairWork,
+    FaceWork,
 }
 
 #[derive(Default)]
-struct Work {
+pub(in crate::thermochemical_gas) struct Work {
     evaluations: usize,
     pair_evaluations: usize,
+    pub(in crate::thermochemical_gas) face_evaluations: usize,
 }
 
 // Borrowed transfer views let both original owners share accounting without
 // allocating or cloning an intermediate stream for rejected probes.
-struct Transfer<'a> {
-    donor: u64,
-    receiver: u64,
-    species: &'a SpeciesId,
-    mass_kg: f64,
-    enthalpy_j: f64,
+pub(in crate::thermochemical_gas) struct Transfer<'a> {
+    pub(in crate::thermochemical_gas) donor: u64,
+    pub(in crate::thermochemical_gas) receiver: u64,
+    pub(in crate::thermochemical_gas) species: &'a SpeciesId,
+    pub(in crate::thermochemical_gas) mass_kg: f64,
+    pub(in crate::thermochemical_gas) enthalpy_j: f64,
 }
-trait Candidate {
+// The controller never invents an EOS or reconstructs a physical state. Each
+// original inventory owner supplies its actual masses, temperature and audit.
+pub(in crate::thermochemical_gas) trait Inventory: Clone {
+    fn species_inventory(&self) -> Result<BTreeMap<SpeciesId, f64>, GasEnergyError>;
+    fn temperature_k(&self) -> f64;
+    fn audit_window(
+        before: &BTreeMap<u64, Self>,
+        after: &BTreeMap<u64, Self>,
+        physical: DiffusionNetworkSolve,
+        elapsed_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasTransportWindowAudit, Error>;
+}
+impl Inventory for ClosedGasParcel {
+    fn species_inventory(&self) -> Result<BTreeMap<SpeciesId, f64>, GasEnergyError> {
+        inventory(self.model(), self.mass_kg())
+    }
+    fn temperature_k(&self) -> f64 {
+        self.state().state().temperature
+    }
+    fn audit_window(
+        before: &BTreeMap<u64, Self>,
+        after: &BTreeMap<u64, Self>,
+        physical: DiffusionNetworkSolve,
+        elapsed_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasTransportWindowAudit, Error> {
+        audit_closed_window(
+            before,
+            after,
+            GasTransportSolve {
+                exchange: physical.exchange,
+                entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
+            },
+            cancelled,
+        )
+        .map_err(|error| match error {
+            GasTransportError::Cancelled => Error::Cancelled,
+            GasTransportError::Diffusion(DiffusionNetworkError::EntropyDecrease {
+                change_j_k,
+                ..
+            }) => Error::Entropy {
+                elapsed_s,
+                step_s: 0.0,
+                change_j_k,
+            },
+            other => Error::Window(other),
+        })
+    }
+}
+pub(in crate::thermochemical_gas) trait Candidate {
+    type Parcel: Inventory;
     type Receipt;
-    fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel>;
+    fn parcels(&self) -> &BTreeMap<u64, Self::Parcel>;
     fn entropy_change(&self) -> f64;
     fn energy_residual(&self) -> f64;
     fn transfers(&self) -> impl Iterator<Item = Transfer<'_>>;
@@ -223,7 +290,7 @@ trait Candidate {
     ) -> Result<Option<f64>, Error> {
         Ok(None)
     }
-    fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt);
+    fn into_parts(self) -> (BTreeMap<u64, Self::Parcel>, Self::Receipt);
 }
 
 struct SpeciesCandidate {
@@ -231,6 +298,7 @@ struct SpeciesCandidate {
     entropy_change_j_k: f64,
 }
 impl Candidate for SpeciesCandidate {
+    type Parcel = ClosedGasParcel;
     type Receipt = SpeciesNetworkStep;
     fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
         self.candidate.parcels()
@@ -258,6 +326,7 @@ impl Candidate for SpeciesCandidate {
     }
 }
 impl Candidate for DiffusionNetworkCandidate {
+    type Parcel = ClosedGasParcel;
     type Receipt = DiffusionNetworkStep;
     fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
         DiffusionNetworkCandidate::parcels(self)
@@ -282,6 +351,7 @@ impl Candidate for DiffusionNetworkCandidate {
     }
 }
 impl Candidate for BinaryDiffusionNetworkCandidate {
+    type Parcel = ClosedGasParcel;
     type Receipt = Vec<BinaryDiffusionNetworkFaceStep>;
     fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
         BinaryDiffusionNetworkCandidate::parcels(self)
@@ -309,13 +379,13 @@ impl Candidate for BinaryDiffusionNetworkCandidate {
 
 #[allow(clippy::too_many_arguments)]
 fn trial<C: Candidate>(
-    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    parcels: &BTreeMap<u64, C::Parcel>,
     dt: f64,
     physical: DiffusionNetworkSolve,
     work: &mut Work,
     maximum_evaluations: usize,
     evaluate: &mut impl FnMut(
-        &BTreeMap<u64, ClosedGasParcel>,
+        &BTreeMap<u64, C::Parcel>,
         f64,
         &mut Work,
         &mut dyn FnMut() -> bool,
@@ -373,19 +443,19 @@ fn arithmetic(_: super::GasEnergyError) -> Error {
     Error::Invalid("unrepresentable whole-window diffusion account")
 }
 
-fn error_ratios(
-    initial: &BTreeMap<u64, ClosedGasParcel>,
-    coarse: &BTreeMap<u64, ClosedGasParcel>,
-    fine: &BTreeMap<u64, ClosedGasParcel>,
+fn error_ratios<P: Inventory>(
+    initial: &BTreeMap<u64, P>,
+    coarse: &BTreeMap<u64, P>,
+    fine: &BTreeMap<u64, P>,
     controls: DiffusionNetworkAdvanceControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, f64), Error> {
     let (mut species, mut temperature) = (0.0_f64, 0.0_f64);
     for (&id, old) in initial {
         poll(cancelled)?;
-        let before = inventory(old.model(), old.mass_kg()).map_err(arithmetic)?;
-        let a = inventory(coarse[&id].model(), coarse[&id].mass_kg()).map_err(arithmetic)?;
-        let b = inventory(fine[&id].model(), fine[&id].mass_kg()).map_err(arithmetic)?;
+        let before = old.species_inventory().map_err(arithmetic)?;
+        let a = coarse[&id].species_inventory().map_err(arithmetic)?;
+        let b = fine[&id].species_inventory().map_err(arithmetic)?;
         // The union retains species that were absent before the first stage or
         // have not yet reached the coarse endpoint. No trace is seeded/clipped.
         for name in before.keys().chain(a.keys()).chain(b.keys()) {
@@ -404,9 +474,8 @@ fn error_ratios(
             }
             species = species.max(ratio);
         }
-        let ratio =
-            (coarse[&id].state().state().temperature - fine[&id].state().state().temperature).abs()
-                / controls.temperature_tolerance_k;
+        let ratio = (coarse[&id].temperature_k() - fine[&id].temperature_k()).abs()
+            / controls.temperature_tolerance_k;
         if !ratio.is_finite() {
             return Err(Error::Invalid("unrepresentable temperature temporal error"));
         }
@@ -507,7 +576,7 @@ pub fn advance_species_candidate(
     }
     advance_with_kernel(
         original,
-        &[],
+        0,
         duration_s,
         endpoints,
         DiffusionNetworkSolve {
@@ -515,6 +584,7 @@ pub fn advance_species_candidate(
             entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
         },
         controls,
+        None,
         None,
         |state, dt, _, cancelled| {
             let candidate = evaluate(state, dt, cancelled).map_err(|error| match error {
@@ -605,11 +675,12 @@ pub fn advance_candidate_with_driving(
 ) -> Result<DiffusionNetworkAdvanceCandidate, Error> {
     advance_with_kernel(
         original,
-        links,
+        links.len(),
         duration_s,
         endpoints,
         physical,
         controls,
+        None,
         None,
         |state, dt, _, cancelled| {
             candidate_before_entropy_gate(state, links, dt, endpoints, physical, driving, cancelled)
@@ -637,12 +708,13 @@ pub(super) fn advance_binary_candidate(
     }
     advance_with_kernel(
         original,
-        links,
+        links.len(),
         duration_s,
         endpoints,
         physical,
         controls.temporal,
         Some(controls.maximum_pair_evaluations),
+        None,
         |state, dt, work, cancelled| {
             let remaining = controls.maximum_pair_evaluations - work.pair_evaluations;
             let required = if links.is_empty() {
@@ -673,22 +745,23 @@ pub(super) fn advance_binary_candidate(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_with_kernel<C: Candidate>(
-    original: &BTreeMap<u64, ClosedGasParcel>,
-    links: &[DiffusionNetworkLink<'_>],
+pub(in crate::thermochemical_gas) fn advance_with_kernel<C: Candidate>(
+    original: &BTreeMap<u64, C::Parcel>,
+    link_count: usize,
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     physical: DiffusionNetworkSolve,
     controls: DiffusionNetworkAdvanceControls,
     maximum_pair_evaluations: Option<usize>,
+    maximum_face_evaluations: Option<usize>,
     mut evaluate: impl FnMut(
-        &BTreeMap<u64, ClosedGasParcel>,
+        &BTreeMap<u64, C::Parcel>,
         f64,
         &mut Work,
         &mut dyn FnMut() -> bool,
     ) -> Result<C, TrialFailure>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<DiffusionNetworkAdvanceCandidate<C::Receipt>, Error> {
+) -> Result<DiffusionNetworkAdvanceCandidate<C::Receipt, C::Parcel>, Error> {
     poll(&mut cancelled)?;
     if ![
         duration_s,
@@ -705,7 +778,7 @@ fn advance_with_kernel<C: Candidate>(
         || !(0.0..=1.0).contains(&controls.relative_species_tolerance)
         || original.is_empty()
         || original.len() > MAX_SNAPSHOT_PARCELS
-        || links.len() > MAX_SNAPSHOT_TRANSFERS
+        || link_count > MAX_SNAPSHOT_TRANSFERS
         || !original.keys().eq(endpoints.keys())
     {
         return Err(Error::Invalid(
@@ -718,7 +791,7 @@ fn advance_with_kernel<C: Candidate>(
             physical_error(DiffusionNetworkError::Parcel { id, error }, 0.0, 0.0)
         })?;
         if !(solve.minimum_temperature_k..=solve.maximum_temperature_k)
-            .contains(&original[&id].state().state().temperature)
+            .contains(&original[&id].temperature_k())
         {
             return Err(Error::Invalid(
                 "original gas temperature outside endpoint caloric bracket",
@@ -792,6 +865,15 @@ fn advance_with_kernel<C: Candidate>(
                         .expect("binary trials own a pair-work budget"),
                 });
             }
+            Err(TrialFailure::FaceWork) => {
+                return Err(Error::FaceWorkLimit {
+                    elapsed_s: elapsed,
+                    accepted_intervals: accepted,
+                    face_evaluations: work.face_evaluations,
+                    maximum_face_evaluations: maximum_face_evaluations
+                        .expect("real-gas trials own a face-work budget"),
+                });
+            }
             Err(TrialFailure::Binary(error)) => {
                 if error == BinaryDiffusionNetworkError::Cancelled {
                     return Err(Error::Cancelled);
@@ -815,6 +897,30 @@ fn advance_with_kernel<C: Candidate>(
                 }
                 let retry = thermal::retryable(&error);
                 let error = Error::ThermalStep {
+                    elapsed_s: elapsed,
+                    step_s: dt,
+                    error,
+                };
+                if !retry {
+                    return Err(error);
+                }
+                error
+            }
+            Err(TrialFailure::RealGas(error)) => {
+                if error == RealGasDiffusionNetworkError::Cancelled {
+                    return Err(Error::Cancelled);
+                }
+                let retry = matches!(
+                    error,
+                    RealGasDiffusionNetworkError::Exchange(
+                        SpeciesNetworkError::Withdrawal { .. }
+                            | SpeciesNetworkError::Parcel {
+                                error: GasEnergyError::OutsideBracket { .. },
+                                ..
+                            }
+                    ) | RealGasDiffusionNetworkError::Entropy { .. }
+                );
+                let error = Error::RealGasStep {
                     elapsed_s: elapsed,
                     step_s: dt,
                     error,
@@ -904,26 +1010,7 @@ fn advance_with_kernel<C: Candidate>(
         }
         ceiling = half;
     }
-    let audit = audit_closed_window(
-        original,
-        &state,
-        GasTransportSolve {
-            exchange: physical.exchange,
-            entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
-        },
-        &mut cancelled,
-    )
-    .map_err(|error| match error {
-        GasTransportError::Cancelled => Error::Cancelled,
-        GasTransportError::Diffusion(DiffusionNetworkError::EntropyDecrease {
-            change_j_k, ..
-        }) => Error::Entropy {
-            elapsed_s: elapsed,
-            step_s: 0.0,
-            change_j_k,
-        },
-        other => Error::Window(other),
-    })?;
+    let audit = C::Parcel::audit_window(original, &state, physical, elapsed, &mut cancelled)?;
     if ledger.energy.value.abs() > physical.exchange.energy_tolerance_j {
         return Err(Error::Invalid(
             "complete diffusion window exceeds its species/mass/energy budget",
@@ -952,6 +1039,7 @@ fn advance_with_kernel<C: Candidate>(
             rejected_intervals: rejected,
             evaluations: work.evaluations,
             pair_evaluations: work.pair_evaluations,
+            face_evaluations: work.face_evaluations,
             minimum_accepted_substep_s: minimum,
             maximum_accepted_substep_s: maximum,
             maximum_species_error_ratio: max_species_error,
