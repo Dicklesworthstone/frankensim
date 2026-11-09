@@ -31,6 +31,7 @@ use fs_rand::philox::philox4x32_10;
 
 mod sensor;
 mod transient;
+mod sequential;
 
 fn material() -> DielectricGlass {
     DielectricGlass::new(

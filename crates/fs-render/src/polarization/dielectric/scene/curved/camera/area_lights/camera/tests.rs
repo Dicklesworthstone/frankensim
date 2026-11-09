@@ -4,6 +4,7 @@ mod support;
 mod sphere;
 mod thermal;
 mod transient;
+mod sequential;
 
 use super::*;
 use crate::charts::{Ray, TriMesh};

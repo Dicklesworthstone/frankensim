@@ -49,6 +49,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod receiver;
+mod sequential;
 pub(in super::super) use receiver::{SurfaceReceiver, receiver_media};
 #[cfg(feature = "volumes")]
 pub(super) use receiver::directional_contribution;

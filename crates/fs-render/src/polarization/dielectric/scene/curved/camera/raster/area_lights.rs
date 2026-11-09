@@ -23,6 +23,7 @@ use fs_rand::philox::philox4x32_10;
 /// Spectral pixels with native molecular flights and finite-area lighting.
 #[cfg(feature = "volumes")]
 pub mod participating;
+mod sequential;
 
 /// Keep the original physical-camera or source-transport failure with its lane.
 #[derive(Debug)]

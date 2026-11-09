@@ -5344,6 +5344,22 @@ tracking. These scene samples include lens/analyzer transmission but exclude
 the rear-cap geometric factor; callers apply that factor exactly once during
 pixel integration. Retained scene paths start at the lens exit.
 
+`CurvedAreaLightCameraScene::sample_sequential_ray_with_samples` continues
+an original steady sequential beam through finite-area NEE and complementary
+emitter-hit MIS. The complete Stokes state, original coating/Fresnel response,
+bulk Beer attenuation and endpoint normalization stay in that beam. The
+steady `sample_pixel_sequential_area_lights` and
+`sample_pixel_sensor_sequential_area_lights` APIs, with constant and spectral
+analyzer variants, reuse the original CIE/QE lens integrators and native area
+work accumulator. Analyzers are admitted over the original integration band
+and installed at the physical sensor before lens traversal. Group derivatives
+are not requested: active steady coatings and phase-only laws retain their
+original optical domain. The separate pupil geometry factor is applied once;
+clipped lanes retain the original four-lane proposal measure and zero source
+work. Source errors retain their original lane and cause. Focused G1 controls
+cover quarter-wave-coated axial area radiometry; G0 controls retain the native
+steady CIE/QE path, detector and clipping semantics.
+
 The explicit `generate_sequential_spectral_timed_beams*` entry points retain
 sensor-to-front-surface group transit in DD seconds. Every finite lens segment
 uses its original positive group index and actual geometric length, divided by
