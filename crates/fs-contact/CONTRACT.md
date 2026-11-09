@@ -3610,6 +3610,29 @@ counterfaces and cancellation. This is endpoint property transfer over an
 explicitly representative preconditioned column; it does not import bulk
 residual stress, heat or plastic work or certify the intermediate loading path.
 
+### Retained actual sliding during depth/history refresh
+
+`SourceDepthSlidingWear::refresh_hardness_profiles` carries the same original
+profile continuation through the existing friction/wear owner. The native depth
+owner applies held approach, maintained force or the finite spring directly;
+the entire genuine shear state, signed accumulated travel, last actual shear
+temperature and original friction source stay unchanged. Refresh introduces no
+shear interval, frictional work or material removal.
+
+Before publishing the complete successor, the adapter resolves the original
+fixed-temperature friction claims at every actual new loaded pressure. Shared
+samples and cell indices accompany the original and successor source identities
+and native normal/parameter-work receipt. A valid reference-pressure sample does
+not excuse unsupported successor pressure. Late friction refusal publishes
+neither the provisional normal indentation nor a partial profile/shear owner;
+detached cells require no fabricated zero-pressure claim.
+
+Regressions retain nonzero shear and both worn-body inventories through native
+profile softening, perform a genuine reverse sliding step afterwards, compare
+all three boundaries with their original native continuation, and refuse a
+softened actual pressure outside the pinned friction support while preserving
+the full predecessor.
+
 ## Mixed-mode JKR normal traction on structural faces
 
 `AdhesiveTractionProfile::{jkr_mixed_mode_displacement,jkr_mixed_mode_force}`

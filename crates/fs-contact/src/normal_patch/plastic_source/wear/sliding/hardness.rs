@@ -4,12 +4,15 @@
 //! Only the unsigned length of actual irreversible slip removes material;
 //! released body motion and net signed travel are not wear distances. Original
 //! spatial hardness and normal continuation remain with their existing owners.
-//! This is a beginning-pressure split with fixed axes and diagonal external
-//! body compliance, not cross-cell tangential elasticity or a heat model.
+//! The baseline step uses diagonal external body compliance; `coupled` retains
+//! full cross-cell and cross-axis recoil. Both use a beginning-pressure split
+//! with fixed tangent axes and separately owned thermal evolution.
 
-pub mod temperature;
 /// Full cross-cell mechanical recoil driving actual slip and own-hardness wear.
 pub mod coupled;
+/// Accepted depth/history profile refresh with retained genuine shear memory.
+pub mod history;
+pub mod temperature;
 
 use std::sync::Arc;
 

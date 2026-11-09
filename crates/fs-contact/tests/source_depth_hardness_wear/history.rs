@@ -2,6 +2,8 @@
 
 #[path = "history/refresh.rs"]
 mod refresh;
+#[path = "history/sliding_refresh.rs"]
+mod sliding_refresh;
 
 use super::*;
 use fs_matdb::{ClaimSet, MaterialStateId};
