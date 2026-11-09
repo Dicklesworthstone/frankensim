@@ -1,12 +1,14 @@
 //! Well-balanced isothermal gravity on the original evolving-species Euler step.
 //!
-//! The reference has uniform composition and temperature. Perturbations retain
-//! every species equation and the original composition-dependent calorics.
+//! References have uniform temperature and either uniform composition or
+//! species-specific gravitational scale heights. Perturbations retain every
+//! species equation and the original composition-dependent calorics.
 //! A stationary constant-area mesh and reflecting ends are required. MUSCL
 //! reconstructs density and pressure relative to the retained atmosphere, with
 //! the original common mass-fraction limiter and source-admitted face states.
-//! This supplies no molecular diffusive equilibrium, chemistry, moving boundary
-//! or reservoir potential convention.
+//! The stratified reference is neutral ideal-mixture diffusive equilibrium;
+//! its Euler evolution supplies no finite-rate molecular diffusion, chemistry,
+//! moving boundary or reservoir potential convention.
 //!
 //! Momentum subtracts the same original reference face tractions before
 //! differencing, then adds g*(rho-rho_ref) with rho=sum(rho_species). Energy
@@ -18,6 +20,8 @@ use super::*;
 use crate::dynamics::IsothermalAtmosphere;
 use fs_math::det;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+mod profile;
 
 const CLOSED: Boundaries = Boundaries::Ends {
     left: Boundary::Reflecting,
@@ -37,6 +41,7 @@ pub struct IsothermalMixtureGravity {
     mesh: Mesh1d,
     reference: IsothermalAtmosphere,
     fractions: Vec<f64>,
+    diffusive: bool,
     cells: Vec<f64>,
     cell_primitive: Vec<Primitive>,
     faces: Vec<f64>,
@@ -88,6 +93,46 @@ impl IsothermalMixtureGravity {
         mesh: Mesh1d,
         reference: IsothermalAtmosphere,
         mass_fractions: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::prepare(gas, mesh, reference, mass_fractions, false, cancelled)
+    }
+
+    /// Prepare neutral ideal-mixture diffusive/gravitational equilibrium.
+    ///
+    /// The supplied mass fractions apply at the pressure datum. Each original
+    /// species has `rho_k(x)=rho_k(x0)*exp(M_k*g*(x-x0)/(R*T))`; temperature is
+    /// uniform and total pressure is the sum of its partial pressures. Faces
+    /// and every species' cell average are integrated analytically. Thus heavy
+    /// and light species have different scale heights without a surrogate EOS.
+    ///
+    /// Active charged species are refused: no electrostatic balance is owned
+    /// here. Species amounts are separately conserved, not chemically relaxed.
+    /// This initializes a stratified equilibrium and its conservative Euler
+    /// perturbations; it does not advance molecular diffusion toward that state.
+    pub fn try_new_diffusive(
+        gas: MixtureGas,
+        mesh: Mesh1d,
+        reference: IsothermalAtmosphere,
+        mass_fractions_at_datum: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::prepare(
+            gas,
+            mesh,
+            reference,
+            mass_fractions_at_datum,
+            true,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        gas: MixtureGas,
+        mesh: Mesh1d,
+        reference: IsothermalAtmosphere,
+        mass_fractions: &[f64],
+        diffusive: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
@@ -143,6 +188,28 @@ impl IsothermalMixtureGravity {
                 "unrepresentable mixture atmosphere scale height",
             ));
         }
+        let mut datum_densities = [0.0; MAX_SPECIES];
+        let mut species_beta = [0.0; MAX_SPECIES];
+        if diffusive {
+            for k in 0..n {
+                poll(&mut cancelled)?;
+                if mass_fractions[k] == 0.0 {
+                    continue;
+                }
+                if gas.source().charge_vector().get(k) != Some(0) {
+                    return Err(Error::Invalid(
+                        "diffusive atmosphere requires neutral active species",
+                    ));
+                }
+                datum_densities[k] = (pressure / rt) * mass_fractions[k];
+                species_beta[k] = g / (R * gas.inverse_molar_masses()[k] * temperature);
+                if !positive(datum_densities[k]) || !species_beta[k].is_finite() {
+                    return Err(Error::Invalid(
+                        "unrepresentable diffusive atmosphere species datum or scale height",
+                    ));
+                }
+            }
+        }
         let mut densities = [0.0; MAX_SPECIES];
         let mut flux = [0.0; MAX_COMPONENTS];
         let state_at =
@@ -155,18 +222,54 @@ impl IsothermalMixtureGravity {
                 }
                 gas.state_at(densities, 0.0, p, out)
             };
+        let diffusive_state_at = |left: f64,
+                                  right: f64,
+                                  out: &mut [f64],
+                                  densities: &mut [f64]|
+         -> Result<Primitive, Error> {
+            for k in 0..n {
+                densities[k] = profile::exponential_average(
+                    datum_densities[k],
+                    species_beta[k],
+                    left - datum,
+                    right - datum,
+                )
+                .ok_or(Error::Invalid(
+                    "unrepresentable diffusive atmosphere species density",
+                ))?;
+            }
+            let concentration = sum(densities
+                .iter()
+                .zip(gas.inverse_molar_masses())
+                .map(|(rho, inverse_mass)| rho * inverse_mass));
+            gas.state_at(densities, 0.0, R * concentration * temperature, out)
+        };
         for i in 0..=count {
             poll(&mut cancelled)?;
             let offset = mesh.positions()[i] - datum;
             let exponent = beta * offset;
-            let p = pressure * det::exp(exponent);
-            if !exponent.is_finite() || !(g * offset).is_finite() || !positive(p) {
+            let p = if diffusive {
+                0.0
+            } else {
+                pressure * det::exp(exponent)
+            };
+            if !(g * offset).is_finite() || (!diffusive && (!exponent.is_finite() || !positive(p)))
+            {
                 return Err(Error::Invalid(
                     "unrepresentable mixture atmosphere pressure or potential",
                 ));
             }
             let q = &mut faces[i * width..(i + 1) * width];
-            let primitive = state_at(p, q, &mut densities[..n])?;
+            let primitive = if diffusive {
+                diffusive_state_at(
+                    mesh.positions()[i],
+                    mesh.positions()[i],
+                    q,
+                    &mut densities[..n],
+                )?
+            } else {
+                state_at(p, q, &mut densities[..n])?
+            };
             // Cache exactly the traction used by the original boundary/face
             // kernel, including the source's pressure representation.
             if i == 0 || i == count {
@@ -194,6 +297,15 @@ impl IsothermalMixtureGravity {
             poll(&mut cancelled)?;
             let left = mesh.positions()[i];
             let right = mesh.positions()[i + 1];
+            if diffusive {
+                cell_primitive[i] = diffusive_state_at(
+                    left,
+                    right,
+                    &mut cells[i * width..(i + 1) * width],
+                    &mut densities[..n],
+                )?;
+                continue;
+            }
             let center = left + 0.5 * (right - left);
             let z = 0.5 * beta * (right - left);
             let average = if z.abs() < 1e-3 {
@@ -214,6 +326,7 @@ impl IsothermalMixtureGravity {
             mesh,
             reference,
             fractions,
+            diffusive,
             cells,
             cell_primitive,
             faces,
@@ -238,9 +351,15 @@ impl IsothermalMixtureGravity {
     pub const fn atmosphere(&self) -> IsothermalAtmosphere {
         self.reference
     }
-    /// Unmodified reference composition in the source's canonical order.
+    /// Unmodified composition at the pressure datum, in canonical source order.
+    /// For a diffusive reference the physical fractions vary with position.
     pub fn reference_mass_fractions(&self) -> &[f64] {
         &self.fractions
+    }
+
+    /// Whether species have their separate source-owned gravitational scales.
+    pub const fn is_diffusive_reference(&self) -> bool {
+        self.diffusive
     }
 
     /// Original source-admitted cell average and its primitive diagnostics.
@@ -331,13 +450,53 @@ impl IsothermalMixtureGravity {
         pressure / self.cell_primitive[i].pressure
     }
 
+    pub(super) fn composition_value(&self, i: usize, k: usize, fraction: f64) -> f64 {
+        if self.diffusive {
+            let width = self.gas.species_count() + 2;
+            fraction - self.cells[i * width + k] / self.cell_primitive[i].density
+        } else {
+            fraction
+        }
+    }
+
+    /// Subtract the same common-limited reference gradient from every species.
+    /// Both vectors have zero sum to roundoff; subtraction retains that
+    /// constraint. No fraction is renormalized.
+    pub(super) fn subtract_reference_slopes(
+        &self,
+        stencil: [usize; 3],
+        factors: [f64; 3],
+        slopes: &mut [f64],
+    ) -> Result<(), Error> {
+        if !self.diffusive {
+            return Ok(());
+        }
+        let n = self.gas.species_count();
+        let width = n + 2;
+        let [left, center, right] = stencil.map(|i| &self.cells[i * width..i * width + n]);
+        let mut reference_slopes = [0.0; MAX_SPECIES];
+        super::super::reconstruction::slopes_with_geometry(
+            left,
+            center,
+            right,
+            factors,
+            &mut reference_slopes[..n],
+        )?;
+        for k in 0..n {
+            slopes[k] -= reference_slopes[k];
+        }
+        Ok(())
+    }
+
     /// The limiter and the face solve must admit the SAME physical trace.
-    /// Layout is Y_species, rho/rho_ref, velocity, p/p_ref. One common slope
-    /// contraction preserves the original composition constraints and zeros.
+    /// Layout is Y_species (or Y_species-Y_reference for a diffusive profile),
+    /// rho/rho_ref, velocity, p/p_ref. One common slope contraction preserves
+    /// the original composition constraints and zeros.
     pub(super) fn reconstruct_values(
         &self,
         face: usize,
         values: &[f64],
+        center_species: &[f64],
         out: &mut [f64],
     ) -> Result<Primitive, Error> {
         let n = self.gas.species_count();
@@ -351,8 +510,20 @@ impl IsothermalMixtureGravity {
         }
         let mut densities = [0.0; MAX_SPECIES];
         for k in 0..n {
-            densities[k] = density * values[k];
-            if values[k] > 0.0 && densities[k] == 0.0 {
+            let fraction = if self.diffusive {
+                values[k] + self.faces[face * (n + 2) + k] / reference.density
+            } else {
+                values[k]
+            };
+            // A reference gradient must not create a species missing from the
+            // actual cell. Such a trace uses the existing first-order fallback.
+            if self.diffusive && center_species[k] == 0.0 && fraction != 0.0 {
+                return Err(Error::Invalid(
+                    "mixture gravity face would seed an absent species",
+                ));
+            }
+            densities[k] = density * fraction;
+            if fraction > 0.0 && densities[k] == 0.0 {
                 return Err(Error::Invalid(
                     "mixture gravity face lost a positive species",
                 ));
@@ -375,6 +546,21 @@ impl IsothermalMixtureGravity {
         if self.is_reference_cell(i, q) {
             out.copy_from_slice(&self.faces[face * width..(face + 1) * width]);
             return Ok(self.face_primitive[face]);
+        }
+        if self.diffusive {
+            let mut values = [0.0; MAX_COMPONENTS + 1];
+            for k in 0..n {
+                values[k] = self.composition_value(i, k, q[k] / primitive.density);
+            }
+            values[n] = self.relative_density(i, primitive.density);
+            values[n + 1] = primitive.velocity;
+            values[n + 2] = self.relative_pressure(i, primitive.pressure);
+            if let Ok(trace) = self.reconstruct_values(face, &values[..n + 3], &q[..n], out) {
+                return Ok(trace);
+            }
+            // Large composition departures can make additive reference traces
+            // inadmissible even at zero slope. Keep the admitted cell's actual
+            // composition in the original positive-density fallback below.
         }
         // Positive relative-density reconstruction preserves the current
         // composition, including exact zeros, while recovering the same

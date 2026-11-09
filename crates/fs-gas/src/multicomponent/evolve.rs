@@ -1244,7 +1244,10 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
     slopes.fill(0.0);
     let value = |i: usize, k: usize| {
         if k < n {
-            states[i * m + k] / primitive[i].density
+            let fraction = states[i * m + k] / primitive[i].density;
+            gravity.map_or(fraction, |reference| {
+                reference.composition_value(i, k, fraction)
+            })
         } else if k == n {
             gravity.map_or(primitive[i].density, |reference| {
                 reference.relative_density(i, primitive[i].density)
@@ -1291,13 +1294,17 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
         let xr = center(next) + if i + 1 == count { length } else { 0.0 };
         let width = mesh.positions()[i + 1] - mesh.positions()[i];
         let row = &mut slopes[i * primitive_width..(i + 1) * primitive_width];
+        let factors = [width / (x - xl), width / (xr - xl), width / (xr - x)];
         super::reconstruction::slopes_with_geometry(
             &states[prev * m..prev * m + n],
             &states[i * m..i * m + n],
             &states[next * m..next * m + n],
-            [width / (x - xl), width / (xr - xl), width / (xr - x)],
+            factors,
             &mut row[..n],
         )?;
+        if let Some(reference) = gravity {
+            reference.subtract_reference_slopes([prev, i, next], factors, &mut row[..n])?;
+        }
         for k in n..primitive_width {
             let (a, b, c) = (value(prev, k), value(i, k), value(next, k));
             row[k] = minmod(
@@ -1318,6 +1325,7 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
                     reference.reconstruct_values(
                         if sign < 0.0 { i } else { i + 1 },
                         &trial[..primitive_width],
+                        &states[i * m..i * m + n],
                         &mut out[..m],
                     )
                 } else {
@@ -1360,7 +1368,12 @@ fn operator_core_with_gravity<const ENTROPY_FLUX: bool>(
             for k in 0..primitive_width {
                 values[k] = value(i, k) + sign * row[k];
             }
-            return reference.reconstruct_values(face, &values[..primitive_width], target);
+            return reference.reconstruct_values(
+                face,
+                &values[..primitive_width],
+                &states[i * m..i * m + n],
+                target,
+            );
         }
         if row.iter().all(|x| *x == 0.0) {
             target.copy_from_slice(&states[i * m..(i + 1) * m]);

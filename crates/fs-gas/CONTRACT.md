@@ -7691,6 +7691,16 @@ bank, canonical mass fractions, physical mesh, temperature, pressure datum and
 signed acceleration. Species densities remain dynamic; density is their
 compensated sum, including when local composition changes.
 
+The existing `try_new` constructor retains its uniform-composition mechanical
+atmosphere. `try_new_diffusive` instead interprets the supplied fractions at
+the pressure datum and uses every original molar mass:
+`rho_k(x)=rho_k(x0)*exp(M_k*g*(x-x0)/(R*T))`. Heavy and light species therefore
+have different scale heights; total pressure, energy and heat capacity come
+from the original species EOS. At fixed temperature, each species' chemical
+potential per mass plus gravitational potential is constant. This reference
+assumes separately conserved neutral ideal-gas species; active charged species
+are refused because no electrostatic balance is supplied.
+
 Preparation caches original source-admitted reference face states and
 tractions, and analytic exponential cell averages evaluated stably to floating
 precision. The native Riemann and wall kernels remain the flux owners.
@@ -7698,6 +7708,12 @@ Subtracting the same reference tractions before differencing preserves
 reference rest, while the density perturbation supplies the actual buoyancy
 force. The report separates physical gravity impulse from the represented
 reference-traction balance defect.
+
+The diffusive profile integrates each partial density independently. A stable
+expm1 expression retains the zero-gravity limit, with logarithmic product
+evaluation only when intermediate exponential overflow or underflow would
+hide a representable result. An authored zero species stays exactly absent;
+an unrepresentable positive species is refused, never silently removed.
 
 MUSCL reconstructs density and pressure relative to the integrated reference
 cell averages, with physical velocity and the existing common mass-fraction
@@ -7709,6 +7725,15 @@ An unchanged three-cell reference stencil has exactly zero perturbation slopes;
 a neighboring disturbance still enters the original conservative Riemann solve.
 The original first-order path remains the native fallback, and the higher-order
 path reuses the existing slope and stage storage without additional allocation.
+
+For the diffusive reference, composition is reconstructed as a departure from
+the reference fractions. The physical and reference fraction gradients use
+the same common limiter; their difference retains a zero fraction sum to
+roundoff. Adding the physical reference-face fractions preserves the original
+composition axis without renormalization. Both faces still pass the native
+EOS admission and one common slope contraction. Large departures that would
+produce an inadmissible fraction or seed an actually absent species use the
+original positive-density, composition-preserving first-order fallback.
 
 Gravitational work uses the same species mass fluxes as each native SSP-RK2
 stage. The potential convention is phi=-g*(x-x0), with the explicit discrete
@@ -7726,10 +7751,11 @@ entry, preserving its bits. Preparation owns the added buffers; successful
 steps add no scratch allocation.
 
 The scope excludes tapered/moving meshes, open reservoirs, self-gravity,
-species diffusion and a jointly advanced chemistry
-model. Uniform reference composition is a common-velocity Euler atmosphere,
-not a claim of molecular diffusive equilibrium. The broad conservative gas
-control-volume bead remains open.
+finite-rate species diffusion and a jointly advanced chemistry model.
+Preparing a diffusive-equilibrium reference does not supply a transient
+molecular-diffusion solver, nor does it relax arbitrary species inventories
+toward that reference. The broad conservative gas control-volume bead remains
+open.
 
 The MUSCL regressions exercise exact stratified rest on a stretched mesh for
 both reconstruction orders, real composition-driven buoyancy, source/formation
@@ -7739,6 +7765,16 @@ free fall checks actual acceleration, temperature and composition; an integrated
 analytic small-pressure perturbation checks second-order momentum-response
 convergence under mesh refinement. This is not a general convergence or entropy
 theorem.
+
+The diffusive-reference regressions additionally cover a 100:1 molar-mass
+ratio, independently integrated partial densities and source energy,
+chemical/gravitational potential balance, exact rest for both spatial orders,
+small-pressure perturbations at two amplitudes under mesh refinement, actual
+species/energy conservation, formation-gauge invariance, reference-present
+species absent from the actual flow, representational refusal and final
+cancellation. The standalone production profile leaf has independent
+antiderivative, partition-additivity, small-gravity and overflow/underflow
+checks; it uses the same deterministic elementary-function owner as the flow.
 
 Four new integration tests cover analytical reference rest, composition-driven
 buoyancy, species and combined-energy conservation, formation-gauge invariance,
