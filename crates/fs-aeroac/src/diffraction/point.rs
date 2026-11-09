@@ -37,8 +37,9 @@ pub use quadrupole::{
     HalfPlaneQuadrupoleDiagnostics, HalfPlaneQuadrupoleLimits, PreparedHalfPlaneQuadrupole,
 };
 pub use transient::{
+    HalfPlaneForceTransientDiagnostics, HalfPlaneForceTransientLimits,
     HalfPlaneTransientDiagnostics, HalfPlaneTransientField, HalfPlaneTransientLimits,
-    PreparedHalfPlaneTransient,
+    PreparedHalfPlaneForceTransient, PreparedHalfPlaneTransient,
 };
 
 /// The same physical p/Q and u/Q tolerances and bounded adaptive work controls

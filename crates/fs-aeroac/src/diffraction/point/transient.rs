@@ -31,6 +31,11 @@ mod convolution;
 use convolution::Convolution;
 mod flow;
 use flow::FlowImage;
+mod force;
+pub use force::{
+    HalfPlaneForceTransientDiagnostics, HalfPlaneForceTransientLimits,
+    PreparedHalfPlaneForceTransient,
+};
 
 const MAX_SAMPLES: usize = 65_536;
 const MAX_TOTAL_EVALUATIONS: usize = 16_777_216;
@@ -177,7 +182,7 @@ impl PreparedHalfPlaneTransient {
                 "causal diffraction time or propagation span is unrepresentable",
             ));
         }
-        let (fft_length, fft_workspace) = Convolution::layout(maximum_samples)?;
+        let (fft_length, fft_workspace) = Convolution::<8>::layout(maximum_samples)?;
         let peak = fft_length
             .checked_mul(11 * 16)
             .and_then(|v| {

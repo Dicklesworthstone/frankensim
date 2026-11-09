@@ -4445,3 +4445,55 @@ fs-math and original FFT/scalar-SIMD algorithms. Unrelated material
 receipts and executor/dependency construction are outside this narrow
 build. This is not full Cargo/workspace or DSR success, a near-sonic
 relative-error certificate, or a measured performance benchmark.
+
+## Causal physical-force diffraction and retained impulse
+
+`diffraction::PreparedHalfPlaneForceTransient` propagates original stationary
+force-on-fluid records through the same real Biot--Tolstoy half-plane Green
+function as the volume-source owner. It evaluates
+`p = grad_source G[F]` and
+`u = -grad_receiver grad_source G[integral(F dt)] / rho`.
+Analytic derivatives precede the radial substitution; the shared original
+mixed source/receiver geometry also serves the harmonic physical-force owner.
+No displaced source pair, harmonic reconstruction, fitted attenuation or
+pressure-to-impedance velocity approximation is introduced.
+
+The original uniform source clock carries all three force and force-rate
+components. C1 cubic Hermite interpolation has an analytically integrated
+primitive: value bases retain their unit impulse beyond support, while rate
+bases retain zero total impulse. The complete finite-horizon response includes
+post-emission near-field velocity and the causal edge tail. All original world
+source axes and receiver velocity axes are rotated independently. Rigid and
+pressure-release sheet faces, exact shadow boundaries and arbitrarily narrow
+resolved shadow transitions retain the original half-weighted mixed terms.
+
+Preparation caches 24 real lag coefficients and corresponding original FFT
+spectra. Record observation uses six input transforms and zero-padded linear
+convolution, with no circular wrap or tail cutoff. One-knot observation is
+allocation-free. Both paths use signed DD reductions and the original coherent
+perturbation-energy owner. Exact pre-arrival zeros are retained; elsewhere the
+FFT retains its ordinary floating-point error. Explicit per-tap/total work,
+finite-history and peak-payload limits cover all force directions and the
+original FFT workspace. Cancellation and refusal publish no partial owner or
+record. Input must start quiescent; volume injection and incompatible clocks
+refuse rather than being silently discarded.
+
+Seven new physical groups pass alongside all fourteen original stationary/
+convected transient groups and six harmonic-force groups. The independent
+free-space pulse and retained-impulse reference agrees within 4.469e-14 in the
+direct observation; FFT error normalized by each complete record component is
+3.432e-15, including pressure zeros. Independent unintegrated real Green
+derivatives agree within 2.140e-11 in the sampled light/shadow cases. Additional
+tests cover time refinement, all force directions, both sheet faces, narrow
+transitions, placed frames, causal future independence, resources/cancellation
+and original momentum, continuity and energy equations. The largest sampled
+finite-difference PDE defect was 1.238e-7.
+
+The focused native build executes unchanged production numerical owners with
+the original gas material, one-dimensional FFT, mixed geometry, adaptive
+quadrature and energy arithmetic; unrelated modules/dependency surfaces are
+omitted. This is not a full Cargo/workspace test or experimental validation.
+Quadrature estimates exclude interpolation, geometry and floating-point error;
+time refinement remains required. This force owner is a stationary homogeneous
+lossless-fluid model without source motion, mean flow, finite wall impedance,
+finite barriers, source feedback or measured-SPL qualification.
