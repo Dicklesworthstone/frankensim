@@ -6035,8 +6035,30 @@ factorization during a ramp. Six focused checks cover Kelvin and combined
 Maxwell/Kelvin closed forms, a noncommuting original-equation ODE ladder,
 rotation and loading switches, extreme rates and transactional refusals.
 Singular Kelvin tensors require a constrained differential/algebraic evolution
-and refuse; this API does not infer mixed control, thermal evolution, derivatives
-or certified error bounds.
+and refuse; this API does not infer mixed control, derivatives or certified
+error bounds.
+
+`PreparedTensorKelvinStressControl::advance_temperature_ramp` consumes the
+existing calibrated temperature schedule for physical-time stress loading.
+Both original Maxwell times and the complete Kelvin viscosity scale by the
+same `a_T`; fixed equilibrium/branch stiffness and original memory remain
+unchanged. Each midpoint-frozen subinterval reuses the reference controller for
+`h/a_T`, with no factorization or fit. Stress interpolates in physical time;
+local work, storage changes and independent Kelvin/Maxwell heat accumulate
+without rescaling. The reported endpoint strain rate divides the reference
+rate by the actual final shift, rather than the last midpoint shift.
+The whole history publishes only after final-rate representability and final
+cancellation admission, including constant-temperature and zero-duration calls.
+Constant reference temperature retains the original response bits.
+
+The shared coefficient-variation and substep limits control this second-order
+midpoint kinetic approximation; they are not trajectory-error certificates.
+Elastic moduli stay fixed, temperature is prescribed, and no thermal expansion,
+caloric feedback or thermal-state evolution is inferred. Focused regressions
+cover shifted-law/reference parity, endpoint-rate physics, noncommuting thermal
+reversals against an independent physical-coordinate ODE and refinement,
+original-memory continuation into strain control, and atomic late cancellation,
+applicability, budget, binding and physical-rate overflow refusals.
 
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated

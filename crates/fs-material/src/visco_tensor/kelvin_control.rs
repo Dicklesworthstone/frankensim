@@ -10,8 +10,10 @@
 //!
 //! This retains the original history and full noncommuting tensors. Singular
 //! Kelvin tensors require differential/algebraic constraints and refuse here.
-//! Coefficients are fixed over each ramp; no thermal evolution, mixed loading,
-//! derivative or certified forward-error bound is inferred.
+//! Fixed-temperature ramps are exact. Prescribed temperature ramps reuse this
+//! controller in reduced time with bounded midpoint kinetics; elastic moduli
+//! remain fixed. No thermal-state evolution, mixed loading, derivative or
+//! certified forward-error bound is inferred.
 
 use super::{
     TensorProny, TensorPronyError, TensorPronyHistory, Voigt, apply, dot, finite, invalid, mandel,
@@ -23,6 +25,8 @@ use fs_math::dd::Dd;
 use std::sync::Arc;
 
 mod prepare;
+mod temperature;
+pub use temperature::TensorKelvinStressTemperatureStep;
 
 type Result<T> = core::result::Result<T, TensorPronyError>;
 

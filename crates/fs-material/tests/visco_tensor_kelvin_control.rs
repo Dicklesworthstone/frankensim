@@ -5,6 +5,9 @@ use fs_material::visco_tensor::kelvin_control::{
 use fs_material::visco_tensor::{TensorProny, TensorPronyBranch, TensorPronyError};
 use fs_material::{Tangent6, Voigt};
 
+#[path = "visco_tensor_kelvin_control/temperature.rs"]
+mod temperature;
+
 const W: Voigt = [
     1.0,
     1.0,
