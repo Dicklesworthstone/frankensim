@@ -30,10 +30,10 @@ use fs_la::eigen_complex::solve_tridiagonal_complex;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::{c64::C64, dd::Dd, det};
 
-/// Original radial velocity/thermal fields and local irreversible acoustic heat.
-pub mod field;
-/// Coherent finite-segment fields and exact axial integrals of radial heat.
+/// Coherent finite-segment fields and exact axial integrals of physical losses.
 pub mod excitation;
+/// Original radial velocity/thermal fields and local acoustic dissipation.
+pub mod field;
 /// Molecular heat storage solved together with the original annular wall diffusion.
 pub mod molecular;
 
@@ -222,11 +222,7 @@ impl AnnularSection {
             let left = inner_m / mean_radius + (gap_m / mean_radius) * fractions[i];
             let right = inner_m / mean_radius + (gap_m / mean_radius) * fractions[i + 1];
             let k = 0.5 * (left + right) / dx;
-            let m = dx * ((left + right) / 12.0);
-            let diagonal = [
-                dx * ((3.0 * left + right) / 12.0),
-                dx * ((left + 3.0 * right) / 12.0),
-            ];
+            let (diagonal, m) = radial_mass(dx, left, right);
             if ![dx, left, right, k, m, diagonal[0], diagonal[1]]
                 .into_iter()
                 .all(positive)
@@ -429,18 +425,6 @@ impl AnnularSection {
     // z is dimensionless (physical argument * gap²); phase=sqrt(|z|).
     // Im(<h>) = Im(z)/|z|² * <|grad_x h|²>, x=(r-inner)/gap,
     // follows by taking the imaginary part of h* (K/z + M) h = h* b.
-    fn diffusion_scaled(
-        &self,
-        argument: C64,
-        phase: f64,
-        gradient_scale: f64,
-        admission: AnnularAdmission,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<AnnularDiffusion, DuctError> {
-        self.diffusion_solution_scaled(argument, phase, gradient_scale, admission, cancelled)
-            .map(|solution| solution.response)
-    }
-
     fn diffusion_solution_scaled(
         &self,
         argument: C64,
@@ -611,6 +595,18 @@ impl AnnularSection {
             is_wall: solve_wall,
         })
     }
+}
+
+// The same exact weighted P1 element mass serves diffusion assembly and
+// molecular field absorption; neither owner introduces a radial quadrature.
+fn radial_mass(width: f64, left: f64, right: f64) -> ([f64; 2], f64) {
+    (
+        [
+            width * ((3.0 * left + right) / 12.0),
+            width * ((left + 3.0 * right) / 12.0),
+        ],
+        width * ((left + right) / 12.0),
+    )
 }
 
 fn filled<T: Clone>(n: usize, value: T) -> Result<Vec<T>, DuctError> {

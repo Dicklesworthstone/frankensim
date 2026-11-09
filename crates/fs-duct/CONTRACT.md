@@ -35,7 +35,7 @@ and isothermal limits, radial refinement against an independent primitive
 ODE, slit and slowly vanishing inner-wall limits, original scattering power
 and long-duct composition, and material/geometry/budget/cancellation refusals.
 
-### Resolved annular fields and irreversible heat
+### Resolved annular fields and physical acoustic dissipation
 
 `AnnularSection::prepare_fields` retains those SAME radial diffusion solutions
 and the original material owner. Its averaged `AnnularWave` keeps the existing
@@ -62,7 +62,8 @@ without allocation or another material query. The axial owner supplies the
 local amplitudes; these local W/m values are not finite-length heat integrals
 or an inferred wall/fluid heat partition. Original geometry, continuum,
 uniform-pressure and frequency limits remain. Molecular relaxation, radial
-velocity and axial-gradient/bulk dissipation are not added by this field view.
+velocity and axial-gradient/bulk dissipation are not added by this ordinary
+field view; molecular preparation below retains its original reservoirs.
 `tests/annular_fields.rs` checks independent annular Poiseuille/temperature
 limits and h refinement, physical volume-flow recovery, both heat mechanisms
 against the local coherent-wave power gradient, Cp=Cv, source retention,
@@ -84,10 +85,13 @@ to one original radial ring. The shared positive two-wave integral retains
 interference and the cubic heat near pressure/velocity nodes in very short
 cells. Each query performs constant work without allocations, material
 queries, acoustic solves or axial quadrature. Radial and axial partitions sum
-to the original whole-segment heat. These watts already include the original
-volume measure and peak-to-mean scaling and can feed finite thermal cells;
-the signed boundary-power balance is an independent diagnostic, not a heat
-source. No wall/fluid heat partition or temperature feedback is inferred.
+to the original whole-segment acoustic loss. These watts already include the
+original volume measure and peak-to-mean scaling. Viscous work is direct
+caloric heating; the Fourier channel is thermal availability loss (T0 times
+conductive entropy production), not another local caloric source. The signed
+boundary-power balance is an independent diagnostic, not a heat source.
+No mean heat transport, wall/fluid heat partition or temperature feedback is
+inferred.
 
 The original fully developed, plane-pressure and radial-resolution envelope
 still applies. `tests/annular_excitation.rs` compares physical radial viscous
@@ -95,6 +99,42 @@ and thermal gradients with an independent axial quadrature, checks original
 face fields and partitioned power, resolves subwavelength node heat, covers
 opaque two-sided propagation and reversal, and verifies one-query source
 reuse, zero thermal coupling and physical-domain refusals.
+
+### Molecular temperature fields and coherent finite-volume absorption
+
+`AnnularSection::prepare_molecular_fields[_controlled]` retains the original
+`RelaxationState`, its evaluated complex Cp, and the SAME radial solutions as
+`evaluate_molecular`. Both molecular propagation and observation use one
+complex-Cp energy equation with the actual inner and outer isothermal walls.
+No equilibrium thermal shunt, bulk viscosity, Stokes–Kirchhoff correction or
+separately fitted molecular attenuation is added. Empty reservoir lists reuse
+the original constant-Cp field preparation and arithmetic exactly.
+
+In the native exp(-i omega t) convention the physical temperature is
+`T'=p*conj(h_t)/(rho*Cp)`. Three separate positive channels are exposed:
+`mu*|du/dr|²/2`, `conductivity*|grad T'|²/(2*T0)`, and
+`rho*omega*Im(Cp)*|T'|²/(2*T0)`. The last expression is the original sum of
+reservoir temperature-difference losses, not an attenuation-to-heat conversion.
+Fourier and molecular values describe acoustic availability loss; they do not
+by themselves establish local caloric deposition or a second-order thermal
+transport model. Viscous heating remains separately identifiable.
+
+The molecular ring integral uses the same exact weighted P1 element mass as
+the radial diffusion assembly, including the off-diagonal term. It evaluates
+a positive factorization instead of squaring a midpoint or averaged
+temperature. The existing `AnnularExcitation` integrates all three channels
+over finite axial intervals, retaining coherent pressure nodes and stable
+opaque propagation. Its original total-loss accessors include the new
+molecular channel; the old channels retain their meanings. Observation
+allocates nothing and performs no new material query, reservoir sum, radial
+solve or axial quadrature. The original geometry, source, phase, payload,
+mesh-resolution and cancellation admission remain in force.
+
+`tests/annular_molecular_fields.rs` checks source/wave identity, independent
+reservoir-temperature and Fourier-gradient loss forms with physical radial
+quadrature, coherent axial integration and partitions, cubic molecular loss
+at pressure nodes, opaque segments, exact empty-reservoir reduction,
+isothermal suppression, fast/frozen reservoir limits, and native refusals.
 
 ## Purpose and layer
 

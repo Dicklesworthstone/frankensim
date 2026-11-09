@@ -1,8 +1,9 @@
-//! Coherent sound and volume-integrated heat in the original annular section.
+//! Coherent sound and volume-integrated loss in the original annular section.
 //!
 //! The native two-port supplies both face fields. Oppositely anchored waves
 //! retain interference without growing exponentials; the shared positive wave
-//! integrals then integrate the ORIGINAL radial shear/thermal loss forms.
+//! integrals then integrate the ORIGINAL radial shear, Fourier and optional
+//! molecular reservoir loss forms.
 //! No attenuation fit, face-power subtraction, radial remesh or axial sampling
 //! replaces those forms. All phasors use exp(-i omega t) and peak amplitudes.
 //!
@@ -14,8 +15,8 @@ use super::field::{AnnularField, PreparedAnnularFields};
 use super::{bad, finite};
 use crate::DuctError;
 use crate::compose::{TwoPort, TwoPortPower, pressure_wave_integral_weights};
-use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::gas::GasState;
+use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
 /// Complete axial pressure/flow at one original cross section.
@@ -29,18 +30,25 @@ pub struct AnnularAxialField {
 }
 
 /// Independently integrated irreversible radial work over a finite volume.
-/// This is heat generated in the fluid model, without wall/fluid partition.
+/// Viscous work is direct caloric heating. The Fourier and molecular channels
+/// are acoustic availability loss; they do not by themselves assign local
+/// caloric deposition or transport between the fluid and the two walls.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AnnularDissipation {
+    /// Direct cycle-mean viscous heating [W].
     pub viscous_power_w: f64,
+    /// Fourier thermal availability loss [W].
     pub thermal_power_w: f64,
+    /// Original molecular-reservoir availability loss [W].
+    pub molecular_power_w: f64,
+    /// Sum of all three independently integrated acoustic losses [W].
     pub absorbed_power_w: f64,
 }
 
 /// One coherent finite segment, bound to its original radial/material owner.
 /// Preparation and every query use fixed work, no allocation or material query.
 #[derive(Debug)]
-pub struct AnnularExcitation<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> {
+pub struct AnnularExcitation<'f, 'g, 'm, M: ?Sized> {
     fields: &'f PreparedAnnularFields<'g, 'm, M>,
     length_m: f64,
     two_port: TwoPort,
@@ -51,7 +59,7 @@ pub struct AnnularExcitation<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> {
     wavenumber: C64,
 }
 
-impl<'g, 'm, M: ThermoviscousFluid + ?Sized> PreparedAnnularFields<'g, 'm, M> {
+impl<'g, 'm, M: ?Sized> PreparedAnnularFields<'g, 'm, M> {
     /// Excite a positive finite length through the original stable two-port.
     /// The reference is real pressure/volume-flow impedance [Pa s/m³], shared
     /// with the connected network. Both incident pressures combine coherently.
@@ -89,7 +97,7 @@ impl<'g, 'm, M: ThermoviscousFluid + ?Sized> PreparedAnnularFields<'g, 'm, M> {
     }
 }
 
-impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M> {
+impl<'f, 'g, 'm, M: ?Sized> AnnularExcitation<'f, 'g, 'm, M> {
     pub const fn fields(&self) -> &'f PreparedAnnularFields<'g, 'm, M> {
         self.fields
     }
@@ -132,7 +140,7 @@ impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M
         })
     }
 
-    /// Original radial P1 velocity, thermal response and heat at this depth.
+    /// Original radial P1 velocity, thermal response and physical loss at this depth.
     pub fn field_in_cell(
         &self,
         cell: usize,
@@ -157,8 +165,8 @@ impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M
 
     /// The same finite-length integral in ONE original radial ring.
     /// Its physical volume is fields().cell_area_m2(cell) * (end_m-start_m).
-    /// Neither factor of volume nor peak-to-mean factor should be added again
-    /// when these watts become a native thermal cell's source.
+    /// Volume and peak-to-mean factors are already included. Only viscous work
+    /// directly specifies a caloric source; thermal availability remains distinct.
     pub fn cell_dissipation_between(
         &self,
         cell: usize,
@@ -170,7 +178,7 @@ impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M
 
     fn integrate(
         &self,
-        roots: [C64; 2],
+        roots: [C64; 3],
         start_m: f64,
         end_m: f64,
     ) -> Result<AnnularDissipation, DuctError> {
@@ -200,16 +208,24 @@ impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M
                 .norm_sq();
         let thermal_power_w = (sum * roots[1]).scale(plus_root).norm_sq()
             + (difference * roots[1]).scale(minus_root).norm_sq();
-        let absorbed_power_w = viscous_power_w + thermal_power_w;
-        if ![viscous_power_w, thermal_power_w, absorbed_power_w]
-            .into_iter()
-            .all(f64::is_finite)
+        let molecular_power_w = (sum * roots[2]).scale(plus_root).norm_sq()
+            + (difference * roots[2]).scale(minus_root).norm_sq();
+        let absorbed_power_w = viscous_power_w + thermal_power_w + molecular_power_w;
+        if ![
+            viscous_power_w,
+            thermal_power_w,
+            molecular_power_w,
+            absorbed_power_w,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
         {
             return Err(bad("annular volume-integrated heat is unrepresentable"));
         }
         Ok(AnnularDissipation {
             viscous_power_w,
             thermal_power_w,
+            molecular_power_w,
             absorbed_power_w,
         })
     }
@@ -217,6 +233,21 @@ impl<'f, 'g, 'm, M: ThermoviscousFluid + ?Sized> AnnularExcitation<'f, 'g, 'm, M
 
 impl AnnularExcitation<'_, '_, '_, GasState> {
     /// Original ideal-gas temperature perturbation in kelvin, at this depth.
+    pub fn gas_temperature_in_cell(
+        &self,
+        cell: usize,
+        fraction: f64,
+        depth_m: f64,
+    ) -> Result<C64, DuctError> {
+        let axial = self.at_depth(depth_m)?;
+        self.fields
+            .gas_temperature_in_cell(cell, fraction, axial.pressure_pa)
+    }
+}
+
+impl AnnularExcitation<'_, '_, '_, RelaxationState> {
+    /// Physical temperature from the SAME complex molecular heat capacity and
+    /// coherent pressure field. No equilibrium-Cp surrogate enters this query.
     pub fn gas_temperature_in_cell(
         &self,
         cell: usize,
