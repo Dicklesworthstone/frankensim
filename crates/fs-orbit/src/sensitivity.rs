@@ -21,6 +21,8 @@ mod autonomous;
 pub use autonomous::{
     AutonomousOrbitSensitivity, AutonomousSensitivityPoint, PreparedAutonomousSensitivity,
 };
+mod adjoint;
+pub use adjoint::{ForcedObjectiveGradient, PreparedForcedAdjoint};
 mod backbone;
 use backbone::{AmplitudeClosure, SensitivityFactor};
 pub use backbone::{
@@ -60,7 +62,10 @@ pub struct ForcedSensitivityControls {
     pub maximum_relative_residual: f64,
     /// Maximum Parseval norm of the differentiated equations on BOTH grids,
     /// in equation-scale units per declared parameter-scale increment,
-    /// combined with normalized phase/amplitude defects when present.
+    /// combined with normalized phase/amplitude defects when present. Forced
+    /// objective adjoints use this same absolute allowance for their normalized
+    /// dual equations, direction-column sampling change and objective-gradient
+    /// sampling change; objective units are supplied by `prepare_adjoint`.
     pub maximum_derivative_residual: f64,
 }
 

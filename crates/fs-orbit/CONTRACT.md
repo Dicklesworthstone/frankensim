@@ -1078,3 +1078,56 @@ resolution failure; and rejection of exact-residual seeds with an extra neutral
 family. The 47 relevant existing continuation, coordinate, harmonic-balance,
 autonomous-phase and backbone-sensitivity tests also pass in the original-source
 bounded native lane; this is not a Cargo/workspace/DSR gate.
+
+## Forced harmonic objective adjoints
+
+`sensitivity::PreparedForcedSensitivity::prepare_adjoint` prepares one real
+objective's implicit gradient with the existing forced-response LU. It retains
+every original DC, real and imaginary harmonic balance coordinate, including
+coupled material memory. The caller supplies the complete ordinary real-coordinate
+objective gradient at fixed physical frequency. For a real state's mean square,
+`q = X_0^2 + 2 sum |X_n|^2`, its entries are `2 X_0`, `4 Re X_n` and
+`4 Im X_n`; no additional complex conjugation or harmonic weight is applied by
+the adjoint.
+
+With original row and coordinate units `D_r` and `D_x`, the existing conditioned
+matrix is `A = D_r^-1 R_X D_x`. The new path solves
+`A^T lambda_hat = D_x q_X / q_scale` using its cached transpose LU solve and
+bounded iterative corrections, then returns physical residual weights
+`lambda = q_scale D_r^-1 lambda_hat`. The componentwise relative solve residual
+and BOTH original physical dual equations `R_X^T lambda = q_X`, independently
+assembled on the coarse and fine AFT grids, must satisfy the prepared controls.
+Objective scaling changes arithmetic and normalized absolute admission, not the
+physical derivative.
+
+`PreparedForcedAdjoint::gradient` accepts complete original residual parameter
+columns, including material, forcing, frequency-port and clock dependence.
+`gradient_island_direction` instead projects complete local-island partials
+through the cached centered AFT owner and requires a fixed clock and linear
+port. Both return `q_p - lambda^T R_p` in original objective/parameter units;
+the explicit objective partial must include any direct clock dependence.
+Both the full normalized residual-column difference and the normalized
+contracted-gradient difference between the two grids are checked. Incomplete
+declarations, unresolved dual equations or sampling changes, invalid units and
+cancellation refuse without publishing a gradient.
+
+The adjoint adds O(N) storage to the prepared O(N^2) factorization; it stores no
+transposed dense matrix. Its bounded transpose solves and residual corrections
+fit the existing sensitivity work allowance, and its peak extra vectors fit the
+existing payload allowance. A complete-column parameter contraction is O(N),
+apart from the caller's column construction; the island entry additionally
+performs the existing AFT projection. No per-parameter waveform solve, new
+factorization, baseline source/tangent evaluation or finite-difference probe is
+introduced. These are operation counts, not measured performance claims.
+
+Five focused G1/G3 regressions in `tests/forced_sensitivity.rs` check nonlinear
+coupled force and material objectives against independent forward derivatives
+and separately resolved neighboring orbits, frequency-port/explicit clock
+dependence, and independent state/equation/objective/parameter units. They also
+check incomplete declarations, cancellation, inconsistent sampling and refusal
+of an original dual equation unresolved on one AFT grid.
+
+This forced, fixed-order objective derivative supplies no existence, harmonic-tail,
+branch-uniqueness or stability guarantee. The original source, objective
+derivative and cached base must remain unchanged. Autonomous and conservative
+phase/family closures are outside this entry.

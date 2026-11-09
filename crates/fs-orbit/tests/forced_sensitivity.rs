@@ -599,3 +599,457 @@ fn singular_and_authored_condition_thresholds_refuse_without_regularization() {
         Err(ForcedSensitivityError::Singular)
     ));
 }
+
+// A physical observation mixes the two coupled coordinates BEFORE measuring
+// mean square, retaining their coherent cross terms and all generated harmonics.
+fn observation_mean_square(orbit: &HbOrbit) -> f64 {
+    orbit.coeffs[0]
+        .iter()
+        .zip(&orbit.coeffs[1])
+        .enumerate()
+        .map(|(n, (&x, &z))| {
+            let y = x + z.scale(0.7);
+            (if n == 0 { 1.0 } else { 2.0 }) * (y.re * y.re + y.im * y.im)
+        })
+        .sum()
+}
+
+fn observation_gradient(orbit: &HbOrbit) -> Vec<f64> {
+    let n = orbit.coeffs[0].len() - 1;
+    let mut gradient = vec![0.0; 2 * (2 * n + 1)];
+    for h in 0..=n {
+        let y = orbit.coeffs[0][h] + orbit.coeffs[1][h].scale(0.7);
+        for (state, weight) in [1.0, 0.7].into_iter().enumerate() {
+            if h == 0 {
+                gradient[state] = 2.0 * weight * y.re;
+            } else {
+                gradient[(2 * h - 1) * 2 + state] = 4.0 * weight * y.re;
+                gradient[2 * h * 2 + state] = 4.0 * weight * y.im;
+            }
+        }
+    }
+    gradient
+}
+
+fn objective_direction(gradient: &[f64], derivative: &[Vec<C64>]) -> f64 {
+    let mut total = 0.0;
+    for h in 0..derivative[0].len() {
+        for state in 0..2 {
+            if h == 0 {
+                total += gradient[state] * derivative[state][0].re;
+            } else {
+                total += gradient[(2 * h - 1) * 2 + state] * derivative[state][h].re
+                    + gradient[2 * h * 2 + state] * derivative[state][h].im;
+            }
+        }
+    }
+    total
+}
+
+#[test]
+fn forced_objective_adjoint_reuses_one_factor_for_nonlinear_force_and_material_gradients() {
+    let problem = Coupled::new(1.1, 1.0);
+    let orbit = solve(&problem, 11);
+    let mut prepared =
+        PreparedForcedSensitivity::new(&problem, &orbit, controls(128), &scales(2), || false)
+            .unwrap();
+    let force = prepared
+        .solve_island_direction(
+            direction(1.0),
+            |t, _, out| {
+                out.copy_from_slice(&[det::cos(0.9 * t), 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let material = prepared
+        .solve_island_direction(
+            direction(0.25),
+            |_, x, out| {
+                out.copy_from_slice(&[-x[0].powi(3), 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let gradient = observation_gradient(&orbit);
+    let counts = (problem.source_calls.get(), problem.tangent_calls.get());
+    let mut adjoint = prepared.prepare_adjoint(&gradient, 1.0, || false).unwrap();
+    assert_eq!(adjoint.residual_weights().len(), gradient.len());
+    assert!(adjoint.relative_residual < 1e-12 && adjoint.dual_residual < 1e-10);
+    // q includes explicit terms 0.25*force + 0.5*beta^2 as well as the
+    // complete observation's mean square. They are not state-chain terms.
+    let d_force = adjoint
+        .gradient_island_direction(
+            direction(1.0),
+            0.25,
+            |t, _, out| {
+                out.copy_from_slice(&[det::cos(0.9 * t), 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let d_material = adjoint
+        .gradient_island_direction(
+            direction(0.25),
+            1.0,
+            |_, x, out| {
+                out.copy_from_slice(&[-x[0].powi(3), 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    assert!(
+        (d_force.derivative - 0.25 - objective_direction(&gradient, &force.coeffs)).abs() < 3e-13
+    );
+    assert!(
+        (d_material.derivative - 1.0 - objective_direction(&gradient, &material.coeffs)).abs()
+            < 3e-13
+    );
+    // An independently authored coefficient direction gives the same answer
+    // with two O(N) contractions and without any waveform sampling.
+    let direct = adjoint
+        .gradient(
+            direction(1.0),
+            0.25,
+            |_, out| {
+                out.fill(0.0);
+                out[2] = -0.5;
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    assert!((direct.derivative - d_force.derivative).abs() < 3e-13);
+    assert_eq!(
+        counts,
+        (problem.source_calls.get(), problem.tangent_calls.get())
+    );
+    let step = 2e-5;
+    for (got, low, high) in [
+        (
+            d_force.derivative,
+            Coupled::new(1.1 - step, 1.0),
+            Coupled::new(1.1 + step, 1.0),
+        ),
+        (
+            d_material.derivative,
+            Coupled::new(1.1, 1.0 - step),
+            Coupled::new(1.1, 1.0 + step),
+        ),
+    ] {
+        let objective = |p: &Coupled| {
+            observation_mean_square(&solve(p, 11)) + 0.25 * p.force + 0.5 * p.beta * p.beta
+        };
+        let independently_solved = (objective(&high) - objective(&low)) / (2.0 * step);
+        assert!(
+            (got - independently_solved).abs() < 5e-10,
+            "{got} vs {independently_solved}"
+        );
+    }
+}
+
+#[test]
+fn objective_adjoint_retains_frequency_port_and_explicit_clock_dependence() {
+    let problem = FrequencyPort {
+        omega: 0.8,
+        forcing: vec![
+            C64::from_re(0.3),
+            C64::new(0.5, -0.2),
+            C64::ZERO,
+            C64::new(-0.1, 0.07),
+        ],
+    };
+    let orbit = frequency_orbit(&problem);
+    let mut prepared =
+        PreparedForcedSensitivity::new(&problem, &orbit, controls(64), &scales(1), || false)
+            .unwrap();
+    // Mean squared physical velocity: 2*sum(n^2*omega^2*|X_n|^2).
+    let mut gradient = vec![0.0; 7];
+    let mut explicit = 0.0;
+    for n in 1..=3 {
+        let x = orbit.coeffs[0][n];
+        let scale = 4.0 * (n * n) as f64 * orbit.omega.powi(2);
+        gradient[2 * n - 1] = scale * x.re;
+        gradient[2 * n] = scale * x.im;
+        explicit += 4.0 * (n * n) as f64 * orbit.omega * (x.re * x.re + x.im * x.im);
+    }
+    let adjoint = prepared.prepare_adjoint(&gradient, 1.0, || false).unwrap();
+    let result = adjoint
+        .gradient(
+            ForcedSensitivityDirection {
+                parameter: 0.8,
+                parameter_scale: 0.1,
+                angular_frequency_derivative: 1.0,
+            },
+            explicit,
+            |point, out| {
+                out.fill(0.0);
+                for n in 1..=point.harmonics {
+                    let x = C64::new(point.coefficients[2 * n - 1], point.coefficients[2 * n]);
+                    let derivative = C64::new(
+                        -2.6 * (n * n) as f64 * point.angular_frequency,
+                        0.4 * n as f64,
+                    ) * x;
+                    out[2 * n - 1] = derivative.re;
+                    out[2 * n] = derivative.im;
+                }
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let objective = |w: f64| {
+        let orbit = frequency_orbit(&FrequencyPort {
+            omega: w,
+            forcing: problem.forcing.clone(),
+        });
+        (1..=3)
+            .map(|n| {
+                let x = orbit.coeffs[0][n];
+                2.0 * (n * n) as f64 * w * w * (x.re * x.re + x.im * x.im)
+            })
+            .sum::<f64>()
+    };
+    let fd = (objective(0.8 + 1e-5) - objective(0.8 - 1e-5)) / 2e-5;
+    assert!(
+        (result.derivative - fd).abs() < 3e-9,
+        "{} vs {fd}",
+        result.derivative
+    );
+}
+
+#[test]
+fn objective_adjoint_preserves_independent_state_equation_objective_and_parameter_units() {
+    struct Units<'a>(&'a Coupled, [f64; 2], [f64; 2]);
+    impl OrbitProblem for Units<'_> {
+        fn dim(&self) -> usize {
+            2
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+        fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+            self.0.rhs(t, &[x[0] / self.1[0], x[1] / self.1[1]], out);
+            for (v, scale) in out.iter_mut().zip(self.2) {
+                *v *= scale;
+            }
+        }
+        fn port(&self, s: C64) -> Vec<C64> {
+            vec![
+                s.scale(self.2[0] / self.1[0]),
+                C64::ZERO,
+                C64::ZERO,
+                s.scale(self.2[1] / self.1[1]),
+            ]
+        }
+        fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
+            Some(|p, t, x, out| {
+                p.0.tangent(t, &[x[0] / p.1[0], x[1] / p.1[1]], out);
+                for row in 0..2 {
+                    for col in 0..2 {
+                        out[2 * row + col] *= p.2[row] / p.1[col];
+                    }
+                }
+                true
+            })
+        }
+    }
+    let problem = Coupled::new(1.1, 1.0);
+    let orbit = solve(&problem, 11);
+    let gradient = observation_gradient(&orbit);
+    let mut original =
+        PreparedForcedSensitivity::new(&problem, &orbit, controls(128), &scales(2), || false)
+            .unwrap();
+    let mut adjoint = original.prepare_adjoint(&gradient, 1.0, || false).unwrap();
+    let expected = adjoint
+        .gradient_island_direction(
+            direction(1.0),
+            0.0,
+            |t, _, out| {
+                out.copy_from_slice(&[det::cos(0.9 * t), 0.0]);
+                true
+            },
+            || false,
+        )
+        .unwrap()
+        .derivative;
+    let units = Units(&problem, [1e-6, 1e5], [1e3, 1e-2]);
+    let mut converted = orbit.clone();
+    for (row, unit) in converted.coeffs.iter_mut().zip(units.1) {
+        for value in row {
+            *value = value.scale(unit);
+        }
+    }
+    let gradient: Vec<_> = gradient
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v / units.1[i % 2])
+        .collect();
+    for (objective_scale, parameter_scale) in [(0.01, 100.0), (1.0, 1.0), (100.0, 0.01)] {
+        let mut prepared = PreparedForcedSensitivity::new(
+            &units,
+            &converted,
+            controls(128),
+            &HbScales {
+                states: units.1.to_vec(),
+                equations: units.2.to_vec(),
+                angular_frequency: 1.0,
+            },
+            || false,
+        )
+        .unwrap();
+        let mut adjoint = prepared
+            .prepare_adjoint(&gradient, objective_scale, || false)
+            .unwrap();
+        let actual = adjoint
+            .gradient_island_direction(
+                direction(parameter_scale),
+                0.0,
+                |t, _, out| {
+                    out.copy_from_slice(&[units.2[0] * det::cos(0.9 * t), 0.0]);
+                    true
+                },
+                || false,
+            )
+            .unwrap();
+        assert!((actual.derivative - expected).abs() < 3e-13);
+    }
+}
+
+#[test]
+fn objective_adjoint_refuses_incomplete_inconsistent_and_cancelled_directions() {
+    let problem = Coupled::new(1.1, 1.0);
+    let orbit = solve(&problem, 7);
+    let gradient = observation_gradient(&orbit);
+    let mut prepared =
+        PreparedForcedSensitivity::new(&problem, &orbit, controls(128), &scales(2), || false)
+            .unwrap();
+    assert!(matches!(
+        prepared.prepare_adjoint(&gradient[..3], 1.0, || false),
+        Err(ForcedSensitivityError::Invalid(_))
+    ));
+    assert!(matches!(
+        prepared.prepare_adjoint(&gradient, 0.0, || false),
+        Err(ForcedSensitivityError::Invalid(_))
+    ));
+    assert!(matches!(
+        prepared.prepare_adjoint(&gradient, 1.0, || true),
+        Err(ForcedSensitivityError::Cancelled)
+    ));
+    let mut adjoint = prepared.prepare_adjoint(&gradient, 1.0, || false).unwrap();
+    assert!(matches!(
+        adjoint.gradient(
+            direction(1.0),
+            0.0,
+            |_, out| {
+                out[0] = 0.0;
+                true
+            },
+            || false
+        ),
+        Err(ForcedSensitivityError::DirectionRefused { .. })
+    ));
+    assert!(matches!(
+        adjoint.gradient(
+            direction(1.0),
+            0.0,
+            |point, out| {
+                out.fill(if point.aft_samples == 128 { 1.0 } else { 2.0 });
+                true
+            },
+            || false
+        ),
+        Err(ForcedSensitivityError::DerivativeUnresolved { .. })
+    ));
+    let calls = Cell::new(0);
+    assert!(matches!(
+        adjoint.gradient(
+            direction(1.0),
+            0.0,
+            |_, out| {
+                calls.set(calls.get() + 1);
+                out.fill(0.0);
+                true
+            },
+            || true
+        ),
+        Err(ForcedSensitivityError::Cancelled)
+    ));
+    assert_eq!(calls.get(), 0);
+    assert!(matches!(
+        adjoint.gradient_island_direction(
+            ForcedSensitivityDirection {
+                angular_frequency_derivative: 1.0,
+                ..direction(1.0)
+            },
+            0.0,
+            |_, _, _| panic!("clock refusal precedes callback"),
+            || false
+        ),
+        Err(ForcedSensitivityError::Invalid(_))
+    ));
+    let zero = adjoint
+        .gradient(
+            direction(1.0),
+            0.25,
+            |_, out| {
+                out.fill(0.0);
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    assert_eq!(zero.derivative, 0.25);
+}
+
+#[test]
+fn objective_adjoint_rechecks_original_dual_equations_on_both_grids() {
+    struct PeriodicCoefficient;
+    impl OrbitProblem for PeriodicCoefficient {
+        fn dim(&self) -> usize {
+            1
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+        fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+            out[0] = -(1.0 + 0.001 * det::cos(16.0 * t)) * x[0];
+        }
+        fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
+            Some(|_, t, _, out| {
+                out[0] = -(1.0 + 0.001 * det::cos(16.0 * t));
+                true
+            })
+        }
+    }
+    let orbit = HbOrbit {
+        omega: 1.0,
+        coeffs: vec![vec![C64::ZERO; 4]],
+        residual_trace: vec![],
+        residual: 0.0,
+        aft_samples: 0,
+        sampling_defect: 0.0,
+    };
+    // The source's 16th harmonic aliases to DC on the 16-point grid. Deliberately
+    // admit that loose tangent comparison: the separate physical dual gate must
+    // still refuse a finely solved lambda that fails the coarse equations.
+    let mut prepared = PreparedForcedSensitivity::new(
+        &PeriodicCoefficient,
+        &orbit,
+        ForcedSensitivityControls {
+            maximum_tangent_sampling_defect: 0.1,
+            ..controls(16)
+        },
+        &scales(1),
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        prepared.prepare_adjoint(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 1.0, || false),
+        Err(ForcedSensitivityError::DerivativeUnresolved { .. })
+    ));
+}
