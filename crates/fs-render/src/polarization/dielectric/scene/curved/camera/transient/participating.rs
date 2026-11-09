@@ -125,7 +125,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
     ) -> Result<TransientRayleighCameraSample, TransientCameraError> {
         let camera = self.camera.source_camera();
         let index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, index);
+        let mut emission = SurfaceEmission::new(camera, index, beam);
         let mut error = None;
         let result = self.scattering.for_camera().trace_events_observed(
             cx,
@@ -184,7 +184,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
     ) -> Result<TransientRayleighCameraSample, TransientCameraError> {
         let camera = self.camera.source_camera();
         let index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, index);
+        let mut emission = SurfaceEmission::new(camera, index, beam);
         let mut error = None;
         let result = self
             .scattering
@@ -246,7 +246,7 @@ impl<'a, 'h, 's, 'm, 'o> TransientCurvedRayleighCameraScene<'a, 'h, 's, 'm, 'o> 
     ) -> Result<TransientRayleighCameraSample, TransientCameraError> {
         let camera = self.camera.source_camera();
         let index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, index);
+        let mut emission = SurfaceEmission::new(camera, index, beam);
         let mut error = None;
         let result = self
             .scattering

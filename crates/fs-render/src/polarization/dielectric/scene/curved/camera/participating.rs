@@ -141,7 +141,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         path_id: u64,
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let result = self
             .scattering
             .for_camera()
@@ -183,7 +183,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         flight_samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let result = self.scattering.for_camera().trace_with_samples_events_observed(
             cx,
             beam,
@@ -229,7 +229,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         flight_samples: impl FnMut(u32) -> [f64; 4],
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let result = self.scattering.for_camera().trace_with_tracking_samples_events_observed(
             cx,
             beam,

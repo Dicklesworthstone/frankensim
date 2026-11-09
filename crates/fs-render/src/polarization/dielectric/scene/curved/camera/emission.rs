@@ -73,13 +73,19 @@ pub(super) struct SurfaceEmission<'a, 's, 'm> {
 }
 
 impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
-    pub(super) fn new(camera: &'a CurvedCameraScene<'s, 'm>, initial_index: f64) -> Self {
+    // The first LTE leg starts after any analyzer and resolved-lens losses.
+    pub(super) fn new(
+        camera: &'a CurvedCameraScene<'s, 'm>,
+        initial_index: f64,
+        launch: PolarizedBeam,
+    ) -> Self {
         Self {
             camera,
             initial_index,
             radiance: 0.0,
             error: None,
-            thermal: (!camera.volume_emitters.is_empty()).then(ThermalEmission::new),
+            thermal: (!camera.volume_emitters.is_empty())
+                .then(|| ThermalEmission::new(launch.power().i)),
             spatial_emission: 0.0,
         }
     }

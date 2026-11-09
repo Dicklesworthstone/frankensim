@@ -57,6 +57,7 @@ fn glass_ray() -> Ray {
 fn limits() -> CurvedRayleighTraceSettings {
     let mut limits = settings();
     limits.surfaces.max_distance_m = 64.0;
+    limits.surfaces.event.surface_tolerance_m = 1e-9;
     limits
 }
 

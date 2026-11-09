@@ -191,7 +191,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
             .surface_camera()
             .launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index);
+        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index, beam);
         let mut fixtures =
             FixtureContributions::new(self.point_lights, settings.point_lights, initial_index);
         let mut connector = self.connector(settings, |connection, draw| {
@@ -241,7 +241,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
             .surface_camera()
             .launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index);
+        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index, beam);
         let mut fixtures =
             FixtureContributions::new(self.point_lights, settings.point_lights, initial_index);
         let mut connector = self.connector(settings, source_samples);
@@ -310,7 +310,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
         let beam = launch()?;
         let wavelength_nm = beam.wavelength_nm();
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index);
+        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index, beam);
         let mut fixtures =
             FixtureContributions::new(self.point_lights, settings.point_lights, initial_index);
         let mut connector = self.connector(settings, source_samples);

@@ -219,7 +219,7 @@ impl<'a, 'c, 's, 'm, 'o> CurvedParticipatingEnvironmentCameraScene<'a, 'c, 's, '
         let camera = self.camera.surface_camera();
         let beam = launch()?;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, initial_index);
+        let mut emission = SurfaceEmission::new(camera, initial_index, beam);
         let mut work = Work::default();
         let mut source_cells = 0;
         let mut volume_ordinal = 0_u32;

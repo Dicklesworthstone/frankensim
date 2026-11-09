@@ -286,7 +286,7 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
         settings.validate()?;
         let beam = launch()?;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut work = Work::default();
         let mut direct = 0.0;
         let mut continuous = false;

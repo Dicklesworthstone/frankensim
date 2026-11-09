@@ -278,7 +278,7 @@ impl<'a, 's, 'm> SmithCameraScene<'a, 's, 'm> {
         ) -> Result<f64, CameraRadianceError>,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let result = self
             .camera
             .scene

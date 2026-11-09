@@ -348,7 +348,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         workspace.reverse_events.clear();
         let beam = launch()?;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut state = PathState::default();
         let mut work = Work::default();
         let mut radiance = Sum::default();

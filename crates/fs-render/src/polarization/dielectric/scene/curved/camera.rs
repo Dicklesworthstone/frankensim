@@ -609,7 +609,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         path_id: u64,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self, initial_index);
+        let mut emission = SurfaceEmission::new(self, initial_index, beam);
         let result = self.scene.trace_with_seed_events_mode(
             cx,
             beam,
@@ -654,7 +654,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self, initial_index);
+        let mut emission = SurfaceEmission::new(self, initial_index, beam);
         let result = self.scene.trace_with_samples_events_mode(
             cx,
             beam,

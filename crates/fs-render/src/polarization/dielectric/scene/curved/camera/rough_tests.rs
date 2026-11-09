@@ -269,8 +269,17 @@ fn g1_rough_metal_camera_has_one_fresnel_and_one_smith_mask_with_physical_beer()
                 let wi = sample.path().beam().ray().dir;
                 let facet = unit(Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z));
                 let fresnel = law.fresnel(wavelength, 1.33, wo.dot(facet)).unwrap();
-                let masking = 2.0
-                    / (1.0 + (1.0 + alpha * alpha * (1.0 - wi.z * wi.z) / (wi.z * wi.z)).sqrt());
+                // Independently cancel D in the correlated GGX f*cos / PDF.
+                // The current reflection proposal is bounded by a spherical
+                // cap, so the old unbounded outgoing G1 is not its weight.
+                let lambda = |c: f64| {
+                    0.5 * ((1.0 + alpha * alpha * (1.0 - c * c) / (c * c)).sqrt() - 1.0)
+                };
+                let s2 = (1.0 + (1.0 - wo.z * wo.z).sqrt()).powi(2);
+                let k = (1.0 - alpha * alpha) * s2 / (s2 + alpha * alpha * wo.z * wo.z);
+                let stretched = (alpha * alpha + (1.0 - alpha * alpha) * wo.z * wo.z).sqrt();
+                let masking = (k * wo.z + stretched)
+                    / (2.0 * wo.z * (1.0 + lambda(wo.z) + lambda(wi.z)));
                 let distance = 0.5 / wo.z + 1.0 / wi.z;
                 close(
                     sample.radiance_w_m2_sr_nm(),

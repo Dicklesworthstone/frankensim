@@ -248,7 +248,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
         let beam = launch()?;
         let wavelength_nm = beam.wavelength_nm();
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.owner.surface_camera(), initial_index);
+        let mut emission = SurfaceEmission::new(self.owner.surface_camera(), initial_index, beam);
         let mut fixtures =
             FixtureContributions::new(self.owner.point_lights, settings.point_lights, initial_index);
         let mut connector = self.owner.connector(settings, source_samples);

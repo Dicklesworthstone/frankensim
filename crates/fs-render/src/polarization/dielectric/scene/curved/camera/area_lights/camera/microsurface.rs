@@ -286,7 +286,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         workspace.reverse_events.clear();
         let camera = self.source.camera;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, initial_index);
+        let mut emission = SurfaceEmission::new(camera, initial_index, beam);
         let mut partition = DirectPartition::default();
         let mut work = Work::default();
         let mut radiance = Sum::default();

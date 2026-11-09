@@ -137,10 +137,10 @@ pub(super) struct ThermalEmission {
 }
 
 impl ThermalEmission {
-    pub(super) const fn new() -> Self {
+    pub(super) const fn new(initial_power: f64) -> Self {
         Self {
             optical_depth: 0.0,
-            departure_power: 1.0,
+            departure_power: initial_power,
             source: None,
         }
     }

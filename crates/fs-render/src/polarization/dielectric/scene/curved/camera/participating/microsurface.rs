@@ -116,7 +116,7 @@ impl<'v, 'a, 's, 'm, 'o> SmithDielectricRayleighCameraScene<'v, 'a, 's, 'm, 'o> 
         path_id: u64,
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera.camera, initial_index, beam);
         let scene = self.camera.scattering.for_camera();
         let smith = SmithDielectricRayleighScene::new(&scene, self.microsurface);
         let result = smith.trace_events_observed(
@@ -244,7 +244,7 @@ impl<'v, 'a, 's, 'm, 'o> SmithDielectricRayleighCameraScene<'v, 'a, 's, 'm, 'o> 
         dielectric: impl FnMut(u32, u32) -> [f64; 4],
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera.camera, initial_index, beam);
         let scene = self.camera.scattering.for_camera();
         let smith = SmithDielectricRayleighScene::new(&scene, self.microsurface);
         let result = smith.trace_with_tracking_samples_events_observed(

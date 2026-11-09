@@ -279,7 +279,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         workspace.camera.reverse_events.clear();
         let beam = launch()?;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index);
+        let mut emission = SurfaceEmission::new(self.surface_camera(), initial_index, beam);
         let mut state = PathState::default();
         let mut work = Work::default();
         let mut tracking_work = TrackingWork::default();

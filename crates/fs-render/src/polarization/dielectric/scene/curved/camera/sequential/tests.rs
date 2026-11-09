@@ -422,3 +422,99 @@ fn zero_scattering_preserves_complete_lens_seed_and_surface_sample_bits() {
         assert_eq!(*explicit.radiance_sample(), expected);
     });
 }
+
+#[test]
+fn first_lte_leg_keeps_analyzer_and_resolved_lens_intensity() {
+    use crate::polarization::dielectric::scene::curved::camera::{
+        CameraAnalyzer, IsothermalVolumeEmitter,
+    };
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(7, 1.0)]).unwrap();
+        let host = glass(1.0, 0.3);
+        let media = [SceneMedium::Homogeneous(&host)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![opaque(7)], 100_000).unwrap();
+        let source =
+            IsothermalVolumeEmitter::try_new(0, 2300.0, fs_blake3::ContentHash([127; 32])).unwrap();
+        let scene = CurvedCameraScene::try_new(cx, &native, &[], None)
+            .unwrap()
+            .with_isothermal_volume_emitters(cx, &[source])
+            .unwrap();
+        let mut limits = settings();
+        // Resolve the exact-plane analytic source integral independently of
+        // the default event-position error allowance.
+        limits.event.surface_tolerance_m = 1e-10;
+        limits.event.integration.position_tolerance_m = 1e-12;
+        let wavelength = 550e-9_f64;
+        let (h, c, k) = (6.626_070_15e-34, 299_792_458.0, 1.380_649e-23);
+        let blackbody = 2.0 * h * c * c
+            / (wavelength.powi(5) * (h * c / (wavelength * k * 2300.0)).exp_m1())
+            * 1e-9;
+        let ray = crate::charts::Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(0.0, 0.0, 1.0),
+        };
+        let ordinary = scene
+            .sample_ray_with_samples(cx, ray, 550.0, 0, limits, |_| {
+                panic!("opaque endpoint needs no sample")
+            })
+            .unwrap();
+        let identity =
+            CameraAnalyzer::try_new(Vec3::new(1.0, 0.0, 0.0), Stokes::unpolarized(1.0)).unwrap();
+        assert_eq!(
+            ordinary,
+            scene
+                .sample_ray_analyzed_with_samples(cx, ray, 550.0, 0, identity, limits, |_| panic!(
+                    "opaque endpoint needs no sample"
+                ),)
+                .unwrap()
+        );
+        near(
+            ordinary.radiance_w_m2_sr_nm() / blackbody,
+            -(-0.3_f64).exp_m1(),
+            1e-9,
+        );
+        let row = Stokes {
+            i: 0.125,
+            q: 0.075,
+            u: 0.0,
+            v: 0.0,
+        };
+        let analyzer = CameraAnalyzer::try_new(Vec3::new(1.0, 0.0, 0.0), row).unwrap();
+        let analyzed = scene
+            .sample_ray_analyzed_with_samples(cx, ray, 550.0, 0, analyzer, limits, |_| {
+                panic!("opaque endpoint needs no sample")
+            })
+            .unwrap();
+        near(
+            analyzed.radiance_w_m2_sr_nm() / blackbody,
+            row.i * -(-0.3_f64).exp_m1(),
+            1e-9,
+        );
+        let physical = camera();
+        for row in [Stokes::unpolarized(1.0), row] {
+            let optical = physical
+                .generate_sequential_spectral_beams_analyzed_from_tangent_offsets(
+                    cx,
+                    0.15,
+                    0.05,
+                    LensSample::CENTER,
+                    &[550.0],
+                    Vec3::new(0.0, 1.0, 0.0),
+                    row,
+                )
+                .unwrap()[0]
+                .unwrap();
+            assert!(optical.power().i > 0.0 && optical.power().i < row.i);
+            let actual = scene
+                .sample_sequential_ray_with_samples(cx, &optical, 0, limits, |_| {
+                    panic!("opaque endpoint needs no sample")
+                })
+                .unwrap();
+            let distance = (1.0 - optical.ray().origin.z) / optical.ray().dir.z;
+            let expected = optical.power().i * -(-0.3 * distance).exp_m1();
+            near(actual.radiance_w_m2_sr_nm() / blackbody, expected, 1e-9);
+            assert_ne!(optical.geometry_weight(), 1.0);
+        }
+    });
+}

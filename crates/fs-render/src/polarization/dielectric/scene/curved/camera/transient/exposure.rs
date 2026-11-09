@@ -119,7 +119,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         path_id: u64,
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut error = None;
         let result = self.camera.scene.trace_with_seed_events_mode(
             cx,
@@ -188,7 +188,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut error = None;
         let result = self.camera.scene.trace_with_samples_events_mode(
             cx,

@@ -63,7 +63,7 @@ fn g1_full_glass_area_matches_native_response_on_both_sides_and_owns_direct_hit(
             ];
             let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
             let light = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
-            let seeds = [seed(Vec3::new(1.0, 0.0, 0.0))];
+            let seeds = [seed(Vec3::new(0.0, 0.0, 1.0 - source_z))];
             let bindings = [AreaLightBinding {
                 source: &light,
                 receiver_object_id: 1,

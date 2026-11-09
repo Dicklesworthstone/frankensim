@@ -209,7 +209,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
         validate_settings(settings)?;
         let camera = self.source.camera;
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-        let mut emission = SurfaceEmission::new(camera, initial_index);
+        let mut emission = SurfaceEmission::new(camera, initial_index, beam);
         let mut fixtures = FixtureContributions::new(self.source, settings, initial_index);
         let mut connector = ClearFixtureConnector {
             scene: camera.scene,

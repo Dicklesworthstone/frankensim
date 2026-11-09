@@ -381,7 +381,7 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         validate_settings(settings)?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut fixtures = FixtureContributions::new(self, settings, initial_index);
         let result = self.camera.scene.trace_with_seed_events_mode(
             cx,
@@ -452,7 +452,7 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         let beam = launch()?;
         let wavelength_nm = beam.wavelength_nm();
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut emission = SurfaceEmission::new(self.camera, initial_index, beam);
         let mut fixtures = FixtureContributions::new(self, settings, initial_index);
         let result = self.camera.scene.trace_with_samples_events_mode(
             cx,
