@@ -18,6 +18,11 @@ mod fission;
 #[path = "tests/precursors.rs"]
 mod precursors;
 
+#[path = "tests/induced_fission.rs"]
+mod induced_fission;
+
+pub(crate) use induced_fission::material_induced_fission_fixture;
+
 const MEV: f64 = 1.602_176_634e-13;
 
 fn data(energies_mev: &[f64], cells: usize) -> DiffusionData {

@@ -3789,3 +3789,45 @@ selected original-source modules and the existing native numerical owners.
 Unused test-helper/import warnings arise from the narrowed selection. These
 runs are not full Cargo/constellation, DSR, empirical calibration, or performance
 benchmarks.
+
+## Explicit future-neutron conversion in induced fission
+
+`NeutronKineticModel::new_with_fission_precursor_funding` admits original
+positive delayed-fission yields under reaction-ordered declarations of
+`InducedFissionPrecursorFunding::AdditionalDelayedConversion`. The declaration
+bounds the actual sum of each family yield times its reserved neutron energy.
+An unused part of the cap is never generated or deposited. Positive products
+that underflow, insufficient/nonfinite caps and funding on nonfission reactions
+refuse, including channels whose current cross section is zero.
+
+The existing `NeutronReactionEnergy::nuclear_q_j` remains prompt Q. Prompt
+threshold checks and E_in + Q_prompt - E_prompt_out deposition are unchanged.
+Additional future-neutron conversion enters precursor storage at the accepted
+induced-fission event, independently of prompt Q and external source injection.
+Family decay subsequently transfers that reserve to the original neutron
+spectrum; transport and outflow retain their existing separate energy accounts.
+This partition follows the separate prompt and delayed neutron components in
+[ENDF MF1/MT458](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf) and the
+[OpenMC energy-deposition description](https://docs.openmc.org/en/stable/methods/energy_deposition.html).
+No delayed beta/gamma energy, evaluated-data match or calibration is inferred.
+
+Native family births are reconstructed from the accepted original fission
+reaction counts and yields, including their actual rounded products. Each
+family balance is audited independently. Whole-step energy includes the
+additional conversion once, and state/history retain separate cumulative and
+per-cell accounts through continuation and restart. Prepared positive-source
+reaction indices avoid rescanning unrelated capture/scatter reactions for this
+account. Evolution remains with the original native diffusion propagator.
+
+Legacy kinetic constructors retain their original refusals. Finite and
+radioactive-inventory consumers must additionally establish exclusive ownership
+of the fission-product cohort; a raw energy declaration alone does not do so.
+
+The focused native core suite passed 15 tests, zero failures: five new induced
+family tests, four existing prompt-fission tests and six existing precursor
+tests. Independent analytical chains cover prompt versus delayed neutron
+residence, capture and heat, unused funding, original thresholds, outflow,
+history/restart and late cancellation. All six changed Rust files matched the
+compiled snapshot; narrow formatting passed. This original-source selection
+is not a full Cargo/constellation or DSR gate, an empirical isotope calibration,
+or a performance benchmark.

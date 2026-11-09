@@ -5,8 +5,9 @@
 //! original material flow. Exterior precursor energy is not neutron leakage.
 
 use super::{
-    Accumulator, DiffusionModel, DiffusionState, DiffusionStep, FissionError,
-    NeutronKineticError, NeutronKineticModel, checked, positive, sum, weighted_sum,
+    Accumulator, DiffusionModel, DiffusionReactionKind, DiffusionState, DiffusionStep,
+    FissionError, InducedFissionPrecursorFunding, NeutronKineticError, NeutronKineticModel,
+    checked, nonnegative, positive, sum, weighted_sum,
 };
 
 pub(super) fn energies(
@@ -28,11 +29,58 @@ pub(super) fn energies(
         .collect()
 }
 
+/// Retain the actual future-neutron coefficient; a declared cap is an admission
+/// bound, not a source value. Every reaction is checked even when inactive.
+pub(super) fn funding(
+    diffusion: &DiffusionModel,
+    energies: &[f64],
+    declarations: &[Option<InducedFissionPrecursorFunding>],
+) -> Result<Vec<f64>, NeutronKineticError> {
+    let mut reserved = Vec::with_capacity(diffusion.reactions().len());
+    for (reaction, declaration) in diffusion.reactions().iter().zip(declarations) {
+        let DiffusionReactionKind::Fission { delayed_yields, .. } = &reaction.kind else {
+            if declaration.is_some() {
+                return Err(NeutronKineticError::Invalid(
+                    "induced precursor funding must follow original fission reactions only",
+                ));
+            }
+            reserved.push(0.0);
+            continue;
+        };
+        let mut total = Accumulator::new(0.0);
+        for (&yield_, &energy) in delayed_yields.iter().zip(energies) {
+            let value = checked(yield_ * energy)?;
+            if yield_ > 0.0 && value == 0.0 {
+                return Err(NeutronKineticError::Arithmetic(
+                    "induced-fission precursor energy underflow",
+                ));
+            }
+            total.add(value)?;
+        }
+        match declaration {
+            Some(InducedFissionPrecursorFunding::AdditionalDelayedConversion {
+                maximum_energy_j_per_fission,
+            }) if nonnegative(*maximum_energy_j_per_fission)
+                && total.value() <= *maximum_energy_j_per_fission => {}
+            None if delayed_yields.iter().all(|&yield_| yield_ == 0.0) => {}
+            _ => {
+                return Err(NeutronKineticError::Invalid(
+                    "induced-fission future-neutron energy requires its own finite sufficient funding cap",
+                ));
+            }
+        }
+        reserved.push(total.value());
+    }
+    Ok(reserved)
+}
+
 pub(super) struct Accounts {
     pub initial_j: f64,
     pub final_j: f64,
     pub injected_j: f64,
     pub converted_j: f64,
+    pub cell_induced_j: Vec<f64>,
+    pub induced_j: f64,
     pub cell_exported_j: Vec<f64>,
     pub exported_j: f64,
 }
@@ -58,6 +106,7 @@ pub(super) fn account(
         || before.precursor_counts().len() != nodes
         || after.precursor_counts().len() != nodes
         || step.delayed_decays.len() != nodes
+        || step.reaction_counts.len() != model.diffusion.reactions().len()
         || step.injected_precursor_counts.len() != nodes
         || step.precursor_transfer_counts.len() != transport.transfers.len() * families
         || step.precursor_outflow_counts.len() != transport.outflows.len() * families
@@ -70,6 +119,9 @@ pub(super) fn account(
     let mut final_energy = Accumulator::new(0.0);
     let mut injected = Accumulator::new(0.0);
     let mut converted = Accumulator::new(0.0);
+    let mut induced = Accumulator::new(0.0);
+    let mut induced_counts = Accumulator::new(0.0);
+    let mut cell_induced = vec![Accumulator::new(0.0); cells];
     let mut balance = vec![Accumulator::new(0.0); nodes];
     for cell in 0..cells {
         for (family, &energy) in model.precursor_energies_j.iter().enumerate() {
@@ -110,6 +162,50 @@ pub(super) fn account(
             add(&mut neutron_balance[cell], -emitted.value(), defect)?;
         }
     }
+    // Native induced births are not injection. Reconstruct the exact native
+    // count * yield products, retaining their family identity and rounding.
+    for &index in &model.induced_fission_reactions {
+        checkpoint()?;
+        let reaction = &model.diffusion.reactions()[index];
+        let DiffusionReactionKind::Fission { delayed_yields, .. } = &reaction.kind else {
+            continue;
+        };
+        let count = step.reaction_counts[index];
+        for (family, (&yield_, &energy)) in delayed_yields
+            .iter()
+            .zip(&model.precursor_energies_j)
+            .enumerate()
+        {
+            checkpoint()?;
+            let born = checked(count * yield_)?;
+            if count > 0.0 && yield_ > 0.0 && born == 0.0 {
+                return Err(NeutronKineticError::Arithmetic(
+                    "induced-fission precursor birth underflow",
+                ));
+            }
+            defect.add(checked(count.mul_add(yield_, -born) * energy)?.abs())?;
+            let reserve = product(born, energy, defect)?;
+            let count_roundoff = induced_counts.add(born)?.abs();
+            defect.add(checked(count_roundoff * energy)?.abs())?;
+            add(
+                &mut balance[reaction.cell * families + family],
+                -reserve,
+                defect,
+            )?;
+            add(&mut cell_induced[reaction.cell], reserve, defect)?;
+            add(&mut induced, reserve, defect)?;
+        }
+    }
+    let count_residual = checked(sum(&[
+        induced_counts.value(),
+        -step.delayed_precursors_produced,
+    ]))?;
+    let largest_reserve = model
+        .precursor_energies_j
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
+    defect.add(checked(count_residual.abs() * largest_reserve)?)?;
     for (face, transfer) in transport.transfers.iter().enumerate() {
         checkpoint()?;
         for (family, &energy) in model.precursor_energies_j.iter().enumerate() {
@@ -154,6 +250,8 @@ pub(super) fn account(
         final_j: final_energy.value(),
         injected_j: injected.value(),
         converted_j: converted.value(),
+        cell_induced_j: cell_induced.into_iter().map(Accumulator::value).collect(),
+        induced_j: induced.value(),
         cell_exported_j: cell_exported.into_iter().map(Accumulator::value).collect(),
         exported_j: exported.value(),
     })
@@ -168,11 +266,7 @@ fn add(
     Ok(())
 }
 
-fn product(
-    count: f64,
-    energy: f64,
-    defect: &mut Accumulator,
-) -> Result<f64, NeutronKineticError> {
+fn product(count: f64, energy: f64, defect: &mut Accumulator) -> Result<f64, NeutronKineticError> {
     let value = checked(count * energy)?;
     if count > 0.0 && energy > 0.0 && value == 0.0 {
         return Err(NeutronKineticError::Arithmetic(

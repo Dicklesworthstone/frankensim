@@ -16,6 +16,9 @@
 //! their own event energies. Explicit precursor storage reserves each original
 //! family's future neutron kinetic energy. Its native decay transfers that
 //! energy into neutrons; no additional beta/gamma release is inferred.
+//! Explicit induced-fission funding reserves separately declared future-neutron
+//! nuclear conversion at each family birth. Prompt Q retains its original
+//! meaning; delayed funding cannot pay a prompt energy deficit or threshold.
 //!
 //! A fusion interval retains separate D-T and D-D-neutron counts and energies.
 //! `FusionNeutronSource::project_interval_mean` explicitly replaces each channel
@@ -61,6 +64,19 @@ pub struct NeutronReactionEnergy {
     pub threshold_j: f64,
 }
 
+/// Explicit funding for the future neutron energy of induced-fission families.
+///
+/// This declaration supplements, and never changes, the original prompt Q.
+/// The actual reserve is the original delayed yield times each family's neutron
+/// energy. Unused allowance releases no energy. A finite inventory consumer
+/// must additionally admit ownership of the unrepresented fragment cohort.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InducedFissionPrecursorFunding {
+    /// Separate nuclear conversion stored for later neutron emission [J/fission].
+    /// No delayed beta/gamma energy or local heat is inferred from this cap.
+    AdditionalDelayedConversion { maximum_energy_j_per_fission: f64 },
+}
+
 /// Immutable energy interpretation of an original neutron-diffusion model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NeutronKineticModel {
@@ -68,6 +84,9 @@ pub struct NeutronKineticModel {
     diffusion: Arc<DiffusionModel>,
     energies_j: Vec<f64>,
     precursor_energies_j: Vec<f64>,
+    fission_precursor_funding: Vec<Option<InducedFissionPrecursorFunding>>,
+    fission_precursor_energy_j: Vec<f64>,
+    induced_fission_reactions: Vec<usize>,
     local_heat_fractions: Vec<f64>,
     reaction_energies: Vec<NeutronReactionEnergy>,
     available_energy_j: Vec<f64>,
@@ -145,6 +164,7 @@ impl NeutronKineticModel {
             local_heat_fractions,
             reaction_energies,
             false,
+            None,
         )
     }
 
@@ -174,6 +194,35 @@ impl NeutronKineticModel {
             local_heat_fractions,
             reaction_energies,
             true,
+            None,
+        )
+    }
+
+    /// Admit explicit additional future-neutron conversion for induced fission.
+    ///
+    /// Funding follows the exact original reaction order. Positive delayed
+    /// yields require a declaration even while their cross section is zero;
+    /// nonfission reactions require None. Prompt Q, thresholds and prompt
+    /// outgoing-energy admission remain unchanged. The native family reserve
+    /// must fit its per-fission cap; unused cap is never generated or deposited.
+    /// A finite activation consumer must separately establish exclusive
+    /// ownership of each induced-fission fragment cohort.
+    pub fn new_with_fission_precursor_funding(
+        data_id: String,
+        diffusion: Arc<DiffusionModel>,
+        energies_j: Vec<f64>,
+        local_heat_fractions: Vec<f64>,
+        reaction_energies: Vec<NeutronReactionEnergy>,
+        funding: Vec<Option<InducedFissionPrecursorFunding>>,
+    ) -> Result<Self, NeutronKineticError> {
+        Self::prepare(
+            data_id,
+            diffusion,
+            energies_j,
+            local_heat_fractions,
+            reaction_energies,
+            true,
+            Some(funding),
         )
     }
 
@@ -184,11 +233,15 @@ impl NeutronKineticModel {
         local_heat_fractions: Vec<f64>,
         reaction_energies: Vec<NeutronReactionEnergy>,
         precursor_storage: bool,
+        funding: Option<Vec<Option<InducedFissionPrecursorFunding>>>,
     ) -> Result<Self, NeutronKineticError> {
         if data_id.trim().is_empty()
             || energies_j.len() != diffusion.groups().len()
             || local_heat_fractions.len() != diffusion.reactions().len()
             || reaction_energies.len() != diffusion.reactions().len()
+            || funding
+                .as_ref()
+                .is_some_and(|values| values.len() != diffusion.reactions().len())
             || (!precursor_storage && !diffusion.delayed_groups().is_empty())
         {
             return Err(NeutronKineticError::Invalid(
@@ -208,6 +261,20 @@ impl NeutronKineticModel {
             }
         }
         let precursor_energies_j = precursors::energies(&diffusion, &energies_j)?;
+        let fission_precursor_funding =
+            funding.unwrap_or_else(|| vec![None; diffusion.reactions().len()]);
+        let fission_precursor_energy_j = precursors::funding(
+            &diffusion,
+            &precursor_energies_j,
+            &fission_precursor_funding,
+        )?;
+        // The hot accounting path visits only reactions that can create a
+        // funded family; ordinary capture/scatter models pay no repeated scan.
+        let induced_fission_reactions = fission_precursor_energy_j
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &energy)| (energy > 0.0).then_some(index))
+            .collect();
         let mut available_energy_j = Vec::with_capacity(diffusion.reactions().len());
         for ((reaction, &fraction), energy) in diffusion
             .reactions()
@@ -235,9 +302,7 @@ impl NeutronKineticModel {
                     prompt_yields,
                     delayed_yields,
                 } => {
-                    if (!precursor_storage && !delayed_yields.is_empty())
-                        || delayed_yields.iter().any(|&value| value > 0.0)
-                    {
+                    if !precursor_storage && !delayed_yields.is_empty() {
                         return Err(NeutronKineticError::Invalid(
                             "induced-fission delayed production requires an explicit physical energy funding declaration",
                         ));
@@ -256,6 +321,9 @@ impl NeutronKineticModel {
             diffusion,
             energies_j,
             precursor_energies_j,
+            fission_precursor_funding,
+            fission_precursor_energy_j,
+            induced_fission_reactions,
             local_heat_fractions,
             reaction_energies,
             available_energy_j,
@@ -279,6 +347,15 @@ impl NeutronKineticModel {
     /// Reserved future neutron energy in original delayed-family order [J].
     pub fn precursor_energies_j(&self) -> &[f64] {
         &self.precursor_energies_j
+    }
+    /// Explicit future-neutron funding in unchanged reaction order.
+    pub fn fission_precursor_funding(&self) -> &[Option<InducedFissionPrecursorFunding>] {
+        &self.fission_precursor_funding
+    }
+    /// Actual reserved future-neutron conversion per induced event [J].
+    /// Zero for nonfission reactions and zero-yield families; unused cap is absent.
+    pub fn fission_precursor_energy_j(&self) -> &[f64] {
+        &self.fission_precursor_energy_j
     }
     /// Local heat fractions in original reaction order.
     pub fn local_heat_fractions(&self) -> &[f64] {
@@ -458,6 +535,7 @@ pub struct NeutronKineticState {
     neutrons: DiffusionState,
     released: Vec<[Accumulator; 3]>,
     nuclear_reaction_energy: Vec<Accumulator>,
+    induced_precursor_energy: Vec<Accumulator>,
     exported_precursor_energy: Vec<Accumulator>,
 }
 
@@ -476,6 +554,11 @@ pub struct NeutronKineticStep {
     pub cell_nuclear_reaction_energy_j: Vec<f64>,
     /// Sum of signed prompt nuclear conversion on this neutron history [J].
     pub nuclear_reaction_energy_j: f64,
+    /// Additional nuclear conversion reserved by induced-fission family births,
+    /// in original spatial-cell order [J]. Neither prompt heat nor injection.
+    pub cell_induced_precursor_energy_j: Vec<f64>,
+    /// Sum of additional future-neutron conversion reserved at induced births [J].
+    pub induced_precursor_energy_j: f64,
     /// Initial stored neutron kinetic energy [J].
     pub initial_kinetic_energy_j: f64,
     /// Final stored neutron kinetic energy [J].
@@ -498,7 +581,8 @@ pub struct NeutronKineticStep {
     /// Sum of reserved precursor energy exported to the exterior [J].
     pub exported_precursor_energy_j: f64,
     /// Final - initial neutron and precursor storage + disjoint exports
-    /// - injected neutron and precursor energy - prompt nuclear Q [J].
+    /// - injected neutron and precursor energy - prompt nuclear Q
+    /// - additional induced-fission precursor conversion [J].
     pub energy_balance_residual_j: f64,
     /// Sum of absolute per-cell energy/account defects [J].
     pub energy_roundoff_j: f64,
@@ -534,12 +618,14 @@ impl NeutronKineticState {
         )?;
         let released = vec![[Accumulator::new(0.0); 3]; model.diffusion.cell_count()];
         let nuclear_reaction_energy = vec![Accumulator::new(0.0); model.diffusion.cell_count()];
+        let induced_precursor_energy = vec![Accumulator::new(0.0); model.diffusion.cell_count()];
         let exported_precursor_energy = vec![Accumulator::new(0.0); model.diffusion.cell_count()];
         let state = Self {
             model,
             neutrons,
             released,
             nuclear_reaction_energy,
+            induced_precursor_energy,
             exported_precursor_energy,
         };
         state.stored_energy_j()?;
@@ -560,7 +646,10 @@ impl NeutronKineticState {
     }
     /// Total reserved future-neutron energy in the retained precursor stock [J].
     pub fn precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
-        weighted_sum(self.neutrons.precursor_counts(), &self.model.precursor_energies_j)
+        weighted_sum(
+            self.neutrons.precursor_counts(),
+            &self.model.precursor_energies_j,
+        )
     }
     /// Neutron kinetic energy plus reserved precursor energy [J].
     pub fn stored_energy_j(&self) -> Result<f64, NeutronKineticError> {
@@ -569,7 +658,10 @@ impl NeutronKineticState {
     /// Reserved energy exported by precursor outflow from this cell since
     /// binding [J]. It is not part of the cell's released heat or radiation.
     pub fn cell_exported_precursor_energy_j(&self, cell: usize) -> Option<f64> {
-        self.exported_precursor_energy.get(cell).copied().map(Accumulator::value)
+        self.exported_precursor_energy
+            .get(cell)
+            .copied()
+            .map(Accumulator::value)
     }
     /// Lifetime reserved energy exported by all precursor outflows [J].
     pub fn cumulative_exported_precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
@@ -601,6 +693,24 @@ impl NeutronKineticState {
             .map(Accumulator::value)
     }
 
+    /// Additional future-neutron conversion reserved in this cell since binding.
+    /// It is separate from prompt Q and from already released material heat.
+    pub fn cell_induced_precursor_energy_j(&self, cell: usize) -> Option<f64> {
+        self.induced_precursor_energy
+            .get(cell)
+            .copied()
+            .map(Accumulator::value)
+    }
+
+    /// Lifetime additional conversion reserved by induced-fission families [J].
+    pub fn cumulative_induced_precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        let mut total = Accumulator::new(0.0);
+        for value in &self.induced_precursor_energy {
+            total.add(value.value())?;
+        }
+        Ok(total.value())
+    }
+
     /// Native continuous source integration with explicit constant group rates.
     /// This entrypoint is also the seam for an independently scheduled source.
     /// Zero rates continue slowing/absorption/leakage after fusion switches off.
@@ -612,7 +722,13 @@ impl NeutronKineticState {
         checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, NeutronKineticStep), NeutronKineticError> {
         let precursor_rates = vec![0.0; self.neutrons.precursor_counts().len()];
-        self.trial_with_sources(duration_s, neutron_rates_s, &precursor_rates, budget, checkpoint)
+        self.trial_with_sources(
+            duration_s,
+            neutron_rates_s,
+            &precursor_rates,
+            budget,
+            checkpoint,
+        )
     }
 
     /// Native uniform neutron and precursor feeds. Precursor injection supplies
@@ -732,12 +848,18 @@ impl NeutronKineticState {
         }
         let mut released = self.released.clone();
         let mut nuclear_reaction_energy = self.nuclear_reaction_energy.clone();
+        let mut induced_precursor_energy = self.induced_precursor_energy.clone();
         let mut exported_precursor_energy = self.exported_precursor_energy.clone();
         let mut totals = [Accumulator::new(0.0); 3];
         let mut cell_released = Vec::with_capacity(cells);
         for cell in 0..cells {
             checkpoint()?;
             defect.add(cell_balance[cell].value().abs())?;
+            defect.add(
+                induced_precursor_energy[cell]
+                    .add(precursors.cell_induced_j[cell])?
+                    .abs(),
+            )?;
             defect.add(
                 exported_precursor_energy[cell]
                     .add(precursors.cell_exported_j[cell])?
@@ -768,6 +890,7 @@ impl NeutronKineticState {
             -injected.value(),
             -precursors.injected_j,
             -nuclear_total.value(),
+            -precursors.induced_j,
         ]))?;
         defect.add(energy_balance_residual_j.abs())?;
         if defect.value() > energy_tolerance_j {
@@ -784,6 +907,8 @@ impl NeutronKineticState {
                 .map(Accumulator::value)
                 .collect(),
             nuclear_reaction_energy_j: nuclear_total.value(),
+            cell_induced_precursor_energy_j: precursors.cell_induced_j,
+            induced_precursor_energy_j: precursors.induced_j,
             initial_kinetic_energy_j: initial_energy.value(),
             final_kinetic_energy_j: final_energy.value(),
             injected_kinetic_energy_j: injected.value(),
@@ -806,6 +931,7 @@ impl NeutronKineticState {
                 neutrons,
                 released,
                 nuclear_reaction_energy,
+                induced_precursor_energy,
                 exported_precursor_energy,
             },
             step,
@@ -907,3 +1033,6 @@ fn weighted_sum(counts: &[f64], energies: &[f64]) -> Result<f64, NeutronKineticE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::material_induced_fission_fixture;

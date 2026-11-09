@@ -128,6 +128,15 @@ impl FusionNeutronActivationState {
         model: Arc<NeutronKineticModel>,
         spatial: DiffusionBurnupState,
     ) -> Result<Self, FusionNeutronActivationError> {
+        if model
+            .fission_precursor_energy_j()
+            .iter()
+            .any(|&energy| energy > 0.0)
+        {
+            return Err(FusionNeutronActivationError::Invalid(
+                "aggregate induced-fission families require an explicit unrepresented-product boundary",
+            ));
+        }
         let mut bound_reactions = vec![false; model.diffusion().reactions().len()];
         for binding in spatial.bindings() {
             let bound = bound_reactions.get_mut(binding.diffusion_reaction).ok_or(
@@ -197,6 +206,7 @@ impl FusionNeutronActivationState {
             neutrons: spatial.neutrons().clone(),
             released: vec![[Accumulator::new(0.0); 3]; cells],
             nuclear_reaction_energy: vec![Accumulator::new(0.0); cells],
+            induced_precursor_energy: vec![Accumulator::new(0.0); cells],
             exported_precursor_energy: vec![Accumulator::new(0.0); cells],
         };
         kinetic.stored_energy_j()?;
@@ -488,7 +498,9 @@ impl FusionNeutronActivationState {
             kinetic: kinetic_step,
             nuclear_released: crate::channel_values(nuclear_totals),
             decay_neutrons: transfer.as_ref().map_or(0.0, |value| value.decay_neutrons),
-            decay_precursors: transfer.as_ref().map_or(0.0, |value| value.decay_precursors),
+            decay_precursors: transfer
+                .as_ref()
+                .map_or(0.0, |value| value.decay_precursors),
             transferred_decay_neutron_energy_j: transfer
                 .as_ref()
                 .map_or(0.0, |value| value.transferred_energy_j),
@@ -659,4 +671,6 @@ mod tests;
 mod precursor_tests;
 
 #[cfg(test)]
-pub(crate) use precursor_tests::{expected_history as precursor_expected_history, material_precursor_fixture};
+pub(crate) use precursor_tests::{
+    expected_history as precursor_expected_history, material_precursor_fixture,
+};
