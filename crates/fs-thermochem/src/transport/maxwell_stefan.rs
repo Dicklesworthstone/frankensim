@@ -16,6 +16,7 @@
 //! This L1 module owns constitutive algebra and scratch storage, never evolution.
 
 mod composition;
+mod factorization;
 
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
@@ -23,7 +24,7 @@ use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
 /// Hard species/work bound for the constitutive solve.
 pub const MAX_MAXWELL_STEFAN_SPECIES_V1: usize = 128;
 /// Fixed operation-tree version of the barycentric friction solve.
-pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 4;
+pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 5;
 
 /// Explicit checks on original constitutive equations and the mass frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,6 +188,7 @@ impl MaxwellStefanV1 {
             ratios: filled(n * n, 0.0)?,
             right: filled(n, 0.0)?,
             row_scales: filled(n, 0.0)?,
+            factorization: factorization::Factorization::new(n)?,
             driving: filled(n, 0.0)?,
             molar_flux: filled(n, 0.0)?,
             mass_flux: filled(n, 0.0)?,
@@ -205,9 +207,12 @@ impl MaxwellStefanV1 {
     /// a small driving force alone is never grounds to suppress a response.
     /// Exact-zero species are solved without numerical concentration floors;
     /// their entering fluxes still force the coupled positive-composition block.
-    /// Its solve costs O(k³) for k positive fractions, while complete source-data
-    /// validation and original-row checks remain O(n²). A binary mixture uses
-    /// its analytical two-species solution. Equal active pair diffusivities
+    /// For k positive fractions, an unequal-pair matrix costs O(k³) to factor
+    /// once; subsequent directions with exactly the same assembled matrix
+    /// reuse its factors in O(k²). New driving forces and complete source-data
+    /// admission and original-row checks are refreshed on every call. Changed
+    /// matrices refactor automatically, without approximate cache keys. A binary
+    /// mixture uses its analytical two-species solution. Equal active pair diffusivities
     /// likewise avoid the cubic solve: linear algebra in ordinary cases and
     /// pairwise evaluation for cancellation-prone components. Complete
     /// admission and original-row checks remain O(n²). Unequal pair data never
@@ -664,6 +669,7 @@ pub struct MaxwellStefanWorkspaceV1 {
     ratios: Vec<f64>,
     right: Vec<f64>,
     row_scales: Vec<f64>,
+    factorization: factorization::Factorization,
     driving: Vec<f64>,
     molar_flux: Vec<f64>,
     mass_flux: Vec<f64>,
@@ -685,7 +691,8 @@ impl MaxwellStefanWorkspaceV1 {
         ]
         .iter()
         .map(|values| values.capacity() * core::mem::size_of::<f64>())
-        .sum()
+        .sum::<usize>()
+            + self.factorization.workspace_bytes()
     }
 }
 
@@ -754,60 +761,6 @@ impl MaxwellStefanMolarEvaluationV1<'_> {
     pub const fn drag_entropy_production_w_m3_k(&self) -> Option<f64> {
         self.evaluation.drag_entropy_production_w_m3_k
     }
-}
-
-fn solve(
-    a: &mut [f64],
-    b: &mut [f64],
-    scales: &mut [f64],
-    n: usize,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), MaxwellStefanErrorV1> {
-    for i in 0..n {
-        scales[i] = a[i * n..(i + 1) * n]
-            .iter()
-            .map(|v| v.abs())
-            .fold(0.0, f64::max);
-        if !positive(scales[i]) {
-            return Err(MaxwellStefanErrorV1::SingularSystem);
-        }
-    }
-    for k in 0..n {
-        poll(cancelled)?;
-        let mut pivot = k;
-        for i in k + 1..n {
-            if a[i * n + k].abs() / scales[i] > a[pivot * n + k].abs() / scales[pivot] {
-                pivot = i;
-            }
-        }
-        if a[pivot * n + k] == 0.0 || !a[pivot * n + k].is_finite() {
-            return Err(MaxwellStefanErrorV1::SingularSystem);
-        }
-        if pivot != k {
-            for j in 0..n {
-                a.swap(k * n + j, pivot * n + j);
-            }
-            b.swap(k, pivot);
-            scales.swap(k, pivot);
-        }
-        for i in k + 1..n {
-            let factor = a[i * n + k] / a[k * n + k];
-            a[i * n + k] = 0.0;
-            for j in k + 1..n {
-                a[i * n + j] -= factor * a[k * n + j];
-            }
-            b[i] -= factor * b[k];
-        }
-    }
-    for i in (0..n).rev() {
-        poll(cancelled)?;
-        let rhs = b[i] - sum((i + 1..n).map(|j| a[i * n + j] * b[j]));
-        b[i] = rhs / a[i * n + i];
-        if !b[i].is_finite() {
-            return Err(MaxwellStefanErrorV1::Arithmetic("diffusion linear solve"));
-        }
-    }
-    Ok(())
 }
 
 fn drag_entropy(x: &[f64], z: &[f64], diffusion: &[f64], concentration: f64) -> Option<f64> {

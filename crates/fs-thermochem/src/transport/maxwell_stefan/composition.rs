@@ -7,7 +7,7 @@
 
 use super::{
     Frame, MAX_MAXWELL_STEFAN_SPECIES_V1, MaxwellStefanErrorV1, MaxwellStefanWorkspaceV1, poll,
-    positive, scaled_product_ratio, solve, sum,
+    positive, scaled_product_ratio, sum,
 };
 
 pub(super) fn evaluate(
@@ -156,8 +156,8 @@ pub(super) fn evaluate(
             ));
         }
     }
-    solve(
-        &mut work.matrix[..count * count],
+    work.factorization.solve(
+        &work.matrix[..count * count],
         &mut rhs[..count],
         &mut work.row_scales[..count],
         count,

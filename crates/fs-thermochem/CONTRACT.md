@@ -3090,6 +3090,32 @@ fs-blake3 dependencies passed. This is a focused module result, not a full
 workspace/DSR result or experimental transport qualification.
 
 
+### Reusing unequal-pair friction across spatial directions
+
+Evaluator version 5 retains a factorization of the exact assembled active
+friction and reference-frame matrix in the existing workspace. A changed
+dimension or any changed coefficient bit refactors it; neither source IDs nor
+approximate fingerprints can select stale factors. Each direction still admits
+the complete current source table and fractions, forms fresh absent-species
+responses and driving terms, rescales the published physical flux, and checks
+every original friction equation and the chosen frame.
+
+The first unequal-pair solve costs O(k^3) for k positive-composition species;
+an unchanged matrix then costs O(k^2) per driving direction. Row scaling,
+pivot choices and chronological right-hand-side arithmetic retain the original
+scalar elimination order. The two additional dense buffers and pivot indices
+are included in `workspace_bytes`; no successful evaluation allocates.
+Interrupted refactorization invalidates the cache before mutation, while an
+interrupted right-hand-side solve leaves complete factors reusable.
+
+Six focused native groups cover dense, exact-absent and positive-trace mixtures
+through 128 species in both frames; bitwise equality with fresh workspaces;
+composition, coefficient, frame and molecular-mass changes; current source
+admission and diffusivity rescaling; late pivots; cancellation/reuse; and
+capacity accounting. All 30 tests of the real constitutive module and genuine
+fs-qty/fs-blake3 dependencies passed. This is a focused native module result,
+not a full workspace gate or experimental transport qualification.
+
 ## Source-bound dilute-gas collision transport
 
 `transport::kinetic::KineticGasTransportV1` retains the exact original NASA
