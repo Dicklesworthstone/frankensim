@@ -7,12 +7,12 @@ use super::*;
 use crate::bdm::{edge_gauss_pub, eval_basis};
 use crate::ns::convection_edge_quadrature;
 
-pub(super) struct ScalarBasis {
+pub(in crate::ns) struct ScalarBasis {
     origin: [f64; 2],
     pub(super) gradient: [[f64; 2]; 3],
 }
 impl ScalarBasis {
-    pub(super) fn new(p: [[f64; 2]; 3], area: f64) -> Self {
+    pub(in crate::ns) fn new(p: [[f64; 2]; 3], area: f64) -> Self {
         Self {
             origin: p[0],
             gradient: core::array::from_fn(|i| {
@@ -24,7 +24,7 @@ impl ScalarBasis {
             }),
         }
     }
-    pub(super) fn value(&self, p: [f64; 2]) -> [f64; 3] {
+    pub(in crate::ns) fn value(&self, p: [f64; 2]) -> [f64; 3] {
         let d = [p[0] - self.origin[0], p[1] - self.origin[1]];
         let b = dot(self.gradient[1], d);
         let c = dot(self.gradient[2], d);

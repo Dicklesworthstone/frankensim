@@ -28,6 +28,9 @@ mod bounded_scalar;
 #[path = "incompressible_sgs/bounded_species.rs"]
 mod bounded_species;
 
+#[path = "incompressible_sgs/boussinesq.rs"]
+mod boussinesq;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::with_capacity(2 * mesh.edges.len());
     for edge in &mesh.edges {

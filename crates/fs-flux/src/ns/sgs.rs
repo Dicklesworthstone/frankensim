@@ -44,6 +44,12 @@ pub use newton::{PlanarSgsMixedNewtonStep, PlanarSgsNewtonStep};
 mod scalar;
 pub use scalar::{PlanarSgsScalarError, PlanarSgsScalarTransport};
 
+mod boussinesq;
+pub use boussinesq::{
+    PlanarBoussinesqConfig, PlanarSgsBoussinesqError, PlanarSgsBoussinesqStep,
+    PlanarSgsThermalControls, PlanarSgsThermalInput,
+};
+
 /// Admission, arithmetic or native nonlinear-solve refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanarSgsError {
