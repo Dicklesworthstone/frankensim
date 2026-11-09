@@ -473,6 +473,9 @@ fn same_response_source(a: DielectricResponse<'_>, b: DielectricResponse<'_>) ->
         }
         (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => a.same_source(b),
         (DielectricResponse::SilicaOptical(a), DielectricResponse::SilicaOptical(b)) => a.same_source(b),
+        (DielectricResponse::ThermoOpticOptical(a), DielectricResponse::ThermoOpticOptical(b)) => {
+            a.same_source(b)
+        }
         (DielectricResponse::MolecularGasOptical(a), DielectricResponse::MolecularGasOptical(b)) => {
             a.same_source(b)
         }

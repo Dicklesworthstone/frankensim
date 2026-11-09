@@ -1,5 +1,29 @@
 # fs-em contract
 
+## Original SCHOTT temperature response in Maxwell transport
+
+`ThermoOpticOpticalResponse::try_lossless` composes the shared material-owned
+TIE-19 law with an original transparent spectral glass reference. Native
+interfaces, coherent films, angular spectra and bulk/interface frequency
+dispersion use the same temperature-corrected absolute index. The material
+owner differentiates the reference-index prefactor and thermal pole analytically
+through ordinary wavelength curvature; no heated Sellmeier refit or frequency
+differencing occurs. Fixed-size wavelength queries allocate no storage.
+
+Actual temperature and SI permeability belong to a separate complete snapshot
+on the original immutable material card. Reference-state glass coefficients
+and catalog reference/coordinate atmospheres stay fixed. Rebinding always
+starts from that reference. Nonzero source absorption, unsupported coordinates,
+a wrong reference temperature, disjoint bands and unsupported derivative
+neighbourhoods refuse. Admitted phase-only table knots remain usable. The law
+supplies no thermal absorption, expansion, stress or causal transient reservoir.
+
+Three material curvature controls and four native Maxwell regression groups
+cover independent TIE-19 derivatives, source/domain ownership, changed Fresnel
+and film response, interface frequency derivatives, fixed reference air and
+multifrequency source continuity. The actual shared material's 16 tests passed
+in an isolated Rust compilation; the native EM integration tests remain unrun.
+
 ## Original temperature-resolved Corning 7980 refraction
 
 With `plane-wave`, `SilicaOpticalResponse::try_lossless` and

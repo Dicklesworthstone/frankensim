@@ -31,10 +31,12 @@ pub(in crate::plane_wave) mod frequency;
 mod gas;
 mod silica;
 mod spectral;
+mod thermo_optic;
 mod uniaxial;
 mod water;
 pub use gas::{MolecularGasOpticalResponse, MolecularGasOpticalSource};
 pub use silica::SilicaOpticalResponse;
+pub use thermo_optic::ThermoOpticOpticalResponse;
 pub use spectral::{
     RefreshedSpectralOpticalSource, SpectralOpticalResponse, SpectralOpticalSource,
 };

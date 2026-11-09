@@ -449,3 +449,104 @@ fn nonphysical_or_unrepresentable_response_refuses_without_clamping() {
         Err(ThermoOpticError::NumericalRange)
     );
 }
+
+#[test]
+fn spectral_curvature_matches_independent_decimal_reference_and_reference_bits() {
+    // 80-digit Decimal differentiation of the unfactored TIE-19 equation,
+    // with n0=1.51+0.04805/lambda_um² at lambda=1.55 um.
+    let value = law()
+        .refractive_index_jet(1550.0, 337.5, 1.53, 1.57, 0.12)
+        .unwrap();
+    close(value.phase_index, 1.530_211_993_158_215_9, 3e-16);
+    close(value.group_index, 1.570_279_391_067_132_8, 3e-16);
+    close(
+        value.scaled_wavelength_derivatives[0],
+        -0.040_067_397_908_916_87,
+        2e-16,
+    );
+    close(
+        value.scaled_wavelength_derivatives[1],
+        0.120_211_889_312_051_67,
+        3e-16,
+    );
+    let curvature = f64::from_bits((-0.12_f64).to_bits() + 1);
+    let reference = law()
+        .refractive_index_jet(1550.0, 300.0, 1.53, 1.57, curvature)
+        .unwrap();
+    assert_eq!(reference.phase_index.to_bits(), 1.53_f64.to_bits());
+    assert_eq!(reference.group_index.to_bits(), 1.57_f64.to_bits());
+    assert_eq!(
+        reference.scaled_wavelength_derivatives[1].to_bits(),
+        curvature.to_bits()
+    );
+}
+
+#[test]
+fn spectral_jet_matches_independent_temperature_equation_wavelength_sweeps() {
+    for temperature in [210.0, 300.0, 480.0] {
+        for wavelength_um in [0.85_f64, 1.55, 1.95] {
+            let dispersion = 0.04805 / wavelength_um.powi(2);
+            let value = law()
+                .refractive_index_jet(
+                    wavelength_um * 1000.0,
+                    temperature,
+                    1.51 + dispersion,
+                    1.51 + 3.0 * dispersion,
+                    6.0 * dispersion,
+                )
+                .unwrap();
+            let phase = |lambda: f64| {
+                let n = 1.51 + 0.04805 / lambda.powi(2);
+                let dt = temperature - 300.0;
+                n + (n * n - 1.0) / (2.0 * n)
+                    * (1.2e-5 * dt - 2e-8 * dt.powi(2)
+                        + 3e-11 * dt.powi(3)
+                        + (4e-6 * dt - 5e-9 * dt.powi(2)) / (lambda * lambda - 0.18_f64.powi(2)))
+            };
+            let h = wavelength_um * 1e-3;
+            let f = [-2.0, -1.0, 0.0, 1.0, 2.0].map(|k| phase(wavelength_um + k * h));
+            let first = wavelength_um * (f[0] - 8.0 * f[1] + 8.0 * f[3] - f[4]) / (12.0 * h);
+            let second = wavelength_um.powi(2)
+                * (-f[4] + 16.0 * f[3] - 30.0 * f[2] + 16.0 * f[1] - f[0])
+                / (12.0 * h * h);
+            close(value.phase_index, f[2], 5e-16);
+            close(value.scaled_wavelength_derivatives[0], first, 1e-9);
+            close(value.scaled_wavelength_derivatives[1], second, 2e-8);
+            close(value.group_index, value.phase_index - first, 1e-9);
+        }
+    }
+}
+
+#[test]
+fn spectral_curvature_keeps_inactive_poles_and_refuses_missing_support() {
+    let constant = SchottThermoOpticLaw::try_new(
+        ThermoOpticCoefficients {
+            d: COEFFICIENTS.d,
+            e: [0.0; 2],
+            resonance_um: 1.55,
+        },
+        300.0,
+        [200.0, 500.0],
+        [800.0, 2000.0],
+        SOURCE,
+    )
+    .unwrap();
+    let value = constant
+        .refractive_index_jet(1550.0, 420.0, 1.5, 1.5, 0.0)
+        .unwrap();
+    assert_eq!(value.scaled_wavelength_derivatives, [0.0; 2]);
+    for curvature in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            law().refractive_index_jet(1550.0, 337.5, 1.53, 1.57, curvature),
+            Err(ThermoOpticError::NumericalRange),
+        );
+    }
+    assert_eq!(
+        law().refractive_index_jet(1550.0, 500.01, 1.53, 1.57, 0.12),
+        Err(ThermoOpticError::TemperatureOutsideRange),
+    );
+    assert_eq!(
+        law().refractive_index_jet(2000.01, 337.5, 1.53, 1.57, 0.12),
+        Err(ThermoOpticError::WavelengthOutsideRange),
+    );
+}

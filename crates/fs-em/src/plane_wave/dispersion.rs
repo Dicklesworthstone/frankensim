@@ -88,6 +88,7 @@ impl<'a> DielectricResponse<'a> {
             Self::SpectralOptical(source) => Some(source.frequency_jet(omega)?),
             Self::WaterOptical(source) => Some(source.frequency_jet(omega)?),
             Self::SilicaOptical(source) => Some(source.frequency_jet(omega)?),
+            Self::ThermoOpticOptical(source) => Some(source.frequency_jet(omega)?),
             Self::MolecularGasOptical(source) => Some(source.frequency_jet(omega)?),
             _ => None,
         };

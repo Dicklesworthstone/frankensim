@@ -192,6 +192,86 @@ impl SchottThermoOpticLaw {
         self.identity
     }
 
+    /// Absolute spectral jet at fixed temperature from the original reference.
+    ///
+    /// The supplied curvature is `lambda² d²n0/dlambda²`, with ordinary
+    /// derivatives in any consistent wavelength unit. The reference phase,
+    /// group and curvature must describe the same absolute dispersion law.
+    /// All temperature terms differentiate the ORIGINAL reference prefactor.
+    /// No finite difference, resampling or heated-index refit is performed.
+    ///
+    /// # Errors
+    /// Applies the original phase/group domain and positivity checks and refuses
+    /// nonfinite reference or resulting curvature. A reference derivative must
+    /// actually exist; this method does not establish support across table cusps.
+    pub fn refractive_index_jet(
+        &self,
+        wavelength_nm: f64,
+        temperature_k: f64,
+        reference_phase_index: f64,
+        reference_group_index: f64,
+        reference_scaled_curvature: f64,
+    ) -> Result<ThermoOpticRefractiveIndexJet, ThermoOpticError> {
+        if !reference_scaled_curvature.is_finite() {
+            return Err(ThermoOpticError::NumericalRange);
+        }
+        let sample = self
+            .prepare(
+                wavelength_nm,
+                reference_phase_index,
+                Some(reference_group_index),
+            )?
+            .sample(temperature_k)?;
+        let group_index = sample
+            .group_index
+            .expect("reference group index was supplied");
+        let dt = temperature_k - self.reference_temperature_k;
+        let n0 = reference_phase_index;
+        let first0 = n0 - reference_group_index;
+        if dt == 0.0 {
+            return Ok(ThermoOpticRefractiveIndexJet {
+                phase_index: sample.phase_index,
+                group_index,
+                scaled_wavelength_derivatives: [first0, reference_scaled_curvature],
+            });
+        }
+
+        // n(T)=n0+A*F, A=(n0-1/n0)/2. Ordinary scaled derivatives:
+        // lambda²(A F)'' = A2 F + 2 A1 F1 + A F2.
+        let amplitude = (n0 - 1.0) * (0.5 + 0.5 / n0);
+        let first_ratio = first0 / n0;
+        let amplitude_first = 0.5 * first0 + 0.5 * first_ratio / n0;
+        let amplitude_second = 0.5 * reference_scaled_curvature
+            + (0.5 * (reference_scaled_curvature / n0) - first_ratio * first_ratio) / n0;
+        let mut pole = 0.0;
+        let mut ratio = 0.0;
+        if self.coefficients.e.iter().any(|value| *value != 0.0) {
+            let wavelength_um = wavelength_nm * 1e-3;
+            let difference = wavelength_um - self.coefficients.resonance_um;
+            let sum = wavelength_um + self.coefficients.resonance_um;
+            // prepare already admitted the same factored denominator.
+            let [e0, e1] = self.coefficients.e.map(|value| (value / sum) / difference);
+            pole = dt * (e0 + dt * e1);
+            ratio = (wavelength_um / difference) * (wavelength_um / sum);
+        }
+        let f = increment(self.coefficients.d, dt) + pole;
+        let f_first = -2.0 * ratio * pole;
+        let f_second = (8.0 * ratio - 2.0) * ratio * pole;
+        let curvature = reference_scaled_curvature
+            + amplitude_second * f
+            + 2.0 * amplitude_first * f_first
+            + amplitude * f_second;
+        let first = first0 + amplitude_first * f + amplitude * f_first;
+        if !first.is_finite() || !curvature.is_finite() {
+            return Err(ThermoOpticError::NumericalRange);
+        }
+        Ok(ThermoOpticRefractiveIndexJet {
+            phase_index: sample.phase_index,
+            group_index,
+            scaled_wavelength_derivatives: [first, curvature],
+        })
+    }
+
     /// Precompute a cubic temperature response for one vacuum wavelength.
     ///
     /// Both supplied indices describe the same original reference state. The
@@ -266,6 +346,15 @@ impl SchottThermoOpticLaw {
             group_coefficients,
         })
     }
+}
+
+/// Absolute dispersion at one temperature, retaining the original wavelength law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermoOpticRefractiveIndexJet {
+    pub phase_index: f64,
+    pub group_index: f64,
+    /// `[lambda dn/dlambda, lambda² d²n/dlambda²]`, ordinary scaled derivatives.
+    pub scaled_wavelength_derivatives: [f64; 2],
 }
 
 /// Allocation-free cubic response prepared at one original wavelength/state.

@@ -83,6 +83,7 @@ impl<'m> LossLaw<'m> {
             | DielectricResponse::SpectralOptical(_)
             | DielectricResponse::WaterOptical(_)
             | DielectricResponse::SilicaOptical(_)
+            | DielectricResponse::ThermoOpticOptical(_)
             | DielectricResponse::MolecularGasOptical(_)
             | DielectricResponse::IonizedGas(_) => {
                 return Err(bad(
