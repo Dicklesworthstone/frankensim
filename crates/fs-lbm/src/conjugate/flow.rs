@@ -42,6 +42,7 @@ pub use density_transport::{
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
+    AdaptiveBoundarySpeciesEnthalpyDiffusionStep, BoundarySpeciesEnthalpyAccuracy,
     BoundarySpeciesEnthalpyDiffusionStep, SpeciesBoundaryEnthalpyDiffusionReport,
     SpeciesBoundaryEnthalpyTransfer, BoundaryThermochemicalSpeciesDiffusionStep,
     GasSpeciesEnthalpyBoundarySource,

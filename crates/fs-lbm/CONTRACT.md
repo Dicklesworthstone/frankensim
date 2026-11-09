@@ -1432,6 +1432,26 @@ These are asymptotic temporal estimates, not certified spatial/model bounds.
 This is an isothermal common-D reservoir law, with no inferred selective
 membrane, sorption equilibrium, finite reservoir/solid storage or enthalpy flux.
 
+### Adaptive accuracy for caloric reservoir diffusion
+
+`diffuse_species_with_enthalpy_and_boundaries_adaptive` refines the original
+fixed-coefficient reservoir caloric transaction from the same initial stores.
+Every resolution retains the same source-owned face laws and constituent order.
+The original concentration criterion is joined by independent per-cell specific
+enthalpy and per-face species/energy integral criteria. Cell-energy differences
+use retained increments divided by the original carrier mass; face differences
+use retained signed and both gross-sign accounts. Their largest absolute
+difference is summed across faces and divided by three. Large formation data,
+opposing reservoirs and rounded scalar readbacks cannot erase those estimates.
+
+The accepted fine inventories and original receipts are unchanged. All trials
+share the cumulative pair-work budget; retained coarse fields and original
+per-cell/per-face accounts enter the storage allowance. These are asymptotic
+temporal estimates of the frozen model, not spatial, source-refresh or phase
+transition guarantees. The exact compensated-comparison helper passed its
+focused native test. Six analytic/refinement/refusal regression groups are
+authored but unexecuted because the dependency build is blocked before fs-lbm.
+
 ### Native open 3D local SGS momentum and heat
 
 `lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman

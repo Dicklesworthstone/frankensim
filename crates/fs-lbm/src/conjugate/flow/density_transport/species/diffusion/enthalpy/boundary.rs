@@ -5,6 +5,8 @@
 //! same energy convention as cell storage. This is diffusive exchange on a
 //! fixed carrier, not bulk inflow or a second advective enthalpy deposit.
 
+pub mod adaptive;
+
 use super::super::boundary::{
     ReservoirObserver, ReservoirTransfers, SpeciesBoundaryDiffusionReport, SpeciesDiffusionBoundary,
 };

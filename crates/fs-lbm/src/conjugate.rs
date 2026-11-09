@@ -177,6 +177,7 @@ pub use flow::{
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
+    AdaptiveBoundarySpeciesEnthalpyDiffusionStep, BoundarySpeciesEnthalpyAccuracy,
     BoundarySpeciesEnthalpyDiffusionStep, SpeciesBoundaryEnthalpyDiffusionReport,
     SpeciesBoundaryEnthalpyTransfer, BoundaryThermochemicalSpeciesDiffusionStep,
     GasSpeciesEnthalpyBoundarySource,

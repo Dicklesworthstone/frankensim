@@ -1436,3 +1436,6 @@ mod enthalpy_adaptive;
 
 #[path = "tests/enthalpy_boundary.rs"]
 mod enthalpy_boundary;
+
+#[path = "tests/enthalpy_boundary_adaptive.rs"]
+mod enthalpy_boundary_adaptive;
