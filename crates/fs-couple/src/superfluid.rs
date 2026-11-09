@@ -5,6 +5,9 @@
 //! contacts to that same endpoint, then accepts those joules through its own
 //! caloric laws. Both histories publish only after every source, energy and
 //! cancellation check succeeds. Retrying a refused step deposits no heat.
+//! Physical heat includes mutual friction, normal-wall shear and configured
+//! longitudinal viscosity. Fourier conduction's loss of wave availability is
+//! already accounted for by the channel and is never deposited as extra heat.
 //!
 //! This is a first-order endpoint heat split. It does not change the channel's
 //! frozen thermodynamic reference or fold finite thermal-cell temperatures into
@@ -56,7 +59,8 @@ pub struct FrictionHeatControls {
 /// Both unchanged owner reports and the one internal energy transfer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatReport {
-    /// Original channel step, including mutual-friction and normal-wall debits.
+    /// Original channel step, including all physical viscous/friction debits
+    /// and the separate conductive availability account.
     pub channel: ChannelStep,
     /// Original thermal march, excluding the endpoint friction deposit.
     pub thermal_march: EnergyAudit,
@@ -66,6 +70,8 @@ pub struct FrictionHeatReport {
     /// Deposited joules minus the original channel's total dissipative debit [J].
     pub transfer_residual_j: f64,
     /// Sum of the original wave, march, heat-intake and transfer residuals [J].
+    /// The wave residual includes conductive availability destruction; this is
+    /// not a claim that wave availability plus caloric energy is conserved.
     pub combined_storage_residual_j: f64,
 }
 
@@ -274,7 +280,8 @@ fn prepare_heat<'a>(
     )?;
     let transfer_residual_j = heat_intake.external_heat_j - wave.dissipated_heat_j();
     // Preserve the owners' cell-relative residuals. The wave balance already
-    // accounts for any external force work; friction crosses this interface once.
+    // accounts for external force work and conductive availability loss; only
+    // physical viscous/friction heat crosses this interface once.
     // Subtracting large absolute thermal energies can erase a small heat deposit.
     let combined_storage_residual_j = wave.wave_balance_defect_j
         + thermal_march.residual_j

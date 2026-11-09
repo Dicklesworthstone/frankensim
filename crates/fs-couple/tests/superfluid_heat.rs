@@ -7,9 +7,10 @@ use fs_couple::superfluid::{
     advance_forced_closed_friction_heat,
 };
 use fs_duct::superfluid::{
-    BodyForce, CellSample, ComponentForceDensity, FaceSample, LinearizationLimits, MutualFriction,
-    TwoFluidChannel,
+    BodyForce, CellSample, ClosedTransportControls, ComponentForceDensity, FaceSample,
+    LinearizationLimits, MutualFriction, TwoFluidChannel,
 };
+use fs_material::superfluid::transport::{LongitudinalTransport, SecondViscosities};
 use fs_material::superfluid::{NormalViscousWall, TwoFluidProperties, TwoFluidState};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -154,10 +155,13 @@ struct Snapshot {
     wave_energy: f64,
     cumulative_heat: f64,
     cumulative_viscous_heat: f64,
+    cumulative_longitudinal_heat: f64,
+    cumulative_conductive_loss: f64,
     cells: Vec<CellSample>,
     faces: Vec<FaceSample>,
     heat: Vec<f64>,
     viscous_heat: Vec<f64>,
+    longitudinal_heat: Option<Vec<f64>>,
     thermal_time: f64,
     thermal_cells: Vec<DepositedCell>,
 }
@@ -168,6 +172,8 @@ fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Sn
         wave_energy: channel.wave_energy_j().unwrap(),
         cumulative_heat: channel.cumulative_mutual_friction_heat_j(),
         cumulative_viscous_heat: channel.cumulative_normal_viscous_heat_j(),
+        cumulative_longitudinal_heat: channel.cumulative_longitudinal_viscous_heat_j(),
+        cumulative_conductive_loss: channel.cumulative_conductive_availability_loss_j(),
         cells: (0..channel.cells())
             .map(|i| channel.cell(i).unwrap())
             .collect(),
@@ -176,8 +182,130 @@ fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Sn
             .collect(),
         heat: channel.last_mutual_friction_heat_j().to_vec(),
         viscous_heat: channel.last_normal_viscous_heat_j().to_vec(),
+        longitudinal_heat: channel
+            .last_longitudinal_viscous_heat_j()
+            .map(<[f64]>::to_vec),
         thermal_time: thermal.time_s(),
         thermal_cells: thermal.cells().values().cloned().collect(),
+    }
+}
+
+fn channel_with_bulk_transport() -> TwoFluidChannel {
+    let mut flow = channel();
+    let normal: Vec<_> = (0..=N)
+        .map(|i| flow.face(i).unwrap().normal_velocity_m_s)
+        .collect();
+    let superfluid: Vec<_> = (0..=N)
+        .map(|i| flow.face(i).unwrap().superfluid_velocity_m_s)
+        .collect();
+    flow.initialize(
+        &[0.0; N],
+        &[0.004, 0.002, -0.002, -0.004],
+        &normal,
+        &superfluid,
+        || false,
+    )
+    .unwrap();
+    let transport = LongitudinalTransport::try_new(
+        *flow.material(),
+        SecondViscosities::try_new(0.02, 0.2, 0.06).unwrap(),
+        4.0,
+    )
+    .unwrap();
+    flow.configure_closed_transport(transport, ClosedTransportControls::default(), || false)
+        .unwrap();
+    flow
+}
+
+#[test]
+fn longitudinal_heat_reaches_native_calorics_once_and_conductive_loss_stays_separate() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 2.0,
+    };
+    let mut flow = channel_with_bulk_transport();
+    let mut heat = thermal(&law, 0.0);
+    let ids = destinations();
+    let dt = 0.2 * flow.maximum_step_s();
+    let initial_wave = flow.wave_energy_j().unwrap();
+    let mut physical_heat = 0.0;
+    let mut conductive_loss = 0.0;
+    for _ in 0..4 {
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| heat.cells()[id].specific_h_j_kg)
+            .collect();
+        let report = advance_closed_friction_heat(
+            &mut flow,
+            &mut heat,
+            &ids,
+            dt,
+            MutualFriction::None,
+            controls(),
+            || false,
+        )
+        .unwrap();
+        assert!(report.channel.longitudinal_viscous_heat_j > 0.0);
+        assert!(report.channel.conductive_availability_loss_j > 0.0);
+        assert_eq!(report.channel.mutual_friction_heat_j, 0.0);
+        assert_eq!(report.channel.normal_viscous_heat_j, 0.0);
+        physical_heat += report.channel.longitudinal_viscous_heat_j;
+        conductive_loss += report.channel.conductive_availability_loss_j;
+        near(
+            report.heat_intake.external_heat_j,
+            report.channel.longitudinal_viscous_heat_j,
+            1e-4,
+        );
+        near(report.combined_storage_residual_j, 0.0, 1e-4);
+        for (i, id) in ids.iter().enumerate() {
+            near(
+                MASS * (heat.cells()[id].specific_h_j_kg - before[i]),
+                flow.last_longitudinal_viscous_heat_j().unwrap()[i],
+                1e-4,
+            );
+        }
+        near(heat.energy_j(), physical_heat, 1e-4);
+        near(
+            initial_wave - flow.wave_energy_j().unwrap(),
+            physical_heat + conductive_loss,
+            1e-4,
+        );
+        near(flow.cumulative_dissipated_heat_j(), physical_heat, 1e-4);
+        near(
+            flow.cumulative_conductive_availability_loss_j(),
+            conductive_loss,
+            1e-4,
+        );
+        assert!(heat.energy_j() < physical_heat + 0.5 * conductive_loss);
+        assert_eq!(heat.time_s(), flow.time_s());
+        assert!(heat.uses_material_law(MaterialId(1), &law));
+    }
+}
+
+#[test]
+fn longitudinal_heat_refusal_preserves_wave_conduction_and_native_thermal_histories() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 0.0,
+    };
+    let mut flow = channel_with_bulk_transport();
+    let mut heat = thermal(&law, 0.0);
+    let before = snapshot(&flow, &heat);
+    let dt = 0.2 * flow.maximum_step_s();
+    for _ in 0..2 {
+        assert!(matches!(
+            advance_closed_friction_heat(
+                &mut flow,
+                &mut heat,
+                &destinations(),
+                dt,
+                MutualFriction::None,
+                controls(),
+                || false,
+            ),
+            Err(FrictionHeatError::Thermal(DepositionError::MaterialDomain))
+        ));
+        assert_eq!(snapshot(&flow, &heat), before);
     }
 }
 

@@ -8446,6 +8446,23 @@ histories reusable. Tests compare two consecutive beat-heated intervals against
 independent physical-time integration and nonlinear contact/radiation balances,
 and cover evolving-source refusal, late heat failure, cancellation and retry.
 
+## Closed two-fluid bulk loss on the native thermal timeline
+
+With `superfluid`, `advance_closed_friction_heat` also routes the original
+channel's configured longitudinal shear/second-viscosity heat to its declared
+`DepositionSimulation` cells. It uses the existing per-cell physical Joule
+intake exactly once per accepted interval, preserving the native caloric law,
+timeline and source accounts. Fourier conduction destroys quadratic wave
+availability while redistributing thermal energy; its separate channel loss is
+included in the channel balance and is never deposited as additional heat.
+
+The composition remains a frozen-reference, first-order endpoint heat split;
+it does not turn the linear perturbation temperature into absolute caloric
+storage or relinearize material coefficients. Source-domain refusal and late
+cancellation preserve both accepted owners and all heat/conduction histories.
+`tests/superfluid_heat.rs` checks repeated physical bulk-heat intake, distinct
+conductive availability loss, native-law retention and repeated thermal refusal.
+
 ## Transient porous absorption on native acoustic and thermal cells
 
 `porous_heating::transient::TransientPorousHeating` binds each complete original
