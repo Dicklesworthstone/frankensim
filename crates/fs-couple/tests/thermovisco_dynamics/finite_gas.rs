@@ -11,6 +11,9 @@ use fs_material::thermochemical_gas::{
 #[path = "finite_gas/entropy.rs"]
 mod entropy;
 
+#[path = "finite_gas/window.rs"]
+mod window;
+
 fn gas(temperature_k: f64, volume_m3: f64) -> IsochoricGasParcel {
     gas_with_conductivity(temperature_k, volume_m3, 0.025)
 }

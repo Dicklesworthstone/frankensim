@@ -10,6 +10,9 @@
 mod entropy;
 pub use entropy::FiniteGasEntropyReport;
 
+/// Error-controlled physical-time windows on the same finite gas and enthalpy body.
+pub mod window;
+
 /// Finite water condensation/evaporation in the same reciprocal thermal solve.
 pub mod condensation;
 
@@ -38,6 +41,9 @@ use fs_material::{
 
 /// Original thermal, gas or bounded-feedback refusal. No piston is introduced.
 pub type Error = ThermalPistonError<ConductionError>;
+
+const EMPTY_HEAT_INTERVAL: &str =
+    "authored exchange cannot keep gas heat inside its caloric/increment bounds";
 
 /// Original coupled-thermal refusal or the caller's concrete convection law.
 #[derive(Debug)]
@@ -443,9 +449,7 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
         let lower = self.exchange.heat_bracket_j[0].max(supported[0]);
         let upper = self.exchange.heat_bracket_j[1].min(supported[1]);
         if supported[0] > supported[1] || lower > upper {
-            return Err(Error::Invalid(
-                "authored exchange cannot keep gas heat inside its caloric/increment bounds",
-            ));
+            return Err(Error::Invalid(EMPTY_HEAT_INTERVAL));
         }
         Ok([lower, upper])
     }

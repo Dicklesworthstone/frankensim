@@ -8664,3 +8664,31 @@ facades. Three full duct-chain/IF97 tests remain excluded. The example's updated
 pressure-sweep function, including a gas-diffusion spectrum and separate heating,
 compiled and ran against explicit liquid coefficients. Full IF97 example and
 Cargo/DSR remain unverified without the missing constellation siblings and tools.
+
+## Adaptive finite gas and enthalpy-body windows
+
+`FiniteGasThermalEnvironment::advance_adaptive` and
+`advance_adaptive_with_convection` continue the original reciprocal thermal
+transaction across a complete physical-time window. One native backward-Euler
+interval is compared with two native half intervals; only the fine states and
+their heat/entropy accounts are accepted. The existing first-order thermal
+controller compares body enthalpy, liquid fraction, both temperatures and native
+fixed-density gas internal energy. Formation references never scale time error.
+
+Prescribed body and gas heats are total window energies delivered at constant
+power. Cumulative source endpoints apportion them once through all accepted
+intervals. Rejected comparisons supply no physical heat or elapsed time.
+Source-domain failures propagate; only the existing exchange bracket/increment
+admission can trigger subdivision. Every native interval spends the shared
+attempt budget and retains all inner work limits. Final original body/gas
+storage, radiation, source apportionment and summed absolute local energy
+defects must pass a separate whole-window joule budget before publication.
+
+Compact accepted history retains convection sources and original entropy
+accounts without copying a gas catalog per sample. Fixed geometry, mass and
+composition remain the native owners' assumptions. This is local time-error
+control, not a global-error or unconditional-convergence certificate. The
+`thermovisco_dynamics::finite_gas::window` regressions specify three-level
+two-capacity decay, total-source ownership, external radiation, latent-only
+accuracy control and atomic budget/source/cancellation refusal. They are
+source/formatter checked; native execution remains unverified in this session.
