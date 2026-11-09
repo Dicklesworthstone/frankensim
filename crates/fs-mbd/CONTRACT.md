@@ -34,6 +34,19 @@ slip cases in `tests/tangential_friction.rs` and `tests/hertz_friction.rs` compa
 rest-frame history, traction, recoil and heat under common tangential drift
 using exactly representable impulses and an independent analytic Hertz loss.
 
+`PointKinematics` also retains `relative_point_velocity_world`, the body-coordinate
+rate rotated into world axes. Body-fixed material queries initialize it to zero;
+`PreparedRigidPointMotion::relative_point_motion` records the prescribed rate
+without changing the carrier COM or angular velocity. Both relative-velocity
+queries include this component before their final rounding. The moving-point
+absolute query uses the same reduction, so cancellation between translation and
+prescribed motion does not erase a smaller rotational contribution. Fixed-point
+queries retain their original arithmetic path. G1/G3 cases in
+`tests/relative_point_motion.rs` check analytic rotated-coordinate derivatives,
+relative motion between two points and a support, common-translation invariance,
+and cancellation in the absolute query. A migrating geometric location remains
+distinct from either body's material surface velocity in a contact law.
+
 ## Physical torque products
 
 The native `Vec3::cross` compensates both floating-point product tails before

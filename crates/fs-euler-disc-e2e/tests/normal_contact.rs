@@ -49,6 +49,7 @@ fn point(point_world: Vec3) -> PointKinematics {
         center_of_mass_velocity_world: Vec3::ZERO,
         angular_velocity_body: Vec3::ZERO,
         angular_velocity_world: Vec3::ZERO,
+        relative_point_velocity_world: Vec3::ZERO,
         point_velocity_world: Vec3::ZERO,
     }
 }

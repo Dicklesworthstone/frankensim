@@ -620,6 +620,7 @@ pub fn compute_moving_one_mode_patch_kinematics(
         center_of_mass_velocity_world: bridge.base_contact_velocity_world_m_per_s,
         angular_velocity_body: Vec3::ZERO,
         angular_velocity_world: Vec3::ZERO,
+        relative_point_velocity_world: Vec3::ZERO,
         point_velocity_world: bridge.base_contact_velocity_world_m_per_s,
     };
     let (first_velocity, second_velocity, first_angular, second_angular) =

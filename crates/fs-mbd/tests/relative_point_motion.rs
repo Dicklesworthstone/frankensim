@@ -59,6 +59,13 @@ fn native_velocity_and_acceleration_match_differentiated_rotating_coordinates() 
                 dd.z,
             )).add(Vec3::new(0.3, -0.2, 0.5));
             close(components(point.kinematics.point_velocity_world), components(v));
+            let rigid = carrier.point_motion(r).unwrap().kinematics;
+            close(components(point.kinematics.relative_velocity_world(rigid).unwrap()),
+                components(rz(theta, d)));
+            close(components(point.kinematics.velocity_relative_to_world(
+                Vec3::new(7.0, -4.0, 2.0)).unwrap()),
+                components(rz(theta, Vec3::new(
+                    d.x - omega * r.y, d.y + omega * r.x, d.z))));
             close(components(point.point_acceleration_world), components(a));
             close(components(point.kinematics.point_world),
                 components(Vec3::new(2.0, -1.0, 0.5).add(rz(theta, r))));
@@ -135,17 +142,120 @@ fn relative_motion_does_not_invent_centripetal_acceleration_from_slip() {
 }
 
 #[test]
+fn relative_queries_retain_coordinate_motion_under_common_translation() {
+    let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    for boost in [0.0, 2.0_f64.powi(60)] {
+        let translation = Vec3::new(boost, -boost, boost);
+        let state =
+            RigidBodyState::new(Pose::identity(), translation, Vec3::new(0.0, 0.0, 2.0)).unwrap();
+        let carrier = RigidBodyIntegrator::new(Gravity::new(Vec3::ZERO).unwrap())
+            .prepare_point_motion(state, properties, Wrench::default())
+            .unwrap();
+        let arm_a = Vec3::new(1.0, 0.0, 0.0);
+        let a = carrier
+            .relative_point_motion(arm_a, Vec3::new(0.0, 3.0, -0.5), Vec3::ZERO)
+            .unwrap()
+            .kinematics;
+        let b = carrier
+            .relative_point_motion(
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(4.0, 0.0, 0.25),
+                Vec3::ZERO,
+            )
+            .unwrap()
+            .kinematics;
+        let rigid = carrier.point_motion(arm_a).unwrap().kinematics;
+        // d(Rz(2t) * r(t))/dt: a has rotational velocity [0,2,0],
+        // b has [-2,0,0], before either authored coordinate rate is added.
+        assert_eq!(
+            a.velocity_relative_to_world(translation).unwrap(),
+            Vec3::new(0.0, 5.0, -0.5)
+        );
+        assert_eq!(
+            b.velocity_relative_to_world(translation).unwrap(),
+            Vec3::new(2.0, 0.0, 0.25)
+        );
+        assert_eq!(
+            a.relative_velocity_world(b).unwrap(),
+            Vec3::new(-2.0, 5.0, -0.75)
+        );
+        assert_eq!(
+            b.relative_velocity_world(a).unwrap(),
+            Vec3::new(2.0, -5.0, 0.75)
+        );
+        assert_eq!(
+            a.relative_velocity_world(rigid).unwrap(),
+            Vec3::new(0.0, 3.0, -0.5)
+        );
+        assert_eq!(a.relative_velocity_world(a).unwrap(), Vec3::ZERO);
+        assert_eq!(a.center_of_mass_velocity_world, translation);
+        assert_eq!(a.angular_velocity_world, Vec3::new(0.0, 0.0, 2.0));
+        assert_eq!(rigid.relative_point_velocity_world, Vec3::ZERO);
+        if boost != 0.0 {
+            // Absolute f64 velocities cannot represent the small terms here.
+            assert_eq!(a.point_velocity_world, translation);
+            assert_eq!(b.point_velocity_world, translation);
+        }
+    }
+}
+
+#[test]
+fn absolute_query_retains_spin_when_coordinate_motion_cancels_translation() {
+    let boost = 2.0_f64.powi(60);
+    let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let state = RigidBodyState::new(
+        Pose::identity(),
+        Vec3::new(boost, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let carrier = RigidBodyIntegrator::new(Gravity::new(Vec3::ZERO).unwrap())
+        .prepare_point_motion(state, properties, Wrench::default())
+        .unwrap();
+    let point = carrier
+        .relative_point_motion(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(-boost, 0.0, 0.0),
+            Vec3::ZERO,
+        )
+        .unwrap()
+        .kinematics;
+    assert_eq!(point.point_velocity_world, Vec3::new(1.0, 0.0, 0.0));
+    assert_eq!(
+        point.velocity_relative_to_world(Vec3::ZERO).unwrap(),
+        point.point_velocity_world
+    );
+}
+
+#[test]
 fn invalid_relative_inputs_and_overflow_refuse_without_changing_native_snapshot() {
     let carrier = prepared(0.0, 2.0, 0.0);
     let before = carrier;
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(carrier.relative_point_motion(Vec3::ZERO, Vec3::new(bad, 0.0, 0.0),
-            Vec3::ZERO).is_err());
-        assert!(carrier.relative_point_motion(Vec3::ZERO, Vec3::ZERO,
-            Vec3::new(0.0, bad, 0.0)).is_err());
+        assert!(
+            carrier
+                .relative_point_motion(Vec3::ZERO, Vec3::new(bad, 0.0, 0.0), Vec3::ZERO)
+                .is_err()
+        );
+        assert!(
+            carrier
+                .relative_point_motion(Vec3::ZERO, Vec3::ZERO, Vec3::new(0.0, bad, 0.0))
+                .is_err()
+        );
     }
-    assert!(carrier.relative_point_motion(Vec3::ZERO, Vec3::new(1e308, 0.0, 0.0),
-        Vec3::ZERO).is_err());
+    assert!(
+        carrier
+            .relative_point_motion(Vec3::ZERO, Vec3::new(1e308, 0.0, 0.0), Vec3::ZERO)
+            .is_err()
+    );
     assert_eq!(carrier, before);
     assert!(carrier.point_motion(Vec3::ZERO).is_ok());
+    let valid = carrier.point_motion(Vec3::ZERO).unwrap().kinematics;
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid = valid;
+        invalid.relative_point_velocity_world = Vec3::new(0.0, bad, 0.0);
+        assert!(invalid.velocity_relative_to_world(Vec3::ZERO).is_err());
+        assert!(invalid.relative_velocity_world(valid).is_err());
+        assert!(valid.relative_velocity_world(invalid).is_err());
+    }
 }

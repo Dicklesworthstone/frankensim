@@ -38,8 +38,19 @@ impl PreparedRigidPointMotion {
         let rotation = self.pose().orientation();
         let slip = rotation.rotate_body_to_world(velocity_body);
         let relative_acceleration = rotation.rotate_body_to_world(acceleration_body);
-        let coriolis = point.kinematics.angular_velocity_world.cross(slip).scale(2.0);
-        point.kinematics.point_velocity_world = point.kinematics.point_velocity_world.add(slip);
+        let coriolis = point
+            .kinematics
+            .angular_velocity_world
+            .cross(slip)
+            .scale(2.0);
+        point.kinematics.relative_point_velocity_world = slip;
+        // Preserve the coordinate-motion term in the same decomposition used
+        // by relative point queries. Combining it with an already rounded
+        // absolute velocity could discard motion before the carrier cancels.
+        if slip != Vec3::ZERO {
+            point.kinematics.point_velocity_world =
+                point.kinematics.velocity_relative_to_world(Vec3::ZERO)?;
+        }
         point.point_acceleration_world = point
             .point_acceleration_world
             .add(coriolis)

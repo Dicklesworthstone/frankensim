@@ -120,6 +120,7 @@ fn nonzero_arm_patch_kinematics() -> PatchKinematics {
             .sub(angular_velocity_world.cross(arm_world_m)),
         angular_velocity_body: angular_velocity_world,
         angular_velocity_world,
+        relative_point_velocity_world: Vec3::ZERO,
         point_velocity_world,
     };
     kinematics.base_point = PointKinematics {
@@ -129,6 +130,7 @@ fn nonzero_arm_patch_kinematics() -> PatchKinematics {
         center_of_mass_velocity_world: Vec3::new(9.0, 0.0, 0.0),
         angular_velocity_body: Vec3::ZERO,
         angular_velocity_world: Vec3::ZERO,
+        relative_point_velocity_world: Vec3::ZERO,
         point_velocity_world: Vec3::new(9.0, 0.0, 0.0),
     };
     kinematics

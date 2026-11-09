@@ -919,6 +919,7 @@ impl RigidBodyState {
             center_of_mass_velocity_world,
             angular_velocity_body,
             angular_velocity_world,
+            relative_point_velocity_world: Vec3::ZERO,
             point_velocity_world,
         })
     }
@@ -1311,33 +1312,41 @@ pub struct PointKinematics {
     pub angular_velocity_body: Vec3,
     /// Angular velocity in the world frame.
     pub angular_velocity_world: Vec3,
-    /// Material-point velocity in the world frame.
+    /// Point motion relative to its carrier, expressed in the world frame.
+    ///
+    /// This is `R * arm_dot_body`, where the derivative is taken in rotating
+    /// body coordinates. It is zero for a body-fixed material point. Keeping
+    /// this term separate preserves prescribed slip under a common translation
+    /// without changing the carrier's centre-of-mass or angular velocity.
+    pub relative_point_velocity_world: Vec3,
+    /// Point velocity in the world frame, including relative coordinate motion.
     pub point_velocity_world: Vec3,
 }
 
 impl PointKinematics {
-    /// Velocity of this material point relative to another dynamic point [m/s].
+    /// Velocity of this point relative to another dynamic point [m/s].
     ///
     /// Common centre-of-mass motion cancels before adding either rotational
     /// contribution. Subtracting the rounded absolute point velocities can
     /// erase real slip or approach when both bodies translate rapidly.
-    /// The original COM, angular velocity and arm components remain the input;
-    /// no tolerance suppresses a small physical relative motion.
+    /// The original COM, angular velocity, arm and relative-coordinate velocity
+    /// remain the input; no tolerance suppresses a small physical relative motion.
     pub fn relative_velocity_world(self, other: Self) -> Result<Vec3, DynamicsError> {
         self.relative_velocity_parts(
             other.center_of_mass_velocity_world,
             other.angular_velocity_world,
             other.arm_world,
+            other.relative_point_velocity_world,
         )
     }
 
-    /// Material-point velocity relative to an explicitly translating support.
+    /// Point velocity relative to an explicitly translating support.
     ///
-    /// This retains the same rotational contribution as
+    /// This retains the same rotational and relative-coordinate contributions as
     /// [`Self::relative_velocity_world`], even when adding it to the absolute
     /// COM velocity would round it away. It does not infer a support reaction.
     pub fn velocity_relative_to_world(self, velocity_world: Vec3) -> Result<Vec3, DynamicsError> {
-        self.relative_velocity_parts(velocity_world, Vec3::ZERO, Vec3::ZERO)
+        self.relative_velocity_parts(velocity_world, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO)
     }
 
     fn relative_velocity_parts(
@@ -1345,14 +1354,17 @@ impl PointKinematics {
         other_com: Vec3,
         other_omega: Vec3,
         other_arm: Vec3,
+        other_relative: Vec3,
     ) -> Result<Vec3, DynamicsError> {
         if [
             self.center_of_mass_velocity_world,
             self.angular_velocity_world,
             self.arm_world,
+            self.relative_point_velocity_world,
             other_com,
             other_omega,
             other_arm,
+            other_relative,
         ]
         .iter()
         .any(|value| !value.is_finite())
@@ -1366,16 +1378,21 @@ impl PointKinematics {
         let omega_b = wide(other_omega);
         let arm_a = wide(self.arm_world);
         let arm_b = wide(other_arm);
+        let relative_a = wide(self.relative_point_velocity_world);
+        let relative_b = wide(other_relative);
+        let has_relative_motion =
+            self.relative_point_velocity_world != Vec3::ZERO || other_relative != Vec3::ZERO;
         let mut result = [0.0; 3];
         for i in 0..3 {
             let j = (i + 1) % 3;
             let k = (i + 2) % 3;
             let rotation_a = omega_a[j] * arm_a[k] - omega_a[k] * arm_a[j];
             let rotation_b = omega_b[j] * arm_b[k] - omega_b[k] * arm_b[j];
-            result[i] = finite_derived(
-                (a[i] - b[i] + rotation_a - rotation_b).to_f64(),
-                "relative_point_velocity_world",
-            )?;
+            let mut velocity = a[i] - b[i] + rotation_a - rotation_b;
+            if has_relative_motion {
+                velocity = velocity + (relative_a[i] - relative_b[i]);
+            }
+            result[i] = finite_derived(velocity.to_f64(), "relative_point_velocity_world")?;
         }
         Ok(Vec3::new(result[0], result[1], result[2]))
     }

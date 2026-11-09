@@ -172,6 +172,7 @@ impl PreparedRigidPointMotion {
                 center_of_mass_velocity_world: self.center_of_mass_velocity_world,
                 angular_velocity_body: self.angular_velocity_body,
                 angular_velocity_world: self.angular_velocity_world,
+                relative_point_velocity_world: Vec3::ZERO,
                 point_velocity_world,
             },
             center_of_mass_acceleration_world: self.center_of_mass_acceleration_world,
