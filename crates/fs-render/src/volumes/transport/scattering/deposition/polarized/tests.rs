@@ -453,3 +453,5 @@ fn g0_invalid_stokes_and_scalar_scattering_refuse_before_publishing_heat() {
         );
     });
 }
+
+mod continuous;

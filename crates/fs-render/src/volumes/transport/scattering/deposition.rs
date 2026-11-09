@@ -401,6 +401,7 @@ fn deposit_prepared_sampled<const N: usize>(
                     &mut || random.next_f64(),
                     &mut capture,
                     history_momentum.as_mut(),
+                    &mut phases[lane].clone(),
                 ),
             }?;
             if let Some(tally) = history_momentum {

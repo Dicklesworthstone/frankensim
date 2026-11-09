@@ -49,6 +49,7 @@ impl ScatteringGrid<'_> {
             incident_stokes_w,
             config,
             None,
+            AbsorptionEstimator::Collision,
         )
     }
 
@@ -76,6 +77,70 @@ impl ScatteringGrid<'_> {
             incident_stokes_w,
             config,
             Some(&mut tallies),
+            AbsorptionEstimator::Collision,
+        )?;
+        let momentum = tallies.finish(&mut || checkpoint(cx), &power, frame.direction())?;
+        Ok(ScatteringMomentumDeposition { power, momentum })
+    }
+
+    /// Continuous isotropic absorption under a full-Stokes incident source.
+    ///
+    /// Admitted molecular/spherical phase laws have polarization-independent
+    /// integrated scattering. Their scattering-only flights therefore share the
+    /// original continuous-absorption owner, while the matched angular sampler
+    /// carries normalized Stokes state through every actual scattering event.
+    /// Positive Beer loss is deposited along each traversed native segment,
+    /// including flights without a collision; no albedo debit is applied again.
+    /// This does not introduce dichroism, aligned particles or optical spin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_polarized_continuous_absorption_power<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        frame: PolarizationFrame,
+        wavelengths_nm: &[f64; N],
+        incident_stokes_w: &[Stokes; N],
+        config: PolarizedDepositionConfig,
+    ) -> Result<ScatteringPowerDeposition<N>, PolarizedScatteringError> {
+        self.deposit_polarized_observed(
+            cx,
+            origin,
+            frame,
+            wavelengths_nm,
+            incident_stokes_w,
+            config,
+            None,
+            AbsorptionEstimator::Continuous,
+        )
+    }
+
+    /// Continuous heat and radiation force from the same polarized histories.
+    ///
+    /// Segment absorption transfers momentum along the incident ray; each
+    /// accepted polarized phase sample transfers its actual elastic recoil.
+    /// A capped scattering event retains the sampled outgoing momentum as
+    /// unresolved radiation. Native work/cell limits, bounded phase proposals,
+    /// cancellation and representability refusals apply to the complete result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_polarized_continuous_absorption_momentum<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        frame: PolarizationFrame,
+        wavelengths_nm: &[f64; N],
+        incident_stokes_w: &[Stokes; N],
+        config: PolarizedDepositionConfig,
+    ) -> Result<ScatteringMomentumDeposition<N>, PolarizedScatteringError> {
+        let mut tallies = MomentumTallies::new(config.transport.max_deposition_cells);
+        let power = self.deposit_polarized_observed(
+            cx,
+            origin,
+            frame,
+            wavelengths_nm,
+            incident_stokes_w,
+            config,
+            Some(&mut tallies),
+            AbsorptionEstimator::Continuous,
         )?;
         let momentum = tallies.finish(&mut || checkpoint(cx), &power, frame.direction())?;
         Ok(ScatteringMomentumDeposition { power, momentum })
@@ -91,6 +156,7 @@ impl ScatteringGrid<'_> {
         incident_stokes_w: &[Stokes; N],
         config: PolarizedDepositionConfig,
         momentum: Option<&mut MomentumTallies<N>>,
+        absorption_estimator: AbsorptionEstimator,
     ) -> Result<ScatteringPowerDeposition<N>, PolarizedScatteringError> {
         checkpoint(cx)?;
         if N == 0 {
@@ -147,7 +213,7 @@ impl ScatteringGrid<'_> {
                 config.transport,
                 momentum,
                 &phases,
-                AbsorptionEstimator::Collision,
+                absorption_estimator,
             )?);
         }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
@@ -167,7 +233,7 @@ impl ScatteringGrid<'_> {
             config.transport,
             momentum,
             &phases,
-            AbsorptionEstimator::Collision,
+            absorption_estimator,
         )?)
     }
 }

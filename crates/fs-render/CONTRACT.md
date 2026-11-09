@@ -3643,6 +3643,20 @@ free flights, implicit capture, original-cell heat identities, force transfer,
 compensated statistics and directed unresolved accounts remain the owners.
 The common power report feeds `ScatteringHeating` without another heat debit.
 
+`deposit_polarized_continuous_absorption_power` and
+`deposit_polarized_continuous_absorption_momentum` use continuous absorption
+weighting through that same source admission and matched Stokes phase owner.
+The admitted total scattering coefficient is polarization independent, so only
+scattering determines free flights. Isotropic absorption deposits positive Beer
+loss along every original segment while leaving normalized Stokes state intact;
+it is not charged again at a scattering event. The common history reducer
+carries the evolving polarization into every angular continuation. Its momentum
+variant also scores segment absorption and actual polarized elastic recoil,
+including the outgoing direction at a capped event. Scalar and polarized
+continuous queries share one DDA, conservative accounts and refusal paths.
+Tests compare the two absorption estimators, weak/no-collision heat, physical
+orthogonal-dipole receiver patterns, spectral replay and proposal/cancel refusal.
+
 `PolarizedDepositionConfig::max_phase_proposals` bounds each angular draw.
 Cancellation, invalid/nonphysical states, unsupported scattering laws and
 proposal exhaustion return no partial heat or force report. Absorption-only

@@ -132,6 +132,7 @@ fn g1_each_continuous_history_closes_energy_force_and_torque_at_the_cap() {
                 &mut || draws.next().unwrap(),
                 &mut |_, _| Ok(()),
                 Some(&mut history),
+                &mut ScalarPhase,
             )
             .unwrap();
             assert_eq!(segments, u64::from(collisions));

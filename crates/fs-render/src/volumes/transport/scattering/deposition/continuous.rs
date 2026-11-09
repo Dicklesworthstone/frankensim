@@ -169,6 +169,7 @@ pub(super) fn trace_history<const N: usize>(
     random: &mut impl FnMut() -> f64,
     capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
     mut momentum: Option<&mut HistoryMomentum<'_, N>>,
+    phase: &mut impl DepositionPhase,
 ) -> Result<HistoryOutcome, VolumeTransportError> {
     let (mut position, mut direction, source_w) = source;
     let mut power = source_w;
@@ -271,7 +272,7 @@ pub(super) fn trace_history<const N: usize>(
                         outcome[3] = power;
                         break 'flights;
                     }
-                    let outgoing = ScalarPhase.sample(
+                    let outgoing = phase.sample(
                         medium.phase(segment.cell),
                         medium.wavelengths()[0],
                         direction,
