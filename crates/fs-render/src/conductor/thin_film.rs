@@ -122,6 +122,16 @@ impl CoherentDielectricCoating {
                 hasher.update(&law.temperature_k().to_bits().to_le_bytes());
                 hasher.update(&law.density_kg_m3().to_bits().to_le_bytes());
             }
+            #[cfg(feature = "material-state")]
+            DielectricIor::Air(law) => {
+                hasher.update(b"coherent-dielectric-coating.ciddor-air.v1");
+                hasher.update(law.content_identity().as_bytes());
+            }
+            #[cfg(feature = "material-state")]
+            DielectricIor::AirRelativeSellmeier(law) => {
+                hasher.update(b"coherent-dielectric-coating.air-relative-sellmeier.v1");
+                hasher.update(law.content_identity().as_bytes());
+            }
         }
         hasher.update(&self.thickness_m.to_bits().to_le_bytes());
         hasher.update(self.source.identity().as_bytes());

@@ -15,6 +15,9 @@ use crate::dielectric::{DielectricGlass, DielectricIor, DielectricSurface};
 use crate::gradient_index::GradientIndexField;
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::instances::InstanceScene;
+use crate::material_state::air_refraction::{
+    MaterialAirRefractiveField, PreparedMaterialAirRefractiveField,
+};
 use crate::material_state::gas_scattering::{
     GasCompositionGradientField, GasCompositionSecondOrderField, GasDensityGradientField,
     GasDensitySecondOrderField, MaterialGasCompositionRefractiveField, MaterialGasRefractiveField,
@@ -22,6 +25,9 @@ use crate::material_state::gas_scattering::{
 };
 use crate::material_state::thermo_optic::{
     MaterialThermoOpticField, TemperatureGradientField, TemperatureSecondOrderField,
+};
+use crate::material_state::water_refraction::pressure_temperature::{
+    PressureTemperatureGradientField, PressureTemperatureSecondOrderField,
 };
 use crate::material_state::water_refraction::{
     MaterialWaterRefractiveField, PreparedMaterialWaterRefractiveField, WaterStateGradientField,
@@ -282,11 +288,11 @@ impl NativeOpticalScene {
     }
 }
 
-/// One accepted molecular material and frozen density/composition snapshot.
+/// One accepted molecular material and frozen density/composition or p/T snapshot.
 /// Only the original material gas owners can construct this ambient; there is
 /// no arbitrary GRIN injection, nominal glass fit or inferred species/EOS.
 /// The source model, density basis and supported vacuum-wavelength band remain
-/// authoritative. Gas true absorption is exactly zero under these owners;
+/// authoritative. Gas true absorption is explicitly approximated as zero;
 /// molecular scattering has its separate source-coupled native attachment.
 #[derive(Clone, Copy)]
 pub struct NativeGasAmbient<'a> {
@@ -297,6 +303,58 @@ pub struct NativeGasAmbient<'a> {
 }
 
 impl<'a> NativeGasAmbient<'a> {
+    /// Original p/T reconstruction under the named Ciddor atmospheric law.
+    /// Its constructor explicitly selects nonabsorbing refraction; refractive
+    /// index data alone do not establish zero loss or no scattering.
+    pub fn from_ciddor_field<F: PressureTemperatureGradientField + Sync + ?Sized>(
+        field: &'a MaterialAirRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            material_identity: field.composition().identity(),
+            field_identity: field.content_identity(),
+            wavelength_range_nm: field.wavelength_range_nm(),
+            field: Field::Gradient(field),
+        }
+    }
+
+    /// Keep both original state Hessians and the complete p/T chain rule.
+    pub fn from_differentiable_ciddor_field<
+        F: PressureTemperatureSecondOrderField + Sync + ?Sized,
+    >(
+        field: &'a MaterialAirRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(field),
+            ..Self::from_ciddor_field(field)
+        }
+    }
+
+    /// Reuse fixed spectral coefficients across every native integration stage.
+    /// The preparation borrows its original field, so state identity cannot drift.
+    pub fn from_prepared_ciddor_field<F: PressureTemperatureGradientField + Sync + ?Sized>(
+        prepared: &'a PreparedMaterialAirRefractiveField<'_, '_, F>,
+    ) -> Self {
+        let field = prepared.source_field();
+        Self {
+            material_identity: field.composition().identity(),
+            field_identity: field.content_identity(),
+            wavelength_range_nm: field.wavelength_range_nm(),
+            field: Field::Gradient(prepared),
+        }
+    }
+
+    /// Reuse spectral preparation while retaining atmospheric bundle focusing.
+    pub fn from_prepared_differentiable_ciddor_field<
+        F: PressureTemperatureSecondOrderField + Sync + ?Sized,
+    >(
+        prepared: &'a PreparedMaterialAirRefractiveField<'_, '_, F>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(prepared),
+            ..Self::from_prepared_ciddor_field(prepared)
+        }
+    }
+
     /// Original fixed-composition density field, including
     /// `IsobaricGasField::bind_refraction`. Its declared constant-polarizability
     /// visible model has equal phase/group indices; no dispersion is invented.

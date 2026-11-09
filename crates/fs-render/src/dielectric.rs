@@ -30,6 +30,11 @@ mod water;
 #[cfg(feature = "material-state")]
 pub use water::IapwsWaterIor;
 
+#[cfg(feature = "material-state")]
+mod air;
+#[cfg(feature = "material-state")]
+pub use air::{AirRelativeSellmeierIor, AirRelativeWavelength, CiddorAirIor};
+
 #[cfg(test)]
 mod absorption_band_tests;
 #[cfg(test)]
@@ -201,7 +206,7 @@ impl CauchyIor {
 /// `n²(lambda_um) = 1 + sum B_i lambda_um² / (lambda_um² - C_i)`.
 ///
 /// Coefficients describe an absolute phase index at vacuum wavelengths. Importers
-/// must convert/refit air-relative catalog data before claiming absolute accuracy;
+/// must convert air-relative catalog data before claiming absolute accuracy;
 /// accepting coefficients does not authenticate a measurement. The transparent
 /// model admits nonnegative oscillator strengths and squared resonances, no
 /// active pole in the declared wavelength band, and ordinary phase indices
@@ -536,6 +541,13 @@ pub enum DielectricIor {
     /// Original IAPWS ordinary-water dispersion at a fixed temperature/density.
     #[cfg(feature = "material-state")]
     Water(IapwsWaterIor),
+    /// Original NIST Ciddor dispersion at a declared frozen atmospheric state.
+    #[cfg(feature = "material-state")]
+    Air(CiddorAirIor),
+    /// Original air-relative Sellmeier coefficients with explicit reference air
+    /// and wavelength-coordinate conversion, without refitting the source law.
+    #[cfg(feature = "material-state")]
+    AirRelativeSellmeier(AirRelativeSellmeierIor),
 }
 
 impl DielectricIor {
@@ -550,6 +562,10 @@ impl DielectricIor {
             Self::Tabulated(ior) => ior.wavelength_bounds_nm(),
             #[cfg(feature = "material-state")]
             Self::Water(ior) => ior.wavelength_bounds_nm(),
+            #[cfg(feature = "material-state")]
+            Self::Air(ior) => ior.wavelength_bounds_nm(),
+            #[cfg(feature = "material-state")]
+            Self::AirRelativeSellmeier(ior) => ior.wavelength_bounds_nm(),
         }
     }
 
@@ -561,6 +577,10 @@ impl DielectricIor {
             Self::Tabulated(ior) => ior.eval(wavelength_nm),
             #[cfg(feature = "material-state")]
             Self::Water(ior) => ior.eval(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::Air(ior) => ior.eval(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::AirRelativeSellmeier(ior) => ior.eval(wavelength_nm),
         }
     }
 
@@ -573,6 +593,10 @@ impl DielectricIor {
             Self::Tabulated(ior) => ior.group_index(wavelength_nm),
             #[cfg(feature = "material-state")]
             Self::Water(ior) => ior.group_index(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::Air(ior) => ior.group_index(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::AirRelativeSellmeier(ior) => ior.group_index(wavelength_nm),
         }
     }
 
@@ -585,6 +609,8 @@ impl DielectricIor {
             Self::Tabulated(ior) => ior.is_dispersive(),
             #[cfg(feature = "material-state")]
             Self::Water(ior) => ior.is_dispersive(),
+            #[cfg(feature = "material-state")]
+            Self::Air(_) | Self::AirRelativeSellmeier(_) => true,
         }
     }
 }

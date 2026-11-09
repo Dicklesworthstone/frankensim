@@ -1129,6 +1129,16 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
             hash.update(&law.temperature_k().to_bits().to_le_bytes());
             hash.update(&law.density_kg_m3().to_bits().to_le_bytes());
         }
+        #[cfg(feature = "material-state")]
+        DielectricIor::Air(law) => {
+            hash.update(&[4]);
+            hash.update(law.content_identity().as_bytes());
+        }
+        #[cfg(feature = "material-state")]
+        DielectricIor::AirRelativeSellmeier(law) => {
+            hash.update(&[5]);
+            hash.update(law.content_identity().as_bytes());
+        }
     }
 }
 

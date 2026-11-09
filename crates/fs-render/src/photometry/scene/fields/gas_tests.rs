@@ -8,6 +8,9 @@ use crate::gradient_index::{GradientIndexError, GradientIndexOptions};
 use crate::material_state::gas_scattering::isobaric::IsobaricGasField;
 use crate::material_state::gas_scattering::{GasPartialDensityJet, GasPartialDensitySample};
 use crate::material_state::thermo_optic::{TemperatureGradientSample, TemperatureJet};
+use crate::material_state::water_refraction::pressure_temperature::{
+    PressureTemperatureGradientSample, PressureTemperatureJet,
+};
 use crate::photometry::scene::{
     NativeGeometryBinding, NativeOpticalRole, NativeRadianceCalibration,
 };
@@ -27,6 +30,7 @@ use crate::tracer::{Camera, Primitive, Shape};
 use fs_blake3::hash_domain;
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3, fixtures::SphereChart};
+use fs_material::air_refraction::CiddorAir;
 use fs_material::gas::{GasSpec, R_USSA_1976};
 use fs_material::gas_scattering::composition::{
     MolecularCauchyDispersion, MolecularRefractionModel, PartialDensityBasis,
@@ -333,6 +337,109 @@ fn g1_original_isobaric_gas_bends_camera_to_original_off_axis_source() {
                     },
                 )
                 .unwrap();
+        }
+    });
+}
+
+struct AtmosphericProfile(ThermalProfile);
+impl PressureTemperatureGradientField for AtmosphericProfile {
+    fn pressure_temperature_gradient(
+        &self,
+        p: Point3,
+    ) -> Result<PressureTemperatureGradientSample, GradientIndexError> {
+        Ok(PressureTemperatureGradientSample {
+            temperature: self.0.temperature_gradient(p)?,
+            pressure_pa: 101_325.0 + 2000.0 * p.x,
+            pressure_gradient_pa_per_m: Vec3::new(2000.0, 0.0, 0.0),
+        })
+    }
+}
+impl PressureTemperatureSecondOrderField for AtmosphericProfile {
+    fn pressure_temperature_jet(
+        &self,
+        p: Point3,
+    ) -> Result<PressureTemperatureJet, GradientIndexError> {
+        let state = self.pressure_temperature_gradient(p)?;
+        Ok(PressureTemperatureJet {
+            temperature: self.0.temperature_jet(p)?,
+            pressure_pa: state.pressure_pa,
+            pressure_gradient_pa_per_m: state.pressure_gradient_pa_per_m,
+            pressure_diagonal_pa_per_m2: [0.0; 3],
+            pressure_off_diagonal_pa_per_m2: [0.0; 3],
+        })
+    }
+}
+
+#[test]
+fn g1_ciddor_atmosphere_bends_native_camera_to_original_source_with_group_delay() {
+    with_cx(|cx, _| {
+        let state = AtmosphericProfile(ThermalProfile {
+            slope: 100.0,
+            curvature: 0.0,
+        });
+        let composition = CiddorAir::try_new(0.01, 450.0).unwrap();
+        let field = MaterialAirRefractiveField::try_nonabsorbing(
+            &state,
+            composition,
+            ContentHash([141; 32]),
+        )
+        .unwrap();
+        let first = NativeGasAmbient::from_ciddor_field(&field);
+        let second = NativeGasAmbient::from_differentiable_ciddor_field(&field);
+        // A straight axial ray misses the original off-axis emitting triangle.
+        let owner = admit(cx, first, scene(40.0, -0.07, 0.025, false, false));
+        assert_eq!(first.material_identity(), composition.identity());
+        assert_eq!(first.wavelength_range_nm(), [300.0, 1700.0]);
+        for wavelength in [450.0, 650.0] {
+            let prepared = field.prepare(wavelength).unwrap();
+            let third = NativeGasAmbient::from_prepared_ciddor_field(&prepared);
+            let fourth = NativeGasAmbient::from_prepared_differentiable_ciddor_field(&prepared);
+            for ambient in [first, second, third, fourth] {
+                assert_eq!(ambient.field_identity(), field.content_identity());
+                owner
+                    .with_curved_camera(
+                        cx,
+                        100_000,
+                        NativeRadianceCalibration::try_new(3.0, 0.0).unwrap(),
+                        ambient,
+                        &[],
+                        |native, _| {
+                            let result = native
+                                .sample_ray_with_samples(
+                                    cx,
+                                    ray(),
+                                    wavelength,
+                                    0,
+                                    settings(),
+                                    |_| panic!("black source has no continuation"),
+                                )
+                                .unwrap();
+                            assert_eq!(
+                                result.endpoint(),
+                                RadianceEndpoint::Surface { object_id: 9 }
+                            );
+                            let path = result.path();
+                            let end = path.beam().ray();
+                            assert!((-0.095..-0.045).contains(&end.origin.x));
+                            close(end.origin.z, 40.0, 5e-7);
+                            assert_eq!(
+                                path.medium_snapshot_identity(),
+                                Some(field.content_identity())
+                            );
+                            let n0 = prepared.optical_sample(ray().origin).unwrap().phase_index();
+                            let n1 = prepared.optical_sample(end.origin).unwrap().phase_index();
+                            close(n1 * end.dir.z, n0, 2e-9);
+                            assert!(
+                                path.group_optical_path_length_m().unwrap()
+                                    > path.optical_path_length_m() + 1e-4
+                            );
+                            assert_eq!(path.optical_depth(), 0.0);
+                            let expected = 6.0 * SPECTRUM.eval(wavelength) * (n0 / n1).powi(2);
+                            close(result.radiance_w_m2_sr_nm(), expected, expected * 1e-8);
+                        },
+                    )
+                    .unwrap();
+            }
         }
     });
 }

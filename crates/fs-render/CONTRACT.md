@@ -9509,8 +9509,9 @@ and source/math review but does not provide native Cargo execution.
 With `photometry` and `material-state`, `NativeGasOpticalScene` admits original
 scene geometry and materials with an actual molecular ambient. Its
 `NativeGasAmbient` can be constructed only from existing
-`MaterialGasRefractiveField` or `MaterialGasCompositionRefractiveField` owners,
-including an `IsobaricGasField` refraction binding. Material identity and source
+`MaterialGasRefractiveField`, `MaterialGasCompositionRefractiveField` or
+`MaterialAirRefractiveField` owners, including an `IsobaricGasField` refraction
+binding or explicit Ciddor pressure/temperature reconstruction. Material identity and source
 band come from those owners; no nominal glass, vacuum placeholder, fitted index
 or caller-asserted material identity is introduced. The distinct scene type
 does not expose ordinary `render_scene`/`into_scene` views that would lose the
@@ -9539,8 +9540,9 @@ cache, finite-difference Hessian or independent gas EOS is added.
 
 Camera/source preparation is shared with the original native camera. Authored
 radiance calibration, exact thermal sources, reflection, source spectral support
-and emitting-host restrictions remain intact. Molecular true absorption is
-zero under these source owners. The same composition scattering field attaches
+and emitting-host restrictions remain intact. These refraction bindings
+explicitly select zero true absorption. For molecular-composition bindings,
+the same composition scattering field attaches
 directly to the existing `CurvedRayleighScene` and `CurvedRayleighCameraScene`
 using its unchanged refractive identity, so elastic collision and survival
 sampling are not double-counted as Beer absorption. Refraction alone does not
@@ -9557,6 +9559,50 @@ collisions; and material, snapshot, capability, domain, duplicate, work and
 cancellation refusals. Native Rust execution is not available in the current
 implementation environment; parser/format checks and independent source/math
 review are recorded separately from the authored regressions.
+
+## Atmospheric air through original state fields and native cameras
+
+`material_state::air_refraction::MaterialAirRefractiveField` borrows the existing
+joint pressure/temperature reconstruction and the original Ciddor composition.
+Its immutable identity binds the source snapshot and the complete material law.
+Analytic optical gradients and Hessians retain both original state Hessians and
+the full TT, PP and mixed TP chain rule. Constant temperature does not suppress
+pressure-driven bending. The prepared form caches wavelength coefficients outside
+ray/bundle stages and refuses any different wavelength.
+
+`try_nonabsorbing` explicitly selects a zero-loss approximation; refractive-index
+data do not establish atmospheric transparency or absence of scattering.
+`NativeGasAmbient` accepts prepared or unprepared first- and second-order Ciddor
+fields on the existing original-scene camera path. Phase, group path, focusing,
+source identity and refractive radiance scaling use the existing transport
+owners. Variable-composition spatial gradients, phase equilibrium, droplets,
+moving-fluid effects and attenuation/scattering require separate source owners.
+Focused exact-source controls cover joint-state derivatives, analytic
+pressure-lens focusing and source-domain refusals. The original off-axis scene
+regression requires the complete native camera feature build.
+
+## Absolute atmospheric and air-relative glass indices
+
+With `material-state`, `CiddorAirIor` retains the original atmospheric composition,
+absolute pressure and temperature as a native phase/group law. The independent
+`DielectricGlass` absorption source remains authoritative.
+
+`AirRelativeSellmeierIor` retains original relative-index oscillator coefficients
+and source support, together with an explicit index-reference atmosphere and an
+independently declared vacuum or air-wavelength coordinate. For reference-air
+index A, coordinate-air index B and relative source R, absolute phase is
+A R(lambda/B). Group index includes both air dispersion and the coordinate
+chain rule; equal atmospheres reduce to the product of their group indices.
+Changing the actual scene atmosphere leaves the measurement reference intact.
+
+Source-coordinate endpoints are mapped inward into vacuum support once at
+construction, intersecting the original Ciddor band. Ray queries do no root
+solving, fitting, interpolation or allocation. Native Fresnel/lens, bulk
+phase/group transport, coating and material identities consume the same absolute
+law; existing identity tags are unchanged. No automatic catalog convention,
+source authentication, glass temperature evolution or source extrapolation is
+inferred. Focused exact-source controls exercise all coordinate conventions,
+independent group differences, source support, Fresnel/lens power and identities.
 
 ## Joint pressure and temperature driving molecular gas refraction
 
