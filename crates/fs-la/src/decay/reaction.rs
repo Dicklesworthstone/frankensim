@@ -23,6 +23,9 @@
 //! are numerical admission, not a certified floating-point forward-error bound.
 //! Extreme cyclic stiffness, multiplication or unrepresented transfers may
 //! refuse; no clipping, yield normalization or invented conservation is used.
+//! A closed two-state exchange uses its exact equilibrium and transient modes,
+//! retaining repeated-event and uniform-source residence integrals without
+//! accumulating roundoff over arbitrarily many exchange lifetimes.
 
 use super::{
     DecayError, DecayLimits, MAX_DECAY_EDGES, MAX_DECAY_NODES, MAX_SERIES_TERMS, MAX_SQUARINGS,
@@ -32,6 +35,9 @@ use super::{
 /// Uniform production through the same positive reaction/count propagation.
 #[path = "reaction/source.rs"]
 pub mod source;
+
+#[path = "reaction/exchange.rs"]
+mod exchange;
 
 /// An expected number of products per removal of a parent. Repeated endpoints
 /// add, self-products are allowed, and a parent with no edges is a finite sink.
@@ -330,6 +336,21 @@ impl ReactionPlan {
                 plan,
                 with_source.then(|| source::SourceMaps::identity(n, with_source_integrals)),
             ));
+        }
+        // Exactly one product in the other state, with no self-product or
+        // sink: this is the analytically solvable conservative exchange block.
+        // Do not normalize nearly conservative authored reaction yields.
+        if n == 2
+            && plan.rates.iter().all(|&rate| rate > 0.0)
+            && plan.yields == [0.0, 1.0, 1.0, 0.0]
+        {
+            return exchange::prepare(
+                plan,
+                limits,
+                with_source,
+                with_source_integrals,
+                &mut cancelled,
+            );
         }
         let mut production = vec![0.0; n * n];
         let mut maximum_production = 0.0_f64;

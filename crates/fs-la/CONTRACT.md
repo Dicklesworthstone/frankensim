@@ -1107,3 +1107,26 @@ range checks against independently integrated removals. Existing ordinary and
 source-only preparation retain their prior maps and work charges. Zero duration
 requires zero injection. The new analytic residence, source-age, stiff scalar,
 cycle and unequal-interval composition checks use the existing decay tests.
+
+## Conservative two-state exchange
+
+The original `ReactionPlan` recognizes a closed two-state exchange only when
+each removal produces exactly one constituent in the other state, without
+self-products, sinks or yield normalization. Positive forward and reverse rates
+give the exact stationary projector and exponentially decaying transient.
+Preparation uses fixed bounded scalar work, independent of the number of
+exchange lifetimes, while preserving the original population and event maps.
+Arbitrary cycles and nonconservative reactions retain their existing algorithm.
+
+The same decomposition supplies uniform-production populations and removals,
+initial residence and source-aged residence. Independently evaluated small
+phi-function complements retain transfers and repeated events at tiny times.
+Integrated events include repeated visits; equilibrium does not stop the
+physical clocks. Rate sums and products need not be formed when they overflow,
+and subnormal rates are scaled by elapsed time before event integration.
+
+Focused native regressions compare analytic equilibrium and event counts,
+unequal rates, tiny intervals, overflowing rate sums, subnormal rates and
+source/residence semigroup composition. Work limits, exact-yield admission and
+late cancellation remain mandatory. These are numerical tests of the admitted
+two-state model, not physical calibration or a certified forward-error bound.
