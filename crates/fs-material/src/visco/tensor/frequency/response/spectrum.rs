@@ -141,14 +141,65 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         )
     }
 
-    pub(in crate::visco::tensor::frequency) fn distinct_frequencies(&self) -> &[f64] {
+    /// Admit a geometric strain envelope with an additional component ceiling.
+    ///
+    /// The original material norm limit and each absolute Mandel-component
+    /// limit apply to the complete coherent waveform. Equal-frequency inputs
+    /// combine before either bound. This amplitude-only gate does not require
+    /// DC constitutive support: a held thermal expansion can contribute a
+    /// constant TOTAL strain while the actual mechanical bias is zero. The
+    /// constitutive query must separately admit its mechanical strain and band.
+    pub fn validate_kinematic_envelope_with_bias(
+        &self,
+        strains: &[[C64; 6]],
+        bias: &[f64; 6],
+        maximum_absolute_component: f64,
+    ) -> Result<(), ViscoError> {
+        if !maximum_absolute_component.is_finite() || maximum_absolute_component <= 0.0 {
+            return Err(ViscoError::Parameters {
+                what: "kinematic strain ceiling must be finite and positive",
+            });
+        }
+        let grouped = self.group_strains(strains)?;
+        let strains = &grouped[..self.frequencies.len()];
+        let bias = bias.map(Dd::from_f64);
+        self.admit_grouped_envelope_with_bias(strains, &bias, false)?;
+        for component in 0..6 {
+            let mut bound = bias[component].abs();
+            for strain in strains {
+                let z = strain[component];
+                for word in 0..2 {
+                    let value = if word == 0 {
+                        C64::new(z[0].hi, z[1].hi)
+                    } else {
+                        C64::new(z[0].lo, z[1].lo)
+                    };
+                    bound = bound
+                        + Dd::from_f64(
+                            super::super::strain::peak_norm(&[value]).ok_or_else(invalid)?,
+                        );
+                }
+            }
+            if !bound.hi.is_finite()
+                || !bound.lo.is_finite()
+                || Dd::from_f64(maximum_absolute_component).lt(bound)
+            {
+                return Err(ViscoError::Parameters {
+                    what: "coherent waveform exceeds its original kinematic component ceiling",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn distinct_frequencies(&self) -> &[f64] {
         &self.frequencies
     }
 
     // Equal-frequency authored coordinates must combine before a physical
     // constraint is recovered. In particular, separately admitting thin-body
     // strains would reject a cancelling field or overflow its transverse map.
-    pub(in crate::visco::tensor::frequency) fn group_strains<const N: usize>(
+    pub(crate) fn group_strains<const N: usize>(
         &self,
         strains: &[[C64; N]],
     ) -> Result<[[[Dd; 2]; N]; MAX_SPECTRUM_LINES], ViscoError> {
@@ -179,10 +230,19 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         self.admit_grouped_strains_with_bias(strains, &[Dd::ZERO; 6])
     }
 
-    pub(in crate::visco::tensor::frequency) fn admit_grouped_strains_with_bias(
+    pub(crate) fn admit_grouped_strains_with_bias(
         &self,
         strains: &[StrainParts],
         bias: &[Dd; 6],
+    ) -> Result<(), ViscoError> {
+        self.admit_grouped_envelope_with_bias(strains, bias, true)
+    }
+
+    fn admit_grouped_envelope_with_bias(
+        &self,
+        strains: &[StrainParts],
+        bias: &[Dd; 6],
+        admit_constitutive_dc: bool,
     ) -> Result<(), ViscoError> {
         if strains.len() != self.frequencies.len() {
             return Err(invalid());
@@ -195,7 +255,7 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
                 what: "relaxed material bias must be a finite Mandel strain",
             });
         }
-        if bias.iter().any(|&value| value != Dd::ZERO) {
+        if admit_constitutive_dc && bias.iter().any(|&value| value != Dd::ZERO) {
             super::super::admit_frequency(self.law, 0.0)?;
         }
         let mut envelope = Dd::ZERO;

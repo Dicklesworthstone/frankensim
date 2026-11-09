@@ -23856,3 +23856,27 @@ Five focused G0/G3/G4 regression groups specify independent spherical rates,
 mixed directions/sizes, original scalar/collective equivalence, permutation,
 shared donor limits, reciprocal heat and atomic retry. Pinned rustfmt parsing
 and formatting checks passed; compilation and runtime execution were unavailable.
+
+## Coherent kinematic envelopes for held thermal expansion
+
+`TensorPronyHarmonicSpectrum::validate_kinematic_envelope_with_bias` admits
+both the original material norm and an explicit finite positive absolute
+Mandel-component ceiling over the complete waveform. Original equal-frequency
+grouping occurs before bounds, so large cancelling authored fields retain their
+physical residual. Distinct-frequency envelopes remain conservative all-time
+bounds, not sampled peaks or certified suprema.
+
+This is amplitude admission for total or mechanical kinematics. A constant
+free-expansion offset does not request a fictitious DC material response.
+The actual constitutive evaluation independently admits its mechanical bias
+and original frequency band. Both rules are retained when held thermal strains
+enter the causal solid history.
+
+The two original-source admission regressions pass natively, including
+coherent cancellation, future-phase ceiling refusal, independent norm/component
+limits and retained DC refusal for actual mechanical bias. Follow-up native
+execution also passed all seven causal material regressions, eleven settled
+spectrum regressions and seven one-tone window regressions (27 total). These
+used the original material modules and original fs-math/harmonic-window owners;
+the latter passed all 90 original window tests including the nine causal tests. Full Cargo
+and Cx-backed solid/coupling integration are separate unexecuted gates.

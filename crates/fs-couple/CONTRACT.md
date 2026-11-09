@@ -10588,3 +10588,19 @@ identical-layer partition invariance, including signed inertia. Four additional
 integration groups specify original 3D complex-work agreement, native coupled
 heat closure, homogeneous/partition parity and source/geometry/budget refusals.
 Pinned formatting passed; the full fs-couple integration groups remain unrun.
+
+## Held expansion through causal material-to-thermal acceptance
+
+The causal harmonic heat candidate accepts the solid owner's original frozen
+thermal snapshot. It preserves that snapshot and the existing eigenstrain-work
+ledger while depositing only interval Maxwell/Kelvin heat in the existing
+caloric solver. Both endpoints still publish together after source, residual
+and cancellation admission. Caloric temperature changes do not implicitly
+change the held expansion or the constitutive law.
+
+Two additional tests use actual thermal-strain preloading and the independent
+mechanical-memory oracle. They specify repeated static heat release, coherent
+work/heat, snapshot and nonzero prior eigenstrain-work preservation, and late
+thermal refusal/retry/cancellation. Formatting and bounded review completed;
+full original Cx-backed coupling execution remains unavailable. The expansion and
+constitutive coefficients remain fixed.

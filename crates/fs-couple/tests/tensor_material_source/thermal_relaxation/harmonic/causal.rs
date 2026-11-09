@@ -1,4 +1,7 @@
 //! Retained Maxwell memory heats the original thermal cells without a reset.
+#[path = "causal/held_thermal.rs"]
+mod held_thermal;
+
 use super::*;
 use fs_couple::tensor_material::solid::thermal::harmonic::causal_heat_assembly_candidate;
 use fs_math::dd::Dd;

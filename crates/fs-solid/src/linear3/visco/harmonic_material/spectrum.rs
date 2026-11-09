@@ -23,10 +23,13 @@ pub struct ViscoHarmonicMaterialSpectrumPoint {
     /// Original compatible strains when the constitutive field uses B-bar.
     /// The complete compatible waveform independently satisfies the source limit.
     pub compatible_strain_mandel: Option<Vec<[C64; 6]>>,
-    /// Static strain from the same original constitutive kinematics. The
-    /// observing owner determines whether Maxwell memory is settled or causal.
+    /// Static mechanical strain from the original constitutive kinematics.
+    /// A causal owner with held thermal expansion subtracts its original
+    /// projected free strain; the returned history retains the thermal source.
+    /// The observing owner determines whether Maxwell memory is settled or causal.
     pub bias_mandel: [f64; 6],
-    /// Original compatible static strain when the constitutive field uses B-bar.
+    /// Compatible static mechanical strain when the field uses B-bar, with
+    /// the raw held thermal free strain subtracted by a causal thermal owner.
     pub compatible_bias_mandel: Option<[f64; 6]>,
     /// Physical storage, work and Kelvin/Maxwell heat densities, including
     /// equal-frequency interference and all sum/difference-frequency terms.

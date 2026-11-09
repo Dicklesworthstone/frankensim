@@ -14002,7 +14002,7 @@ leaves the borrowed accepted history unchanged.
 
 This is constitutive evolution under prescribed displacement, not a mechanical
 equilibrium, kinetic-energy or support-work solve. Material laws remain fixed;
-histories with retained thermal eigenstrain are explicitly refused.
+accepted thermal eigenstrain remains fixed with its original source snapshot.
 Four G1/G3/G4 regression groups specify preloaded Tet4 memory and moving
 supports against independent real-time oracles, original time-domain
 continuation, free relaxation on large DD clocks, B-bar admission, and
@@ -14022,3 +14022,28 @@ identical during modal rebinding, including density moments hidden by supports.
 Heating may change constitutive metadata without replacing this frozen matter
 inventory. This does not introduce ten-node density interpolation, density
 averaging, a new constitutive law, or a new integration rule.
+
+## Held thermal strain in causal harmonic material histories
+
+Causal harmonic evolution retains an accepted thermal snapshot with its
+original material/source identities, reference temperatures and raw samples.
+Constitutive static bias subtracts the original projected free strain;
+compatible B-bar bias subtracts the raw point free strain. The complete total
+and mechanical waveforms independently satisfy the original material norm
+and each thermal sample's component ceiling. Pure free expansion preserves
+AC-only constitutive admission when mechanical DC is zero.
+
+The returned point biases describe mechanical strain. Full nodal displacement
+and the original thermal snapshot remain with the endpoint history. No thermal
+sample is rebound or averaged away. Frozen eigenstrain contributes zero new
+eigenstrain work; cumulative eigenstrain and parameter work stay unchanged,
+while actual retained Maxwell energy may become heat. Existing cancellation,
+source identity and resource bounds apply.
+
+Two additional regression groups specify free expansion with AC-only material
+support, a future-phase thermal-ceiling refusal, retained cancellation state,
+and nonuniform Hex8 B-bar memory/heat against independent original spring
+solutions followed by native history continuation. Rustfmt and bounded source
+review completed; these Cx-backed tests remain unexecuted because the original
+runtime dependency closure is unavailable. Evolving free strain and material
+coefficients require their original separate owners.

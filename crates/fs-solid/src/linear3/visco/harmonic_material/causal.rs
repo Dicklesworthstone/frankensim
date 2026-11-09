@@ -2,7 +2,8 @@
 
 use super::{ViscoHarmonicMaterialBudget, ViscoHarmonicMaterialSpectrumPoint, cap};
 use crate::linear3::visco::{
-    ViscoElementError, ViscoElementState, ViscoElements, ViscoEnergy, ViscoHarmonicError, checkpoint,
+    ViscoElementError, ViscoElementState, ViscoElements, ViscoEnergy, ViscoHarmonicError,
+    checkpoint,
 };
 use fs_exec::Cx;
 use fs_fft::harmonic_window::phase_angular_interval_from_clock_dd;
@@ -38,15 +39,24 @@ impl<'a> ViscoElementState<'a> {
         if !finite_clock(time_s) {
             return Err(invalid("original history clock is unrepresentable"));
         }
-        Ok(ViscoHarmonicMaterialHistory { history: self, time_s })
+        Ok(ViscoHarmonicMaterialHistory {
+            history: self,
+            time_s,
+        })
     }
 }
 impl<'a> ViscoHarmonicMaterialHistory<'a> {
-    pub const fn time_s_dd(&self) -> Dd { self.time_s }
-    pub const fn history(&self) -> &ViscoElementState<'a> { &self.history }
+    pub const fn time_s_dd(&self) -> Dd {
+        self.time_s
+    }
+    pub const fn history(&self) -> &ViscoElementState<'a> {
+        &self.history
+    }
     /// Continue with the original time-domain/dynamic owners without discarding
     /// the accepted material state or its exact represented clock.
-    pub fn into_parts(self) -> (ViscoElementState<'a>, Dd) { (self.history, self.time_s) }
+    pub fn into_parts(self) -> (ViscoElementState<'a>, Dd) {
+        (self.history, self.time_s)
+    }
 }
 
 /// Independent physical interval account on every original material point.
@@ -105,13 +115,17 @@ impl ViscoElements {
         if frequencies.len() > MAX_HARMONIC_MATERIAL_LINES
             || frequencies.iter().any(|v| !v.is_finite() || *v <= 0.0)
         {
-            return Err(invalid("causal material observation needs at most 64 positive finite frequencies").into());
+            return Err(invalid(
+                "causal material observation needs at most 64 positive finite frequencies",
+            )
+            .into());
         }
         let f = frequencies.len() as u128;
         let mut points = 0_u128;
         let mut bytes = core::mem::size_of::<ViscoHarmonicMaterialCausalObserver<'_>>() as u128
             + core::mem::size_of::<ViscoHarmonicMaterialCausalStep<'_>>() as u128
-            + 128 * f + 8 * self.full_dofs as u128;
+            + 128 * f
+            + 8 * self.full_dofs as u128;
         let mut work = 256 * (f + 1) * self.full_dofs as u128;
         for element in &self.elements {
             checkpoint(cx)?;
@@ -122,39 +136,79 @@ impl ViscoElements {
                 + 128 * f * (b + 1)
                 + core::mem::size_of::<Vec<TensorPronyState>>() as u128;
             for point in &element.points {
-                let fields = if point.compatible_gradients.is_some() { 2 } else { 1 };
+                let fields = if point.compatible_gradients.is_some() {
+                    2
+                } else {
+                    1
+                };
                 bytes += core::mem::size_of::<ViscoHarmonicMaterialSpectrumPoint>() as u128
                     + fields * f * core::mem::size_of::<[C64; 6]>() as u128
-                    + core::mem::size_of::<TensorPronyState>() as u128 + 48 * b;
+                    + core::mem::size_of::<TensorPronyState>() as u128
+                    + 48 * b;
             }
-            work += 4096 * (f + 1) * (b + 1)
-                + 512 * (f + 1) * p * element.dofs.len() as u128;
+            work += 4096 * (f + 1) * (b + 1) + 512 * (f + 1) * p * element.dofs.len() as u128;
         }
-        cap("causal harmonic material quadrature points", points, budget.maximum_points as u128)?;
-        cap("causal harmonic material numerical payload bytes", bytes, budget.maximum_payload_bytes as u128)?;
-        cap("causal harmonic material observation work", work, budget.maximum_work as u128)?;
+        cap(
+            "causal harmonic material quadrature points",
+            points,
+            budget.maximum_points as u128,
+        )?;
+        cap(
+            "causal harmonic material numerical payload bytes",
+            bytes,
+            budget.maximum_payload_bytes as u128,
+        )?;
+        cap(
+            "causal harmonic material observation work",
+            work,
+            budget.maximum_work as u128,
+        )?;
         let mut materials = Vec::with_capacity(self.elements.len());
         let mut temporal_bytes = 0;
         for element in &self.elements {
             checkpoint(cx)?;
-            let material = element.law.prepare_harmonic_spectrum(frequencies)
+            let material = element
+                .law
+                .prepare_harmonic_spectrum(frequencies)
                 .map_err(ViscoElementError::Material)?;
-            temporal_bytes = temporal_bytes.max(material.causal_window_payload_bound_bytes()
-                .map_err(ViscoElementError::Material)?);
-            work += element.points.len() as u128 * material.causal_window_work_bound()
-                .map_err(ViscoElementError::Material)? as u128;
+            temporal_bytes = temporal_bytes.max(
+                material
+                    .causal_window_payload_bound_bytes()
+                    .map_err(ViscoElementError::Material)?,
+            );
+            work += element.points.len() as u128
+                * material
+                    .causal_window_work_bound()
+                    .map_err(ViscoElementError::Material)? as u128;
             materials.push(material);
         }
-        cap("causal harmonic material numerical payload bytes", bytes + temporal_bytes as u128, budget.maximum_payload_bytes as u128)?;
-        cap("causal harmonic material observation work", work, budget.maximum_work as u128)?;
+        cap(
+            "causal harmonic material numerical payload bytes",
+            bytes + temporal_bytes as u128,
+            budget.maximum_payload_bytes as u128,
+        )?;
+        cap(
+            "causal harmonic material observation work",
+            work,
+            budget.maximum_work as u128,
+        )?;
         checkpoint(cx)?;
-        Ok(ViscoHarmonicMaterialCausalObserver { source: self, frequencies: frequencies.to_vec(), materials, points: points as usize })
+        Ok(ViscoHarmonicMaterialCausalObserver {
+            source: self,
+            frequencies: frequencies.to_vec(),
+            materials,
+            points: points as usize,
+        })
     }
 }
 
 impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
-    pub const fn source(&self) -> &'a ViscoElements { self.source }
-    pub fn angular_frequencies_rad_s(&self) -> &[f64] { &self.frequencies }
+    pub const fn source(&self) -> &'a ViscoElements {
+        self.source
+    }
+    pub fn angular_frequencies_rad_s(&self) -> &[f64] {
+        &self.frequencies
+    }
 
     /// Advance the ORIGINAL accepted Maxwell memories through a prescribed
     /// coherent multitone interval. Every tone uses peak exp(-i omega t) on the
@@ -168,8 +222,12 @@ impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
     /// DC coverage for nonzero strain bias. Initial memory need not be settled.
     /// Its natural decays are not a claim that startup is band limited.
     ///
-    /// The source law and eigenstrain are frozen. Histories with accepted
-    /// thermal eigenstrain are explicitly refused. This is constitutive
+    /// The source law and any accepted thermal eigenstrain stay frozen. The
+    /// original thermal snapshot retains its source identities, raw samples
+    /// and B-bar projection. Total and mechanical waveform envelopes must both
+    /// satisfy their original material and thermal small-strain limits. A held
+    /// free strain changes the mechanical bias but supplies no eigenstrain
+    /// work during this interval. This is constitutive
     /// evolution, not a mechanical equilibrium, kinetic or boundary-work solve.
     /// Input history is borrowed; any refusal/cancellation publishes no partial
     /// next history, force, thermal deposit or cumulative-ledger change.
@@ -184,25 +242,34 @@ impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
         checkpoint(cx)?;
         let old = &accepted.history;
         if !core::ptr::eq(self.source, old.system) {
-            return Err(invalid("causal observation requires the exact original solid history source").into());
-        }
-        if old.thermal_strains.is_some() {
-            return Err(invalid("causal harmonic observation does not yet admit retained thermal eigenstrain").into());
+            return Err(invalid(
+                "causal observation requires the exact original solid history source",
+            )
+            .into());
         }
         let end_time = accepted.time_s + Dd::from_f64(duration_s);
-        if !duration_s.is_finite() || duration_s <= 0.0
-            || !finite_clock(end_time) || !accepted.time_s.lt(end_time)
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || !finite_clock(end_time)
+            || !accepted.time_s.lt(end_time)
             || displacements.len() != self.frequencies.len()
-            || bias.len() != self.source.full_dofs || bias.iter().any(|x| !x.is_finite())
-            || displacements.iter().any(|u| u.len() != self.source.full_dofs
-                || u.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()))
+            || bias.len() != self.source.full_dofs
+            || bias.iter().any(|x| !x.is_finite())
+            || displacements.iter().any(|u| {
+                u.len() != self.source.full_dofs
+                    || u.iter().any(|z| !z.re.is_finite() || !z.im.is_finite())
+            })
         {
             return Err(invalid("causal material evolution needs finite full nodal fields and a positive advancing DD interval").into());
         }
-        let phases = self.frequencies.iter().map(|&omega| {
-            phase_angular_interval_from_clock_dd(omega, accepted.time_s, duration_s)
-                .map_err(|_| invalid("causal nodal phase is unrepresentable"))
-        }).collect::<Result<Vec<_>, _>>()?;
+        let phases = self
+            .frequencies
+            .iter()
+            .map(|&omega| {
+                phase_angular_interval_from_clock_dd(omega, accepted.time_s, duration_s)
+                    .map_err(|_| invalid("causal nodal phase is unrepresentable"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut endpoint = Vec::with_capacity(self.source.full_dofs);
         for dof in 0..self.source.full_dofs {
             checkpoint(cx)?;
@@ -212,95 +279,193 @@ impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
             for (tone, phase) in displacements.iter().zip(&phases) {
                 let z = tone[dof];
                 scale = scale.max(z.re.abs()).max(z.im.abs());
-                start = start + Dd::from_f64(z.re) * phase.start[0] - Dd::from_f64(z.im) * phase.start[1];
+                start = start + Dd::from_f64(z.re) * phase.start[0]
+                    - Dd::from_f64(z.im) * phase.start[1];
                 end = end + Dd::from_f64(z.re) * phase.end[0] - Dd::from_f64(z.im) * phase.end[1];
             }
-            let difference = (start - Dd::from_f64(old.displacement_m[dof])).to_f64().abs();
+            let difference = (start - Dd::from_f64(old.displacement_m[dof]))
+                .to_f64()
+                .abs();
             let tolerance = 128.0 * f64::EPSILON * (2 * self.frequencies.len() + 2) as f64;
-            if !start.to_f64().is_finite() || !end.to_f64().is_finite()
+            if !start.to_f64().is_finite()
+                || !end.to_f64().is_finite()
                 || !difference.is_finite()
                 || (scale == 0.0 && difference != 0.0)
                 || (scale > 0.0 && difference / scale > tolerance)
             {
-                return Err(invalid("initial full nodal displacement is discontinuous with its harmonic history").into());
+                return Err(invalid(
+                    "initial full nodal displacement is discontinuous with its harmonic history",
+                )
+                .into());
             }
             endpoint.push(end.to_f64());
         }
         let mut points = Vec::with_capacity(self.points);
         let mut histories = Vec::with_capacity(self.materials.len());
         let mut totals = [Dd::ZERO; 10];
-        for (element, (source, material)) in self.source.elements.iter().zip(&self.materials).enumerate() {
+        for (element, (source, material)) in
+            self.source.elements.iter().zip(&self.materials).enumerate()
+        {
             checkpoint(cx)?;
-            let prepared = material.prepare_causal_window_from_clock_dd_with_checkpoint::<ViscoElementError>(
-                accepted.time_s, duration_s, || checkpoint(cx),
-            )?;
+            let prepared = material
+                .prepare_causal_window_from_clock_dd_with_checkpoint::<ViscoElementError>(
+                    accepted.time_s,
+                    duration_s,
+                    || checkpoint(cx),
+                )?;
             let mut states = Vec::with_capacity(source.points.len());
             for (quadrature_point, point) in source.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let bias_at = |i: usize| bias[source.dofs[i]];
-                let bias_mandel = point.strain_from_local(bias_at);
-                let compatible_bias = point.compatible_gradients.as_ref()
-                    .map(|_| point.compatible_strain_from_local(bias_mandel, bias_at));
+                let total_bias = point.strain_from_local(bias_at);
+                let compatible_total_bias = point
+                    .compatible_gradients
+                    .as_ref()
+                    .map(|_| point.compatible_strain_from_local(total_bias, bias_at));
                 let mut strain = Vec::with_capacity(self.frequencies.len());
-                let mut compatible = point.compatible_gradients.as_ref()
+                let mut compatible = point
+                    .compatible_gradients
+                    .as_ref()
                     .map(|_| Vec::with_capacity(self.frequencies.len()));
                 for tone in displacements {
                     let re = point.strain_from_local(|i| tone[source.dofs[i]].re);
                     let im = point.strain_from_local(|i| tone[source.dofs[i]].im);
                     strain.push(core::array::from_fn(|i| C64::new(re[i], im[i])));
                     if let Some(raw) = &mut compatible {
-                        let re = point.compatible_strain_from_local(re, |i| tone[source.dofs[i]].re);
-                        let im = point.compatible_strain_from_local(im, |i| tone[source.dofs[i]].im);
+                        let re =
+                            point.compatible_strain_from_local(re, |i| tone[source.dofs[i]].re);
+                        let im =
+                            point.compatible_strain_from_local(im, |i| tone[source.dofs[i]].im);
                         raw.push(core::array::from_fn(|i| C64::new(re[i], im[i])));
                     }
                 }
+                let mut bias_mandel = total_bias;
+                let mut compatible_bias = compatible_total_bias;
+                if let Some(thermal) = old.thermal_strains.as_deref() {
+                    let sample = thermal.at(element, quadrature_point);
+                    let ceiling = sample.maximum_absolute_mandel_strain();
+                    let projected_free = thermal.free_strain(element, quadrature_point);
+                    bias_mandel = core::array::from_fn(|i| total_bias[i] - projected_free[i]);
+                    for offset in [&total_bias, &bias_mandel] {
+                        material
+                            .validate_kinematic_envelope_with_bias(&strain, offset, ceiling)
+                            .map_err(ViscoElementError::Material)?;
+                    }
+                    if let (Some(raw), Some(total)) = (&compatible, compatible_total_bias) {
+                        let raw_free = sample.free_strain_mandel();
+                        let mechanical = core::array::from_fn(|i| total[i] - raw_free[i]);
+                        for offset in [&total, &mechanical] {
+                            material
+                                .validate_kinematic_envelope_with_bias(raw, offset, ceiling)
+                                .map_err(ViscoElementError::Material)?;
+                        }
+                        compatible_bias = Some(mechanical);
+                    }
+                }
                 if let (Some(raw), Some(bias)) = (&compatible, &compatible_bias) {
-                    material.validate_strains_with_bias(raw, bias)
+                    material
+                        .validate_strains_with_bias(raw, bias)
                         .map_err(ViscoElementError::Material)?;
                 }
                 let response = prepared.evaluate_with_bias_and_checkpoint::<ViscoElementError>(
-                    &strain, &bias_mandel, &old.histories[element][quadrature_point], || checkpoint(cx),
+                    &strain,
+                    &bias_mandel,
+                    &old.histories[element][quadrature_point],
+                    || checkpoint(cx),
                 )?;
                 let energy = response.material;
                 let volume = Dd::from_f64(point.volume_m3);
                 for (sum, value) in totals.iter_mut().zip([
-                    energy.start_stored_energy_j_m3, energy.end_stored_energy_j_m3,
-                    energy.stored_energy_change_j_m3, energy.kelvin_heat_j_m3,
-                    energy.maxwell_heat_j_m3, energy.material_heat_j_m3,
-                    energy.stress_work_j_m3, response.state.stored,
-                    response.state.work, response.state.dissipated,
-                ]) { *sum = *sum + volume * Dd::from_f64(value); }
+                    energy.start_stored_energy_j_m3,
+                    energy.end_stored_energy_j_m3,
+                    energy.stored_energy_change_j_m3,
+                    energy.kelvin_heat_j_m3,
+                    energy.maxwell_heat_j_m3,
+                    energy.material_heat_j_m3,
+                    energy.stress_work_j_m3,
+                    response.state.stored,
+                    response.state.work,
+                    response.state.dissipated,
+                ]) {
+                    *sum = *sum + volume * Dd::from_f64(value);
+                }
                 states.push(response.state);
                 points.push(ViscoHarmonicMaterialSpectrumPoint {
-                    element, quadrature_point, volume_m3: point.volume_m3,
-                    strain_mandel: strain, compatible_strain_mandel: compatible,
-                    bias_mandel, compatible_bias_mandel: compatible_bias, material: energy,
+                    element,
+                    quadrature_point,
+                    volume_m3: point.volume_m3,
+                    strain_mandel: strain,
+                    compatible_strain_mandel: compatible,
+                    bias_mandel,
+                    compatible_bias_mandel: compatible_bias,
+                    material: energy,
                 });
             }
             histories.push(states);
         }
         let balance = (totals[6] - totals[2] - totals[5]).to_f64();
-        let [start, end, change, kelvin, maxwell, heat, work, stored, cumulative_work, cumulative_heat] = totals.map(Dd::to_f64);
-        if [start, end, change, kelvin, maxwell, heat, work, stored, cumulative_work, cumulative_heat, balance]
-            .iter().any(|v| !v.is_finite())
-        { return Err(ViscoElementError::NonFiniteResult.into()); }
+        let [
+            start,
+            end,
+            change,
+            kelvin,
+            maxwell,
+            heat,
+            work,
+            stored,
+            cumulative_work,
+            cumulative_heat,
+        ] = totals.map(Dd::to_f64);
+        if [
+            start,
+            end,
+            change,
+            kelvin,
+            maxwell,
+            heat,
+            work,
+            stored,
+            cumulative_work,
+            cumulative_heat,
+            balance,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+        {
+            return Err(ViscoElementError::NonFiniteResult.into());
+        }
         checkpoint(cx)?;
         Ok(ViscoHarmonicMaterialCausalStep {
             history: ViscoHarmonicMaterialHistory {
                 time_s: end_time,
                 history: ViscoElementState {
-                    system: self.source, histories, endpoint_stress_observed: true,
-                    energy: ViscoEnergy { stored_j: stored, work_j: cumulative_work, dissipated_j: cumulative_heat },
-                    displacement_m: endpoint, thermal_strains: None,
-                    eigenstrain_work_j: old.eigenstrain_work_j, parameter_work_j: old.parameter_work_j,
+                    system: self.source,
+                    histories,
+                    endpoint_stress_observed: true,
+                    energy: ViscoEnergy {
+                        stored_j: stored,
+                        work_j: cumulative_work,
+                        dissipated_j: cumulative_heat,
+                    },
+                    displacement_m: endpoint,
+                    thermal_strains: old.thermal_strains.clone(),
+                    eigenstrain_work_j: old.eigenstrain_work_j,
+                    parameter_work_j: old.parameter_work_j,
                 },
             },
             field: ViscoHarmonicMaterialCausalField {
-                start_time_s_dd: accepted.time_s, end_time_s_dd: end_time, duration_s,
-                angular_frequencies_rad_s: self.frequencies.clone(), points,
-                start_stored_energy_j: start, end_stored_energy_j: end,
-                stored_energy_change_j: change, kelvin_heat_j: kelvin,
-                maxwell_heat_j: maxwell, material_heat_j: heat, stress_work_j: work,
+                start_time_s_dd: accepted.time_s,
+                end_time_s_dd: end_time,
+                duration_s,
+                angular_frequencies_rad_s: self.frequencies.clone(),
+                points,
+                start_stored_energy_j: start,
+                end_stored_energy_j: end,
+                stored_energy_change_j: change,
+                kelvin_heat_j: kelvin,
+                maxwell_heat_j: maxwell,
+                material_heat_j: heat,
+                stress_work_j: work,
                 energy_balance_residual_j: balance,
             },
         })

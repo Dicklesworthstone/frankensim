@@ -57,8 +57,15 @@ impl<'s, 't, S> CausalHarmonicSolidHeatCandidate<'s, 't, S> {
 /// This admits ordinary adjacent thermal steps while explicitly refusing an
 /// interval whose endpoint would silently lose material time. It does not round
 /// or reset a retained clock. Standalone causal material evolution can continue
-/// with finer DD intervals. Temperature feedback into material coefficients,
-/// held thermal eigenstrain, mechanical force balance and startup-constrained
+/// with finer DD intervals.
+///
+/// An accepted thermal eigenstrain snapshot is held exactly, including its
+/// original source identities, reference temperature and quadrature samples.
+/// Its free strain is subtracted from the prescribed total-strain waveform;
+/// its zero rate leaves accumulated imposed-eigenstrain work unchanged. The
+/// receiving caloric temperatures may evolve without refreshing that snapshot
+/// or the original material law. Evolving eigenstrain, temperature feedback
+/// into material coefficients, mechanical force balance and startup-constrained
 /// plane stress remain outside this physical handoff.
 #[allow(clippy::too_many_arguments)]
 pub fn causal_heat_assembly_candidate<'s, 't, A: HeatAssembly + ?Sized>(
