@@ -227,6 +227,103 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn stage_sampling_retains_sub_quantum_energy_without_relaxing_parcel_updates() {
+    let bubble = bubble(true, 0.0005, 0.0);
+    let original = bubble.clone();
+    let parcel = bubble.gas();
+    let branch = parcel
+        .model()
+        .prepare_caloric_branch(solve(), || false)
+        .unwrap();
+    let density = parcel.mass_kg() / volume(RADIUS).unwrap();
+    for neighbor in [TEMPERATURE.next_down(), TEMPERATURE.next_up()] {
+        let quantum = parcel
+            .model()
+            .thermodynamics()
+            .specific_internal_energy_change(
+                Temperature::new(TEMPERATURE),
+                Temperature::new(neighbor),
+            )
+            .unwrap()
+            .value();
+        let retained = 0.25 * quantum;
+        assert!(
+            branch
+                .sample_density_internal_energy_increment(parcel.point(), density, retained, || {
+                    false
+                },)
+                .is_err()
+        );
+        let numeric = branch
+            .sample_density_internal_energy_coordinate(parcel.point(), density, retained, || false)
+            .unwrap();
+        assert_eq!(numeric.temperature_k, TEMPERATURE);
+        assert_eq!(numeric.energy_change_j_kg, 0.0);
+        assert_eq!(numeric.residual_j_kg, -retained);
+        let stage = bubble
+            .stage(
+                &branch,
+                bubble.state(),
+                retained * parcel.mass_kg(),
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(stage.temperature_k, TEMPERATURE);
+        // Four retained contributions resolve the neighboring source state;
+        // the coordinate is not reset to the rounded stage temperature.
+        let accumulated = bubble
+            .stage(
+                &branch,
+                bubble.state(),
+                4.0 * retained * parcel.mass_kg(),
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(accumulated.temperature_k, neighbor);
+        assert!(
+            parcel
+                .at_volume_internal_energy_increment(
+                    parcel.volume_m3(),
+                    retained * parcel.mass_kg(),
+                    solve(),
+                    || false,
+                )
+                .is_err()
+        );
+        let tighter = parcel
+            .model()
+            .prepare_caloric_branch(
+                GasEnergySolve {
+                    energy_tolerance_j_kg: 0.1 * retained.abs(),
+                    ..solve()
+                },
+                || false,
+            )
+            .unwrap();
+        assert!(
+            tighter
+                .sample_density_internal_energy_coordinate(
+                    parcel.point(),
+                    density,
+                    retained,
+                    || false,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            bubble.stage(
+                &branch,
+                bubble.state(),
+                retained * parcel.mass_kg(),
+                &mut || true
+            ),
+            Err(CaloricBubbleError::Cancelled)
+        ));
+    }
+    assert_eq!(bubble, original);
+}
+
+#[test]
 fn constant_cv_adiabatic_dynamics_match_both_original_polytropic_equations() {
     for compressible in [false, true] {
         let mut coupled = bubble(compressible, 0.0, 0.0);

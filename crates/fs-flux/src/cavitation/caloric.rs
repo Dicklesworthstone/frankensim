@@ -17,8 +17,7 @@
 //! dissolution, gas diffusion and shocks are not supplied by this owner.
 //! The KM equation already owns acoustic back-reaction; an observer adds none.
 //!
-//! Available with `caloric-cavitation`; execution of its new regression tests
-//! is pending because the implementation environment became unavailable.
+//! Available with `caloric-cavitation`.
 //!
 //! See Brennen, *Cavitation and Bubble Dynamics*, sections 2.2--2.4:
 //! <https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm>.
@@ -472,7 +471,11 @@ impl CaloricBubble {
                 "unrepresentable gas energy coordinate",
             ));
         }
-        let sample = branch.sample_density_internal_energy_increment(
+        // The conservative RK coordinate retains even sub-quantum energy.
+        // Its source sample may use the nearest represented temperature;
+        // strict endpoint reconstruction and whole-window energy checks below
+        // still decide whether an accepted parcel can represent the result.
+        let sample = branch.sample_density_internal_energy_coordinate(
             self.gas.point(),
             density,
             increment,

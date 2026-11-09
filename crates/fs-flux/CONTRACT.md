@@ -9319,11 +9319,14 @@ heat term, and exercise signed heat, preserved inventories, source-domain
 refusal and transactional cancellation. They are numerical model checks, not
 experimental validation of cavitation or heat-transfer coefficients.
 
-The implementation remains opt-in while native regression execution is pending.
-The implementation environment became unavailable before compilation/tests
-completed; no passing runtime result is claimed for this extension. The intended
-focused selector is `cargo test -p fs-flux --no-default-features --features
-caloric-cavitation --lib cavitation`.
+The implementation remains opt-in. The focused original-source subset now
+passes all 82 native cavitation tests, including the caloric groups and the
+new conservative-coordinate regression. Numeric RK stages may sample a gas
+energy smaller than one represented temperature increment while retaining that
+energy coordinate; strict original-source endpoint reconstruction and both
+energy audits remain unchanged. Full workspace/DSR execution remains outside
+this focused result. The workspace selector is `cargo test -p fs-flux
+--no-default-features --features caloric-cavitation --lib cavitation`.
 
 ## Finite surrounding-liquid conduction for cavitation nuclei
 

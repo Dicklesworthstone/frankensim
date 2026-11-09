@@ -80,3 +80,57 @@ fn prepared_numeric_density_sample_matches_original_source_and_retains_bounds() 
     assert!(branch.sample_density_internal_energy_increment(
         &context, -density, 0.0, || false).is_err());
 }
+
+#[test]
+fn retained_energy_coordinate_can_sample_below_one_temperature_quantum() {
+    let gas = model(vec![0.75, 0.25], 0.002);
+    let context = point(400.0, 100000.0);
+    let density = gas.evaluate(&context).unwrap().state().density;
+    let branch = gas.prepare_caloric_branch(controls(), || false).unwrap();
+    for neighbor in [400.0_f64.next_down(), 400.0_f64.next_up()] {
+        let quantum = caloric_change(&gas, Temperature::new(400.0), neighbor,
+            Constraint::Density(density)).unwrap();
+        let request = 0.25 * quantum;
+        // Strict parcel semantics remain unchanged: a separate heat addition
+        // cannot lose a nonzero energy change by returning the same state.
+        assert!(branch.sample_density_internal_energy_increment(
+            &context, density, request, || false).is_err());
+        assert!(branch.reconstruct_density_internal_energy_increment(
+            &context, density, request, || false).is_err());
+        let mut polls = 0;
+        let sample = branch.sample_density_internal_energy_coordinate(
+            &context, density, request, || { polls += 1; false }).unwrap();
+        assert_eq!(sample.temperature_k, 400.0);
+        assert_eq!(sample.energy_change_j_kg, 0.0);
+        assert_eq!(sample.residual_j_kg, -request);
+        assert!(sample.residual_j_kg.abs() <= controls().energy_tolerance_j_kg);
+        let zero = branch.sample_density_internal_energy_increment(
+            &context, density, 0.0, || false).unwrap();
+        assert_eq!(sample.pressure_pa, zero.pressure_pa);
+        assert_eq!(sample.cv_j_kg_k, zero.cv_j_kg_k);
+        for stop in 1..=polls {
+            let mut count = 0;
+            assert!(matches!(branch.sample_density_internal_energy_coordinate(
+                &context, density, request, || { count += 1; count == stop }),
+                Err(GasEnergyError::Cancelled)));
+        }
+        let stricter = gas.prepare_caloric_branch(GasEnergySolve {
+            energy_tolerance_j_kg: 0.1 * request.abs(), ..controls()
+        }, || false).unwrap();
+        assert!(stricter.sample_density_internal_energy_coordinate(
+            &context, density, request, || false).is_err());
+        let bounded = gas.prepare_caloric_branch(if request > 0.0 {
+            GasEnergySolve { maximum_temperature_k: 400.0, ..controls() }
+        } else {
+            GasEnergySolve { minimum_temperature_k: 400.0, ..controls() }
+        }, || false).unwrap();
+        assert!(bounded.sample_density_internal_energy_coordinate(
+            &context, density, request, || false).is_err());
+    }
+    for request in [-10000.0, -1.0, 0.0, 1.0, 10000.0] {
+        assert_eq!(branch.sample_density_internal_energy_coordinate(
+            &context, density, request, || false).unwrap(),
+            branch.sample_density_internal_energy_increment(
+                &context, density, request, || false).unwrap());
+    }
+}

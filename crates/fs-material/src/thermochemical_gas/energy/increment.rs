@@ -165,6 +165,63 @@ impl GasCaloricBranch<'_> {
         })
     }
 
+    /// Sample a separately retained conservative internal-energy coordinate.
+    ///
+    /// Unlike a standalone heat increment, an ODE stage can retain a nonzero
+    /// energy change that is too small to move its temperature by one float.
+    /// This opt-in view may then use the unchanged reference temperature ONLY
+    /// when it is the closest representable temperature, as established by the
+    /// original source-law energy change to the directional float neighbor.
+    /// The unresolved energy is returned as `residual_j_kg` and must remain in
+    /// the caller's conservative coordinate; it is never added to a parcel or
+    /// silently discarded. The caller's absolute tolerance still applies.
+    ///
+    /// The directional neighbor must lie inside the admitted temperature
+    /// bracket. Every ordinarily converged sample is unchanged, cancellation
+    /// and original-source failures propagate, and full accepted states still
+    /// require the strict reconstruction/energy-residual checks.
+    pub fn sample_density_internal_energy_coordinate(
+        &self, context: &QueryPoint, density_kg_m3: f64, change_j_kg: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasCaloricSample, GasEnergyError> {
+        let refused = match self.sample_density_internal_energy_increment(
+            context, density_kg_m3, change_j_kg, &mut cancelled,
+        ) {
+            Err(error @ GasEnergyError::NotConverged { .. }) => error,
+            result => return result,
+        };
+        if change_j_kg.abs() > self.controls.energy_tolerance_j_kg {
+            return Err(refused);
+        }
+        poll(&mut cancelled)?;
+        let (initial, _) = coordinates(context)?;
+        let neighbor = if change_j_kg > 0.0 {
+            initial.value().next_up()
+        } else {
+            initial.value().next_down()
+        };
+        if neighbor < self.controls.minimum_temperature_k
+            || neighbor > self.controls.maximum_temperature_k
+        {
+            return Err(refused);
+        }
+        let quantum = caloric_change(self.model, initial, neighbor, Constraint::Density(density_kg_m3))?;
+        if !quantum.is_finite() || quantum == 0.0
+            || quantum.is_sign_positive() != change_j_kg.is_sign_positive()
+            || change_j_kg.abs() > 0.5 * quantum.abs()
+        {
+            return Err(refused);
+        }
+        let mut sample = self.sample_density_internal_energy_increment(
+            context, density_kg_m3, 0.0, &mut cancelled,
+        )?;
+        sample.residual_j_kg = -change_j_kg;
+        if let GasEnergyError::NotConverged { iterations, .. } = refused {
+            sample.iterations = iterations;
+        }
+        Ok(sample)
+    }
+
     /// Reuse this admitted branch for a frozen-composition density/Delta-u solve.
     /// The reference temperature must lie in the prepared bracket. The returned
     /// state's residual is the direct original-law increment minus the request.
