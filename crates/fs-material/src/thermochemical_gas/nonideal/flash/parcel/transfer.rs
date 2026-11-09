@@ -25,6 +25,9 @@ use fs_qty::{Pressure, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+/// Atomic bulk transfer between finite equilibrium tanks using integrated flow H.
+pub mod finite;
+
 /// A prescribed finite incoming portion from one held equilibrium source state.
 #[derive(Clone, Copy, Debug)]
 pub struct MixtureEquilibriumInflow<'m> {
@@ -228,6 +231,30 @@ impl IsochoricMixtureEquilibriumParcel {
         incoming: MixtureEquilibriumInflow<'_>,
         interaction_catalog: Option<&ThermochemicalPengRobinsonModel>,
         controls: MixtureEquilibriumInflowControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MixtureEquilibriumInflowStep, Error> {
+        self.receive_accounted_stream(
+            incoming,
+            interaction_catalog,
+            controls,
+            None,
+            0.0,
+            cancelled,
+        )
+    }
+
+    // The finite-tank owner supplies an ACTUAL donor anchor and its original
+    // integrated H minus dm*h_anchor, without inventing a mean inlet T,p.
+    // Only the public held-stream path exposes this receipt: its inlet_state
+    // and pressure-flow-work fields describe the anchor, not a variable stream.
+    // The finite owner publishes its own integrated accounts instead.
+    fn receive_accounted_stream(
+        &mut self,
+        incoming: MixtureEquilibriumInflow<'_>,
+        interaction_catalog: Option<&ThermochemicalPengRobinsonModel>,
+        controls: MixtureEquilibriumInflowControl,
+        retained_inlet: Option<&ResolvedThermochemicalPhaseState>,
+        enthalpy_adjustment_j: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MixtureEquilibriumInflowStep, Error> {
         poll(&mut cancelled)?;
@@ -236,6 +263,8 @@ impl IsochoricMixtureEquilibriumParcel {
             || incoming.mass_kg < 0.0
             || !positive(incoming.temperature.value())
             || !positive(incoming.pressure.value())
+            || !enthalpy_adjustment_j.is_finite()
+            || incoming.mass_kg == 0.0 && enthalpy_adjustment_j != 0.0
         {
             return Err(Error::Invalid(
                 "finite nonnegative incoming mass and positive source T,p required",
@@ -345,17 +374,30 @@ impl IsochoricMixtureEquilibriumParcel {
             return Err(Error::Invalid("joined source lost a conserved species"));
         }
         poll(&mut cancelled)?;
-        let inlet_state = incoming
-            .model
-            .evaluate_phase_equilibrium(
-                incoming.temperature,
-                incoming.pressure,
-                controls.equilibrium.phase.phase_options(),
-                &mut cancelled,
-            )
-            .map_err(|e| phase_error(0, 0, e))?;
-        let mut pt = 1;
-        let mut eos = inlet_state.caloric_sample().eos_evaluation_upper_bound;
+        let (inlet_state, mut pt, mut eos) = if let Some(state) = retained_inlet {
+            if state.constitutive_law() != incoming.model.mechanics()
+                || state.phase().options() != controls.equilibrium.phase.phase_options()
+                || state.temperature_k() != incoming.temperature.value()
+                || state.pressure_pa() != incoming.pressure.value()
+            {
+                return Err(Error::Invalid(
+                    "retained inflow anchor/source/policy mismatch",
+                ));
+            }
+            (state.clone(), 0, 0)
+        } else {
+            let state = incoming
+                .model
+                .evaluate_phase_equilibrium(
+                    incoming.temperature,
+                    incoming.pressure,
+                    controls.equilibrium.phase.phase_options(),
+                    &mut cancelled,
+                )
+                .map_err(|e| phase_error(0, 0, e))?;
+            let eos = state.caloric_sample().eos_evaluation_upper_bound;
+            (state, 1, eos)
+        };
         let remaining = controls.equilibrium.maximum_pt_evaluations - pt;
         if remaining == 0 {
             return Err(Error::WorkLimit { pt_evaluations: pt });
@@ -439,7 +481,11 @@ impl IsochoricMixtureEquilibriumParcel {
             feed_h,
             -anchor_u,
         ]);
-        let target_energy = products([(self.mass_kg, old_target), (incoming.mass_kg, feed_target)]);
+        let target_energy = products([
+            (self.mass_kg, old_target),
+            (incoming.mass_kg, feed_target),
+            (1.0, enthalpy_adjustment_j),
+        ]);
         let target_increment = target_energy / final_mass;
         if !target_energy.is_finite()
             || !target_increment.is_finite()
@@ -495,6 +541,7 @@ impl IsochoricMixtureEquilibriumParcel {
             (final_mass, increment),
             (-self.mass_kg, old_target),
             (-incoming.mass_kg, feed_target),
+            (-1.0, enthalpy_adjustment_j),
         ]);
         let volume_residual =
             final_mass * (source_specific_volume(solved.state()) - final_specific_volume);
@@ -536,7 +583,9 @@ impl IsochoricMixtureEquilibriumParcel {
             .map_err(|e| {
                 phase_error(4, pt, failure("inflow source reference receipt", e).into())
             })?;
-        let incoming_enthalpy = incoming.mass_kg * inlet_state.specific_enthalpy_j_kg();
+        let incoming_enthalpy = incoming
+            .mass_kg
+            .mul_add(inlet_state.specific_enthalpy_j_kg(), enthalpy_adjustment_j);
         let incoming_entropy = incoming.mass_kg * inlet_state.specific_entropy_j_kg_k();
         let incoming_flow_work =
             incoming.mass_kg * incoming.pressure.value() * source_specific_volume(&inlet_state);

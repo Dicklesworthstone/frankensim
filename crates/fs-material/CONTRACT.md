@@ -22617,3 +22617,30 @@ explicit pressure support, phase identity and late cancellation.
 The evaluator borrows the original tension-positive tensor-shear `Voigt` stress and projects its transverse anisotropy under an explicitly adopted isotropic linear constitutive extension. It returns differential indices and relative phase with the higher-index slow axis; hydrostatic stress cancels. Common index/group shifts, splitting and walk-off are outside this law. Applicability to the caller's stress, temperature and specimen remains the caller's responsibility, distinct from scalar CHARMS provenance.
 
 Validation: the three original source assertion bodies executed successfully in a small dynamic-std executable using the exact production module, exact original Voigt alias and original cached fs-math/fs-blake3. They cover the published SI/one-sigma controls, signed tensor shear and principal stresses, oblique projection/frame covariance, hydrostatic null and refusals. Rustfmt passed. Cargo libtest and Clippy could not write their outputs because the environment was full; no workspace lint or native-renderer test pass is claimed.
+
+### Paired finite equilibrium tanks with integrated enthalpy transfer
+
+`nonideal::flash::parcel::transfer::finite` transfers a prescribed bulk portion
+between two existing rigid equilibrium tanks. The original donor S,V withdrawal
+retains overall composition and specific entropy while temperature, pressure and
+phase amounts evolve. Both phases are entrained in equilibrium proportions.
+Its integrated outgoing H drives the original receiving source join and U,V
+closure; freezing initial donor h over the finite portion is not permitted.
+The receiving inventory is credited with the donor's actual mass debit.
+
+The native integrated-H correction enters the receiving relative-energy target
+before original species datums are added. The accepted donor phase state is reused
+without another inlet flash. Original NASA/PR identities, known cross-interactions
+and common phase policy remain authoritative. Pair mass, each species, reference-
+free energy and total entropy production are checked independently; pressure-flow
+work and latent energy already belong to the original H/U owners. Both native work
+caps remain finite and their combined receipt counters use checked addition.
+
+Both inventories publish together after final cancellation and balance checks.
+Source, budget, entropy or pressure refusal leaves both unchanged. Zero transfer
+is exact idle. Initial and final pressure-head checks are necessary endpoint
+conditions, not a guarantee of the intervening path. This owner supplies no
+rate law, empty-tank filling, selective vapor vent, jet energy, heat or shaft work.
+Focused regressions specify two-phase discharge and actual endpoint U closure,
+dilute analytic blowdown/filling with changing composition, portion subdivision,
+large energy/entropy datums and atomic late refusal/cancellation.
