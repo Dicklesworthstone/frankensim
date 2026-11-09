@@ -3330,8 +3330,8 @@ prevents a newly born target and neutron field from falsely converging at zero.
 This closes the frozen-mean equations, not their unresolved nonlinear time
 correlation; physical interval refinement remains necessary. Existing explicit
 work, node, edge, iteration and cancellation limits apply to the entire joint
-system. Independent stationary cell inventories are admitted; material movement
-is explicitly refused by this binding. The combined node ceiling remains 64.
+system. Independent inventories and the original finite-compartment transport owner
+are admitted. The combined neutron/precursor/nuclide node ceiling remains 64.
 
 The existing `FusionNeutronActivationState` accounts that same accepted neutron
 trajectory. Emitted kinetic energy is an internal transfer funded exclusively
@@ -3372,3 +3372,40 @@ Two additional native regressions pass for evaluated emission with competing
 finite capture, reordered decay channels, changed identity/energy/grid refusal
 and late cancellation. They test the admitted mapping and manufactured
 equations rather than evaluated-isotope calibration.
+
+## Transported finite radioactive emitters
+
+The finite-emitter binding also admits the original `BurnupTransportState`.
+Its physical channel compiler and accepted-evolution ledger are shared with
+the standalone transport path. One neutron/nuclide operator includes decay,
+irradiation, donor-proportional transfer, exterior outflow, daughter ingrowth
+and continuous supply. Every nuclear and neutron-source edge is scaled to the
+complete removal hazard; departure is never counted as a radioactive event.
+Physical reaction and movement counts use the same joint residence integrals.
+
+A daughter may be born in one cell, move and emit in another during the same
+interval. Original per-cell reaction/heat histories stay at their event
+locations; moving a remaining nucleus does not move previously released heat.
+Exterior outflow retains its original nucleus ledger and excludes subsequent
+emission from the represented domain. It creates neither neutron leakage nor
+heat. External feed remains distinct from internal transfer and products.
+
+Transported compartments retain the exact shared nuclear model and original
+nuclide order, matched neutron-cell volumes and unchanged neutron yields for
+each transported nuclide. An external joint solve clears incompatible
+nuclear-only prepared maps; native standalone advances restore their own
+compatible map and reuse it under the original rules. Transfer-path and
+coefficient limits remain active alongside the complete joint node/edge bounds.
+
+The existing activation energy and material transaction consume the resulting
+local events directly. Seven additional native regressions cover analytic
+moving-parent and daughter emission, outflow/restart, continuous-feed reduction,
+nonlinear moving-emitter capture against an independent ODE with physical
+refinement, joint-budget/cancellation rollback and local material calorimetry.
+The affected suite passed 129 tests, including the original transport cache,
+circulation, continuous-feed and lifetime-account regressions.
+
+Compartment rates remain prescribed. Carrier fluid dynamics, transported bulk
+mass and sensible/latent enthalpy are separate owners; this coupling does not
+infer them. Frozen-mean reaction closure, diffusion-model limits and the
+existing kinetic-energy model exclusions still apply.

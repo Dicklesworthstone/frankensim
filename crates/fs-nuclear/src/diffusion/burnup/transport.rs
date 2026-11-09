@@ -38,6 +38,64 @@ pub(super) struct InventoryTrial {
     pub transport: Option<DiffusionBurnupTransportStep>,
 }
 
+impl InventoryTrial {
+    /// Preserve the original transport report when its trajectory was solved
+    /// either by its native map or inside the larger neutron/nuclide block.
+    pub(super) fn from_transport(
+        initial: &BurnupTransportState,
+        candidate: BurnupTransportState,
+        limits: BurnupTransportLimits,
+        report: BurnupTransportStep,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, DiffusionBurnupError> {
+        let mut means = Vec::with_capacity(initial.inventories().len());
+        for (inventory, residence) in initial
+            .inventories()
+            .iter()
+            .zip(&report.integrated_populations_s)
+        {
+            let mut mean = Vec::with_capacity(residence.len());
+            for (&population, &integral) in inventory.populations().iter().zip(residence) {
+                checkpoint()?;
+                // Residence retains continuous ingrowth and movement even
+                // without a local removal hazard. Endpoints cannot replace it.
+                mean.push(if report.duration_s == 0.0 {
+                    population
+                } else {
+                    mean_population(integral, 1.0, report.duration_s)?
+                });
+            }
+            means.push(mean);
+        }
+        let BurnupTransportStep {
+            burnup,
+            integrated_populations_s,
+            produced_nuclei,
+            produced_nuclei_by_compartment,
+            transfer_counts,
+            outflow_counts,
+            cohort_balance_residuals,
+            ..
+        } = report;
+        Ok(Self {
+            owner: InventoryOwner::Transported {
+                state: candidate,
+                limits,
+            },
+            reports: burnup,
+            means,
+            produced: produced_nuclei,
+            produced_by_cell: produced_nuclei_by_compartment,
+            transport: Some(DiffusionBurnupTransportStep {
+                integrated_populations_s,
+                transfer_counts,
+                outflow_counts,
+                cohort_balance_residuals,
+            }),
+        })
+    }
+}
+
 impl DiffusionBurnupState {
     /// Couple the existing finite-material transport owner to evolving spatial
     /// neutrons. Original cell volumes and ordering must match exactly. Every
@@ -152,51 +210,7 @@ impl InventoryOwner {
                     &mut *checkpoint,
                 )?
             };
-            let mut means = Vec::with_capacity(state.inventories().len());
-            for (inventory, residence) in state
-                .inventories()
-                .iter()
-                .zip(&report.integrated_populations_s)
-            {
-                let mut mean = Vec::with_capacity(residence.len());
-                for (&initial, &integral) in inventory.populations().iter().zip(residence) {
-                    checkpoint()?;
-                    // Residence retains continuous ingrowth even when a node
-                    // has no local removal hazard. Endpoint averaging does not.
-                    mean.push(if duration_s == 0.0 {
-                        initial
-                    } else {
-                        mean_population(integral, 1.0, duration_s)?
-                    });
-                }
-                means.push(mean);
-            }
-            let BurnupTransportStep {
-                burnup,
-                integrated_populations_s,
-                produced_nuclei,
-                produced_nuclei_by_compartment,
-                transfer_counts,
-                outflow_counts,
-                cohort_balance_residuals,
-                ..
-            } = report;
-            return Ok(InventoryTrial {
-                owner: Self::Transported {
-                    state: candidate,
-                    limits: *limits,
-                },
-                reports: burnup,
-                means,
-                produced: produced_nuclei,
-                produced_by_cell: produced_nuclei_by_compartment,
-                transport: Some(DiffusionBurnupTransportStep {
-                    integrated_populations_s,
-                    transfer_counts,
-                    outflow_counts,
-                    cohort_balance_residuals,
-                }),
-            });
+            return InventoryTrial::from_transport(state, candidate, *limits, report, checkpoint);
         }
 
         let inventories = self.inventories();

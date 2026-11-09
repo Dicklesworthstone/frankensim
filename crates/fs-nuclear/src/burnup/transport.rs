@@ -277,6 +277,16 @@ pub struct BurnupTransportStep {
     pub energy_roundoff_j: f64,
 }
 
+/// Nuclear slice of one accepted joint evolution, including the residence that
+/// attributes physical reactions and movement. External source product-rounding
+/// losses are supplied per cell; scalar supply exports are audited by the owner.
+pub(crate) struct BurnupTransportEvolution {
+    pub(crate) evolved: ReactionAdvance,
+    pub(crate) residence: Vec<f64>,
+    pub(crate) produced_nuclei: Vec<Vec<f64>>,
+    pub(crate) input_roundoff_nuclei: Vec<f64>,
+}
+
 impl BurnupTransportState {
     /// Bind finite current inventories and positive fixed control volumes.
     /// Earlier physical histories are preserved, not redistributed with material.
@@ -573,7 +583,7 @@ impl BurnupTransportState {
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, BurnupTransportStep), BurnupError> {
         checkpoint()?;
-        let local_budget = budget.local()?;
+        budget.local()?;
         self.admit(transport, budget.limits, &mut checkpoint)?;
         let cells = self.inventories.len();
         let n = self.model.nuclides().len();
@@ -618,26 +628,109 @@ impl BurnupTransportState {
         let mut initial = Vec::with_capacity(cells * n);
         let mut supplied = Vec::with_capacity(cells * n);
         let mut produced_nuclei = Vec::with_capacity(cells);
-        let mut produced_nuclei_by_compartment = Vec::with_capacity(cells);
         let mut defects = vec![Accumulator::new(0.0); cells];
         for (cell, inventory) in self.inventories.iter().enumerate() {
             let mut row = Vec::with_capacity(n);
-            let mut total = Accumulator::new(0.0);
             for (nuclide, &population) in inventory.populations().iter().enumerate() {
                 checkpoint()?;
                 initial.push(population);
                 let rate = production_rates_s.map_or(0.0, |rows| rows[cell][nuclide]);
                 let count = product(rate, duration_s)?;
                 charge(&mut defects[cell], rate.mul_add(duration_s, -count).abs())?;
-                charge(&mut defects[cell], add(&mut total, count)?.abs())?;
                 row.push(count);
                 supplied.push(count);
             }
-            charge(&mut defects[cell], projection_error(total)?)?;
-            produced_nuclei_by_compartment.push(checked(total.value())?);
             produced_nuclei.push(row);
         }
         let (evolved, residence) = prepared.plan.apply(&initial, &supplied, &mut checkpoint)?;
+        let input_roundoff_nuclei = defects
+            .into_iter()
+            .map(nonnegative_bound)
+            .collect::<Result<_, _>>()?;
+        let (mut next, report) = self.account_evolution(
+            duration_s,
+            &prepared.rates,
+            transport,
+            BurnupTransportEvolution {
+                evolved,
+                residence,
+                produced_nuclei,
+                input_roundoff_nuclei,
+            },
+            budget,
+            &mut checkpoint,
+        )?;
+        next.transport = Arc::clone(&prepared.transport);
+        next.prepared = Some(prepared);
+        Ok((next, report))
+    }
+
+    /// Attach original physical and lifetime accounts to the nuclear slice of
+    /// a joint solve. The caller supplies the original frozen reaction rates
+    /// and the SAME evolution's population integrals, never endpoint averages.
+    /// No propagator is prepared or applied here. A standalone prepared map is
+    /// cleared because an external joint map may contain additional species.
+    pub(crate) fn account_evolution(
+        &self,
+        duration_s: f64,
+        rates: &[Vec<f64>],
+        transport: &NuclideTransport,
+        evolution: BurnupTransportEvolution,
+        budget: BurnupTransportBudget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, BurnupTransportStep), BurnupError> {
+        let mut poll = || checkpoint();
+        let checkpoint = &mut poll;
+        checkpoint()?;
+        let local_budget = budget.local()?;
+        self.admit(transport, budget.limits, checkpoint)?;
+        let cells = self.inventories.len();
+        let n = self.model.nuclides().len();
+        let nodes = cells * n;
+        let BurnupTransportEvolution {
+            evolved,
+            residence,
+            produced_nuclei,
+            input_roundoff_nuclei,
+        } = evolution;
+        if !nonnegative(duration_s)
+            || rates.len() != cells
+            || evolved.populations.len() != nodes
+            || evolved.removals.len() != nodes
+            || residence.len() != nodes
+            || produced_nuclei.len() != cells
+            || input_roundoff_nuclei.len() != cells
+        {
+            return Err(BurnupError::Invalid(
+                "joint transport evolution must retain the original cell/nuclide layout",
+            ));
+        }
+        for row in rates {
+            admit_rate_row(row, self.model.reactions().len(), checkpoint)?;
+        }
+        self.admit_sources(&produced_nuclei, checkpoint)?;
+        for row in [
+            evolved.populations.as_slice(),
+            evolved.removals.as_slice(),
+            residence.as_slice(),
+            input_roundoff_nuclei.as_slice(),
+        ] {
+            admit_rate_row(row, row.len(), checkpoint)?;
+        }
+        let mut defects = input_roundoff_nuclei
+            .into_iter()
+            .map(Accumulator::new)
+            .collect::<Vec<_>>();
+        let mut produced_nuclei_by_compartment = Vec::with_capacity(cells);
+        for (cell, row) in produced_nuclei.iter().enumerate() {
+            let mut total = Accumulator::new(0.0);
+            for &count in row {
+                checkpoint()?;
+                charge(&mut defects[cell], add(&mut total, count)?.abs())?;
+            }
+            charge(&mut defects[cell], projection_error(total)?)?;
+            produced_nuclei_by_compartment.push(checked(total.value())?);
+        }
         let mut next = self.clone();
         let mut imports = vec![vec![Accumulator::new(0.0); n]; cells];
         let mut exports = vec![vec![Accumulator::new(0.0); n]; cells];
@@ -706,7 +799,7 @@ impl BurnupTransportState {
             let mut removals = vec![Accumulator::new(0.0); n];
             let mut counts = Vec::with_capacity(self.model.reactions().len());
             let mut count_errors = Vec::with_capacity(self.model.reactions().len());
-            for (reaction, &rate) in self.model.reactions().iter().zip(&prepared.rates[cell]) {
+            for (reaction, &rate) in self.model.reactions().iter().zip(&rates[cell]) {
                 checkpoint()?;
                 let integral = residence[cell * n + reaction.parent];
                 let count = product(rate, integral)?;
@@ -744,7 +837,7 @@ impl BurnupTransportState {
                 Some(&produced_nuclei[cell]),
                 nonnegative_bound(defects[cell])?,
                 local_budget,
-                &mut checkpoint,
+                checkpoint,
             )?;
             // The accepted cohort owns one map; retain no redundant local maps.
             inventory.prepared = None;
@@ -758,7 +851,7 @@ impl BurnupTransportState {
             &produced_nuclei,
             &outflow_counts,
             transport,
-            &mut checkpoint,
+            checkpoint,
         )?;
         let mut first_defect = Accumulator::new(burnup[0].population_roundoff_nuclei);
         charge(&mut first_defect, collective_defect)?;
@@ -776,8 +869,12 @@ impl BurnupTransportState {
                 "joint reaction energy accounting roundoff",
             ));
         }
-        next.transport = Arc::clone(&prepared.transport);
-        next.prepared = Some(prepared);
+        next.transport = if std::ptr::eq(transport, self.transport.as_ref()) {
+            Arc::clone(&self.transport)
+        } else {
+            Arc::new(transport.clone())
+        };
+        next.prepared = None;
         checkpoint()?;
         Ok((
             next,
@@ -805,8 +902,48 @@ impl BurnupTransportState {
         with_sources: bool,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
     ) -> Result<PreparedBurnupTransport, BurnupError> {
+        let (removals, edges) = self.compile_channels(&rates, transport, limits, checkpoint)?;
+        let plan = JointPlan::prepare(
+            &removals,
+            &edges,
+            duration_s,
+            limits,
+            with_sources,
+            checkpoint,
+        )?;
+        Ok(PreparedBurnupTransport {
+            model: Arc::clone(&self.model),
+            transport: Arc::new(transport.clone()),
+            rates,
+            limits,
+            plan,
+        })
+    }
+
+    /// Compile physical reactions and donor-proportional movement together.
+    /// Returned indices are cell-major then original nuclide; each edge yield
+    /// is relative to the complete nuclear-plus-transport removal rate. This
+    /// prepares no numerical map and is shared by standalone and coupled solves.
+    pub(crate) fn compile_channels(
+        &self,
+        rates: &[Vec<f64>],
+        transport: &NuclideTransport,
+        limits: BurnupTransportLimits,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Vec<f64>, Vec<ReactionEdge>), BurnupError> {
+        let mut poll = || checkpoint();
+        let checkpoint = &mut poll;
+        self.admit(transport, limits, checkpoint)?;
         let n = self.model.nuclides().len();
         let cells = self.inventories.len();
+        if rates.len() != cells {
+            return Err(BurnupError::Invalid(
+                "one original reaction-rate row per compartment required",
+            ));
+        }
+        for row in rates {
+            admit_rate_row(row, self.model.reactions().len(), checkpoint)?;
+        }
         let mut channels = Vec::with_capacity(cells);
         let mut totals = vec![Accumulator::new(0.0); cells * n];
         for (cell, rates) in rates.iter().enumerate() {
@@ -867,21 +1004,8 @@ impl BurnupTransportState {
                 });
             }
         }
-        let plan = JointPlan::prepare(
-            &removals,
-            &edges,
-            duration_s,
-            limits,
-            with_sources,
-            checkpoint,
-        )?;
-        Ok(PreparedBurnupTransport {
-            model: Arc::clone(&self.model),
-            transport: Arc::new(transport.clone()),
-            rates,
-            limits,
-            plan,
-        })
+        checkpoint()?;
+        Ok((removals, edges))
     }
 
     fn cohort_balance(
@@ -982,7 +1106,11 @@ fn defect_sum(values: impl Iterator<Item = f64>) -> Result<f64, BurnupError> {
 
 // Choose an ordering that represents the positive normalized yield without
 // premature product overflow or ratio underflow. All coefficients remain finite.
-fn scale_yield(yield_: f64, physical_rate: f64, total_rate: f64) -> Result<f64, BurnupError> {
+pub(crate) fn scale_yield(
+    yield_: f64,
+    physical_rate: f64,
+    total_rate: f64,
+) -> Result<f64, BurnupError> {
     for value in [
         yield_ * (physical_rate / total_rate),
         (yield_ / total_rate) * physical_rate,

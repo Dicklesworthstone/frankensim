@@ -10,8 +10,10 @@
 //! The original reaction-consistency iteration also checks the actual mean
 //! target and integrated flux, including initially empty targets/fields. This
 //! closes the frozen-mean equations, not the nonlinear time correlation; physical
-//! timestep refinement remains necessary. Sources are independent stationary
-//! cell inventories. Material movement must not be silently approximated here.
+//! timestep refinement remains necessary. Independent inventories and the
+//! original finite material-transport owner share this same block. A moved
+//! nucleus emits in the compartment where it actually decays; exterior outflow
+//! removes its future retained emission without creating a neutron or heat.
 
 use std::sync::Arc;
 
@@ -29,7 +31,10 @@ use super::{
     DiffusionBurnupBudget, DiffusionBurnupError, DiffusionBurnupSources, DiffusionBurnupState,
     DiffusionState, DiffusionStep, export_supplied_count, mean_population, upper_value,
 };
-use crate::burnup::{BurnupError, BurnupModel, BurnupRate};
+use crate::burnup::transport::{
+    BurnupTransportBudget, BurnupTransportEvolution, BurnupTransportLimits, scale_yield,
+};
+use crate::burnup::{BurnupError, BurnupInventory, BurnupModel, BurnupRate, BurnupStep};
 use crate::irradiation::GroupFlux;
 use crate::{Accumulator, FissionError, nonnegative, sum};
 
@@ -87,14 +92,25 @@ impl DiffusionBurnupState {
     /// Enable radioactive birth on the original stocks without resetting any
     /// inventory, resident neutron, event count or accumulated energy account.
     /// Every cell supplies its exact original model, including explicit zero
-    /// rows. An inventory-transport state is refused instead of freezing motion.
+    /// rows. Transported stocks retain their original movement and require the
+    /// same parent-wide yields in every compartment: movement cannot change a
+    /// nuclide's decay spectrum on this common neutron grid.
     pub fn with_decay_neutrons(
         mut self,
         emissions: Vec<Arc<BurnupDecayNeutronEmission>>,
     ) -> Result<Self, DiffusionBurnupError> {
-        if self.transport().is_some() || emissions.len() != self.inventories().len() {
+        if emissions.len() != self.inventories().len() {
             return Err(DiffusionBurnupError::Invalid(
-                "decay-neutron coupling requires all original independent cell inventories",
+                "decay-neutron coupling requires every original cell inventory",
+            ));
+        }
+        if self.transport().is_some()
+            && emissions
+                .windows(2)
+                .any(|pair| pair[0].neutron_yields() != pair[1].neutron_yields())
+        {
+            return Err(DiffusionBurnupError::Invalid(
+                "transported nuclides require unchanged decay-neutron yields across cells",
             ));
         }
         let mut nodes = self.neutrons.model.nodes;
@@ -177,47 +193,91 @@ impl DiffusionBurnupState {
             )?;
             rate_accounts[reaction.cell][binding.burnup_reaction].add(rate)?;
         }
-        let mut rates = neutron_initial.model.removal_rates.clone();
-        let mut edges = neutron_initial.model.edges.clone();
+        let reaction_rates = rate_accounts
+            .iter()
+            .map(|row| row.iter().map(|rate| rate.value()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let transported = self.transport().is_some();
         let mut channels = Vec::with_capacity(inventories.len());
+        let (nuclear_rates, nuclear_edges) = match &self.inventories {
+            InventoryOwner::Transported { state, limits } => state.compile_channels(
+                &reaction_rates,
+                state.transport(),
+                BurnupTransportLimits {
+                    burnup: budget.burnup.limits,
+                    ..*limits
+                },
+                checkpoint,
+            )?,
+            InventoryOwner::Independent(_) => {
+                let mut rates = Vec::with_capacity(nodes - neutron_nodes);
+                let mut edges = Vec::new();
+                for (inventory, reaction_rates) in inventories.iter().zip(&reaction_rates) {
+                    checkpoint()?;
+                    let offset = rates.len();
+                    let compiled = inventory
+                        .model()
+                        .prepare_channels(reaction_rates, &mut *checkpoint)?;
+                    rates.extend_from_slice(&compiled.removal_rates);
+                    for edge in &compiled.edges {
+                        push_edge(
+                            &mut edges,
+                            ReactionEdge {
+                                parent: offset + edge.parent,
+                                daughter: offset + edge.daughter,
+                                yield_per_removal: edge.yield_per_removal,
+                            },
+                            limits.maximum_edges,
+                        )?;
+                    }
+                    channels.push(compiled);
+                }
+                (rates, edges)
+            }
+        };
+        let mut rates = neutron_initial.model.removal_rates.clone();
+        rates.extend_from_slice(&nuclear_rates);
+        let mut edges = neutron_initial.model.edges.clone();
+        for edge in nuclear_edges {
+            checkpoint()?;
+            push_edge(
+                &mut edges,
+                ReactionEdge {
+                    parent: neutron_nodes + edge.parent,
+                    daughter: neutron_nodes + edge.daughter,
+                    yield_per_removal: edge.yield_per_removal,
+                },
+                limits.maximum_edges,
+            )?;
+        }
+        let mut offset = neutron_nodes;
         for (cell, inventory) in inventories.iter().enumerate() {
             checkpoint()?;
-            let offset = rates.len();
-            let reaction_rates = rate_accounts[cell]
-                .iter()
-                .map(|rate| rate.value())
-                .collect::<Vec<_>>();
-            let compiled = inventory
-                .model()
-                .prepare_channels(&reaction_rates, &mut *checkpoint)?;
-            rates.extend_from_slice(&compiled.removal_rates);
-            for edge in &compiled.edges {
-                push_edge(
-                    &mut edges,
-                    ReactionEdge {
-                        parent: offset + edge.parent,
-                        daughter: offset + edge.daughter,
-                        yield_per_removal: edge.yield_per_removal,
-                    },
-                    limits.maximum_edges,
-                )?;
-            }
             let mut fractions = vec![Accumulator::new(0.0); inventory.populations().len()];
-            for (reaction, &fraction) in inventory
-                .model()
-                .reactions()
-                .iter()
-                .zip(&compiled.fractions)
-            {
+            for (index, reaction) in inventory.model().reactions().iter().enumerate() {
                 checkpoint()?;
                 if matches!(reaction.rate, BurnupRate::Decay { .. }) {
-                    fractions[reaction.parent].add(fraction)?;
+                    fractions[reaction.parent].add(if transported {
+                        reaction_rates[cell][index]
+                    } else {
+                        channels[cell].fractions[index]
+                    })?;
                 }
             }
             for (parent, row) in emissions[cell].neutron_yields().iter().enumerate() {
                 checkpoint()?;
                 for (group, &yield_) in row.iter().enumerate() {
-                    let coefficient = product(fractions[parent].value(), yield_)?;
+                    let spontaneous = fractions[parent].value();
+                    let coefficient = if spontaneous == 0.0 || yield_ == 0.0 {
+                        0.0
+                    } else if transported {
+                        // The original transport owner includes departure in
+                        // this hazard. Only spontaneous reactions emit; neither
+                        // transfer nor exterior outflow is a radioactive event.
+                        scale_yield(yield_, spontaneous, rates[offset + parent])?
+                    } else {
+                        product(spontaneous, yield_)?
+                    };
                     if coefficient > 0.0 {
                         push_edge(
                             &mut edges,
@@ -231,7 +291,7 @@ impl DiffusionBurnupState {
                     }
                 }
             }
-            channels.push(compiled);
+            offset += inventory.populations().len();
         }
 
         let mut accounts = Accounts::new(neutron_nodes)?;
@@ -280,19 +340,50 @@ impl DiffusionBurnupState {
         };
         let evolved = plan.apply(&initial, &supplied, checkpoint)?;
         let residence = plan.integrals(&initial, &supplied, checkpoint)?;
-        let mut candidates = Vec::with_capacity(inventories.len());
-        let mut reports = Vec::with_capacity(inventories.len());
-        let mut means = Vec::with_capacity(inventories.len());
-        let mut produced_by_cell = Vec::with_capacity(inventories.len());
-        let mut births = Vec::with_capacity(inventories.len());
-        let mut offset = neutron_nodes;
-        let mut nuclei_error = Accumulator::new(0.0);
-        let mut energy_error = Accumulator::new(0.0);
-        for (cell, inventory) in inventories.iter().enumerate() {
-            checkpoint()?;
-            let n = inventory.populations().len();
-            let (candidate, mut report) =
-                inventory.account_evolution(
+        let trial = if let InventoryOwner::Transported { state, limits } = &self.inventories {
+            let (candidate, report) = state.account_evolution(
+                duration_s,
+                &reaction_rates,
+                state.transport(),
+                BurnupTransportEvolution {
+                    evolved: ReactionAdvance {
+                        populations: evolved.populations[neutron_nodes..].to_vec(),
+                        removals: evolved.removals[neutron_nodes..].to_vec(),
+                        balance_residuals: evolved.balance_residuals[neutron_nodes..].to_vec(),
+                        population_balance_residual: sum(
+                            &evolved.balance_residuals[neutron_nodes..]
+                        ),
+                    },
+                    residence: residence[neutron_nodes..].to_vec(),
+                    produced_nuclei: produced,
+                    input_roundoff_nuclei: input_errors
+                        .iter()
+                        .map(upper_value)
+                        .collect::<Result<_, _>>()?,
+                },
+                BurnupTransportBudget {
+                    limits: BurnupTransportLimits {
+                        burnup: budget.burnup.limits,
+                        ..*limits
+                    },
+                    nuclei_tolerance: budget.burnup.nuclei_tolerance,
+                    energy_tolerance_j: budget.burnup.energy_tolerance_j,
+                },
+                checkpoint,
+            )?;
+            InventoryTrial::from_transport(state, candidate, *limits, report, checkpoint)?
+        } else {
+            let mut candidates = Vec::with_capacity(inventories.len());
+            let mut reports = Vec::with_capacity(inventories.len());
+            let mut means = Vec::with_capacity(inventories.len());
+            let mut produced_by_cell = Vec::with_capacity(inventories.len());
+            let mut offset = neutron_nodes;
+            let mut nuclei_error = Accumulator::new(0.0);
+            let mut energy_error = Accumulator::new(0.0);
+            for (cell, inventory) in inventories.iter().enumerate() {
+                checkpoint()?;
+                let n = inventory.populations().len();
+                let (candidate, mut report) = inventory.account_evolution(
                     ReactionAdvance {
                         populations: evolved.populations[offset..offset + n].to_vec(),
                         removals: evolved.removals[offset..offset + n].to_vec(),
@@ -308,86 +399,55 @@ impl DiffusionBurnupState {
                     budget.burnup,
                     &mut *checkpoint,
                 )?;
-            produced_by_cell.push(export_supplied_count(
-                &produced[cell],
-                &mut report,
-                budget.burnup,
-                checkpoint,
-            )?);
-            nuclei_error.add(report.population_roundoff_nuclei)?;
-            energy_error.add(report.energy_roundoff_j)?;
-            let mut decays = vec![Accumulator::new(0.0); n];
-            let mut decay_count_errors = vec![Accumulator::new(0.0); n];
-            for (reaction, &count) in inventory
-                .model()
-                .reactions()
-                .iter()
-                .zip(&report.reaction_counts)
-            {
-                if matches!(reaction.rate, BurnupRate::Decay { .. }) {
-                    decay_count_errors[reaction.parent]
-                        .add(decays[reaction.parent].add(count)?.abs())?;
+                produced_by_cell.push(export_supplied_count(
+                    &produced[cell],
+                    &mut report,
+                    budget.burnup,
+                    checkpoint,
+                )?);
+                nuclei_error.add(report.population_roundoff_nuclei)?;
+                energy_error.add(report.energy_roundoff_j)?;
+                let mut mean = Vec::with_capacity(n);
+                for (&population, &integral) in inventory
+                    .populations()
+                    .iter()
+                    .zip(&residence[offset..offset + n])
+                {
+                    checkpoint()?;
+                    mean.push(if duration_s == 0.0 {
+                        population
+                    } else {
+                        mean_population(integral, 1.0, duration_s)?
+                    });
                 }
+                means.push(mean);
+                candidates.push(candidate);
+                reports.push(report);
+                offset += n;
             }
-            let mut born = vec![Accumulator::new(0.0); groups];
-            for ((&decays, mut count_error), row) in decays
-                .iter()
-                .zip(decay_count_errors)
-                .zip(emissions[cell].neutron_yields())
+            if upper_value(&nuclei_error)? > budget.burnup.nuclei_tolerance
+                || upper_value(&energy_error)? > budget.burnup.energy_tolerance_j
             {
-                checkpoint()?;
-                let count = checked(decays.value())?;
-                count_error.add(checked(sum(&[decays.hi, decays.lo, -count]))?.abs())?;
-                let count_error = upper_value(&count_error)?;
-                for (group, &yield_) in row.iter().enumerate() {
-                    // Parent-count defects are nuclei; convert them with this
-                    // group's yield before charging the neutron allowance.
-                    let source_error = accounts.multiply(count_error, yield_)?;
-                    accounts.error.add(source_error)?;
-                    let value = accounts.multiply(count, yield_)?;
-                    account_add(&mut born[group], value, &mut accounts.error)?;
-                }
+                return Err(BurnupError::Budget("aggregate joint burnup accounts").into());
             }
-            let mut row = Vec::with_capacity(groups);
-            for (group, count) in born.into_iter().enumerate() {
-                let value = checked(count.value())?;
-                accounts
-                    .error
-                    .add(checked(sum(&[count.hi, count.lo, -value]))?.abs())?;
-                let index = cell * groups + group;
-                let mut total = Accumulator::new(injected[index]);
-                account_add(&mut total, value, &mut accounts.error)?;
-                injected[index] = checked(total.value())?;
-                accounts
-                    .error
-                    .add(checked(sum(&[total.hi, total.lo, -injected[index]]))?.abs())?;
-                accounts.total(SOURCE_NEUTRONS, value)?;
-                row.push(value);
+            InventoryTrial {
+                owner: InventoryOwner::Independent(candidates),
+                reports,
+                means,
+                produced,
+                produced_by_cell,
+                transport: None,
             }
-            births.push(row);
-            let mut mean = Vec::with_capacity(n);
-            for (&population, &integral) in inventory
-                .populations()
-                .iter()
-                .zip(&residence[offset..offset + n])
-            {
-                checkpoint()?;
-                mean.push(if duration_s == 0.0 {
-                    population
-                } else {
-                    mean_population(integral, 1.0, duration_s)?
-                });
-            }
-            means.push(mean);
-            candidates.push(candidate);
-            reports.push(report);
-            offset += n;
-        }
-        if upper_value(&nuclei_error)? > budget.burnup.nuclei_tolerance
-            || upper_value(&energy_error)? > budget.burnup.energy_tolerance_j
-        {
-            return Err(BurnupError::Budget("aggregate joint burnup accounts").into());
-        }
+        };
+        let births = account_births(
+            inventories,
+            emissions,
+            &trial.reports,
+            groups,
+            &mut injected,
+            &mut accounts,
+            checkpoint,
+        )?;
         let (neutrons, report) = neutron_initial.account_evolution(
             duration_s,
             DiffusionEvolution {
@@ -403,20 +463,77 @@ impl DiffusionBurnupState {
             &mut *checkpoint,
         )?;
         checkpoint()?;
-        Ok((
-            neutrons,
-            report,
-            InventoryTrial {
-                owner: InventoryOwner::Independent(candidates),
-                reports,
-                means,
-                produced,
-                produced_by_cell,
-                transport: None,
-            },
-            births,
-        ))
+        Ok((neutrons, report, trial, births))
     }
+}
+
+// Reported local radioactive events fund both stationary and moved sources.
+// This attaches an injection account to the accepted neutron trajectory; it
+// never adds the emitted particles to the propagator a second time.
+fn account_births(
+    inventories: &[BurnupInventory],
+    emissions: &[Arc<BurnupDecayNeutronEmission>],
+    reports: &[BurnupStep],
+    groups: usize,
+    injected: &mut [f64],
+    accounts: &mut Accounts,
+    checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+) -> Result<Vec<Vec<f64>>, DiffusionBurnupError> {
+    let mut births = Vec::with_capacity(inventories.len());
+    for (cell, (inventory, report)) in inventories.iter().zip(reports).enumerate() {
+        checkpoint()?;
+        let n = inventory.populations().len();
+        let mut decays = vec![Accumulator::new(0.0); n];
+        let mut decay_count_errors = vec![Accumulator::new(0.0); n];
+        for (reaction, &count) in inventory
+            .model()
+            .reactions()
+            .iter()
+            .zip(&report.reaction_counts)
+        {
+            checkpoint()?;
+            if matches!(reaction.rate, BurnupRate::Decay { .. }) {
+                decay_count_errors[reaction.parent]
+                    .add(decays[reaction.parent].add(count)?.abs())?;
+            }
+        }
+        let mut born = vec![Accumulator::new(0.0); groups];
+        for ((&decays, mut count_error), row) in decays
+            .iter()
+            .zip(decay_count_errors)
+            .zip(emissions[cell].neutron_yields())
+        {
+            checkpoint()?;
+            let count = checked(decays.value())?;
+            count_error.add(checked(sum(&[decays.hi, decays.lo, -count]))?.abs())?;
+            let count_error = upper_value(&count_error)?;
+            for (group, &yield_) in row.iter().enumerate() {
+                // Convert nuclei to neutrons before charging their allowance.
+                let source_error = accounts.multiply(count_error, yield_)?;
+                accounts.error.add(source_error)?;
+                let value = accounts.multiply(count, yield_)?;
+                account_add(&mut born[group], value, &mut accounts.error)?;
+            }
+        }
+        let mut row = Vec::with_capacity(groups);
+        for (group, count) in born.into_iter().enumerate() {
+            let value = checked(count.value())?;
+            accounts
+                .error
+                .add(checked(sum(&[count.hi, count.lo, -value]))?.abs())?;
+            let index = cell * groups + group;
+            let mut total = Accumulator::new(injected[index]);
+            account_add(&mut total, value, &mut accounts.error)?;
+            injected[index] = checked(total.value())?;
+            accounts
+                .error
+                .add(checked(sum(&[total.hi, total.lo, -injected[index]]))?.abs())?;
+            accounts.total(SOURCE_NEUTRONS, value)?;
+            row.push(value);
+        }
+        births.push(row);
+    }
+    Ok(births)
 }
 
 // An active neutron channel must agree with the interval means generated by
@@ -487,3 +604,6 @@ fn push_edge(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transport_tests;
