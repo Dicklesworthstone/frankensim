@@ -3765,6 +3765,35 @@ Numerical regressions cover heterogeneous mapped caps and separate wear,
 external softening with retained dent/work, maintained force and spring storage,
 fixed counterfaces, and atomic source/mapping/history/control refusals.
 
+### Full mechanical recoil before mapped-hardness removal
+
+`SourceHistorySlidingWear::advance_coupled` uses one retained
+`HardnessSlidingCoupling` to register original surface cells with the native
+prepared full 2N-by-2N tangential response. Cross-cell and cross-axis recoil
+therefore participate in the simultaneous Coulomb stick/slip solve. Original
+held-temperature/local-pressure friction samples are shared across identical
+loaded queries; every native iteration starts from the same committed shear
+history. Only the solved irreversible slip feeds each body's own mapped
+hardness and Archard removal. The complete successor publishes shear history,
+separate body inventories, recession and native approach/load/spring continuation
+together, or refuses without a partial successor.
+
+Only registered sites supply shear reactions. An omitted loaded cell's effect
+must already have been eliminated consistently into the supplied response and
+released motion; zero wear input there is not evidence of physical sticking.
+Beginning pressure is held during the tangential interval, and wear then
+re-equilibrates the original normal boundary. The caller refines the physical
+interval when pressure changes matter. Existing admission still rejects
+unresolved speed/path-dependent friction axes. Friction dissipation, normal
+plastic work and signed parameter work remain separate; no heat partition is
+inferred.
+
+Regression cases cover the independent mixed stick/slip cross-cell oracle in
+two tangent frames, separate own-hardness removal and full work reconstruction,
+diagonal reduction under all three normal boundaries within native numerical
+tolerances, and atomic registration, solver-budget, late-wear and cancellation
+refusals.
+
 ## Full-stick vector traction transfer
 
 The explicit vector queries in `normal_patch::traction::sectors::vector`

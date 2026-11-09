@@ -8,6 +8,8 @@
 //! body compliance, not cross-cell tangential elasticity or a heat model.
 
 pub mod temperature;
+/// Full cross-cell mechanical recoil driving actual slip and own-hardness wear.
+pub mod coupled;
 
 use std::sync::Arc;
 

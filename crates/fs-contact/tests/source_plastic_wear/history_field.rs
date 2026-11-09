@@ -5,6 +5,8 @@
 mod sliding;
 #[path = "history_field/integration.rs"]
 mod integration;
+#[path = "history_field/coupled.rs"]
+mod coupled;
 
 use std::sync::Arc;
 
