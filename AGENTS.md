@@ -187,17 +187,115 @@ branch, no per-task branch, and no scratch worktree.
 
 ## Project Truth Sources
 
-This repository is currently plan-first. The authoritative design document is:
+The code and its tests say what exists. Documents say what was intended. Where
+they disagree, the code is right about the present and the document is either a
+goal or stale; say which when you report.
 
-- `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`
+- `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md` is the technical constitution: the
+  Decalogue, architecture, crate atlas, Gauntlet verification program and
+  performance targets. Read the relevant sections before broad design work.
+- The other root `COMPREHENSIVE_*.md` files are plans for one program each
+  (bridge plan, new domains, instruments, building blocks, Wright Flyer).
+- `README.md` and each crate's `CONTRACT.md` state what is claimed and what is
+  refused. Read the crate's contract before a nontrivial edit to that crate.
+- `.beads/` is the work tracker. The current convergence program is the epic
+  `frankensim-rc-1109-root-3gc12` (label `reality-check-2026-11-09`). Its
+  operating rules are the next section; pick work from it with
+  `bv --robot-plan --label reality-check-2026-11-09`.
 
-Read it before broad design work. It defines the Decalogue, architecture,
-roadmap, crate atlas, Gauntlet verification program, performance targets, and
-flagship pipelines. This `AGENTS.md` is the operating contract for agents; the
-plan is the technical constitution.
+This `AGENTS.md` is the operating contract for agents.
 
-If a `README.md`, crate `CONTRACT.md`, `TESTING.md`, or `.beads/` directory is
-added later, read the relevant files before making nontrivial edits.
+---
+
+## Operating Rules From The 2026-11-09 Review
+
+The owner agreed these on 2026-11-09 after a whole-project review. They bind
+every agent that writes to `main`.
+
+### 1. Compose, do not enumerate
+
+Coupled-physics capability lands in one of three forms only:
+
+- a **Component**: one physics owner's state, ports and step behind the shared
+  contract in `fs-ports`, with the conformance tests;
+- a **connection or interface law**: a junction, a transformer, a mapped field
+  transfer, or a dissipative law built from a material or interface card;
+- a **description plus an oracle test**: an assembly file that the generic path
+  runs, with an analytic, manufactured or measured reference.
+
+Do not add a new pairing module, and do not add a new `*_with_*` entry point
+(for example `advance_liquid_regions_with_moving_gas_and_heat`). Each one is a
+cell of a physics x integrator x controller matrix that has no end, and every
+cell must later be migrated or removed. Between 2026-10-26 and 2026-11-09
+`crates/fs-couple/src` gained 822,563 lines and lost 12,841 that way.
+
+Until the Component contract is frozen at v1, the accepted work is the menu on
+bead `frankensim-rc-1109-root-3gc12.8.3`: compile repairs, Component
+implementations for existing physics owners, adapters, the kernel slices, card
+data, and oracle tests for existing leaf laws.
+
+### 2. Behaviour is computed, never put in
+
+An application, demo or instrument gets its behaviour from conservation laws
+and interface laws acting on a described assembly of parts and cards.
+
+- No rate, amplitude, threshold, event time or loss chosen from the expected
+  result. A value that was fitted to the answer is named as fitted, with its
+  source, in the card that holds it.
+- An app describes the device, sets inputs, steps the engine and reads probes.
+  Do not add new integration code to an app crate; the app engines that
+  integrate their own state today move to this form under the `.13` beads of
+  the epic.
+- A demo that integrates nothing says so on its page ("kinematic
+  illustration"); it does not claim to use a physics crate it does not call.
+- Each demo has at least one test of a quantity that was not an input.
+
+### 3. Source that was never compiled does not land on `main`
+
+- Before pushing a change to Rust source, compile every crate the change
+  touches, on the feature sets it touches, and run the tests you added or
+  changed. Put the exact commands and their results in the commit message.
+- If you cannot compile (no Cargo, missing sibling checkouts, no disk, no build
+  host), do not push. Keep the change in the working tree, or send it to the
+  coordinator as a patch (`git format-patch` output in a mail thread) marked
+  UNCOMPILED. The landing lane applies it on the current tip, compiles and
+  tests it, and then pushes it or returns it with the compiler output.
+- "Compile was unavailable" in a commit message on `main` describes a defect.
+  It is not an accepted disclosure.
+- Documentation-only changes are not covered. A data file that a test reads is
+  covered by that test.
+
+### 4. Large files: no length limit, and no write-back of a partial read
+
+There is no size limit on any file (owner ruling, 2026-11-09). Do not split a
+file for its size and do not add size checks.
+
+Measured on 2026-11-09: 27 times, a commit replaced a `CONTRACT.md` larger than
+1 MiB with only that commit's new section (`fs-couple` 18, `fs-material` 8,
+`fs-lbm` 1); megabytes of contract text were absent for days. The cause is not
+identified. So:
+
+- If a tool shows you a tracked file as empty or cut short, or refuses to read
+  it, do not write the file back. Add your lines with a patch.
+- Before every commit, read `git diff --stat` for the files you touched. A
+  deletion you did not intend means stop and restore the file from `HEAD`.
+- The `fs-couple`, `fs-material` and `fs-lbm` contracts are an index
+  (`CONTRACT.md`) plus `contracts/part-NN.md`. New sections go in the index,
+  where its layout note says.
+
+### 5. Deletion during migration
+
+RULE NUMBER 1 stands without exception. A migration bead that replaces a
+pairing by a composition posts its deletion list (paths and line counts) with
+the equivalence evidence. The files are removed only after the owner approves
+that list in writing.
+
+### 6. Byte controls for instrument renders
+
+Compare renders only between runs of the same binary. A change that alters
+arithmetic order, such as a kernel migration, needs a recorded A/B on the same
+inputs before and after, and regenerated controls committed with both commit
+hashes named.
 
 ---
 
@@ -247,7 +345,7 @@ layer.
 Use Cargo for Rust builds. Do not introduce another package manager unless the
 user explicitly asks for a non-Rust subproject.
 
-Expected baseline when the workspace exists:
+Baseline:
 
 - Rust 2024 edition.
 - Cargo workspace with flat `fs-*` crates.
@@ -343,52 +441,38 @@ If you need to violate this, stop and redesign the API.
 
 ---
 
-## Planned Workspace Crates
+## Workspace Map
 
-Appendix A of the plan is the authoritative crate atlas. The rough intended
-shape is:
+As of 2026-11-09:
 
-### L0 / L1
+- `crates/` holds 192 flat `fs-*` crates. Each declares its layer in
+  `[package.metadata.frankensim] layer` in its `Cargo.toml` (L0 to L6, plus
+  `UTIL` and `TOOL`); `cargo run -p xtask -- check-layers` enforces the
+  dependency direction. Appendix A of the plan lists the crates the plan
+  foresaw; the manifests are the list of what exists.
+- `xtask/` holds the repository checks (`check-all`, `check-layers`,
+  `check-deps`, `check-contracts`, `check-docs` and the rest).
+- `apps/` holds the browser applications: `instrument-lab`,
+  `instrument-explorer`, `observatory`, `pocket-watch`, `wright-flyer`.
+- `data/` holds material database packs (`data/matdb`), instrument
+  measurements (`data/instruments`), and reference and V&V corpora.
+- `docs/` holds design and decision records.
+- Sibling repositories (the constellation, for example `../asupersync`) are
+  path dependencies pinned in `constellation.lock`.
 
-- `fs-substrate` - architecture detection, topology fingerprints, dispatch
-- `fs-simd` - portable SIMD, NEON, AVX-512, exploratory SME2 tiers
-- `fs-alloc` - scope arenas, huge pages, pools
-- `fs-exec` - asupersync-backed two-lane executor and deterministic reductions
-- `fs-la` - GEMM, small dense batches, TSQR, LOBPCG/Lanczos, mixed precision
-- `fs-sparse` - BSR, SELL-C-sigma, SpMV/SpMM, AMG
-- `fs-fft` - Stockham FFTs, real transforms, 3D pencils
-- `fs-ivl` - interval, affine, Taylor models, exact predicates
-- `fs-cheb` - Chebyshev/Fourier function objects and spectral eigenproblems
-- `fs-ad` - duals, FrankenTorch tape bridge, adjoint support
-- `fs-rand` - Philox, Sobol/Owen, distributions
-- `fs-ga` - projective and conformal geometric algebra
+The repository contains three programs that share leaf crates but do not yet
+share a composition layer:
 
-### L2 / L3
+| Program | Entry point | Reaches |
+| --- | --- | --- |
+| Evidence and thermal design | `frankensim` (`crates/fs-cli`) | projects, studies, cooling and electrothermal commands, reports, the design ledger |
+| Coupled multiphysics | library API of `fs-couple`, `fs-material` and the physics owners (`fs-mbd`, `fs-thermal`, `fs-gas`, `fs-flux`, `fs-solid`, `fs-em`, `fs-tribo`) | tests and examples only: no `frankensim` command and no assembly file runs a coupled pairing |
+| Instruments and demos | `music_render` (`crates/fs-couple/src/bin/music_render.rs`) and `apps/` | offline instrument renders graded against recordings; browser demos |
 
-- `fs-geom` - Regions, charts, Rep Router, sheaf certificates
-- `fs-rep-sdf`, `fs-rep-frep`, `fs-rep-nurbs`, `fs-rep-mesh`,
-  `fs-rep-voxel`, `fs-rep-neural`
-- `fs-xform` - FFD, RBF, level-set velocity, manifold harmonics, SIMP fields
-- `fs-mesh` - dual contouring, Delaunay/Ruppert, anisotropic remeshing
-- `fs-feec` - FEEC families, exact sequences, DWR
-- `fs-cutfem` - ghost penalty and cut quadrature
-- `fs-iga` - spline elements and shells
-- `fs-solid`, `fs-lbm`, `fs-bem`, `fs-fmm`, `fs-vpm`
-- `fs-time`, `fs-couple`, `fs-adjoint`, `fs-uq`
-
-### L4 / L5 / L6
-
-- `fs-eproc` - e-processes, e-BH, conformal e-prediction
-- `fs-opt` - L-BFGS, TR-Newton-Krylov, CMA-ES, BO, NSGA, PDHG
-- `fs-topo` - SIMP, level-set, ground structure, homogenization, persistence
-- `fs-sos` - moment/SOS, Burer-Monteiro SDP, Lyapunov certificates
-- `fs-surrogate` - neural operators, POD-DEIM, Koopman, certify-or-escalate
-- `fs-render`, `fs-viz`, `fs-img`
-- `fs-ir` - FrankenScript, catalog, admission
-- `fs-session` - capabilities, governor, idempotency
-- `fs-ledger` - schema, content addressing, time travel, explain
-- `fs-plan` - cost/error models, budget allocator, tropical analytics
-- `fs-report` - notebooks and reports via FrankenPandas
+The convergence program joins them: one composition kernel (Component
+contract in `fs-ports` and one coupled-step driver), one assembly description
+that lowers to it (`fs-scenario`, `.fsim`), and one run path through the
+ledger (`frankensim run <assembly>`).
 
 Every crate must eventually ship:
 
@@ -584,15 +668,16 @@ After substantive Rust code changes, verify that the relevant checks pass.
 DSR is the first choice for repo-level gates and release builds. Prefer RCH
 only for narrow ad hoc Cargo probes or when DSR itself is unavailable.
 
-Typical lanes once the workspace exists:
+Typical lanes:
 
 ```bash
 dsr quality --tool frankensim
 dsr build frankensim --target darwin/arm64
 ```
 
-If the workspace is still plan-only, do not invent checks. State that no Cargo
-workspace exists yet and validate markdown or file presence only.
+For the crates a change touches, the narrow check is
+`cargo check -p <crate> --all-targets` and `cargo test -p <crate>` on the
+feature sets the change touches. Operating rule 3 requires it before a push.
 
 ---
 
@@ -744,8 +829,7 @@ contracts, or issue records.
 
 1. Read this file.
 2. Read `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md` sections relevant to the task.
-3. If present, read `README.md`, crate `CONTRACT.md`, and the relevant Beads
-   issue.
+3. Read the crate `CONTRACT.md` and the relevant Beads issue.
 4. Inspect the tree before editing.
 5. Reserve files through Agent Mail if multiple agents are active and the tools
    are available.
@@ -859,8 +943,9 @@ or a bare `/tmp` — when you invent a new per-task target dir name.** These iso
 target dirs are 5-15G *each* and are never cleaned up by the task that made them.
 On the Mac, `$TMPDIR` and `/tmp` both live on the internal Data volume: 600G+ of
 `rch_target_frankensim_*` accumulated there and wedged the machine at 100% full
-(2026-07-11). `RCH_TARGET_BASE` is exported per-machine (Mac: the external NVMe;
-Linux workers: unset, so `$TMPDIR`=/data/tmp is used, which is already correct).
+(2026-07-11). Since 2026-10-11 `RCH_TARGET_BASE` is unset on the Mac as well
+(the external NVMe is retired for builds), so the base falls back to `$TMPDIR`
+on the internal disk; on Linux workers `$TMPDIR`=/data/tmp.
 
 Prefer reusing one of the two names above. If you truly need a distinct target dir
 for an isolated task, still base it on `$RCH_TARGET_BASE` and delete it when done.
@@ -900,42 +985,35 @@ Do not use broad scripted rewrites where a hand patch is safer.
 
 ## Current Repository State
 
-At the time this file was written, `/Users/jemanuel/projects/frankensim`
-contained only:
+As of 2026-11-09 (replace the dated facts when they change):
 
-- `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`
-- `AGENTS.md`
-
-There was no git repository and no Cargo workspace yet. When those are added,
-update this section or replace it with the actual workspace map.
+- The workspace is described in "Workspace Map" above.
+- The workspace has not compiled as a whole with default features since
+  2026-10-23 (bead `frankensim-g7u99`). Single crates do compile; check the
+  ones you touch.
+- `suite-receipt.json` is from 2026-08-01 and is not green. No retained
+  receipt describes the current tree. Do not cite it as current evidence.
+- `README.md` was last revised on 2026-10-16 and is behind the code.
 
 ---
 
-## Building P0 First
+## What To Build First
 
-The coda of the plan says: build P0. Agents should interpret that literally.
+The plan's P0 crates (substrate, execution, dense and sparse algebra, FFT,
+intervals, random numbers, ledger) exist. The work that matters most now is
+convergence, in this order:
 
-Initial implementation should prioritize:
+1. Keep `main` compiling: the compile census and landing rule (beads `.1.x` of
+   the epic).
+2. The composition kernel: the Component contract, connections, the system
+   state store and the coupled-step driver (beads `.5.x`), proved on five
+   slices of existing behaviour (beads `.6.x`).
+3. The description path: one assembly model, its lowering to the kernel, and
+   `frankensim run <assembly>` (beads `.11.x`).
+4. Migration of the existing pairings, instruments and demos onto the kernel
+   (beads `.9.x`, `.12.x`, `.13.x`), with oracle tests (beads `.14.x`).
 
-- `fs-substrate`
-- `fs-exec`
-- `fs-alloc`
-- `fs-la`
-- `fs-sparse`
-- `fs-fft`
-- `fs-ivl`
-- `fs-rand`
-- ledger v0
-
-P0 exit criteria from the plan:
-
-- G0 and G4 green.
-- GEMM, SpMV, and FFT within the stated target bands on both reference ISA
-  families.
-- deterministic mode bit-stable.
-
-Do not start with moonshot features. Keep `[M]` work behind flags and contracts
-until the solid spine exists.
+Do not start with moonshot features. Keep `[M]` work behind flags and contracts.
 
 <!-- bv-agent-instructions-v2 -->
 
