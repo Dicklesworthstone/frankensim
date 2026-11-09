@@ -17,6 +17,9 @@ use fs_material::{
     fluid_transport::{FluidTransport, FluidTransportState},
 };
 
+#[path = "material_boundary_sgs/curved.rs"]
+mod curved;
+
 const DX: f64 = 0.01;
 const DT: f64 = 0.01;
 const ORIGIN: [f64; 3] = [1.25, -2.5, 0.75];

@@ -88,20 +88,42 @@ impl BoundaryGrid3 {
         config: SgsConfig,
         workspace: &mut SgsWorkspace3<CollisionModel3>,
     ) -> core::result::Result<SgsReport, BoundarySgsError3> {
-        wall.validate(self, gate)?;
+        self.prepare_curved_sgs_sampled(wall, wall_velocity, gate, config, workspace, |_, _| {
+            Ok(self.collision_model)
+        })
+    }
+
+    // The actual intersection stencil supplies BOTH molecular rheology and
+    // SGS. Source errors retain their original type; no halfway-wall rate or
+    // independently sampled wall velocity enters the material composition.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_curved_sgs_sampled<E: From<BoundarySgsError3>>(
+        &self,
+        wall: &CurvedWall3,
+        wall_velocity: &[[f64; 3]],
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> core::result::Result<CollisionModel3, E>,
+    ) -> core::result::Result<SgsReport, E> {
+        wall.validate(self, gate).map_err(BoundarySgsError3::from)?;
         if wall_velocity.len() != wall.links.len() {
-            return Err(invalid("curved SGS requires one velocity per selected link").into());
+            return Err(BoundarySgsError3::from(invalid(
+                "curved SGS requires one velocity per selected link",
+            ))
+            .into());
         }
         for &velocity in wall_velocity {
-            checkpoint(gate)?;
+            checkpoint(gate).map_err(BoundarySgsError3::from)?;
             if !low_mach(velocity) {
-                return Err(
-                    invalid("curved wall velocity is non-finite or outside low Mach").into(),
-                );
+                return Err(BoundarySgsError3::from(invalid(
+                    "curved wall velocity is non-finite or outside low Mach",
+                ))
+                .into());
             }
         }
         let mut cursor = 0;
-        let report = self.prepare_sgs_with_gradient::<BoundarySgsError3>(
+        let report = self.prepare_sgs_with_gradient(
             gate,
             config,
             workspace,
@@ -140,7 +162,7 @@ impl BoundaryGrid3 {
                 }
                 gradient
             },
-            |_, _| Ok(self.collision_model),
+            sample,
         )?;
         debug_assert_eq!(cursor, wall.links.len());
         Ok(report)
@@ -169,23 +191,54 @@ impl BoundaryGrid3 {
         config: SgsConfig,
         workspace: &mut SgsWorkspace3<CollisionModel3>,
     ) -> core::result::Result<(CurvedWallStep3, SgsReport), BoundarySgsError3> {
-        checkpoint(gate)?;
-        if !moment_origin.into_iter().all(f64::is_finite) {
-            return Err(invalid("curved wall moment origin must be finite").into());
-        }
-        let report = self.prepare_curved_sgs(wall, wall_velocity, gate, config, workspace)?;
-        self.collide_sgs_prepared(gate, workspace)?;
-        let mut cursor = 0;
-        let loads = self.stream_curved_collided(
+        let molecular = self.collision_model;
+        self.step_with_curved_walls_and_sgs_sampled(
             wall,
-            |_| {
-                let velocity = wall_velocity[cursor];
-                cursor += 1;
-                velocity
-            },
+            wall_velocity,
             moment_origin,
             gate,
-        )?;
+            config,
+            workspace,
+            |_, _| Ok(molecular),
+        )
+    }
+
+    // Material consumers stage their original source epoch through this same
+    // collision/curved-stream/load transaction, then publish it after success.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_curved_walls_and_sgs_sampled<E: From<BoundarySgsError3>>(
+        &mut self,
+        wall: &CurvedWall3,
+        wall_velocity: &[[f64; 3]],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> core::result::Result<CollisionModel3, E>,
+    ) -> core::result::Result<(CurvedWallStep3, SgsReport), E> {
+        checkpoint(gate).map_err(BoundarySgsError3::from)?;
+        if !moment_origin.into_iter().all(f64::is_finite) {
+            return Err(BoundarySgsError3::from(invalid(
+                "curved wall moment origin must be finite",
+            ))
+            .into());
+        }
+        let report =
+            self.prepare_curved_sgs_sampled(wall, wall_velocity, gate, config, workspace, sample)?;
+        self.collide_sgs_prepared(gate, workspace)?;
+        let mut cursor = 0;
+        let loads = self
+            .stream_curved_collided(
+                wall,
+                |_| {
+                    let velocity = wall_velocity[cursor];
+                    cursor += 1;
+                    velocity
+                },
+                moment_origin,
+                gate,
+            )
+            .map_err(BoundarySgsError3::from)?;
         Ok((loads, report))
     }
 }

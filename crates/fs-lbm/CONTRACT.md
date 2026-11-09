@@ -1761,3 +1761,36 @@ fully-liquid parity with the original viscous route, and atomic source/solid/
 cancellation refusals with retry. These and three existing phase-resistance
 tests passed in a native production-source harness; this is not a full workspace
 build or a temporal-convergence certificate.
+
+## Original material rheology with curved-wall SGS
+
+`MaterialScaling::step_curved_walls_with_material_rheology_and_sgs` couples
+the original source response to the native off-lattice wall owner. Each fluid
+cell is sampled once at incoming physical deviatoric shear. One accepted
+Guo-centered full gradient supplies both molecular rheology and the explicit
+Smagorinsky, WALE or Vreman closure. Selected axial wall links use their actual
+intersection distances and supplied wall velocities; diagonal intersections
+retain the original BFL population/load geometry.
+
+The exact same frozen wall velocities drive gradient, population exchange,
+impulse, torque and wall work. Original local molecular viscosity supplies the
+eddy/molecular ratio gate and molecular diagnostic. Collision family, TRT
+product, independent bulk and higher-order controls remain unchanged. There
+is no second gradient, full-grid clone, implicit material solve or heat deposit.
+The original resolved-shear nonlinear-material approximation and fixed
+reference-density/scaling limits remain explicit.
+
+This reuses `BoundaryRheologySgsWorkspace3` and its two source buffers.
+Applied material samples and the SGS/selected-wall report publish only after
+the original curved collision/stream/load transaction succeeds. The complete
+returned native receipt also retains other walls, body force, BFL mass change,
+open and periodic transport. Refusal/cancellation leaves accepted populations
+and material samples unchanged.
+
+Three focused regressions are authored for affine/quadratic wall profiles on
+every axis and all five collision families, independent material/eddy
+viscosities and momentum/angular-momentum/work accounting, exact constant-source
+native recovery, single source reads, and late-refusal replay. Scoped pinned
+formatting and whitespace checks passed; native execution remains pending the
+pinned dependency build's resource requirement. This composition adds no
+turbulent-flow, unresolved roughness or wall-resolution validation claim.

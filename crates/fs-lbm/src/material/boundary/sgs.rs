@@ -18,6 +18,8 @@ use crate::sgs3::{SgsConfig, SgsWorkspace3};
 use fs_exec::{CancelGate, KernelRunner};
 use fs_material::{MaterialError, fluid_transport::FluidTransport};
 
+mod curved;
+
 /// Original source errors remain distinct from closure and native-flow errors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialBoundarySgsError3 {
@@ -67,6 +69,8 @@ impl<M> BoundaryRheologySgsWorkspace3<M> {
     }
 
     /// SGS diagnostics and actual wall loads from the same accepted epoch.
+    /// A curved step retains its selected off-lattice wall loads here; its
+    /// returned native receipt also includes other walls, forces and reservoirs.
     pub fn last_report(&self) -> Option<BoundarySgsReport3> {
         self.report
     }
