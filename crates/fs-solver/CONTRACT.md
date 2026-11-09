@@ -532,3 +532,7 @@ owner before the execution workspace disconnected. The final explicit
 nonzero-action-underflow assertion and guard were added during source review
 after that outage and remain unexecuted. These are numerical conformance
 checks, not empirical or interval validation.
+
+## Parameter continuation through original correctors
+
+`continuation::follow` schedules a caller-owned, independently admitted nonlinear corrector from an accepted parameter-zero state to exactly parameter one. Accepted states alone seed later trials; numerical `Retry` refusals halve the increment, successful steps grow within the caller's bound, and terminal source errors propagate unchanged. Increment and attempt exhaustion return no partial target state. Bounded checkpoints include the final acceptance. This scheduler introduces no residual, tangent, nonlinear root solver, physical time/work, stability selection or pseudo-arclength equation; original correctors retain their source, residual and per-attempt work limits. Six focused native tests cover a nonlinear branch with a bounded corrector basin, original-source refusal, a missing branch beyond a fold, final cancellation/retry, exact final-parameter/remainder behavior and attempt/control boundaries. All six passed on the exact production module.

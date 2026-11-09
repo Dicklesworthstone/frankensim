@@ -23,6 +23,8 @@
 
 pub mod block;
 pub mod checked_cg;
+/// Bounded parameter stepping through existing source-owned nonlinear correctors.
+pub mod continuation;
 /// Source-refusing numerical Jacobian actions for the existing nonlinear owner.
 pub mod finite_difference;
 /// Outward residual evaluation and checked discrete algebraic goal bounds.
