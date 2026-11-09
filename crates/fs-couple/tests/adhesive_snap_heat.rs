@@ -1,6 +1,8 @@
 //! Original normal snap work, material calorics and native heat impulses.
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
+#[path = "adhesive_snap_heat/rolling.rs"]
+mod rolling;
 
 use fs_contact::normal_patch::adhesive::{
     JkrBranch, JkrEnvelope, JkrJumpKind, JkrState, SourceJkrSphereContact,

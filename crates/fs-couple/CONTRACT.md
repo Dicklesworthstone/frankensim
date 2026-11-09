@@ -9772,3 +9772,27 @@ shared spectral states and equivalent covariance heating, exact empty-reservoir
 recovery, and source-domain/cancellation refusal without candidate publication.
 They are authored and syntax checked; native execution remains blocked by the
 dependency compilation resource limit.
+
+## Finite-cell heat from adhesive rolling separation
+
+`friction_heat::adhesive::snap::rolling::JkrRollingSnapHeat` owns an original
+`SourceJkrRollingEvents` cycle and pins the original ordered material caloric
+receivers. It regenerates bounded, explicitly ordered normal and angular
+segments from sealed history. Original normal snap and released rolling spring
+storage keep separate source reports and compensated transfer ledgers; their
+declared surface shares enter actual finite caloric cells, with any remainder
+assigned to a named outside destination. Prior source releases are never
+re-deposited when a binding is created. Signed parameter work and accumulated
+plastic rolling loss are not silently converted into snap heat.
+
+Preparation stages the complete lifecycle, release ledgers and thermal cells.
+Versioned source stamps prevent stale replay; caloric, source, budget or
+cancellation refusal leaves every accepted owner unchanged. Detached rotation
+creates no spring preload and recontact retains prior release/loss accounts.
+The composition applies its releases at the current thermal time under the
+original frozen-source approximation. It introduces no conducting contact link,
+intervening thermal transport or temperature feedback; separate calls at actual
+event times are required when transport between releases matters. Focused
+cases in `tests/adhesive_snap_heat/rolling.rs` specify analytical spring release,
+actual cell/outside energy closure, fresh recontact, reversible area work with
+zero snap heat, and atomic caloric/cancellation refusal and retry.

@@ -22,15 +22,17 @@ use fs_thermal::enthalpy::{
 use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
 use std::collections::BTreeMap;
 
-mod normal_motion;
 /// Native rigid-body motion and event-timed snap heat in one accepted candidate.
 pub mod native;
+mod normal_motion;
+/// Retained rolling cycles with separate normal-snap and spring-release heating.
+pub mod rolling;
+/// Preserve original snap and caloric history across prescribed source temperature changes.
+pub mod temperature;
 /// Original thermal transport between the sealed normal trajectory's events.
 pub mod timed;
 /// Explicit viscous-support losses on their original smooth mechanical intervals.
 pub mod viscous;
-/// Preserve original snap and caloric history across prescribed source temperature changes.
-pub mod temperature;
 
 /// Finite work and heat accuracy budgets, all chosen by the caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
