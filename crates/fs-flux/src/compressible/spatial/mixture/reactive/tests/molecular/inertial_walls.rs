@@ -1,4 +1,5 @@
 use super::*;
+mod body_forcing;
 use crate::compressible::spatial::mixture::molecular::{MolecularWall3d, WallThermalCondition};
 use crate::compressible::spatial::mixture::reactive::{
     InertialWallLoad, InertialWallsControl, Piston, ReactiveInertialWallsError,

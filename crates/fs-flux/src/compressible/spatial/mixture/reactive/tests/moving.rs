@@ -7,6 +7,8 @@ use fs_gas::multicomponent::dissipation::{TransportCoefficients, TransportDomain
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
+mod body_forcing;
+
 fn case(reference: f64) -> (ReactingEuler3d, MolecularTransport3d<ConstantTransport>) {
     let (gas, mechanism) = mechanism(5.0, 8.0, reference);
     let field = field(

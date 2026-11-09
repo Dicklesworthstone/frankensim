@@ -11,6 +11,8 @@ pub use crate::compressible::spatial::molecular::{
 use crate::compressible::spatial::molecular::{admit_planes, bounded_duration, displacement};
 use fs_gas::dynamics::inertial_walls::{WallGasExchange, solve_coupled};
 
+mod body_forcing;
+
 /// Original reacting source or mechanical refusal, with atomic publication.
 pub type ReactiveInertialWallsError =
     crate::compressible::spatial::molecular::MolecularInertialWallsError<ReactiveError>;
@@ -71,6 +73,7 @@ impl ReactingEuler3d {
             transport_controls,
             DissipationControl::default(),
             super::super::MAX_MIXTURE_WORKSPACE_BYTES,
+            None,
             loads,
             controls,
             cancelled,
@@ -116,6 +119,7 @@ impl ReactingEuler3d {
             transport_controls,
             dissipation_controls,
             maximum_workspace_bytes,
+            None,
             loads,
             controls,
             cancelled,
@@ -132,6 +136,7 @@ impl ReactingEuler3d {
         transport_controls: ReactiveStepControl,
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         loads: [InertialWallLoad; 2],
         controls: InertialWallsControl,
         mut cancelled: impl FnMut() -> bool,
@@ -143,12 +148,14 @@ impl ReactingEuler3d {
             transport_controls.transport,
             loads,
         )?;
+        let remaining_bytes =
+            self.prepare_moving_forcing(&mut forcing, maximum_workspace_bytes, &mut cancelled)?;
         self.admit_moving(
             maximum_duration.value(),
             transport_controls,
             operator.as_deref(),
             dissipation_controls,
-            maximum_workspace_bytes,
+            remaining_bytes,
             MeshMotion::default(),
         )?;
         let grid = self.accepted.grid;
@@ -169,6 +176,11 @@ impl ReactingEuler3d {
             let p = cell(row, n)
                 .primitive(&self.accepted.gas, &mut cancelled)
                 .map_err(ReactiveError::from)?;
+            if let Some((_, control, _)) = &forcing {
+                control
+                    .admit_velocity::<super::super::Error>(p.velocity, p.sound_speed)
+                    .map_err(ReactiveError::from)?;
+            }
             let local: f64 = (0..3)
                 .map(|a| {
                     let relative = if a == axis {
@@ -228,6 +240,9 @@ impl ReactingEuler3d {
                             motion,
                             before,
                             retry,
+                            forcing
+                                .as_mut()
+                                .map(|(force, control, work)| (*force, *control, &mut **work)),
                             &mut cancelled,
                         )
                         .map_err(|failure| {
@@ -284,13 +299,18 @@ impl ReactingEuler3d {
                             (after.species_masses[k] - before.species_masses[k])
                                 * self.accepted.gas.energy_references()[k]
                         }))
-                        .chain(gas.wall_heat_j.map(|q| -q)));
+                        .chain(gas.wall_heat_j.map(|q| -q))
+                        .chain(
+                            (gas.reactive.source_change.work != 0.0)
+                                .then_some(-gas.reactive.source_change.work),
+                        ));
                     let travel = displacement(grid, self.trial.grid, axis, speed)?;
                     Ok(WallGasExchange {
                         gas,
                         momentum_change_n_s: after.momentum[axis]
                             - before.momentum[axis]
-                            - side_impulse[axis],
+                            - side_impulse[axis]
+                            - gas.reactive.source_change.impulse[axis],
                         energy_change_j: physical_change,
                         boundary_impulse_n_s: inward.map(|q| q[n + axis]),
                         boundary_work_j: work,
@@ -309,6 +329,7 @@ impl ReactingEuler3d {
                 ]
                 .into_iter()
                 .chain(mechanics.gas.wall_heat_j.map(|q| -q))
+                .chain((reactive.source_change.work != 0.0).then_some(-reactive.source_change.work))
                 .chain((0..2).map(|i| {
                     mechanics.kinetic_energy_change_j[i] + mechanics.exterior_pressure_work_j[i]
                         - mechanics.external_force_work_j[i]

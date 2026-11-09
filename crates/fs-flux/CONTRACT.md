@@ -11944,3 +11944,35 @@ stationary forced transport. Cellwise coefficients are held in original cell
 order over each attempted interval. Existing domain restrictions remain in
 force; this entry does not imply hydrostatic balancing, force-field resampling
 or a moving-frame transformation.
+
+### Held body forcing in moving and finite-piston reacting mixtures
+
+`ReactingEuler3d::step_moving_with_forcing` composes the original chemical
+half-solves around the native forced ALE interval:
+`C/2–K/2–ALE–K/2–C/2`. The molecular variant
+`step_moving_with_dissipation_and_forcing` encloses that sequence in the
+original `D/2` phases. Each stage uses its actual incoming state and old/new
+geometry. Source impulse and kinetic work are retained in the reacting report
+once; chemical reference changes, molecular heat and boundary work retain
+their original independent accounts. Physical Mach admission applies at
+chemical/molecular intermediate endpoints as well as the native forced
+transport stages. The final actual-geometry endpoint obeys relative acoustic
+CFL before acceptance.
+
+The inviscid and molecular reacting finite-piston forcing entries reuse the
+same simultaneous finite-mass mechanics and complete reacting trial. Gas body
+impulse and work are prescribed external inputs, removed explicitly from
+combined mechanical residuals in both physical and referenced energy charts.
+Actual pressure and molecular traction drive the pistons. Direct wall heat,
+fixed-side support impulse, guide reactions and wall torques remain explicit.
+Gas forcing does not infer forces on the piston bodies; those loads are still
+authored separately.
+
+All chemistry, source, transport, molecular and mechanical refusals retry the
+complete interval from accepted owners. Prepared forcing scratch is included
+in the aggregate workspace budget, including inactive forcing, and is reused
+across trial solves. Zero forcing retains the original numerical transaction.
+Gas state, geometry, clock, wall impulses, reports, molecular binding and both
+piston states publish together after the final checkpoint. Force coefficients
+are held in original cell order through motion and retries. Existing closed
+or periodic domains and single-axis affine deformation remain authoritative.

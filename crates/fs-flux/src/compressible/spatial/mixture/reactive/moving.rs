@@ -5,6 +5,8 @@ use crate::compressible::AxisBoundaries;
 use crate::compressible::spatial::mixture::molecular::{DissipationError, WallTransfer};
 use crate::compressible::spatial::{BoundaryCondition, MeshMotion};
 
+mod body_forcing;
+
 /// Complete reacting ALE interval, with directly integrated molecular wall heat
 /// and work when the original molecular operator is explicitly supplied.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +73,7 @@ impl ReactingEuler3d {
             DissipationControl::default(),
             super::super::MAX_MIXTURE_WORKSPACE_BYTES,
             motion,
+            None,
             cancelled,
         )
     }
@@ -102,6 +105,7 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             motion,
+            None,
             cancelled,
         )
     }
@@ -115,15 +119,18 @@ impl ReactingEuler3d {
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
         motion: MeshMotion,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
+        let remaining_bytes =
+            self.prepare_moving_forcing(&mut forcing, maximum_workspace_bytes, &mut cancelled)?;
         self.admit_moving(
             maximum_duration.value(),
             controls,
             operator.as_deref(),
             dissipation_controls,
-            maximum_workspace_bytes,
+            remaining_bytes,
             motion,
         )?;
         let before = checked_totals(
@@ -136,6 +143,7 @@ impl ReactingEuler3d {
             &self.accepted,
             motion,
             self.reactor.controls(),
+            forcing.as_ref().map(|(_, control, _)| *control),
             &mut cancelled,
         )?;
         let mut dt = maximum_duration
@@ -151,6 +159,9 @@ impl ReactingEuler3d {
                 motion,
                 before,
                 retry,
+                forcing
+                    .as_mut()
+                    .map(|(force, control, work)| (*force, *control, &mut **work)),
                 &mut cancelled,
             ) {
                 Ok(report) => {
@@ -240,6 +251,7 @@ impl ReactingEuler3d {
         motion: MeshMotion,
         before: Totals,
         retry: usize,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MovingReactiveStepReport3d, MovingTrialFailure> {
         poll(cancelled)?;
@@ -281,6 +293,18 @@ impl ReactingEuler3d {
         } else {
             None
         };
+        if let Some((_, control, _)) = forcing.as_ref() {
+            // Molecular momentum changes cannot be hidden by subsequent
+            // chemical heating reducing the physical Mach number.
+            forcing::admit_moving_field(
+                &self.trial.gas,
+                &self.trial.grid,
+                &self.trial.states,
+                *control,
+                motion,
+                cancelled,
+            )?;
+        }
         react_cells(
             &mut self.trial,
             &mut self.reactor,
@@ -288,9 +312,23 @@ impl ReactingEuler3d {
             &mut chemistry,
             cancelled,
         )?;
-        let transport =
-            self.trial
-                .step_moving(Time::new(dt), controls.transport, motion, &mut *cancelled)?;
+        let transport = match forcing.as_mut() {
+            Some((force, control, work)) => self.trial.step_moving_with_forcing(
+                Time::new(dt),
+                controls.transport,
+                motion,
+                *force,
+                *control,
+                work,
+                &mut *cancelled,
+            )?,
+            None => self.trial.step_moving(
+                Time::new(dt),
+                controls.transport,
+                motion,
+                &mut *cancelled,
+            )?,
+        };
         if transport.elapsed.value() != dt {
             return Err(MovingTrialFailure {
                 error: ReactiveError::Invalid("ALE shortened moving reactive interval"),
@@ -317,6 +355,18 @@ impl ReactingEuler3d {
             &mut chemistry,
             cancelled,
         )?;
+        if let Some((_, control, _)) = forcing.as_ref() {
+            // Endothermic chemistry can increase Mach before the final
+            // molecular interval; admit that physical endpoint separately.
+            forcing::admit_moving_field(
+                &self.trial.gas,
+                &self.trial.grid,
+                &self.trial.states,
+                *control,
+                motion,
+                cancelled,
+            )?;
+        }
         let second = if let Some(operator) = operator.as_deref_mut() {
             let (report, exchange) = operator.advance_moving_unpublished(
                 &mut self.trial,
@@ -338,7 +388,13 @@ impl ReactingEuler3d {
         };
         // Both reacting endpoints and viscously heated endpoints remain in
         // the original chemical interval and the moving-face acoustic budget.
-        let rate = endpoint_rate(&self.trial, motion, self.reactor.controls(), cancelled)?;
+        let rate = endpoint_rate(
+            &self.trial,
+            motion,
+            self.reactor.controls(),
+            forcing.as_ref().map(|(_, control, _)| *control),
+            cancelled,
+        )?;
         super::super::stepping::check_cfl::<super::super::Error>(
             rate * dt,
             controls.transport.cfl,
@@ -416,12 +472,16 @@ fn endpoint_rate(
     flow: &MixtureEuler3d,
     motion: MeshMotion,
     chemistry: IsochoricKineticsSolve,
+    force_control: Option<ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, ReactiveError> {
     let n = flow.gas.species_count();
     let mut rate: f64 = 0.0;
     for (index, row) in flow.states.chunks_exact(n + 4).enumerate() {
         let p = cell(row, n).primitive(&flow.gas, &mut *cancelled)?;
+        if let Some(control) = force_control {
+            control.admit_velocity::<super::super::Error>(p.velocity, p.sound_speed)?;
+        }
         if !(chemistry.minimum_temperature_k..=chemistry.maximum_temperature_k)
             .contains(&p.temperature)
         {
