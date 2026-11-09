@@ -9,6 +9,7 @@
 use super::*;
 use fs_material::fluid_acoustics::FluidAcousticState;
 
+mod band;
 mod readout;
 pub use readout::{
     HarmonicReadoutBudget, HarmonicReadoutTap, PreparedHarmonicReadout, WindowedHarmonicReadoutPair,
@@ -55,6 +56,8 @@ pub struct HarmonicArrayBudget {
     pub max_total_lines: usize,
     /// Sum, over mean/factor banks, of the squared line count across receivers.
     /// Bounds all spatial frequency pairs; each has at most sixteen p/u products.
+    /// Short uniform bands instead use a fixed union of at most 64 analytic or
+    /// 32 real frequencies and 17 temporal modes per component.
     pub max_line_pairs: usize,
 }
 
@@ -90,9 +93,10 @@ pub struct WindowedHarmonicReceiverPair<const D: usize> {
 /// Borrowed original receiver ensembles with an explicit common factor binding.
 /// Preparation copies only receiver metadata; it does not rebuild propagation
 /// or duplicate spectral coefficients. Pair queries allocate nothing and use
-/// the original DD harmonic-window kernels for deterministic, real and proper
-/// factors. Close frequencies retain their beats and real factors retain sum
-/// frequencies. Covariance does not assume Gaussianity or stationarity.
+/// a common positive temporal factor for short uniform frequency bands, or
+/// the original DD pair kernels for other windows. Deterministic, real and
+/// proper factors retain their declared laws; close frequencies keep beats and
+/// real factors keep sum frequencies. Covariance does not assume stationarity.
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicArray<'a, const D: usize> {
     source_clock: &'a str,
@@ -233,7 +237,7 @@ impl<'a, const D: usize> PreparedHarmonicArray<'a, D> {
         self.observe_pair_cancellable(receivers, window, || false)
     }
 
-    /// Allocation-free cross-location products, with a poll per frequency pair.
+    /// Allocation-free cross-location products, with bounded mode/pair polls.
     /// Reversing the receiver order transposes p/u order and the velocity tensor.
     pub fn observe_pair_cancellable(
         &self,
@@ -312,6 +316,21 @@ fn pair<const D: usize>(
         let a = field(left, bank);
         let b = field(right, bank);
         if a.lines.is_empty() || b.lines.is_empty() {
+            continue;
+        }
+        if band::accumulate(
+            a,
+            b,
+            window,
+            kind,
+            &mut moments,
+            if bank == 0 {
+                None
+            } else {
+                Some(&mut covariance)
+            },
+            cancelled,
+        )? {
             continue;
         }
         for x in &a.lines {
