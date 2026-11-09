@@ -8,10 +8,14 @@
 //!
 //! OCV, capacitances, inductances, inertias, motor reciprocity and bearing drag
 //! stay fixed. Endpoint material feedback needs time refinement. Native sampled
-//! device limits do not certify unresolved peaks or semiconductor safe area;
-//! recovery, gate/junction capacitance, avalanche and transition heat are absent.
+//! device limits do not certify unresolved peaks or semiconductor safe area.
+//! The default nine-state lane has no device capacitor states; `capacitance`
+//! adds explicit constant output-charge storage. Neither lane models gate-drive
+//! energy, reverse recovery, avalanche or a general nonlinear capacitance law.
 
 use super::*;
+
+pub mod capacitance;
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError, closed_balance};
 use crate::circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatError;
@@ -37,21 +41,24 @@ pub struct CommutatedBatteryMotorThermalNetwork<'a> {
     pub bearing_cell: CellId,
 }
 
-/// Accepted original nine-state drive and complete source-bound coefficients.
+/// Accepted original drive and complete source-bound coefficients.
+/// The default nine coordinates retain the existing algebraic-node API; the
+/// capacitor child binds eleven coordinates with four immutable charge laws.
 #[derive(Clone, Debug)]
-pub struct MaterialCommutatedBatteryMotorDrive {
+pub struct MaterialCommutatedBatteryMotorDrive<const N: usize = 9, C = ()> {
     time_s: f64,
     curve: BatteryOcvCurve,
     battery_parameters: BatteryParameters,
     parameters: CommutationParameters,
     lead_resistance_ohm: f64,
     motor_parameters: DcMotorParameters,
-    state: [f64; 9],
+    state: [f64; N],
+    capacitors: C,
     resistors: Arc<[ConverterChannelMaterial; DRIVE_RESISTORS]>,
     devices: Arc<[DeviceConductionMaterial; 4]>,
     bearing_cell: CellId,
 }
-impl MaterialCommutatedBatteryMotorDrive {
+impl<const N: usize, C> MaterialCommutatedBatteryMotorDrive<N, C> {
     pub const fn time_s(&self) -> f64 {
         self.time_s
     }
@@ -70,7 +77,7 @@ impl MaterialCommutatedBatteryMotorDrive {
     pub const fn motor_parameters(&self) -> DcMotorParameters {
         self.motor_parameters
     }
-    pub const fn state(&self) -> &[f64; 9] {
+    pub const fn state(&self) -> &[f64; N] {
         &self.state
     }
     pub fn resistors(&self) -> &[ConverterChannelMaterial; DRIVE_RESISTORS] {
@@ -235,13 +242,119 @@ fn coefficient_bits(
     bits
 }
 
+fn admit_original_state(native: &BatteryMotorDrive, state: &[f64; 9]) -> Result<(), Error> {
+    if !native.system().hamiltonian(state).is_finite() {
+        return Err(invalid(
+            "commutated battery drive needs nine supported original coordinates",
+        ));
+    }
+    Ok(())
+}
+
+/// A view of actual native physical transfers, never an averaged receipt.
+struct DrivePower<'a> {
+    native: &'a fs_phs::PreparedStepRecord,
+    storage_change_j: [f64; 7],
+    heat: [f64; 14],
+    battery_terminal_work_j: f64,
+    converter_terminal_work_j: [f64; 2],
+    motor_electrical_work_j: f64,
+    electromagnetic_work_j: f64,
+    shaft_work_j: [f64; 2],
+    load_work_j: f64,
+}
+trait DriveReceipt: Clone {
+    fn account(&self) -> DrivePower<'_>;
+    fn admit_storage(&self, _allowance_j: f64) -> Result<(), Error> {
+        Ok(())
+    }
+}
+impl DriveReceipt for CommutatedBatteryMotorCycleStep {
+    fn account(&self) -> DrivePower<'_> {
+        DrivePower {
+            native: &self.native,
+            storage_change_j: self.storage_change_j,
+            heat: self.heat_joules(),
+            battery_terminal_work_j: self.battery_terminal_work_j,
+            converter_terminal_work_j: self.converter_terminal_work_j,
+            motor_electrical_work_j: self.motor_electrical_work_j,
+            electromagnetic_work_j: self.electromagnetic_work_j,
+            shaft_work_j: self.shaft_work_j,
+            load_work_j: self.load_work_j,
+        }
+    }
+}
+
+fn admit_cycle_clock(
+    start_s: f64,
+    target_s: f64,
+    period_s: f64,
+    integration_steps: usize,
+    expected_steps: usize,
+) -> Result<(), Error> {
+    let dt = finite(target_s - start_s)?;
+    let represented_end = finite(start_s + period_s)?;
+    let allowance = 0.5 * (clock_spacing(start_s) + clock_spacing(target_s))
+        + 64.0 * f64::EPSILON * period_s.max(dt);
+    if represented_end <= start_s
+        || represented_end.to_bits() != target_s.to_bits()
+        || (period_s - dt).abs() > allowance
+        || integration_steps != expected_steps
+    {
+        return Err(invalid(
+            "the commutated drive cycle must reach the same represented thermal endpoint",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_commutated(
+    original: BatteryMotorDrive,
+    devices: [SwitchDevice; 4],
+    state: &[f64; 9],
+    start_s: f64,
+    target_s: f64,
+    intervals: &[CommutationInterval],
+    commands: &[BatteryMotorSwitchCommand],
+    substeps: usize,
+    electrical_controls: PowerLoadControls,
+    cycle_controls: SwitchCycleControls,
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<([f64; 9], CommutatedBatteryMotorCycleStep), Error> {
+    let mut native = PreparedCommutatedBatteryMotorCycle::new_controlled(
+        original,
+        devices,
+        intervals,
+        substeps,
+        electrical_controls,
+        cycle_controls,
+        || (*cancel.borrow_mut())(),
+    )
+    .map_err(electrical)?;
+    admit_cycle_clock(
+        start_s,
+        target_s,
+        native.period_s(),
+        native.integration_steps(),
+        intervals
+            .len()
+            .checked_mul(substeps)
+            .ok_or_else(|| invalid("commutation work overflow"))?,
+    )?;
+    let mut next = [0.0; 9];
+    let step = native
+        .step_interval_commands_controlled(state, commands, &mut next, || (*cancel.borrow_mut())())
+        .map_err(electrical)?;
+    Ok((next, step))
+}
+
 // Independent physical boundaries precede optional auxiliary-work routing.
 // No heat is inferred from an energy remainder.
-fn physical_account(
-    step: &CommutatedBatteryMotorCycleStep,
-    allowance_j: f64,
-) -> Result<(Dd, Dd), Error> {
-    let heat = step.heat_joules();
+fn physical_account(receipt: &impl DriveReceipt, allowance_j: f64) -> Result<(Dd, Dd), Error> {
+    receipt.admit_storage(allowance_j)?;
+    let step = receipt.account();
+    let heat = step.heat;
     if heat
         .iter()
         .chain([&step.load_work_j])
@@ -290,28 +403,28 @@ fn physical_account(
     Ok((total, external))
 }
 
-struct DriveDriver {
-    drive: MaterialCommutatedBatteryMotorDrive,
-    step: CommutatedBatteryMotorCycleStep,
+struct DriveDriver<const N: usize, C, Step> {
+    drive: MaterialCommutatedBatteryMotorDrive<N, C>,
+    step: Step,
     load_heat: Option<RegulatedLoadHeat>,
     total_heat_j: f64,
     external_work_j: Dd,
 }
-impl ThermalDriver for DriveDriver {
-    type Model = MaterialCommutatedBatteryMotorDrive;
-    type Step = CommutatedBatteryMotorCycleStep;
+impl<const N: usize, C, Step: DriveReceipt> ThermalDriver for DriveDriver<N, C, Step> {
+    type Model = MaterialCommutatedBatteryMotorDrive<N, C>;
+    type Step = Step;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
             resistors: &[],
             contacts: &[],
             heat_j: self.total_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.step.native.delta_h,
+            stored_change_j: self.step.account().native.delta_h,
             supplied_j: self.external_work_j.to_f64(),
         }
     }
     fn retained_energy_balance_j(&self) -> Dd {
-        Dd::from_f64(self.step.native.delta_h) - self.external_work_j
+        Dd::from_f64(self.step.account().native.delta_h) - self.external_work_j
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
         (self.drive, self.step)
@@ -340,12 +453,12 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
         }
         Ok(())
     }
-    fn resolve_bindings(
+    fn resolve_bindings<const N: usize, C>(
         &self,
         thermal: &DepositionSimulation<'_>,
         sample: &MaterialNetworkSample,
         fixed: [f64; DRIVE_RESISTORS],
-        retained: Option<&MaterialCommutatedBatteryMotorDrive>,
+        retained: Option<&MaterialCommutatedBatteryMotorDrive<N, C>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<
         (
@@ -398,41 +511,44 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                 let sample = prepared
                     .resolve(thermal, || (*cancel.borrow_mut())())
                     .map_err(material)?;
-                self.resolve_bindings(thermal, &sample.source, fixed, None, &cancel)
+                self.resolve_bindings::<9, ()>(thermal, &sample.source, fixed, None, &cancel)
+                    .map(|(r, d)| (r, d, ()))
             },
+            |state, _, _| admit_original_state(native, state),
             &cancel,
         )
     }
 
-    fn bind_resolved<E: From<ConverterThermalError>>(
+    fn bind_resolved<const N: usize, C, E: From<ConverterThermalError>>(
         &self,
         thermal: &DepositionSimulation<'_>,
         native: &BatteryMotorDrive,
-        state: [f64; 9],
+        state: [f64; N],
         resolve: impl FnOnce(
             [f64; DRIVE_RESISTORS],
         ) -> Result<
             (
                 [ConverterChannelMaterial; DRIVE_RESISTORS],
                 [DeviceConductionMaterial; 4],
+                C,
             ),
             CircuitEnthalpyError<E>,
         >,
+        admit_state: impl FnOnce(&[f64; N], &C, CommutationParameters) -> Result<(), Error>,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<MaterialCommutatedBatteryMotorDrive, CircuitEnthalpyError<E>> {
+    ) -> Result<MaterialCommutatedBatteryMotorDrive<N, C>, CircuitEnthalpyError<E>> {
         check(cancel).map_err(map_drive)?;
         self.admit_receiver(thermal, self.bearing_cell)
             .map_err(map_drive)?;
-        if state.iter().any(|v| !v.is_finite()) || !native.system().hamiltonian(&state).is_finite()
-        {
+        if state.iter().any(|v| !v.is_finite()) {
             return Err(map_drive(invalid(
-                "commutated battery drive needs nine supported original coordinates",
+                "commutated battery drive needs finite original charge and momentum coordinates",
             )));
         }
         let p = native.electrical().parameters();
         let b = native.electrical().battery_parameters();
         let m = native.motor_parameters();
-        let (resistors, devices) = resolve([
+        let (resistors, devices, capacitors) = resolve([
             p.winding_resistance_ohm,
             b.series_resistance_ohm,
             b.polarization_resistance_ohm,
@@ -455,6 +571,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
             motor_parameters,
         )
         .map_err(map_drive)?;
+        admit_state(&state, &capacitors, parameters).map_err(map_drive)?;
         check(cancel).map_err(map_drive)?;
         Ok(MaterialCommutatedBatteryMotorDrive {
             time_s: thermal.time_s(),
@@ -464,6 +581,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
             lead_resistance_ohm: lead,
             motor_parameters,
             state,
+            capacitors,
             resistors: Arc::new(resistors),
             devices: Arc::new(devices),
             bearing_cell: self.bearing_cell,
@@ -501,7 +619,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        self.step_resolved_candidate(
+        let (thermal, drive, report) = self.step_resolved_candidate(
             thermal,
             target_s,
             drive,
@@ -509,8 +627,6 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
             commands,
             substeps_per_interval,
             load_heat_cell,
-            electrical_controls,
-            cycle_controls,
             controls,
             initial_energy_increments_j,
             |trial, fixed, retained| {
@@ -519,40 +635,98 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     .map_err(material)?;
                 let (resistors, devices) =
                     self.resolve_bindings(trial, &coefficients.source, fixed, retained, &cancel)?;
-                Ok((coefficients, resistors, devices))
+                Ok((coefficients, resistors, devices, ()))
+            },
+            |original, devices, _, state| {
+                advance_commutated(
+                    original,
+                    devices,
+                    state,
+                    thermal.time_s(),
+                    target_s,
+                    intervals,
+                    commands,
+                    substeps_per_interval,
+                    electrical_controls,
+                    cycle_controls,
+                    &cancel,
+                )
+            },
+            |network, resistors, devices, (), load_heat, motor_parameters| {
+                CommutatedBatteryMotorThermalSample {
+                    network,
+                    resistors,
+                    devices,
+                    bearing_cell: self.bearing_cell,
+                    bearing_drag_nm_s_per_rad: motor_parameters.bearing_drag_nm_s_per_rad,
+                    load_heat,
+                }
             },
             &cancel,
-        )
+        )?;
+        Ok(CommutatedBatteryMotorEnthalpyCandidate {
+            thermal,
+            drive,
+            report,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_resolved_candidate<'t, S, E: From<ConverterThermalError>>(
+    fn step_resolved_candidate<
+        't,
+        S,
+        Out,
+        E: From<ConverterThermalError>,
+        const N: usize,
+        C: Clone + PartialEq,
+        Step: DriveReceipt,
+    >(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        drive: &MaterialCommutatedBatteryMotorDrive,
+        drive: &MaterialCommutatedBatteryMotorDrive<N, C>,
         intervals: &[CommutationInterval],
         commands: &[BatteryMotorSwitchCommand],
         substeps_per_interval: usize,
         load_heat_cell: Option<CellId>,
-        electrical_controls: PowerLoadControls,
-        cycle_controls: SwitchCycleControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         resolve: impl Fn(
             &DepositionSimulation<'t>,
             [f64; DRIVE_RESISTORS],
-            Option<&MaterialCommutatedBatteryMotorDrive>,
+            Option<&MaterialCommutatedBatteryMotorDrive<N, C>>,
         ) -> Result<
             (
                 CircuitThermalCoefficients<S>,
                 [ConverterChannelMaterial; DRIVE_RESISTORS],
                 [DeviceConductionMaterial; 4],
+                C,
             ),
             CircuitEnthalpyError<E>,
         >,
+        advance: impl Fn(
+            BatteryMotorDrive,
+            [SwitchDevice; 4],
+            &C,
+            &[f64; N],
+        ) -> Result<([f64; N], Step), Error>,
+        sample: impl Fn(
+            S,
+            Arc<[ConverterChannelMaterial; DRIVE_RESISTORS]>,
+            Arc<[DeviceConductionMaterial; 4]>,
+            C,
+            Option<RegulatedLoadHeat>,
+            DcMotorParameters,
+        ) -> Out,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<CommutatedBatteryMotorEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>> {
+    ) -> Result<
+        (
+            DepositionSimulation<'t>,
+            MaterialCommutatedBatteryMotorDrive<N, C>,
+            CircuitEnthalpyReport<Out, Step>,
+        ),
+        CircuitEnthalpyError<E>,
+    > {
         check(cancel).map_err(map_drive)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
             thermal,
@@ -589,18 +763,22 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
             drive.lead_resistance_ohm,
             drive.motor_parameters,
         );
-        let (_, original_resistors, original_devices) = resolve(thermal, fixed, Some(drive))?;
+        let (_, original_resistors, original_devices, original_capacitors) =
+            resolve(thermal, fixed, Some(drive))?;
         if original_resistors
             .iter()
             .zip(drive.resistors.iter())
             .any(|(a, b)| !same_channel(a, b))
             || original_devices != *drive.devices
+            || original_capacitors != drive.capacitors
         {
             return Err(map_drive(invalid(
-                "commutated drive must retain every accepted resistor and complete device source",
+                "commutated drive must retain every accepted resistance, conduction and capacitance source",
             )));
         }
-        let cache = RefCell::new(None::<([u64; 33], [f64; 9], CommutatedBatteryMotorCycleStep)>);
+        // Every storage coefficient and the accepted state are fixed within this call.
+        // Capacitor source/domain admission still runs on every thermal proposal.
+        let cache = RefCell::new(None::<([u64; 33], [f64; N], Step)>);
         let (thermal, drive, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -611,7 +789,8 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                 if remaining < integration_steps {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
-                let (coefficients, resistors, devices) = resolve(trial, fixed, Some(drive))?;
+                let (coefficients, resistors, devices, capacitors) =
+                    resolve(trial, fixed, Some(drive))?;
                 let resistors = Arc::new(resistors);
                 let devices = Arc::new(devices);
                 let (parameters, battery_parameters, lead, motor_parameters) = parameters_at(
@@ -640,48 +819,14 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                         motor_parameters,
                     )
                     .map_err(map_drive)?;
-                    let mut native = PreparedCommutatedBatteryMotorCycle::new_controlled(
-                        original,
-                        parameters.devices,
-                        intervals,
-                        substeps_per_interval,
-                        electrical_controls,
-                        cycle_controls,
-                        || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(electrical)
-                    .map_err(map_drive)?;
-                    let period = native.period_s();
-                    let represented_end = finite(thermal.time_s() + period)?;
-                    let clock_allowance = 0.5
-                        * (clock_spacing(thermal.time_s()) + clock_spacing(target_s))
-                        + 64.0 * f64::EPSILON * period.max(dt);
-                    if represented_end <= thermal.time_s()
-                        || represented_end.to_bits() != target_s.to_bits()
-                        || (period - dt).abs() > clock_allowance
-                        || native.integration_steps() != integration_steps
-                    {
-                        return Err(map_drive(invalid(
-                            "the commutated drive cycle must reach the same represented thermal endpoint",
-                        )));
-                    }
-                    let mut next = [0.0; 9];
-                    let step = native
-                        .step_interval_commands_controlled(
-                            &drive.state,
-                            commands,
-                            &mut next,
-                            || (*cancel.borrow_mut())(),
-                        )
-                        .map_err(electrical)
-                        .map_err(map_drive)?;
-                    (next, step)
+                    advance(original, parameters.devices, &capacitors, &drive.state)
+                        .map_err(map_drive)?
                 };
                 let (heat, external) = physical_account(&step, controls.total_energy_tolerance_j)
                     .map_err(map_drive)?;
                 let load_heat = load_heat_cell.map(|cell| RegulatedLoadHeat {
                     cell,
-                    energy_j: step.load_work_j,
+                    energy_j: step.account().load_work_j,
                 });
                 let routed = Dd::from_f64(load_heat.as_ref().map_or(0.0, |load| load.energy_j));
                 let total_heat_j = finite((heat + routed).to_f64())?;
@@ -702,6 +847,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                             lead_resistance_ohm: lead,
                             motor_parameters,
                             state: next,
+                            capacitors: capacitors.clone(),
                             resistors: Arc::clone(&resistors),
                             devices: Arc::clone(&devices),
                             bearing_cell: self.bearing_cell,
@@ -713,19 +859,19 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     },
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
-                    source: CommutatedBatteryMotorThermalSample {
-                        network: coefficients.source,
+                    source: sample(
+                        coefficients.source,
                         resistors,
                         devices,
-                        bearing_cell: self.bearing_cell,
-                        bearing_drag_nm_s_per_rad: motor_parameters.bearing_drag_nm_s_per_rad,
+                        capacitors,
                         load_heat,
-                    },
+                        motor_parameters,
+                    ),
                     circuit_trials: integration_steps,
                 })
             },
             |driver, duration, checkpoint| {
-                let heat = driver.step.heat_joules();
+                let heat = driver.step.account().heat;
                 let mut by_cell: BTreeMap<CellId, Dd> = BTreeMap::new();
                 let mut add = |cell, value| {
                     let sum = by_cell.entry(cell).or_insert(Dd::ZERO);
@@ -763,11 +909,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
             || (*cancel.borrow_mut())(),
         )?;
         check(cancel).map_err(map_drive)?;
-        Ok(CommutatedBatteryMotorEnthalpyCandidate {
-            thermal,
-            drive,
-            report,
-        })
+        Ok((thermal, drive, report))
     }
 }
 
@@ -800,13 +942,13 @@ impl<A: HeatAssembly + ?Sized> CommutatedBatteryMotorHeatNetwork<'_, A> {
             bearing_cell: self.bearing_cell,
         })
     }
-    fn resolve(
+    fn resolve<const N: usize, C>(
         &self,
         cx: &Cx<'_>,
         network: &CommutatedBatteryMotorThermalNetwork<'_>,
         thermal: &DepositionSimulation<'_>,
         fixed: [f64; DRIVE_RESISTORS],
-        retained: Option<&MaterialCommutatedBatteryMotorDrive>,
+        retained: Option<&MaterialCommutatedBatteryMotorDrive<N, C>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<
         (
@@ -851,9 +993,10 @@ impl<A: HeatAssembly + ?Sized> CommutatedBatteryMotorHeatNetwork<'_, A> {
             native,
             state,
             |fixed| {
-                self.resolve(cx, &network, thermal, fixed, None, &cancel)
-                    .map(|(_, r, d)| (r, d))
+                self.resolve::<9, ()>(cx, &network, thermal, fixed, None, &cancel)
+                    .map(|(_, r, d)| (r, d, ()))
             },
+            |state, _, _| admit_original_state(native, state),
             &cancel,
         )
     }
@@ -888,7 +1031,8 @@ impl<A: HeatAssembly + ?Sized> CommutatedBatteryMotorHeatNetwork<'_, A> {
         )?;
         let network = self.network(cx)?;
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
-        let candidate = network.step_resolved_candidate(
+        let duration_s = target_s - thermal.time_s();
+        let (thermal, drive, report) = network.step_resolved_candidate(
             thermal,
             target_s,
             drive,
@@ -896,15 +1040,46 @@ impl<A: HeatAssembly + ?Sized> CommutatedBatteryMotorHeatNetwork<'_, A> {
             commands,
             substeps_per_interval,
             load_heat_cell,
-            electrical_controls,
-            cycle_controls,
             controls,
             initial_energy_increments_j,
-            |trial, fixed, retained| self.resolve(cx, &network, trial, fixed, retained, &cancel),
+            |trial, fixed, retained| {
+                self.resolve(cx, &network, trial, fixed, retained, &cancel)
+                    .map(|(coefficients, r, d)| (coefficients, r, d, ()))
+            },
+            |original, devices, _, state| {
+                advance_commutated(
+                    original,
+                    devices,
+                    state,
+                    thermal.time_s(),
+                    target_s,
+                    intervals,
+                    commands,
+                    substeps_per_interval,
+                    electrical_controls,
+                    cycle_controls,
+                    &cancel,
+                )
+            },
+            |network, resistors, devices, (), load_heat, motor_parameters| {
+                CommutatedBatteryMotorThermalSample {
+                    network,
+                    resistors,
+                    devices,
+                    bearing_cell: self.bearing_cell,
+                    bearing_drag_nm_s_per_rad: motor_parameters.bearing_drag_nm_s_per_rad,
+                    load_heat,
+                }
+            },
             &cancel,
         )?;
+        let candidate = CommutatedBatteryMotorEnthalpyCandidate {
+            thermal,
+            drive,
+            report,
+        };
         closed_balance(
-            target_s - thermal.time_s(),
+            duration_s,
             candidate.report().total_energy_residual_j,
             candidate.report().source.network.as_ref(),
             controls.total_energy_tolerance_j,

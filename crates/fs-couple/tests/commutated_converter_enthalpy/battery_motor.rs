@@ -1,4 +1,7 @@
 //! Finite chemical/shaft power, diode heat and the original finite caloric owners.
+#[path = "battery_motor/capacitance.rs"]
+mod capacitance;
+
 use super::*;
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,

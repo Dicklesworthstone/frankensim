@@ -8451,6 +8451,48 @@ motoring/regenerative fourteen-heat calorimetry, threshold-only feedback into
 motion, finite-liquid-coolant exchange and transactional refusal. Sources are
 manufactured fixtures, not measured device qualification.
 
+
+### Dynamic device output charge with fixed material capacitance
+
+`converter::commutation::battery_motor::capacitance` connects the original
+eleven-state finite battery/converter/motor owner to the existing material and
+HeatAssembly enthalpy path. Both switch-node charges remain continuous across
+gate and thermal boundaries. Incoming bus/node coordinates are total electrode
+charges. Binding requires four explicit authored capacitances and a bitwise
+match to original positive farad claims on the corresponding semiconductor
+packages; replacing capacitance at fixed incoming charge is refused.
+
+`DeviceCapacitanceBinding` and `DeviceCapacitanceMaterial` retain the original
+card, claim, property key, package and held external context. Every actual
+caloric proposal refreshes source validity, even when the electrical trajectory
+cache is reused. Only original zero-axis `ConstantWithinValidity` laws with
+owned static applicability are admitted. A sampled temperature- or
+voltage-dependent capacitance is refused. All storage coefficients remain fixed;
+variable charge laws and their reversible parameter/entropy work require a
+separate coupled model.
+
+The actual eleven-state receipt retains four signed device-capacitor energy
+changes and the original bus/inductor storage. Their independently summed
+partition precedes the seven-constituent and fourteen-loss physical balances.
+Only those fourteen dissipative terms and optionally routed actual auxiliary
+work heat the finite bodies. Stored capacitor energy is never deposited as
+package heat or reconstructed from a balance remainder.
+
+The nine-state public network/candidate/sample interfaces remain available.
+Both lanes share the same source-refresh and enthalpy loop, exact coefficient
+cache, full subdivision budgets, represented endpoint clocks and original
+HeatAssembly/radiation closure. The capacitor lane has explicit eleven-state
+accepted histories, source bundles and native receipts; no synthetic nine-state
+receipt or sequential electrical/thermal trajectory replaces them.
+
+Four regression definitions cover steady motoring/regeneration calorimetry,
+dynamic capacitor energy with hot-diode feedback and gate continuation,
+source/charge/package/domain refusal, and two finite thermal inventories.
+Fixture values are synthetic. These new coupled regressions were not compiled
+or executed in this delivery; the dependency set was incomplete and the runtime
+became unavailable. Gate-drive energy, reverse recovery, avalanche, nonlinear
+Coss and unresolved-peak qualification remain outside this constant-C lane.
+
 ## Finite source impedance, regulated demand and material heat
 
 `converter::voltage::power_load` adds `step_power_loaded_candidate` to the

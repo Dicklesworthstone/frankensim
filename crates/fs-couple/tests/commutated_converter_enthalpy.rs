@@ -93,8 +93,7 @@ fn fixture(cp: f64, threshold_slope: f64, upper_k: f64, channel_limit: f64) -> F
                         QuantitySpec::dimensional(Temperature::DIMS),
                         299.0,
                         upper_k,
-                    )
-                    .with("lot", 7.0, 7.0),
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![],
