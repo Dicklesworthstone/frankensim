@@ -17,6 +17,9 @@ use crate::thermal_surface::{
 };
 use fs_math::det;
 
+mod absorption;
+pub use absorption::PreparedIncoherentSlabAbsorption;
+
 /// Fractions of incident normal power, including every internal reflection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlabPowerBalance {
@@ -171,6 +174,33 @@ impl DielectricGlass {
         incident_index: f64,
         exit_index: f64,
     ) -> Result<IncoherentSlabResponse, DielectricError> {
+        self.prepare_incoherent_slab_absorption_between(
+            wavelength_nm,
+            thickness_m,
+            incident_cosine,
+            incident_index,
+            exit_index,
+        )
+        .map(|prepared| prepared.optical())
+    }
+
+    /// Prepare exact depth-interval absorption for the original incoherent
+    /// slab, including every internal forward and backward traversal.
+    ///
+    /// Preparation resolves the original wavelength-dependent material and
+    /// both interfaces once. Each subsequent interval query is allocation-free
+    /// and uses normal depths measured from the illuminated face. The same
+    /// smooth real-index/Beer model and source support as
+    /// [`Self::incoherent_slab_response_between`] apply. Optical preparation
+    /// adds no thermal storage or heat-transport law.
+    pub fn prepare_incoherent_slab_absorption_between(
+        &self,
+        wavelength_nm: f64,
+        thickness_m: f64,
+        incident_cosine: f64,
+        incident_index: f64,
+        exit_index: f64,
+    ) -> Result<PreparedIncoherentSlabAbsorption, DielectricError> {
         validate_thickness(thickness_m)?;
         if incident_cosine <= 0.0 || !super::admitted_dielectric_index(exit_index) {
             return Err(DielectricError::InvalidInterface);
@@ -184,11 +214,17 @@ impl DielectricGlass {
                 transmittance: 0.0,
                 absorptance: 0.0,
             };
-            return Ok(IncoherentSlabResponse {
-                perpendicular: reflected,
-                parallel: reflected,
-                transmitted_cosine: 0.0,
-                optical_depth: f64::INFINITY,
+            return Ok(PreparedIncoherentSlabAbsorption {
+                optical: IncoherentSlabResponse {
+                    perpendicular: reflected,
+                    parallel: reflected,
+                    transmitted_cosine: 0.0,
+                    optical_depth: f64::INFINITY,
+                },
+                thickness_m,
+                alpha_per_m: alpha,
+                entering_sum: [0.0; 2],
+                rear_reflectance: [0.0; 2],
             });
         }
         let cosine = interface.transmitted_cosine;
@@ -206,29 +242,26 @@ impl DielectricGlass {
         } else {
             dielectric_power_coefficients(incident_cosine, incident_index, index, cosine)
         };
+        let (rear_reflection, rear_transmission) = if incident_index == exit_index {
+            (reflection, transmission)
+        } else if exit_index == index {
+            ([0.0; 2], [1.0; 2])
+        } else {
+            // The original incident ray fixes the conserved tangential wave
+            // number. A rounded internal cosine can misclassify the rear
+            // critical ray, so resolve the exit from that original ray.
+            let exit = fresnel_dielectric(incident_cosine, incident_index, exit_index)?;
+            if exit.total_internal_reflection {
+                ([1.0; 2], [0.0; 2])
+            } else {
+                dielectric_power_coefficients(cosine, index, exit_index, exit.transmitted_cosine)
+            }
+        };
         let powers = if incident_index == exit_index {
             [0, 1].map(|pol| {
                 power_balance(reflection[pol] * reflection[pol], transmission[pol], depth)
             })
         } else {
-            let (rear_reflection, rear_transmission) = if exit_index == index {
-                ([0.0; 2], [1.0; 2])
-            } else {
-                // The original incident ray fixes the conserved tangential
-                // wave number. Reconstructing it from a rounded internal
-                // cosine can misclassify the rear critical ray.
-                let exit = fresnel_dielectric(incident_cosine, incident_index, exit_index)?;
-                if exit.total_internal_reflection {
-                    ([1.0; 2], [0.0; 2])
-                } else {
-                    dielectric_power_coefficients(
-                        cosine,
-                        index,
-                        exit_index,
-                        exit.transmitted_cosine,
-                    )
-                }
-            };
             [0, 1].map(|pol| {
                 asymmetric_power_balance(
                     reflection[pol] * reflection[pol],
@@ -239,35 +272,50 @@ impl DielectricGlass {
                 )
             })
         };
-        Ok(IncoherentSlabResponse {
-            perpendicular: powers[0],
-            parallel: powers[1],
-            transmitted_cosine: cosine,
-            optical_depth: depth,
+        Ok(PreparedIncoherentSlabAbsorption {
+            optical: IncoherentSlabResponse {
+                perpendicular: powers[0].0,
+                parallel: powers[1].0,
+                transmitted_cosine: cosine,
+                optical_depth: depth,
+            },
+            thickness_m,
+            alpha_per_m: alpha,
+            // Reuse the same geometric-series factor already evaluated for
+            // total power; depth support adds no exponential to that solve.
+            entering_sum: powers.map(|power| power.1),
+            rear_reflectance: rear_reflection.map(|r| r * r),
         })
     }
 }
 
-fn power_balance(r: f64, t: f64, depth: f64) -> SlabPowerBalance {
+fn power_balance(r: f64, t: f64, depth: f64) -> (SlabPowerBalance, f64) {
     if depth == 0.0 {
-        return SlabPowerBalance {
-            reflectance: 2.0 * r / (1.0 + r),
-            transmittance: t / (1.0 + r),
-            absorptance: 0.0,
-        };
+        return (
+            SlabPowerBalance {
+                reflectance: 2.0 * r / (1.0 + r),
+                transmittance: t / (1.0 + r),
+                absorptance: 0.0,
+            },
+            if t == 0.0 { 0.0 } else { 1.0 / (1.0 + r) },
+        );
     }
     let a = det::exp(-depth);
     let loss = -det::expm1(-depth);
     // D = 1 - r² a², written without subtracting nearly equal unit powers.
     // Native Poynting transmission t retains the complement when r rounds to 1.
     let denominator = t * (1.0 + r) + r * r * -det::expm1(-2.0 * depth);
-    let transmittance = t * (t / denominator) * a;
-    SlabPowerBalance {
-        reflectance: r + r * a * transmittance,
-        transmittance,
-        // Cancel (1+r*a) analytically from t*(1-a)*(1+r*a)/D.
-        absorptance: t * (loss / (t + r * loss)),
-    }
+    let entering_sum = t / denominator;
+    let transmittance = t * entering_sum * a;
+    (
+        SlabPowerBalance {
+            reflectance: r + r * a * transmittance,
+            transmittance,
+            // Cancel (1+r*a) analytically from t*(1-a)*(1+r*a)/D.
+            absorptance: t * (loss / (t + r * loss)),
+        },
+        entering_sum,
+    )
 }
 
 fn asymmetric_power_balance(
@@ -276,13 +324,16 @@ fn asymmetric_power_balance(
     rear_r: f64,
     rear_t: f64,
     depth: f64,
-) -> SlabPowerBalance {
+) -> (SlabPowerBalance, f64) {
     if front_t == 0.0 || (rear_t == 0.0 && depth == 0.0) {
-        return SlabPowerBalance {
-            reflectance: 1.0,
-            transmittance: 0.0,
-            absorptance: 0.0,
-        };
+        return (
+            SlabPowerBalance {
+                reflectance: 1.0,
+                transmittance: 0.0,
+                absorptance: 0.0,
+            },
+            0.0,
+        );
     }
     let a = det::exp(-depth);
     let loss = -det::expm1(-depth);
@@ -290,13 +341,16 @@ fn asymmetric_power_balance(
     // expm1 retain weak escape/loss when either reflection rounds to one.
     let denominator = front_t + front_r * rear_t + front_r * rear_r * -det::expm1(-2.0 * depth);
     let entering_sum = front_t / denominator;
-    SlabPowerBalance {
-        reflectance: front_r + front_t * entering_sum * rear_r * a * a,
-        transmittance: entering_sum * rear_t * a,
-        // Positive dissipative work on forward and returning traversals;
-        // never infer weak heating by subtracting R+T from unit power.
-        absorptance: entering_sum * (loss * (1.0 + rear_r * a)),
-    }
+    (
+        SlabPowerBalance {
+            reflectance: front_r + front_t * entering_sum * rear_r * a * a,
+            transmittance: entering_sum * rear_t * a,
+            // Positive dissipative work on forward and returning traversals;
+            // never infer weak heating by subtracting R+T from unit power.
+            absorptance: entering_sum * (loss * (1.0 + rear_r * a)),
+        },
+        entering_sum,
+    )
 }
 
 impl BeerLambertAbsorption {

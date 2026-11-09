@@ -20,7 +20,10 @@ mod anisotropic;
 pub use anisotropic::AnisotropicDielectricRoughness;
 
 mod slab;
-pub use slab::{IncoherentSlabResponse, IncoherentSlabThermalResponse, SlabPowerBalance};
+pub use slab::{
+    IncoherentSlabResponse, IncoherentSlabThermalResponse, PreparedIncoherentSlabAbsorption,
+    SlabPowerBalance,
+};
 
 #[cfg(feature = "material-state")]
 mod water;

@@ -2357,6 +2357,21 @@ for the distinction between internal and external transmittance.
 
 ### Slab emission and native thermal exchange
 
+`DielectricGlass::prepare_incoherent_slab_absorption_between` resolves the same
+spectral and interface laws once for allocation-free depth-interval queries.
+`PreparedIncoherentSlabAbsorption::absorption_between` integrates positive
+forward and backward Beer losses with every internal reflection, separately
+for s/p incident power. Normal-depth partitions create no optical interfaces.
+Unequal exteriors and rear total reflection retain their original power laws;
+front total reflection, clear materials and empty intervals absorb zero.
+`expm1` retains weak cell heating and positive path decomposition preserves a
+finite entrance skin even when the full slab is opaque. Opposite-face queries
+retain the authored interval width without subtracting two reversed depths,
+so a very thin physical cell is not rounded away inside a thick slab. G1/G3 tests compare
+independent bounce integrals, additive partitions, metre scaling and opaque
+skin localization. Optical coefficients remain homogeneous and frozen; no
+thermal storage, within-slab material variation or coherent profile is inferred.
+
 `CoatingThermalEmission::try_incoherent_slab` retains one uniform-temperature
 bulk-glass receiver and the original finite-band phase/absorption laws. Native
 slab s/p absorptance supplies reciprocal emissivity; transmitted power remains
