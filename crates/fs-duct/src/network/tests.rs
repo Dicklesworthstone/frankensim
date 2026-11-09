@@ -996,3 +996,174 @@ fn network_coupled_termination_even_mode_and_diagonal_limit() {
     anonymous.source_id = " ".into();
     assert!(response.drive_coupled("in", &[], &anonymous, &gas).is_err());
 }
+
+fn impedance_fixture(z: Vec<C64>) -> CoupledTermination {
+    let n = (z.len() as f64).sqrt() as usize;
+    CoupledTermination {
+        omega: 1.0,
+        labels: (0..n).map(|i| format!("port-{i}")).collect(),
+        z,
+        source_id: "analytic Hermitian-work fixture".into(),
+    }
+}
+
+fn admittance_fixture(y: Vec<C64>) -> JunctionMultiport {
+    let n = (y.len() as f64).sqrt() as usize;
+    JunctionMultiport {
+        omega: 1.0,
+        terminals: (0..n)
+            .map(|i| NetworkTerminal {
+                edge_id: format!("edge-{i}"),
+                end: EdgeEnd::From,
+            })
+            .collect(),
+        y,
+        source_id: "analytic Hermitian-work fixture".into(),
+    }
+}
+
+// G0/G3: changing units or adding a reactive load cannot make active work passive.
+#[test]
+fn network_passivity_rejects_resistance_hidden_by_reactance_or_another_port() {
+    for scale in [1.0e-200, 1.0, 1.0e200] {
+        let active = C64::new(-scale, 1.0e20 * scale);
+        assert!(finite_impedance(active).is_err());
+        assert!(impedance_fixture(vec![active]).validate().is_err());
+        assert!(admit_multiport(&admittance_fixture(vec![active])).is_err());
+    }
+    let unrelated_resistor = vec![
+        C64::from_re(1.0e200),
+        C64::ZERO,
+        C64::ZERO,
+        C64::from_re(-1.0e-200),
+    ];
+    assert!(
+        impedance_fixture(unrelated_resistor.clone())
+            .validate()
+            .is_err()
+    );
+    assert!(admit_multiport(&admittance_fixture(unrelated_resistor)).is_err());
+}
+
+// G0: imaginary antisymmetry is dissipative cross-work, not lossless reactance.
+#[test]
+fn network_passivity_rejects_active_complex_mutual_work() {
+    let z = vec![
+        C64::new(1.0, 1.0e20),
+        C64::new(0.0, 2.0),
+        C64::new(0.0, -2.0),
+        C64::new(1.0, 1.0e20),
+    ];
+    let flow = [C64::ONE, C64::new(0.0, 1.0)];
+    let effort = [
+        z[0] * flow[0] + z[1] * flow[1],
+        z[2] * flow[0] + z[3] * flow[1],
+    ];
+    let work = 0.5 * (flow[0].conj() * effort[0] + flow[1].conj() * effort[1]).re;
+    assert_eq!(work, -1.0);
+    assert!(impedance_fixture(z.clone()).validate().is_err());
+    // Its 4-unit transpose defect is inside the existing reciprocity tolerance
+    // relative to 1e20 reactance, but that must not excuse the negative work.
+    assert!(admit_multiport(&admittance_fixture(z)).is_err());
+    // Positive 2x2 principal minors alone are not a PSD test for three ports.
+    let all_pairs_pass = vec![
+        C64::ONE,
+        C64::from_re(-0.75),
+        C64::from_re(-0.75),
+        C64::from_re(-0.75),
+        C64::ONE,
+        C64::from_re(-0.75),
+        C64::from_re(-0.75),
+        C64::from_re(-0.75),
+        C64::ONE,
+    ];
+    assert!(
+        impedance_fixture(all_pairs_pass.clone())
+            .validate()
+            .is_err()
+    );
+    assert!(admit_multiport(&admittance_fixture(all_pairs_pass)).is_err());
+}
+
+// G0: independent factorized work law, including its exact rank-one nullspace.
+#[test]
+fn network_passivity_preserves_passive_complex_cross_work_and_reactive_entries() {
+    // H = [[1,i],[-i,1]], so U^H H U = |U0+i U1|^2. The diagonal
+    // imaginary terms and antisymmetric real terms belong to a lossless load.
+    let z = vec![
+        C64::new(1.0, 3.0),
+        C64::new(7.0, 1.0),
+        C64::new(-7.0, -1.0),
+        C64::new(1.0, -3.0),
+    ];
+    let load = impedance_fixture(z.clone());
+    load.validate().unwrap();
+    assert_eq!(load.z, z);
+    for flow in [
+        [C64::ONE, C64::ZERO],
+        [C64::ONE, C64::new(0.0, 1.0)],
+        [C64::ONE, C64::new(0.0, -1.0)],
+        [C64::new(1.0, 2.0), C64::new(-0.5, 0.4)],
+    ] {
+        let effort = [
+            z[0] * flow[0] + z[1] * flow[1],
+            z[2] * flow[0] + z[3] * flow[1],
+        ];
+        let work = 0.5 * (flow[0].conj() * effort[0] + flow[1].conj() * effort[1]).re;
+        let physical_channel = flow[0] + C64::new(0.0, 1.0) * flow[1];
+        let expected = 0.5 * (physical_channel.re.powi(2) + physical_channel.im.powi(2));
+        assert!((work - expected).abs() < 1.0e-14);
+    }
+}
+
+// G0/G3: singular passive operators need neither resistance floors nor repairs.
+#[test]
+fn network_passivity_keeps_lossless_and_scaled_rank_deficient_loads() {
+    for z in [
+        vec![C64::ZERO; 4],
+        vec![C64::new(0.0, 1.0e300); 4],
+        vec![
+            C64::from_re(1.0e-200),
+            C64::ONE,
+            C64::ONE,
+            C64::from_re(1.0e200),
+        ],
+        vec![
+            C64::from_re(1.0e200),
+            C64::ONE,
+            C64::ONE,
+            C64::from_re(1.0e-200),
+        ],
+        vec![
+            C64::from_re(f64::from_bits(1)),
+            C64::ZERO,
+            C64::ZERO,
+            C64::ZERO,
+        ],
+    ] {
+        impedance_fixture(z.clone()).validate().unwrap();
+        admit_multiport(&admittance_fixture(z)).unwrap();
+    }
+    // An exactly dark port cannot have nonzero dissipative coupling, even
+    // when the supplied work coefficient is the smallest positive f64.
+    let tiny = C64::from_re(f64::from_bits(1));
+    let active = vec![C64::ZERO, tiny, tiny, C64::ONE];
+    assert!(impedance_fixture(active.clone()).validate().is_err());
+    assert!(admit_multiport(&admittance_fixture(active)).is_err());
+    // Full complex Schur updates retain the two-dimensional nullspace of
+    // H = [1,i,1] [1,i,1]^H, including its imaginary mutual work.
+    let i = C64::new(0.0, 1.0);
+    impedance_fixture(vec![
+        C64::ONE,
+        -i,
+        C64::ONE,
+        i,
+        C64::ONE,
+        i,
+        C64::ONE,
+        -i,
+        C64::ONE,
+    ])
+    .validate()
+    .unwrap();
+}

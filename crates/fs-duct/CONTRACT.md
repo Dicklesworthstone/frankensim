@@ -1702,8 +1702,15 @@ inner/series/mutual junction corrections. Bare graph junctions are ideal;
 corrections are never added implicitly. `JunctionMultiport` instead supplies
 an explicitly identified, frequency-specific plane-port admittance, with exact
 bindings to every incident edge end. Its terminal pressures remain distinct.
-The supplied matrix must be reciprocal and have PSD real Hermitian part within
-1e-12 normalized numerical admission. This is not evidence that a 3-D/modal
+The supplied matrix must be reciprocal within its existing relative 1e-12
+transpose tolerance and have a positive-semidefinite complete Hermitian work
+form. The shared impedance/admittance check forms `(Z+Z^H)/2` with safe
+midpoints, rejects negative diagonal work and nonzero work on an exact zero
+diagonal, then applies diagonal congruence and pivoted complex LDL with a
+1e-12 numerical allowance on the equilibrated work form. Reactive magnitude
+and another port's larger resistance cannot hide active work. Imaginary mutual
+work is checked even when its transpose defect lies inside the separate
+reciprocity tolerance. This is not evidence that a 3-D/modal
 producer's geometry, discretization or evanescent-to-plane projection is valid.
 No such producer or local junction correction is synthesized by this module.
 
@@ -1842,15 +1849,15 @@ empty or mixed with the bank. Every source bank port is unique and disjoint
 from all other sources and loads. Independent banks can share a block-diagonal
 operator. Zero open-circuit pressure retains every internal mutual term.
 
-The complete source matrix must be finite, reciprocal and passive: its
-Hermitian part must be positive semidefinite within relative 1e-12 admission
-tolerance. Negative mutual resistance and either sign of reactance are valid;
+The complete source matrix must be finite, reciprocal and passive under the
+shared diagonally equilibrated Hermitian-work admission above. Negative mutual
+resistance and either sign of reactance are valid;
 entrywise clipping or diagonal-only passivity checks are not used. Reciprocity
 is checked on the full complex matrix with the same relative tolerance. Exact
 query frequency, original source identity and finite peak pressures bind the
-input. Shared source/exterior passivity admission normalizes the matrix before
-forming its Hermitian part, so extreme finite magnitudes cannot bypass the
-gate through overflow or underflow. Admission does not repair the operator.
+input. Shared source/exterior admission uses only the dissipative work form
+for passivity scaling, retaining rank-deficient and lossless operators without
+a resistance floor. Admission does not repair the operator.
 
 The ordinary closure adds the complete source impedance to the same loaded
 port equations and combines pressure and flow excitation in one right-hand
@@ -1861,8 +1868,8 @@ regularized open-circuit poles. All 32 ports may be finite-impedance sources.
 Each representation uses one factorization for the complete source vector,
 with the existing condition cap, canonical port ordering and compensated
 complex reductions. A maximum of 32 total source ports is checked before
-allocation; source-bank admission uses at most a 64-by-64 real Hermitian
-embedding. The prescribed-flow and single-unit source APIs use the same
+allocation; source-bank admission uses at most 32-by-32 complex Hermitian
+scratch and O(N^3) preparation work. The prescribed-flow and single-unit source APIs use the same
 boundary assembly, retaining unit-source arithmetic.
 
 `NetworkSourceResponse::fields` contains actual pressure, flow and signed
@@ -2117,10 +2124,17 @@ row-major acoustic impedance matrix [Pa s/m³] over named external ports, with
 matrix declaration. Its ports are always unknowns and are disjoint from the
 SISO `loads`; together they terminate every non-driven port exactly once. The
 block enters the port Schur complement whole, `A = Z_live + Z_L`. Admission
-refuses non-finite or non-square matrices, a frequency mismatch, and a
-Hermitian part with an eigenvalue below `-1e-12 max|Z|`. Reciprocity is not
+refuses non-finite or non-square matrices, a frequency mismatch, and active
+Hermitian work under the shared dissipative-only admission above. Reciprocity is not
 required: a collocation radiation matrix is reciprocal only to its
 discretization error. `drive` is the no-coupled case with unchanged arithmetic.
+
+G0/G3 `network_passivity_*` regressions exercise resistance hidden by huge
+reactance or another port, negative work from complex mutual terms, an
+indefinite three-port matrix whose two-port principal minors are positive,
+independent factorized passive work, exact nullspaces, lossless cross-coupling,
+subnormal coefficients and port-unit rescaling. These checks are pointwise;
+they do not establish causality or passivity between sampled frequencies.
 
 Compact chains retain independent exterior self loads for embedded tone-hole
 mouths. The automatic six-iteration scalar correction has been removed: it

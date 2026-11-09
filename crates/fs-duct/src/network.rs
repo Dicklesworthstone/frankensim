@@ -165,56 +165,116 @@ fn admit_multiport(feature: &JunctionMultiport) -> Result<(), DuctError> {
     }
     let scale = feature.y.iter().map(|z| z.abs()).fold(0.0, f64::max);
     let tol = 1.0e-12 * scale;
-    let mut real = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..n {
             if (feature.y[i * n + j] - feature.y[j * n + i]).abs() > tol {
                 return Err(bad("network junction multiport is not reciprocal (1e-12)"));
             }
-            real[i * n + j] = if scale == 0.0 {
-                0.0
-            } else {
-                0.5 * (feature.y[i * n + j].re / scale + feature.y[j * n + i].re / scale)
-            };
         }
     }
-    // Diagonal-pivoted LDL of the real Hermitian part. At a zero pivot the
-    // remaining block must also vanish; positive diagonals alone are insufficient.
+    admit_passive_matrix(&feature.y, n)
+}
+
+/// Pointwise work admission, shared by impedance loads and admittance features.
+/// The reactive part never sets a tolerance for physical dissipation. A
+/// diagonal congruence also prevents a large resistance at another port from
+/// masking an active direction. These coordinates are temporary: the supplied
+/// operator is neither symmetrized nor changed in the actual network solve.
+fn admit_passive_matrix(matrix: &[C64], n: usize) -> Result<(), DuctError> {
+    let active = || bad("network port matrix has an active Hermitian part");
+    let mut roots = Vec::with_capacity(n);
+    for i in 0..n {
+        let diagonal = matrix[i * n + i].re;
+        if diagonal < 0.0 {
+            return Err(active());
+        }
+        roots.push(fs_math::det::sqrt(diagonal));
+    }
+    let tolerance = 1.0e-12;
+    let mut h = vec![C64::ZERO; n * n];
+    let mut coupled_work = false;
+    for i in 0..n {
+        h[i * n + i] = if roots[i] == 0.0 { C64::ZERO } else { C64::ONE };
+        for j in 0..i {
+            let forward = matrix[i * n + j];
+            let reverse = matrix[j * n + i];
+            // Midpoints avoid overflow and retain subnormal dissipative work.
+            // Imaginary antisymmetry contributes to H even when reciprocity
+            // defects are small compared with a much larger reactive matrix.
+            let work = C64::new(
+                forward.re.midpoint(reverse.re),
+                forward.im.midpoint(-reverse.im),
+            );
+            if roots[i] == 0.0 || roots[j] == 0.0 {
+                // PSD with an exact zero diagonal requires a zero work row.
+                // Lossless skew-Hermitian mutual terms remain admissible.
+                if work.re != 0.0 || work.im != 0.0 {
+                    return Err(active());
+                }
+                continue;
+            }
+            let entry = C64::new(
+                (work.re / roots[i]) / roots[j],
+                (work.im / roots[i]) / roots[j],
+            );
+            // The corresponding 2x2 principal minor must be nonnegative.
+            if !finite(entry) || entry.abs() > 1.0 + tolerance {
+                return Err(active());
+            }
+            h[i * n + j] = entry;
+            h[j * n + i] = entry.conj();
+            coupled_work |= entry != C64::ZERO;
+        }
+    }
+    if !coupled_work {
+        return Ok(());
+    }
+    // Diagonal-pivoted complex LDL checks the COMPLETE Hermitian work form in
+    // O(n^3) preparation work and n^2 complex scratch, without a doubled real
+    // eigensolve. The numerical allowance is on this equilibrated work form.
+    // At a vanishing pivot the remaining block must also vanish to tolerance.
     for k in 0..n {
         let mut p = k;
         for i in k + 1..n {
-            if real[i * n + i] > real[p * n + p] {
+            if h[i * n + i].re > h[p * n + p].re {
                 p = i;
             }
         }
         if p != k {
             for j in 0..n {
-                real.swap(k * n + j, p * n + j);
+                h.swap(k * n + j, p * n + j);
             }
             for i in 0..n {
-                real.swap(i * n + k, i * n + p);
+                h.swap(i * n + k, i * n + p);
             }
         }
-        let pivot = real[k * n + k];
-        if !pivot.is_finite() || pivot < -1.0e-12 {
-            return Err(bad("network junction multiport has active Hermitian part"));
+        let pivot = h[k * n + k].re;
+        if !pivot.is_finite() || pivot < -tolerance {
+            return Err(active());
         }
-        if pivot <= 1.0e-12 {
+        if pivot <= tolerance {
             for i in k..n {
                 for j in k..n {
-                    if !real[i * n + j].is_finite() || real[i * n + j].abs() > 1.0e-12 {
-                        return Err(bad(
-                            "network junction multiport has indefinite zero-pivot block",
-                        ));
+                    if !finite(h[i * n + j]) || h[i * n + j].abs() > tolerance {
+                        return Err(active());
                     }
                 }
             }
             break;
         }
         for i in k + 1..n {
-            for j in k + 1..n {
-                let update = real[i * n + k] * real[k * n + j] / pivot;
-                real[i * n + j] -= update;
+            for j in k + 1..=i {
+                let update = (h[i * n + k] * h[k * n + j]).scale(1.0 / pivot);
+                let value = h[i * n + j] - update;
+                if !finite(value) {
+                    return Err(active());
+                }
+                if i == j {
+                    h[i * n + i] = C64::from_re(value.re);
+                } else {
+                    h[i * n + j] = value;
+                    h[j * n + i] = value.conj();
+                }
             }
         }
     }
@@ -780,38 +840,7 @@ pub(crate) fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<
             "network coupled termination needs the response frequency, a source and a finite square matrix",
         ));
     }
-    // Normalize before forming H: finite near-maximum entries must neither
-    // overflow into NaN and bypass admission nor underflow its passivity gate.
-    let scale = coupled
-        .z
-        .iter()
-        .map(|z| z.re.abs().max(z.im.abs()))
-        .fold(0.0, f64::max);
-    if scale == 0.0 {
-        return Ok(());
-    }
-    let mut embedding = vec![0.0; 4 * n * n];
-    for a in 0..n {
-        for b in 0..n {
-            let forward = coupled.z[a * n + b];
-            let reverse = coupled.z[b * n + a];
-            let h = C64::new(
-                0.5 * (forward.re / scale + reverse.re / scale),
-                0.5 * (forward.im / scale - reverse.im / scale),
-            );
-            embedding[a * 2 * n + b] = h.re;
-            embedding[(a + n) * 2 * n + b + n] = h.re;
-            embedding[a * 2 * n + b + n] = -h.im;
-            embedding[(a + n) * 2 * n + b] = h.im;
-        }
-    }
-    let (values, _) = fs_la::eigen::jacobi_eigh(&embedding, 2 * n);
-    if values.iter().any(|value| !value.is_finite()) || values[0] < -1.0e-12 {
-        return Err(bad(
-            "network coupled termination has an active Hermitian part",
-        ));
-    }
-    Ok(())
+    admit_passive_matrix(&coupled.z, n)
 }
 
 fn bad(what: &'static str) -> DuctError {
