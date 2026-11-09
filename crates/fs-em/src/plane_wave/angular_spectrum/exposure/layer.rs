@@ -187,7 +187,7 @@ struct MomentKernel<P> {
 // Real peak phasors use BOTH signed frequencies. Their full carrier span must
 // fit the shared factor; a short beat alone never licenses cycle averaging.
 fn positive_band_tones(frequencies: usize, proper: bool) -> Option<usize> {
-    if frequencies < 3 {
+    if frequencies < 2 {
         return None;
     }
     let maximum = MAX_UNIFORM_HARMONIC_BAND_TONES / if proper { 1 } else { 2 };

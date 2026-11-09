@@ -213,6 +213,54 @@ fn triangular_nulls_preserve_weighted_means_and_signed_real_proper_moments() {
     }
 }
 
+#[test]
+fn two_tone_real_and_proper_nulls_retain_receiver_power_and_signed_moments() {
+    for proper in [false, true] {
+        let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+        let transfers = gains().map(|receiver| receiver.map(C64::from_re));
+        let owners = [carrier, carrier + 1.0].map(|omega| owner(omega, transfers));
+        let coefficients = [[C64::ONE], [C64::from_re(-1.0)]];
+        let lines: [_; 2] = core::array::from_fn(|i| HarmonicExposureLine {
+            observation: &owners[i],
+            coefficients: &coefficients[i],
+        });
+        let exposure = if proper {
+            PreparedHarmonicExposure::new(&owners[0], "clock", &[], &[&lines], limits())
+        } else {
+            PreparedHarmonicExposure::new(&owners[0], "clock", &lines, &[], limits())
+        }
+        .unwrap();
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let triangle = profile == HarmonicWindowProfile::Triangular;
+            for duration in [1e-6_f64, 1e-9, 1e-12] {
+                let window =
+                    HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+                // cos(t)-cos(2t)=3t²/2+O(t⁴), whereas the proper analytic
+                // two-tone field has leading squared modulus t².
+                let power = if proper {
+                    duration.powi(2) / if triangle { 48.0 } else { 24.0 }
+                } else {
+                    duration.powi(4) * if triangle { 3.0 / 320.0 } else { 9.0 / 320.0 }
+                };
+                let mean = if proper {
+                    0.0
+                } else {
+                    duration.powi(2) / if triangle { 16.0 } else { 8.0 }
+                };
+                verify_quiet_moments(
+                    &exposure.observe_window(window).unwrap(),
+                    mean,
+                    power,
+                    5e-10,
+                );
+            }
+        }
+    }
+}
+
 fn mixed_owners() -> [PreparedHarmonicObservation; 3] {
     [1.0, 2.0, 3.0].map(|omega| {
         owner(

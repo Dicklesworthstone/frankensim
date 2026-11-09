@@ -77,3 +77,13 @@ within an explicit absolute `rho*V-m` allowance, leaving its T,p and original
 source state unchanged. A receiving consumer remains responsible for admitting
 the actual returned energy/entropy balances. These operations introduce no
 alternative EOS, finite-energy law, species source or material transport model.
+
+## Two-source physical constitutive intervals
+
+The positive tensor-Prony interval path now includes two actual-real source
+frequencies through shared admission. Original one-tone and broad-band paths
+remain unchanged. The retained numerical payload bound now covers both the
+17-mode two-source corner and the pair cache. Nineteen actual material
+projection/window tests pass with warnings denied; the added centered1ps
+cos(t)-cos(2t) rate verifies physical Kelvin heat9*T^5/320 and independent
+original-viscosity stress work. Full public material integration remains unrun.

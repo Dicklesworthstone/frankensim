@@ -16,7 +16,7 @@ pub(super) fn accumulate(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<bool, TransferError> {
     let count = bank.lines.len();
-    if !(3..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&count) {
+    if !(2..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&count) {
         return Ok(false);
     }
     let mut frequencies = [0.0; MAX_UNIFORM_HARMONIC_BAND_TONES];

@@ -14,7 +14,7 @@ fn eligible(count: usize, statistics: HarmonicExposureFactorStatistics) -> bool 
         HarmonicExposureFactorStatistics::Real => MAX_UNIFORM_HARMONIC_BAND_TONES / 2,
         HarmonicExposureFactorStatistics::ProperComplex => MAX_UNIFORM_HARMONIC_BAND_TONES,
     };
-    (3..=maximum).contains(&count)
+    (2..=maximum).contains(&count)
 }
 
 /// Repeated windows are unknown at preparation. Admit the larger of the

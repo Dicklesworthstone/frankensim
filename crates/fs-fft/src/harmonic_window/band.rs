@@ -73,7 +73,7 @@ pub struct PreparedUniformHarmonicBand {
 impl HarmonicWindow {
     /// Allocation-free admission and mode count for the positive band factor.
     ///
-    /// `None` selects the original pair kernels: fewer than three or more than
+    /// `None` selects the original pair kernels: fewer than two or more than
     /// 64 tones, a nonuniform window, or a half-band phase greater than 1/2.
     /// This lets consumers admit projection work BEFORE allocating the factor.
     pub fn uniform_band_mode_count_hz(

@@ -246,7 +246,7 @@ fn frequencies(bank: &Bank) -> [f64; MAX_UNIFORM_HARMONIC_BAND_TONES] {
     result
 }
 fn mode_count(bank: &Bank, window: HarmonicWindow) -> Result<Option<usize>, TransferError> {
-    if !(3..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&bank.lines.len()) {
+    if !(2..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&bank.lines.len()) {
         return Ok(None);
     }
     let values = frequencies(bank);

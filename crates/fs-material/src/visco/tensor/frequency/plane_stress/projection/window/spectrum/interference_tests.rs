@@ -24,6 +24,40 @@ fn imaginary_strains(scale: f64) -> [StrainParts; 3] {
 }
 
 #[test]
+fn g1_two_tone_kelvin_null_retains_physical_heat_and_independent_work() {
+    let frequencies = [1.0, 2.0];
+    let duration = 1e-12;
+    let temporal = HarmonicEnergySpectrum::new(
+        &frequencies,
+        HarmonicWindow::new(-0.5 * duration, duration).unwrap(),
+    )
+    .unwrap();
+    let strains = [1.0, -0.5].map(|imaginary| {
+        let mut strain = [[Dd::ZERO; 2]; 6];
+        strain[0][1] = Dd::from_f64(imaginary);
+        strain
+    });
+    // epsilon_dot=cos(t)-cos(2t); physical heat integrates its fourth-order
+    // weak square over the interval, without an incoherent/cycle average.
+    let expected = 9.0 * duration.powi(5) / 320.0;
+    close(
+        temporal.kelvin_heat(&one_channel(1.0), &strains).unwrap(),
+        expected,
+        3e-11,
+    );
+    let mut work = Sum::default();
+    let rates = frequencies.map(|w| [(0.0, 0), (w, 0)]);
+    temporal.add_stress_work(&one_channel(1.0), &strains, &rates, &mut work);
+    close(work.value(), expected, 3e-11);
+    // The new two-source/17-mode corner remains inside the public payload bound.
+    let edge =
+        HarmonicEnergySpectrum::new(&frequencies, HarmonicWindow::new(0.0, 0.5).unwrap()).unwrap();
+    let bound =
+        core::mem::size_of::<HarmonicEnergySpectrum>() + 128 * 2 + (272 * 2).max(32 * 2 * 2);
+    assert!(edge.numerical_payload_bytes() <= bound);
+}
+
+#[test]
 fn g1_kelvin_heat_resolves_a_real_three_tone_rate_null() {
     let duration = 1e-10;
     let temporal = HarmonicEnergySpectrum::new(

@@ -564,3 +564,66 @@ fn triangular_dark_surface_keeps_stress_and_torque_but_intervals_remain_uniform(
         close(interval.energy_j, 48.0 * square * duration, 3e-12);
     }
 }
+
+#[test]
+fn two_tone_surface_retains_real_and_proper_stress_at_an_unresolved_null() {
+    let duration = 1e-12_f64;
+    for proper in [false, true] {
+        let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+        let owners = [carrier, carrier + 1.0].map(|omega| {
+            owner(
+                omega,
+                vec![[C64::from_re(8.0), C64::ONE, C64::ZERO, C64::ZERO]],
+            )
+        });
+        let coefficients = [[C64::ONE], [C64::from_re(-1.0)]];
+        let lines: [_; 2] = core::array::from_fn(|i| HarmonicExposureLine {
+            observation: &owners[i],
+            coefficients: &coefficients[i],
+        });
+        let exposure = if proper {
+            PreparedHarmonicExposure::new(&owners[0], "clock", &[], &[&lines], source_limits())
+        } else {
+            PreparedHarmonicExposure::new(&owners[0], "clock", &lines, &[], source_limits())
+        }
+        .unwrap();
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let triangle = profile == HarmonicWindowProfile::Triangular;
+            let window = HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+            let square = if proper {
+                duration.powi(2) / if triangle { 48.0 } else { 24.0 }
+            } else {
+                duration.powi(4) * if triangle { 3.0 / 320.0 } else { 9.0 / 320.0 }
+            };
+            let actual = exposure
+                .surface_field_window(&surface(), [0.0; 3], window, limits(), || false)
+                .unwrap();
+            close(actual.mean_power_w, 16.0 * square, 5e-10);
+            close(actual.mean_linear_momentum_rate_n[0], 4.0 * square, 5e-10);
+            close(
+                actual.mean_angular_momentum_rate_nm[2],
+                -12.0 * square,
+                5e-10,
+            );
+        }
+        let interval = exposure
+            .surface_field_interval_from_clock_dd(
+                &surface(),
+                [0.0; 3],
+                Dd::from_f64(-duration / 2.0),
+                duration,
+                limits(),
+                || false,
+            )
+            .unwrap();
+        let uniform = if proper {
+            duration.powi(2) / 24.0
+        } else {
+            9.0 * duration.powi(4) / 320.0
+        };
+        close(interval.energy_j, 16.0 * uniform * duration, 5e-10);
+    }
+}

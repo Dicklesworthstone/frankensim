@@ -4508,3 +4508,18 @@ Nominal outer BEM source/receiver/error carriers supply unrelated metadata; the
 full native BEM solver and workspace suite were not run. The deepest triangular
 cubic test uses an explicit conditioning-aware1e-7 relative tolerance; this is
 not certification of arbitrary cancellation nulls.
+
+## Two-tone receiver, surface and pressure-array interference
+
+The existing bounded field projections now include two real or proper source
+tones in receiver, signed surface and calibrated/delayed array paths. Single-tone
+fallback and original coherence/readout statistics remain unchanged. Array
+admission still charges the complete projection work and scratch before queries.
+For centered1ps real cos(t)-cos(2t), the old receiver and array returned
+9.183549615799121e-41 Uniform power instead of2.8125e-50, and
+4.591774807899561e-41 Triangular power instead of9.375e-51.
+The two-tone projections resolve both cases. Twenty-six focused actual-source
+BEM checks pass against the new shared core, including signed surface exchange,
+physical interval energy, real-factor readout covariance and one-tone fallback.
+The full BEM solver/workspace suite and separate pair-correlation observer remain
+outside this execution boundary.

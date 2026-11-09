@@ -284,7 +284,7 @@ fn positive_heat_cancellation_is_transactional_and_nonadmitted_bands_fall_back()
         expected
     );
     for (window, frequencies, proper) in [
-        (short, vec![1.0, 2.0], true),
+        (short, vec![1.0], true),
         (short, vec![1e15, 1e15 + 1.0, 1e15 + 2.0], false),
         (
             HarmonicWindow::new(0.0, 2.0).unwrap(),
@@ -314,4 +314,90 @@ fn positive_heat_cancellation_is_transactional_and_nonadmitted_bands_fall_back()
     assert_eq!(positive_band_tones(32, false), Some(32));
     assert_eq!(positive_band_tones(33, false), None);
     assert_eq!(positive_band_tones(usize::MAX, true), None);
+}
+
+#[test]
+fn two_real_tones_keep_fourth_order_heat_and_signed_flux() {
+    // cos(t)-cos(2t)=3*t^2/2+O(t^4): two sources already need field-first power.
+    for (profile, denominator) in [
+        (HarmonicWindowProfile::Uniform, 320.0 / 9.0),
+        (HarmonicWindowProfile::Triangular, 320.0 / 3.0),
+    ] {
+        for duration in [1e-9_f64, 1e-12] {
+            let window = HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap();
+            let mut workspace = HarmonicBandWorkspace::new();
+            let positive = PositiveLayerMoments::prepare(
+                window,
+                &[1.0, 2.0],
+                false,
+                &mut workspace,
+                &mut || false,
+            )
+            .unwrap()
+            .unwrap();
+            let fields = [1.0, -1.0].map(|a| {
+                [
+                    C64::from_re(a),
+                    C64::ZERO,
+                    C64::ZERO,
+                    C64::ZERO,
+                    C64::from_re(-2.0 * a),
+                    C64::ZERO,
+                ]
+            });
+            let kernels = real_kernels(&[1.0, 2.0], window);
+            let moments = layer_point_moments(
+                2,
+                &kernels,
+                |i| fields[i],
+                |k, a, b| product(k.product, a, b),
+                Some(&positive),
+                &mut || false,
+            )
+            .unwrap();
+            let expected = duration.powi(4) / denominator;
+            relative(moments[0].to_f64(), expected);
+            relative(moments[4].to_f64(), 4.0 * expected);
+            relative(-moments[8].to_f64(), 2.0 * expected);
+            let heat = positive
+                .square(|i| [Dd::from_f64([1.0, -1.0][i]), Dd::ZERO], &mut || false)
+                .unwrap();
+            relative(heat.to_f64(), expected);
+            let (heat, _) =
+                pole_moments_with_heat(&kernels, &fields, None, Some(heat), product, &mut || false)
+                    .unwrap();
+            relative(heat.to_f64(), expected);
+        }
+    }
+    assert_eq!(positive_band_tones(1, false), None);
+    assert_eq!(positive_band_tones(2, false), Some(2));
+}
+
+#[test]
+fn two_proper_tones_keep_weak_beats_without_reintroducing_the_carrier() {
+    for (profile, denominator) in [
+        (HarmonicWindowProfile::Uniform, 24.0),
+        (HarmonicWindowProfile::Triangular, 48.0),
+    ] {
+        let duration = 1e-20_f64;
+        let window = HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap();
+        for carrier in [0.0, 2.0_f64.powi(49)] {
+            let mut workspace = HarmonicBandWorkspace::new();
+            let positive = PositiveLayerMoments::prepare(
+                window,
+                &[carrier + 1.0, carrier + 2.0],
+                true,
+                &mut workspace,
+                &mut || false,
+            )
+            .unwrap()
+            .unwrap();
+            let actual = positive
+                .square(|i| [Dd::from_f64([1.0, -1.0][i]), Dd::ZERO], &mut || false)
+                .unwrap();
+            relative(actual.to_f64(), duration.powi(2) / denominator);
+        }
+    }
+    assert_eq!(positive_band_tones(1, true), None);
+    assert_eq!(positive_band_tones(2, true), Some(2));
 }

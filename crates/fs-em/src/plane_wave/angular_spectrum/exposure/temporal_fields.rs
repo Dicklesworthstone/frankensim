@@ -26,7 +26,7 @@ pub(super) const WORKSPACE_BYTES: usize = core::mem::size_of::<Workspace>()
     + 2 * core::mem::size_of::<[[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_TONES]>();
 
 fn eligible(frequencies: usize, proper: bool) -> bool {
-    (3..=MAX_UNIFORM_HARMONIC_BAND_TONES / if proper { 1 } else { 2 }).contains(&frequencies)
+    (2..=MAX_UNIFORM_HARMONIC_BAND_TONES / if proper { 1 } else { 2 }).contains(&frequencies)
 }
 
 /// Optional reservation, decided before field reconstruction or query allocation.

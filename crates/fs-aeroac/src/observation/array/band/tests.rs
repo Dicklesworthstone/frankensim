@@ -1,7 +1,11 @@
 use super::*;
 use fs_fft::harmonic_window::HarmonicWindowProfile;
 
-fn field(frequencies: [f64; 3], amplitudes: [[f64; 2]; 3], gain: f64) -> PreparedHarmonicField<2> {
+fn field<const N: usize>(
+    frequencies: [f64; N],
+    amplitudes: [[f64; 2]; N],
+    gain: f64,
+) -> PreparedHarmonicField<2> {
     PreparedHarmonicField {
         lines: frequencies
             .into_iter()
@@ -159,4 +163,58 @@ fn shaped_union_correlation_and_proper_average_keep_the_original_carrier() {
         .unwrap()
     );
     assert_eq!(sums.pp, before);
+}
+
+#[test]
+fn two_tone_cross_receiver_gram_retains_real_and_proper_signed_power() {
+    let duration = 1e-12_f64;
+    for proper in [false, true] {
+        let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+        let a = field([carrier, carrier + 1.0], [[1.0, 0.0], [-1.0, 0.0]], 1.0);
+        let b = field([carrier, carrier + 1.0], [[1.0, 0.0], [-1.0, 0.0]], -0.5);
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let triangle = profile == HarmonicWindowProfile::Triangular;
+            let window = HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+            let mut sums = CrossSums::new();
+            let mut covariance = CrossSums::new();
+            assert!(
+                accumulate(
+                    &a,
+                    &b,
+                    window,
+                    if proper {
+                        FactorKind::Proper
+                    } else {
+                        FactorKind::Deterministic
+                    },
+                    &mut sums,
+                    Some(&mut covariance),
+                    &mut || false
+                )
+                .unwrap()
+            );
+            let square = -0.5
+                * if proper {
+                    duration.powi(2) / if triangle { 48.0 } else { 24.0 }
+                } else {
+                    duration.powi(4) * if triangle { 3.0 / 320.0 } else { 9.0 / 320.0 }
+                };
+            for (actual, expected) in [sums.pp, sums.pu[0], sums.up[0], sums.uu[0][1]]
+                .into_iter()
+                .zip([square, -2.0 * square, -2.0 * square, -square])
+            {
+                assert!(
+                    (actual.to_f64() - expected).abs() < 5e-10 * expected.abs(),
+                    "{actual:?} != {expected:e}"
+                );
+            }
+            if !proper {
+                let mean = duration.powi(2) / if triangle { 16.0 } else { 8.0 };
+                assert!((covariance.pp.to_f64() + 0.5 * mean * mean).abs() < 5e-10 * mean * mean);
+            }
+        }
+    }
 }

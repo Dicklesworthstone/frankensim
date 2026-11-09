@@ -1410,3 +1410,21 @@ new groups: proper fourth-order and real even/odd nulls through 1 ps; independen
 weighted time integration of real and complex cross moments; retained DD epochs
 and proper carrier shifts; and scale/admission/uniform-compatibility behavior.
 Owned and borrowed factors agree in both original frequency units.
+
+## Two-tone positive temporal factors
+
+Positive Uniform and profile-aware temporal preparation now admits2..64
+analytic sources and2..32 actual-real sources under the existing half-band
+phase bound. Single-tone fallback, maximum17 modes, source clocks, profile
+normalization and proper peak scaling are unchanged. Two actual-real tones
+already produce a fourth-order power null: cos(t)-cos(2t) has centered leading
+mean square9*T^4/320 for Uniform sensitivity and3*T^4/320 for Triangular
+sensitivity. Pair subtraction can lose this physical residual even when the
+field itself is representable. The existing field basis now covers this case.
+
+Sixteen focused shared positive-band tests pass with warnings denied, including
+new two-tone real/proper, Uniform/Triangular, Hz/rad/s and owned/borrowed checks.
+Consumers that delegate admission directly, including coherent diffraction,
+inherit the new source-count eligibility and its corresponding projection-work
+preflight. This does not enlarge the accepted phase span or provide arbitrary
+null-relative roundoff certification.

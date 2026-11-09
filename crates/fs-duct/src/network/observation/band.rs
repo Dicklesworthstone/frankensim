@@ -27,7 +27,7 @@ pub(in crate::network) fn accumulate(
     } else {
         MAX_UNIFORM_HARMONIC_BAND_TONES / 2
     };
-    if !(3..=maximum).contains(&count) {
+    if !(2..=maximum).contains(&count) {
         return Ok(false);
     }
     poll(cancelled, 0)?;

@@ -5587,3 +5587,12 @@ Two focused actual-helper regressions pass with warnings denied, including
 triangular cancellation and retained-clock/fallback behavior. Numerical
 projection uses the actual shared temporal implementation with narrow outer
 duct metadata carriers. The full network solver/workspace suite was not run.
+
+## Two-tone network field projections
+
+The bounded Uniform/Triangular network observation path now admits two real or
+proper source tones. Original single-tone fallback and physical statistics
+remain unchanged. A new physical two-tone null check joins the existing profile
+tests; the combined duct/aeroac actual-helper execution passes eight checks with
+warnings denied against the shared two-tone core. Full network integration
+remains unrun.

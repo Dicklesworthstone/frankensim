@@ -95,6 +95,36 @@ fn actual_real_odd_null_retains_full_carrier_and_source_phase() {
     }
 }
 
+#[test]
+fn two_tone_real_carrier_null_and_proper_beat_keep_their_distinct_physics() {
+    let amplitudes = [wave(C64::ONE), wave(-C64::ONE)];
+    for (profile, real_divisor, proper_divisor) in [
+        (HarmonicWindowProfile::Uniform, 320.0, 24.0),
+        (HarmonicWindowProfile::Triangular, 960.0, 48.0),
+    ] {
+        for duration in [1e-6_f64, 1e-9, 1e-12] {
+            let window = HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+            for proper in [false, true] {
+                let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+                with_factor(&[carrier, carrier + 1.0], window, proper, |factor| {
+                    let actual = factor.point(|i| amplitudes[i], &mut || false).unwrap();
+                    // Actual real cos(t)-cos(2t) ~3*t²/2; a proper peak
+                    // factor has half the analytic |1-exp(i*t)|² ~t².
+                    // These cannot share a cycle-averaged source law.
+                    let expected = if proper {
+                        duration.powi(2) / proper_divisor
+                    } else {
+                        9.0 * duration.powi(4) / real_divisor
+                    };
+                    close(actual[0].to_f64(), expected, 2e-12);
+                    close(actual[4].to_f64(), 4.0 * expected, 2e-12);
+                    close(actual[8].to_f64(), -2.0 * expected, 2e-12);
+                });
+            }
+        }
+    }
+}
+
 fn simpson(k: usize, n: usize) -> f64 {
     if k == 0 || k == n {
         1.0
@@ -300,6 +330,14 @@ fn nonzero_spatial_carrier_matches_independent_time_and_space_integral() {
 
 #[test]
 fn optional_reservations_use_exact_headroom_and_keep_mixed_banks_independent() {
+    let two_tone_work = 4 * 3 * MAX_UNIFORM_HARMONIC_BAND_MODES;
+    assert_eq!(
+        admit(1, 2, false, two_tone_work, WORKSPACE_BYTES),
+        Some(two_tone_work)
+    );
+    assert_eq!(admit(1, 2, false, two_tone_work - 1, WORKSPACE_BYTES), None);
+    assert_eq!(admit(1, 1, false, usize::MAX, usize::MAX), None);
+    assert_eq!(admit(1, 1, true, usize::MAX, usize::MAX), None);
     let work = 4 * 4 * MAX_UNIFORM_HARMONIC_BAND_MODES;
     assert_eq!(admit(1, 3, false, work, WORKSPACE_BYTES), Some(work));
     assert_eq!(admit(1, 3, false, work - 1, WORKSPACE_BYTES), None);

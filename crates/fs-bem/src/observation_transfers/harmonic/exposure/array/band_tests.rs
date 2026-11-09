@@ -319,3 +319,58 @@ fn array_projection_admits_exact_work_and_scratch_and_replays_after_cancellation
         );
     }
 }
+
+#[test]
+fn two_tone_pressure_channels_retain_real_and_proper_unresolved_interference() {
+    let duration = 1e-12_f64;
+    for proper in [false, true] {
+        let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+        let owners = [carrier, carrier + 1.0].map(owner);
+        let coefficients = [[C64::ONE], [C64::from_re(-1.0)]];
+        let lines: [_; 2] = core::array::from_fn(|i| HarmonicExposureLine {
+            observation: &owners[i],
+            coefficients: &coefficients[i],
+        });
+        let exposure = PreparedHarmonicExposure::new_with_statistics(
+            &owners[0],
+            "clock",
+            &[],
+            &[&lines],
+            &[if proper {
+                HarmonicExposureFactorStatistics::ProperComplex
+            } else {
+                HarmonicExposureFactorStatistics::Real
+            }],
+            preparation(),
+        )
+        .unwrap();
+        let array = PreparedHarmonicPressureArray::new(&exposure, &channels(), limits()).unwrap();
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let triangle = profile == HarmonicWindowProfile::Triangular;
+            let window = HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+            let power = if proper {
+                duration.powi(2) / if triangle { 48.0 } else { 24.0 }
+            } else {
+                duration.powi(4) * if triangle { 3.0 / 320.0 } else { 9.0 / 320.0 }
+            };
+            let actual = array.observe_window(window).unwrap();
+            for (point, gain) in actual.moments().iter().zip([1.0, -0.5]) {
+                close(point.mean_square_pressure_pa2, gain * gain * power, 5e-10);
+                assert_eq!(point.mean_pressure_pa, 0.0);
+            }
+            if !proper {
+                let mean = duration.powi(2) / if triangle { 16.0 } else { 8.0 };
+                for (covariance, gain) in actual
+                    .averaged_covariance_pa2()
+                    .iter()
+                    .zip([1.0, -0.5, -0.5, 0.25])
+                {
+                    close(*covariance, gain * mean * mean, 5e-10);
+                }
+            }
+        }
+    }
+}

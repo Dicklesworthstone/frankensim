@@ -253,7 +253,7 @@ fn fixed_workspace_matches_owned_for_both_units_and_laws_and_reuses_after_refusa
         );
     }
     for frequencies in [
-        &[1.0, 2.0][..],
+        &[1.0][..],
         &[1.0; 33][..],
         &[1e9, 1e9 + 1.0, 1e9 + 2.0][..],
     ] {

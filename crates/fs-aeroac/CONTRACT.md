@@ -4376,3 +4376,12 @@ diffraction, finite barriers, impedance edges, thermal/molecular
 absorption, stress-quadrupole time histories, structural feedback or an
 experimental SPL certificate. Those require their own original physical
 owners and evidence.
+
+## Two-tone local and cross-receiver projections
+
+The bounded local and union-spectrum array factors now include two real or
+proper source frequencies in native Hz or rad/s. Original-carrier averaged
+covariance, signed cross moments, temporal profiles and one-tone fallback are
+preserved. New physical null and cross-receiver checks join the existing profile
+tests; the combined duct/aeroac actual-helper execution passes eight checks with
+warnings denied. Full source/observer pipeline integration remains unrun.

@@ -30,7 +30,7 @@ pub struct TensorPronyHarmonicSpectrum<'a> {
 }
 
 /// Cached real temporal moments, reusable across original material points.
-/// Short actual-real bands of 3..32 frequencies with max(omega)*duration/2 <= 0.5
+/// Short actual-real bands of 2..32 frequencies with max(omega)*duration/2 <= 0.5
 /// use at most M=17 positive field modes. Preparation and storage are O(F*M),
 /// and point work is O(F*M*(branches+1)*6). Other bands retain O(F²) temporal
 /// pairs and point work O(F²*(branches+1)*6). Point scratch is fixed and no heap
@@ -302,7 +302,8 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
 
     /// Cache unweighted physical interval products once, for every source point.
     /// Additional temporal payload is bounded by size_of::<TensorPronySpectrumWindow>()
-    /// + 256*F + 64*F² bytes. Source spectrum payload is retained separately.
+    /// + 128*F + max(272*F, 32*F²) bytes. Source spectrum payload is retained
+    /// separately; the maximum covers either 17 field modes or temporal pairs.
     pub fn prepare_window(
         &self,
         window: HarmonicWindow,

@@ -182,7 +182,7 @@ fn g0_bounded_projection_retains_large_nulls_and_weighted_subnormal_power() {
 #[test]
 fn g0_unsupported_bands_fall_back_and_bad_fields_refuse() {
     let window = HarmonicWindow::new(0.0, 0.1).unwrap();
-    for frequencies in [&[1.0, 2.0][..], &[0.0, 1.0, 10.0][..], &[1.0; 65][..]] {
+    for frequencies in [&[1.0][..], &[0.0, 1.0, 10.0][..], &[1.0; 65][..]] {
         assert!(
             window
                 .prepare_uniform_band_hz(frequencies)

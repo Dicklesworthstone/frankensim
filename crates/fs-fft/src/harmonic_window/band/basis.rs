@@ -58,7 +58,7 @@ pub(super) fn admit_profile(
     if frequencies.iter().any(|f| !f.is_finite()) {
         return Err(WindowError::InvalidFrequency);
     }
-    if frequencies.len() < 3 {
+    if frequencies.len() < 2 {
         return Ok(None);
     }
     let (minimum, maximum) = frequencies.iter().fold(
@@ -213,7 +213,7 @@ impl HarmonicWindow {
         prepare_owned(self, frequencies, Units::Radians, false)
     }
 
-    /// Real-peak admission: 3..32 tones and max(abs(2*pi*f))*duration/2 <= 0.5.
+    /// Real-peak admission: 2..32 tones and max(abs(2*pi*f))*duration/2 <= 0.5.
     /// The full absolute frequencies are retained, including sum-frequency products.
     pub fn uniform_real_band_mode_count_hz(
         self,

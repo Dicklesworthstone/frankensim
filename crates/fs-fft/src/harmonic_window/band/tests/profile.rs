@@ -1,5 +1,115 @@
 use super::*;
 
+#[test]
+fn g1_two_real_tones_retain_fourth_order_null_power_and_actual_mean() {
+    let amplitudes = [field(1.0, 0.0), field(-1.0, 0.0)];
+    let frequencies = [1.0, 2.0];
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        for hz in [false, true] {
+            let angular_scale = if hz { core::f64::consts::TAU } else { 1.0 };
+            for duration in [1e-6, 1e-12] {
+                let window =
+                    HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap();
+                let owned = if hz {
+                    window.prepare_real_band_hz(&frequencies)
+                } else {
+                    window.prepare_real_band_rad_s(&frequencies)
+                }
+                .unwrap()
+                .unwrap();
+                let mut workspace = HarmonicBandWorkspace::new();
+                let borrowed = if hz {
+                    window.prepare_real_band_hz_in(&frequencies, &mut workspace)
+                } else {
+                    window.prepare_real_band_rad_s_in(&frequencies, &mut workspace)
+                }
+                .unwrap()
+                .unwrap();
+                // cos(w*t)-cos(2*w*t) = 3*w^2*t^2/2+O(t^4).
+                // Centered fourth moments are T^4/80 and T^4/240.
+                let width = angular_scale * duration;
+                let (power, mean) = match profile {
+                    HarmonicWindowProfile::Uniform => {
+                        (9.0 * width.powi(4) / 320.0, width.powi(2) / 8.0)
+                    }
+                    HarmonicWindowProfile::Triangular => {
+                        (3.0 * width.powi(4) / 320.0, width.powi(2) / 16.0)
+                    }
+                };
+                let actual = owned.mean_square_parts_dd(&amplitudes).unwrap();
+                close(actual, power, 3e-10);
+                assert_eq!(actual, borrowed.mean_square_parts_dd(&amplitudes).unwrap());
+                assert!(owned.mode_count() >= 4);
+                let mut modes = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
+                borrowed
+                    .project_parts_dd(&amplitudes, &mut modes[..borrowed.mode_count()])
+                    .unwrap();
+                close(modes[0][0], mean, 3e-10);
+                assert_eq!(modes[0][1], Dd::ZERO);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_two_proper_tones_retain_the_weak_beat_and_physical_half_factor() {
+    let carrier = 2_f64.powi(49);
+    let frequencies = [carrier, carrier + 1.0];
+    let amplitudes = [field(1.0, 0.0), field(-1.0, 0.0)];
+    let duration = 1e-12;
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        for hz in [false, true] {
+            let window = HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap();
+            let owned = if hz {
+                window.prepare_band_hz(&frequencies)
+            } else {
+                window.prepare_band_rad_s(&frequencies)
+            }
+            .unwrap()
+            .unwrap();
+            let mut workspace = HarmonicBandWorkspace::new();
+            let borrowed = if hz {
+                window.prepare_band_hz_in(&frequencies, &mut workspace)
+            } else {
+                window.prepare_band_rad_s_in(&frequencies, &mut workspace)
+            }
+            .unwrap()
+            .unwrap();
+            // The authored proper law gives |1-exp(-i*dw*t)|^2/2.
+            let angular_scale = if hz { core::f64::consts::TAU } else { 1.0 };
+            let divisor = if profile == HarmonicWindowProfile::Uniform {
+                24.0
+            } else {
+                48.0
+            };
+            let expected = (angular_scale * duration).powi(2) / divisor;
+            let actual = owned
+                .mean_square_parts_dd_scaled(&amplitudes, HALF)
+                .unwrap();
+            close(actual, expected, 3e-11);
+            assert_eq!(
+                actual,
+                borrowed
+                    .mean_square_parts_dd_scaled(&amplitudes, HALF)
+                    .unwrap()
+            );
+            assert_eq!(owned.source_count(), 2);
+            assert!(
+                window
+                    .prepare_real_band_rad_s(&frequencies)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+}
+
 fn triangular(start: f64, duration: f64) -> HarmonicWindow {
     HarmonicWindow::with_profile(start, duration, HarmonicWindowProfile::Triangular).unwrap()
 }
@@ -187,7 +297,7 @@ fn g0_profile_factor_preserves_uniform_results_scale_and_bounded_admission() {
         3e-15,
     );
     assert!(factor.mean_square_parts_dd(&amplitudes).is_err());
-    for frequencies in [&[1.0, 2.0][..], &[0.0, 1.0, 100.0][..], &[1.0; 65][..]] {
+    for frequencies in [&[1.0][..], &[0.0, 1.0, 100.0][..], &[1.0; 65][..]] {
         assert!(shaped.prepare_band_rad_s(frequencies).unwrap().is_none());
     }
     assert_eq!(

@@ -8852,3 +8852,21 @@ compile and execute the verbatim deterministic/ensemble dispatch bodies with
 counted manufactured frequency fields, confirming reuse and fallback. Actual
 math/cell helpers were executed; native material/FFT constructors and the full
 workspace suite were not. The finite-aperture observer remains a separate owner.
+
+## Two-tone field and heat interference
+
+The film positive-field admission and optional exterior field reservation now
+include two real or proper source frequencies. Retained heat uses the same film
+gate; stress/momentum and volume heat delegate to shared two-tone admission.
+Existing maximum capacities, full real-carrier span, source independence,
+physical Uniform heat intervals and single-tone fallback remain unchanged.
+Film preparation and optical/shared callers admit their corresponding projection
+work; tight exterior headroom retains the original pair path.
+
+Eight focused film heat/flux tests and ten exterior field-helper tests pass
+against the shared two-tone core with warnings denied. Added cases resolve
+cos(t)-cos(2t) fourth-order real leakage and second-order proper beats,
+including signed Poynting and a2^49 rad/s common proper carrier. The exterior
+two-tone one-point reservation admits exactly204 terms and falls back at203.
+This is actual numerical-helper validation; full native material/FFT constructors
+and the workspace suite remain unrun.

@@ -46,7 +46,7 @@ pub(super) fn accumulate<const D: usize>(
             count += 1;
         }
     }
-    if count < 3 {
+    if count < 2 {
         return Ok(false);
     }
     let frequencies = &mut frequencies[..count];

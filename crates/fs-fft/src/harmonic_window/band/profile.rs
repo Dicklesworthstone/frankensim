@@ -17,7 +17,7 @@ pub type HarmonicBandRef<'a> = UniformHarmonicBandRef<'a>;
 
 impl HarmonicWindow {
     /// Analytic-factor admission on original Hz for this detector profile.
-    /// Admits 3..64 tones and a half-band phase at most 0.5; at most 17 modes.
+    /// Admits 2..64 tones and a half-band phase at most 0.5; at most 17 modes.
     /// A common carrier cancels only from second moments. Independent source
     /// banks remain separate, and proper peak moments require scale 0.5.
     pub fn band_mode_count_hz(self, frequencies: &[f64]) -> Result<Option<usize>, WindowError> {
@@ -29,7 +29,7 @@ impl HarmonicWindow {
         Ok(basis::admit_profile(self, frequencies, Units::Radians, false)?.map(|s| s.modes))
     }
 
-    /// Actual-real admission: 3..32 tones and max(abs(2*pi*f))*T/2 <= 0.5.
+    /// Actual-real admission: 2..32 tones and max(abs(2*pi*f))*T/2 <= 0.5.
     /// Absolute carrier and sum-frequency contributions remain present.
     pub fn real_band_mode_count_hz(
         self,

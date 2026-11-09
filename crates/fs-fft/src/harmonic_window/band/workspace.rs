@@ -115,7 +115,7 @@ impl HarmonicWindow {
     }
 
     /// Prepare actual real-peak Hz products in fixed scratch; no half factor.
-    /// The same 3..32-tone full-frequency admission as the cached real factor applies.
+    /// The same 2..32-tone full-frequency admission as the cached real factor applies.
     pub fn prepare_uniform_real_band_hz_in<'a>(
         self,
         frequencies: &[f64],

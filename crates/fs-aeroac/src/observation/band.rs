@@ -25,7 +25,7 @@ pub(super) fn accumulate<const D: usize>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<bool, AeroacError> {
     let count = field.lines.len();
-    if !(3..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&count) {
+    if !(2..=MAX_UNIFORM_HARMONIC_BAND_TONES).contains(&count) {
         return Ok(false);
     }
     let angular = field.lines[0].frequency.is_angular();
