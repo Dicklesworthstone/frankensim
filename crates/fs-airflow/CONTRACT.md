@@ -5213,6 +5213,16 @@ the air temperature factor. Focused G1/G3 regressions cover correction values,
 source/geometry refusal, both analytic temperature axes, actual bulk-density
 flow response and the existing native conduction/storage/bath-entropy balance.
 
+## Mean laminar tube wall viscosity in source and native heat exchange
+
+Selecting `SourceCellConvectionLaw::Forced` with `SiederTateLaminar` now retains the original mean laminar entrance correlation through both material callbacks and the native implicit exterior boundary. `Reservoir` denotes the authored arithmetic-mean bulk temperature for this model; the explicit L/D is the whole physical heated tube length. Bulk Re, Pr and conductivity stay at that source state, and only the same fluid's dynamic viscosity is queried at the actual wall temperature. The source's open viscosity/Pr intervals, laminar Reynolds support and coupled thermal-entrance gate remain active.
+
+Source callbacks lower through `CellConvectionLaw::ForcedLaminarTube` and the existing material mean evaluator. Positive finite-cell area must equal the complete wetted area pi D L; a remaining patch cannot inherit the whole-tube mean. The pointwise native interface documents the same full-area requirement for its downstream boundary geometry. Neither path invents an axial profile or infers inlet/outlet temperatures from a local fluid state.
+
+Liquid and gas native boundaries reuse their original analytic wall-viscosity queries. The coefficient tangent is `-0.14 h (dmu_wall/dTs)/mu_wall`, including the original density factor for kinematic liquid viscosity; the existing heat tangent adds `h + (Ts-Tmean) dh/dTs`. Prescribed mass flow retains the original laminar Reynolds partial. Source kinks or unavailable active partials refuse. Native conduction, radiation, storage and heat/entropy accounting remain in the existing solver.
+
+Focused regressions cover dynamic/kinematic liquids, original air and CO2 sources, wall and mass-flow tangents, retained source coordinates, full-area admission, model/source refusals, and native surface/storage balance against an independent whole-tube law. These check implementation and conservation; they do not supply experimental validation or an error enclosure.
+
 ## Developing tube sections on finite gas heat owners
 
 `FilmGasHeatLaw::BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface)`

@@ -47,7 +47,10 @@ pub struct ExteriorConvectionSettings {
     pub characteristic_length: Length,
     pub property_temperature: ConvectionPropertyTemperature,
     /// Forced, finite plate/tube section, forced-sphere, natural-geometry or
-    /// laminar aiding mixed law.
+    /// laminar aiding mixed law. SiederTateLaminar uses the whole heated L/D
+    /// and an authored arithmetic-mean bulk bath temperature; its coefficient
+    /// is not a local tube-section law. The native boundary area must represent
+    /// the full uniformly heated wetted area pi D L.
     pub law: SourceCellConvectionLaw,
     /// Constant total hemispherical gray emissivity on the same exterior.
     pub emissivity: f64,
@@ -167,7 +170,10 @@ pub use ExteriorConvectionSettings as LiquidExteriorConvectionSettings;
 /// Dynamic and kinematic viscosity are both supported. Mean-film sampling
 /// includes dTfilm/dTs = 1/2 in EVERY transport term. Sieder-Tate and Whitaker
 /// instead retain bulk Re/Pr/k and differentiate only the same fluid's wall
-/// viscosity. Natural convection uses signed sourced beta, the full Ts-Tbath
+/// viscosity. The laminar Sieder-Tate choice retains the whole heated length
+/// and the authored arithmetic-mean bulk bath temperature; it does not resolve
+/// inlet/outlet temperatures or supply a local downstream coefficient.
+/// Natural convection uses signed sourced beta, the full Ts-Tbath
 /// contrast and the existing geometry selector.
 /// Aiding mixed convection retains the same source-owned expansion and the
 /// caller's signed flow and density-departure bound. Its forced/natural

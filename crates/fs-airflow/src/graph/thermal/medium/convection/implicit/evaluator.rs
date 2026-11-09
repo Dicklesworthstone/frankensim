@@ -315,7 +315,9 @@ pub(super) fn evaluate(
             if let Some(ratio) = settings.aspect_ratio {
                 inputs = inputs.with_aspect_ratio(ratio);
             }
-            let dratio = if correlation == CorrelationId::SiederTateTurbulent {
+            let dratio = if matches!(correlation,
+                CorrelationId::SiederTateTurbulent | CorrelationId::SiederTateLaminar)
+            {
                 let (wall, dwall, varies) = source.wall_viscosity(surface_temperature_k)?;
                 varying_wall_viscosity = varies;
                 wall_viscosity = Some(wall);

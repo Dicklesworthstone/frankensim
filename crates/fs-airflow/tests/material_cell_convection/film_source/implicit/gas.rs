@@ -294,3 +294,5 @@ mod native;
 mod surface;
 #[path = "gas/turbulent_air.rs"]
 mod turbulent_air;
+#[path = "gas/laminar_tube.rs"]
+mod laminar_tube;

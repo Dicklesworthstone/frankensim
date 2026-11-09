@@ -30,6 +30,10 @@ pub enum SourceCellConvectionLaw {
     /// Original forced relation. Sieder-Tate additionally resolves this same
     /// fluid at the wall for viscosity; it requires Reservoir bulk properties
     /// and an explicit circular tube heated length/diameter in `settings`.
+    /// For SiederTateLaminar, the reference temperature is the authored
+    /// arithmetic mean bulk temperature over the WHOLE heated tube. It is
+    /// neither a local downstream fluid state nor a log-mean temperature;
+    /// the caller retains that mean convention and uniform wall temperature.
     /// GnielinskiDeveloping also requires bulk properties and physical heated
     /// L/D, with its explicitly constant-property K=1 approximation.
     Forced {
@@ -104,7 +108,8 @@ impl SourceCellConvectionLaw {
     /// its actual wall temperature. Only that state's viscosity is consumed.
     pub(crate) fn needs_surface_viscosity(self) -> bool {
         matches!(self, Self::ForcedSphere { .. }
-            | Self::Forced { correlation: CorrelationId::SiederTateTurbulent, .. })
+            | Self::Forced { correlation: CorrelationId::SiederTateTurbulent
+                | CorrelationId::SiederTateLaminar, .. })
     }
 
     // Admit prescribed strip geometry before invoking an external resolver.
@@ -127,7 +132,8 @@ impl SourceCellConvectionLaw {
                 .admit_area(0.0, length)?;
         }
         if let Self::Forced {
-            correlation: CorrelationId::SiederTateTurbulent | CorrelationId::GnielinskiDeveloping,
+            correlation: CorrelationId::SiederTateTurbulent | CorrelationId::SiederTateLaminar
+                | CorrelationId::GnielinskiDeveloping,
             settings, ..
         } = self {
             if settings.aspect_ratio.is_some()
@@ -135,7 +141,7 @@ impl SourceCellConvectionLaw {
                     .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
             {
                 return Err(ConvectionSourceError::Invalid(
-                    "turbulent tube convection requires a circular tube and explicit positive heated length/diameter",
+                    "tube convection requires a circular tube and explicit positive heated length/diameter",
                 ));
             }
         }
@@ -202,6 +208,19 @@ impl SourceCellConvectionLaw {
                 speed_m_s,
                 settings,
             } => CellConvectionLaw::ForcedTube {
+                speed_m_s,
+                length_over_diameter: settings.length_over_hydraulic_diameter.ok_or(
+                    ConvectionSourceError::Invalid("Sieder-Tate requires an explicit heated length/diameter"),
+                )?,
+                surface_transport: surface.ok_or(ConvectionSourceError::Invalid(
+                    "Sieder-Tate is missing its original fluid evaluated at wall temperature",
+                ))?.transport(),
+            },
+            Self::Forced {
+                correlation: CorrelationId::SiederTateLaminar,
+                speed_m_s,
+                settings,
+            } => CellConvectionLaw::ForcedLaminarTube {
                 speed_m_s,
                 length_over_diameter: settings.length_over_hydraulic_diameter.ok_or(
                     ConvectionSourceError::Invalid("Sieder-Tate requires an explicit heated length/diameter"),

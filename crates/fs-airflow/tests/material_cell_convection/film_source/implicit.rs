@@ -9,6 +9,8 @@ mod gas;
 mod mass_flow;
 #[path = "implicit/turbulent_wall.rs"]
 mod turbulent_wall;
+#[path = "implicit/laminar_tube.rs"]
+mod laminar_tube;
 use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings, HorizontalPlateFacing, NaturalConvectionGeometry,
     evaluate_aiding_vertical_plate_from_material, evaluate_natural_from_material,

@@ -99,6 +99,17 @@ pub enum CellConvectionLaw {
         length_over_diameter: f64,
         surface_transport: FluidTransportState,
     },
+    /// Mean Sieder-Tate laminar thermal entrance over the WHOLE heated tube.
+    /// The primary fluid and reference temperature represent the arithmetic
+    /// mean bulk state; only the same fluid's wall viscosity comes from this
+    /// second state. Characteristic length is diameter. Positive active area
+    /// must be the full wetted area pi D L of the uniformly heated tube.
+    /// This is not a finite-section or local downstream correlation.
+    ForcedLaminarTube {
+        speed_m_s: f64,
+        length_over_diameter: f64,
+        surface_transport: FluidTransportState,
+    },
     /// Churchill-Chu isothermal vertical plate. Gravity is a nonnegative
     /// magnitude [m/s²]; volumetric expansion [1/K] is explicitly supplied.
     /// Negative expansion is admitted by the original vertical-plate owner.
@@ -158,6 +169,22 @@ impl CellConvectionLaw {
             {
                 return Err(ConvectionSourceError::Invalid(
                     "tube sections require positive speed and diameter, finite 0 <= start < end and area within the actual wetted interval",
+                ));
+            }
+        }
+        if let Self::ForcedLaminarTube { speed_m_s, length_over_diameter, .. } = self {
+            let heated_length = length.value() * length_over_diameter;
+            let wetted_area = core::f64::consts::PI * length.value() * heated_length;
+            if !speed_m_s.is_finite() || speed_m_s <= 0.0
+                || !length.value().is_finite() || length.value() <= 0.0
+                || !length_over_diameter.is_finite() || length_over_diameter <= 0.0
+                || !wetted_area.is_finite() || wetted_area <= 0.0
+                || !area_m2.is_finite() || area_m2 < 0.0
+                || (area_m2 > 0.0
+                    && (area_m2 - wetted_area).abs() > 64.0 * f64::EPSILON * wetted_area)
+            {
+                return Err(ConvectionSourceError::Invalid(
+                    "mean laminar tube convection requires positive speed and diameter, the whole heated length and full wetted area pi D L",
                 ));
             }
         }
@@ -517,6 +544,13 @@ pub(crate) fn evaluate_convection_state(
         }
         CellConvectionLaw::ForcedTube { speed_m_s, length_over_diameter, surface_transport } => {
             let result = evaluate_tube_from_material(
+                transport, &surface_transport, speed_m_s, length, length_over_diameter,
+            )?;
+            let (_, nusselt, coefficient) = result.into_parts();
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None, rectangular_section: None }));
+        }
+        CellConvectionLaw::ForcedLaminarTube { speed_m_s, length_over_diameter, surface_transport } => {
+            let result = evaluate_laminar_tube_from_material(
                 transport, &surface_transport, speed_m_s, length, length_over_diameter,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
