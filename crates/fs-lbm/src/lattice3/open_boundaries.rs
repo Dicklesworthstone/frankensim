@@ -841,7 +841,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
         mut reconstructed: [f64; Q],
         output: &mut [f64; Q],
     ) -> Result<(), GridError3<L::Error>> {
-        let owned = |q| walls == 0 || open & (1 << q) != 0;
+        let owned = |q| walls == 0 || open & (1u32 << q) != 0;
         let mut density = reconstructed.iter().sum::<f64>();
         if walls != 0 {
             let mut response = [0.0; Q];
