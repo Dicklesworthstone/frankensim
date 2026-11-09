@@ -26,6 +26,7 @@ mod sdirk;
 mod transient;
 #[cfg(feature = "enthalpy-coupling")]
 pub(in crate::conjugate) use caloric::{
+    CaloricAdaptiveForcing, CaloricAdaptiveTrial, advance_caloric_adaptive_with, embedded_ratio,
     advance_radiating_caloric_prepared, advance_radiating_sdirk2_prepared,
 };
 #[cfg(feature = "enthalpy-coupling")]

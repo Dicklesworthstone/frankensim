@@ -11,6 +11,9 @@ pub mod interfaces;
 mod caloric;
 #[cfg(feature = "enthalpy-coupling")]
 pub use caloric::{
+    CaloricElectrothermalAdaptiveConfig, CaloricElectrothermalAdaptiveReport,
+    CaloricElectrothermalAdaptiveSolution, CaloricElectrothermalForcing,
+    advance_caloric_tensor_electrothermal_adaptive,
     CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalSdirk2Step,
     CaloricElectrothermalStep,
     advance_caloric_tensor_electrothermal, advance_caloric_tensor_electrothermal_radiating,

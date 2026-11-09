@@ -18,7 +18,13 @@ use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use std::borrow::Cow;
 
+mod adaptive;
 mod sdirk;
+pub use adaptive::{
+    CaloricElectrothermalAdaptiveConfig, CaloricElectrothermalAdaptiveReport,
+    CaloricElectrothermalAdaptiveSolution, CaloricElectrothermalForcing,
+    advance_caloric_tensor_electrothermal_adaptive,
+};
 pub use sdirk::{
     CaloricElectrothermalSdirk2Step, advance_caloric_tensor_electrothermal_radiating_sdirk2,
     advance_caloric_tensor_electrothermal_sdirk2,

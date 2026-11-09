@@ -18,6 +18,9 @@ mod adaptive;
 mod material;
 mod radiation;
 mod storage;
+pub(in crate::conjugate) use adaptive::{
+    CaloricAdaptiveForcing, CaloricAdaptiveTrial, advance_caloric_adaptive_with, embedded_ratio,
+};
 pub(in crate::conjugate) use radiation::{
     advance_radiating_caloric_prepared, advance_radiating_sdirk2_prepared,
 };

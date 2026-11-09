@@ -5,13 +5,14 @@ use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     CaloricElectrothermalConfig, ChtError, ConductivityTensor, ElectricSetup, ElectricalContact,
     Electrode, ElectrodeDrive, EnergyConfig, RadiationConfig, STEFAN_BOLTZMANN, SolidMaterial,
-    TENSOR_SDIRK2_GAMMA, TensorCaloricLaw, TensorCaloricStorage, TensorNonlinearConfig,
+    TENSOR_SDIRK2_GAMMA, TensorCaloricLaw, TensorCaloricStorage, TensorConductivityLaw,
+    TensorNonlinearConfig,
     ThermalFace, ThermalSetup, Voxel, VoxelDomain, advance_caloric_tensor_electrothermal,
     advance_caloric_tensor_electrothermal_radiating,
     advance_caloric_tensor_electrothermal_radiating_sdirk2,
     advance_caloric_tensor_electrothermal_sdirk2,
 };
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 
 const CURRENT: f64 = 4.0;
 const MASS: f64 = 2.0;
@@ -139,8 +140,9 @@ fn exposed_bar_radiation_w(temperature_k: f64) -> f64 {
 }
 
 fn single_phase() -> EquilibriumEnthalpyPhaseCurve {
-    EquilibriumEnthalpyPhaseCurve::try_new(
+    EquilibriumEnthalpyPhaseCurve::try_single_phase(
         ContentHash([0xE5; 32]),
+        SolidLiquidPhase::Solid,
         [(-200.0, 200.0), (400.0, 500.0)]
             .map(
                 |(specific_enthalpy_j_kg, temperature_k)| EnthalpyPhaseKnot {
@@ -184,7 +186,7 @@ fn current_and_phase_energy_converge_even_when_every_temperature_is_constant() {
             &electric,
             &[],
             &setup,
-            &[&k; 3],
+            &[&k as &dyn TensorConductivityLaw; 3],
             TensorCaloricStorage {
                 laws: &laws,
                 reference_mass_kg: &[MASS; 3],
@@ -270,7 +272,7 @@ fn electrical_contact_heat_and_a_fixed_electrode_have_one_physical_destination()
         &electric,
         &contact,
         &setup,
-        &[&k; 3],
+        &[&k as &dyn TensorConductivityLaw; 3],
         TensorCaloricStorage {
             laws: &laws,
             reference_mass_kg: &[MASS; 3],
@@ -346,7 +348,7 @@ fn exhausted_coupling_and_late_electrical_refusals_publish_no_heated_state() {
             &electric,
             &[],
             &setup,
-            &[&k; 3],
+            &[&k as &dyn TensorConductivityLaw; 3],
             TensorCaloricStorage {
                 laws: &laws,
                 reference_mass_kg: &[MASS; 3],
@@ -417,7 +419,7 @@ fn current_feedback_and_spatial_conduction_match_a_three_cell_energy_system() {
         &electric,
         &[],
         &setup,
-        &[&k; 3],
+        &[&k as &dyn TensorConductivityLaw; 3],
         TensorCaloricStorage {
             laws: &laws,
             reference_mass_kg: &[MASS; 3],
@@ -504,7 +506,7 @@ fn radiating_current_feedback_closes_latent_contact_and_thermostat_energy() {
             &electric,
             &contact,
             &setup,
-            &[&k; 6],
+            &[&k as &dyn TensorConductivityLaw; 6],
             TensorCaloricStorage {
                 laws: &laws,
                 reference_mass_kg: &[MASS; 6],
@@ -615,7 +617,7 @@ fn radiating_electrothermal_endpoint_matches_independent_quartic_balance() {
         &electric,
         &[],
         &setup,
-        &[&k; 6],
+        &[&k as &dyn TensorConductivityLaw; 6],
         TensorCaloricStorage {
             laws: &laws,
             reference_mass_kg: &[MASS; 6],
@@ -719,7 +721,7 @@ fn sdirk_stage_sources_and_changing_thermostats_keep_original_latent_storage() {
         [&first_electric, &second_electric],
         [&first_contact, &second_contact],
         [&first, &second],
-        &[&k; 3],
+        &[&k as &dyn TensorConductivityLaw; 3],
         storage,
         [&[(1, 40.0)], &[(0, 60.0)]],
         start,
@@ -789,7 +791,7 @@ fn sdirk_stage_sources_and_changing_thermostats_keep_original_latent_storage() {
         [&first_electric, &second_electric],
         [&first_contact, &second_contact],
         [&first, &second],
-        &[&k; 3],
+        &[&k as &dyn TensorConductivityLaw; 3],
         storage,
         [&[(1, 40.0)], &[(0, 60.0)]],
         start,
@@ -848,7 +850,7 @@ fn radiating_sdirk_integrates_each_physical_current_and_radiation_stage() {
         [&first_electric, &second_electric],
         [&[], &[]],
         [&setup, &second],
-        &[&k; 6],
+        &[&k as &dyn TensorConductivityLaw; 6],
         TensorCaloricStorage {
             laws: &laws,
             reference_mass_kg: &[MASS; 6],
@@ -939,7 +941,7 @@ fn spatial_electrothermal_sdirk_has_second_order_time_accuracy() {
                 [&electric, &electric],
                 [&[], &[]],
                 [&setup, &setup],
-                &[&k; 3],
+                &[&k as &dyn TensorConductivityLaw; 3],
                 TensorCaloricStorage {
                     laws: &laws,
                     reference_mass_kg: &[MASS; 3],

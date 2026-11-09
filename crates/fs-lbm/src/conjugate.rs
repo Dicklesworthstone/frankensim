@@ -146,6 +146,9 @@ pub(crate) mod krylov;
 pub mod material_coupling;
 #[cfg(feature = "enthalpy-coupling")]
 pub use material_coupling::{
+    CaloricElectrothermalAdaptiveConfig, CaloricElectrothermalAdaptiveReport,
+    CaloricElectrothermalAdaptiveSolution, CaloricElectrothermalForcing,
+    advance_caloric_tensor_electrothermal_adaptive,
     CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalSdirk2Step,
     CaloricElectrothermalStep,
     advance_caloric_tensor_electrothermal, advance_caloric_tensor_electrothermal_radiating,

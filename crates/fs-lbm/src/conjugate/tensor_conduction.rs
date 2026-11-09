@@ -28,6 +28,7 @@ mod transient;
 use local::LocalOperator;
 #[cfg(feature = "enthalpy-coupling")]
 pub(super) use nonlinear::{
+    CaloricAdaptiveForcing, CaloricAdaptiveTrial, advance_caloric_adaptive_with, embedded_ratio,
     advance_radiating_caloric_prepared, advance_radiating_sdirk2_prepared,
 };
 #[cfg(feature = "enthalpy-coupling")]

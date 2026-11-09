@@ -3,7 +3,7 @@
 /// Difference between a native endpoint increment and the embedded first-order
 /// increment first/stage_weight, divided by their change-based allowance.
 /// The embedded increment is never made into an absolute material state.
-pub(super) fn embedded_ratio(
+pub(in crate::conjugate) fn embedded_ratio(
     first: f64,
     endpoint: f64,
     stage_weight: f64,

@@ -4574,8 +4574,9 @@ cover constant-Kelvin phase heating and datum shifts, BE refinement, spatial
 contact transfer with independent BE/SDIRK equations, source/cancellation
 refusals, and an actual MaterialCard/prepared-source solve crossing a latent
 conductivity knot. Their independent scalar references and pinned parser
-checks pass. The integration groups have not yet executed in a full native
-fs-lbm build; numerical-leaf execution is not integration-build evidence.
+checks pass. Native production and integration-target type checks also pass;
+the integration-execution resource limit is recorded below. Numerical-leaf
+execution is separate from full native integration evidence.
 
 ### Thermal feedback in resolved film mechanics
 
@@ -4727,3 +4728,59 @@ check the reference-energy term at mass scales 2^-60, 1 and 2^60, local absolute
 accumulation, missing/wrong/insufficient allowances, larger defects and
 nonfinite/overflow refusal. This is focused native numerical validation, not a
 full Cargo feature-graph or repository-level gate.
+
+
+## Adaptive scheduled caloric electrothermal evolution
+
+`advance_caloric_tensor_electrothermal_adaptive` advances a complete original
+energy/current window to an exact target time, with optional physical gray
+radiation. `CaloricElectrothermalForcing` retains each stage's thermal forcing,
+electric setup and electrical contacts. Forcing and resistivity receive the
+same original `TensorCaloricForcingSample`, including an authored transition's
+left-limit marker. The fixed prescribed mask, event clipping, stage clock,
+embedded controller and compensated heat ledger remain with the existing
+native adaptive owner. Each coupling proposal restarts the same physical
+opening energy; rejected temporal/coupling proposals publish no physical heat.
+Original source objects and their query budgets persist across the whole run.
+
+Temporal admission checks both original caloric increments and each cell's
+applied Joule-energy discrepancy. The latter compares the actual SDIRK2
+weighted stage heat with its first-order embedded estimate using the original
+scale-safe error owner. Prescribed cells participate: a thermostatted conductor
+with constant energy still refines time when its electrical heat changes.
+Electrical source error cannot cancel between cells. Relative caloric scaling
+uses changes, preserving the original energy datum. These local asymptotic
+estimates do not certify global error or every independent external heat
+channel. Declare source jumps; sharp material corners can reduce time order.
+
+Radiative geometry is prepared once for the whole window. The result retains
+small accepted coupling/radiation receipts and only the last accepted
+interval's electrical fields. Accepted electrical work, Joule heat, thermostat
+heat and noncancelling coupling defects accumulate in double-double accounts.
+Native thermal closure and the accepted coupling-defect sum each face the
+whole-window energy allowance. The thermostat electrical receipt is a separate
+source/removal account; it is not deposited again in native caloric storage.
+
+Completed-trial work includes every successful thermal proposal inside each
+completed coupling trial, including trials rejected for time accuracy. Incomplete
+failed trials remain separately bounded by attempts, coupling passes and native
+solver ceilings; their partial work is not claimed as completed work. Late
+source, budget, energy or cancellation refusal discards the whole private prefix.
+This remains fixed-inventory, fixed-geometry stationary DC with the original
+gray-surface radiation model and immutable original material laws.
+
+Four integration groups cover latent exponential feedback and datum invariance,
+changing heat through a fully thermostatted conductor, scheduled current and
+resistivity transitions with late refusal/cancellation, and radiating cooling
+against an independent nonlinear ODE. The existing electrothermal sensible
+fixture now uses the actual single-phase constructor and explicitly typed
+conductivity arrays. All 24 tests in the three actual numerical leaf modules
+pass with the pinned Rust compiler. The native production library and all four
+named integration targets (`tensor_caloric_phase_conductivity`,
+`tensor_caloric_electrothermal_adaptive`, `tensor_caloric_electrothermal`, and
+`tensor_caloric_radiation`) pass `cargo check --locked` with enthalpy coupling,
+authentic locked sibling sources, one compiler thread, no debug information and
+MIR optimization disabled. Actual execution of those four targets was blocked
+by SIGKILL during asupersync code generation under the 8 GiB memory limit,
+before any test binary ran. Native type checking and the 24 numerical-leaf
+passes are not a claim that those integration tests executed.
