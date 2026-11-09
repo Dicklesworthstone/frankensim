@@ -12,6 +12,9 @@
 //! qualify the actual rarefied-flow/thermal contact: no coefficient is inferred
 //! from the molecular aperture. All gas and material endpoints publish together.
 
+/// Adaptive accepted thermal/molecular histories with fixed physical budgets.
+pub mod trajectory;
+
 use super::{
     MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS, MolecularExchangeError, MolecularNetworkControls,
     MolecularNetworkError, MolecularNetworkLink, MolecularNetworkStep, MovingGasBoundaryError,

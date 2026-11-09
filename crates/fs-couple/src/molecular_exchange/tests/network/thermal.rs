@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: actual finite bodies, one heated molecular snapshot and atomic closure.
 //! Synthetic calorics and declared h are analytic fixtures, not measured source laws.
 
+mod trajectory;
+
 use super::*;
 use crate::{
     cavity_phs::piston::thermal::HeatExchangeSolve,
