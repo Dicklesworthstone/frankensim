@@ -2300,3 +2300,78 @@ absolute motion and all power integrals, explicit ambient continuation and
 partitioned source work, cancellation, held parity, physical timescales under
 refinement, refusal of light-body inertia, and an interior slip maximum.
 No new finite-reservoir, thermal-advection or evolving-material claim is made.
+
+## Complete tensor equilibrium, Maxwell and Kelvin spatial attachments
+
+The spatial_relaxation module binds an original TensorProny or an immutable
+ResolvedTensorMaterial to the existing native rigid-body material-memory graph.
+TensorSpatialGeometry supplies two original body indices and attachment arms,
+six tensor-shear strain columns in the first body's material axes, positive
+physical quadrature volume and explicit coordinate scales. Translation columns
+act on metres and rotation columns on radians. The existing material owner
+performs tensor-shear/Mandel conversion and the exact original work-conjugate
+factor projection; no scalar damping fit, branchwise plane-stress reduction,
+mass-derived modulus or geometric coefficient is inferred.
+
+TensorSpatialRelaxation retains the complete original projection, native
+link, geometry, optional borrowed material-card source and explicit proper
+material-to-first-body rotation. Native channel zero is the original projected
+lossless equilibrium factor. Channel j+1 is original Maxwell branch j with its
+unchanged six rows and finite time. Original projected Kelvin rows enter the
+factor-preserving PassiveBushingMatrix constructor. Dependent rows, weak
+directions, all cross terms and distinct spectra survive. Source density stays
+provenance and does not add mass to an original rigid body.
+
+The binding defines a small-strain corotated material rate law on the native
+relative-twist port. Its equilibrium coordinates integrate that declared rate;
+they are not a principal-Log rotation spring or a rest configuration recovered
+from a current pose. The existing full native graph remains the sole motion,
+wrench, inertia, exact held-flow and positive source-heat owner. Equilibrium
+stores energy but produces zero heat; only original Kelvin/Maxwell loss feeds
+the existing per-connector heat routes. Changing any stored tensor is outside
+this fixed-factor binding and requires an explicit thermodynamic transfer.
+
+Initial memory is explicit. relaxed_memory retains the total equilibrium
+strain and initializes all Maxwell springs relaxed; nonzero relaxed strain
+must pass the original material DC frequency admission. A zero strain remains
+valid for an AC-only source. memory_from_elastic_coordinates instead requires
+a distinct physical elastic displacement for every original Maxwell spring.
+Both initialize the original factor amplitudes; neither may be used to reset
+continuing accepted histories. Independent source strain checks are retained.
+
+All six total material coordinates must continue alongside the complete native
+memory bank. coordinates_after_source uses the accepted original integrated
+relative twist with compensated accumulation; coordinates_after_motion applies
+both source-half integrals and checks each half endpoint before returning.
+The intervening native drift carries the declared corotated coordinates
+unchanged. No factor inverse recovers an otherwise hidden strain direction,
+and no Maxwell history is reconstructed from total strain or pose.
+
+The original small-strain domain is checked at supplied coordinate endpoints.
+The caller explicitly admits its application spectrum with admit_frequency_band;
+a timestep is not a material-frequency certificate. Neither endpoint checking
+nor the native energy gate certifies all interior strains. Source oscillations
+and moving geometry require independent temporal subdivision. Failure leaves
+the borrowed original material, coordinates, body and history inputs unchanged.
+Projection work uses the existing TensorProjectionBudget; the native graph
+separately admits every retained equilibrium/Maxwell coordinate and complete
+prepared work/storage before advancing.
+
+Verification: All four focused adapter groups passed natively. Complete
+six-coordinate coupled equilibrium, Maxwell and Kelvin spectra agree with
+the original material response and tensor-shear SI work; original factor rows
+and channel order remain exact. Native fixed-pose and moving receipts continue
+explicit source strain and full memory without history reset. Source strain,
+geometry, budget, cancellation and resolved half-endpoint refusals preserve
+borrowed inputs. Real original MaterialCard resolution, source rotation,
+selection/provenance, frequency support and DC relaxed-preload admission are
+exercised. The manufactured symmetric Kelvin fixture is authored symmetrically;
+no physical passivity gate or numerical tolerance was relaxed.
+
+The bounded isolated run uses the actual TensorProny/projection/material-source
+owners, canonical evidence/matdb/quantity/math code and native MBD/time/pHS
+numerics, without numerical substitutes. It is not a full workspace build or
+measured-material validation. The prerequisite native equilibrium/Gram increment
+also passed all eighteen focused and hereditary/kinetics regression groups.
+Pinned Rust formatting passed for the new adapter and test; the final test
+formatting change is whitespace only after the four-group run.

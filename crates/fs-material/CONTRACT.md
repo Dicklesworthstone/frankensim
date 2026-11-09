@@ -25112,3 +25112,25 @@ Focused regressions specify exact admitted-mass evaluation, independent caloric 
 Short real material windows now admit one through 32 authored AC frequencies within the existing max(omega)*duration/2 <= 0.5 bound. A singleton reuses the shared real factor with an exact zero-frequency preparation column; only the authored AC coefficients are retained. Authored relaxed DC strain enters the constant temporal mode before the independently supplied constitutive stress is multiplied by strain rate. Thus cancellation between DC and AC stress is retained before physical work, including one-tone and multitone fields. The existing factored spring increment now also handles the singleton short-window case. Original material/source admission, Maxwell zero-bias policy, unweighted physical interval, wide-window pair fallback and retained payload bounds remain in force; point evaluation adds no heap allocation.
 
 Focused actual numerical-source tests reproduce cos(t)-1 over [0, 1e-16]: the previous storage increment was zero and stress work was one-third of the physical 1.25e-65; both now retain that value. Regressions cover signed reverse intervals, multiple AC tones plus DC, an unrepresentable individual stress with finite physical work, singleton payload admission, existing wide-window fallback and prior anisotropic Maxwell/work checks. This focused validation executes the original projection/window/spectrum graph with actual fs-math/fs-fft; the full TensorProny/plane-stress owner integration and workspace were not built in this storage-constrained environment. The finite basis tail bound excludes roundoff and does not certify relative accuracy at arbitrary nulls.
+
+## Original equilibrium factors for mechanical projection consumers
+
+ProjectedTensorProny retains the six original volume-scaled equilibrium Gram
+rows already computed by TensorProny::project_strain and exposes them through
+equilibrium_gram_rows. They define the same full work-conjugate stiffness as
+the existing projected matrix. Original column order, material factor basis,
+cross terms and null directions remain intact; no consumer-side factorization
+or equilibrium-modulus reconstruction is required.
+
+Projection arithmetic, its scalar-work budget, source law, compatible strain
+map, Maxwell factors/times and Kelvin factors are unchanged. The additional
+retained rows use six times the admitted coordinate count of f64 storage.
+Existing clones and explicitly bound eigenstrain projections retain those
+same stiffness factors; affine eigenstrain terms remain separate original
+potential terms and are not inferred by this getter.
+
+Verification: The complete spatial-material bridge's four actual-source
+groups exercise this getter against original factor rows, full coupled
+equilibrium/Maxwell/Kelvin spectra, SI work and native memory continuation.
+The bounded run retained the original material projection/source owners and
+canonical numerical dependencies; the full material/workspace suite was not run.

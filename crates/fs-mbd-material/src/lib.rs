@@ -32,6 +32,9 @@ pub mod hydrostatic;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
 pub mod principal;
 
+/// Complete tensor equilibrium, Maxwell and Kelvin laws on native rigid graphs.
+pub mod spatial_relaxation;
+
 /// Source-integrated free expansion with conserved reference material mass.
 pub mod thermal;
 

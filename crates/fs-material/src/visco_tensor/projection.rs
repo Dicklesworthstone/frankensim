@@ -62,6 +62,7 @@ pub struct ProjectedTensorProny {
     compatible_columns: Option<Vec<Voigt>>,
     volume_m3: f64,
     equilibrium: Vec<f64>,
+    equilibrium_rows: Vec<Vec<f64>>,
     viscosity: Vec<f64>,
     viscosity_rows: Option<Vec<Vec<f64>>>,
     branches: Vec<ProjectedPronyBranch>,
@@ -138,7 +139,7 @@ impl TensorProny {
         }
         poll(&mut cancelled)?;
         Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), compatible_columns:None, volume_m3,
-            equilibrium, viscosity, viscosity_rows: viscous_rows, branches, free_strain_mandel: [0.0; 6] })
+            equilibrium, equilibrium_rows, viscosity, viscosity_rows: viscous_rows, branches, free_strain_mandel: [0.0; 6] })
     }
 }
 impl ProjectedTensorProny {
@@ -174,6 +175,10 @@ impl ProjectedTensorProny {
     }
     /// Full symmetric row-major equilibrium stiffness in the caller's coordinates.
     pub fn equilibrium_stiffness(&self) -> &[f64] { &self.equilibrium }
+    /// Original six volume-scaled equilibrium Gram rows. They define complete
+    /// lossless energy coordinates in the SAME basis as the projected Maxwell
+    /// factors; consumers need not refactor a possibly singular projection.
+    pub fn equilibrium_gram_rows(&self) -> &[Vec<f64>] { &self.equilibrium_rows }
     /// Full symmetric Kelvin damping matrix [N s/m] in the same coordinates.
     /// Absent viscosity is exactly zero; signed cross terms are never dropped.
     pub fn viscosity_matrix(&self) -> &[f64] { &self.viscosity }
