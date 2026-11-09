@@ -321,3 +321,226 @@ fn g4_energy_refusal_and_late_cancellation_publish_no_physical_history() {
     assert_eq!(initial.spatial().sources()[0].inventory, original_source);
     assert_eq!(initial.cell_released(0), Some(EnergyChannels::default()));
 }
+
+#[test]
+fn g1_g3_binding_and_restart_preserve_original_precursor_stock_with_radioactive_sources() {
+    use crate::diffusion::{DelayedGroup, DiffusionModel, DiffusionState};
+    use crate::fusion_neutrons::NeutronReactionEnergy;
+
+    let template = state(&[1.0, 0.0], &[100.0, 0.0], &[0.5, 0.0], 0.25, 0.0);
+    let mut data = template.neutrons().model().data().clone();
+    data.delayed_groups = vec![DelayedGroup {
+        data_id: "manufactured-resident-family".into(),
+        decay_constant_s_inv: 2.0,
+        spectrum: vec![1.0],
+    }];
+    let native = Arc::new(DiffusionModel::new(data, spatial_budget().diffusion.limits).unwrap());
+    let model = Arc::new(
+        NeutronKineticModel::new_with_precursor_storage(
+            "manufactured-preserved-family-storage".into(),
+            Arc::clone(&native),
+            vec![2.0],
+            vec![0.25],
+            vec![NeutronReactionEnergy::default()],
+        )
+        .unwrap(),
+    );
+    let spatial = DecayNeutronState::new(
+        DiffusionState::new(native, vec![0.0], vec![10.0]).unwrap(),
+        template.sources().to_vec(),
+    )
+    .unwrap();
+    let initial = DecayNeutronEnergyState::new(Arc::clone(&model), spatial).unwrap();
+    assert_eq!(initial.kinetic().neutrons().precursor_counts(), &[10.0]);
+    close(initial.kinetic().stored_energy_j().unwrap(), 20.0);
+    let time = 1.25_f64;
+    let response = |rate: f64| ((-rate * time).exp() - (-0.25 * time).exp()) / (0.25 - rate);
+    let decays = 100.0 * -(-time).exp_m1();
+    let families = 10.0 * (-2.0 * time).exp();
+    let neutrons = 50.0 * response(1.0) + 20.0 * response(2.0);
+    let captures = 0.5 * decays + 10.0 - families - neutrons;
+    let (whole, step) = initial.trial(time, budget(), || Ok(())).unwrap();
+    close(whole.spatial().neutrons().precursor_counts()[0], families);
+    close(whole.kinetic().neutrons().precursor_counts()[0], families);
+    close(whole.spatial().neutrons().neutron_counts()[0], neutrons);
+    close(step.released.deposited_j, 2.0 * decays + 0.5 * captures);
+    close(step.released.radiation_j, 2.0 * decays + 1.5 * captures);
+    close(step.released.escaped_j, decays);
+    close(
+        whole.kinetic().stored_energy_j().unwrap() + step.released.total_j(),
+        20.0 + 6.0 * decays,
+    );
+    assert_eq!(step.kinetic.induced_precursor_energy_j, 0.0);
+    assert_eq!(step.kinetic.injected_precursor_energy_j, 0.0);
+
+    let (middle, first) = initial.trial(0.5, budget(), || Ok(())).unwrap();
+    let rebound = DecayNeutronEnergyState::new(model, middle.spatial().clone()).unwrap();
+    assert_eq!(
+        rebound.kinetic().neutrons().precursor_counts(),
+        middle.spatial().neutrons().precursor_counts(),
+    );
+    let (split, second) = rebound.trial(0.75, budget(), || Ok(())).unwrap();
+    close(
+        split.kinetic().stored_energy_j().unwrap(),
+        whole.kinetic().stored_energy_j().unwrap(),
+    );
+    close(
+        first.released.total_j() + second.released.total_j(),
+        step.released.total_j(),
+    );
+    close(
+        split.spatial().sources()[0].inventory.cumulative_decays()[0],
+        decays,
+    );
+}
+
+/// Shared manufactured coexistence source for the existing material owner.
+/// Fast40, initialfamily10, independent radioactive stock60 atlambda.5/s.
+/// Group energies[2,4]J; fissionrate1, promptQ6, future reserve1J/fission;
+/// familylambda2, slowcapture.25/s, both reaction heatfractions.25, volume.01.
+pub(crate) fn material_induced_decay_fixture(outflow_rate_s: f64) -> DecayNeutronEnergyState {
+    use crate::diffusion::DiffusionState;
+    use crate::diffusion::decay::{DecayNeutronEmission, DecayNeutronSource};
+
+    let native = crate::fusion_neutrons::material_induced_fission_fixture(40.0, outflow_rate_s);
+    let original = state(&[0.5, 0.0], &[60.0, 0.0], &[0.5, 0.0], 0.25, 0.0);
+    let source = &original.sources()[0];
+    let emission = Arc::new(
+        DecayNeutronEmission::new(
+            "manufactured-separate-radioactive-neutrons".into(),
+            Arc::clone(source.inventory.model()),
+            Arc::clone(native.model().diffusion().groups()),
+            vec![vec![0.5, 0.0], vec![0.0; 2]],
+        )
+        .unwrap(),
+    );
+    let spatial = DecayNeutronState::new(
+        DiffusionState::new(
+            Arc::clone(native.model().diffusion()),
+            vec![0.0, 40.0],
+            vec![10.0],
+        )
+        .unwrap(),
+        vec![DecayNeutronSource {
+            cell: 0,
+            inventory: source.inventory.clone(),
+            emission,
+        }],
+    )
+    .unwrap();
+    DecayNeutronEnergyState::new_with_unrepresented_fission_precursors(
+        Arc::clone(native.model()),
+        spatial,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_g3_g4_radioactive_and_funded_background_histories_close_without_replaying_reserves() {
+    let initial = material_induced_decay_fixture(0.6);
+    assert!(
+        DecayNeutronEnergyState::new(Arc::clone(initial.model()), initial.spatial().clone(),)
+            .is_err()
+    );
+    let time = 1.25_f64;
+    let removal = 2.6;
+    let response = |rate: f64| ((-rate * time).exp() - (-0.25 * time).exp()) / (0.25 - rate);
+    let fissions = 40.0 * -(-time).exp_m1();
+    let decays = 60.0 * -(-0.5 * time).exp_m1();
+    let families = 10.0 * (-removal * time).exp()
+        + 20.0 * ((-time).exp() - (-removal * time).exp()) / (removal - 1.0);
+    let residence = 10.0 * -(-removal * time).exp_m1() / removal
+        + 20.0 / (removal - 1.0) * (-(-time).exp_m1() + (-removal * time).exp_m1() / removal);
+    let neutrons = 40.0 * response(1.0)
+        + 40.0 / (removal - 1.0) * (response(1.0) - response(removal))
+        + 20.0 * response(removal)
+        + 15.0 * response(0.5);
+    let captures = fissions + 2.0 * residence + 0.5 * decays - neutrons;
+    let heat = 2.0 * fissions + 0.5 * captures + 2.0 * decays;
+    let radiation = 6.0 * fissions + 1.5 * captures + 2.0 * decays;
+    let (whole, step) = initial.trial(time, budget(), || Ok(())).unwrap();
+    close(
+        whole.spatial().neutrons().neutron_counts()[1],
+        40.0 * (-time).exp(),
+    );
+    close(whole.spatial().neutrons().neutron_counts()[0], neutrons);
+    close(whole.kinetic().neutrons().precursor_counts()[0], families);
+    close(step.spatial.neutrons.fissions, fissions);
+    close(step.spatial.neutrons.captures, captures);
+    close(step.transferred_neutron_energy_j, decays);
+    close(step.kinetic.induced_precursor_energy_j, fissions);
+    close(step.kinetic.nuclear_reaction_energy_j, 6.0 * fissions);
+    close(step.kinetic.exported_precursor_energy_j, 1.2 * residence);
+    close(step.released.deposited_j, heat);
+    close(step.released.radiation_j, radiation);
+    close(step.released.escaped_j, decays);
+    close(
+        whole.kinetic().stored_energy_j().unwrap()
+            + step.released.total_j()
+            + step.kinetic.exported_precursor_energy_j,
+        180.0 + 6.0 * decays + 7.0 * fissions,
+    );
+    assert_eq!(step.kinetic.injected_precursor_energy_j, 0.0);
+
+    let (middle, first) = initial.trial(0.5, budget(), || Ok(())).unwrap();
+    let mut polls = 0;
+    let (split, second) = middle
+        .trial(0.75, budget(), || {
+            polls += 1;
+            Ok(())
+        })
+        .unwrap();
+    close(
+        split.kinetic().stored_energy_j().unwrap(),
+        whole.kinetic().stored_energy_j().unwrap(),
+    );
+    close(
+        first.released.total_j() + second.released.total_j(),
+        step.released.total_j(),
+    );
+    close(
+        split
+            .kinetic()
+            .cumulative_induced_precursor_energy_j()
+            .unwrap(),
+        fissions,
+    );
+    close(
+        split
+            .kinetic()
+            .cumulative_exported_precursor_energy_j()
+            .unwrap(),
+        1.2 * residence,
+    );
+    let before = middle
+        .kinetic()
+        .cumulative_induced_precursor_energy_j()
+        .unwrap();
+    let populations = middle.spatial().neutrons().precursor_counts().to_vec();
+    let mut seen = 0;
+    assert!(
+        middle
+            .trial(0.75, budget(), || {
+                seen += 1;
+                if seen == polls {
+                    Err(FissionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+    );
+    assert_eq!(
+        middle
+            .kinetic()
+            .cumulative_induced_precursor_energy_j()
+            .unwrap(),
+        before
+    );
+    assert_eq!(middle.spatial().neutrons().precursor_counts(), populations);
+    let (retry, _) = middle.trial(0.75, budget(), || Ok(())).unwrap();
+    close(
+        retry.kinetic().stored_energy_j().unwrap(),
+        split.kinetic().stored_energy_j().unwrap(),
+    );
+}

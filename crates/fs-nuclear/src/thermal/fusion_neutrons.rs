@@ -2,7 +2,9 @@
 //!
 //! One complete spatial cohort advances the original neutron owner once per
 //! accepted thermal interval. Its local heat reaches the bound material cells;
-//! neutron storage, outgoing radiation and leakage retain their own accounts.
+//! neutron and precursor storage, outgoing radiation and leakage retain their
+//! own accounts. Explicitly funded delayed fission follows the same accepted
+//! native history; its future neutron energy becomes heat only upon deposition.
 //! A single pulse or accepted-interval history retains its original channel
 //! moments. Each source interval uses an explicit uniform/mean-energy projection.
 //! This adapter supplies no new nuclear data or
@@ -197,6 +199,8 @@ pub struct NeutronKineticCellStep {
     start_s: f64,
     captures: f64,
     capture_roundoff: f64,
+    fissions: f64,
+    fission_roundoff: f64,
     source_number_residual: f64,
     source_energy_residual_j: f64,
 }
@@ -474,6 +478,7 @@ impl NuclearHeatSource for NeutronKineticCellSource {
             ));
         }
         let mut captures = vec![super::Sum::default(); sources.len()];
+        let mut fissions = vec![super::Sum::default(); sources.len()];
         for (reaction, &count) in first
             .state
             .model()
@@ -483,15 +488,17 @@ impl NuclearHeatSource for NeutronKineticCellSource {
             .zip(&report.diffusion.reaction_counts)
         {
             checkpoint()?;
-            if reaction.kind == DiffusionReactionKind::Capture {
-                captures[reaction.cell].add(count)?;
+            match reaction.kind {
+                DiffusionReactionKind::Capture => captures[reaction.cell].add(count)?,
+                DiffusionReactionKind::Fission { .. } => fissions[reaction.cell].add(count)?,
+                _ => {}
             }
         }
         let mut population_defect = super::Sum::default();
         population_defect.add(report.diffusion.population_roundoff)?;
         population_defect.add(source_number_residual.abs())?;
-        for capture in &captures {
-            population_defect.add(capture.export_roundoff()?)?;
+        for account in captures.iter().chain(&fissions) {
+            population_defect.add(account.export_roundoff()?)?;
         }
         if population_defect.nonnegative_upper_bound()? > budget.diffusion.population_tolerance {
             return Err(FissionThermalError::Invalid(
@@ -516,6 +523,8 @@ impl NuclearHeatSource for NeutronKineticCellSource {
                     start_s: time_s,
                     captures: captures[source.cell_index].value()?,
                     capture_roundoff: captures[source.cell_index].export_roundoff()?,
+                    fissions: fissions[source.cell_index].value()?,
+                    fission_roundoff: fissions[source.cell_index].export_roundoff()?,
                     source_number_residual,
                     source_energy_residual_j,
                 },
@@ -541,13 +550,14 @@ impl NuclearHeatSource for NeutronKineticCellSource {
                 step.spatial.diffusion.population_roundoff,
                 step.source_number_residual.abs(),
                 step.capture_roundoff,
+                step.fission_roundoff,
             ])
         } else {
-            step.capture_roundoff
+            crate::sum(&[step.capture_roundoff, step.fission_roundoff])
         }
     }
-    fn fissions(_: &Self::Step) -> f64 {
-        0.0
+    fn fissions(step: &Self::Step) -> f64 {
+        step.fissions
     }
     fn captures(step: &Self::Step) -> f64 {
         step.captures

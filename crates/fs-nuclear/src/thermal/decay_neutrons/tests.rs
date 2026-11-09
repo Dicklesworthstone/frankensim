@@ -401,3 +401,75 @@ fn g4_late_cancellation_and_caloric_refusal_leave_sources_and_material_unchanged
         &original
     ));
 }
+
+#[test]
+fn g1_g3_delayed_background_fission_and_radioactivity_heat_the_same_original_material() {
+    use crate::diffusion::decay::energy::material_induced_decay_fixture;
+
+    let original = Arc::new(material_induced_decay_fixture(0.6));
+    let initial = thermal(1, 0.01, &LAW);
+    let heating = bound(&initial, Arc::clone(&original));
+    let time = 1.25_f64;
+    let (warm, accepted, _) = heating
+        .advance_to(&initial, time, controls(0.125), || Ok(()))
+        .unwrap();
+    let removal = 2.6;
+    let response = |rate: f64| ((-rate * time).exp() - (-0.25 * time).exp()) / (0.25 - rate);
+    let fissions = 40.0 * -(-time).exp_m1();
+    let decays = 60.0 * -(-0.5 * time).exp_m1();
+    let residence = 10.0 * -(-removal * time).exp_m1() / removal
+        + 20.0 / (removal - 1.0) * (-(-time).exp_m1() + (-removal * time).exp_m1() / removal);
+    let neutrons = 40.0 * response(1.0)
+        + 40.0 / (removal - 1.0) * (response(1.0) - response(removal))
+        + 20.0 * response(removal)
+        + 15.0 * response(0.5);
+    let captures = fissions + 2.0 * residence + 0.5 * decays - neutrons;
+    let heat = 2.0 * decays + 2.0 * fissions + 0.5 * captures;
+    close(accepted.audit().fissions, fissions);
+    close(accepted.audit().decays, decays);
+    close(accepted.audit().captures, captures);
+    close(warm.energy_j() - initial.energy_j(), heat);
+    close(warm.temperature_k(CellId(20)).unwrap(), 300.0 + heat / 8.0);
+    assert_eq!(warm.cells()[&CellId(20)].mass_kg, 2.0);
+    let shared = accepted.source(CellId(20)).unwrap().state();
+    close(
+        shared
+            .kinetic()
+            .cumulative_induced_precursor_energy_j()
+            .unwrap(),
+        fissions,
+    );
+    close(
+        shared
+            .kinetic()
+            .cumulative_exported_precursor_energy_j()
+            .unwrap(),
+        1.2 * residence,
+    );
+    close(
+        shared.kinetic().stored_energy_j().unwrap()
+            + shared.cell_released(0).unwrap().total_j()
+            + shared
+                .kinetic()
+                .cumulative_exported_precursor_energy_j()
+                .unwrap(),
+        180.0 + 6.0 * decays + 7.0 * fissions,
+    );
+    let (middle, checkpoint, _) = heating
+        .advance_to(&initial, 0.5, controls(0.125), || Ok(()))
+        .unwrap();
+    let rebound = bound(
+        &middle,
+        Arc::clone(checkpoint.source(CellId(20)).unwrap().state()),
+    );
+    let (resumed, continued, _) = rebound
+        .advance_to(&middle, time, controls(0.125), || Ok(()))
+        .unwrap();
+    close(resumed.energy_j(), warm.energy_j());
+    close(
+        checkpoint.audit().fissions + continued.audit().fissions,
+        fissions,
+    );
+    assert_eq!(original.spatial().neutrons().precursor_counts(), &[10.0]);
+    assert_eq!(initial.time_s(), 0.0);
+}

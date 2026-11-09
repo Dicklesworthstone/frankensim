@@ -3,8 +3,9 @@
 //! One complete spatial cohort advances once per accepted thermal interval.
 //! The energy owner has already transferred emitted neutron energy out of the
 //! radioactive radiation account. Only its disjoint deposited channel is heat;
-//! neutron storage, later capture, outward radiation and leakage keep their own
-//! accounts. The bound thermal law and physical mass are unchanged. Nuclear
+//! neutron/precursor storage, later capture, outward radiation and leakage keep
+//! their own accounts. Funded background fission also retains its actual event
+//! count and delayed reserve; only accepted deposited energy heats material. The bound thermal law and physical mass are unchanged. Nuclear
 //! coefficients remain authored and fixed; material temperature does not infer
 //! a new half-life, neutron cross section or deposition fraction.
 
@@ -45,6 +46,7 @@ pub struct DecayNeutronCellStep {
     spatial: Arc<DecayNeutronEnergyStep>,
     decays: f64,
     captures: f64,
+    fissions: f64,
     count_roundoff: f64,
 }
 
@@ -234,7 +236,7 @@ impl NuclearHeatSource for DecayNeutronCellSource {
             source.validate_temperature(temperature)?;
         }
         let (state, report) = first.state.trial(duration_s, budget, &mut *checkpoint)?;
-        let mut counts = vec![[Sum::default(); 2]; sources.len()];
+        let mut counts = vec![[Sum::default(); 3]; sources.len()];
         for (source, decay) in first
             .state
             .spatial()
@@ -256,8 +258,10 @@ impl NuclearHeatSource for DecayNeutronCellSource {
             .zip(&report.spatial.neutrons.reaction_counts)
         {
             checkpoint()?;
-            if reaction.kind == DiffusionReactionKind::Capture {
-                counts[reaction.cell][1].add(count)?;
+            match reaction.kind {
+                DiffusionReactionKind::Capture => counts[reaction.cell][1].add(count)?,
+                DiffusionReactionKind::Fission { .. } => counts[reaction.cell][2].add(count)?,
+                _ => {}
             }
         }
         let mut defect = Sum::default();
@@ -265,7 +269,11 @@ impl NuclearHeatSource for DecayNeutronCellSource {
         defect.add(report.spatial.decay_population_roundoff)?;
         let mut count_roundoff = Vec::with_capacity(sources.len());
         for count in &counts {
-            let value = finite(count[0].export_roundoff()? + count[1].export_roundoff()?)?;
+            let value = finite(crate::sum(&[
+                count[0].export_roundoff()?,
+                count[1].export_roundoff()?,
+                count[2].export_roundoff()?,
+            ]))?;
             defect.add(value)?;
             count_roundoff.push(value);
         }
@@ -292,6 +300,7 @@ impl NuclearHeatSource for DecayNeutronCellSource {
                     spatial: Arc::clone(&spatial),
                     decays: counts[source.cell_index][0].value()?,
                     captures: counts[source.cell_index][1].value()?,
+                    fissions: counts[source.cell_index][2].value()?,
                     count_roundoff: count_roundoff[source.cell_index],
                 },
             ));
@@ -324,8 +333,8 @@ impl NuclearHeatSource for DecayNeutronCellSource {
     fn decays(step: &Self::Step) -> f64 {
         step.decays
     }
-    fn fissions(_: &Self::Step) -> f64 {
-        0.0
+    fn fissions(step: &Self::Step) -> f64 {
+        step.fissions
     }
     fn captures(step: &Self::Step) -> f64 {
         step.captures

@@ -10,7 +10,11 @@
 //! neutron kinetic energy. A reaction with Q in the neutron energy model must
 //! have zero prompt energy in burnup, as must every neutron-producing reaction,
 //! including prompt fission;
-//! double ownership refuses. Capture entries also exclude subsequent product
+//! double ownership refuses. Aggregate induced-fission precursors additionally
+//! require an explicit unrepresented-product boundary. Their separately authored
+//! future-neutron conversion becomes stored precursor energy at birth; prompt Q
+//! remains unchanged. Positive retained fission products refuse that boundary.
+//! Capture entries also exclude subsequent product
 //! decay energy; the product's actual decay events release that energy later. No ENDF
 //! Q, product yield, charged-particle stopping or gamma deposition is inferred.
 //! Unbound neutron reactions remain explicitly fixed background interactions;
@@ -97,8 +101,9 @@ pub struct FusionNeutronActivationStep {
     /// Noncancelling external/internal injection reconciliation [neutrons].
     pub injection_number_roundoff: f64,
     /// Net signed nuclear conversion: original inventory event releases plus
-    /// `kinetic.nuclear_reaction_energy_j` [J]. Endothermic reactions may make
-    /// this negative. Future product-decay energy is not included.
+    /// kinetic prompt Q and explicitly funded induced-precursor storage [J].
+    /// Endothermic reactions may make this negative. Subsequent represented
+    /// product-decay energy enters only when its original decay events occur.
     pub nuclear_generated_energy_j: f64,
     /// Neutron-associated plus inventory exports in diffusion-cell order [J].
     pub cell_released: Vec<EnergyChannels>,
@@ -128,10 +133,39 @@ impl FusionNeutronActivationState {
         model: Arc<NeutronKineticModel>,
         spatial: DiffusionBurnupState,
     ) -> Result<Self, FusionNeutronActivationError> {
-        if model
-            .fission_precursor_energy_j()
-            .iter()
-            .any(|&energy| energy > 0.0)
+        Self::prepare(model, spatial, false)
+    }
+
+    /// Admit funded aggregate induced-fission families whose entire product
+    /// cohort lies outside this finite nuclide inventory.
+    ///
+    /// Each positive induced-family source must already carry the kinetic
+    /// model's explicit future-neutron conversion declaration. Every bound
+    /// fission channel producing these families must retain no positive nuclide
+    /// products, including stable products; deleting only an overlapping neutron
+    /// emission channel would still duplicate fragment energy or ownership.
+    /// Unbound reactions declare fixed background sources with unrepresented
+    /// product cohorts. Unrelated radioactive inventories remain admissible.
+    ///
+    /// The declaration applies to dormant and active original channels alike.
+    /// Neither finite stock nor an accepted precursor/transport history is reset.
+    pub fn new_with_unrepresented_fission_precursors(
+        model: Arc<NeutronKineticModel>,
+        spatial: DiffusionBurnupState,
+    ) -> Result<Self, FusionNeutronActivationError> {
+        Self::prepare(model, spatial, true)
+    }
+
+    fn prepare(
+        model: Arc<NeutronKineticModel>,
+        spatial: DiffusionBurnupState,
+        unrepresented_fission_products: bool,
+    ) -> Result<Self, FusionNeutronActivationError> {
+        if !unrepresented_fission_products
+            && model
+                .fission_precursor_energy_j()
+                .iter()
+                .any(|&energy| energy > 0.0)
         {
             return Err(FusionNeutronActivationError::Invalid(
                 "aggregate induced-fission families require an explicit unrepresented-product boundary",
@@ -176,6 +210,17 @@ impl FusionNeutronActivationState {
                 &spatial.inventories()[neutron.cell].model().reactions()[binding.burnup_reaction];
             let q = model.reaction_energies()[binding.diffusion_reaction].nuclear_q_j;
             let inventory_q = nuclear.energy_per_event.total_j();
+            let precursor_energy = model.fission_precursor_energy_j()[binding.diffusion_reaction];
+            if precursor_energy > 0.0
+                && nuclear
+                    .products
+                    .iter()
+                    .any(|product| product.yield_per_event > 0.0)
+            {
+                return Err(FusionNeutronActivationError::Invalid(
+                    "aggregate induced-fission families require every positive retained fission product to be unrepresented",
+                ));
+            }
             if (q != 0.0
                 || matches!(
                     neutron.kind,
@@ -188,8 +233,8 @@ impl FusionNeutronActivationState {
                     "prompt Q in neutron production or the neutron energy model requires zero burnup event energy",
                 ));
             }
-            maximum_reaction_energy_j[neutron.cell] =
-                maximum_reaction_energy_j[neutron.cell].max(checked(q.abs() + inventory_q)?);
+            maximum_reaction_energy_j[neutron.cell] = maximum_reaction_energy_j[neutron.cell]
+                .max(checked(q.abs() + precursor_energy + inventory_q)?);
         }
         if decay_partitions.is_some() {
             let maximum_neutron_energy = model
@@ -254,6 +299,17 @@ impl FusionNeutronActivationState {
     /// Current neutron kinetic plus reserved precursor energy [J].
     pub fn stored_energy_j(&self) -> Result<f64, NeutronKineticError> {
         self.kinetic.stored_energy_j()
+    }
+
+    /// Explicit induced-fission future-neutron conversion accepted since binding [J].
+    /// It is already stored in families or converted to neutrons, not extra heat.
+    pub fn cumulative_induced_precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        self.kinetic.cumulative_induced_precursor_energy_j()
+    }
+
+    /// Per-cell induced-fission future-neutron conversion since binding [J].
+    pub fn cell_induced_precursor_energy_j(&self, cell: usize) -> Option<f64> {
+        self.kinetic.cell_induced_precursor_energy_j(cell)
     }
 
     /// Stored energy carried out by precursor flow since binding [J].
@@ -422,6 +478,11 @@ impl FusionNeutronActivationState {
             defect.add(transfer.energy_roundoff_j)?;
         }
         let mut generated = Accumulator::new(kinetic_step.nuclear_reaction_energy_j);
+        defect.add(
+            generated
+                .add(kinetic_step.induced_precursor_energy_j)?
+                .abs(),
+        )?;
         let mut reaction_defect = Accumulator::new(0.0);
         let mut nuclear_totals = [Accumulator::new(0.0); 3];
         let mut totals = [Accumulator::new(0.0); 3];
@@ -669,6 +730,12 @@ mod tests;
 
 #[cfg(test)]
 mod precursor_tests;
+
+#[cfg(test)]
+mod induced_tests;
+
+#[cfg(test)]
+pub(crate) use induced_tests::material_induced_precursor_fixture;
 
 #[cfg(test)]
 pub(crate) use precursor_tests::{

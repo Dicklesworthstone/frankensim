@@ -734,3 +734,130 @@ fn g0_absolute_pulse_clock_cannot_change_the_original_integrated_source() {
     );
     assert_eq!(shifted.source().emission(), ordinary.source().emission());
 }
+
+#[test]
+fn g1_g3_g4_funded_induced_families_heat_material_after_release_and_retain_fission_counts() {
+    use crate::fusion_neutrons::material_induced_fission_fixture;
+
+    let initial_fast = 100.0;
+    for outflow in [0.0_f64, 0.5] {
+        let state = Arc::new(material_induced_fission_fixture(initial_fast, outflow));
+        let initial = one_cell(0.0);
+        let source = pulse(&state, 0.0, 1.0, 0.0);
+        let heating = bound(&initial, Arc::clone(&state), Arc::clone(&source));
+        let (middle, checkpoint, _) = heating
+            .advance_to(&initial, 0.5, controls(0.125), || Ok(()))
+            .unwrap();
+        let mut polls = 0;
+        let (warm, accepted, _) = checkpoint
+            .advance_to(&middle, 2.0, controls(0.125), || {
+                polls += 1;
+                Ok(())
+            })
+            .unwrap();
+
+        for (time, material, owner) in [(0.5_f64, &middle, &checkpoint), (2.0, &warm, &accepted)] {
+            let native = owner.source(CellId(20)).unwrap().state();
+            let loss = 2.0 + outflow;
+            let fast = initial_fast * (-time).exp();
+            let fissions = initial_fast * -(-time).exp_m1();
+            let family = 0.5 * initial_fast * ((-time).exp() - (-loss * time).exp()) / (loss - 1.0);
+            let residence =
+                |rate: f64| ((-rate * time).exp() - (-0.25 * time).exp()) / (0.25 - rate);
+            let slow = initial_fast * residence(1.0)
+                + initial_fast / (loss - 1.0) * (residence(1.0) - residence(loss));
+            let integrated_family = (0.5 * fissions - family) / loss;
+            let escaped_family = outflow * integrated_family;
+            let captures = fissions + 2.0 * integrated_family - slow;
+            let heat = 2.0 * fissions + 0.5 * captures;
+            let radiation = 6.0 * fissions + 1.5 * captures;
+            close(native.neutrons().neutron_counts()[1], fast, 1e-8);
+            close(native.neutrons().neutron_counts()[0], slow, 1e-8);
+            close(native.neutrons().precursor_counts()[0], family, 1e-8);
+            close(native.precursor_energy_j().unwrap(), 2.0 * family, 1e-8);
+            close(
+                native.cell_nuclear_reaction_energy_j(0).unwrap(),
+                6.0 * fissions,
+                1e-8,
+            );
+            close(
+                native.cumulative_induced_precursor_energy_j().unwrap(),
+                fissions,
+                1e-8,
+            );
+            close(
+                native.cumulative_exported_precursor_energy_j().unwrap(),
+                2.0 * escaped_family,
+                1e-8,
+            );
+            let released = native.cell_released(0).unwrap();
+            close(released.deposited_j, heat, 1e-8);
+            close(released.radiation_j, radiation, 1e-8);
+            assert_eq!(released.escaped_j, 0.0);
+            close(
+                native.stored_energy_j().unwrap()
+                    + released.total_j()
+                    + native.cumulative_exported_precursor_energy_j().unwrap(),
+                4.0 * initial_fast + 7.0 * fissions,
+                1e-8,
+            );
+            // Thermal audits cover each advance request. Compose the already
+            // checked prefix when comparing the complete accepted history.
+            let prefix = if time > 0.5 {
+                (checkpoint.audit().fissions, checkpoint.audit().captures)
+            } else {
+                (0.0, 0.0)
+            };
+            close(prefix.0 + owner.audit().fissions, fissions, 1e-8);
+            close(prefix.1 + owner.audit().captures, captures, 1e-8);
+            close(material.energy_j() - initial.energy_j(), heat, 1e-8);
+            close(
+                material.temperature_k(CellId(20)).unwrap(),
+                300.0 + heat / 8.0,
+                1e-8,
+            );
+            assert_eq!(material.cells()[&CellId(20)].mass_kg, 2.0);
+            let last = owner.last_step(CellId(20)).unwrap().spatial();
+            assert_eq!(last.diffusion.injected_neutrons, 0.0);
+            assert_eq!(last.diffusion.injected_precursors, 0.0);
+            assert!(last.induced_precursor_energy_j > 0.0);
+            assert!(last.precursor_conversion_energy_j > 0.0);
+        }
+
+        let rebound = bound(
+            &middle,
+            Arc::clone(checkpoint.source(CellId(20)).unwrap().state()),
+            source,
+        );
+        let (resumed, _, _) = rebound
+            .advance_to(&middle, 2.0, controls(0.125), || Ok(()))
+            .unwrap();
+        close(resumed.energy_j(), warm.energy_j(), 1e-9);
+
+        assert!(polls > 2);
+        let before = Arc::clone(checkpoint.source(CellId(20)).unwrap().state());
+        let mut remaining = polls - 2;
+        assert!(
+            checkpoint
+                .advance_to(&middle, 2.0, controls(0.125), || {
+                    if remaining == 0 {
+                        Err(DepositionError::Cancelled)
+                    } else {
+                        remaining -= 1;
+                        Ok(())
+                    }
+                })
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            checkpoint.source(CellId(20)).unwrap().state(),
+            &before
+        ));
+        assert_eq!(state.neutrons().neutron_counts(), &[0.0, initial_fast]);
+        assert_eq!(middle.time_s(), 0.5);
+        let (retry, _, _) = checkpoint
+            .advance_to(&middle, 2.0, controls(0.125), || Ok(()))
+            .unwrap();
+        close(retry.energy_j(), warm.energy_j(), 1e-9);
+    }
+}

@@ -3831,3 +3831,56 @@ history/restart and late cancellation. All six changed Rust files matched the
 compiled snapshot; narrow formatting passed. This original-source selection
 is not a full Cargo/constellation or DSR gate, an empirical isotope calibration,
 or a performance benchmark.
+
+## Funded induced families in finite inventories and material heating
+
+`FusionNeutronActivationState::new_with_unrepresented_fission_precursors`
+explicitly admits the aggregate fission-product cohort outside the represented
+finite inventory. Every bound positive-delayed fission channel must have no
+positive retained nuclide products, including dormant cross sections and stable
+products. Prescribed background fission shares the caller's explicit
+unrepresented-cohort declaration. Legacy `new` retains its refusal; unrelated
+radioactive inventories and their existing energy histories remain admissible.
+
+The finite owner includes actual induced precursor conversion once in nuclear
+generation and in its reaction-consistency energy weighting. Its prompt-Q
+account, radioactive-source radiation debit, external source accounts and
+precursor outflow remain distinct. No product decay energy is inferred from a
+funding cap. Coefficient rebinding continues to check the original prompt
+thresholds and available prompt energy.
+
+Finite neutron/nuclide feedback retains the original interval-mean reaction
+closure. Family production follows that accepted native history; it does not
+claim the exact continuous nonlinear birth-time distribution inside a finite
+step. Independent Bateman comparisons test physical refinement, and the material
+regression uses an independent closed-form recurrence for each accepted
+fixed-duration interval. Temperature, deposited energy, radiation, original
+mass and inventory, restart and late cancellation are checked on that same
+trajectory.
+
+`DecayNeutronEnergyState` now binds the original precursor counts along with
+the original neutron counts. Its whole-history balance includes precursor
+storage, precursor outflow and additional induced conversion. A separate
+`new_with_unrepresented_fission_precursors` entrypoint admits funded prescribed
+background families under the explicit statement that their products are
+outside every represented radioactive source cohort. The background has no
+fragment-isotope map from which that ownership can be inferred. Initial
+families, ordinary radioactive neutron emission, induced fission and capture
+can coexist in the original coupled history without resetting any stock.
+
+Both standalone neutron and radioactive-neutron material adapters now report
+the actual accepted per-cell fission counts. Their existing compensated count
+exports and absolute error bounds include those sums. They continue to retain
+the complete native energy report and pass only deposited energy to the
+original material calorics; precursor reserve or outflow is not thermal credit.
+
+The focused native integration suite passed 31 tests, zero failures, with
+`thermal` enabled: nine new finite-inventory, radioactive-energy and material
+regressions plus 22 existing regressions. Independent analytical histories and
+finite-step recurrences cover stored and exported reserves, actual fissions,
+captures, material heat and temperature, source shutoff, restart/rebinding and
+atomic cancellation/refusal. All nine changed Rust files matched the compiled
+snapshot; narrow formatting passed. Combined with the 15-test core selection,
+this verifies the changed physical paths using the original numerical owners.
+These manufactured cases do not establish evaluated isotope calibration,
+performance measurements, or a full Cargo/constellation or DSR gate.

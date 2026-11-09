@@ -2,7 +2,9 @@
 //!
 //! Each parent's emitted group energy is debited from its original outward
 //! radiation account. The original neutron energy owner attaches absorption,
-//! scattering, prompt Q and leakage to the SAME coupled diffusion history.
+//! scattering, prompt Q, precursor storage and leakage to the SAME coupled
+//! diffusion history. Separately funded induced-fission families retain their
+//! future-neutron conversion and outflow accounts on that original history.
 //! Only actual local deposition is heat; neutrons still in flight retain their
 //! kinetic energy, and leakage remains an outgoing export. Neither emitted
 //! neutron energy nor its later absorbed energy is counted twice.
@@ -60,7 +62,8 @@ pub struct DecayNeutronEnergyStep {
     /// Disjoint local deposition, remaining outward radiation and escape by cell.
     pub cell_released: Vec<EnergyChannels>,
     pub released: EnergyChannels,
-    /// Final neutron storage - initial + exports - decay release - prompt Q [J].
+    /// Final neutron and precursor storage - initial + disjoint exports
+    /// - radioactive release - prompt Q - additional induced conversion [J].
     pub energy_balance_residual_j: f64,
     pub energy_roundoff_j: f64,
 }
@@ -103,14 +106,47 @@ impl DecayNeutronEnergyState {
         model: Arc<NeutronKineticModel>,
         spatial: DecayNeutronState,
     ) -> Result<Self, DecayNeutronEnergyError> {
+        Self::prepare(model, spatial, false)
+    }
+
+    /// Admit separately funded induced families in the prescribed background.
+    ///
+    /// The caller declares that these background fission products are outside
+    /// every represented radioactive source cohort. The group-only background
+    /// has no fragment isotope mapping from which this can be inferred. Use
+    /// finite activation with explicit product bindings for represented targets.
+    /// This declaration does not reset original source or precursor populations.
+    pub fn new_with_unrepresented_fission_precursors(
+        model: Arc<NeutronKineticModel>,
+        spatial: DecayNeutronState,
+    ) -> Result<Self, DecayNeutronEnergyError> {
+        Self::prepare(model, spatial, true)
+    }
+
+    fn prepare(
+        model: Arc<NeutronKineticModel>,
+        spatial: DecayNeutronState,
+        unrepresented_fission_products: bool,
+    ) -> Result<Self, DecayNeutronEnergyError> {
+        if !unrepresented_fission_products
+            && model
+                .fission_precursor_energy_j()
+                .iter()
+                .any(|&energy| energy > 0.0)
+        {
+            return Err(DecayNeutronEnergyError::Invalid(
+                "funded induced families require an explicit unrepresented background-fragment cohort",
+            ));
+        }
         if !Arc::ptr_eq(model.diffusion(), spatial.neutrons().model()) {
             return Err(DecayNeutronEnergyError::Invalid(
                 "radioactive source requires its original neutron energy model",
             ));
         }
-        let kinetic = NeutronKineticState::new(
+        let kinetic = NeutronKineticState::new_with_precursors(
             Arc::clone(&model),
             spatial.neutrons().neutron_counts().to_vec(),
+            spatial.neutrons().precursor_counts().to_vec(),
         )?;
         let mut partitions = Vec::with_capacity(spatial.sources().len());
         let mut maximum_source_energy_j = 0.0_f64;
@@ -169,17 +205,24 @@ impl DecayNeutronEnergyState {
             }
             partitions.push(source_partitions);
         }
-        let maximum_neutron_energy_j = model
-            .group_energies_j()
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max)
-            + model
+        let maximum_neutron_energy_j = finite(sum(&[
+            model
+                .group_energies_j()
+                .iter()
+                .chain(model.precursor_energies_j())
+                .copied()
+                .fold(0.0_f64, f64::max),
+            model
                 .reaction_energies()
                 .iter()
                 .map(|energy| energy.nuclear_q_j.abs())
-                .fold(0.0_f64, f64::max);
-        finite(maximum_neutron_energy_j)?;
+                .fold(0.0_f64, f64::max),
+            model
+                .fission_precursor_energy_j()
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max),
+        ]))?;
         let released = vec![[Accumulator::new(0.0); 3]; model.diffusion().cell_count()];
         Ok(Self {
             spatial,
@@ -324,6 +367,9 @@ impl DecayNeutronEnergyState {
         let energy_balance_residual_j = finite(sum(&[
             kinetic_step.final_kinetic_energy_j,
             -kinetic_step.initial_kinetic_energy_j,
+            kinetic_step.final_precursor_energy_j,
+            -kinetic_step.initial_precursor_energy_j,
+            kinetic_step.exported_precursor_energy_j,
             combined.deposited_j,
             combined.radiation_j,
             combined.escaped_j,
@@ -331,6 +377,7 @@ impl DecayNeutronEnergyState {
             -decay_released.radiation_j,
             -decay_released.escaped_j,
             -kinetic_step.nuclear_reaction_energy_j,
+            -kinetic_step.induced_precursor_energy_j,
         ]))?;
         error.add(energy_balance_residual_j.abs())?;
         let energy_roundoff_j = bound(error)?;
@@ -427,3 +474,6 @@ fn bound(account: Accumulator) -> Result<f64, DecayNeutronEnergyError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::material_induced_decay_fixture;
