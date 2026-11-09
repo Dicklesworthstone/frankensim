@@ -21791,6 +21791,34 @@ This is a dilute two-state constitutive snapshot, with no trap distribution, pop
 
 `phosphorescence::pump::GroundStatePumpStatePoint` resolves two separately authored ground-to-singlet/triplet absorption cross sections in square metres per emitter. Vacuum wavelength is an explicitly typed SI-metre coordinate; an optional owned absolute-temperature coordinate refreshes at the thermal state. Original native queries retain the complete material bundle, exact selected claims, coordinate conventions and source support, with no fitted spectrum or inferred molecular count. Both target cross sections may be nonzero at one wavelength: a transport owner must use their sum for attenuation and their separate shares for excitation. They are not mass absorption, molar extinction or a bulk-index conversion. Missing/negative roles, wrong units, unowned field/history dependence and unsupported refreshes refuse; explicit zero is retained. The convenience wavelength/temperature refresh holds every other external coordinate fixed and requires temperature optionality to match its declared owner. This source snapshot supplies coefficients only; photon depletion and finite-population/energy evolution remain their existing transport and kinetic owners. Manufactured tests in `tests/phosphorescence/pump.rs` cover native wavelength/temperature surfaces, overlapping-source claim pinning, whole-bundle retention, coordinate/domain refusal and permissive-bundle revalidation.
 
+### Triplet-pair annihilation source coefficients
+
+`phosphorescence::annihilation::TripletAnnihilationStatePoint` resolves the
+original `luminescence_triplet_pair_event_rate` in m^3/s and
+`luminescence_triplet_pair_singlet_yield` in [0, 1]. The convention is explicitly
+`R = k N_t^2 / V` pair events per second: each event removes two triplets. A
+triplet-loss coefficient must be converted by its author, and a molar rate
+coefficient is not interchangeable with this count-based convention. Neither
+diffusion rates nor spin branching factors are inferred from material names.
+
+The snapshot preserves the complete original material bundle, exact selected
+claims and fixed external conditions. An explicitly owned absolute-temperature
+axis refreshes both coefficients at the native thermal state. Wrong units,
+negative rates, probabilities outside [0, 1], unsupported source domains and
+unowned field/history response refuse. Zero remains an explicit physical value.
+The caller supplies the active volume to `law(volume_m3)`; the native
+`TripletAnnihilation` owner checks that each productive pair can supply its
+singlet energy and owns pair counts, populations and heat. Coefficient refresh
+does not evolve or replace those histories.
+
+Four focused G0/G1/G3 tests in `tests/phosphorescence/annihilation.rs` cover
+original thermal interpolation, the physical factor of two and exact isolated
+pair kinetics, active-volume admission, whole-bundle and claim retention,
+explicit zeros, permissive-bundle revalidation and unsupported refreshes. All
+14 phosphorescence source tests passed in the existing narrow actual-source
+validation build. These manufactured claims establish implementation behavior,
+not empirical coefficients for a particular phosphor.
+
 ## Bounded tabulated plastic hardening
 
 `plastic::tabulated::TabulatedHardening` retains explicitly supplied absolute

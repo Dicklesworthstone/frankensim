@@ -28,6 +28,8 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 use fs_thermal::luminescence::transfer::{SingletTripletDecay, SingletTripletError};
 
+/// Source-bound triplet pair encounters and productive singlet branching.
+pub mod annihilation;
 /// Source-bound molecular absorption into the singlet and triplet states.
 pub mod pump;
 

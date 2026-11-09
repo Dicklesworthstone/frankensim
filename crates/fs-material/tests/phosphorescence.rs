@@ -1,5 +1,7 @@
 //! G0/G1/G3 source admission and physical quenching using manufactured claims.
 
+#[path = "phosphorescence/annihilation.rs"]
+mod annihilation;
 #[path = "phosphorescence/pump.rs"]
 mod pump;
 
