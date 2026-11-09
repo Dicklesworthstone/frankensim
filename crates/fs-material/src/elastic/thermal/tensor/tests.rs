@@ -247,3 +247,6 @@ fn isothermal_views_preserve_source_symmetry_and_rotated_thermal_derivatives() {
         }
     }}
 }
+
+#[path = "tests/exchange.rs"]
+mod exchange;

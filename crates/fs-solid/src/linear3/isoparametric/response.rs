@@ -756,6 +756,7 @@ impl TetLinearElasticProblem<'_> {
                 damping[node][c] = finite(damping[node][c] + finite(eta * mv + zeta * kv[d])?)?;
             }
             elements.push(TetElementThermalStress {
+                total_strain_mandel: total,
                 elastic_strain_mandel,
                 stress_mandel_pa,
                 elastic_energy_j: energy,

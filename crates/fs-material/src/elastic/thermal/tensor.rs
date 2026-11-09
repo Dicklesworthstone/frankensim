@@ -27,6 +27,9 @@ use crate::state_point::{
 };
 use crate::tensor::{mandel_rotation, rotate_mandel};
 
+mod increment;
+pub(super) use increment::{ThermalCoefficientIncrement, coefficient_increments};
+
 const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 /// Explicit source schema and fixed material axes. Elastic and thermal

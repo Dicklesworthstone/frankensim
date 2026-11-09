@@ -1277,6 +1277,7 @@ impl TetEigenstrainDisplacementSolution {
 /// Constant P1 element response in the reference mesh's Mandel coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TetElementEigenstrainStress {
+    total_strain_mandel: [f64; 6],
     elastic_strain_mandel: [f64; 6],
     stress_mandel_pa: [f64; 6],
     elastic_energy_j: f64,
@@ -1287,6 +1288,13 @@ pub struct TetElementEigenstrainStress {
 pub type TetElementThermalStress = TetElementEigenstrainStress;
 
 impl TetElementEigenstrainStress {
+    /// Actual compatible total Mandel strain, retained before subtracting the
+    /// integrated free strain. Do not reconstruct small motion from rounded
+    /// elastic and free-strain endpoints when computing finite thermal work.
+    #[must_use]
+    pub const fn total_strain_mandel(&self) -> &[f64; 6] {
+        &self.total_strain_mandel
+    }
     /// Compatible total strain minus the integrated stress-free strain.
     #[must_use]
     pub const fn elastic_strain_mandel(&self) -> &[f64; 6] {
@@ -2659,6 +2667,7 @@ impl TetLinearElasticProblem<'_> {
                 identity.update(&value.to_bits().to_le_bytes());
             }
             elements.push(TetElementThermalStress {
+                total_strain_mandel: total,
                 elastic_strain_mandel,
                 stress_mandel_pa,
                 elastic_energy_j: energy,
