@@ -1,3 +1,21 @@
+## Physical momentum at forced D3Q19 initialization
+
+`BoundaryGrid3` constructors initialize unit-density fluid at physical rest in
+the held Guo source frame, `f = f_eq(rho, 0) - S(0, F)/2`. Density perturbation
+uses each cell's actual uniform-plus-spatial force. Thus initialization adds
+neither a half-step body impulse nor the artificial `F F/(4 rho)` pressure
+produced by shifting the equilibrium velocity. The native collision and stream
+then supply their ordinary full-step momentum exchange. Boundary semantics
+version 2 records this correction; zero-force population arithmetic and the
+unforced boundary golden remain unchanged. `set_force_field` still explicitly
+selects source coordinates; `rebind_force_field` preserves an evolved physical
+state.
+
+G0/G1/G3 regressions cover both force signs, all five D3Q19 collision families,
+the initial isotropic pressure tensor, and integrated body impulse on periodic
+grids with nonuniform density and spatial forcing. These establish the stated
+initialization and balance laws, not a new whole-solver convergence claim.
+
 ## Conducting walls in native open-flow heat transport
 
 `ThermalOpenField3::set_wall_conduction(axis, links, controls)` attaches the existing implicit finite-wall graph to an original lower/upper external wall pair. Multiple axis pairs can coexist, including both transverse pairs of a rectangular duct. Link indices omit the selected normal coordinate and retain the original x-fast surface order. Every endpoint must face an active fluid cell; blocked wall-array slots cannot become hidden solid storage or consume sources.

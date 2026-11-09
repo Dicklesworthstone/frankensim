@@ -37,11 +37,159 @@ fn nonequilibrium_stress(populations: [f64; Q3], rho: f64, velocity: [f64; 3]) -
     stress
 }
 
+fn forced_initialization_models() -> [CollisionModel3; 5] {
+    [
+        CollisionModel3::Bgk { tau: 0.85 },
+        CollisionModel3::Trt {
+            tau: 0.85,
+            magic: 3.0 / 16.0,
+        },
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.2,
+            higher_order_rate: 1.5,
+        },
+        CollisionModel3::CentralMomentBulk {
+            shear_rate: 1.2,
+            bulk_rate: 0.9,
+            higher_order_rate: 1.5,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.2,
+            third_order_rate: 1.35,
+            fourth_order_rate: 1.5,
+        },
+    ]
+}
+
+/// G0/G1: the constructor's physical rest is independent of force and
+/// collision rates. An initially uniform periodic fluid receives exactly one
+/// force impulse on its first step, without an artificial half-step head start.
+#[test]
+fn forced_boundaries_start_at_physical_rest_with_isotropic_pressure() {
+    for model in forced_initialization_models() {
+        for sign in [-1.0, 1.0] {
+            let force = [3e-4 * sign, -2e-4 * sign, 1e-4 * sign];
+            let mut grid = BoundaryGrid3::with_collision_model(
+                4,
+                4,
+                4,
+                model,
+                force,
+                BoundarySpec3::periodic(),
+            );
+            let rho = grid.density(0, 0, 0);
+            let velocity = grid.velocity(0, 0, 0);
+            assert!((rho - 1.0).abs() < 2e-15);
+            assert!(
+                velocity.iter().all(|u| u.abs() < 2e-16),
+                "{model:?}: {velocity:?}"
+            );
+            // At rest the Guo source has no second moment. Initializing by
+            // shifting equilibrium velocity instead would add F F / (4 rho).
+            let f = grid.populations(0, 0, 0);
+            for a in 0..3 {
+                for b in 0..3 {
+                    let second = E3
+                        .iter()
+                        .zip(f)
+                        .map(|(&(x, y, z), f)| {
+                            let e = [f64::from(x), f64::from(y), f64::from(z)];
+                            f * e[a] * e[b]
+                        })
+                        .sum::<f64>();
+                    let expected = if a == b { rho * CS2 } else { 0.0 };
+                    assert!((second - expected).abs() < 2e-15, "{model:?}: {a},{b}");
+                }
+            }
+            grid.step();
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let rho = grid.density(x, y, z);
+                        let velocity = grid.velocity(x, y, z);
+                        for a in 0..3 {
+                            assert!(
+                                (rho * velocity[a] - force[a]).abs() < 3e-15,
+                                "{model:?}, axis {a}: {} vs {}",
+                                rho * velocity[a],
+                                force[a]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// G0/G3: perturbing density must retain rest in every cell's actual total
+/// force frame. Subsequent periodic momentum growth equals the independently
+/// summed body impulse even with spatially varying forces and density.
+#[test]
+fn perturbed_boundaries_use_local_force_frames_without_initial_momentum() {
+    let uniform = [2e-4, -1e-4, 3e-5];
+    for model in forced_initialization_models() {
+        let mut grid =
+            BoundaryGrid3::with_collision_model(4, 4, 4, model, uniform, BoundarySpec3::periodic());
+        grid.set_force_field(|p| {
+            [
+                1e-5 * (p[0] as f64 - 2.0),
+                2e-5 * (p[1] as f64 - 1.0),
+                -1e-5 * p[2] as f64,
+            ]
+        });
+        grid.perturb(0xC011_1DE3, 0.05);
+        let mass = grid.total_mass();
+        let mut total_force = [0.0; 3];
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    let rho = grid.density(x, y, z);
+                    let velocity = grid.velocity(x, y, z);
+                    let force = grid.force_density(x, y, z);
+                    assert!((rho - 1.0).abs() < 0.05);
+                    for a in 0..3 {
+                        assert!(
+                            velocity[a].abs() < 2e-16,
+                            "{model:?}, cell {x},{y},{z}: {velocity:?}"
+                        );
+                        total_force[a] += force[a];
+                    }
+                }
+            }
+        }
+        for step in 1..=4 {
+            grid.step();
+            let mut momentum = [0.0; 3];
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let rho = grid.density(x, y, z);
+                        let velocity = grid.velocity(x, y, z);
+                        for a in 0..3 {
+                            momentum[a] += rho * velocity[a];
+                        }
+                    }
+                }
+            }
+            assert!((grid.total_mass() - mass).abs() < 2e-12);
+            for a in 0..3 {
+                let expected = f64::from(step) * total_force[a];
+                assert!(
+                    (momentum[a] - expected).abs() < 2e-13,
+                    "{model:?}, step {step}, axis {a}: {} vs {expected}",
+                    momentum[a]
+                );
+            }
+        }
+    }
+}
+
 /// lbm3bc-001: wall and SDF-solid links are represented by exact masks in
 /// tile-major order, and enumeration is stable by `(tile,lane,direction)`.
 #[test]
 fn link_masks_cover_planar_and_voxelized_boundaries() {
-    assert_eq!(D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, 1);
+    assert_eq!(D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, 2);
     let grid = BoundaryGrid3::new(8, 8, 8, 0.8, [0.0; 3], BoundarySpec3::periodic_duct_z());
     // Hand-enumerated from the pinned table; this oracle does not reuse the
     // production predicate that constructs the masks.
@@ -214,9 +362,10 @@ fn collision_model_selection_is_backward_compatible_and_conservative() {
                     let rho = forced.density(x, y, z);
                     let u = forced.velocity(x, y, z);
                     for axis in 0..3 {
-                        // Initial stored momentum is zero; the reported
-                        // physical momentum includes the initial half force.
-                        let expected = 4.5 * (uniform[axis] + local[axis]);
+                        // The constructor starts at physical rest under its
+                        // uniform force. Selecting the initial field changes
+                        // only that field's half-source interpretation.
+                        let expected = 4.0 * (uniform[axis] + local[axis]) + 0.5 * local[axis];
                         assert!((rho * u[axis] - expected).abs() < 5e-13, "{model:?}");
                     }
                 }

@@ -77,9 +77,10 @@ pub use body_motion::{
 ///
 /// This covers face ordering, link-mask construction, solid-cell
 /// voxelization, moving-wall correction, regularized open-face
-/// reconstruction, and deterministic traversal. Bump it whenever any of
-/// those rules can move result bits.
-pub const D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION: u32 = 1;
+/// reconstruction, physical initialization, and deterministic traversal.
+/// Version 2 initializes rest states in the held Guo half-source frame;
+/// zero-force initialization and the unforced boundary golden are unchanged.
+pub const D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION: u32 = 2;
 
 /// Axis-aligned domain face in deterministic registry order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -802,7 +803,9 @@ impl BoundaryGrid3 {
         Self::with_collision_model(nx, ny, nz, CollisionModel3::Bgk { tau }, force, boundaries)
     }
 
-    /// Unit-density fluid at rest under an explicit collision model.
+    /// Unit-density fluid at physical rest under an explicit collision model.
+    /// Stored populations include `-S(0, force)/2`, so the Guo velocity is
+    /// zero initially and the first step receives one full force impulse.
     ///
     /// Every dimension must be a positive multiple of [`TILE`]. The collision
     /// model and force must be finite and admissible. BGK and moment-space
@@ -852,7 +855,10 @@ impl BoundaryGrid3 {
             .checked_mul(nty)
             .and_then(|xy| xy.checked_mul(ntz))
             .expect("grid tile count overflow");
-        let f0 = equilibrium3(1.0, [0.0; 3]);
+        let mut f0 = equilibrium3(1.0, [0.0; 3]);
+        if force != [0.0; 3] {
+            crate::thermal::forcing::reframe3(&mut f0, [0.0; 3], [0.0; 3], force);
+        }
         let f = core::array::from_fn(|i| vec![Tile::filled(f0[i]); tiles]);
         let post = core::array::from_fn(|i| vec![Tile::filled(f0[i]); tiles]);
         let mut grid = BoundaryGrid3 {
@@ -1364,7 +1370,9 @@ impl BoundaryGrid3 {
         total
     }
 
-    /// Deterministic density perturbation for replay/golden fixtures.
+    /// Deterministic density perturbation at physical rest for replay fixtures.
+    /// Each cell retains its held total force, including a spatial field, in
+    /// the half-source coordinates. No half-force velocity is initialized.
     pub fn perturb(&mut self, seed: u64, amplitude: f64) {
         assert!(
             amplitude.is_finite() && amplitude.abs() < 1.0,
@@ -2128,8 +2136,12 @@ impl BoundaryGrid3 {
     }
 
     fn write_equilibrium(&mut self, x: usize, y: usize, z: usize, rho: f64, velocity: [f64; 3]) {
-        let equilibrium = equilibrium3(rho, velocity);
+        let mut equilibrium = equilibrium3(rho, velocity);
         let (tile, lane) = self.addr(x, y, z);
+        let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+        if force != [0.0; 3] {
+            crate::thermal::forcing::reframe3(&mut equilibrium, velocity, [0.0; 3], force);
+        }
         for (field, value) in self.f.iter_mut().zip(equilibrium) {
             field[tile].0[lane] = value;
         }
