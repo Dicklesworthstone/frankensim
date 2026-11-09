@@ -466,6 +466,30 @@ hardness transfer: the consumer supplies an explicit original cell mapping and
 its original contact geometry, without transferring residual stress, plastic
 displacements or duplicating the bulk indentation deformation/work.
 
+## Original indentation hardness at native Hex8 points
+
+`SmallStrainHexProblem::observe_hardness` and `observe_cyclic_hardness`
+extend the original J2 and source-bound Voce/Chaboche observers to all eight
+material points per brick. Uniform, per-element and per-quadrature hardness
+sources remain explicit. Each actual law, accepted assumed strain and complete
+history is admitted in native element/Gauss order, including the B-bar strain
+used by the mechanical solver. No element-average hardness, extra return map or
+per-point source-receipt clone is introduced; scalar output costs one f64 per
+point. Allocation budgets, source/support mismatch and cancellation refuse the
+complete field atomically.
+
+`export_hardness_field` and `export_cyclic_hardness_field` retain every point's
+own alpha/H in the original compact `AcceptedHardnessField`. A shared source is
+stored once; different actual original laws refuse homogeneous export. External
+contact still supplies its explicit point map and original geometry. Residual
+stress, displacement, bulk work and thermal energy are not transferred.
+
+`tests/plastic_hex_hardness.rs` covers Standard/B-bar quadrature, heterogeneous
+laws, an independent first-load radial-return result, elastic unloading,
+reversal, complete cyclic branches and late atomic refusals. Its Archard fixture
+uses each local hardness and shows why averaging H changes removal; it does not
+qualify measured material behavior or solve reciprocal bulk/contact loading.
+
 ## Owned finite-strain membrane reference continuation
 
 `OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original

@@ -39,6 +39,8 @@ use std::collections::BTreeSet;
 
 /// Consistent-reference-mass motion with the original eight point histories.
 pub mod dynamics;
+/// Original indentation hardness on accepted native quadrature histories.
+pub mod hardness;
 
 /// Original source-bound thermal histories, heat and mechanical work.
 pub mod thermal;
