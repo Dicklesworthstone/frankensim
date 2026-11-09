@@ -1,6 +1,8 @@
 //! Original molecular sources and finite-gas droplet integration.
 //! This file is included under the existing evaporation fixture module so the
 //! NASA/material owners are reused rather than replaced with a new gas model.
+#[path = "chamber/tests.rs"]
+mod chamber;
 #[path = "forced/tests.rs"]
 mod forced;
 

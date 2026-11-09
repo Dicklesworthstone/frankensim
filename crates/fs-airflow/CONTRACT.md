@@ -6208,3 +6208,33 @@ Four focused regression definitions cover independent heating/cooling transfer,
 original bulk/wall sources, both native finite stores and link reversal, gas and
 numeric-source refusal, and changed source claims or non-temperature context.
 Their execution is not claimed by this implementation checkpoint.
+
+## Shared atmosphere for heterogeneous sourced spherical droplets
+
+`evaporation::droplet::chamber` explicitly assigns each physical droplet its
+existing stagnant or forced-sphere film adapter, original liquid law and
+caloric inverse. Different sizes, temperatures, kinetics and prescribed
+relative speeds share one original material chamber. Canonical stable IDs and
+a caller-owned positive roster ceiling bound the work. Volatile identity is
+admitted before the liquid source is queried.
+
+Every initial film sees the same actual gas. Stagnant transport retains the
+original bulk-temperature D/r path; forced transport reuses the pinned source,
+arithmetic mean film temperature, original gas density/viscosity, selected
+Sherwood correlation and existing dilute guard. That guard remains active at
+every phase evaluation, including after collective sensible heat. One joint
+material phase/heat owner handles shared vapor and caloric storage. Final
+source/correlation support for every accepted size and common gas must pass
+before any candidate is returned; no model or source claim silently switches.
+
+Full typed initial/final film receipts retain molecular D and Sh separately.
+Geometry and transport freeze through this first-order interval; endpoint
+samples prepare the next interval. Gas volume is external and fixed. This
+well-mixed humidity/heat feedback introduces no statistical weights, wakes,
+shielding, trajectories, drag, coalescence or moving-volume work.
+
+Five focused G0/G3/G4 regression groups specify mixed models/directions,
+source-based rates, original scalar parity, shared reciprocal heat, canonical
+ordering, early identity refusal and atomic late source/dilute refusal.
+New Rust modules passed pinned rustfmt parsing/format checks; runtime and
+full-crate compilation remain unverified in this environment.

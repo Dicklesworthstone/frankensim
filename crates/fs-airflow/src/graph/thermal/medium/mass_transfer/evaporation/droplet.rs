@@ -23,6 +23,9 @@
 /// Explicit dilute forced convection with the same original molecular source.
 pub mod forced;
 
+/// Original sourced spherical films sharing one finite atmosphere and heat solve.
+pub mod chamber;
+
 use super::super::chamber::binary_vapor_fraction;
 use super::super::{GasFilmError, typed};
 use fs_matdb::QueryPoint;

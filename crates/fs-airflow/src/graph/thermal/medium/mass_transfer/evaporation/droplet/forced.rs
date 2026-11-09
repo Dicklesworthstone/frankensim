@@ -345,7 +345,7 @@ impl<'film, 'm> SourceForcedSphericalDropletFilm<'film, 'm> {
         })
     }
 
-    fn admit_surface<L: EvaporationLaw + ?Sized>(
+    pub(super) fn admit_surface<L: EvaporationLaw + ?Sized>(
         &self,
         law: &L,
         film: &ForcedSphericalDropletFilmSample,
@@ -386,10 +386,10 @@ fn correlation_error(error: ForcedSphereFilmError) -> SphericalDropletFilmError 
 /// Admit each phase-film state and supply the frozen mean transport temperature.
 /// All constitutive values, actual interface temperature, kinetics and hooks
 /// remain original; gas and carried-vapor calorics are untouched.
-struct DiluteLaw<'a, L: EvaporationLaw + ?Sized> {
-    source: &'a L,
-    maximum: f64,
-    film_temperature_k: f64,
+pub(super) struct DiluteLaw<'a, L: EvaporationLaw + ?Sized> {
+    pub(super) source: &'a L,
+    pub(super) maximum: f64,
+    pub(super) film_temperature_k: f64,
 }
 impl<L: EvaporationLaw + ?Sized> EvaporationLaw for DiluteLaw<'_, L> {
     fn temperature_range_k(&self) -> [f64; 2] {
