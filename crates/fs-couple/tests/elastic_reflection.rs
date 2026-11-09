@@ -17,6 +17,8 @@ mod oriented;
 mod transient;
 #[path = "elastic_reflection/viscoelastic.rs"]
 mod viscoelastic;
+#[path = "elastic_reflection/viscoelastic_heating.rs"]
+mod viscoelastic_heating;
 
 fn solid(scale: f64) -> ElasticAcousticState {
     ElasticAcousticState::from_bulk_and_shear(

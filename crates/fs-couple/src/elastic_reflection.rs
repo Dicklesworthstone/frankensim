@@ -36,7 +36,10 @@ pub use transient::{
     TransientElasticSupportEnergy, TransientElasticSupportState,
 };
 mod viscoelastic;
-pub use viscoelastic::{OscillatorBackedViscoelasticLayers, SupportedViscoelasticResponse};
+pub use viscoelastic::{
+    OscillatorBackedViscoelasticHeating, OscillatorBackedViscoelasticLayers,
+    SupportedViscoelasticResponse,
+};
 
 use fs_material::MaterialError;
 use fs_material::elastic::acoustic::ElasticAcousticState;

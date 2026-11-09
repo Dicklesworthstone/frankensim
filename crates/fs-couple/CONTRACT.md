@@ -12250,3 +12250,32 @@ supply passages and coupled radiation; those combinations were not runtime
 verified. Seven existing stored-source regressions also passed after sharing
 its immutable boundary preview. New files passed pinned formatting; full
 workspace Cargo/remote-runner validation remains unavailable.
+
+### Original oscillator-backed coatings on the native thermal timeline
+
+`OscillatorBackedViscoelasticLayers::prepare_heating` binds the original
+supported coating and authored peak pressure to native
+`SupportedViscoelasticHeating`. Exact original bulk and shear work enters the
+existing physical depth cells; accepted thermal intervals and explicit power
+envelopes own each joule. The adapter adds no observer, heat account or time
+integrator.
+
+A distinct optional backing cell receives the original resistance work once;
+otherwise that work is reported as exported. Its caloric mass remains an
+explicit thermal property and is not inferred from the pin's reduced inertia.
+The wrapper retains the original `WallPin` and exposes `peak_response` for the
+actual rear displacement and cycle-mean kinetic and spring storage. Those
+stored mechanical energies never enter thermal source credits. The peak
+response remains the authored carrier response after an envelope changes or
+ends; it does not represent an instantaneous transient state.
+
+Original coating and support coefficients remain frozen inside their declared
+temperature bands. The native thermal engine retains conduction, boundary
+events, material storage, accepted-step decisions and atomic refusal. The
+adapter does not infer temperature-dependent mechanics or oscillator ring-up.
+
+Integration fixtures cover depth-resolved Maxwell-layer heat, a distinct
+backing receiver with independent caloric mass, reactive storage without heat,
+affine envelopes and dark intervals, split versus whole advances with native
+boundary events, original source bindings, temperature support, budgets and
+late cancellation without mutation of the input histories.

@@ -5,6 +5,9 @@
 //! opposite phasor sign, so its conjugate is supplied explicitly. The same
 //! phase conversion gives x=v/(i omega) for the returned backing displacement.
 
+mod heating;
+pub use heating::OscillatorBackedViscoelasticHeating;
+
 use super::{ElasticSupportError, displacement, mean_energy};
 use fs_material::elastic::acoustic::viscoelastic::layers::{
     DrivenSupportedViscoelasticLayers, SupportedViscoelasticLayers, ViscoelasticBacking,
