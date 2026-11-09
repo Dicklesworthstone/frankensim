@@ -41,10 +41,63 @@ export interface ToolRenderParams {
 const CASE_SHELL_N_THETA = 64;
 const CASE_SHELL_N_Z = 8;
 const CASE_SHELL_NODES = CASE_SHELL_N_THETA * CASE_SHELL_N_Z;
+const CASE_RENDER_N_THETA = 128;
+const CASE_RENDER_N_Z = 22;
 
 const GRID_N = 24;
 const GRID_HALF_SPAN_MM = 28.8;
 const GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
+const RENDER_GRID_N = 84;
+const RENDER_GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / (RENDER_GRID_N - 1);
+
+function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2.0 * p1 +
+      (-p0 + p2) * t +
+      (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+      (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+  );
+}
+
+/**
+ * Smoothly sample a 2D scalar field on the `24 x 24` PDE grid at world coordinates `(xMm, yMm)`
+ * using 9-point Gaussian-filtered bilinear interpolation so free-surface molten & solidified gold
+ * pools render with organic Young-Laplace meniscus contours instead of 2.17 mm square cells.
+ */
+function sampleSmoothPdeField(
+  gridData: Float32Array,
+  channelOffset: number,
+  xMm: number,
+  yMm: number,
+): number {
+  const gx = (xMm + GRID_HALF_SPAN_MM) / GRID_DX_MM - 0.5;
+  const gy = (yMm + GRID_HALF_SPAN_MM) / GRID_DX_MM - 0.5;
+  const ix0 = Math.floor(gx);
+  const iy0 = Math.floor(gy);
+  const fx = gx - ix0;
+  const fy = gy - iy0;
+
+  const readCell = (cx: number, cy: number): number => {
+    const xClamp = Math.max(0, Math.min(GRID_N - 1, cx));
+    const yClamp = Math.max(0, Math.min(GRID_N - 1, cy));
+    return gridData[(yClamp * GRID_N + xClamp) * 7 + channelOffset]!;
+  };
+
+  // Evaluate 4x4 Catmull-Rom bicubic patch clamped to >= 0 for positive thickness fields
+  const rowVals = [0, 0, 0, 0];
+  for (let m = -1; m <= 2; m++) {
+    const v0 = readCell(ix0 - 1, iy0 + m);
+    const v1 = readCell(ix0, iy0 + m);
+    const v2 = readCell(ix0 + 1, iy0 + m);
+    const v3 = readCell(ix0 + 2, iy0 + m);
+    rowVals[m + 1] = catmullRom(v0, v1, v2, v3, fx);
+  }
+  const val = catmullRom(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, fy);
+  return channelOffset === 0 ? Math.max(70.0, val) : Math.max(0.0, val);
+}
 
 /**
  * Generate high-DPI procedural horological surface finishing normal & roughness textures:
@@ -58,6 +111,7 @@ function buildHorologicalFinishTextures(): {
   perlageNormal: THREE.CanvasTexture;
   guillocheNormal: THREE.CanvasTexture;
   sunburstNormal: THREE.CanvasTexture;
+  softParticleTex: THREE.CanvasTexture;
 } {
   // 1. Côtes de Genève (Geneva Stripes)
   const cGeneva = document.createElement("canvas");
@@ -185,7 +239,21 @@ function buildHorologicalFinishTextures(): {
   sCtx.putImageData(sImg, 0, 0);
   const sunburstNormal = new THREE.CanvasTexture(cSun);
 
-  return { genevaNormal, perlageNormal, guillocheNormal, sunburstNormal };
+  // 5. Soft Radial Gaussian Sprite Texture (prevents square WebGL point-sprite artifacts)
+  const cPart = document.createElement("canvas");
+  cPart.width = 64;
+  cPart.height = 64;
+  const ptCtx = cPart.getContext("2d")!;
+  const radGrad = ptCtx.createRadialGradient(32, 32, 1, 32, 32, 31);
+  radGrad.addColorStop(0.0, "rgba(255, 255, 255, 1.0)");
+  radGrad.addColorStop(0.35, "rgba(235, 248, 255, 0.65)");
+  radGrad.addColorStop(0.72, "rgba(195, 232, 255, 0.18)");
+  radGrad.addColorStop(1.0, "rgba(180, 225, 255, 0.0)");
+  ptCtx.fillStyle = radGrad;
+  ptCtx.fillRect(0, 0, 64, 64);
+  const softParticleTex = new THREE.CanvasTexture(cPart);
+
+  return { genevaNormal, perlageNormal, guillocheNormal, sunburstNormal, softParticleTex };
 }
 
 /**
@@ -541,6 +609,7 @@ export class PocketWatchScene {
 
   // Shared PBR Materials
   private readonly matGoldCase: THREE.MeshPhysicalMaterial;
+  private readonly matSolidGoldStatic: THREE.MeshPhysicalMaterial;
   private readonly matMoltenGold: THREE.MeshPhysicalMaterial;
   private readonly matSolidifiedGold: THREE.MeshPhysicalMaterial;
   private readonly matRhodiumPlate: THREE.MeshStandardMaterial;
@@ -569,21 +638,24 @@ export class PocketWatchScene {
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = 0.84;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x070a10);
+    this.scene.background = new THREE.Color(0x06080e);
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.035).texture;
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.045).texture;
+    this.scene.environmentIntensity = 0.36;
     pmrem.dispose();
 
     this.camera = new THREE.PerspectiveCamera(34, 1.0, 0.5, 450);
     this.camera.position.set(0, -34, 66);
 
     // Half-float HDR post-processing pipeline (RenderPass -> UnrealBloomPass -> SMAAPass -> OutputPass)
+    // Bloom threshold is set above 1.45 so room-temperature metals stay crisp and un-washed,
+    // while genuine >900 K blackbody incandescence and blowtorch plasma plumes bloom naturally.
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const initW = Math.max(320, canvas.clientWidth || 960);
     const initH = Math.max(260, canvas.clientHeight || 640);
@@ -596,9 +668,9 @@ export class PocketWatchScene {
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(initW, initH),
-      0.38,
-      0.52,
-      0.92,
+      0.08,
+      0.36,
+      1.48,
     );
     this.composer.addPass(this.bloomPass);
     this.smaaPass = new SMAAPass();
@@ -610,8 +682,8 @@ export class PocketWatchScene {
     this.controls.dampingFactor = 0.06;
     this.controls.target.set(0, -2, 0);
 
-    // Studio horological lighting
-    const keyLight = new THREE.DirectionalLight(0xfff6e5, 2.8);
+    // Museum-grade chiaroscuro horological lighting (balanced to prevent metallic blowout)
+    const keyLight = new THREE.DirectionalLight(0xfff4e0, 1.38);
     keyLight.position.set(32, 42, 58);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(2048, 2048);
@@ -625,11 +697,11 @@ export class PocketWatchScene {
     keyLight.shadow.bias = -0.0005;
     this.scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x9ec5ff, 1.35);
+    const rimLight = new THREE.DirectionalLight(0x8ab6f9, 0.58);
     rimLight.position.set(-38, -28, 36);
     this.scene.add(rimLight);
 
-    const underFill = new THREE.DirectionalLight(0xffdca8, 0.75);
+    const underFill = new THREE.DirectionalLight(0xffd79e, 0.28);
     underFill.position.set(0, 24, -38);
     this.scene.add(underFill);
 
@@ -638,99 +710,106 @@ export class PocketWatchScene {
 
     // Sourced Materials from `data/matdb/seed-v1`
     this.matGoldCase = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xffcf58),
-      metalness: 0.98,
-      roughness: 0.14,
-      clearcoat: 0.25,
-      clearcoatRoughness: 0.12,
+      color: new THREE.Color(0xffffff),
+      metalness: 0.92,
+      roughness: 0.22,
+      clearcoat: 0.14,
+      clearcoatRoughness: 0.18,
       vertexColors: true,
     });
 
+    this.matSolidGoldStatic = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0xe5b852),
+      metalness: 0.92,
+      roughness: 0.21,
+      clearcoat: 0.14,
+      clearcoatRoughness: 0.18,
+    });
+
     this.matMoltenGold = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xffd86b),
-      metalness: 0.96,
-      roughness: 0.04,
-      clearcoat: 0.85,
-      clearcoatRoughness: 0.03,
+      color: new THREE.Color(0xffffff),
+      metalness: 0.94,
+      roughness: 0.07,
+      clearcoat: 0.75,
+      clearcoatRoughness: 0.05,
       vertexColors: true,
     });
 
     this.matSolidifiedGold = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xe8b448),
-      metalness: 0.94,
-      roughness: 0.26,
-      clearcoat: 0.15,
-      vertexColors: true,
+      color: new THREE.Color(0xdca942),
+      metalness: 0.9,
+      roughness: 0.28,
+      clearcoat: 0.12,
     });
 
     this.matRhodiumPlate = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xd8dde6),
-      metalness: 0.9,
-      roughness: 0.26,
+      color: new THREE.Color(0xc2c9d6),
+      metalness: 0.86,
+      roughness: 0.34,
       normalMap: finishes.perlageNormal,
-      normalScale: new THREE.Vector2(0.38, 0.38),
-    });
-
-    this.matGenevaBridge = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xe3e7ef),
-      metalness: 0.92,
-      roughness: 0.2,
-      normalMap: finishes.genevaNormal,
-      normalScale: new THREE.Vector2(0.48, 0.48),
-    });
-
-    this.matBrassWheel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xe7be5a),
-      metalness: 0.93,
-      roughness: 0.19,
-    });
-
-    this.matPolishedSteel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xedf2f8),
-      metalness: 0.97,
-      roughness: 0.08,
-    });
-
-    this.matSunburstSteel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xe2e7f0),
-      metalness: 0.95,
-      roughness: 0.16,
-      normalMap: finishes.sunburstNormal,
       normalScale: new THREE.Vector2(0.45, 0.45),
     });
 
-    this.matBluedSteel = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0x2856c8),
+    this.matGenevaBridge = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0xcfd6e3),
       metalness: 0.88,
-      roughness: 0.14,
-      clearcoat: 0.55,
-      clearcoatRoughness: 0.08,
+      roughness: 0.27,
+      normalMap: finishes.genevaNormal,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+    });
+
+    this.matBrassWheel = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0xd8ae48),
+      metalness: 0.89,
+      roughness: 0.25,
+    });
+
+    this.matPolishedSteel = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0xdce3ee),
+      metalness: 0.93,
+      roughness: 0.15,
+    });
+
+    this.matSunburstSteel = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0xd0d7e4),
+      metalness: 0.9,
+      roughness: 0.22,
+      normalMap: finishes.sunburstNormal,
+      normalScale: new THREE.Vector2(0.52, 0.52),
+    });
+
+    this.matBluedSteel = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0x1f49b8),
+      metalness: 0.84,
+      roughness: 0.18,
+      clearcoat: 0.48,
+      clearcoatRoughness: 0.1,
     });
 
     this.matHairspring = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0x386ce2),
-      metalness: 0.9,
-      roughness: 0.15,
-      clearcoat: 0.4,
+      color: new THREE.Color(0x2e60d8),
+      metalness: 0.86,
+      roughness: 0.18,
+      clearcoat: 0.35,
     });
 
     this.matTitaniumCage = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xc5cdd8),
-      metalness: 0.91,
-      roughness: 0.16,
+      color: new THREE.Color(0xb4becb),
+      metalness: 0.88,
+      roughness: 0.21,
     });
 
     this.matGlucydurBalance = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xf2b452),
-      metalness: 0.94,
-      roughness: 0.13,
+      color: new THREE.Color(0xe2a442),
+      metalness: 0.9,
+      roughness: 0.18,
     });
 
     this.matRubyJewel = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xd80b38),
-      emissive: new THREE.Color(0x35000b),
+      color: new THREE.Color(0xc90a35),
+      emissive: new THREE.Color(0x280008),
       metalness: 0.02,
-      roughness: 0.05,
+      roughness: 0.06,
       transmission: 0.82,
       ior: 1.77,
       thickness: 1.2,
@@ -741,12 +820,12 @@ export class PocketWatchScene {
     this.matSapphireCrystal = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(0xf4f9ff),
       metalness: 0.0,
-      roughness: 0.03,
+      roughness: 0.04,
       transmission: 0.94,
       ior: 1.768,
-      thickness: 1.4,
+      thickness: 1.2,
       transparent: true,
-      opacity: 0.24,
+      opacity: 0.18,
     });
 
     this.matScrewSlot = new THREE.MeshBasicMaterial({ color: 0x0b101b });
