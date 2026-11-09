@@ -18,6 +18,8 @@
 //! reversal requires a refined interval rather than the unforced orbit bound.
 //! [`normal`] explicitly continues the original attached normal area before a
 //! rolling phase, retaining its spring memory and separate prescribed work.
+//! [`events`] carries that split through loaded separation and fresh recontact,
+//! with outgoing release separate from native rolling loss and body impulses.
 //! Pose evolution, history transport, arbitrary vector rolling and heat
 //! allocation remain with their physical owners.
 
@@ -36,6 +38,9 @@ pub use super::moment::RigidAdhesiveMomentControls as RigidAdhesiveRollingContro
 
 /// Prescribed attached-area continuation and native recoil with retained memory.
 pub mod normal;
+
+/// Original attachment/separation events and unforced native rolling recoil.
+pub mod events;
 
 /// Physical pair and coincident reaction markers; longitudinal is the rolling axis.
 #[derive(Clone, Copy, Debug)]

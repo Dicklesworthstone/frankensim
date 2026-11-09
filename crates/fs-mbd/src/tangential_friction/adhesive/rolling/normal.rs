@@ -89,7 +89,9 @@ pub fn prepare_rigid_adhesive_rolling_with_normal_update(
     if native.geometry != state.geometry {
         return Err(RigidAdhesiveRollingError::GeometryMismatch);
     }
-    let update = contact.source.advance_normal(&state.source, indentation_m)?;
+    let update = contact
+        .source
+        .advance_normal(&state.source, indentation_m)?;
     let normal_before = *contact.source.normal_response();
     let normal_after = *update.source().normal_response();
     let normal_work = update.normal_contact_work_j();

@@ -9313,3 +9313,28 @@ not startup history or inferred bearing/preload/temperature laws.
 `rotor_maxwell_synchronous` supplies five independent native test groups,
 including a rational hereditary unbalance peak and both half-height roots,
 signed-order shaft-unit scaling, source moments, cancellation and refusals.
+
+## Native rolling through adhesive separation and recontact
+
+`tangential_friction::adhesive::rolling::events` composes one original
+prescribed-normal lifecycle stage with an unforced native midpoint rolling
+phase. Original JKR attachment/separation thresholds remain authoritative.
+Attached endpoints use both actual inertia tensors and the original source
+moment solve; its accepted angle is replayed once through the sealed lifecycle
+owner to retain cumulative release and plastic-loss accounts. A detached pair
+keeps its original momenta and records bounded free angular travel without
+preloading a future junction. A normal snap supplies no invented body impulse.
+
+Preparation binds the source history to the original pair, material arms,
+poses, mass properties and frame. It compares original mechanical endpoints
+with the regenerated lifecycle, checks the separate incremental energy channels,
+and independently observes both normal and rolling endpoint storage with an
+explicit rounding allowance. All fallible checks precede simultaneous
+publication of the two momenta and full lifecycle state. New native bindings
+create fresh attached or detached histories; loaded memory cannot be silently
+adopted into another frame. G1/G3/G4 tests in `tests/adhesive_rolling/events.rs`
+specify analytical spring release, absence of a spurious snap impulse, exact
+fresh-contact recoil after reattachment and atomic late-refusal/retry behavior.
+The scope is prescribed indentation followed by unforced rolling at held poses
+and frame; normal body motion, reciprocal area relaxation, heat destinations
+and finite rotation remain with their separate physical owners.

@@ -5,7 +5,11 @@ use fs_mbd::tangential_friction::adhesive::rolling::normal::*;
 fn loaded() -> (SourceJkrRollingContact, Fixture, RigidAdhesiveRollingState) {
     let source = source(false);
     let dt = 1e-4;
-    let mut f = fixture(0.3 * source.law().critical_rolling_angle_rad() / dt, 0.0, true);
+    let mut f = fixture(
+        0.3 * source.law().critical_rolling_angle_rad() / dt,
+        0.0,
+        true,
+    );
     let mut state = f
         .contact(&source)
         .initial_state(&f.bodies, &f.properties, controls(), &CancelGate::new())
@@ -55,10 +59,14 @@ fn g1_changed_area_retains_preload_and_drives_the_actual_inertial_response() {
         let rotational_k = k * r * r;
         let rate = next.report.mechanical.rolling_rate_before_rad_s;
         let initial_elastic_angle = state.elastic_shift_m() / r;
-        let expected_angle =
-            (dt * rate - 0.5 * dt * dt * f.mobility() * rotational_k * initial_elastic_angle)
-                / (1.0 + 0.25 * dt * dt * f.mobility() * rotational_k);
-        close(next.report.mechanical.angle_increment_rad, expected_angle, 1e-18);
+        let expected_angle = (dt * rate
+            - 0.5 * dt * dt * f.mobility() * rotational_k * initial_elastic_angle)
+            / (1.0 + 0.25 * dt * dt * f.mobility() * rotational_k);
+        close(
+            next.report.mechanical.angle_increment_rad,
+            expected_angle,
+            1e-18,
+        );
         close(
             next.state_after.elastic_shift_m(),
             state.elastic_shift_m() + r * expected_angle,
@@ -88,7 +96,10 @@ fn g1_changed_area_retains_preload_and_drives_the_actual_inertial_response() {
         assert!(next.report.absolute_stage_residual_j < c.energy_tolerance_j);
         assert_eq!(next.source_after.normal_source(), normal);
         assert_eq!(next.source_after.controls(), source.controls());
-        assert_eq!(next.report.mechanical.contact.rolling().irreversible_loss_j, 0.0);
+        assert_eq!(
+            next.report.mechanical.contact.rolling().irreversible_loss_j,
+            0.0
+        );
         for i in 0..2 {
             assert_eq!(next.bodies_after[i].pose(), f.bodies[i].pose());
             assert_eq!(
@@ -96,7 +107,10 @@ fn g1_changed_area_retains_preload_and_drives_the_actual_inertial_response() {
                 f.bodies[i].linear_momentum_world(),
             );
         }
-        assert_eq!(next.report.rolling_parameter_work_j.is_sign_positive(), load > 0.0);
+        assert_eq!(
+            next.report.rolling_parameter_work_j.is_sign_positive(),
+            load > 0.0
+        );
     }
 }
 
@@ -156,8 +170,10 @@ fn g4_normal_update_and_recoil_publish_all_owners_only_after_acceptance() {
         match failure {
             0 => gate.request(),
             1 => {
-                indentation =
-                    original_source.normal_source().minimum_attached_indentation_m() - 1e-8;
+                indentation = original_source
+                    .normal_source()
+                    .minimum_attached_indentation_m()
+                    - 1e-8;
             }
             2 => wrenches[0].torque_body = Vec3::new(f64::NAN, 0.0, 0.0),
             _ => frame = TangentFrame::new(f.frame.normal(), f.frame.lateral()).unwrap(),

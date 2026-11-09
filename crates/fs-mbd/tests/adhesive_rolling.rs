@@ -10,6 +10,8 @@ use fs_mbd::tangential_friction::{RigidContactBinding, adhesive::rolling::*};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_tribo::partial_slip::TangentFrame;
 
+#[path = "adhesive_rolling/events.rs"]
+mod events;
 #[path = "adhesive_rolling/normal.rs"]
 mod normal;
 
