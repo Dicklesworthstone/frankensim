@@ -10820,3 +10820,53 @@ fourth-order dark-fringe joules, native cell order, retained sub-ulp source
 epochs, ripple refusal before field work, and cancellation. These exercise the
 shared harmonic source and accepted-interval energy seam. Full native material,
 field reconstruction and thermal-solver integration execution remains unrun.
+
+## Adaptive finite-wall bidirectional and inertial ambient effusion
+
+`rocket_blowdown::effusion::thermal::trajectory::exchange` adds
+`GasRocketState::advance_effusion_exchange_with_wall_adaptive` and its
+convection-source variant. Vacuum discharge, comoving supply and fixed-inertial
+ambient capture share the existing finite-wall step-doubling controller.
+Every full and half trial calls the original thermal/particle exchange owner
+at the actual gas composition, gas temperature, finite-wall state and vessel
+velocity. An inertial ambient velocity is never silently made comoving.
+
+The existing vacuum API/report shape is preserved. One private generic driver
+owns time, wall/species error control, accepted history and the fixed-window
+audit; native report adapters supply the different molecular accounts. Incoming,
+outgoing and authoritative signed-net momentum and energy participate
+separately in temporal error control, so nearly cancelling streams do not hide
+gross exchange errors. A species entering from zero joins the species error
+axis without a fictitious seed inventory.
+
+Molecular reference energies use original caloric integrals and accepted
+crossing-energy corrections, including drift, before multiplication by actual
+species mass. Incoming energy is not reconstructed from net plus outgoing
+energy or from subtraction of large formation datums. Each species has one
+fixed reference for the window: the original vessel temperature when present,
+otherwise the first active external source in canonical port-ID order.
+Original material models retain only positive-composition species; inactive
+catalog entries do not acquire a baseline from an absent gas. Native boundary
+admission still requires the actual heated pre-exchange gas temperature.
+
+Accepted native reports retain complete inertial molecular energy, separate
+external heat/radiation and force/work, and signed source-coordinate net totals.
+The original fixed-window species, mass, momentum, energy, rounding/reserve and
+prescribed-heat-prorating budgets remain binding and do not grow with step count.
+Only typed gross-withdrawal errors permit physical retry; source errors,
+cancellation, balance failures and exhausted work refuse atomically.
+External reservoirs remain prescribed/undepleted and receive the opposite
+original port accounts. Export tolerances are defined in the declared inertial
+frame; a common observer boost need not produce identical adaptive step choices.
+The estimates concern local temporal splitting, not certified global or
+constitutive error.
+
+Four G0/G1/G3/G4 test groups cover entering-species refinement and exact native
+history replay; an independent continuous monatomic gas/wall/supply/discharge/
+recoil balance; independent incoming/outgoing/net reference energies under
+formation-datum shifts and common boosts; and fixed-window budget, work,
+minimum-step, unsupported-source, closed-source and cancellation behavior.
+Pinned formatter parsing/checks and scoped whitespace checks pass. Source/API
+and physical-account review found no concrete blocker. Native compilation
+and execution of these cross-crate integration tests were not performed in the
+constrained workspace.

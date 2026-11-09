@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: adaptive finite heat/recoil feedback, continuous manufactured
 //! equations, accepted-only accounting, frame transformations and atomic refusal.
 
+mod exchange;
+
 use super::*;
 use crate::rocket_blowdown::effusion::thermal::trajectory::{
     EffusionWallAdaptiveSolve, EffusionWallTrajectoryCandidate, EffusionWallTrajectoryError,
