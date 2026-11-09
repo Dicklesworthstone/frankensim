@@ -10252,6 +10252,52 @@ temperature with 3.47e-18 kg mass residual and 3.64e-12 J enthalpy residual.
 These values validate that authored integration fixture, not real propellant
 or engine performance. The full repository Cargo workspace was not run.
 
+### Prepared reacting pressure/enthalpy material endpoints
+
+`energy::equilibrium::pressure::EquilibriumGasEnthalpyPath` binds the original
+prepared reacting PH workspace to this same exact source bank and product
+freezing boundary. Typed reference T,p and original feed elements establish
+an immutable INITIAL EQUILIBRIUM enthalpy reference. Queries prescribe pressure
+and extensive H-H_reference; the native original-source inverse includes
+chemical redistribution and reacting Cp throughout its bounded temperature
+search. Source admission covers the complete declared temperature bracket.
+
+The original feed mass is preserved exactly in every material endpoint.
+Actual chemical mass and density times accepted volume are independently
+checked against the caller's absolute mass allowance. Material enthalpy
+increments are independently reduced from the actual frozen amounts:
+`sum[(n_final-n_reference)*h_reference + n_final*integral(Cp dT)]`.
+Double-double amount differences, products and sums retain small sensible
+increments beside large formation datums without removing genuine chemical
+formation terms. Direct endpoint freezing defects and the actual material
+enthalpy residual must satisfy a separate absolute Joule allowance; rounded
+absolute material enthalpy is diagnostic and never supplies the increment.
+
+The result keeps original reacting derivatives and chemical entropy separate
+from the frozen parcel's calorics, sound speed, transport and flow response.
+At constant pressure with only quasistatic pV work, the prescribed enthalpy
+change can equal supplied heat. Other processes require their own heat, work
+and kinetic-energy balance. No reaction rate, throttle flow rate, pressure
+controller, reservoir entropy or passivity claim is inferred. Failed chemistry,
+transport, balance or cancellation invalidates the current query; the immutable
+reference and previously owned results survive. Publication follows the final
+material checks and cancellation poll.
+
+The existing single-temperature `equilibrium_chamber_hp` now delegates to the
+native inlet-aware HP entry point before using the common original-material
+freezing boundary. A source chart jump between the inlet and the declared
+product bracket cannot bypass the native continuity admission.
+
+Four material regressions specify signed reacting heating/cooling against an
+independent enthalpy root, 1 mJ increments beside positive and negative large
+formation references, transport/final-poll failure atomicity, and original
+inlet-path refusal through the material HP adapter. These integration tests
+were not executed in this session because the complete material dependency
+cone requires the unavailable runtime build. The native thermochemical
+composition target passed all 52 tests, including seven new pressure/enthalpy
+and shared-isentrope cases; that result does not assert full material or
+workspace validation.
+
 ### Sealed constant-volume equilibrium and conserved parcel chemistry
 
 `energy::equilibrium::volume` connects the original TV/UV chemistry owner to

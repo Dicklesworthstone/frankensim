@@ -14,6 +14,9 @@
 /// Constant-volume, internal-energy-conserving chemistry and closed-parcel updates.
 pub mod volume;
 
+/// Reusable reacting pressure/enthalpy endpoints with original frozen material products.
+pub mod pressure;
+
 use super::parcel::ClosedGasParcel;
 use super::{GasEnergyError, IsochoricGasParcel, updated_point};
 use crate::thermochemical_gas::{ThermochemicalGasModel, coordinates, positive};
@@ -169,8 +172,15 @@ impl ThermochemicalGasModel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasEquilibriumChamber, GasEquilibriumChamberError> {
         self.admit_equilibrium_bank(chemistry, controls.mass_tolerance_kg, &mut cancelled)?;
-        let target = chemistry.feed_enthalpy(inlet_temperature, feed, &mut cancelled)?;
-        self.equilibrium_chamber_hp_enthalpy(chemistry, context, feed, target, controls, cancelled)
+        let (_, pressure) = coordinates(context)?;
+        // Preserve the native owner's admission of the positive-feed source
+        // path from the inlet to the entire solved temperature bracket.
+        let equilibrium = chemistry.equilibrate_hp(
+            pressure, feed, inlet_temperature, controls.equilibrium, &mut cancelled,
+        )?;
+        self.freeze_enthalpy_equilibrium(
+            chemistry, context, feed, equilibrium, controls, &mut cancelled,
+        )
     }
 
     /// Adiabatic fixed-pressure equilibrium for an explicit total enthalpy [J].
@@ -201,25 +211,29 @@ impl ThermochemicalGasModel {
             controls.equilibrium,
             &mut cancelled,
         )?;
-        poll(&mut cancelled)?;
+        self.freeze_enthalpy_equilibrium(
+            chemistry, context, feed, equilibrium, controls, &mut cancelled,
+        )
+    }
 
-        let feed_mass = equilibrium_feed_mass(chemistry, feed)?;
-        let (model, correction) = self.freeze_equilibrium_composition(&equilibrium)?;
-        let point = updated_point(
-            context,
-            equilibrium.temperature().value(),
-            equilibrium.pressure().value(),
+    fn freeze_enthalpy_equilibrium(
+        &self,
+        chemistry: &IdealGasEquilibriumV1,
+        context: &QueryPoint,
+        feed: &[(SpeciesId, Amount)],
+        equilibrium: IdealGasEquilibriumSolutionV1,
+        controls: GasEquilibriumChamberSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasEquilibriumChamber, GasEquilibriumChamberError> {
+        let target_enthalpy = equilibrium.target_enthalpy().ok_or(
+            GasEquilibriumChamberError::Invalid("chamber HP endpoint lacks its original target"),
         )?;
-        poll(&mut cancelled)?;
-        let state = model.evaluate(&point)?;
-        let volume = equilibrium.mass().value() / state.state().density;
-        let mass = state.state().density * volume;
-        if !positive(volume) || !positive(mass) {
-            return Err(GasEquilibriumChamberError::Invalid(
-                "unrepresentable chamber volume or mass",
-            ));
-        }
-        let enthalpy = mass * state.specific_enthalpy_j_kg();
+        let feed_mass = equilibrium_feed_mass(chemistry, feed)?;
+        let (parcel, correction) = self.freeze_pressure_products(
+            context, &equilibrium, None, cancelled,
+        )?;
+        let mass = parcel.mass_kg();
+        let enthalpy = mass * parcel.state().specific_enthalpy_j_kg();
         let balance = GasEquilibriumChamberBalance {
             feed_mass_kg: feed_mass,
             mass_residual_kg: mass - feed_mass,
@@ -239,19 +253,41 @@ impl ThermochemicalGasModel {
         {
             return Err(GasEquilibriumChamberError::Balance(balance));
         }
-        let parcel = ClosedGasParcel::from_isochoric(IsochoricGasParcel {
-            model,
-            point,
-            state,
-            mass_kg: mass,
-            volume_m3: volume,
-        });
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(GasEquilibriumChamber {
             equilibrium,
             parcel,
             balance,
         })
+    }
+
+    // Absolute HP chambers and source-relative PH queries retain the same
+    // original composition, source, transport and material-state boundary.
+    fn freeze_pressure_products(
+        &self,
+        context: &QueryPoint,
+        equilibrium: &IdealGasEquilibriumSolutionV1,
+        conserved_mass: Option<f64>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ClosedGasParcel, f64), GasEquilibriumChamberError> {
+        poll(cancelled)?;
+        let (model, correction) = self.freeze_equilibrium_composition(equilibrium)?;
+        let point = updated_point(
+            context, equilibrium.temperature().value(), equilibrium.pressure().value(),
+        )?;
+        let state = model.evaluate(&point)?;
+        let volume = conserved_mass.unwrap_or(equilibrium.mass().value()) / state.state().density;
+        let mass = conserved_mass.unwrap_or(state.state().density * volume);
+        if !positive(volume) || !positive(mass) {
+            return Err(GasEquilibriumChamberError::Invalid(
+                "unrepresentable chamber volume or mass",
+            ));
+        }
+        let parcel = ClosedGasParcel::from_isochoric(IsochoricGasParcel {
+            model, point, state, mass_kg: mass, volume_m3: volume,
+        });
+        poll(cancelled)?;
+        Ok((parcel, correction))
     }
 
     fn admit_equilibrium_bank(
