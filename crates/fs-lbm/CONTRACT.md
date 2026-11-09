@@ -3498,3 +3498,47 @@ half-cell resistance and analytic tangents; independent coupled momentum/thermal
 roots at two Pr_t values; finite-solid history and molecular wall interfaces;
 used/accepted closure receipts; exact zero closures; invalid Pr_t; bounded work;
 late cancellation and original-input replay.
+
+### Radiation on original gas/solid caloric storage
+
+With `enthalpy-coupling`, `advance_caloric_tensor_conduction_radiating`
+couples the original backward-Euler tensor/caloric owner to the existing gray
+radiation geometry and checked enclosure radiosity. Every radiative retry
+retains the same physical starting specific energies and reference masses.
+Original nonlinear conductivity, caloric slopes and source contacts remain
+live; an isothermal latent plateau changes stored energy without an extra
+latent heat deposit. Original Newton, Krylov, backtracking and source query
+allowances are shared across all retries, and the explicit radiation budget
+bounds complete native heat solves.
+
+Both the temperature update and original physical radiative power must
+converge. The native endpoint retains the final tangent-sink diagnostics;
+`TensorCaloricRadiationReport` discloses their physical-power discrepancy.
+The interval record uses the actual emission/absorption correction.
+Prescribed-cell radiation changes the thermostat reaction by the same amount,
+so it does not introduce an additional net external heat term. Any invalid
+source, inventory, work budget, unresolved radiation or cancellation returns
+no accepted interval.
+
+`MaterialAdvectionStep::conduct_thermochemical_species_with_solids_radiating`
+uses the same mixed original gas/solid preparation, original species composition,
+finite masses, and gas caloric/source-conductivity budgets. Its returned
+`ThermochemicalConductionAdvance::RadiatingBackwardEuler` retains both native
+heat and radiation evidence; `radiation_reports()` borrows the evidence.
+Gas-only continuation still uses the separately masked original gas enthalpy
+field. This entry initially requires the explicit backward-Euler scheme.
+
+The reused radiation discretization emits at exposed solid voxel CELL
+temperatures, with transparent gas and the original gray/diffuse/opaque
+surface assumptions. It does not resolve emission at tensor face traces,
+participating-media absorption, moving geometry or phase-transfer mass.
+Radiation and conduction are declared parallel heat routes; callers must not
+include the same radiative heat in an authored sink or source. The ray geometry
+and nonlinear residuals are numerical estimates, not certified error bounds.
+
+Focused G0/G1/G3/G4 regression definitions exercise independent quartic energy
+balance, exact latent plateaus, reciprocal enclosure transfer, prescribed
+latent inventory, source/budget/cancellation refusal, and mixed gas/solid heat
+with the original source-conductivity option. Changed Rust sources were parsed
+with the pinned compiler's formatter. Full native integration execution was
+unavailable: DSR and RCH are absent and the local workspace has no build space.

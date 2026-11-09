@@ -40,6 +40,7 @@ pub use nonlinear::{
     advance_caloric_tensor_conduction_adaptive,
     TensorCaloricStorage, advance_caloric_tensor_conduction,
     advance_caloric_tensor_conduction_sdirk2,
+    TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
 };
 pub use sdirk::{
     TENSOR_SDIRK2_GAMMA, TensorConductionSdirk2Step, advance_tensor_conduction_sdirk2,

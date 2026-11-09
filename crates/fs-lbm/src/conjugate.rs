@@ -249,6 +249,7 @@ pub use tensor_conduction::{
     advance_caloric_tensor_conduction_adaptive,
     TensorCaloricStorage, advance_caloric_tensor_conduction,
     advance_caloric_tensor_conduction_sdirk2,
+    TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{

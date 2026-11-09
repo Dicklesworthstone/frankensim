@@ -627,3 +627,121 @@ fn conjugate_bindings_preserve_source_mass_constraints_and_refuse_atomically() {
     assert_eq!(binding.reference_mass_kg, 2.0);
     assert_eq!(binding.specific_energy_j_kg, 20.0);
 }
+
+#[test]
+fn radiating_gas_solid_interval_cools_latent_inventory_and_reuses_original_gas_sources() {
+    use fs_lbm::conjugate::{RadiationConfig, ThermochemicalConductivityModel};
+    use fs_material::thermochemical_gas::conductivity::GasConductivityQuadrature;
+
+    let mut domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    domain.set(1, 0, 0, Voxel::Solid(0));
+    let mass = [0.02, 0.0];
+    let carrier = carrier(&domain, &mass);
+    let before = carrier.clone();
+    let species = [[mass[0]], [0.0]];
+    let bank = source::constant_cp_model(-4000.0, 1.0);
+    let names = [SpeciesId::new("manufactured").unwrap()];
+    let context = source::point(350.0, 100_000.0);
+    let d = [0.0; 2];
+    let gate = CancelGate::new_clock_free();
+    let source =
+        GasSpeciesEnthalpySource::new(&bank, &names, &context, &d, energy(), &gate).unwrap();
+    let h = [gas_h(&bank, 350.0), 0.0];
+    let opening = source
+        .prepare(&domain, &carrier, &species, &h, &gate)
+        .unwrap();
+    let gas_k = opening.transport(0).unwrap().thermal_conductivity_w_m_k();
+    let solid_k = 3.0;
+    let conductivity = isotropic(solid_k);
+    let caloric = melting(2.0);
+    let bindings = [ThermochemicalSolidConductionCell {
+        cell: 1,
+        reference_mass_kg: 2.0,
+        specific_energy_j_kg: 60.0,
+        caloric: &caloric,
+        conductivity: &conductivity,
+        prescribed_specific_energy_j_kg: None,
+    }];
+    let solids = [SolidMaterial::new("radiating latent solid", solid_k)];
+    let setup = contact_setup(0.75);
+    let mut radiation = RadiationConfig::new(vec![0.8], [Some(250.0); 6]);
+    radiation.surface_exchange = false;
+    radiation.rays_per_face = 64;
+    radiation.tolerance = 1e-10;
+    let duration = 0.1;
+    let cp = 3.0 * R / MOLAR_MASS[0];
+    let capacity = mass[0] * cp;
+    let conductance = 1.0 / (0.5 / gas_k + 0.5 / solid_k + 0.75);
+    // One unit-area solid face looks through transparent gas into a uniform
+    // enclosure. Every ray sees the same temperature, so no fitted view factor
+    // is used by this independent physical-energy calculation.
+    let radiated_w = 0.8 * 5.670_374_419e-8 * (300.0_f64.powi(4) - 250.0_f64.powi(4));
+    let mut control = controls(ThermochemicalConductionScheme::BackwardEuler);
+    control.conductivity = ThermochemicalConductivityModel::SourceIntegral {
+        quadrature: GasConductivityQuadrature {
+            absolute_tolerance_w_m_k: 1e-12,
+            relative_tolerance: 1e-10,
+            maximum_subdivisions: 256,
+            maximum_depth: 16,
+        },
+        maximum_evaluations: 2_000_000,
+    };
+    let result = carrier
+        .conduct_thermochemical_species_with_solids_radiating(
+            &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
+            &radiation, &gate,
+        )
+        .unwrap();
+    let expected_gas_t = 300.0 + 50.0 / (1.0 + duration * conductance / capacity);
+    let gas_change = capacity * (expected_gas_t - 350.0);
+    let expected_solid_h = 60.0 + (-gas_change - duration * radiated_w) / 2.0;
+    assert!(expected_solid_h > 0.0 && expected_solid_h < 100.0);
+    let endpoint = result.thermal.endpoint();
+    near(
+        endpoint.solution.solution.temperature[0],
+        expected_gas_t,
+        2e-7,
+    );
+    near(endpoint.solution.solution.temperature[1], 300.0, 1e-10);
+    near(endpoint.specific_energy_j_kg[1], expected_solid_h, 2e-6);
+    near(
+        result.gas_specific_enthalpy_j_kg[0] - h[0],
+        gas_change / mass[0],
+        2e-4,
+    );
+    assert_eq!(result.gas_specific_enthalpy_j_kg[1], 0.0);
+    near(result.thermal.record().radiated_w, radiated_w, 1e-8);
+    near(
+        result.thermal.record().boundary_outflow_j,
+        duration * radiated_w,
+        2e-7,
+    );
+    assert!(result.thermal.record().closure_j.abs() < HEAT_BUDGET_J);
+    assert_eq!(result.thermal.radiation_reports().len(), 1);
+    assert!(result.report.conductivity_evaluations > 0);
+
+    let exhausted = ThermochemicalConductionControls {
+        maximum_caloric_queries: 1,
+        ..control
+    };
+    assert!(
+        carrier
+            .conduct_thermochemical_species_with_solids_radiating(
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source,
+                exhausted, &radiation, &gate,
+            )
+            .is_err()
+    );
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        carrier.conduct_thermochemical_species_with_solids_radiating(
+            &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
+            &radiation, &cancelled,
+        ),
+        Err(ChtError::Cancelled)
+    ));
+    assert_eq!(carrier, before);
+    assert_eq!(bindings[0].specific_energy_j_kg, 60.0);
+    assert_eq!(species, [[0.02], [0.0]]);
+}

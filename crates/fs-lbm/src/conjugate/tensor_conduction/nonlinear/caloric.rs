@@ -16,7 +16,11 @@ use crate::conjugate::{
 
 mod adaptive;
 mod material;
+mod radiation;
 mod storage;
+pub use radiation::{
+    TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
+};
 pub use adaptive::{
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
     TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,

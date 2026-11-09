@@ -3,11 +3,11 @@
 use super::{
     CancelGate, ChtError, GasConductionCaloric, GasConductionConductivity,
     GasConductionQueryBudget, GasConductivityBudget, GasSpeciesEnthalpyField,
-    GasSpeciesEnthalpySource, MaterialAdvectionStep, SolidMaterial, TensorCaloricLaw,
-    TensorCaloricStorage, TensorConductivityLaw, ThermalSetup, ThermochemicalConductionAdvance,
-    ThermochemicalConductionControls, ThermochemicalSpeciesConductionReport, VoxelDomain,
-    admit_interval, admitted_defect, advance_native, conduction_report, gas_query_defect, invalid,
-    poll, poll_every, reserved,
+    GasSpeciesEnthalpySource, MaterialAdvectionStep, RadiationConfig, SolidMaterial,
+    TensorCaloricLaw, TensorCaloricStorage, TensorConductivityLaw, ThermalSetup,
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalSpeciesConductionReport, VoxelDomain, admit_interval, admitted_defect,
+    advance_native, conduction_report, gas_query_defect, invalid, poll, poll_every, reserved,
 };
 
 /// Original caloric and conductivity owners for one stationary solid voxel.
@@ -150,6 +150,88 @@ impl MaterialAdvectionStep {
         controls: ThermochemicalConductionControls,
         gate: &CancelGate,
     ) -> Result<ThermochemicalConjugateConductionStep<'a, N>, ChtError> {
+        self.conduct_thermochemical_species_with_solids_inner(
+            domain,
+            species_mass_kg,
+            gas_specific_enthalpy_j_kg,
+            solid_materials,
+            solid_cells,
+            setup,
+            start_time_s,
+            duration_s,
+            source,
+            controls,
+            None,
+            gate,
+        )
+    }
+
+    /// Converge original gas/solid enthalpy and the existing gray radiation law.
+    ///
+    /// The same native caloric step advances finite gas and solid inventories.
+    /// Radiative retries retain the original masses and initial energies; they
+    /// do not apply extra physical timesteps or deposit latent energy again.
+    /// Original caloric and source-conductivity query budgets remain shared
+    /// across every retry. The physical radiative power, thermostat reaction,
+    /// and stored-energy change enter the returned native interval account.
+    ///
+    /// Emission uses the original radiation owner's exposed SOLID voxel
+    /// temperatures, reciprocal enclosure geometry and transparent-gas model.
+    /// It is not participating-gas radiation or face-trace surface emission.
+    /// Authored sources, contacts and sinks are additional declared physical
+    /// channels; callers must not include the same radiative heat in them.
+    /// Radiation diagnostics are available from thermal.radiation_reports().
+    ///
+    /// All source support, heat closure, radiation and native solver admissions
+    /// apply before either gas or solid state can be returned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conduct_thermochemical_species_with_solids_radiating<'a, const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        gas_specific_enthalpy_j_kg: &[f64],
+        solid_materials: &[SolidMaterial],
+        solid_cells: &[ThermochemicalSolidConductionCell<'_>],
+        setup: &ThermalSetup,
+        start_time_s: f64,
+        duration_s: f64,
+        source: &GasSpeciesEnthalpySource<'a, N>,
+        controls: ThermochemicalConductionControls,
+        radiation: &RadiationConfig,
+        gate: &CancelGate,
+    ) -> Result<ThermochemicalConjugateConductionStep<'a, N>, ChtError> {
+        self.conduct_thermochemical_species_with_solids_inner(
+            domain,
+            species_mass_kg,
+            gas_specific_enthalpy_j_kg,
+            solid_materials,
+            solid_cells,
+            setup,
+            start_time_s,
+            duration_s,
+            source,
+            controls,
+            Some(radiation),
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn conduct_thermochemical_species_with_solids_inner<'a, const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        gas_specific_enthalpy_j_kg: &[f64],
+        solid_materials: &[SolidMaterial],
+        solid_cells: &[ThermochemicalSolidConductionCell<'_>],
+        setup: &ThermalSetup,
+        start_time_s: f64,
+        duration_s: f64,
+        source: &GasSpeciesEnthalpySource<'a, N>,
+        controls: ThermochemicalConductionControls,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+    ) -> Result<ThermochemicalConjugateConductionStep<'a, N>, ChtError> {
         poll(gate)?;
         admit_interval(start_time_s, duration_s, &controls)?;
         let declared_prescribed_solids = admit_solids(domain, solid_cells, gate)?;
@@ -267,6 +349,7 @@ impl MaterialAdvectionStep {
             start_time_s,
             duration_s,
             &controls,
+            radiation,
             gate,
         )?;
         let maximum_query_caloric_defect_j =
