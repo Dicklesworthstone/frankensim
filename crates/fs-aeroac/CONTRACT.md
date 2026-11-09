@@ -4201,3 +4201,67 @@ This force owner is stationary and homogeneous/lossless. It does not inherit
 the monopole's edge-flow model: a body force in moving fluid also has convected
 vortical response. Finite barriers, wall impedance/absorption, moving force
 sources, source feedback and measured acoustics remain outside this model.
+
+## Physical volume-stress diffraction by the original straight edge
+
+`diffraction::PreparedHalfPlaneQuadrupole` binds the original symmetric
+Lighthill stress moment [N m], acoustic state, source position, placed edge,
+receiver and positive frequency. It completes the ideal half-plane's physical
+volume/force/stress source ladder. The original `QuadrupolePhasor` entries
+xx, yy, zz, xy, xz, yz retain their trace, physical shear and emission clock.
+The source Hessian supplies pressure and its receiving derivative supplies
+all three Euler velocity components. No source-volume or density multiplier
+is added to an already integrated stress. All source contributions and tensor
+entries remain coherent before active/reactive intensity or energy is formed.
+
+The original Biot--Tolstoy Green integral, geometry admission, DD propagation
+phase and adaptive Gauss--Kronrod owner remain shared with the finite volume
+and force propagators. Third derivatives require an additional exact
+regularization at geometrical shadow boundaries: subtract
+A*s/(1+s²/L²), A=(d/dL)[exp(i*k*L)/L]/L, from the integration-by-parts
+integrand and integrate that term analytically. Its logarithmic primitive
+cancels the visible Green term's q|q| contribution. The remaining contour
+integrand vanishes cubically at its origin, so third derivatives are regular
+at q=0 as well as on either one-sided approach. Small divided exponentials
+and the visible Green remainder use analytic continuations; no displaced
+source stencil, high-frequency ray approximation or numerical source
+regularization changes the physical problem. The entire rotated contour is
+integrated, including its algebraic subtraction tail.
+
+A fixed, allocation-free 40-scalar derivative algebra retains exactly two
+symmetric source derivatives and one receiving derivative. Geometry
+derivatives are prepared in the original world axes and dimensionless edge
+length; the physical length/momentum scales are applied once. The 24 shared
+quadrature channels weight shear by sqrt(2), so the pressure and velocity
+acceptance norms are their complete Frobenius norms. The retained 4-by-6
+physical map instead includes the required factor two for physical shear.
+Warm evaluation uses 24 complex products and fixed-order DD sums with no
+allocation, new quadrature, transcendental evaluation or phase reset.
+
+Diagnostics retain total evaluations, maximum depth, retained panels, shortest
+edge path and absolute errors for every physical Cartesian transfer column.
+For an authored moment, sum the column errors times the corresponding moment
+magnitudes. These are embedded quadrature estimates, excluding geometry,
+material and floating-point errors; they do not establish relative accuracy
+at a tensor-pattern or coherent null. Explicit resource limits and bounded
+cancellation publish no partial prepared observer. The original point and
+force numerical kernels are unchanged.
+
+Seven new physical regressions cover all six entries against independent
+spherical Hessian/third-derivative fields, original force-source finite
+differences in light/shadow and at q=0, the isotropic Helmholtz trace,
+momentum/compression/energy flux, both exact sheet faces, occluded image
+coincidence, shadow offsets through 1e-13 m, full world-tensor rotation,
+original source phase, zero moments and invalid/cancelled/unresolved work.
+All seven and the twenty existing stationary/flow point and force checks
+passed in the focused native Rust slice with the pinned July 2026 compiler.
+The slice compiled the complete new implementation, original quadrature,
+geometry, diffraction and energy numerical code, and actual fs-math.
+It narrowed unrelated crate/error/material-construction wrappers; full Cargo
+and the repository DSR gate were unavailable and are not claimed.
+
+The model remains a stationary prescribed compact stress in a homogeneous
+lossless fluid around one infinite, ideal straight-edged sheet. Finite source
+size and stress acquisition require their original source evidence. Finite
+barriers, absorbing faces, nonuniform or mean flow, source feedback,
+unresolved SGS stresses and measured-SPL qualification are outside this owner.

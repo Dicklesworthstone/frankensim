@@ -30,7 +30,11 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod flow;
 mod force;
+mod quadrupole;
 pub use force::{HalfPlaneForceDiagnostics, HalfPlaneForceLimits, PreparedHalfPlaneForce};
+pub use quadrupole::{
+    HalfPlaneQuadrupoleDiagnostics, HalfPlaneQuadrupoleLimits, PreparedHalfPlaneQuadrupole,
+};
 
 /// The same physical p/Q and u/Q tolerances and bounded adaptive work controls
 /// used by the existing spherical-wave interface propagator.

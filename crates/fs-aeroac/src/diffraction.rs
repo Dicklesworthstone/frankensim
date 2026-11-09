@@ -10,6 +10,8 @@
 //! Green function and analytic velocity with bounded contour quadrature.
 //! [`PreparedHalfPlaneForce`] differentiates the same Green function in source
 //! and receiver coordinates for physical point forces and full Euler velocity.
+//! [`PreparedHalfPlaneQuadrupole`] retains symmetric physical volume stresses
+//! with the complete source Hessian and third-derivative velocity tensor.
 //!
 //! For exp(-i omega t), arrival azimuth alpha and receiver azimuth theta,
 //! the transverse solution is
@@ -41,7 +43,8 @@ mod point;
 mod spectrum;
 pub use point::{
     HalfPlaneForceDiagnostics, HalfPlaneForceLimits, HalfPlaneMonopoleDiagnostics,
-    HalfPlaneMonopoleLimits, PreparedHalfPlaneForce, PreparedHalfPlaneMonopole,
+    HalfPlaneMonopoleLimits, HalfPlaneQuadrupoleDiagnostics, HalfPlaneQuadrupoleLimits,
+    PreparedHalfPlaneForce, PreparedHalfPlaneMonopole, PreparedHalfPlaneQuadrupole,
 };
 pub use spectrum::{
     HalfPlaneFace, HalfPlaneFrame, HalfPlaneIncidentWave, HalfPlaneReceiver,
