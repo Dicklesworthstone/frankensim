@@ -593,3 +593,261 @@ fn very_soft_actual_material_is_retained_without_elastic_reference_subtraction()
         assert_eq!(operator.damping().nnz(), 0);
     });
 }
+
+fn global_phasors(model: &MitcShellModel, q: &[C64]) -> Vec<C64> {
+    let re = model
+        .expand(&q.iter().map(|v| v.re).collect::<Vec<_>>())
+        .unwrap();
+    let im = model
+        .expand(&q.iter().map(|v| v.im).collect::<Vec<_>>())
+        .unwrap();
+    re.into_iter()
+        .zip(im)
+        .map(|(re, im)| C64::new(re, im))
+        .collect()
+}
+
+#[test]
+fn moving_supports_retain_original_frames_inertia_loss_and_actuator_work() {
+    with_cx(|cx| {
+        let reference = reference(0.0);
+        let laminate = source(Arc::clone(&reference), actual(&reference, 1.0, None));
+        let model = model(&reference, 0.37);
+        let shell =
+            HarmonicMitcShell::try_new(&model, vec![Arc::clone(&laminate)], budget(), cx).unwrap();
+        let omega = 37.0;
+        let operator = shell
+            .prepare_harmonic_operator(omega, controls(), cx)
+            .unwrap();
+        let supported = shell
+            .prepare_supported_harmonic_response(omega, &[12, 15], controls(), cx)
+            .unwrap();
+        assert_eq!(supported.original_support_dofs(), &[12, 15]);
+        assert_eq!(supported.retained_support_dofs(), &[0, 3]);
+        assert_eq!(supported.free_dofs(), &[1, 2, 4, 5]);
+        assert!(core::ptr::eq(supported.source(), &shell));
+        assert_eq!(supported.omega_rad_s(), omega);
+        let drive = [C64::new(8e-7, -3e-7), C64::new(2e-5, -4e-6)];
+        // Include externally applied forces AT the supports: reaction must
+        // subtract these rather than counting their actuator work twice.
+        let force = [
+            C64::new(2e-5, -3e-6),
+            C64::new(-1e-5, 4e-6),
+            C64::new(3e-5, 2e-6),
+            C64::new(-4e-7, 1e-8),
+            C64::new(5e-7, -3e-8),
+            C64::new(2e-8, 1e-8),
+        ];
+        let response = supported.solve(&force, &drive, cx).unwrap();
+        for (i, &row) in supported.retained_support_dofs().iter().enumerate() {
+            near(response.displacement[row], drive[i], 1e-13);
+        }
+        let mut support_force = vec![C64::ZERO; 6];
+        for i in 0..6 {
+            let residual = (0..6).fold(-force[i], |sum, j| {
+                sum + C64::new(
+                    operator.stiffness().get(i, j) - omega * omega * operator.mass().get(i, j),
+                    -omega * operator.damping().get(i, j),
+                ) * response.displacement[j]
+            });
+            if let Some(s) = supported
+                .retained_support_dofs()
+                .iter()
+                .position(|&row| row == i)
+            {
+                near(response.support_reaction[s], residual, 2e-9);
+                support_force[i] = response.support_reaction[s];
+            } else {
+                assert!(residual.abs() < 2e-10);
+            }
+        }
+        let mut moving_mass = 0.0_f64;
+        let mut moving_loss = 0.0_f64;
+        for &i in supported.free_dofs() {
+            let mut inertia = C64::ZERO;
+            let mut viscosity = C64::ZERO;
+            for (&j, &q) in supported.retained_support_dofs().iter().zip(&drive) {
+                inertia = inertia + q.scale(-omega * omega * operator.mass().get(i, j));
+                viscosity = viscosity + C64::new(0.0, -omega * operator.damping().get(i, j)) * q;
+            }
+            moving_mass = moving_mass.max(inertia.abs());
+            moving_loss = moving_loss.max(viscosity.abs());
+        }
+        assert!(moving_mass > 1e-14 && moving_loss > 1e-14);
+        let global_q = global_phasors(&model, &response.displacement);
+        let global_v = global_phasors(&model, &response.velocity);
+        let global_r = global_phasors(&model, &support_force);
+        let (s, c) = (det::sin(0.43), det::cos(0.43));
+        // These prescribed components follow the original oblique axes,
+        // independently of the solved orthogonal translations and rotations.
+        near(
+            global_q[12].scale(c) + global_q[13].scale(s),
+            drive[0],
+            2e-12,
+        );
+        near(
+            global_q[15].scale(c) + global_q[16].scale(s),
+            drive[1],
+            2e-12,
+        );
+        let physical_support_power = 0.5
+            * global_r
+                .iter()
+                .zip(&global_v)
+                .map(|(&r, &v)| (r.conj() * v).re)
+                .sum::<f64>();
+        real_near(
+            response.average_support_power_w,
+            physical_support_power,
+            2e-9,
+        );
+        let material = source_work(&model, &laminate, 0.37, omega, &response.displacement).0;
+        real_near(
+            response.average_viscous_power_w,
+            -0.5 * omega * material.im,
+            2e-9,
+        );
+        assert!(response.average_viscous_power_w > 0.0);
+        real_near(
+            response.average_input_power_w + response.average_support_power_w,
+            response.average_viscous_power_w,
+            2e-8,
+        );
+        assert!(response.power_balance_residual_w.abs() < 2e-8 * response.average_viscous_power_w);
+        assert!(response.port_load.is_none());
+    });
+}
+
+#[test]
+fn supported_lossless_shell_handles_empty_and_complete_maps_without_changing_material() {
+    with_cx(|cx| {
+        let reference = reference(0.0);
+        let laminate = source(Arc::clone(&reference), Arc::clone(&reference));
+        let model = model(&reference, 0.37);
+        let shell = HarmonicMitcShell::try_new(&model, vec![laminate], budget(), cx).unwrap();
+        let omega = 17.0;
+        let operator = shell
+            .prepare_harmonic_operator(omega, controls(), cx)
+            .unwrap();
+        let labels: Vec<_> = (12..18).collect();
+        let supported = shell
+            .prepare_harmonic_operator(omega, controls(), cx)
+            .unwrap()
+            .factor_supported(&labels, controls(), cx)
+            .unwrap();
+        assert!(supported.free_dofs().is_empty());
+        let q = motion();
+        let force: Vec<_> = (0..6)
+            .map(|i| C64::new(1e-6 * (i + 1) as f64, -2e-7))
+            .collect();
+        let response = supported.solve(&force, &q, cx).unwrap();
+        assert_eq!(response.relative_residual, 0.0);
+        assert_eq!(response.average_viscous_power_w, 0.0);
+        for i in 0..6 {
+            near(response.displacement[i], q[i], 1e-13);
+            let expected = (0..6).fold(-force[i], |sum, j| {
+                sum + q[j].scale(
+                    operator.stiffness().get(i, j) - omega * omega * operator.mass().get(i, j),
+                )
+            });
+            near(response.support_reaction[i], expected, 2e-10);
+        }
+        assert!(response.power_balance_residual_w.abs() < 1e-12);
+        let empty = shell
+            .prepare_supported_harmonic_response(omega, &[], controls(), cx)
+            .unwrap();
+        let bare = shell
+            .prepare_harmonic_response(omega, controls(), cx)
+            .unwrap();
+        let a = empty.solve(&force, &[], cx).unwrap();
+        let b = bare.solve(&force, cx).unwrap();
+        assert!(a.support_reaction.is_empty());
+        assert_eq!(a.average_support_power_w, 0.0);
+        for (a, b) in a.displacement.iter().zip(b.displacement) {
+            near(*a, b, 2e-10);
+        }
+    });
+}
+
+#[test]
+fn supported_shell_refuses_bad_labels_domains_and_budgets_without_poisoning_factor() {
+    with_cx(|cx| {
+        let reference = reference(0.0);
+        let laminate = source(Arc::clone(&reference), actual(&reference, 1.0, None));
+        let model = model(&reference, 0.37);
+        let shell = HarmonicMitcShell::try_new(&model, vec![laminate], budget(), cx).unwrap();
+        for labels in [vec![0], vec![18], vec![12, 12], vec![15, 12]] {
+            assert!(
+                shell
+                    .prepare_supported_harmonic_response(37.0, &labels, controls(), cx)
+                    .is_err()
+            );
+        }
+        assert!(
+            shell
+                .prepare_supported_harmonic_response(
+                    37.0,
+                    &[12],
+                    HarmonicResponseControls {
+                        maximum_payload_bytes: 1,
+                        ..controls()
+                    },
+                    cx,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            shell.prepare_supported_harmonic_response(101.0, &[12], controls(), cx),
+            Err(MitcHarmonicError::Material { .. })
+        ));
+        let supported = shell
+            .prepare_supported_harmonic_response(37.0, &[12, 13, 14, 15, 16, 17], controls(), cx)
+            .unwrap();
+        let q = motion();
+        let force = [C64::ZERO; 6];
+        let first = supported.solve(&force, &q, cx).unwrap();
+        assert!(matches!(
+            supported.solve(
+                &force,
+                &q.iter().map(|q| q.scale(1e5)).collect::<Vec<_>>(),
+                cx
+            ),
+            Err(MitcHarmonicError::Material { .. })
+        ));
+        assert!(supported.solve(&force, &[], cx).is_err());
+        assert!(
+            supported
+                .solve(&force, &[C64::new(f64::NAN, 0.0); 6], cx)
+                .is_err()
+        );
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            let cancelled = Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 59,
+                    kernel_id: 29,
+                    tile: 0,
+                    iteration: 0,
+                },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            assert!(supported.solve(&force, &q, &cancelled).is_err());
+            assert!(
+                shell
+                    .prepare_supported_harmonic_response(37.0, &[12], controls(), &cancelled,)
+                    .is_err()
+            );
+        });
+        let repeated = supported.solve(&force, &q, cx).unwrap();
+        assert_eq!(first.displacement, repeated.displacement);
+        assert_eq!(first.support_reaction, repeated.support_reaction);
+        assert_eq!(
+            first.average_support_power_w,
+            repeated.average_support_power_w
+        );
+    });
+}

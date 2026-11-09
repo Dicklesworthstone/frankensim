@@ -29,6 +29,9 @@ use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod supports;
+pub use supports::PreparedSupportedHarmonicMitc;
+
 /// Native spatial, source-material, budget or shared harmonic refusal.
 #[derive(Debug)]
 pub enum MitcHarmonicError {

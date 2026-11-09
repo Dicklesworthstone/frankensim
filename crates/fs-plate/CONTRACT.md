@@ -1,5 +1,39 @@
 # CONTRACT: fs-plate
 
+## Prescribed harmonic motion of original MITC supports
+
+`HarmonicMitcShell::prepare_supported_harmonic_response` and the prepared
+operator's `factor_supported` impose moving translations and physical axial
+rotations using the existing `fs-modal` supported harmonic owner. Inputs name
+strictly increasing original `6*node+component` support-axis labels. The original
+node frame applies to both motion and its conjugate reaction; an oblique frame
+is not silently interpreted as global Cartesian axes. Coordinates already
+eliminated by the original model remain homogeneous and cannot be prescribed.
+
+The complete source-owned tensor-laminate storage, loss, reference consistent
+mass, numerical drilling and physical spring terms assemble before the shared
+free-block elimination. The support load retains K_fc, C_fc and M_fc. Only the
+free principal block is factored, so a singular bare full operator need not
+prevent a supported response. Original material frequency bands remain binding;
+this adapter requires positive angular frequency. Empty and all-prescribed maps
+are admitted. Repeated drives reuse the same factor and constitutive spectra.
+
+Returned motion and velocity cover every original retained coordinate.
+Reactions are forces/moments ON the structure in prescribed-label order, with
+externally applied forces at those coordinates subtracted once. Applied-force
+work, signed actuator work and full material heat are computed independently by
+the native owner. Complete source strain admission includes the prescribed
+motion before any response is published; refusal or cancellation preserves the
+prepared source. No support-actuator dynamics, startup history, geometric
+prestress or extra loss from drilling/springs is inferred.
+
+Combined dense numerical payload is bounded by `344*n*n + 544*n + material_bytes`
+before allocation, in addition to the original facet, sparse and material work
+admission. Three focused regression groups exercise oblique-frame translations
+and rotations, cross-support inertia and loss, original-quadrature material heat,
+reaction/actuator work, lossless and empty/all-support cases, source domains,
+labels, budgets, cancellation and factor reuse.
+
 ## Full laminate harmonic response on the original MITC shell
 
 `shell::mitc::harmonic::HarmonicMitcShell` binds one complete material
