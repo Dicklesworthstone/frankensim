@@ -11231,7 +11231,7 @@ density/momentum consumers. The run uses the original native dense assembly,
 transport, Picard, pressure/RCR and LU/GEMM owners. It is not full-workspace or
 sparse-route validation and makes no performance benchmark claim.
 
-### Adaptive multicomponent demixing
+## Adaptive multicomponent demixing
 
 `MulticomponentPhaseField::advance_candidate` compares one explicit interval
 with two half intervals and accepts only the fine trajectory. All independent
@@ -11253,3 +11253,24 @@ Failure or cancellation publishes no partial field or elapsed clock. Adaptation
 provides local temporal estimates; this explicit fourth-order evolution can
 require small steps on fine meshes and does not claim unconditional stability
 or a global trajectory error certificate.
+
+## Original liquid sources through multicomponent phase separation
+
+The phase-field material adapter retains the exact borrowed multicomponent
+liquid law and resolves every returned cell at its actual original species
+inventory and fixed temperature. It shares model/species/molar-mass admission
+and cell source/volume validation with homogeneous miscibility. Selected claims,
+pressure and the full original composition chart remain authoritative; cells
+stay on the original homogeneous free-energy branch even where it is unstable.
+
+Single-step and adaptive endpoint wrappers preserve the numerical demixing
+receipts and qualify source density against each rigid cell volume before
+publishing. A source-domain, material-volume, budget or cancellation refusal
+leaves the original field and retained bindings unchanged. The wrapper exposes
+only the interfacial numerical owner. Material-cell storage has its own explicit
+count budget, separate from numerical workspace.
+
+These source receipts qualify completed endpoints, not each internal/rejected
+adaptive trial. Full pair diffusivities and kappa remain explicitly authored
+numerical inputs; endpoint source refresh does not imply dynamically sourced
+transport coefficients or two-way variable-density momentum coupling.

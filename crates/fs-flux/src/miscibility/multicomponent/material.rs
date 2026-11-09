@@ -114,25 +114,12 @@ impl MulticomponentMiscibilityField {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ResolvedMulticomponentMiscibilityField<'source, 'card>> {
         poll(&mut cancelled)?;
-        let network = self.network();
-        if network.model() != source.thermodynamics()
-            || network.transport().species() != source.species()
-            || !network.transport().molar_masses().iter().copied().eq(source
-                .components()
-                .iter()
-                .map(|component| component.molar_mass))
-        {
-            return Err(MulticomponentMiscibilityMaterialError::Invalid(
-                "field and liquid source require the same full model, ordered species and molar masses",
-            ));
-        }
-        if !maximum_relative_volume_mismatch.is_finite()
-            || !(0.0..=1e-6).contains(&maximum_relative_volume_mismatch)
-        {
-            return Err(MulticomponentMiscibilityMaterialError::Invalid(
-                "relative source-volume allowance must be in [0,1e-6]",
-            ));
-        }
+        admit_source(
+            self.network(),
+            source,
+            maximum_relative_volume_mismatch,
+            &mut cancelled,
+        )?;
         let cells = resolve_cells(
             self,
             source,
@@ -273,7 +260,38 @@ impl<'source, 'card> MulticomponentMiscibilityMaterialAdvanceCandidate<'source, 
     }
 }
 
-fn resolve_cells(
+/// Shared original-source admission for homogeneous and interfacial owners.
+/// The caller retains the appropriate numerical energy owner; this helper
+/// checks material identity without imposing a homogeneous convexity claim.
+pub(super) fn admit_source(
+    network: &MulticomponentMiscibilityNetwork,
+    source: &MulticomponentLiquidSolutionLaw<'_>,
+    maximum_relative_volume_mismatch: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    poll(cancelled)?;
+    if network.model() != source.thermodynamics()
+        || network.transport().species() != source.species()
+        || !network.transport().molar_masses().iter().copied().eq(source
+            .components()
+            .iter()
+            .map(|component| component.molar_mass))
+    {
+        return Err(MulticomponentMiscibilityMaterialError::Invalid(
+            "field and liquid source require the same full model, ordered species and molar masses",
+        ));
+    }
+    if !maximum_relative_volume_mismatch.is_finite()
+        || !(0.0..=1e-6).contains(&maximum_relative_volume_mismatch)
+    {
+        return Err(MulticomponentMiscibilityMaterialError::Invalid(
+            "relative source-volume allowance must be in [0,1e-6]",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn resolve_cells(
     numerical: &MulticomponentMiscibilityField,
     source: &MulticomponentLiquidSolutionLaw<'_>,
     maximum_resolved_cells: usize,

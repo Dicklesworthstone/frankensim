@@ -30,6 +30,10 @@ mod solve;
 /// Bounded complete-window composition and interfacial-energy accuracy.
 pub mod adaptive;
 
+/// Original liquid properties retained through accepted demixing endpoints.
+#[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+pub mod material;
+
 /// Original multicomponent thermodynamics and molecular transport with a
 /// positive species-symmetric interfacial coefficient on a fixed graph.
 #[derive(Clone, Debug, PartialEq)]
