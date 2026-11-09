@@ -97,6 +97,7 @@ fn problem(with_wall: bool) -> InteriorTemperatureAcoustics {
         frequency_hz: FREQUENCY,
         inward_velocity: vec![([0, 2, 3], [C64::new(1.5, -0.4); 3])],
         boundary_drives: Vec::new(),
+        volume_drives: Vec::new(),
         traction_drives: Vec::new(),
         admittances: Vec::new(),
         mechanical_walls: if with_wall {

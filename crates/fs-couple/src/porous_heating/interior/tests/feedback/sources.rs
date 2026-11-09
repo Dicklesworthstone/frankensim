@@ -8,6 +8,8 @@ use fs_feec::acoustics::helmholtz::heterogeneous::{
     EquivalentFluidPressureField, MAX_BOUNDARY_SOURCES, MAX_VOLUME_SOURCES,
 };
 
+mod volume;
+
 const DT: f64 = 0.03125;
 
 fn driven_problem() -> InteriorTemperatureAcoustics {
@@ -51,6 +53,19 @@ fn native_field(
         .iter()
         .map(|drive| prepared.prepare_wall_traction(&drive.profile, &mut || false).unwrap())
         .collect();
+    let volume: Vec<_> = problem
+        .volume_drives
+        .iter()
+        .map(|drive| {
+            prepared
+                .volume_velocity_source(
+                    drive.quadrature_order,
+                    &mut |element, position| (drive.density_per_m3)(element, position),
+                    &mut || false,
+                )
+                .unwrap()
+        })
+        .collect();
     let boundary_values: Vec<_> = boundary
         .iter()
         .zip(&problem.boundary_drives)
@@ -61,11 +76,16 @@ fn native_field(
         .zip(&problem.traction_drives)
         .map(|(source, drive)| (source, drive.amplitude_pa))
         .collect();
+    let volume_values: Vec<_> = volume
+        .iter()
+        .zip(&problem.volume_drives)
+        .map(|(source, drive)| (source, drive.amplitude_m3_s))
+        .collect();
     prepared
         .solve_with_sources(
             &problem.inward_velocity,
             &boundary_values,
-            &[],
+            &volume_values,
             &traction_values,
             &mut || false,
         )
@@ -82,7 +102,7 @@ fn powers(field: &EquivalentFluidPressureField) -> [f64; 4] {
 }
 
 #[test]
-fn mixed_quadratic_and_traction_drives_refresh_on_original_materials_and_heat_once() {
+fn mixed_quadratic_volume_and_traction_drives_refresh_on_original_materials_and_heat_once() {
     let (mesh, positions) = fixture();
     let geometry = HelmholtzFe::new(
         &mesh,
@@ -97,7 +117,15 @@ fn mixed_quadratic_and_traction_drives_refresh_on_original_materials_and_heat_on
     let original_cells = thermal.cells().clone();
     let source = fluid([280.0, 500.0]);
     let calls = source.calls.clone();
-    let problem = driven_problem();
+    let mut problem = driven_problem();
+    problem.volume_drives.push(InteriorTemperatureVolumeDrive {
+        density_per_m3: std::sync::Arc::new(|element, position| {
+            let sign = if element == 0 { 1.0 } else { -0.25 };
+            Ok(sign * (1.0 + position[0] / SCALE) / (0.5 * SCALE.powi(3)))
+        }),
+        quadrature_order: 4,
+        amplitude_m3_s: C64::new(1e-5, -4e-6),
+    });
     let heating = TemperatureInteriorHeating::try_new(
         &geometry, &thermal, &mapping(&law, Some(&porous)), &wall_routes(&law),
         source, problem.clone(), 3, || Ok(()),

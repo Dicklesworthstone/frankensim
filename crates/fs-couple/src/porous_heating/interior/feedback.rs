@@ -24,6 +24,8 @@
 //! coherent fixed drives as the fluid and wall materials refresh. Their signed
 //! source work is observed separately; only native positive physical losses
 //! feed the existing thermal receivers.
+//! Distributed volume injection retains its original spatial profile and is
+//! projected again on each changed-temperature owner, without normalization.
 
 use super::heat::{InteriorHeatAccount, InteriorHeatState};
 use super::{
@@ -78,6 +80,40 @@ pub struct InteriorTemperatureBoundaryDrive {
     pub amplitude_m_s: C64,
 }
 
+/// Original immutable spatial volume-injection shape [m^-3].
+///
+/// Arguments are the original tetrahedron index and physical position [m].
+/// Values must remain the same for the same arguments throughout the owner's
+/// lifetime: changing captured state is not a cache-invalidation mechanism.
+/// Signed and zero-integral profiles are valid. Callback failures propagate
+/// through the original acoustic error without publishing a partial snapshot.
+pub type InteriorTemperatureVolumeProfile =
+    dyn Fn(usize, [f64; 3]) -> Result<f64, HeterogeneousError> + Send + Sync;
+
+/// Distributed continuity injection on the original full pressure geometry.
+///
+/// The peak exp(+i omega t) flow [m^3/s] multiplies the spatial shape [m^-3].
+/// Neither its integral nor its pressure-basis projection is normalized. No
+/// effective density, porosity, mass/enthalpy injection or heat-release model
+/// is inferred. Clone shares the same immutable profile; Debug never calls it.
+#[derive(Clone)]
+pub struct InteriorTemperatureVolumeDrive {
+    pub density_per_m3: Arc<InteriorTemperatureVolumeProfile>,
+    /// Independent native source quadrature, from pressure order + 2 to 16.
+    pub quadrature_order: usize,
+    pub amplitude_m3_s: C64,
+}
+
+impl core::fmt::Debug for InteriorTemperatureVolumeDrive {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InteriorTemperatureVolumeDrive")
+            .field("density_per_m3", &"<retained spatial profile>")
+            .field("quadrature_order", &self.quadrature_order)
+            .field("amplitude_m3_s", &self.amplitude_m3_s)
+            .finish()
+    }
+}
+
 /// Applied mechanical pressure on the original wall's full trace space.
 ///
 /// The native profile uses original global hierarchical coordinates. A complex
@@ -101,6 +137,8 @@ pub struct InteriorTemperatureAcoustics {
     pub inward_velocity: Vec<VelocityTrace>,
     /// Original quadratic boundary motion, simultaneous with the linear traces.
     pub boundary_drives: Vec<InteriorTemperatureBoundaryDrive>,
+    /// Original distributed injection, coherent with every boundary/wall drive.
+    pub volume_drives: Vec<InteriorTemperatureVolumeDrive>,
     /// Independent applied wall pressures, simultaneous with all fluid drives.
     pub traction_drives: Vec<InteriorTemperatureTractionDrive>,
     pub admittances: Vec<BoundaryAdmittance>,
@@ -210,6 +248,11 @@ fn admit_drives(
             "interior feedback quadratic boundary sources",
         ),
         (
+            problem.volume_drives.len(),
+            MAX_VOLUME_SOURCES,
+            "interior feedback distributed volume sources",
+        ),
+        (
             problem.traction_drives.len(),
             MAX_VOLUME_SOURCES,
             "interior feedback mechanical traction sources",
@@ -229,6 +272,7 @@ fn admit_drives(
         .boundary_drives
         .iter()
         .map(|drive| drive.amplitude_m_s)
+        .chain(problem.volume_drives.iter().map(|drive| drive.amplitude_m3_s))
         .chain(problem.traction_drives.iter().map(|drive| drive.amplitude_pa))
     {
         checkpoint()?;
@@ -364,6 +408,14 @@ fn prepare<'f, 'c, 't>(
                 &mut || cancelled(),
             )?);
         }
+        let mut volume = Vec::with_capacity(problem.volume_drives.len());
+        for drive in &problem.volume_drives {
+            volume.push(prepared.volume_velocity_source(
+                drive.quadrature_order,
+                &mut |element, position| (drive.density_per_m3)(element, position),
+                &mut || cancelled(),
+            )?);
+        }
         let mut traction = Vec::with_capacity(problem.traction_drives.len());
         for drive in &problem.traction_drives {
             traction.push(prepared.prepare_wall_traction(&drive.profile, &mut || cancelled())?);
@@ -378,11 +430,16 @@ fn prepare<'f, 'c, 't>(
             .zip(&problem.traction_drives)
             .map(|(source, drive)| (source, drive.amplitude_pa))
             .collect::<Vec<_>>();
+        let volume_values = volume
+            .iter()
+            .zip(&problem.volume_drives)
+            .map(|(source, drive)| (source, drive.amplitude_m3_s))
+            .collect::<Vec<_>>();
         prepared
             .solve_with_sources(
                 &problem.inward_velocity,
                 &boundary_values,
-                &[],
+                &volume_values,
                 &traction_values,
                 &mut || cancelled(),
             )

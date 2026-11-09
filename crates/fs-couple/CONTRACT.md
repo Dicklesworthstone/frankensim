@@ -636,6 +636,26 @@ joules. These remain frozen harmonic source drives within quasisteady thermal
 feedback, without acoustic startup, external-actuator dynamics, transient
 mechanical-memory transfer or parametric stored-energy work.
 
+`volume_drives` extends the same transaction with original distributed
+continuity injection. Each `InteriorTemperatureVolumeDrive` retains an immutable
+thread-safe spatial callback receiving the original tetrahedron index and
+physical position, an explicit native quadrature order, and a complex peak
+volume-flow amplitude [m^3/s]. Its signed profile [m^-3] is neither normalized
+nor multiplied by an inferred density, porosity or heat-release coefficient.
+Clone shares the original callback; Debug never invokes it. Profile values must
+remain fixed for the same arguments throughout the owner's lifetime.
+
+Every changed-temperature factor prepares its own native volume source before
+the coherent boundary/volume/traction solve. Unchanged-temperature snapshots
+perform no callback or projection. Native source caps and finite amplitudes
+are admitted before material evaluation; source quadrature, nonfinite profile
+values, callback failures and cancellation keep their original refusals. Source
+work stays separate from the existing physical heat forms. Focused regressions
+specify analytic homogeneous compression/work, plateau callback/cache reuse,
+mixed original-source heat at changed temperatures, admission and rollback
+during profile evaluation. Native compilation/execution remains unverified
+under the current missing constellation dependency.
+
 `porous_heating/interior/tests/feedback/sources.rs` defines focused original
 field/work comparisons, physical heat accounting, material refresh and source
 admission/rollback cases. Native parsing, formatting, compilation and execution
