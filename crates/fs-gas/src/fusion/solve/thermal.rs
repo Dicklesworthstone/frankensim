@@ -30,6 +30,23 @@ impl Problem<'_> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, DtFusionError> {
+        // Retain this drive across both particle substeps, including when the
+        // burn consumes its last reactant and creates ash before the second.
+        let particle_drive = self.particles.is_some()
+            && ((old.particle_amounts[self.plasma.indices()[0]].value > 0.0
+                && old.particle_amounts[self.plasma.indices()[1]].value > 0.0)
+                || self.heating.heavy_power.value() != 0.0
+                || self.heating.electron_power.value() != 0.0
+                || (sources.conductance_w_k > 0.0
+                    && sources.temperatures[0] != sources.temperatures[1])
+                || sources.radiation_w_per_sqrt_k > 0.0
+                || self.transport.energy_confinement.is_some_and(|law| {
+                    sources
+                        .temperatures
+                        .iter()
+                        .zip(law.exterior_temperatures())
+                        .any(|(&temperature, exterior)| temperature != exterior.value())
+                }));
         if self.transport.energy_confinement.is_some() {
             let reacting = old.limiting_fuel > 0.0;
             admit_confinement_resolution(
@@ -43,13 +60,13 @@ impl Problem<'_> {
                 ],
             )?;
         }
-        let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
+        let supplied = self.exchange_particles(old, 0.5 * dt, particle_drive, cancelled)?;
         let first = self.thermal_step(supplied, 0.5 * dt, sources, cancelled)?;
         let burned = self.frozen_step(first, dt, sources.temperatures[0])?;
         self.admit(burned, cancelled)?;
         let next = self.thermal_step(burned, 0.5 * dt, sources, cancelled)?;
         self.admit(next, cancelled)?;
-        self.exchange_particles(next, 0.5 * dt, cancelled)
+        self.exchange_particles(next, 0.5 * dt, particle_drive, cancelled)
     }
 
     fn thermal_step(

@@ -93,16 +93,22 @@ fn g1_particles_exhaust_keeps_exact_survivors_and_exports_current_thermal_energy
     let duration = 0.3;
     let hazards = [0.0, 3.0, 0.0, 0.0, 120.0];
     let transport = transport([0.0; 5], hazards, [2.0, 1.0]);
+    let mut c = controls();
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    c.maximum_steps = 1;
     let result = advance_dt_fusion_with_transport(
         &initial,
         &plasma,
         heating(0.8),
         &transport,
         Time::new(duration),
-        controls(),
+        c,
         || false,
     )
     .unwrap();
+    assert_eq!(result.balance().accepted_steps, 1);
+    assert_eq!(result.balance().rejected_steps, 0);
     let p = result.balance().particles;
     let mut removed = [0.0; 2];
     for (slot, index, charge) in [(1, plasma.indices()[0], 1.0), (4, plasma.indices()[2], 2.0)] {
@@ -322,4 +328,98 @@ fn g0_particles_local_error_retains_a_transfer_below_cumulative_roundoff() {
         }
     });
     assert_eq!(differences, [(1.0, 2.0, 0.1), (3.0, 5.0, 0.2)]);
+}
+
+#[test]
+fn g1_particles_stiff_replenishment_retains_the_forced_steady_inventory() {
+    // N' = S - lambda*N with S = lambda*N(0) has a constant solution.
+    // At 400 lifetimes, unresolved split injection/exhaust can make both
+    // step-doubling estimates agree on a nearly empty, incorrect endpoint.
+    let (plasma, initial) = source::plasma([8e19, 0.0, 2e19], 1.0, [12.0, 3.0]);
+    let [d, _, he4] = plasma.indices();
+    let duration = 0.04;
+    let hazard = 1e4;
+    let stock = initial.amounts()[d].value();
+    let supply = hazard * stock;
+    let law = transport(
+        [0.0, supply, 0.0, 0.0, 0.0],
+        [0.0, hazard, 0.0, 0.0, 0.0],
+        [12.0, 3.0],
+    );
+    let mut c = controls();
+    c.relative_tolerance = 1e-4;
+    c.energy_tolerance_j = 1e-5;
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    c.minimum_step_s = 1e-9;
+    c.maximum_steps = 50_000;
+    let result = advance_dt_fusion_with_transport(
+        &initial,
+        &plasma,
+        heating(0.8),
+        &law,
+        Time::new(duration),
+        c,
+        || false,
+    )
+    .unwrap();
+    let b = result.balance();
+    let p = b.particles;
+    assert!(b.accepted_steps > 1 && b.rejected_steps > 0);
+    assert_eq!(b.reaction_extent_mol, 0.0);
+    close(result.state().amounts()[d].value(), stock, 1e-3, 0.0);
+    close(
+        result.state().amounts()[he4].value(),
+        initial.amounts()[he4].value(),
+        1e-13,
+        0.0,
+    );
+    close(
+        result.state().amounts()[plasma.electron_index()].value(),
+        initial.amounts()[plasma.electron_index()].value(),
+        1e-3,
+        0.0,
+    );
+    close(p.injected_ions_mol[1], supply * duration, 1e-12, 1e-18);
+    close(p.exhausted_ions_mol[1], supply * duration, 3e-6, 1e-18);
+    close(p.injected_electrons_mol, p.injected_ions_mol[1], 1e-13, 1e-18);
+    close(p.exhausted_electrons_mol, p.exhausted_ions_mol[1], 1e-13, 1e-18);
+    for (pool, (actual, expected)) in [
+        (result.state().heavy_temperature(), initial.heavy_temperature()),
+        (
+            result.state().electron_temperature(),
+            initial.electron_temperature(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        close(actual.value(), expected.value(), 3e-9, 1e-3);
+        close(
+            p.injected_thermal_energy_j[pool],
+            CV_MOLAR * expected.value() * supply * duration,
+            1e-12,
+            1e-6,
+        );
+        close(
+            p.exhausted_thermal_energy_j[pool],
+            CV_MOLAR * expected.value() * supply * duration,
+            3e-6,
+            1e-6,
+        );
+    }
+    // A budget that cannot resolve the driven loss must refuse the solve.
+    c.maximum_steps = 1;
+    assert_eq!(
+        advance_dt_fusion_with_transport(
+            &initial,
+            &plasma,
+            heating(0.8),
+            &law,
+            Time::new(duration),
+            c,
+            || false,
+        ),
+        Err(DtFusionError::StepBudget)
+    );
 }

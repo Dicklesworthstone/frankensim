@@ -130,17 +130,43 @@ fn g3_particles_exhaust_only_thermal_ash_while_fast_alphas_slow_and_restart() {
 #[test]
 fn g1_particles_incoming_helium_is_thermal_and_matches_the_common_network_owner() {
     let (plasma, reference) = fixture::plasma([0.0, 5e19, 5e19, 0.0, 1e18], 1.0, [10.0, 5.0]);
+    let energy_grid = AlphaEnergyGrid::new(
+        vec![Energy::new(KEV_J), Energy::new(100.0 * KEV_J)],
+        || false,
+    )
+    .unwrap();
     let initial = KineticFusionState::from_thermal(
         &reference,
         &plasma,
-        &grid(5000.0),
+        &energy_grid,
         controls().plasma_limits,
         || false,
     )
     .unwrap();
     let alpha = alpha_transport(collision_source(&reference, plasma.indices()[4]));
-    let thermal = particle_transport();
-    let duration = Time::new(0.02);
+    let ash_index = plasma.indices()[4];
+    let ash_before = reference.amounts()[ash_index].value();
+    let hazard = 1e4;
+    let thermal = FusionNetworkTransport {
+        particles: Some(
+            FusionParticleExchange::new(
+                [0.0, 0.0, 0.0, 0.0, hazard * ash_before],
+                [0.0, 0.0, 0.0, 0.0, hazard].map(Frequency::new),
+                reference.heavy_temperature(),
+                reference.electron_temperature(),
+            )
+            .unwrap(),
+        ),
+        ..FusionNetworkTransport::default()
+    };
+    let duration = Time::new(0.04);
+    let mut c = controls();
+    c.relative_tolerance = 1e-4;
+    c.energy_tolerance_j = 1e-5;
+    c.initial_step_s = duration.value();
+    c.maximum_step_s = duration.value();
+    c.minimum_step_s = 1e-9;
+    c.maximum_steps = 50_000;
     let kinetic = advance_kinetic_fusion(
         &initial,
         FusionNetworkChannels::NONE,
@@ -148,7 +174,7 @@ fn g1_particles_incoming_helium_is_thermal_and_matches_the_common_network_owner(
         &thermal,
         &alpha,
         duration,
-        controls(),
+        c,
         || false,
     )
     .unwrap();
@@ -159,10 +185,19 @@ fn g1_particles_incoming_helium_is_thermal_and_matches_the_common_network_owner(
         heating(),
         &thermal,
         duration,
-        controls(),
+        c,
         || false,
     )
     .unwrap();
+    // An exact steady thermal ash stock must survive 400 removal lifetimes.
+    // Comparing only the two owners would miss their shared saturated error.
+    close(
+        kinetic.state().thermal_amounts()[ash_index].value(),
+        ash_before,
+        1e-3,
+        0.0,
+    );
+    assert!(kinetic.balance().accepted_steps > 1 && kinetic.balance().rejected_steps > 0);
     assert_eq!(kinetic.state().alpha_amount().value(), 0.0);
     assert_eq!(kinetic.state().alpha_energy().value(), 0.0);
     assert!(

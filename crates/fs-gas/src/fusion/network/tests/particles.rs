@@ -281,3 +281,113 @@ fn g3_particles_fueling_and_ash_exhaust_share_all_channels_and_thermal_operators
     }
     assert_eq!(result.state().thermodynamics(), initial.thermodynamics());
 }
+
+#[test]
+fn g1_particles_network_rigid_and_volume_paths_retain_stiff_steady_inventories() {
+    let (plasma, initial) = fixture::plasma(MIXED_DENSITY, 0.025, [15.0, 4.0]);
+    let duration = 0.04;
+    let removal = [0.0, 1e4, 1e4, 1e4, 1e4];
+    let before = plasma.indices().map(|i| initial.amounts()[i].value());
+    let supply = core::array::from_fn(|i| removal[i] * before[i]);
+    let transport = FusionNetworkTransport {
+        particles: Some(
+            FusionParticleExchange::new(
+                supply,
+                removal.map(Frequency::new),
+                initial.heavy_temperature(),
+                initial.electron_temperature(),
+            )
+            .unwrap(),
+        ),
+        ..FusionNetworkTransport::default()
+    };
+    let geometry = FusionVolumeHistory::new(
+        vec![
+            FusionVolumeKnot {
+                time: Time::new(0.0),
+                volume: initial.volume(),
+            },
+            FusionVolumeKnot {
+                time: Time::new(duration),
+                volume: initial.volume(),
+            },
+        ],
+        || false,
+    )
+    .unwrap();
+    let mut c = controls();
+    c.relative_tolerance = 1e-4;
+    c.energy_tolerance_j = 1e-5;
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    c.minimum_step_s = 1e-9;
+    c.maximum_steps = 50_000;
+    for moving_owner in [false, true] {
+        let result = if moving_owner {
+            advance_fusion_network_with_volume(
+                &initial,
+                &plasma,
+                FusionNetworkChannels::NONE,
+                heating(),
+                &transport,
+                &geometry,
+                c,
+                || false,
+            )
+        } else {
+            advance_fusion_network(
+                &initial,
+                &plasma,
+                FusionNetworkChannels::NONE,
+                heating(),
+                &transport,
+                Time::new(duration),
+                c,
+                || false,
+            )
+        }
+        .unwrap();
+        let b = result.balance();
+        let p = b.particles;
+        assert!(b.accepted_steps > 1 && b.rejected_steps > 0);
+        assert_eq!(b.reaction_extents_mol, [0.0; 4]);
+        for (slot, index) in plasma.indices().into_iter().enumerate() {
+            close(result.state().amounts()[index].value(), before[slot], 1e-3, 0.0);
+            close(
+                p.injected_ions_mol[slot],
+                supply[slot] * duration,
+                1e-12,
+                1e-18,
+            );
+            close(
+                p.exhausted_ions_mol[slot],
+                supply[slot] * duration,
+                3e-6,
+                1e-18,
+            );
+        }
+        let electrons = (0..5).map(|i| CHARGE[i] * supply[i] * duration).sum();
+        close(p.injected_electrons_mol, electrons, 1e-12, 1e-18);
+        close(p.exhausted_electrons_mol, electrons, 3e-6, 1e-18);
+        close(
+            result.state().amounts()[plasma.electron_index()].value(),
+            initial.amounts()[plasma.electron_index()].value(),
+            1e-3,
+            0.0,
+        );
+        close(
+            result.state().heavy_temperature().value(),
+            initial.heavy_temperature().value(),
+            3e-9,
+            1e-3,
+        );
+        close(
+            result.state().electron_temperature().value(),
+            initial.electron_temperature().value(),
+            3e-9,
+            1e-3,
+        );
+        assert_eq!(b.boundary_work_on_heavy_j, 0.0);
+        assert_eq!(b.boundary_work_on_electrons_j, 0.0);
+    }
+}

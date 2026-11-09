@@ -226,6 +226,7 @@ impl<'a> Problem<'a> {
         &self,
         old: Point,
         dt: f64,
+        other_sources: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, DtFusionError> {
         let Some(source) = &self.particles else {
@@ -239,6 +240,7 @@ impl<'a> Problem<'a> {
             &mut next.thermal_energy,
             &mut next.particles,
             dt,
+            other_sources,
             cancelled,
         )?;
         self.admit(next, cancelled)?;

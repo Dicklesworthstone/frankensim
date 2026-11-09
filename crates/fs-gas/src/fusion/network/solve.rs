@@ -537,6 +537,7 @@ impl<'a> Problem<'a> {
         &self,
         old: Point,
         dt: f64,
+        other_sources: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, FusionNetworkError> {
         let Some(source) = &self.particles else {
@@ -555,6 +556,7 @@ impl<'a> Problem<'a> {
             &mut next.thermal_energy,
             &mut next.particles,
             dt,
+            other_sources,
             cancelled,
         )?;
         self.admit(next, cancelled)?;
@@ -581,6 +583,29 @@ impl<'a> Problem<'a> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Point, [f64; 2]), FusionNetworkError> {
+        // Keep the drive for the whole split interval; products can populate
+        // an initially empty exhaust species before its second particle map.
+        let particle_drive = self.particles.is_some()
+            && ((self.kinetic_alphas && old.kinetic_alpha_amount.value > 0.0)
+                || self.heating.heavy_power.value() != 0.0
+                || self.heating.electron_power.value() != 0.0
+                || (sources.thermal.conductance_w_k > 0.0
+                    && sources.thermal.temperatures[0] != sources.thermal.temperatures[1])
+                || sources.thermal.radiation_w_per_sqrt_k > 0.0
+                || self.transport.energy_confinement.is_some_and(|law| {
+                    sources
+                        .thermal
+                        .temperatures
+                        .iter()
+                        .zip(law.exterior_temperatures())
+                        .any(|(&temperature, exterior)| temperature != exterior.value())
+                })
+                || FusionReactionV1::ALL.iter().enumerate().any(|(r, reaction)| {
+                    sources.events[r].is_some()
+                        && reaction.reactants().iter().all(|&species| {
+                            old.amounts[self.plasma.indices()[species_slot(species)]].value > 0.0
+                        })
+                }));
         if self.transport.energy_confinement.is_some() {
             let indices = self.plasma.indices();
             let reacting = FusionReactionV1::ALL.iter().enumerate().any(|(r, reaction)| {
@@ -612,7 +637,7 @@ impl<'a> Problem<'a> {
             )?;
         }
         let mut births = [Sum::default(); 2];
-        let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
+        let supplied = self.exchange_particles(old, 0.5 * dt, particle_drive, cancelled)?;
         let mut next = self.thermal_step(supplied, 0.5 * dt, sources.thermal, cancelled)?;
         // Palindromic channel composition: each selected binary map is exact
         // at fixed T. Products can feed later maps without an overdraw or seed.
@@ -650,7 +675,7 @@ impl<'a> Problem<'a> {
         self.admit(next, cancelled)?;
         let next = self.thermal_step(next, 0.5 * dt, sources.thermal, cancelled)?;
         self.admit(next, cancelled)?;
-        let next = self.exchange_particles(next, 0.5 * dt, cancelled)?;
+        let next = self.exchange_particles(next, 0.5 * dt, particle_drive, cancelled)?;
         Ok((next, births.map(|n| n.value)))
     }
 

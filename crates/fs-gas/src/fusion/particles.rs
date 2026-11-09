@@ -252,6 +252,9 @@ impl Prepared {
     /// Symmetric exact exhaust/injection maps. Their composition is second
     /// order for simultaneous unlike species hazards and thermal mixing; the
     /// original burn's step doubling resolves that coupling error as well.
+    /// Driven exhaust must first resolve its relaxation time: saturated coarse
+    /// and fine maps can agree while erasing the physical supplied stock S/lambda.
+    /// Pure exhaust retains its unrestricted exact map.
     pub(super) fn apply<const N: usize>(
         &self,
         amounts: &mut [Sum; N],
@@ -260,11 +263,31 @@ impl Prepared {
         energy: &mut [Sum; 2],
         accounts: &mut Accounts,
         dt: f64,
+        other_sources: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DtFusionError> {
         poll(cancelled)?;
         if dt == 0.0 {
             return Ok(());
+        }
+        if other_sources || self.law.injection_mol_s.iter().any(|rate| *rate > 0.0) {
+            for slot in 0..5 {
+                let Some(index) = self.indices[slot] else {
+                    continue;
+                };
+                let available = if slot == 4 {
+                    thermal_he4
+                        .as_ref()
+                        .map_or(amounts[index].value, |n| n.value)
+                } else {
+                    amounts[index].value
+                };
+                if (available > 0.0 || self.law.injection_mol_s[slot] > 0.0)
+                    && self.law.removal_s_inv[slot] * dt > 1.0
+                {
+                    return Err(DtFusionError::StepBudget);
+                }
+            }
         }
         let mut ash = thermal_he4.as_ref().map(|n| **n);
         self.exhaust(amounts, &mut ash, kinetic_he4, energy, accounts, 0.5 * dt)?;
