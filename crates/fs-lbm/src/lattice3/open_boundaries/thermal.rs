@@ -56,9 +56,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     /// for every normal fluid link, in the same x-fast surface ordering.
     ///
     /// Every native velocity/pressure face requires explicit reservoir heat
-    /// data, including outlets that could reverse. Periodic and stationary
-    /// wall face kinds must agree. The scalar |u_axis| < 1/4 kinetic envelope
-    /// is additional to the original native Mach budget, not a replacement.
+    /// data, including outlets that could reverse. Periodic and fixed-geometry
+    /// wall face kinds must agree, including tangentially moving walls. Moving
+    /// faces admit stateless thermal laws; finite solid storage would require
+    /// solid heat advection and refuses. The scalar |u_axis| < 1/4 kinetic
+    /// envelope is additional to the original native Mach budget.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_thermal_field(
         &self,
@@ -221,6 +223,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         poll()?;
         core::mem::swap(&mut self.grid.f, &mut self.grid.next);
         self.grid.completed_steps = step;
+        self.publish_wall_exchange();
         thermal.publish(step, heat);
         Ok(OpenThermalStep3 { momentum, heat })
     }
@@ -230,6 +233,17 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         thermal: ThermalOpenBoundaries3,
     ) -> Result<(), OpenThermalError3<L::Error>> {
         for face in Face3::ALL {
+            if matches!(self.plan.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
+                && matches!(
+                    thermal.faces[face as usize],
+                    ThermalOpenFace3::Wall(crate::thermal::boundary::ThermalWall::FiniteSolid(_))
+                )
+            {
+                return Err(ThermalOpenError3::Invalid(
+                    "moving finite-wall storage requires solid heat advection",
+                )
+                .into());
+            }
             match (
                 self.plan.boundaries.face(face),
                 thermal.faces[face as usize],

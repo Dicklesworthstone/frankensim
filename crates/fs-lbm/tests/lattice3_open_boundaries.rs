@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SEED: u64 = 0x0B03_D327;
 
+#[path = "lattice3_open_boundaries/moving_walls.rs"]
+mod moving_walls;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

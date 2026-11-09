@@ -76,6 +76,53 @@ fn bits<L: EquilibriumLattice3<Q>, const Q: usize>(flow: &OpenBoundaryGrid3<L, Q
         .collect()
 }
 
+#[test]
+fn moving_open_channel_recovers_physical_wall_shear_without_frame_offset() {
+    with_cx(|cx| {
+        for (low, high) in [(0.025, 0.025), (-0.02, 0.04)] {
+            let dims = [5, 6, 3];
+            let velocity = |p: [usize; 3]| {
+                [
+                    low + (high - low) * (p[1] as f64 + 0.5) / dims[1] as f64,
+                    0.0,
+                    0.0,
+                ]
+            };
+            let mut faces = [FaceBoundary3::Periodic; 6];
+            faces[0] = FaceBoundary3::Velocity {
+                velocity: [0.01, 0.0, 0.0],
+            };
+            faces[1] = FaceBoundary3::Pressure { density: 1.3 };
+            faces[2] = FaceBoundary3::Wall {
+                velocity: [low, 0.0, 0.0],
+            };
+            faces[3] = FaceBoundary3::Wall {
+                velocity: [high, 0.0, 0.0],
+            };
+            let flow = make::<D3q27, 27>(cx, dims, bgk(), [0.0; 3], faces, |_| false, velocity);
+            let field: Vec<_> = (0..flow.populations().len())
+                .map(|cell| velocity(coordinates(cell, dims)))
+                .collect();
+            for cell in 0..field.len() {
+                let gradient = flow.rheology_gradient(cell, &field);
+                for (component, row) in gradient.into_iter().enumerate() {
+                    for (axis, value) in row.into_iter().enumerate() {
+                        near(
+                            value,
+                            if component == 0 && axis == 1 {
+                                (high - low) / 6.0
+                            } else {
+                                0.0
+                            },
+                            3e-17,
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn uniform_source<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize>(
     collision: L::Collision,
 ) {

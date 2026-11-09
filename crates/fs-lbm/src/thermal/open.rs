@@ -32,7 +32,8 @@ pub mod immersed;
 pub enum ThermalOpenFace3 {
     /// Match the native periodic axis exactly.
     Periodic,
-    /// Match a stationary native wall, retaining the existing scalar law.
+    /// Match a fixed native wall, including tangential motion, retaining the
+    /// existing normal scalar law. Mechanical wall work is not a heat source.
     Wall(ThermalWall),
     /// An explicit reservoir temperature, including every possible backflow.
     Reservoir { temperature: f64 },

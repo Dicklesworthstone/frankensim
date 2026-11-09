@@ -18,7 +18,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     // nonzero inlet velocity would be mistaken for wall shear. Pressure faces
     // inherit this owner's zero-normal-velocity-gradient donor condition.
     pub(super) fn rheology_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
-        let mut gradient = self.grid.velocity_gradient(cell, velocity);
+        let mut gradient =
+            self.grid
+                .velocity_gradient_with_walls(cell, velocity, |cell, axis, upper| {
+                    self.plan.gradient_wall_velocity(cell, axis, upper)
+                });
         let Some((face, first)) = self.plan.locate(cell) else {
             return gradient;
         };
@@ -69,7 +73,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> OpenBoundar
     /// advance the original native open-reservoir transaction exactly once.
     ///
     /// Physical velocities include the current uniform half force. Interior,
-    /// periodic and stationary-wall slopes retain the native grid stencil.
+    /// periodic and wall slopes retain the native grid stencil, with each
+    /// exterior wall's actual prescribed velocity and stationary solid voxels.
     /// Velocity faces use an on-site quadratic one-sided slope, falling back
     /// to linear only when the second interior donor is solid. Pressure faces
     /// use the reservoir's zero-normal-velocity-gradient condition. At seams,

@@ -1159,6 +1159,35 @@ The interface enables reciprocal finite-body force/couple and dissipation
 checks in `fs-couple` before native publication, with the same source binding
 for frozen, non-Newtonian and thermally evolving liquids.
 
+## Tangential moving walls in native open flow
+
+`OpenBoundaryGrid3` now admits prescribed tangential exterior-wall velocities
+for both D3Q19 and D3Q27. The existing native moving reflection and compensated
+relative-velocity impulse/work reduction serve closed and open grids. Reservoir
+donors and reservoir exchange use the same moving-wall candidate. At open/wall
+seams, reflected links stay wall owned; the reservoir cannot conceal wall mass
+injection. Every reflected set passes a local zero-mass-source check before
+admission. Streamwise moving-wall through-flow is supported, including its seams.
+Normal motion and incompatible velocities at intersecting wall faces refuse;
+the fixed geometry does not represent swept volume or fresh cells.
+
+Boundary rebinding and serial/pooled steps accept wall-speed updates without
+resetting populations. `last_wall_exchange` measures all exterior wall links
+after an accepted moving interval, separately from reservoir transport. It
+retains wall, population and moving-mass impulses and their angular counterparts,
+plus prescribed wall work. Refusal preserves the accepted populations, targets,
+time and last receipt. Spatial-force and thermal publication retain this same
+transaction. Rheology and SGS gradients sample the actual wall velocities.
+The thermal carrier supports stateless normal wall laws on tangentially moving
+faces; finite moving-wall storage refuses because solid heat advection is not
+represented. Mechanical wall work is not silently converted to heat.
+
+Focused tests cover uniform co-motion with through-flow in all orientations,
+separate wall/reservoir momentum closure and seam populations, physical wall
+shear, force-epoch publication, and native-kernel parity through analytic
+Couette convergence. The linear moving reflection retains the native low-Mach
+model; no new high-Mach or moving-geometry accuracy claim is added.
+
 ## Native open-grid spatial force epochs
 
 `lattice3::open_boundaries::forcing::ForcedOpenBoundaryGrid3` binds an explicit per-cell force density to the original native D3Q19/D3Q27 open-grid populations. Initial attachment changes only the native half-source coordinates: density, physical velocity, nonequilibrium stress, accepted time and reservoir/pressure controls survive. There is no public inner-grid escape with stale uniform-force macroscopic readback.

@@ -48,6 +48,97 @@ fn cross(r: [f64; 3], p: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// The native moving reflection, shared by closed and open-grid transport.
+#[inline]
+pub(super) fn reflect<L: Lattice3<Q>, const Q: usize>(
+    outgoing: f64,
+    rho: f64,
+    q: usize,
+    velocity: [f64; 3],
+) -> f64 {
+    if velocity == [0.0; 3] {
+        outgoing
+    } else {
+        outgoing + 2.0 * L::W[q] * rho * dot_direction(L::E[q], velocity) / L::CS2
+    }
+}
+
+/// Canonical compensated reduction of the actual reflected populations.
+#[derive(Default)]
+pub(super) struct WallExchange {
+    sum: [f64; 20],
+    correction: [f64; 20],
+    links: usize,
+}
+
+impl WallExchange {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add<E>(
+        &mut self,
+        cell: usize,
+        outgoing: f64,
+        incoming: f64,
+        e: [f64; 3],
+        velocity: [f64; 3],
+        arm: [f64; 3],
+    ) -> Result<(), GridError3<E>> {
+        let dm = incoming - outgoing;
+        let fluid = e.map(|v| v * (outgoing + incoming));
+        let moving_mass = velocity.map(|v| v * dm);
+        let wall = if velocity == [0.0; 3] {
+            // Preserve the original stationary report arithmetic exactly.
+            e.map(|v| -(outgoing + incoming) * v)
+        } else {
+            core::array::from_fn(|a| {
+                (-e[a] - velocity[a]) * outgoing - (e[a] - velocity[a]) * incoming
+            })
+        };
+        let work = wall[0] * velocity[0] + wall[1] * velocity[1] + wall[2] * velocity[2];
+        let values = [
+            wall,
+            fluid,
+            moving_mass,
+            cross(arm, wall),
+            cross(arm, fluid),
+            cross(arm, moving_mass),
+        ];
+        for (a, value) in values.into_iter().flatten().chain([dm, work]).enumerate() {
+            let next = self.sum[a] + value;
+            self.correction[a] += if self.sum[a].abs() >= value.abs() {
+                (self.sum[a] - next) + value
+            } else {
+                (value - next) + self.sum[a]
+            };
+            self.sum[a] = next;
+            if !next.is_finite() || !self.correction[a].is_finite() {
+                return Err(GridError3::NonFiniteCell { cell });
+            }
+        }
+        self.links += 1;
+        Ok(())
+    }
+
+    pub(super) fn finish<E>(mut self) -> Result<MovingWallMomentum3, GridError3<E>> {
+        for a in 0..20 {
+            self.sum[a] += self.correction[a];
+            if !self.sum[a].is_finite() {
+                return Err(GridError3::Input("nonfinite moving-wall receipt"));
+            }
+        }
+        Ok(MovingWallMomentum3 {
+            wall_impulse: [self.sum[0], self.sum[1], self.sum[2]],
+            fluid_population_impulse: [self.sum[3], self.sum[4], self.sum[5]],
+            wall_velocity_mass_impulse: [self.sum[6], self.sum[7], self.sum[8]],
+            wall_angular_impulse: [self.sum[9], self.sum[10], self.sum[11]],
+            fluid_population_angular_impulse: [self.sum[12], self.sum[13], self.sum[14]],
+            wall_velocity_mass_angular_impulse: [self.sum[15], self.sum[16], self.sum[17]],
+            fluid_mass_change: self.sum[18],
+            wall_work: self.sum[19],
+            measured_links: self.links,
+        })
+    }
+}
+
 impl<L: Lattice3<Q>, const Q: usize> WallMotion3<'_, L, Q> {
     pub(super) fn admit(
         &self,
@@ -118,8 +209,7 @@ impl<L: Lattice3<Q>, const Q: usize> WallMotion3<'_, L, Q> {
         grid: &Grid3<L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<MovingWallMomentum3, GridError3<L::Error>> {
-        let mut sum = [0.0_f64; 20];
-        let mut correction = [0.0_f64; 20];
+        let mut exchange = WallExchange::default();
         for (i, link) in self.probe.links.iter().enumerate() {
             if i % 64 == 0 {
                 checkpoint()?;
@@ -127,59 +217,18 @@ impl<L: Lattice3<Q>, const Q: usize> WallMotion3<'_, L, Q> {
             let q = link.incoming;
             let outgoing = grid.post[link.cell][L::OPP[q]];
             let incoming = grid.next[link.cell][q];
-            let velocity = self.velocities[i];
-            let e = L::E[q].map(f64::from);
-            let dm = incoming - outgoing;
-            let fluid = e.map(|v| v * (outgoing + incoming));
-            let moving_mass = velocity.map(|v| v * dm);
-            let wall = if velocity == [0.0; 3] {
-                // Preserve the original stationary report arithmetic exactly.
-                e.map(|v| -(outgoing + incoming) * v)
-            } else {
-                core::array::from_fn(|a| {
-                    (-e[a] - velocity[a]) * outgoing - (e[a] - velocity[a]) * incoming
-                })
-            };
-            let work = wall[0] * velocity[0] + wall[1] * velocity[1] + wall[2] * velocity[2];
-            let values = [
-                wall,
-                fluid,
-                moving_mass,
-                cross(link.arm, wall),
-                cross(link.arm, fluid),
-                cross(link.arm, moving_mass),
-            ];
-            for (a, value) in values.into_iter().flatten().chain([dm, work]).enumerate() {
-                let next = sum[a] + value;
-                correction[a] += if sum[a].abs() >= value.abs() {
-                    (sum[a] - next) + value
-                } else {
-                    (value - next) + sum[a]
-                };
-                sum[a] = next;
-                if !next.is_finite() || !correction[a].is_finite() {
-                    return Err(GridError3::NonFiniteCell { cell: link.cell });
-                }
-            }
+            exchange.add(
+                link.cell,
+                outgoing,
+                incoming,
+                L::E[q].map(f64::from),
+                self.velocities[i],
+                link.arm,
+            )?;
         }
-        for a in 0..20 {
-            sum[a] += correction[a];
-            if !sum[a].is_finite() {
-                return Err(GridError3::Input("nonfinite moving-wall receipt"));
-            }
-        }
+        let receipt = exchange.finish()?;
         checkpoint()?;
-        Ok(MovingWallMomentum3 {
-            wall_impulse: [sum[0], sum[1], sum[2]],
-            fluid_population_impulse: [sum[3], sum[4], sum[5]],
-            wall_velocity_mass_impulse: [sum[6], sum[7], sum[8]],
-            wall_angular_impulse: [sum[9], sum[10], sum[11]],
-            fluid_population_angular_impulse: [sum[12], sum[13], sum[14]],
-            wall_velocity_mass_angular_impulse: [sum[15], sum[16], sum[17]],
-            fluid_mass_change: sum[18],
-            wall_work: sum[19],
-            measured_links: self.probe.links.len(),
-        })
+        Ok(receipt)
     }
 }
 
@@ -208,8 +257,7 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                     if u != [0.0; 3] {
                         // This is the actual streamed population, also read by
                         // the post-pass receipt; there is no second wall model.
-                        output[q] = src[cell][L::OPP[q]]
-                            + 2.0 * L::W[q] * rho * dot_direction(L::E[q], u) / L::CS2;
+                        output[q] = reflect::<L, Q>(src[cell][L::OPP[q]], rho, q, u);
                     }
                     selected += 1;
                 }

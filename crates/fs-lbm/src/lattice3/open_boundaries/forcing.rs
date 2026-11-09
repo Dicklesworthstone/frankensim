@@ -212,6 +212,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
         )?;
         core::mem::swap(&mut self.inner.grid.f, &mut self.inner.grid.next);
         self.inner.grid.completed_steps = step;
+        self.inner.publish_wall_exchange();
         Ok(receipt)
     }
 
@@ -245,6 +246,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
         core::mem::swap(&mut self.inner.grid.f, &mut self.inner.grid.next);
         core::mem::swap(&mut self.forces, forces_at_end);
         self.inner.grid.completed_steps = step;
+        self.inner.publish_wall_exchange();
+    }
+
+    /// Last accepted native exterior-wall impulse and work, in the same
+    /// force-centered transaction as the population and spatial force epochs.
+    pub fn last_wall_exchange(&self) -> Option<crate::lattice3::moving_walls::MovingWallMomentum3> {
+        self.inner.last_wall_exchange()
     }
 }
 

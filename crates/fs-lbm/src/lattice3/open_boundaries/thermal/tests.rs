@@ -77,6 +77,81 @@ fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.17e} != {b:.17e}");
 }
 
+#[test]
+fn thermal_open_flow_uses_moving_wall_velocity_and_publishes_its_reaction() {
+    with_cx(|cx| {
+        let velocity = [0.025, 0.0, 0.0];
+        let grid = Grid3::<D3q27, 27>::try_new_equilibrium(
+            [6, 5, 3],
+            CollisionConfig27 {
+                model: CollisionModel27::Bgk {
+                    tau: 0.9,
+                    equilibrium: Equilibrium27::Factorized,
+                },
+                maximum_mach: 0.2,
+            },
+            [0.0; 3],
+            [false, false, true],
+            GridBudget3 {
+                maximum_cells: 512,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            |_| (1.2, velocity),
+        )
+        .unwrap();
+        let faces = BoundarySpec3::new([
+            FaceBoundary3::Velocity { velocity },
+            FaceBoundary3::Pressure { density: 1.2 },
+            FaceBoundary3::Wall { velocity },
+            FaceBoundary3::Wall { velocity },
+            FaceBoundary3::Periodic,
+            FaceBoundary3::Periodic,
+        ]);
+        let mut flow = OpenBoundaryGrid3::try_new(grid, cx, faces).unwrap();
+        let mut thermal = thermal_faces(0, 0.8);
+        thermal.faces[2] = ThermalOpenFace3::Wall(ThermalWall::Adiabatic);
+        thermal.faces[3] = ThermalOpenFace3::Wall(ThermalWall::Adiabatic);
+        let cells = flow.populations().len();
+        let mut heat = flow
+            .prepare_thermal_field(cx, &vec![0.8; cells], 0.9, thermal, limits(2.0))
+            .unwrap();
+        for _ in 0..4 {
+            let receipt = flow
+                .step_serial_with_thermal(&mut heat, cx, None, &vec![0.0; cells], None, [0.0; 3])
+                .unwrap();
+            near(receipt.heat.defect, 0.0, 2e-13);
+            near(flow.last_wall_exchange().unwrap().wall_work, 0.0, 2e-14);
+            for cell in 0..cells {
+                near(heat.temperature(cell).unwrap(), 0.8, 3e-14);
+                near(flow.macroscopic(cell).unwrap().1[0], 0.025, 3e-14);
+            }
+        }
+        let before = flow.populations().to_vec();
+        let last_wall = flow.last_wall_exchange();
+        assert!(
+            flow.step_serial_with_thermal(&mut heat, cx, None, &vec![10.0; cells], None, [0.0; 3])
+                .is_err()
+        );
+        assert_eq!(flow.populations(), before);
+        assert_eq!(flow.last_wall_exchange(), last_wall);
+        assert_eq!(flow.completed_steps(), 4);
+        assert_eq!(heat.completed_steps(), 4);
+        thermal.faces[3] = ThermalOpenFace3::Wall(ThermalWall::FiniteSolid(
+            crate::thermal::boundary::FiniteThermalWall {
+                temperature: 0.8,
+                heat_capacity: 2.0,
+                resistance: 0.0,
+                heat_per_step: 0.0,
+            },
+        ));
+        assert!(
+            flow.prepare_thermal_field(cx, &vec![0.8; cells], 0.9, thermal, limits(2.0))
+                .is_err()
+        );
+    });
+}
+
 fn uniform<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collision) {
     with_cx(|cx| {
         for axis in 0..3 {

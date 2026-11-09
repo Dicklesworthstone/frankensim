@@ -11,8 +11,9 @@
 //! incoming rows are replaced: prescribed full moments apply to face interiors,
 //! not to the intersection of incompatible wall and reservoir conditions.
 //! Pressure profiles are held on their native face planes; geometry and the
-//! uniform body force remain fixed. Moving walls, velocity profiles,
-//! characteristic outlets and a thermal-energy equation are separate.
+//! uniform body force remain fixed. Prescribed tangential wall motion uses the
+//! native moving reflection and a separate wall impulse/work account. Velocity
+//! profiles and characteristic outlets remain separate.
 
 use super::{
     EquilibriumLattice3, FirstError, Grid3, GridError3, Lattice3, StepData, coordinates, initial,
@@ -26,14 +27,15 @@ use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, TileKernel, TilePlan};
 use fs_math::dd::Dd;
 use std::sync::Mutex;
 
-mod pressure;
-mod rheology;
 /// Spatial force epochs on the same native reservoir and population owner.
 pub mod forcing;
-/// Conservative D3Q7 heat transport on the same native open-grid transaction.
-pub mod thermal;
+mod moving_walls;
+mod pressure;
+mod rheology;
 /// Explicit local turbulent momentum and heat on original reservoir geometry.
 pub mod sgs;
+/// Conservative D3Q7 heat transport on the same native open-grid transaction.
+pub mod thermal;
 
 use pressure::PressureProfile3;
 
@@ -43,13 +45,16 @@ pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     grid: Grid3<L, Q>,
     plan: FacePlan,
     pressure_profiles: [Option<PressureProfile3>; 6],
+    wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
+    pending_wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     /// Bind reservoirs without modifying populations or advancing time.
     /// Periodicity must match the original grid. The open axis needs at least
     /// three cells; every exposed fluid boundary cell needs a fluid donor one
-    /// cell inward. Nonzero wall velocities refuse rather than become static.
+    /// cell inward. Wall motion must be tangential, compatible at wall junctions
+    /// and locally mass conserving on the actual native reflected links.
     pub fn try_new(
         grid: Grid3<L, Q>,
         cx: &Cx<'_>,
@@ -65,7 +70,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         boundaries: BoundarySpec3,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<Self, GridError3<L::Error>> {
-        let plan = FacePlan::admit(&grid, boundaries)?;
+        let plan = FacePlan::admit(&grid, boundaries, poll)?;
         for (index, cell) in plan.cells().enumerate() {
             if index % 64 == 0 {
                 poll()?;
@@ -85,6 +90,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             grid,
             plan,
             pressure_profiles: core::array::from_fn(|_| None),
+            wall_exchange: None,
+            pending_wall_exchange: None,
         })
     }
 
@@ -113,8 +120,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         self.plan.boundaries
     }
 
-    /// Atomically replace values on existing velocity/pressure faces.
-    /// Changing kinds, wall motion or periodicity requires a different owner;
+    /// Atomically replace values on existing velocity/pressure/wall faces.
+    /// Changing kinds or periodicity requires a different owner;
     /// this update performs no streaming, impulse or hidden population reset.
     /// A spatial pressure profile remains authoritative: clear or update it
     /// explicitly before changing that face's held uniform density.
@@ -143,7 +150,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         for face in Face3::ALL {
             match (self.plan.boundaries.face(face), boundaries.face(face)) {
                 (FaceBoundary3::Velocity { .. }, FaceBoundary3::Velocity { .. })
-                | (FaceBoundary3::Pressure { .. }, FaceBoundary3::Pressure { .. }) => {}
+                | (FaceBoundary3::Pressure { .. }, FaceBoundary3::Pressure { .. })
+                | (FaceBoundary3::Wall { .. }, FaceBoundary3::Wall { .. }) => {}
                 (old, new) if old == new => {}
                 _ => {
                     return Err(GridError3::Input(
@@ -159,7 +167,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 ));
             }
         }
-        let candidate = FacePlan::admit(&self.grid, boundaries)?;
+        let candidate = FacePlan::admit(&self.grid, boundaries, poll)?;
         poll()?;
         Ok(candidate)
     }
@@ -209,6 +217,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         core::mem::swap(&mut self.grid.f, &mut self.grid.next);
         self.grid.completed_steps = step;
         self.plan = plan;
+        self.publish_wall_exchange();
         Ok(receipt)
     }
 
@@ -271,7 +280,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             view.process(&grid.post, chunk, tile * 64)?;
         }
         let receipt = view.measure(&grid.post, &grid.next, origin, poll)?;
+        let walls = view.measure_walls(&grid.post, &grid.next, origin, poll)?;
         poll()?;
+        self.pending_wall_exchange = walls;
         Ok((receipt, step))
     }
 
@@ -357,10 +368,12 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             }
         }
         let receipt = view.measure(&grid.post, &grid.next, origin, &mut poll)?;
+        let walls = view.measure_walls(&grid.post, &grid.next, origin, &mut poll)?;
         poll()?;
         core::mem::swap(&mut grid.f, &mut grid.next);
         grid.completed_steps = step;
         self.plan = plan;
+        self.wall_exchange = walls;
         Ok(receipt)
     }
 
@@ -390,6 +403,7 @@ struct FacePlan {
     dims: [usize; 3],
     axis: Option<usize>,
     stride: usize,
+    moving: bool,
 }
 
 fn is_open(boundary: FaceBoundary3) -> bool {
@@ -403,12 +417,14 @@ impl FacePlan {
     fn admit<L: EquilibriumLattice3<Q>, const Q: usize>(
         grid: &Grid3<L, Q>,
         boundaries: BoundarySpec3,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<Self, GridError3<L::Error>> {
         boundaries.try_validate().map_err(|error| match error {
             BoundaryForcingError3::Invalid(reason) => GridError3::Input(reason),
             _ => GridError3::Input("invalid native open boundaries"),
         })?;
         let mut axis = None;
+        let mut moving = false;
         for face in Face3::ALL {
             let a = face as usize / 2;
             let boundary = boundaries.face(face);
@@ -418,10 +434,19 @@ impl FacePlan {
                 ));
             }
             match boundary {
-                FaceBoundary3::Wall { velocity } if velocity != [0.0; 3] => {
-                    return Err(GridError3::Input(
-                        "open grid requires stationary wall faces",
-                    ));
+                FaceBoundary3::Wall { velocity } => {
+                    if velocity[a] != 0.0 {
+                        return Err(GridError3::Input(
+                            "fixed exterior wall velocity must be tangential",
+                        ));
+                    }
+                    initial::admit_velocity::<L, Q>(
+                        grid.collision,
+                        velocity,
+                        0,
+                        grid.budget.maximum_mach,
+                    )?;
+                    moving |= velocity != [0.0; 3];
                 }
                 FaceBoundary3::Velocity { velocity } => {
                     initial::admit_velocity::<L, Q>(
@@ -440,12 +465,15 @@ impl FacePlan {
                 axis = Some(a);
             }
         }
-        Ok(Self {
+        let plan = Self {
             boundaries,
             dims: grid.dims,
             axis,
             stride: axis.map_or(1, |a| grid.dims[..a].iter().product()),
-        })
+            moving,
+        };
+        plan.admit_wall_motion(grid, poll)?;
+        Ok(plan)
     }
 
     fn locate(&self, cell: usize) -> Option<(Face3, usize)> {
@@ -546,6 +574,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
     ) -> Result<(), GridError3<L::Error>> {
         self.data
             .process_stream_with_update::<false>(src, dst, base, |cell, output, _| {
+                self.reflect_walls(src, output, cell)?;
                 if let Some((face, donor)) = self.plan.locate(cell) {
                     let (walls, open) = self.plan.masks(&self.data, cell);
                     if open != 0 {
@@ -586,6 +615,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
     ) -> Result<(), GridError3<L::Error>> {
         let mut source = [0.0; Q];
         self.data.pull_cell(src, &mut source, donor);
+        self.reflect_walls(src, &mut source, donor)?;
         let force = self
             .data
             .forces
@@ -683,6 +713,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
             }
             let mut before = [0.0; Q];
             self.data.pull_cell(post, &mut before, cell);
+            self.reflect_walls(post, &mut before, cell)?;
             let p = coordinates(cell, self.data.dims);
             let arm: [Dd; 3] =
                 core::array::from_fn(|a| Dd::from_f64(p[a] as f64 + 0.5 - origin[a]));
