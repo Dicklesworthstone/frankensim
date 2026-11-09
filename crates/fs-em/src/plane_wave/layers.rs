@@ -47,8 +47,8 @@ pub use dispersion::LayeredFrequencyDispersion;
 
 mod thickness_ensemble;
 pub use thickness_ensemble::{
-    LayerThicknessRealization, PreparedLayerThicknessEnsemble, ThicknessEnsembleBudget,
-    ThicknessEnsembleReflection,
+    LayerThicknessRealization, PolarizedThicknessEnsembleReflection, PreparedLayerThicknessEnsemble,
+    ThicknessEnsembleBudget, ThicknessEnsemblePolarizedPower, ThicknessEnsembleReflection,
 };
 
 mod transverse;

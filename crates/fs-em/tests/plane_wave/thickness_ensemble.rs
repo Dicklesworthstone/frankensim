@@ -466,3 +466,6 @@ fn admission_budget_cancellation_and_replay_are_bounded_and_do_not_change_the_so
     }
     assert_eq!(stack.layer(0).unwrap().thickness_m, 0.5);
 }
+
+#[path = "thickness_ensemble/polarization.rs"]
+mod polarization;

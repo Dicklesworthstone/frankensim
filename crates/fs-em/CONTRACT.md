@@ -8181,3 +8181,28 @@ Focused source-level regressions resolve three-tone T^4 and real T^6 heat nulls 
 Prepared local film-heat owners retain the original DD reservoir fields and source/reservoir boundaries already included in their admitted preparation workspace. These buffers live with the owner; they add no preparation heap peak or per-observation allocation. Each admitted source bank uses the short uniform temporal factor and reuses it across all its reservoirs, without another FFT or material solve. Other banks retain their original real/proper DD pair law, sharing each pair kernel across the source's reservoirs within the already admitted ordered-product work. A silent one- or two-tone bank or a wide-carrier real source cannot disable another source's positive contraction. When no bank admits, observation keeps the cached flattened spectrum path. Original conductivity normalization and the proper-complex peak half remain attached to their physical source laws.
 
 The exported flattened spectrum, instantaneous `evaluate()`, and spatially integrated heat spectra retain their coefficient representation. This improvement concerns the retained local owner's window observations. Focused regressions exercise actual spectrum preparation, real/proper deep nulls, independent source/reservoir contributions, shifted shutters and native EM phase, conductivity scaling, mixed-bank fallback, finite extreme proper power and cancellation.
+
+## Polarized reflection from correlated thickness ensembles
+
+`PreparedLayerThicknessEnsemble::evaluate_polarized` solves TE and TM for
+each same authored joint geometry row, retaining the original cached materials
+and coherent Maxwell operator. An explicit work limit includes both solves.
+Compensated central moments retain the complex TE/TM response covariance,
+rather than inferring a Jones matrix from averaged powers. The result exposes
+total, mean-response and fluctuating response dyads, an averaged Mueller
+matrix, and constant-work reflected-coherency propagation.
+
+Power-normalized channels use the original fixed tangential-E signs and
+positive incident normal admittances. Consumers must explicitly convert to
+their own rotating optical frames. Direct coherency propagation retains weak
+Brewster channels without reconstructing them from rounded I/Q differences.
+Physical finite-film absorption and exit-face transmitted power remain the
+original channel-diagonal fluxes; reflected covariance is never heat.
+Incident polarization statistics must be independent of the thickness row.
+This model supplies neither lateral scattering/diffraction nor an inferred
+common-plane transmitted coherency or a physical source-coherence law.
+
+Five G1/G3 regression groups cover rowwise lossy Airy/Jones agreement and
+depolarization, single-realization parity, the lossless normal-incidence phase
+ensemble, weak channels and small covariance, physical input admission,
+deterministic replay, explicit work bounds and cancellation between TE/TM.

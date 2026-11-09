@@ -23,6 +23,9 @@
 use super::{LayeredReflection, PlanarDielectricLayers, Polarization, ReflectionError, bad};
 use fs_math::{c64::C64, dd::Dd};
 
+mod polarization;
+pub use polarization::{PolarizedThicknessEnsembleReflection, ThicknessEnsemblePolarizedPower};
+
 /// One joint realization, in the original stack's physical layer order.
 #[derive(Clone, Copy, Debug)]
 pub struct LayerThicknessRealization<'a> {
