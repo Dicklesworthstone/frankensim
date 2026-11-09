@@ -11566,3 +11566,35 @@ The controller exposes local time-discretization estimates, not an
 unconditional stability, global trajectory-error or spatial-convergence
 certificate. Constant energetic kappa and the fixed-geometry transport model
 remain the same as the fixed-step owner.
+
+## Original-source thermal multicomponent interfaces
+
+The original-liquid phase-field adapter can bind the exact original liquid's
+caloric law and return a source-qualified local-temperature phase field.
+Identity is checked against the retained liquid instance, not merely equal
+parameter values. The original pure-liquid Cp curves and A+B/T mixture
+calorics remain the numerical chemical, enthalpy and entropy authority.
+
+Fixed and adaptive candidates preserve the entire numerical interface/thermal
+receipt. Each completed endpoint resolves every cell through the original
+liquid law at its actual local temperature and all independent component
+amounts. Original composition axes, pressure, selected material claims,
+source-volume allowance and cell budget persist. The shared existing thermal
+source-resolution helper handles cell budgets, original-source errors,
+density/geometry consistency and cancellation for both homogeneous and
+interfacial owners.
+
+Source, volume or late cancellation refusal returns no partially refreshed
+endpoint and leaves the caller's field and receipts unchanged. A spinodal
+cell remains an original homogeneous branch of the evolving diffuse
+interface; it is not independently flashed to another material state.
+Resolved mixture transport Cp does not replace original caloric integration.
+Molecular pair diffusivities, face conductivity, authored heat-of-transport
+contrasts and energetic kappa remain explicit transport/interface inputs.
+
+Material receipts qualify completed endpoints, not every rejected adaptive
+trial. The wrapper exposes only the full energetic thermal field, and retains
+the exact borrowed caloric/liquid pair across repeated fixed and adaptive
+advances. Focused integration cases cover identity refusal, actual-temperature
+property resolution, independent total enthalpy-plus-interface accounting,
+unchanged numerical receipts, and transactional original-source/volume gates.

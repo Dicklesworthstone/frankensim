@@ -1,6 +1,8 @@
 //! Original caloric identities, local-temperature receipts and atomic source gates.
 //! Every property and interaction below is synthetic numerical test data.
 
+mod phase_field;
+
 use super::*;
 use fs_flux::miscibility::multicomponent::advection::MulticomponentMiscibilityAdvectionFace;
 use fs_flux::miscibility::multicomponent::nonisothermal::{
