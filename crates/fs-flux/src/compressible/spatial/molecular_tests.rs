@@ -655,3 +655,6 @@ fn g2_g4_all_six_walls_receive_complete_impulse_and_late_cancel_retains_history(
 
 #[path = "molecular/stabilized_tests.rs"]
 mod stabilized;
+
+#[path = "molecular/inertial_walls_tests.rs"]
+mod inertial_walls;

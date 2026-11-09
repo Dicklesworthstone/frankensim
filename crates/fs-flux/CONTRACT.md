@@ -3460,6 +3460,48 @@ composition. Original source-domain and parabolic/acoustic limits still apply;
 these numerical checks do not establish general FSI stability or experimental
 accuracy.
 
+### Reciprocal molecular stress and heat with finite volumetric pistons
+
+`spatial::molecular::MolecularEuler3d::step_with_inertial_walls` uses the
+original simultaneous two-wall midpoint solve with the complete native
+molecular/ALE/molecular trial. Every proposal starts from the same accepted
+gas at one fixed physical duration. Both actual pressure and molecular
+traction impulses accelerate the finite masses, and their conjugate wall
+work uses those same midpoint speeds. No endpoint-force surrogate, full-field
+clone per proposal, artificial damping or kinetic-energy repair is introduced.
+
+`MolecularInertialWallsStep` retains the complete moving molecular report,
+each wall's mechanical balances, and explicit stationary-side and ideal-guide
+reactions. Fixed transverse walls can absorb axial momentum through viscosity;
+their actual inward impulse is subtracted in the combined axial system gate.
+Piston translation guides carry transverse force, and orientation guides carry
+the pressure-plus-viscous torque from every accepted face about its plane
+centre. Those guide motions are constrained and do no mechanical work.
+
+Directly integrated Fourier/Navier heat remains external thermal exchange.
+Both the source's physical and referenced gas-plus-piston energies must pass
+the authored energy tolerance after accounting for that heat. Physical energy
+uses differences of conserved mass and energy, preserving the original source
+reference without subtracting large absolute totals. Each wall's impulse and
+mechanical work still pass their independent tolerances. Exterior pressure
+and additional centre-applied axial forces remain explicit.
+
+The selected axis has two reflecting ends; transverse directions are periodic
+or stationary reflecting walls. All authored tangential wall velocities must
+be zero. No-slip, Navier slip, free slip and prescribed wall temperatures retain
+their original laws. The thermal reservoir has no evolved finite heat capacity.
+Gas, geometry, source binding, clock, loads, reports and both finite masses
+publish together only after complete acceptance and final cancellation.
+
+Six native regressions cover exact zero-transport inviscid agreement on every
+axis, independently predicted initial longitudinal viscous recoil, isothermal
+and Navier heat versus mechanical work, side support and full guide torque,
+whole-interval retry/cancellation/replay, and Galilean work/heat covariance.
+The original nine frozen molecular regressions also pass. Original moving
+transport/source restrictions remain; this guided-plane composition does not
+admit piston rotation, contact stops or surface deformation and does not
+establish general FSI stability.
+
 ### Exploratory subgrid stress and heat in the three-dimensional gas
 
 With `experimental-sgs`, `MolecularTransport3d::with_sgs` and

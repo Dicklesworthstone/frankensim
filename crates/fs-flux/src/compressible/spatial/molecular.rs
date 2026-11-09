@@ -22,9 +22,14 @@ use fs_qty::{Pressure, Temperature};
 
 mod coupled;
 pub use coupled::{
+    InertialWallLoad, InertialWallsControl, MolecularInertialWallsError,
+    MolecularInertialWallsStep, Piston, PistonError,
+};
+pub use coupled::{
     MolecularEuler3d, MolecularStepReport3d, MovingMolecularStepReport3d,
     StabilizedMolecularStepReport3d,
 };
+pub(in crate::compressible::spatial) use coupled::{admit_planes, bounded_duration, displacement};
 mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
 mod reservoir;

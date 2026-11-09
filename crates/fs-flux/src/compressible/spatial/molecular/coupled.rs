@@ -5,6 +5,15 @@ use crate::compressible::molecular::stabilized::StepWork;
 mod moving;
 pub use moving::MovingMolecularStepReport3d;
 
+mod inertial_walls;
+pub use inertial_walls::{
+    InertialWallLoad, InertialWallsControl, MolecularInertialWallsError,
+    MolecularInertialWallsStep, Piston, PistonError,
+};
+pub(in crate::compressible::spatial) use inertial_walls::{
+    admit_planes, bounded_duration, displacement,
+};
+
 #[cfg(feature = "experimental-sgs")]
 mod lagrangian_channel;
 
@@ -156,7 +165,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         config: sgs::EquilibriumThermalWallConfig,
     ) -> Result<Self, MolecularError> {
         let changed = self.molecular.equilibrium_sgs_thermal_wall(side) != Some(config);
-        self.molecular = self.molecular.with_equilibrium_sgs_thermal_wall(side, config)?;
+        self.molecular = self
+            .molecular
+            .with_equilibrium_sgs_thermal_wall(side, config)?;
         if changed {
             self.last_step = None;
         }
@@ -164,7 +175,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     }
 
     #[cfg(feature = "experimental-sgs")]
-    pub fn equilibrium_sgs_thermal_wall(&self, side: BoundarySide) -> Option<sgs::EquilibriumThermalWallConfig> {
+    pub fn equilibrium_sgs_thermal_wall(
+        &self,
+        side: BoundarySide,
+    ) -> Option<sgs::EquilibriumThermalWallConfig> {
         self.molecular.equilibrium_sgs_thermal_wall(side)
     }
 
@@ -567,30 +581,50 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     ) -> Result<StressField3d<'_>, MolecularError> {
         poll(&mut cancelled)?;
         #[cfg(feature = "experimental-sgs")]
-        if let Some(mut filter) = self.molecular.sgs.as_mut()
+        if let Some(mut filter) = self
+            .molecular
+            .sgs
+            .as_mut()
             .and_then(sgs::SubgridTransport::take_lagrangian_filter)
         {
             let result = (|| {
-                let trial = self.molecular.sgs.as_mut()
+                let trial = self
+                    .molecular
+                    .sgs
+                    .as_mut()
                     .expect("selected Lagrangian SGS owner")
                     .prepare_lagrangian_with_walls(
-                        &mut filter, &self.accepted, &self.molecular.walls, &mut cancelled,
+                        &mut filter,
+                        &self.accepted,
+                        &self.molecular.walls,
+                        &mut cancelled,
                     )?;
-                let result = self.molecular.prepare_stress_field(&self.accepted, &mut cancelled);
+                let result = self
+                    .molecular
+                    .prepare_stress_field(&self.accepted, &mut cancelled);
                 drop(trial);
                 result
             })();
-            self.molecular.sgs.as_mut().expect("retained Lagrangian SGS owner")
+            self.molecular
+                .sgs
+                .as_mut()
+                .expect("retained Lagrangian SGS owner")
                 .restore_lagrangian_filter(filter, None);
             result?;
         } else {
-            self.molecular.prepare_stress_field(&self.accepted, &mut cancelled)?;
+            self.molecular
+                .prepare_stress_field(&self.accepted, &mut cancelled)?;
         }
         #[cfg(not(feature = "experimental-sgs"))]
-        self.molecular.prepare_stress_field(&self.accepted, &mut cancelled)?;
+        self.molecular
+            .prepare_stress_field(&self.accepted, &mut cancelled)?;
         Ok(StressField3d::frozen(
-            &self.molecular.grid, self.molecular.boundaries, self.accepted.time.value(),
-            &self.molecular.work.primitive, &self.molecular.work.flux, &self.accepted.states,
+            &self.molecular.grid,
+            self.molecular.boundaries,
+            self.accepted.time.value(),
+            &self.molecular.work.primitive,
+            &self.molecular.work.flux,
+            &self.accepted.states,
         ))
     }
 
@@ -1077,7 +1111,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             .profiles
             .copy_accepted_from(&self.accepted.reservoirs.profiles, &mut cancelled)?;
         self.trial.reservoirs.profiles.publish();
-        self.trial.reservoirs.copy_finite_from(&self.accepted.reservoirs);
+        self.trial
+            .reservoirs
+            .copy_finite_from(&self.accepted.reservoirs);
         let reservoirs = timed::stage(
             &mut self.trial.reservoirs,
             profiles.as_deref_mut(),
@@ -1118,7 +1154,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 timed::admit_interval(self.accepted.time, dt)?;
             }
             self.trial.states.copy_from_slice(&self.accepted.states);
-            self.trial.reservoirs.copy_finite_from(&self.accepted.reservoirs);
+            self.trial
+                .reservoirs
+                .copy_finite_from(&self.accepted.reservoirs);
             self.trial.time = self.accepted.time;
             self.trial.last_step = self.accepted.last_step;
             self.trial
