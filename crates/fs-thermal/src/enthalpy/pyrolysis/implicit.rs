@@ -21,6 +21,10 @@
 use super::*;
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 
+/// Bounded time-error control over the original implicit physical steps.
+#[path = "implicit/adaptive.rs"]
+pub mod adaptive;
+
 /// Bounded small dense solve; larger graphs need a separate sparse solver.
 pub const MAX_IMPLICIT_CELLS: usize = 128;
 

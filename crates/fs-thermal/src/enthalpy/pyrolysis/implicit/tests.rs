@@ -3,6 +3,9 @@ use crate::enthalpy::{
     CellGeometry, DepositionBudget, Reservoir, StepConfig, ThermalLink, TimedEvent,
 };
 
+#[path = "tests/adaptive.rs"]
+mod adaptive;
+
 struct Caloric {
     cp: f64,
     offset: f64,

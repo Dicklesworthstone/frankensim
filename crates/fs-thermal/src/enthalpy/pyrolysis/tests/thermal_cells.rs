@@ -219,22 +219,7 @@ fn g1_latent_sink_retains_exact_plateau_and_absorbed_energy_during_decomposition
     }
 }
 
-#[test]
-fn g1_activated_reaction_and_latent_buffer_converge_to_independent_energy_odes() {
-    let sink = HeatSink {
-        basis: ThermalStorageBasis::Enthalpy,
-        latent: true,
-    };
-    let gas = |t| Ok(2000.0 * (t - 300.0) + 200_000.0);
-    let mut material = model(&VIRGIN, None, &gas, 0.0, 2.0);
-    material.kinetics.activation_energy_j_mol = 4000.0;
-    let state = PyrolysisSimulation::new_with_thermal_materials(
-        thermal_pair(&sink, 50_000.0),
-        &[material],
-        &[MaterialId(2)],
-        || Ok(()),
-    )
-    .unwrap();
+fn latent_buffer_reference() -> [f64; 3] {
     // Independent continuous balances: m Cp Tdot = Q - k(T)m L,
     // mdot = -k(T)m, E_buffer_dot = -Q. The original outgoing h carries
     // sensible energy; only its difference L remains after cancelling mdot*h.
@@ -263,6 +248,26 @@ fn g1_activated_reaction_and_latent_buffer_converge_to_independent_energy_odes()
         exact[0] < 600.0,
         "the initially cooling buffer must later feed reaction heat"
     );
+    exact
+}
+
+#[test]
+fn g1_activated_reaction_and_latent_buffer_converge_to_independent_energy_odes() {
+    let sink = HeatSink {
+        basis: ThermalStorageBasis::Enthalpy,
+        latent: true,
+    };
+    let gas = |t| Ok(2000.0 * (t - 300.0) + 200_000.0);
+    let mut material = model(&VIRGIN, None, &gas, 0.0, 2.0);
+    material.kinetics.activation_energy_j_mol = 4000.0;
+    let state = PyrolysisSimulation::new_with_thermal_materials(
+        thermal_pair(&sink, 50_000.0),
+        &[material],
+        &[MaterialId(2)],
+        || Ok(()),
+    )
+    .unwrap();
+    let exact = latent_buffer_reference();
     for implicit in [false, true] {
         let mut errors = [0.0; 2];
         for (rung, steps) in [50, 100].into_iter().enumerate() {
@@ -303,6 +308,75 @@ fn g1_activated_reaction_and_latent_buffer_converge_to_independent_energy_odes()
         );
         assert!(errors[1] < 0.4, "implicit={implicit}: {errors:?}");
     }
+}
+
+#[test]
+fn adaptive_activated_reaction_resolves_latent_storage_and_reciprocal_heat() {
+    use crate::enthalpy::pyrolysis::implicit::adaptive::AdaptiveControls;
+
+    let sink = HeatSink {
+        basis: ThermalStorageBasis::Enthalpy,
+        latent: true,
+    };
+    let gas = |t| Ok(2000.0 * (t - 300.0) + 200_000.0);
+    let mut material = model(&VIRGIN, None, &gas, 0.0, 2.0);
+    material.kinetics.activation_energy_j_mol = 4000.0;
+    let state = PyrolysisSimulation::new_with_thermal_materials(
+        thermal_pair(&sink, 50_000.0),
+        &[material],
+        &[MaterialId(2)],
+        || Ok(()),
+    )
+    .unwrap();
+    let exact = latent_buffer_reference();
+    let mut workspace = state.implicit_workspace().unwrap();
+    let mut errors = [0.0; 2];
+    let mut work = [0; 2];
+    for (rung, scale) in [1.0, 0.01].into_iter().enumerate() {
+        let (next, report) = state
+            .advance_adaptive_implicit_to(
+                0.5,
+                PyrolysisControls {
+                    maximum_dt_s: 0.5,
+                    cell_energy_tolerance_j: 1e-9,
+                    ..Default::default()
+                },
+                ImplicitSolve::default(),
+                AdaptiveControls {
+                    initial_dt_s: 0.5,
+                    storage_absolute_tolerance_j_kg: 100.0 * scale,
+                    temperature_absolute_tolerance_k: 0.05 * scale,
+                    mass_absolute_tolerance_kg: 1e-6 * scale,
+                    volatile_energy_absolute_tolerance_j: scale,
+                    relative_tolerance: 0.0,
+                    ..Default::default()
+                },
+                &mut workspace,
+                || Ok(()),
+            )
+            .unwrap();
+        let audit = &report.physical.pyrolysis;
+        check_account(&state, &next, audit);
+        assert_eq!(next.temperature_k(CellId(2)).unwrap(), 600.0);
+        assert!(report.accuracy_rejections > 0);
+        assert!(report.maximum_accepted_normalized_error <= 1.0);
+        let observed = [
+            next.temperature_k(CellId(1)).unwrap(),
+            next.cells()[&CellId(1)].mass_kg,
+            next.cells()[&CellId(2)].mass_kg * next.cells()[&CellId(2)].specific_h_j_kg,
+        ];
+        errors[rung] = (observed[0] - exact[0]).abs()
+            + 10000.0 * (observed[1] - exact[1]).abs()
+            + 0.01 * (observed[2] - exact[2]).abs();
+        work[rung] = audit.thermal.substeps;
+        assert!(next.temperature_k(CellId(1)).unwrap() < 600.0);
+    }
+    assert!(
+        errors[1] < 0.2 * errors[0],
+        "errors={errors:?}, steps={work:?}"
+    );
+    assert!(errors[1] < 0.15, "errors={errors:?}, steps={work:?}");
+    assert!(work[1] > work[0]);
 }
 
 #[test]

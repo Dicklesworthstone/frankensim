@@ -1544,6 +1544,35 @@ time-resolution controls; removing the conduction CFL is not an unconditional
 nonlinear-convergence, temporal-accuracy or entropy theorem. Geometry and
 authored coefficients stay fixed within each original advance.
 
+`advance_adaptive_implicit_to` adds bounded local time-error control to that
+same fixed-geometry model. Each comparison solves one native full interval and
+two native half intervals with the reusable workspace. Only the two original
+fine states and their mass/heat/volatile receipts are accepted; no composition
+or enthalpy extrapolation can create negative inventory or skip a latent
+plateau. Accuracy rejection halves the unpublished comparison. Nonlinear,
+material-domain, conservation and cancellation failures propagate immediately.
+
+The error estimate includes original specific storage, temperature, separate
+virgin and char inventories, and each cell's outgoing volatile mass and
+enthalpy. Storage participates even when a finite latent buffer stays at one
+temperature. Relative tolerances scale changes during the interval rather
+than gross formation enthalpies. Outgoing-energy comparisons use actual native
+release masses and the original volatile law at each accepted endpoint,
+subtracting a common cell reference before multiplication. This avoids
+subtracting rounded extensive formation energies; accuracy remains limited by
+the precision of the original source charts. These are local temporal
+discrepancies, not certified whole-trajectory errors or an entropy theorem.
+
+Whole-call conservation tolerances and the original accepted-substep ceiling
+are never renewed between comparisons. `maximum_comparisons` bounds all three
+native solves, including rejected work; each original nonlinear solve retains
+its iteration/backtracking/scalar bounds. Reports separate accepted physical
+accounts from all attempted numerical work and return the next suggested span.
+Tests compare independent exponential virgin/char decay and an activated
+Arrhenius reaction exchanging reciprocal heat with a latent buffer, verify
+exact equivalence to native accepted fine steps after rejection, and exercise
+datum shifts, budgets, source refusal, late cancellation and workspace reuse.
+
 ### Conservative noncharring slab recession
 
 `pyrolysis::slab::RecedingSlab::new` adopts the original homogeneous x-aligned cell
