@@ -117,6 +117,7 @@ impl HertzWrenchContact {
                     (SPIN_RADIUS / upper) * (1.0 - 32.0 * f64::EPSILON),
                     upper * (1.0 + 32.0 * f64::EPSILON),
                 ],
+                maximum_mass_radius: f64::INFINITY,
                 quadrature: CircularTransientQuadrature::Rk4Doubling,
                 evaluate: |velocity, spin| {
                     let native = self

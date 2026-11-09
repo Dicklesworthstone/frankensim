@@ -172,6 +172,9 @@ pub(crate) struct CircularTransientLaw<F> {
     pub spinning_capacity_nm: f64,
     /// `C * bounds[0] * |q| <= H(q) <= C * bounds[1] * |q|`.
     pub power_norm_bounds: [f64; 2],
+    /// Admitted endpoint/tail mass radius; infinity for globally bounded laws.
+    /// Positive RK stages can extend to 1.25 times this radius.
+    pub maximum_mass_radius: f64,
     pub quadrature: CircularTransientQuadrature,
     pub evaluate: F,
 }
@@ -231,6 +234,7 @@ impl AdhesiveWrenchContact {
                 sliding_capacity_n: self.kinetic_patch().sliding_capacity_n(),
                 spinning_capacity_nm: self.kinetic_patch().spinning_capacity_nm(),
                 power_norm_bounds: [2.0 / root_thirteen, root_thirteen / 3.0],
+                maximum_mass_radius: f64::INFINITY,
                 quadrature: CircularTransientQuadrature::BogackiShampine,
                 evaluate: |velocity, spin| {
                     let native = self
@@ -249,6 +253,32 @@ impl AdhesiveWrenchContact {
         )
         .map_err(Error::with_exact)
     }
+}
+
+/// Finite local-speed domain for an unforced passive circular trajectory.
+/// Energy gives |q| <= sqrt(lambda_max(W))*r. Local disk speed is at most
+/// sqrt(2)*|q|. Include the admitted work defect in the endpoint energy ball;
+/// the positive-stage safe-step proof expands its radius by another 1.25.
+pub(crate) fn circular_transient_rate_domain(
+    matrix: [[f64; 3]; 3],
+    initial: Vector,
+    config: AdhesiveWrenchConfig,
+) -> Result<(f64, f64), Error> {
+    let metric = Metric::new(matrix, 1.0, [1.0, 1.0], config)?;
+    let (_, initial_radius) = metric.radius(initial)?;
+    let mass_radius = finite(
+        det::hypot(
+            initial_radius,
+            core::f64::consts::SQRT_2 * det::sqrt(config.energy_tolerance_j),
+        ) * (1.0 + 256.0 * f64::EPSILON),
+    )?;
+    // With unit capacity/norm, maximum_speed is the metric's upper bound on
+    // sqrt(lambda_max(W)); no constitutive curve is involved in this ingress.
+    let local_speed = finite(
+        (1.25 * core::f64::consts::SQRT_2 * metric.maximum_speed * mass_radius)
+            * (1.0 + 256.0 * f64::EPSILON),
+    )?;
+    Ok((mass_radius, local_speed))
 }
 
 /// Shared original-traction integration after each law's exact-ray admission.
@@ -298,6 +328,13 @@ where
     for _ in 0..controls.maximum_attempts {
         poll(work.cancelled)?;
         let q = add(initial, multiply(matrix, impulse));
+        if work.law.maximum_mass_radius.is_finite()
+            && metric.radius(q)?.1 > work.law.maximum_mass_radius
+        {
+            return Err(Error::Invalid(
+                "trajectory left its admitted mass-radius domain",
+            ));
+        }
         let remaining = input.dt_s - elapsed;
         let (stop, tail_travel) = metric.tail(q)?;
         if remaining == 0.0 {
@@ -412,6 +449,14 @@ where
             continue;
         }
         impulse = add(impulse, step.impulse);
+        if work.law.maximum_mass_radius.is_finite()
+            && metric.radius(add(initial, multiply(matrix, impulse)))?.1
+                > work.law.maximum_mass_radius
+        {
+            return Err(Error::Invalid(
+                "trajectory left its admitted mass-radius domain",
+            ));
+        }
         travel = add(travel, step.travel);
         heat = finite(heat + step.heat)?;
         for i in 0..4 {

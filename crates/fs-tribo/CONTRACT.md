@@ -1,3 +1,27 @@
+## Local-speed Hertz traction through finite-body relaxation
+
+`HertzFrictionPatch::advance_transient` evolves the original local-speed Hertz
+pressure integral under the complete held positive-definite mobility. A finite
+speed domain follows from initial mass-metric energy plus the admitted work
+defect. Every accepted endpoint and tail start is checked; positive RK4 stages
+use a 1.25-radius expansion with explicit speed and wrench admission.
+
+Conservative bounds of the original coefficient on this finite interval supply
+the existing physical-power RK4 integration and finite-extinction tail. This
+includes hyperbolic and shifted-power curves with a zero infinite-speed
+asymptote when their finite-domain minimum remains positive. Genuine Coulomb
+retains its original exact-ray path. Proven rest, unloaded motion and fully
+clipped zero-traction states coast exactly; moving coasting never reports arrest.
+Pure-viscous or partly clipped domains without a positive representable lower
+bound refuse without a coefficient floor. No substitute friction curve is used.
+
+Time error estimates exclude spatial pressure-quadrature error. Callers refine
+these two axes separately. Load, radius, mobility and source/environment remain
+fixed; driven stick/slip, source evolution and normal motion retain their owners.
+Seven focused law tests cover analytic affine and zero-asymptote stopping/travel,
+full-matrix curved response, an independent pressure/time reference with live
+spatial refinement, Coulomb parity, coasting, and bounded atomic refusal.
+
 # CONTRACT: fs-tribo
 
 ## Curved Hertz sliding and spin through finite extinction

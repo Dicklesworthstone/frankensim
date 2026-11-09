@@ -29,6 +29,9 @@ use crate::{FrictionLaw, TriboError};
 
 mod clipped;
 
+/// Passive finite-body trajectories driven by this original local-speed law.
+pub mod transient;
+
 // Four-point Gauss--Legendre rule on [-1, 1].
 const GAUSS: [(f64, f64); 4] = [
     (-0.861_136_311_594_052_6, 0.347_854_845_137_453_85),
@@ -98,6 +101,18 @@ impl HertzFrictionPatch {
     #[must_use]
     pub const fn friction_law(&self) -> &FrictionLaw {
         &self.law
+    }
+
+    /// Original prescribed compressive force [N].
+    #[must_use]
+    pub const fn normal_force_n(&self) -> f64 {
+        self.zero_speed_patch.parameters().normal_force_n
+    }
+
+    /// Original prescribed Hertz radius [m].
+    #[must_use]
+    pub const fn contact_radius_m(&self) -> f64 {
+        self.zero_speed_patch.parameters().contact_radius_m
     }
 
     /// Force, spin moment, and local-slip heat from one pressure distribution.
