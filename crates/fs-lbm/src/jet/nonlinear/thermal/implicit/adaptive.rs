@@ -1,6 +1,6 @@
-//! Heat-aware adaptive first-order IMEX Euler.
+//! Heat-aware adaptive coupled implicit integration.
 //!
-//! Each comparison uses one original joint step and two original half steps.
+//! Each comparison uses one selected-method joint step and two joint half steps.
 //! Only the fine path is retained; neither state nor physical heat is Richardson
 //! extrapolated. Endpoint and heat differences are LOCAL indicators, not global
 //! error certificates. Their relative scales use changes during this interval,
@@ -39,7 +39,7 @@ impl ThermalJetAdaptiveTolerance {
 /// Local physical indicators and a separate whole-call damping allowance.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalJetAdaptiveControls {
-    /// Minimum comparison interval [s]; each retained BE step is half of this.
+    /// Minimum comparison interval [s]; each retained method step is half of this.
     /// A shorter final remainder may be tried, but not refined below itself.
     pub minimum_interval_s: f64,
     /// Consecutive halvings allowed at one accepted state, at most 52.
@@ -107,7 +107,8 @@ impl ThermalJetAdaptiveControls {
     }
 }
 
-/// Absolute coarse/fine differences, and the largest normalized local indicator.
+/// Local fine-path estimates |fine-coarse|/(2^p-1), with method order p.
+/// The largest normalized indicator uses changes during the trial interval.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThermalJetAdaptiveIndicators {
     pub area_m2: f64,
@@ -120,6 +121,20 @@ pub struct ThermalJetAdaptiveIndicators {
     pub scaled_maximum: f64,
 }
 impl ThermalJetAdaptiveIndicators {
+    fn for_method(mut self, method: ThermalJetImplicitMethod) -> Self {
+        if method == ThermalJetImplicitMethod::StrangMidpoint {
+            self.area_m2 /= 3.0;
+            self.radius_m /= 3.0;
+            self.velocity_m_s /= 3.0;
+            self.temperature_k /= 3.0;
+            self.specific_energy_j_kg /= 3.0;
+            self.cell_heat_j /= 3.0;
+            self.total_heat_j /= 3.0;
+            self.scaled_maximum /= 3.0;
+        }
+        self
+    }
+
     fn merge(&mut self, other: Self) {
         self.area_m2 = self.area_m2.max(other.area_m2);
         self.radius_m = self.radius_m.max(other.radius_m);
@@ -162,7 +177,7 @@ impl std::error::Error for ThermalJetAdaptiveError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalJetAdaptiveAdvance {
-    /// Actual first-order fine trajectory. Attempted substeps and nonlinear work
+    /// Actual selected-method fine trajectory. Attempted substeps and nonlinear work
     /// include coarse/rejected trials; accepted substeps are the two half steps.
     pub evolution: ThermalJetImplicitAdvance,
     pub accepted_intervals: usize,
@@ -451,6 +466,34 @@ impl ThermalCarreauJet<'_> {
         adaptive: ThermalJetAdaptiveControls,
         gate: &CancelGate,
     ) -> Result<ThermalJetAdaptiveAdvance, ThermalJetAdaptiveError> {
+        self.advance_implicit_adaptive_with_method(
+            duration_s,
+            budget,
+            implicit,
+            adaptive,
+            ThermalJetImplicitMethod::ImexEuler,
+            gate,
+        )
+    }
+
+    /// Select first-order BE or second-order Strang/midpoint with the same
+    /// source, work, heat and whole-call transaction controls.
+    ///
+    /// The fine-path local estimate divides the coarse/fine difference by
+    /// 2^p-1 (one for BE, three for midpoint), with square/cube-root scheduling.
+    /// Midpoint has no BE kinetic damping, but unresolved stiff modes may reverse
+    /// or oscillate: local velocity, caloric and physical-heat controls remain
+    /// essential. A zero damping account alone never certifies heat accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_implicit_adaptive_with_method(
+        &mut self,
+        duration_s: f64,
+        budget: ThermalJetStepBudget,
+        implicit: ThermalJetImplicitControls,
+        adaptive: ThermalJetAdaptiveControls,
+        method: ThermalJetImplicitMethod,
+        gate: &CancelGate,
+    ) -> Result<ThermalJetAdaptiveAdvance, ThermalJetAdaptiveError> {
         poll(gate)?;
         implicit.validate()?;
         adaptive.validate()?;
@@ -489,6 +532,7 @@ impl ThermalCarreauJet<'_> {
             budget,
             implicit,
             adaptive,
+            method,
             &mut work,
             &mut scratch,
             gate,
@@ -505,6 +549,8 @@ impl ThermalCarreauJet<'_> {
         base: Evaluation,
         budget: ThermalJetStepBudget,
         implicit: ThermalJetImplicitControls,
+        method: ThermalJetImplicitMethod,
+        heat: TrialHeat,
         work: &mut super::Workspace,
         totals: &mut AdvanceTotals,
         gate: &CancelGate,
@@ -519,6 +565,8 @@ impl ThermalCarreauJet<'_> {
             base,
             budget.flow.cfl,
             implicit,
+            method,
+            heat,
             work,
             &mut totals.evaluations,
             gate,
@@ -541,34 +589,52 @@ impl ThermalCarreauJet<'_> {
         budget: ThermalJetStepBudget,
         implicit: ThermalJetImplicitControls,
         adaptive: ThermalJetAdaptiveControls,
+        method: ThermalJetImplicitMethod,
         work: &mut super::Workspace,
         scratch: &mut Workspace,
         totals: &mut AdvanceTotals,
         gate: &CancelGate,
     ) -> Result<Option<Comparison>, ThermalJetAdaptiveError> {
-        let Some(coarse) =
-            self.charged_implicit_step(dt, base, budget, implicit, work, totals, gate)?
+        let Some(coarse) = self.charged_implicit_step(
+            dt,
+            base,
+            budget,
+            implicit,
+            method,
+            TrialHeat::Reset,
+            work,
+            totals,
+            gate,
+        )?
         else {
             return Ok(None);
         };
         scratch
             .coarse
             .save(&self.flow.stage, &self.stage, &self.workspace.profile, gate)?;
-        let powers = self.flow.spatial.cell_viscous_power_w()?;
-        for (i, &power) in powers.iter().enumerate() {
+        let cell_heat = self.flow.spatial.trial_viscous_heat_j()?;
+        for (i, &value) in cell_heat.iter().enumerate() {
             poll_at(gate, i)?;
-            scratch.coarse_heat[i] = finite(dt * power)?;
+            scratch.coarse_heat[i] = value;
         }
-        let coarse_heat = finite(dt * coarse.solved.evaluation.viscous_power_w)?;
+        let coarse_heat = coarse.heat;
         scratch.base.restore(self, gate)?;
         let base = self.evaluate_transport(false, gate)?;
         let half = positive(0.5 * dt)?;
-        let Some(first) =
-            self.charged_implicit_step(half, base, budget, implicit, work, totals, gate)?
+        let Some(first) = self.charged_implicit_step(
+            half,
+            base,
+            budget,
+            implicit,
+            method,
+            TrialHeat::Reset,
+            work,
+            totals,
+            gate,
+        )?
         else {
             return Ok(None);
         };
-        self.flow.spatial.start_viscous_heat(half, gate)?;
         core::mem::swap(&mut self.flow.candidate, &mut self.flow.stage);
         core::mem::swap(&mut self.candidate, &mut self.stage);
         let middle = self.evaluate_transport(false, gate)?;
@@ -576,18 +642,25 @@ impl ThermalCarreauJet<'_> {
         if half > stable_step(middle.rate_per_s, budget.flow.cfl) {
             return Ok(None);
         }
-        let Some(second) =
-            self.charged_implicit_step(half, middle, budget, implicit, work, totals, gate)?
+        let Some(second) = self.charged_implicit_step(
+            half,
+            middle,
+            budget,
+            implicit,
+            method,
+            TrialHeat::Add,
+            work,
+            totals,
+            gate,
+        )?
         else {
             return Ok(None);
         };
-        self.flow.spatial.add_viscous_heat(half, gate)?;
-        let heat = finite(
-            half * first.solved.evaluation.viscous_power_w
-                + half * second.solved.evaluation.viscous_power_w,
-        )?;
+        let heat = finite(first.heat + second.heat)?;
         Ok(Some(Comparison {
-            local: scratch.indicators(self, coarse_heat, heat, adaptive, gate)?,
+            local: scratch
+                .indicators(self, coarse_heat, heat, adaptive, gate)?
+                .for_method(method),
             heat,
             upwind: finite(first.upwind + second.upwind)?,
             damping: finite(first.damping + second.damping)?,
@@ -601,6 +674,7 @@ impl ThermalCarreauJet<'_> {
         budget: ThermalJetStepBudget,
         implicit: ThermalJetImplicitControls,
         adaptive: ThermalJetAdaptiveControls,
+        method: ThermalJetImplicitMethod,
         work: &mut super::Workspace,
         scratch: &mut Workspace,
         gate: &CancelGate,
@@ -675,6 +749,7 @@ impl ThermalCarreauJet<'_> {
                 budget,
                 implicit,
                 adaptive,
+                method,
                 work,
                 scratch,
                 &mut totals,
@@ -731,7 +806,13 @@ impl ThermalCarreauJet<'_> {
                     let growth = if indicator == 0.0 {
                         2.0
                     } else {
-                        (0.9 / fs_math::det::sqrt(indicator)).min(2.0)
+                        let root = match method {
+                            ThermalJetImplicitMethod::ImexEuler => fs_math::det::sqrt(indicator),
+                            ThermalJetImplicitMethod::StrangMidpoint => {
+                                fs_math::det::pow(indicator, 1.0 / 3.0)
+                            }
+                        };
+                        (0.9 / root).min(2.0)
                     };
                     cap = positive((dt * growth).min(b.maximum_step_s))?;
                     continue;
@@ -760,6 +841,7 @@ impl ThermalCarreauJet<'_> {
                 + adaptive.relative_numerical_damping * (totals.heat + totals.damping),
         )?;
         let evolution = self.publish_implicit_result(
+            method,
             duration_s,
             elapsed,
             outcome,

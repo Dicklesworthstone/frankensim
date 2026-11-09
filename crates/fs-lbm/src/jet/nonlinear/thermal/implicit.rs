@@ -1,10 +1,15 @@
 //! Coupled stiff viscosity, Fourier exchange and caloric self-heating.
 //!
-//! First-order IMEX Euler advances conservative transport/capillarity explicitly,
+//! Default first-order IMEX Euler advances transport/capillarity explicitly,
 //! then jointly solves backward Euler for face momentum and extensive internal
 //! energy at the transported areas. Every residual uses the actual original
 //! caloric temperature, Carreau rate/temperature and conductivity. An original
 //! held-temperature momentum solve supplies only a Newton initial guess.
+//!
+//! Optional StrangMidpoint composes SSPRK2 transport half steps with a joint
+//! implicit midpoint viscous/conductive step. It is second order on smooth
+//! admitted semidiscrete solutions with converged nonlinear stages. Its physical
+//! heat closes midpoint mechanical work without BE damping; it is not L-stable.
 //!
 //! The analytic Jacobian is nonsymmetric: thermal softening and viscous heating
 //! are coupled, not a positive-definite joint diffusion operator. Native cyclic
@@ -28,10 +33,15 @@ use super::*;
 /// Heat-aware step doubling on the original joint implicit kernel.
 pub mod adaptive;
 
+mod midpoint;
+
 /// Numerical method actually used by this separate coupled advance entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThermalJetImplicitMethod {
     ImexEuler,
+    /// Second-order SSPRK2 transport / joint implicit midpoint / SSPRK2 transport.
+    /// Energy-consistent dissipation is A-stable, not L-stable.
+    StrangMidpoint,
 }
 
 /// Bounded nonlinear work and independent physical component tolerances.
@@ -117,7 +127,7 @@ impl core::fmt::Display for ThermalJetImplicitError {
 }
 impl std::error::Error for ThermalJetImplicitError {}
 
-/// Actual first-order trajectory and distinct physical/numerical accounts.
+/// Actual selected-method trajectory and distinct physical/numerical accounts.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalJetImplicitAdvance {
     pub method: ThermalJetImplicitMethod,
@@ -131,7 +141,9 @@ pub struct ThermalJetImplicitAdvance {
     pub after: SlenderJetDiagnostics,
     pub viscous_heat_j: f64,
     pub upwind_dissipation_j: f64,
-    /// Sum of .5*rho*pi*dx*M_face*(u_end-u_transport)^2 [J].
+    /// BE: sum of .5*rho*pi*dx*M_face*(u_end-u_transport)^2 [J].
+    /// Joint implicit midpoint contributes zero; solve and explicit transport
+    /// defects remain in the signed mechanical residual, never physical heat.
     pub implicit_kinetic_damping_j: f64,
     pub internal_energy_change_j: f64,
     pub energy_balance_residual_j: f64,
@@ -176,6 +188,7 @@ pub(super) struct Workspace {
     input: Vec<f64>,
     output: Vec<f64>,
     adaptive: Option<adaptive::Workspace>,
+    midpoint: Option<midpoint::Checkpoint>,
 }
 fn filled<T: Clone>(n: usize, value: T, gate: &CancelGate) -> Result<Vec<T>, NonlinearJetError> {
     let mut result = Vec::new();
@@ -202,6 +215,7 @@ impl Workspace {
             input: zeros(n, gate)?,
             output: zeros(n, gate)?,
             adaptive: None,
+            midpoint: None,
         })
     }
 }
@@ -565,8 +579,15 @@ struct AdvanceTotals {
     maximum_energy: f64,
 }
 
+#[derive(Clone, Copy)]
+enum TrialHeat {
+    Reset,
+    Add,
+}
+
 struct TrialStep {
     solved: StageReport,
+    heat: f64,
     upwind: f64,
     damping: f64,
 }
@@ -725,6 +746,31 @@ impl ThermalCarreauJet<'_> {
         controls: ThermalJetImplicitControls,
         gate: &CancelGate,
     ) -> Result<ThermalJetImplicitAdvance, ThermalJetImplicitError> {
+        self.advance_implicit_with_method(
+            duration_s,
+            budget,
+            controls,
+            ThermalJetImplicitMethod::ImexEuler,
+            gate,
+        )
+    }
+
+    /// Select the original BE split or second-order energy-consistent midpoint.
+    ///
+    /// StrangMidpoint composes two SSPRK2 transport half steps with one joint
+    /// implicit midpoint viscous/conductive step. Physical midpoint temperature
+    /// comes from the original energy inverse; every reflected endpoint is also
+    /// admitted. It is A-stable, not L-stable: unresolved stiff modes may change
+    /// sign, and temporal resolution remains necessary. All methods preserve the
+    /// original whole-call rollback, source, geometry and work bounds.
+    pub fn advance_implicit_with_method(
+        &mut self,
+        duration_s: f64,
+        budget: ThermalJetStepBudget,
+        controls: ThermalJetImplicitControls,
+        method: ThermalJetImplicitMethod,
+        gate: &CancelGate,
+    ) -> Result<ThermalJetImplicitAdvance, ThermalJetImplicitError> {
         poll(gate)?;
         controls.validate()?;
         let b = budget.flow;
@@ -747,14 +793,15 @@ impl ThermalCarreauJet<'_> {
             Some(work) => work,
             None => Workspace::new(self.accepted.len(), gate)?,
         };
-        let result = self.advance_implicit_inner(duration_s, budget, controls, &mut work, gate);
+        let result =
+            self.advance_implicit_inner(duration_s, budget, controls, method, &mut work, gate);
         self.implicit_workspace = Some(work);
         result
     }
 
-    /// Exactly one IMEX Euler trial. No hidden subdivisions or publication.
-    /// Success leaves the transported source in candidate and endpoint in stage.
-    /// None means the explicit transport bound changed; candidate is untouched.
+    /// Exactly one selected-method trial, with no subdivisions or publication.
+    /// Success leaves the endpoint in stage and its physical heat in the native
+    /// trial account. None or a geometry stop restores the input candidate.
     #[allow(clippy::too_many_arguments)]
     fn try_implicit_step(
         &mut self,
@@ -762,10 +809,15 @@ impl ThermalCarreauJet<'_> {
         base: Evaluation,
         cfl: f64,
         controls: ThermalJetImplicitControls,
+        method: ThermalJetImplicitMethod,
+        heat: TrialHeat,
         work: &mut Workspace,
         evaluations: &mut usize,
         gate: &CancelGate,
     ) -> Result<Option<TrialStep>, ThermalJetImplicitError> {
+        if method == ThermalJetImplicitMethod::StrangMidpoint {
+            return self.try_midpoint_step(dt, base, cfl, controls, heat, work, evaluations, gate);
+        }
         let n = self.candidate.len();
         for i in 0..n {
             poll_at(gate, i)?;
@@ -791,11 +843,27 @@ impl ThermalCarreauJet<'_> {
             let change = finite((self.flow.stage.q[i] - self.flow.candidate.q[i]) / mass)?;
             damping.add(0.5 * mass_factor * mass * change * change);
         }
+        let physical = finite(dt * solved.evaluation.viscous_power_w)?;
+        self.record_trial_heat(heat, dt, gate)?;
         Ok(Some(TrialStep {
             solved,
+            heat: physical,
             upwind,
             damping: finite(damping.total())?,
         }))
+    }
+
+    fn record_trial_heat(
+        &mut self,
+        heat: TrialHeat,
+        weight: f64,
+        gate: &CancelGate,
+    ) -> Result<(), ThermalJetImplicitError> {
+        match heat {
+            TrialHeat::Reset => self.flow.spatial.start_viscous_heat(weight, gate)?,
+            TrialHeat::Add => self.flow.spatial.add_viscous_heat(weight, gate)?,
+        }
+        Ok(())
     }
 
     fn advance_implicit_inner(
@@ -803,6 +871,7 @@ impl ThermalCarreauJet<'_> {
         duration_s: f64,
         budget: ThermalJetStepBudget,
         controls: ThermalJetImplicitControls,
+        method: ThermalJetImplicitMethod,
         work: &mut Workspace,
         gate: &CancelGate,
     ) -> Result<ThermalJetImplicitAdvance, ThermalJetImplicitError> {
@@ -849,6 +918,8 @@ impl ThermalCarreauJet<'_> {
                 base,
                 b.cfl,
                 controls,
+                method,
+                TrialHeat::Reset,
                 work,
                 &mut evaluations,
                 gate,
@@ -868,9 +939,8 @@ impl ThermalCarreauJet<'_> {
                 Ok(Some(trial)) => trial,
             };
             let solved = trial.solved;
-            self.flow.spatial.start_viscous_heat(dt, gate)?;
             self.flow.spatial.accept_viscous_heat_step(gate)?;
-            heat = finite(heat + dt * solved.evaluation.viscous_power_w)?;
+            heat = finite(heat + trial.heat)?;
             upwind = finite(upwind + trial.upwind)?;
             damping = finite(damping + trial.damping)?;
             nonlinear += solved.nonlinear;
@@ -888,6 +958,7 @@ impl ThermalCarreauJet<'_> {
             base = self.evaluate_transport(false, gate)?;
         }
         self.publish_implicit_result(
+            method,
             duration_s,
             elapsed,
             outcome,
@@ -912,6 +983,7 @@ impl ThermalCarreauJet<'_> {
     #[allow(clippy::too_many_arguments)]
     fn publish_implicit_result(
         &mut self,
+        method: ThermalJetImplicitMethod,
         duration_s: f64,
         elapsed: f64,
         outcome: SlenderJetOutcome,
@@ -968,7 +1040,7 @@ impl ThermalCarreauJet<'_> {
             self.flow.time_s + elapsed
         };
         let report = ThermalJetImplicitAdvance {
-            method: ThermalJetImplicitMethod::ImexEuler,
+            method,
             start_time_s: self.flow.time_s,
             end_time_s: end_time,
             requested_duration_s: duration_s,

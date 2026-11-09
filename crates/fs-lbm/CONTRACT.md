@@ -2310,7 +2310,7 @@ publishes only earlier completed comparison intervals.
 
 These are local solution/heat indicators and an actual interval-wide numerical
 damping allowance, not a certified global physical-heat error bound. The
-accepted method remains first order. Numerical damping is never deposited
+default entry retains first-order integration. Numerical damping is never deposited
 as physical heat; explicit transport and nonlinear residual errors remain.
 
 Focused regressions exercise stiff heat recovery and budget refinement,
@@ -2325,6 +2325,81 @@ errors improve by factors about 0.25 when the allowance is quartered.
 These independent numerical calculations and pinned rustfmt parsing do not
 replace native Rust compilation/tests, which remain unexecuted in the current
 dependency/storage-constrained workspace.
+
+### Second-order energy-consistent thermal jet evolution
+
+The method-aware entries `advance_implicit_with_method` and
+`advance_implicit_adaptive_with_method` additionally admit
+`ThermalJetImplicitMethod::StrangMidpoint`. Existing entry points retain
+`ImexEuler` behavior. The second-order method composes an SSPRK2 conservative
+transport/capillary half step, one original jointly solved implicit midpoint
+viscous/conductive step, and a second SSPRK2 transport half step. Order two
+applies to smooth admitted semidiscrete solutions with resolved nonlinear
+error; limiter changes and material/source boundaries are not smoothness
+guarantees.
+
+The midpoint equation is the existing joint BE equation at half duration.
+It solves conserved momentum and extensive caloric energy together, with
+the same original rate/temperature viscosity, conductivity, analytic Jacobian,
+bounded Newton/FGMRES and native block preconditioner. The actual midpoint
+temperature is the original inverse of midpoint energy, not an arithmetic
+temperature average. Endpoint momentum and energy are reflected about that
+midpoint using differences from the transported source state. Both the
+midpoint and reflected endpoint must remain inside original source support.
+A supported midpoint never authorizes clipping an unsupported endpoint.
+
+At the fixed areas of the dissipative subflow, the midpoint kinetic work
+identity is `Delta K = h*<u_mid,Gq_mid>`; the same original cell power
+`h*P_mid` enters internal energy and the cell/aggregate physical heat
+accounts. Reciprocal Fourier exchange cancels across internal faces.
+This subflow has zero BE kinetic damping. Actual reflected-state momentum
+and cell-energy residuals are checked against the caller's physical
+tolerances, after requesting half those allowances from the midpoint solve.
+Explicit transport/capillary and nonlinear/roundoff errors remain in the
+signed mechanical and combined reports. Zero implicit damping is not a
+certificate of full-flow energy accuracy or passivity.
+
+Midpoint is A-stable but not L-stable: an unresolved rapidly decaying mode
+can reverse sign, and a large conduction step can exchange hot/cold states
+while conserving total energy. The method-aware adaptive entry therefore
+retains original state, temperature, specific-energy, cell-heat and
+noncancelling total-heat comparisons. Its fine-path local estimates divide
+coarse/fine differences by three and use cube-root scheduling. Only the two
+fine steps are accepted, without Richardson extrapolation. The BE numerical
+damping guard remains available for BE; a zero midpoint damping account
+cannot replace the trajectory/heat tolerances.
+
+One reusable O(N) checkpoint of area, momentum and energy restores the
+beginning of a split if its later transport phase refuses a CFL or geometry
+trial. Original source, work, residual, cancellation and whole-call rollback
+semantics remain. Physical midpoint power is captured before reflected or
+transport endpoint queries overwrite source scratch. Coarse/rejected heat
+is discarded; the two accepted adaptive halves share the native reset/add
+heat buffer. No second constitutive solver or per-trial simulation clone is
+introduced.
+
+Five focused regression groups cover second-order original nonlinear-caloric
+refinement with and without conduction, a supported midpoint whose reflected
+temperature leaves source support, late work/cancellation and clean retry,
+geometry stopping after an incomplete split, and adaptive stiff-transient
+recovery. Independent coupled equations at h=0.001 s give 0.103642992530559 J
+physical heat with conduction, versus the resolved continuous value
+0.103641958008171 J; all five state/heat errors decrease by about fourfold on
+timestep halving. A stiff single 0.02 s midpoint step conserves energy while
+producing only 0.01359096426 J and reversing velocity. The adaptive independent
+calculation recovers 0.196349540849376 J against 0.196349540849355 J continuously,
+with 21 accepted and 9 rejected comparisons. At an earlier transient,
+tightening active local tolerances tenfold improves deformation, velocity,
+both temperatures and physical heat by factors about 0.23--0.25. These are
+executed independent equation checks. Pinned rustfmt parses the changed Rust
+sources; native compilation and Rust regressions remain unexecuted under
+the current dependency/storage constraints.
+
+The construction uses the second-order half-step composition of Strang
+(SIAM J. Numer. Anal. 5, 1968, DOI 10.1137/0705041) and the quadratic-work
+identity of implicit midpoint (Hairer, Numerical Geometric Integration,
+1999, section III.3). Their order and algebraic identities do not establish
+unconditional source admissibility or resolved stiff dynamics.
 
 ## Adaptive source-owned turbulent gas heat and species transport
 

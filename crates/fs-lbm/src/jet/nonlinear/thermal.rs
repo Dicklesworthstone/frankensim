@@ -15,7 +15,9 @@
 //! so material pressure work vanishes (div u=0); capillary work remains in the
 //! native mechanical account. There is no thermal expansion, Marangoni stress,
 //! phase change, pressure trajectory or radial temperature profile. The optional
-//! `thermal::implicit` owner adds a jointly converged first-order thermoviscous solve. The native radius/slope/resolution limits still apply.
+//! `thermal::implicit` owner adds joint backward Euler and optional second-order
+//! Strang/midpoint evolution, with adaptive heat control for both methods.
+//! The native radius/slope/resolution limits still apply.
 //!
 //! A fixed numerical reference temperature centers the transported internal
 //! energy. Original caloric integrals and inverses retain that reference without
