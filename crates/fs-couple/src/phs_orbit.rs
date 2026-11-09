@@ -31,6 +31,11 @@ pub use tangent::{
 mod sensitivity;
 pub use sensitivity::{PhsForcedSensitivityError, PreparedPhsForcedSensitivity};
 
+mod backbone_sensitivity;
+pub use backbone_sensitivity::{
+    PhsBackboneParameterDirection, PhsBackboneSensitivityError, PreparedPhsBackboneSensitivity,
+};
+
 /// Periodically modulated original Hamiltonians and exact physical pump work.
 pub mod parametric;
 

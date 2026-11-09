@@ -9116,3 +9116,42 @@ radius, gas temperature/pressure, causal microphone pressure, cumulative heat
 and gas work, plus an independently source-integrated final energy residual.
 The example's gas and heat-transfer coefficient are explicitly synthetic;
 neither this example nor the lumped heat law supplies measured bubble accuracy.
+
+
+## Conservative physical backbone sensitivities
+
+`phs_orbit::PreparedPhsBackboneSensitivity` binds the original `PortHamiltonian`
+and constant physical port bias to fs-orbit's conservative rectangular derivative
+owner. `new` discovers the complete storage-owned Hessian; `new_analytic` accepts
+an explicitly authored complete Hessian. Every original state and Fourier
+coefficient remains, with an arbitrary original-coordinate fundamental-amplitude
+anchor and a fixed complete-waveform phase reference. The original `s I` port
+gives the exact frequency column. No loss, physical balance row, or material state
+is deleted.
+
+`solve_parameter` combines complete storage-gradient, skew interconnection,
+symmetric resistance, reciprocal port-map and constant-bias directions through
+fs-phs's compensated physical parameter owner:
+`(J-R)e_p+(J_p-R_p)e+G_p u+G u_p`. The cached full state tangent supplies the
+separate unknown state chain. A zero source direction and unit amplitude
+derivative give the nonlinear backbone slope; physical parameters can instead
+hold amplitude fixed. One QR factor serves all directions without perturbing or
+refitting the source.
+
+Passivity alone does not establish a conservative periodic family. The complete
+base and differentiated original balances, phase and amplitude must pass their
+independent two-grid numerical gates; a dissipative direction that destroys the
+family refuses. Invalid or incomplete physical directions, unavailable/refused
+tangents, resource overruns and cancellation publish no derivative and leave a
+prepared factor reusable. Results are local fixed-order numerical derivatives,
+not proofs of infinite-tail resolution, stability, or branch identity.
+
+Three focused tests cover Duffing amplitude/material derivatives against
+neighboring original nonlinear solves and an independently differentiated
+continuous energy-period quadrature; a four-state elastically coupled nonlinear
+system with bias-generated even harmonics and simultaneous storage/J/G/bias
+changes; and tangent/resource admission plus incompatible loss, incomplete/invalid
+direction, cancellation and reuse. They passed in the bounded native lane using
+complete original fs-orbit and fs-phs, actual fs-la/FFT numerical modules, and
+original PHS-adapter/tangent source. This is not a full fs-couple
+Cargo/workspace/DSR gate.
