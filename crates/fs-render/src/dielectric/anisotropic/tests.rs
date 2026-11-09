@@ -159,7 +159,8 @@ fn reflected_and_refracted_values_match_independent_anisotropic_walter_equations
 fn g1_grazing_glass_samples_retain_correlated_reflection_and_transmission_weights() {
     let mut counts = [0; 2];
     for (ax, ay) in [(0.5, 0.5), (0.15, 0.8)] {
-        let interface = surface(ax, ay).interface(550.0, false).unwrap();
+        let surface = surface(ax, ay);
+        let interface = surface.interface(550.0, false).unwrap();
         let wo = normalized(Vec3::new(1.0, 0.3, 0.04));
         let lambda = |v: Vec3| {
             0.5 * ((1.0 + ((ax * v.x).powi(2) + (ay * v.y).powi(2)) / v.z.powi(2))
