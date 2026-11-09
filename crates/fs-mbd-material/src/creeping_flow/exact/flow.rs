@@ -76,13 +76,39 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     ) -> Result<ExactCreepingFlowStep, Error> {
         poll(&mut cancelled)?;
         self.admit_body(body)?;
+        self.step_exact_frame_with_affine_force_and_flow(
+            body.frame(),
+            state,
+            wrench_before,
+            force_after_world,
+            ambient_velocity_before_world,
+            ambient_velocity_after_world,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Same physical history for an already admitted spherical configuration.
+    /// Thermal consumers own source/geometry admission and momentum transfer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_exact_frame_with_affine_force_and_flow(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        wrench_before: Wrench,
+        force_after_world: Vec3,
+        ambient_velocity_before_world: Vec3,
+        ambient_velocity_after_world: Vec3,
+        controls: ExactCreepingFlowStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ExactCreepingFlowStep, Error> {
         vector(ambient_velocity_before_world)?;
         vector(ambient_velocity_after_world)?;
         if ambient_velocity_before_world == self.ambient_velocity_world
             && ambient_velocity_after_world == self.ambient_velocity_world
         {
             let held = self.step_exact_frame_with_affine_force(
-                body.frame(),
+                frame,
                 state,
                 wrench_before,
                 force_after_world,
@@ -123,7 +149,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         };
         vector(force_after_world)?;
         let prepared = self.prepare_exact_frame_in_flow(
-            body.frame(),
+            frame,
             state,
             wrench_before,
             ambient_velocity_before_world,
@@ -182,7 +208,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             dd(dynamics.applied_work_j) - force_work(buoyancy, displacement) - pressure_work;
         let background_work = dd(dynamics.background_work_j) + pressure_work;
         let flow = self.finish_exact_frame_in_flow(
-            body.frame(),
+            frame,
             state,
             dynamics,
             applied_work,

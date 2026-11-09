@@ -2426,3 +2426,46 @@ adapter and existing rotor/pHS/linear-algebra numerical paths. Only unrelated
 material/tensor/rigid/scheduler adapters are omitted from the bounded source
 selection. DSR/RCH are unavailable; this is not a full workspace or DSR gate,
 nor a measured-material accuracy or coupled thermal-feedback validation.
+
+## Authored ambient velocity on the heated-sphere timeline
+
+`HeatedRigidBody::advance_creeping_sphere_exact_affine_flow` and its composed
+observer entry carry `HeatedCreepingAffineFlow` beside the original affine-force
+history on the same accepted thermal clock. Each actual interval samples both
+original call windows with one shared compensated interpolation, preserving
+authored endpoint values. Both ambient endpoints are explicit; the common audit
+returns the accepted ambient endpoint for the next continuation. The sphere's
+constructor velocity cannot silently restart a later history.
+
+The original material sphere's exact force/flow owner now also accepts an
+already admitted current `PrincipalFrame`. It retains source density/viscosity,
+Navier slip, native motion, positive viscous/spin heat and displaced-fluid
+acceleration pressure. The thermal adapter reuses that physical owner, then
+the existing source expansion and conserved-momentum transfer. It does not
+introduce another ODE, heat solver, fluid property query or pressure formula.
+
+`HeatedCreepingAudit::ambient_pressure_work_j` is a separate subaccount already
+included once in `background_work_j`. External applied work, exterior viscous
+heat, caloric heat, inertia/buoyancy configuration work and numerical defects
+keep their original meanings. The two authored source timescales survive
+subdivision and continuation. Whole-interval slip admission comes from the
+native force/flow bound; updated-radius snapshots recheck actual endpoint slip,
+body/fluid diffusion and both original source timescales. The audit retains
+their force and flow maxima separately. Late source, regime, work or cancellation
+failure publishes none of the proposed heat, motion or observer histories.
+
+The original held-flow APIs retain their native selection and zero acceleration
+pressure. Thermal/geometry splitting remains first order; each exact motion
+interval holds its radius and source resistances. Existing quasi-steady and
+slow-expansion restrictions remain, without radial fluid motion, added mass,
+Basset memory, finite-fluid storage or reciprocal thermoelastic heat. This
+entry uses the authored solid thermal boundary and generated heat; it does
+not extend the separate surrounding-fluid conduction/Peclet model.
+
+Four focused G1/G3/G4 fixture groups use independent velocity/power integration,
+expanding Navier geometry, true endpoint continuation, partitioned source work,
+held parity, generated-heat ownership and late rollback. Updated-radius tests
+separately exercise physical source-timescale refusal and a Reynolds violation
+visible only with the actual final ambient velocity. Rust execution remains
+a separate verification requirement; synthetic source fixtures do not establish
+experimental material accuracy.
