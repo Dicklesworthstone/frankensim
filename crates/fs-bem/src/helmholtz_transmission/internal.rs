@@ -15,12 +15,137 @@
 //! These are prescribed compact volume/force/stress sources in two stationary,
 //! inviscid, nondispersive fluids. Source feedback, motion, viscosity, finite
 //! source size and nonlinear interface deformation are outside this owner.
+//! The molecular owner shares this admission, analytic source sampling and
+//! corrected-equation solve while retaining its original complex compression.
 //! The original P0 BEM mesh and source/receiver quadrature need independent
 //! refinement. The algebraic residual is not a continuum-error certificate.
 
 use super::*;
 use crate::ComplexSum;
 use crate::helmholtz::bc::IncidentSource;
+
+/// Shared finite-source admission for real and molecular transmission owners.
+pub(super) fn validate_sources(
+    sources: IncidentField<'_>,
+    controls: InternalSourceControls,
+) -> Result<(), HelmholtzError> {
+    sources.validate()?;
+    if !controls.maximum_relative_residual.is_finite()
+        || controls.maximum_relative_residual <= 0.0
+        || controls.maximum_relative_residual >= 1.0
+    {
+        return Err(bad("internal source residual ceiling must lie in (0,1)"));
+    }
+    if matches!(sources, IncidentField::PlaneWave(_))
+        || matches!(sources, IncidentField::Sources(terms)
+            if terms.iter().any(|s| matches!(s, IncidentSource::PlaneWave(_))))
+    {
+        return Err(bad("internal radiation requires only bounded finite sources"));
+    }
+    Ok(())
+}
+
+/// The same analytic source owner and REAL pressure-coordinate normalization.
+pub(super) fn sample_reference<K: WaveNumber>(
+    surface: &SpherePanels,
+    sources: IncidentField<'_>,
+    wave: K,
+    rho_omega: f64,
+    source_impedance: Option<f64>,
+    reference_impedance: f64,
+    gate: &CancelGate,
+) -> Result<Vec<C64>, HelmholtzError> {
+    let n = surface.areas().len();
+    let mut reference = vec![C64::ZERO; 2 * n];
+    for i in 0..n {
+        poll(gate)?;
+        let sample = sources.sample_wave(
+            wave,
+            rho_omega,
+            source_impedance,
+            surface.centroids()[i],
+            &mut || gate.is_requested(),
+        )?;
+        let mut normal = ComplexSum::default();
+        for axis in 0..3 {
+            normal.add(sample.velocity_m_s[axis].scale(surface.normals()[i][axis]));
+        }
+        reference[i] = sample.pressure_pa;
+        reference[n + i] = C64::new(0.0, reference_impedance) * normal.finish();
+    }
+    if reference.iter().any(|&z| !finite(z)) {
+        return Err(bad("internal source trace scaling is unrepresentable"));
+    }
+    Ok(reference)
+}
+
+/// Native contrast-correction forcing, solve and componentwise backward error.
+/// Keep the original accumulation order for the existing real-fluid path.
+pub(super) fn solve_correction(
+    contrast: &[C64],
+    factor: Option<&LuComplex>,
+    reference: &[C64],
+    density: [f64; 2],
+    maximum_relative_residual: f64,
+    gate: &CancelGate,
+) -> Result<(Vec<C64>, f64), HelmholtzError> {
+    let dimension = reference.len();
+    let n = dimension / 2;
+    let mut correction = vec![C64::ZERO; dimension];
+    let mut relative_backward_residual = 0.0_f64;
+    if let Some(factor) = factor {
+        let density_jump = (density[1] - density[0]) / density[0];
+        for i in 0..dimension {
+            poll(gate)?;
+            let mut drive = ComplexSum::default();
+            if i >= n {
+                drive.add(reference[i].scale(density_jump));
+            }
+            for (j, &value) in reference.iter().enumerate() {
+                drive.add(-(contrast[i * dimension + j] * value));
+            }
+            correction[i] = drive.finish();
+        }
+        if correction.iter().any(|&z| !finite(z)) {
+            return Err(bad("internal transmission forcing overflow"));
+        }
+        let drive = correction.clone();
+        factor
+            .solve_with_cancel(&mut correction, || gate.is_requested())
+            .map_err(lu_error)?;
+        for i in 0..dimension {
+            poll(gate)?;
+            let mut residual = ComplexSum::default();
+            residual.add(correction[i]);
+            residual.add(-drive[i]);
+            let mut scale = correction[i].abs() + drive[i].abs();
+            for (j, &value) in correction.iter().enumerate() {
+                let coefficient = contrast[i * dimension + j];
+                residual.add(coefficient * value);
+                scale += coefficient.abs() * value.abs();
+            }
+            let defect = residual.finish().abs();
+            let relative = if !defect.is_finite() || !scale.is_finite() {
+                f64::INFINITY
+            } else if scale > 0.0 {
+                defect / scale
+            } else if defect == 0.0 {
+                0.0
+            } else {
+                f64::INFINITY
+            };
+            relative_backward_residual = relative_backward_residual.max(relative);
+        }
+    }
+    if correction.iter().any(|&z| !finite(z))
+        || relative_backward_residual > maximum_relative_residual
+    {
+        return Err(bad(
+            "internal transmission solve exceeds its residual admission",
+        ));
+    }
+    Ok((correction, relative_backward_residual))
+}
 
 /// Source geometry and original corrected-equation admission.
 #[derive(Clone, Copy, Debug)]
@@ -55,21 +180,7 @@ impl<'s> FluidInterface<'s> {
         gate: &CancelGate,
     ) -> Result<InternalSourceRadiation<'p, 's>, HelmholtzError> {
         poll(gate)?;
-        sources.validate()?;
-        if !controls.maximum_relative_residual.is_finite()
-            || controls.maximum_relative_residual <= 0.0
-            || controls.maximum_relative_residual >= 1.0
-        {
-            return Err(bad("internal source residual ceiling must lie in (0,1)"));
-        }
-        if matches!(sources, IncidentField::PlaneWave(_))
-            || matches!(sources, IncidentField::Sources(terms)
-                if terms.iter().any(|s| matches!(s, IncidentSource::PlaneWave(_))))
-        {
-            return Err(bad(
-                "internal radiation requires only bounded finite sources",
-            ));
-        }
+        validate_sources(sources, controls)?;
         near_field::Geometry::new_interior_cancellable(
             self.surface,
             &sources.source_positions(),
@@ -77,83 +188,25 @@ impl<'s> FluidInterface<'s> {
             gate,
         )?;
         let n = self.surface.areas().len();
-        let dimension = 2 * n;
         let z_o = self.exterior.characteristic_impedance_pa_s_m();
         let interior = medium(self.interior);
-        let mut reference = vec![C64::ZERO; dimension];
-        for i in 0..n {
-            poll(gate)?;
-            let sample = sources.sample_wave(
-                self.k_i,
-                self.omega * interior.density,
-                Some(interior.density * interior.sound_speed),
-                self.surface.centroids()[i],
-                &mut || gate.is_requested(),
-            )?;
-            let mut normal = ComplexSum::default();
-            for axis in 0..3 {
-                normal.add(sample.velocity_m_s[axis].scale(self.surface.normals()[i][axis]));
-            }
-            reference[i] = sample.pressure_pa;
-            reference[n + i] = C64::new(0.0, z_o) * normal.finish();
-        }
-        if reference.iter().any(|&z| !finite(z)) {
-            return Err(bad("internal source trace scaling is unrepresentable"));
-        }
-        let mut correction = vec![C64::ZERO; dimension];
-        let mut relative_backward_residual = 0.0_f64;
-        if let Some(factor) = &self.factor {
-            let density_jump = (self.interior.density_kg_m3() - self.exterior.density_kg_m3())
-                / self.exterior.density_kg_m3();
-            for i in 0..dimension {
-                poll(gate)?;
-                let mut drive = ComplexSum::default();
-                if i >= n {
-                    drive.add(reference[i].scale(density_jump));
-                }
-                for (j, &value) in reference.iter().enumerate() {
-                    drive.add(-(self.contrast[i * dimension + j] * value));
-                }
-                correction[i] = drive.finish();
-            }
-            if correction.iter().any(|&z| !finite(z)) {
-                return Err(bad("internal transmission forcing overflow"));
-            }
-            let drive = correction.clone();
-            factor
-                .solve_with_cancel(&mut correction, || gate.is_requested())
-                .map_err(lu_error)?;
-            for i in 0..dimension {
-                poll(gate)?;
-                let mut residual = ComplexSum::default();
-                residual.add(correction[i]);
-                residual.add(-drive[i]);
-                let mut scale = correction[i].abs() + drive[i].abs();
-                for (j, &value) in correction.iter().enumerate() {
-                    let coefficient = self.contrast[i * dimension + j];
-                    residual.add(coefficient * value);
-                    scale += coefficient.abs() * value.abs();
-                }
-                let defect = residual.finish().abs();
-                let relative = if !defect.is_finite() || !scale.is_finite() {
-                    f64::INFINITY
-                } else if scale > 0.0 {
-                    defect / scale
-                } else if defect == 0.0 {
-                    0.0
-                } else {
-                    f64::INFINITY
-                };
-                relative_backward_residual = relative_backward_residual.max(relative);
-            }
-        }
-        if correction.iter().any(|&z| !finite(z))
-            || relative_backward_residual > controls.maximum_relative_residual
-        {
-            return Err(bad(
-                "internal transmission solve exceeds its residual admission",
-            ));
-        }
+        let reference = sample_reference(
+            self.surface,
+            sources,
+            self.k_i,
+            self.omega * interior.density,
+            Some(interior.density * interior.sound_speed),
+            z_o,
+            gate,
+        )?;
+        let (correction, relative_backward_residual) = solve_correction(
+            &self.contrast,
+            self.factor.as_ref(),
+            &reference,
+            [self.exterior.density_kg_m3(), self.interior.density_kg_m3()],
+            controls.maximum_relative_residual,
+            gate,
+        )?;
         let reflected_velocity: Vec<_> = correction[n..]
             .iter()
             .map(|&w| C64::new(w.im / z_o, -w.re / z_o))

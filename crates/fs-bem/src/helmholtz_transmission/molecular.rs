@@ -9,7 +9,8 @@
 //! This is a stationary, source-free, homogeneous gas interior, inviscid
 //! momentum and relaxing bulk compression. Both mean pressures must agree.
 //! No molecular mixing, mean heat transport, shear viscosity, solid interface
-//! is implied. `multiple` extends this owner to mutually scattering bodies.
+//! is implied. `multiple` extends this owner to mutually scattering bodies;
+//! `internal` carries finite interior emitters through the same interface.
 //! Finite receivers use the original
 //! centroid Green derivative, not the lossless owner's adaptive quadrature.
 use super::*;
@@ -25,6 +26,10 @@ pub(super) mod kernels;
 /// All mutual reflections among source-owned molecular gas bodies.
 #[path = "molecular/multiple.rs"]
 pub mod multiple;
+
+/// Prescribed finite emitters inside the original molecular gas inclusion.
+#[path = "molecular/internal.rs"]
+pub mod internal;
 
 /// One original molecular gas on each side, with one reusable factorization.
 pub struct MolecularFluidInterface<'a> {

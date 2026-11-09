@@ -4136,3 +4136,46 @@ mode and real-density Euler momentum; its manufactured reservoir fixtures are
 not measured air data. The original convex outer mesh, one separated core,
 retained closed/outward triangles, source-free interior, constant-panel
 discretization and dense-memory scope remain in force.
+
+## Molecular interior emitters through a transmitting fluid boundary
+
+`MolecularFluidInterface::radiate_internal_field` carries the original finite
+volume, force and stress sources from inside the curved gas inclusion into
+its exterior. The existing source-owned molecular interface and factorization
+are reused. Source sampling uses the original interior complex wavenumber;
+exterior observation uses the original exterior complex wavenumber. Both
+retain real `rho*omega` momentum and the same `exp(-i omega t)` convention.
+
+The real and molecular internal-source paths share finite-source admission,
+analytic multipole trace sampling, contrast-correction forcing, the existing
+LU solve, and its componentwise backward-error check. The density-jump term
+in the derivative drive remains explicit. Weak interior reflection is solved
+directly, never recovered by subtracting a large direct source from a total
+field. The original real-fluid arithmetic and accumulation order are retained.
+
+`MolecularInternalSourceRadiation` exposes continuous total pressure/normal
+velocity and the separately solved regular reflection. Its paired adaptive
+receiver uses the native complex Green pressure/gradient owner, the correct
+interior representation sign, and the physical density in each region.
+Direct sources are added only in their original interior medium; exactly
+matched media evaluate the original analytic sources directly in both regions
+with zero reflection. Original winding, face/edge clearance, singular-source,
+source-cardinality, memory, quadrature-work and cancellation refusals remain.
+An explicit source-point allowance bounds preparation and analytic queries.
+
+Signed surface work is the emitted/transmitted work crossing the original
+interface. The enclosed region contains sources: its negative is NOT an
+absorption estimate for a source-free volume. Exterior molecular dissipation
+also prevents identifying this surface work with lossless far-field power.
+Roundoff intervals and the algebraic residual retain their existing limited
+meaning; quadrature estimates exclude source, spatial and constitutive error.
+
+Five native regression groups in `molecular/internal/tests.rs` cover
+empty-reservoir recovery, independent complex spherical source transmission
+and emitted work, exact transparency and weak reflection, coherent
+volume/force/stress interference, and original source/region/residual plus
+explicit work-budget refusals. The reservoir fixtures are manufactured.
+Scope remains stationary prescribed compact emitters, equal mean gas
+pressures, inviscid momentum and the original relaxing compression law.
+Source feedback, finite source size, motion and additional viscosity require
+their physical owners; no independent attenuation factor is inserted here.
