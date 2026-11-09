@@ -17,7 +17,7 @@ const CONDUCTIVITY: Dims = Dims([1, 1, -3, -1, 0, 0]);
 
 const SELECTION: ClaimSelection = ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly);
 
-struct Fixture {
+pub(super) struct Fixture {
     card: MaterialCard,
     cv: PropertyKey,
     k: PropertyKey,
@@ -26,7 +26,7 @@ struct Fixture {
 }
 impl Fixture {
     // Synthetic source, not measured liquid data: Cv(T)=1e-5*T, k=constant.
-    fn new(conductivities: [f64; 3], density: f64) -> Self {
+    pub(super) fn new(conductivities: [f64; 3], density: f64) -> Self {
         let cv = PropertyKey::new("jet_test_cv", SPECIFIC_HEAT);
         let k = PropertyKey::new("jet_test_conductivity", CONDUCTIVITY);
         let temperature = QuantitySpec::dimensional(Temperature::DIMS);
@@ -86,7 +86,7 @@ impl Fixture {
             upper: point(360.0),
         }
     }
-    fn caloric(&self, datum: f64) -> IsochoricHeatCapacityLaw {
+    pub(super) fn caloric(&self, datum: f64) -> IsochoricHeatCapacityLaw {
         IsochoricHeatCapacityLaw::try_new(
             &self.card,
             IsochoricHeatCapacityQuery {
@@ -101,12 +101,15 @@ impl Fixture {
         )
         .unwrap()
     }
-    fn conduction<'a>(&self, caloric: &'a IsochoricHeatCapacityLaw) -> IsochoricConductionLaw<'a> {
+    pub(super) fn conduction<'a>(
+        &self,
+        caloric: &'a IsochoricHeatCapacityLaw,
+    ) -> IsochoricConductionLaw<'a> {
         IsochoricConductionLaw::try_new(&self.card, caloric, &self.k, SELECTION).unwrap()
     }
 }
 
-fn material() -> CarreauSlenderJetParameters {
+pub(super) fn material() -> CarreauSlenderJetParameters {
     CarreauSlenderJetParameters {
         density_kg_m3: 2.0,
         surface_tension_n_m: 0.0,
@@ -126,7 +129,7 @@ fn material() -> CarreauSlenderJetParameters {
         ),
     }
 }
-fn limits() -> SlenderJetLimits {
+pub(super) fn limits() -> SlenderJetLimits {
     SlenderJetLimits {
         minimum_radius_m: 0.1,
         maximum_abs_slope: 0.75,
@@ -137,18 +140,18 @@ fn flow(velocities: &[f64], gate: &CancelGate) -> PeriodicSlenderJet {
     PeriodicSlenderJet::new_carreau(material(), 4.0, &[1.0; 16], velocities, limits(), gate)
         .unwrap()
 }
-fn alternating(gate: &CancelGate) -> PeriodicSlenderJet {
+pub(super) fn alternating(gate: &CancelGate) -> PeriodicSlenderJet {
     let velocities: Vec<_> = (0..16)
         .map(|i| if i % 2 == 0 { 0.125 } else { -0.125 })
         .collect();
     flow(&velocities, gate)
 }
-fn temperatures() -> Vec<f64> {
+pub(super) fn temperatures() -> Vec<f64> {
     (0..16)
         .map(|i| if i % 2 == 0 { 300.0 } else { 330.0 })
         .collect()
 }
-fn budget(dt: f64) -> ThermalJetStepBudget {
+pub(super) fn budget(dt: f64) -> ThermalJetStepBudget {
     ThermalJetStepBudget {
         flow: SlenderJetStepBudget {
             maximum_step_s: dt,
@@ -158,7 +161,7 @@ fn budget(dt: f64) -> ThermalJetStepBudget {
         energy_tolerance_j: 1e-10,
     }
 }
-fn near(a: f64, b: f64, tolerance: f64) {
+pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a} vs {b}, tolerance {tolerance}"
@@ -202,7 +205,7 @@ fn reference_rhs(y: [f64; 5], k: f64) -> [f64; 5] {
         8.0 * (pe + po),
     ]
 }
-fn reference(k: f64) -> [f64; 5] {
+pub(super) fn reference(k: f64) -> [f64; 5] {
     let factor = 2.0 * core::f64::consts::PI * 0.25;
     let mut y = [
         0.0,
@@ -417,7 +420,7 @@ fn g0_zero_duration_and_source_identity_density_and_policy_admission() {
     );
 }
 
-fn snapshot(
+pub(super) fn snapshot(
     jet: &ThermalCarreauJet<'_>,
 ) -> (
     Vec<f64>,

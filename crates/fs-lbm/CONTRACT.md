@@ -2112,18 +2112,17 @@ coupled substeps and restores the final admitted source profile. An explicit
 absolute-joule allowance checks stored-energy change against physical heat.
 Mass roundoff, the thermal residual and the combined mechanical/thermal
 truncation residual are exposed separately; upwind loss is never deposited.
-All numerical arrays are prepared once, with O(N) reusable storage; the limited
+The explicit numerical arrays are prepared once, with O(N) reusable storage; the limited
 traces require no additional array. Identical rounded stage temperatures reuse
 their immutable prepared rheology. Caloric inversion traverses crossed original
 source segments and is not claimed to have logarithmic cost for every
 reference-relative query.
 
-This owner is explicit, with third-order temporal accuracy for smooth admitted
+The explicit `advance` entry has third-order temporal accuracy for smooth admitted
 semidiscrete solutions. Energy reconstruction is second order on smooth
 monotone patches; limiting reduces spatial order near extrema. Density,
 composition and surface tension stay fixed; the outer surface is insulated.
-There is no radial temperature profile, implicit thermal coupling, expansion,
-phase change or Marangoni stress. Material incompressibility includes radial
+There is no radial temperature profile, expansion, phase change or Marangoni stress. Material incompressibility includes radial
 strain, so pressure dilatation vanishes; native capillary work remains mechanical.
 The original slenderness/resolution and pre-pinch limits still apply.
 
@@ -2144,6 +2143,51 @@ transport calculation. All changed Rust files parse with pinned rustfmt. Native
 compilation and these Rust regressions remain unexecuted in the current
 dependency/storage-constrained workspace; the independent oracle is not
 native integration validation.
+
+### Coupled implicit viscosity, conduction and self-heating
+
+Under `implicit-enthalpy-coupling`, `ThermalCarreauJet::advance_implicit`
+provides first-order IMEX Euler. Original limited conservative transport and
+capillarity advance first; a jointly converged backward-Euler momentum and
+internal-energy stage follows at the transported areas. Every residual resolves
+the original relative caloric inverse, Carreau rate/temperature response and
+direct-temperature conductivity. It does not freeze viscosity in the accepted
+physical stage. An original held-temperature momentum solve supplies only an
+algebraic stiff initial guess.
+
+Analytic nonsymmetric Jacobian actions include thermal-softening, viscous-heat
+and conductivity cross derivatives. Native cyclic positive spring solves
+precondition the frozen momentum and conduction blocks; there is no joint-SPD
+claim or new dense solver. Bounded native Newton/FGMRES, a whole-call budget
+on joint source-state preparations and independent actual-state velocity and
+cell-joule residual checks gate publication. Seed and transport work retain
+their separate native bounds. Krylov storage is O(N*restart), and the original
+source/preconditioner arrays are reused.
+
+Unsupported algebraic source trials may backtrack within original support.
+Accepted-source failures, exhausted work, arithmetic or energy refusal and
+cancellation roll back the whole call. The native geometry-stop convention
+still retains only completed coupled substeps. Explicit viscosity and
+conduction CFL bounds are omitted from the stiff stage; transport, capillary,
+geometry, source-support and caller maximum-step limits remain active.
+
+Physical endpoint viscous heat enters internal energy. Backward-Euler kinetic
+damping is accounted separately as `0.5*rho*pi*dz*sum(M_face*(du)^2)` and never
+deposited as heat. The report identifies the actual first-order method and
+retains thermal, mechanical and combined signed residuals. Stable large
+implicit steps can underresolve fast physical heating; Newton convergence is
+not a time-accuracy certificate, and timestep refinement remains necessary.
+
+Four focused regression groups cover coupled first-order refinement, stiff
+original rheology/conduction beyond the explicit diffusion bound, analytic
+cross-block derivatives, source-trial backtracking and atomic late refusals.
+Independently executed coupled Jacobian checks gave relative errors below
+2.4e-10; timestep-halving errors fell by factors 0.5008--0.5085. A separate
+stiff BE reference took a step about 771 times its initial explicit combined
+diffusion limit, with 0.00342579827 J physical heat and 0.19290853318 J numerical
+kinetic damping. These independent equation checks are distinct from native
+Rust execution, which remains blocked by the workspace dependencies/storage.
+All nine changed Rust sources pass pinned rustfmt parsing.
 
 ## Adaptive source-owned turbulent gas heat and species transport
 

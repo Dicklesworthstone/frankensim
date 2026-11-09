@@ -131,7 +131,7 @@ impl CarreauProfile {
         }
     }
 
-    fn sample(
+    pub(super) fn sample(
         &self,
         axial_rate_per_s: f64,
         cell: usize,

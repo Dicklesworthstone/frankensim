@@ -14,8 +14,8 @@
 //! and surface tension stay fixed. Incompressibility includes the radial strain,
 //! so material pressure work vanishes (div u=0); capillary work remains in the
 //! native mechanical account. There is no thermal expansion, Marangoni stress,
-//! phase change, pressure trajectory, radial temperature profile or implicit
-//! thermal integration. The native radius/slope/resolution limits still apply.
+//! phase change, pressure trajectory or radial temperature profile. The optional
+//! `thermal::implicit` owner adds a jointly converged first-order thermoviscous solve. The native radius/slope/resolution limits still apply.
 //!
 //! A fixed numerical reference temperature centers the transported internal
 //! energy. Original caloric integrals and inverses retain that reference without
@@ -28,6 +28,10 @@ use fs_material::thermal::transport::isochoric::IsochoricHeatCapacityLaw;
 use fs_material::thermal::transport::isochoric::conduction::IsochoricConductionLaw;
 
 use super::*;
+
+/// Coupled stiff viscosity and caloric conduction, with explicit transport.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod implicit;
 
 /// Explicit flow bounds plus an absolute closed-domain caloric acceptance limit.
 #[derive(Clone, Copy, Debug)]
@@ -102,7 +106,8 @@ struct Workspace {
 /// binds its Cv and rheology; neither viscosity nor a material name supplies
 /// calorimetry. An optional conductivity owner must retain this EXACT caloric
 /// identity. All numerical arrays are prepared at construction; warm advances
-/// reuse O(N) storage. Source preparation and caloric inversion run per stage.
+/// reuse O(N) storage in explicit mode. The optional implicit path retains
+/// bounded native Krylov allocations. Sources are resolved at actual stages.
 pub struct ThermalCarreauJet<'m> {
     flow: PeriodicSlenderJet,
     source: Source<'m>,
@@ -111,6 +116,8 @@ pub struct ThermalCarreauJet<'m> {
     stage: Vec<f64>,
     rhs: Vec<f64>,
     workspace: Workspace,
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    implicit_workspace: Option<implicit::Workspace>,
 }
 
 impl<'m> ThermalCarreauJet<'m> {
@@ -123,7 +130,8 @@ impl<'m> ThermalCarreauJet<'m> {
     ///
     /// None conduction means thermally insulated axial faces, not a zero
     /// conductivity inferred from viscosity. An implicit-viscosity flow policy
-    /// refuses: this owner currently provides fully coupled explicit SSPRK3.
+    /// refuses here: the native owner retains its explicit policy. Coupled stiff
+    /// evolution is selected separately through the optional `thermal::implicit` path.
     pub fn new(
         mut flow: PeriodicSlenderJet,
         caloric: &'m IsochoricHeatCapacityLaw,
@@ -211,6 +219,8 @@ impl<'m> ThermalCarreauJet<'m> {
             stage,
             rhs,
             workspace,
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            implicit_workspace: None,
         })
     }
 
@@ -263,6 +273,8 @@ impl<'m> ThermalCarreauJet<'m> {
             &mut self.flow.spatial,
             &mut self.flow.rhs,
             &mut self.rhs,
+            false,
+            false,
             gate,
         )
     }
@@ -513,6 +525,8 @@ fn evaluate(
     spatial: &mut Spatial,
     rhs: &mut Fields,
     energy_rhs: &mut [f64],
+    transport_only: bool,
+    implicit_stage: bool,
     gate: &CancelGate,
 ) -> Result<Evaluation, ThermalJetError> {
     let n = fields.a.len();
@@ -531,7 +545,7 @@ fn evaluate(
             .temperature_at_relative_internal_energy(source.reference_temperature_k, specific)
             .map_err(|source| ThermalJetError::Thermal { cell: i, source })?;
         workspace.profile.reprepare_temperature(i, temperature)?;
-        if let Some(law) = source.conduction {
+        if let Some(law) = source.conduction.filter(|_| !transport_only) {
             workspace.conductivity[i] = positive(
                 law.conductivity_at_temperature_w_m_k(temperature)
                     .map_err(|source| ThermalJetError::Thermal { cell: i, source })?,
@@ -546,7 +560,7 @@ fn evaluate(
         dx,
         spatial,
         rhs,
-        true,
+        !transport_only && !implicit_stage,
         gate,
     )?;
     // The native momentum flux has already supplied rhs.q. Reuse its scratch
@@ -570,7 +584,7 @@ fn evaluate(
                 - 0.5 * minmod(jump, workspace.specific[next(r, n)] - workspace.specific[r])
         };
         let mut flux = finite(rho_pi * fields.q[i] * finite(trace)?)?;
-        if source.conduction.is_some() {
+        if source.conduction.is_some() && !transport_only {
             let left = positive(workspace.conductivity[i] * fields.a[i])?;
             let right = positive(workspace.conductivity[r] * fields.a[r])?;
             let low = left.min(right);
@@ -590,14 +604,16 @@ fn evaluate(
     for i in 0..n {
         poll_at(gate, i)?;
         let l = previous(i, n);
-        energy_rhs[i] = finite(-(spatial.flux[i] - spatial.flux[l]) + powers[i])?;
+        energy_rhs[i] = finite(
+            -(spatial.flux[i] - spatial.flux[l]) + if transport_only { 0.0 } else { powers[i] },
+        )?;
         // Bound limited outgoing traces using twice the gross donor outflow,
         // not net drainage. Together with the conductive row sum this keeps
         // each Euler transport update mass-weighted convex in specific energy.
         // Physical heating is admitted separately through the original inverse.
         let advective =
             finite(2.0 * (fields.q[i].max(0.0) + (-fields.q[l]).max(0.0)) / fields.a[i] / dx)?;
-        let conductive = if source.conduction.is_some() {
+        let conductive = if source.conduction.is_some() && !transport_only && !implicit_stage {
             finite(
                 source.maximum_temperature_slope
                     * (workspace.conductance[l] + workspace.conductance[i])

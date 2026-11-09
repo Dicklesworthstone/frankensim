@@ -37,7 +37,7 @@ impl Default for SlenderJetImplicitControls {
 }
 
 impl SlenderJetImplicitControls {
-    pub(super) fn validate(self) -> Result<(), NonlinearJetError> {
+    pub(in crate::jet::nonlinear) fn validate(self) -> Result<(), NonlinearJetError> {
         if self.maximum_iterations == 0
             || self.maximum_backtracks > 52
             || !self.relative_tolerance.is_finite()
@@ -54,7 +54,7 @@ impl SlenderJetImplicitControls {
 
 /// Five arrays, allocated only when nonlinear implicit viscosity is selected.
 #[derive(Clone, Debug)]
-pub(super) struct ConstitutiveSolve {
+pub(in crate::jet::nonlinear) struct ConstitutiveSolve {
     velocity: Vec<f64>,
     trial: Vec<f64>,
     source: Vec<f64>,
@@ -63,7 +63,10 @@ pub(super) struct ConstitutiveSolve {
 }
 
 impl ConstitutiveSolve {
-    pub(super) fn new(n: usize, gate: &CancelGate) -> Result<Self, NonlinearJetError> {
+    pub(in crate::jet::nonlinear) fn new(
+        n: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, NonlinearJetError> {
         Ok(Self {
             velocity: zeros(n, gate)?,
             trial: zeros(n, gate)?,
@@ -75,7 +78,7 @@ impl ConstitutiveSolve {
 
     /// Return the number of rejected algebraic line-search candidates.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(super) fn apply(
+    pub(in crate::jet::nonlinear) fn apply(
         &mut self,
         linear: &mut CyclicSolve,
         state: &mut Fields,

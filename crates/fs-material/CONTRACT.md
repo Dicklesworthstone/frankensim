@@ -11006,6 +11006,17 @@ prepared conductivity path at an already resolved temperature. It adds no
 material selection, extrapolation or caloric inversion. Relative-energy
 consumers therefore avoid a redundant T-to-absolute-u-to-T round trip.
 
+`IsochoricConductionLaw::state_at_temperature` returns the same original
+conductivity value and its caloric-coordinate derivatives at the exact supplied
+admitted temperature: `dT/du = 1/Cv(T)` and `dk/du = (dk/dT)/Cv(T)`. It does not
+round-trip through absolute energy. Interior conductivity knots retain the
+original right derivative; the upper endpoint retains the left derivative.
+Both caloric and conductivity support and representability refusals remain
+active. `state_at_specific_internal_energy` resolves T once and delegates to
+this same source path. Regression coverage compares exact state bits under
+two caloric energy datums, analytic derivatives across all original segments
+and knots, and immediate-outside/NaN/infinite temperature refusals.
+
 Two focused regression definitions cover relative inversion across knots,
 retained sub-ULP heat, exact support refusals and original conductivity at
 knots/interiors. Pinned rustfmt parsing succeeds; native execution of these

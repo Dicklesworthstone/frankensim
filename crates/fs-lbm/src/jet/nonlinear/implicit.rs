@@ -28,7 +28,7 @@
 use super::*;
 
 mod nonlinear;
-use nonlinear::ConstitutiveSolve;
+pub(super) use nonlinear::ConstitutiveSolve;
 pub use nonlinear::SlenderJetImplicitControls;
 
 /// Time integration policy; changing it does not change any physical coefficient.
@@ -316,7 +316,7 @@ fn copy_fields(to: &mut Fields, from: &Fields, gate: &CancelGate) -> Result<(), 
 }
 
 /// Same centered conservative constitutive stress used by the parent operator.
-fn viscous_rhs(
+pub(super) fn viscous_rhs(
     state: &Fields,
     spatial: &Spatial,
     p: SlenderJetParameters,
@@ -357,16 +357,53 @@ fn viscous_rhs(
 }
 
 #[derive(Clone, Debug)]
-struct CyclicSolve {
+pub(super) struct CyclicSolve {
     diagonal: Vec<f64>,
     y: Vec<f64>,
     z: Vec<f64>,
     rhs: Vec<f64>,
 }
 impl CyclicSolve {
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub(super) fn new(n: usize, gate: &CancelGate) -> Result<Self, NonlinearJetError> {
+        Ok(Self {
+            diagonal: zeros(n, gate)?,
+            y: zeros(n, gate)?,
+            z: zeros(n, gate)?,
+            rhs: zeros(n, gate)?,
+        })
+    }
+
+    /// Frozen positive node weights and periodic springs, reused by the
+    /// thermoviscous block preconditioner. This is not a joint SPD claim.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub(super) fn solve_weighted(
+        &mut self,
+        mass: &impl Fn(usize) -> f64,
+        coupling: &impl Fn(usize) -> f64,
+        rhs: &[f64],
+        output: &mut [f64],
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        let n = self.rhs.len();
+        if rhs.len() != n || output.len() != n {
+            return Err(NonlinearJetError::InvalidInput("cyclic block dimensions"));
+        }
+        for i in 0..n {
+            poll_at(gate, i)?;
+            self.rhs[i] = finite(rhs[i])?;
+        }
+        self.solve_weights(n, mass, coupling, 0.0, gate)?;
+        for i in 0..n {
+            poll_at(gate, i)?;
+            output[i] = self.y[i];
+        }
+        Ok(())
+    }
+
     /// Solve q - dt*3nu*D(A*D(q/M)) = rhs with M_i=(A_i+A_i+1)/2.
     /// Areas remain fixed during this linear stage.
-    fn apply(
+    pub(super) fn apply(
         &mut self,
         state: &mut Fields,
         nu: f64,
@@ -451,11 +488,27 @@ impl CyclicSolve {
         mean: f64,
         gate: &CancelGate,
     ) -> Result<(), NonlinearJetError> {
-        let n = area.len();
+        self.solve_weights(
+            area.len(),
+            &|i| average(area[i], area[next(i, area.len())]),
+            coupling,
+            mean,
+            gate,
+        )
+    }
+
+    fn solve_weights(
+        &mut self,
+        n: usize,
+        mass: &impl Fn(usize) -> f64,
+        coupling: &impl Fn(usize) -> f64,
+        mean: f64,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
         let edge = finite(coupling(0))?;
         for i in 0..n {
             poll_at(gate, i)?;
-            let mass = average(area[i], area[next(i, n)]);
+            let mass = positive(mass(i))?;
             // Remove only the periodic spring: B=T+edge*v*v^T, v=e0-eN.
             let left = if i == 0 { 0.0 } else { coupling(i) };
             let right = if i + 1 == n { 0.0 } else { coupling(i + 1) };

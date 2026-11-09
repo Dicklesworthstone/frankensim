@@ -540,8 +540,37 @@ fn g1_direct_temperature_conductivity_retains_source_values_and_support() {
     let fixture = Fixture::nonlinear();
     let caloric = fixture.caloric();
     let law = fixture.conduction(&caloric);
-    for t in [300.0, 350.0, 425.0, 500.0, 550.0, 625.0, 700.0] {
+    let shifted_caloric = IsochoricHeatCapacityLaw::try_new(
+        &fixture.card,
+        IsochoricHeatCapacityQuery {
+            specific_heat_cv: &fixture.cv,
+            temperature_axis: "T",
+            density_axis: "rho",
+            lower: &fixture.lower,
+            upper: &fixture.upper,
+            selection: SELECTION,
+        },
+        700.0,
+    )
+    .unwrap();
+    let shifted = fixture.conduction(&shifted_caloric);
+    for t in [300.0, 350.123456789, 425.0, 500.0, 550.0, 625.0, 700.0] {
+        let state = law.state_at_temperature(t).unwrap();
+        assert_eq!(state.temperature_k, t);
+        assert_eq!(state, shifted.state_at_temperature(t).unwrap());
+        let cv = if t <= 500.0 {
+            500.0 + (t - 300.0)
+        } else {
+            700.0 + 1.5 * (t - 500.0)
+        };
+        close(state.temperature_slope_kg_k_j, 1.0 / cv, 2e-16);
+        close(
+            state.conductivity_slope_kg_w_m_k_j,
+            conductivity(t).1 / cv,
+            2e-17,
+        );
         let direct = law.conductivity_at_temperature_w_m_k(t).unwrap();
+        assert_eq!(state.conductivity_w_m_k, direct);
         close(direct, conductivity(t).0, 2e-13);
         let u = caloric.specific_internal_energy_j_kg(t).unwrap();
         close(
@@ -559,5 +588,6 @@ fn g1_direct_temperature_conductivity_retains_source_values_and_support() {
         f64::INFINITY,
     ] {
         assert!(law.conductivity_at_temperature_w_m_k(t).is_err());
+        assert!(law.state_at_temperature(t).is_err());
     }
 }

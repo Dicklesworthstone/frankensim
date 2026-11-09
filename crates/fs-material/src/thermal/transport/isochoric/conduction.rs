@@ -111,6 +111,23 @@ impl<'a> IsochoricConductionLaw<'a> {
             .map(|(k, _)| k)
     }
 
+    /// Fused original Cv(T), conductivity and caloric tangents at an already
+    /// resolved temperature. Derivatives remain with respect to specific
+    /// internal energy: dT/du = 1/Cv and dk/du = (dk/dT)/Cv.
+    ///
+    /// This retains the exact supplied temperature and the same original
+    /// source path, without an absolute-energy round trip. At conductivity
+    /// corners it uses the source's right derivative, except at the upper
+    /// endpoint where it uses the left derivative. Unsupported temperatures
+    /// or unrepresentable tangents refuse through the existing source kernels.
+    pub fn state_at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<ImplicitConductionState, ThermalTransportError> {
+        let cv = self.caloric.specific_heat_cv_j_kg_k(temperature_k)?;
+        self.conductivity.state(temperature_k, cv)
+    }
+
     /// Fused source-exact state and derivatives with respect to specific u.
     /// At k corners the shared evaluator selects the right derivative, except
     /// at the upper endpoint where it uses the left derivative.
@@ -121,8 +138,7 @@ impl<'a> IsochoricConductionLaw<'a> {
         let temperature = self.caloric.temperature_k(u).map_err(|_| {
             ThermalTransportError::Invalid("internal energy outside original isochoric law")
         })?;
-        let cv = self.caloric.specific_heat_cv_j_kg_k(temperature)?;
-        self.conductivity.state(temperature, cv)
+        self.state_at_temperature(temperature)
     }
 }
 
