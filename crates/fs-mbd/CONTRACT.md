@@ -8970,3 +8970,29 @@ work with changing area, all sixteen full-inertia mobility entries against actua
 unit body impulses, off-axis loaded equilibrium, elastic energy return and world
 rotation covariance, original torsional/normal limits, and atomic original-source,
 body, stale-geometry, rolling and cancellation refusal with deterministic retry.
+
+### Physical rotor modes, residues and shaft-speed slopes
+
+`RotorOperatingPoint::prepare_resonance_modes` retains the complete original
+quadratic pencil `s² M + s(C + Omega G) + K`. The existing `fs-modal` owner
+supplies binary coordinate/rate equilibration and local simple-pole refinement,
+with original-coordinate unit-mass displacement and velocity shapes and source
+residuals. Signed decay, oscillation and active growth remain intact. Existing
+all-pole and Floquet queries keep their separate scope.
+
+`PreparedRotorModes::prepare_response` rechecks the mode against the current
+original pencil and retains one shared bordered factor for true nonsymmetric
+force/receiver residues and physical parameter derivatives.
+`PreparedRotorPole::spin_derivative` supplies the analytic direction
+`dT/dOmega = s G`, holding M, C, K and per-speed G fixed; it also differentiates
+the normalized displacement and velocity shapes. Speed-dependent bearing,
+preload or material coefficients require their own actual law.
+
+The rotor convention is `exp(+i omega t)`: complex angular frequency is
+`-i s` and its Laurent residue is `-i` times the Laplace residue. Force
+participation uses the full bordered equations, not a right-mode projection.
+Zero forces, coherent cancellation and dark receivers can return zero.
+Physical modes and one-pole residues do not substitute for a driven peak,
+complete modal expansion, crossing identity or stability certificate.
+Repeated/defective roots, resource limits and cancellation retain the shared
+owners' explicit refusals.

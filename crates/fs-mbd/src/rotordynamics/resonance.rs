@@ -20,6 +20,9 @@ use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 
 mod synchronous;
 
+/// Original physical modes, force residues and shaft-speed sensitivities.
+pub mod poles;
+
 /// Direction through forcing frequency, shaft speed and physical force phasors.
 /// All derivatives are with respect to the SAME caller parameter. M/C/K/G are
 /// fixed; speed-dependent bearing, prestress or material coefficients require
