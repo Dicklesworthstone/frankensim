@@ -17,6 +17,10 @@ mod antiresonance;
 pub use antiresonance::{
     AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, search_antiresonance,
 };
+pub(in crate::harmonic) mod antiresonance_parameter;
+pub use antiresonance_parameter::{
+    AntiresonanceRecoveryDerivative, DrivenAntiresonanceParameterResponse,
+};
 pub(in crate::harmonic) mod sensitivity;
 pub use sensitivity::{DrivenResonanceParameterResponse, HalfPowerBandwidthDerivative};
 mod survey;

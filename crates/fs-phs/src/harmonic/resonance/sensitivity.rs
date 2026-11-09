@@ -233,98 +233,116 @@ impl HarmonicModel {
         resolve_parameter_response(
             resonance,
             |omega, second_order, cancelled| {
-                let factor = self.factor(omega, &mut *cancelled)?;
-                let frequency =
-                    factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
-                let parameter = factor.response_with_parameter_derivative(
-                    input,
-                    direction,
-                    input_derivative,
-                    &mut *cancelled,
-                )?;
-                let mut jet = ParameterObservationJet {
-                    value: selected(
-                        observation,
-                        &frequency.response.state,
-                        &frequency.response.effort,
-                        &frequency.response.output,
-                        cancelled,
-                    )?,
-                    frequency: selected(
-                        observation,
-                        &frequency.state_derivative,
-                        &frequency.effort_derivative,
-                        &frequency.output_derivative,
-                        cancelled,
-                    )?,
-                    parameter: selected(
-                        observation,
-                        &parameter.state_derivative,
-                        &parameter.effort_derivative,
-                        &parameter.output_derivative,
-                        cancelled,
-                    )?,
-                    second_frequency: C64::ZERO,
-                    mixed: C64::ZERO,
-                    relative_residual: frequency
-                        .response
-                        .relative_residual
-                        .max(frequency.relative_derivative_residual)
-                        .max(parameter.response.relative_residual)
-                        .max(parameter.relative_derivative_residual),
-                };
-                if !second_order {
-                    return Ok(jet);
-                }
-                let mut rhs = vec![C64::ZERO; self.n];
-                for (target, &dx) in rhs[..self.n_diff]
-                    .iter_mut()
-                    .zip(&frequency.state_derivative)
-                {
-                    *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
-                }
-                let (second, second_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
-                let second_observation = self.observe_parameter_tangent(
-                    observation,
-                    &second,
-                    None,
-                    None,
-                    &frequency.effort_derivative,
-                    cancelled,
-                )?;
-                let action = parameter::generator_action(
-                    self,
-                    &direction,
-                    &frequency.state_derivative,
-                    &frequency.effort_derivative,
-                    cancelled,
-                )?;
-                rhs = action.generator;
-                for (target, &dx) in rhs[..self.n_diff]
-                    .iter_mut()
-                    .zip(&parameter.state_derivative)
-                {
-                    *target = *target + C64::new(-dx.im, dx.re);
-                }
-                let (mixed, mixed_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
-                let mixed_observation = self.observe_parameter_tangent(
-                    observation,
-                    &mixed,
-                    Some(&action.storage),
-                    direction.ports,
-                    &frequency.effort_derivative,
-                    cancelled,
-                )?;
-                jet.second_frequency = second_observation;
-                jet.mixed = mixed_observation;
-                jet.relative_residual = jet
-                    .relative_residual
-                    .max(second_residual)
-                    .max(mixed_residual);
-                Ok(jet)
+                self.resonance_parameter_observation(
+                    input, observation, direction, input_derivative,
+                    omega, second_order, cancelled,
+                )
             },
             &mut cancelled,
         )
+    }
+
+    // Same original second/mixed physical observation for peaks and notches.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::harmonic) fn resonance_parameter_observation(
+        &self,
+        input: &[C64],
+        observation: HarmonicObservation<'_>,
+        direction: HarmonicParameterDirection<'_>,
+        input_derivative: Option<&[C64]>,
+        omega: f64,
+        second_order: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ParameterObservationJet, DrivenResonanceError> {
+        let factor = self.factor(omega, &mut *cancelled)?;
+        let frequency =
+            factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
+        let parameter = factor.response_with_parameter_derivative(
+            input,
+            direction,
+            input_derivative,
+            &mut *cancelled,
+        )?;
+        let mut jet = ParameterObservationJet {
+            value: selected(
+                observation,
+                &frequency.response.state,
+                &frequency.response.effort,
+                &frequency.response.output,
+                cancelled,
+            )?,
+            frequency: selected(
+                observation,
+                &frequency.state_derivative,
+                &frequency.effort_derivative,
+                &frequency.output_derivative,
+                cancelled,
+            )?,
+            parameter: selected(
+                observation,
+                &parameter.state_derivative,
+                &parameter.effort_derivative,
+                &parameter.output_derivative,
+                cancelled,
+            )?,
+            second_frequency: C64::ZERO,
+            mixed: C64::ZERO,
+            relative_residual: frequency
+                .response
+                .relative_residual
+                .max(frequency.relative_derivative_residual)
+                .max(parameter.response.relative_residual)
+                .max(parameter.relative_derivative_residual),
+        };
+        if !second_order {
+            return Ok(jet);
+        }
+        let mut rhs = vec![C64::ZERO; self.n];
+        for (target, &dx) in rhs[..self.n_diff]
+            .iter_mut()
+            .zip(&frequency.state_derivative)
+        {
+            *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
+        }
+        let (second, second_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
+        let second_observation = self.observe_parameter_tangent(
+            observation,
+            &second,
+            None,
+            None,
+            &frequency.effort_derivative,
+            cancelled,
+        )?;
+        let action = parameter::generator_action(
+            self,
+            &direction,
+            &frequency.state_derivative,
+            &frequency.effort_derivative,
+            cancelled,
+        )?;
+        rhs = action.generator;
+        for (target, &dx) in rhs[..self.n_diff]
+            .iter_mut()
+            .zip(&parameter.state_derivative)
+        {
+            *target = *target + C64::new(-dx.im, dx.re);
+        }
+        let (mixed, mixed_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
+        let mixed_observation = self.observe_parameter_tangent(
+            observation,
+            &mixed,
+            Some(&action.storage),
+            direction.ports,
+            &frequency.effort_derivative,
+            cancelled,
+        )?;
+        jet.second_frequency = second_observation;
+        jet.mixed = mixed_observation;
+        jet.relative_residual = jet
+            .relative_residual
+            .max(second_residual)
+            .max(mixed_residual);
+        Ok(jet)
     }
 
     // Observe W dx + dQ x and G^T de + dG^T e in original coordinates.

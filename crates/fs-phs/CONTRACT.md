@@ -1325,6 +1325,63 @@ establish exact/partial matching and analytic recovery widths, reversed-order
 coherent multiport and reaction minima, refusal of an invented lossless-allpass
 notch, and cancellation/missing-edge/replay behavior.
 
+### Physical parameter motion of coherent notches
+
+`HarmonicModel::driven_antiresonance_with_parameter_derivative` and the
+corresponding `ScatteringModel` method differentiate one caller-isolated
+coherent minimum, including a simple exact response zero. They retain the
+complete original dJ/dR/dQ/dG/dT direction and optional source derivative;
+the loaded method also retains selected-reference dZ in authored wave order.
+State chart, topology, descriptor rank and receiver weights stay fixed. Sources,
+source slopes and reference loads are constant in frequency; every material
+and operating-point chain-rule contribution must be authored explicitly.
+
+For observation H, the implicit frequency derivative is
+`-Re(conj(H_p)*H_omega + conj(H)*H_omega_p) /
+(|H_omega|^2 + Re(conj(H)*H_omegaomega))`. The returned complex observation
+derivative is TOTAL along that moving minimum: `H_p+H_omega*omega_p`.
+Neither expression divides by H. Exact cancellation therefore retains a
+meaningful complex derivative without assigning phase, logarithmic depth or Q
+to zero. The result exposes the actual minimum, scaled physical power curvature,
+finite stationarity residual, total query count and worst original residual.
+
+Optional recovery edges hold the caller's ABSOLUTE squared-observation level
+fixed. Each derivative is `-Re(conj(H)*H_p)/Re(conj(H)*H_omega)`; bandwidth
+motion is the upper derivative minus the lower. Source gain can therefore move
+both edges even when the cancellation frequency does not move. There is no
+moving-minimum-height or relative half-height term. The lower and upper slopes
+must point away from the selected minimum.
+
+Peak and notch queries share the existing original second/mixed observation
+owner and one factor per frequency. Every descriptor reaction, memory state,
+storage derivative, source/output dG contribution and wave feedthrough remains
+in that owner. Loaded dZ changes both incident forcing and reciprocal feedback.
+No perturbed model, finite difference or extra dense operator is introduced.
+One minimum query and two optional edge queries are reserved BEFORE search;
+the existing six-work and simultaneous native/loaded payload gates still apply.
+
+A strictly positive resolved power curvature and nonzero directed recovery
+slopes are required. At H=0, identically zero-weight second/mixed jets are
+excluded from conditioning scales so they cannot erase a small frequency shift.
+Binary conditioning scales preserve admitted components exactly. Nonzero
+normalized subnormal components, products without full double-double residual
+range, and unresolved intermediate ratios refuse instead of silently reporting
+zero; some mathematically
+representable extreme cases remain outside this bounded numerical lane. Flat
+or higher-order zeros, branch switching, missing crossings, cancellation and
+native refusals publish no partial sensitivity or band. These local numerical
+derivatives and finite brackets are not uncertainty or interval certificates.
+
+Six authored physical regression groups cover original absorber stiffness,
+mass and damping at source scales `1e-120..1e120`, gain/phase and absolute
+recovery motion, nonunit matched and finite-depth wave references, material and
+storage directions, resource/query limits, cancellation and replay. Five
+private numerical regressions cover a retained `-1e-200` shift at an exact
+zero, product/low-word/partial-subnormal loss, and higher-order-zero refusal.
+The implementation and these eleven groups were source-reviewed; they were not
+compiled or executed in this delivery because the execution environment became
+unavailable before the native validation run.
+
 ### Physical parameter motion of observed resonance peaks
 
 `HarmonicModel::driven_resonance_with_parameter_derivative` differentiates one
