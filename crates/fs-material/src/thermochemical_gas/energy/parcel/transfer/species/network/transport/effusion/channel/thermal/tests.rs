@@ -35,6 +35,16 @@ pub(in super::super) fn material(
     b: f64,
     span: [f64; 2],
 ) -> PreparedVolumetricThermalTransport {
+    material_with_conductivity(a, b, span, [1.0; 2])
+}
+
+/// Independently authored affine conductivity on the same supported interval.
+pub(super) fn material_with_conductivity(
+    a: f64,
+    b: f64,
+    span: [f64; 2],
+    k: [f64; 2],
+) -> PreparedVolumetricThermalTransport {
     let capacity = PropertyKey::new(
         "isochoric-volumetric-capacity",
         VOLUMETRIC_HEAT_CAPACITY_DIMS,
@@ -52,7 +62,7 @@ pub(in super::super) fn material(
         ),
         (
             conductivity.clone(),
-            span.map(|t| (t, 1.0)),
+            [(span[0], k[0]), (span[1], k[1])],
             Dims([1, 1, -3, -1, 0, 0]),
         ),
     ] {

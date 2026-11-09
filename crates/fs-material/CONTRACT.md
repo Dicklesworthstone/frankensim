@@ -23350,8 +23350,9 @@ its double-double energy and entropy accumulation.
 This is an explicit first-order, fixed-geometry stage for stationary,
 collisionless circular channels with diffuse, fully accommodating walls.
 Reported wall entropy is a material storage change; vacuum entropy and total
-open-system entropy production are not assigned. Wall conduction, phase change,
-adsorption and in-flight molecular storage remain outside this owner.
+open-system entropy production are not assigned. Optional source-backed wall
+conduction is supplied by the extension below. Phase change, adsorption and
+in-flight molecular storage remain outside this owner.
 
 Six focused regression groups cover independent monatomic beam/nonlinear-wall
 balances, thermal feedback, shared-wall pooling and input ordering, caloric
@@ -24294,3 +24295,76 @@ isotropic parity, stiff/matched limits, source bounds, and an independent
 two-sided welded-interface oracle. This is lossless normal-wave bulk physics;
 it adds no oblique anisotropic branches, anisotropic coating propagation,
 attenuation, source calibration or experimental qualification.
+
+## Source-backed conduction through finite molecular-channel walls
+
+The closed and vacuum finite-wall owners expose
+`step_candidate_with_conduction`; their existing `step_candidate` functions
+delegate with no conductive links. `thermal::conduction::ChannelWallConduction`
+retains an original `FixedVolumeConductionLink` or an original prepared
+`FixedVolumeLayerConduction` with its explicit nonlinear work controls.
+Endpoint IDs, caloric/source identity, reference mass basis, fixed distances,
+area, aligned scalar conductivity and area-specific contact resistance retain
+their original meaning. No deposition geometry, thermal capacity, source
+curve or thermostat is invented to join the state owners.
+
+The volumetric source owner supplies read-only binding access and stateless
+temperature entry points to its existing conductivity kernels. Its ordinary
+timeline APIs keep the original cell/source/geometry admission before using
+those same kernels. Cellwise conduction evaluates each original endpoint k(T)
+and the native series/contact resistance. Integrated conduction uses the
+already prepared original curves and native source-free one-dimensional layer
+solve, retaining interface temperatures, endpoint derivatives and residuals.
+No material chart is copied or prepared inside a time step. Every conductive
+link must match the actual finite wall laws; a changed mass basis, datum,
+entropy interpretation or source is refused. An integrated path admits both
+original source spans at the initial and final wall temperatures, without a
+second nonlinear solve. Missing material support remains a hard refusal.
+
+Molecular and conductive heat sample one original gas/wall snapshot. Each
+conductive transfer enters the two original wall pools with opposite signs,
+then all molecular and conductive contributions pool before one original
+material inversion per affected wall. Walls without a channel can conduct
+heat through the same finite inventory. Per-wall receipts separate molecular,
+conductive and net heat; per-link receipts retain direction and the native
+source response. Closed paths query no inactive conductivity. Canonical link
+ordering, duplicate/unknown endpoint refusal, existing work bounds and
+cancellation apply before any endpoint is published.
+
+Actual nonlinear material storage and entropy remain authoritative. The closed
+system checks gas plus all finite walls against its original energy and
+entropy budgets. The vacuum audit replaces only the native molecular bath
+term with actual wall storage; internal conduction cancels across finite
+walls. Vacuum retains no invented temperature or total entropy production.
+Refusal leaves all original gas and wall states unchanged.
+
+Both native adaptive owners expose `advance_candidate_with_conduction` through
+the existing, unchanged `advance_history` time controller. Each trial resamples
+the original conductors. Error estimates control molecular and conductive
+wall heat separately and each conductive link's two heat directions, so
+opposing mechanisms or a reversal cannot hide transfer error. Conductive
+receipts count toward the existing retained-row bound. Accepted histories
+alone enter one fixed original-to-final budget; every wall's actual storage
+must agree with its accumulated net heat. These are explicit first-order local
+temporal estimates, not global error certificates.
+
+Six focused G1/G3/G4 test groups cover independent nonlinear volumetric energy
+and entropy integrals, reference-density/datum invariance, the analytic
+Kirchhoff flux for linear k(T), reversed links, simultaneous molecular and
+conductive pooling in closed and vacuum paths, original-law and final cross-leg
+support refusal, analytic two-wall relaxation with tighter-step convergence,
+accepted native replay, conductive-heat-only adaptivity, closed paths,
+reordering, work bounds and late cancellation. The working implementation and
+tests were parsed/formatted by the pinned Rust formatter before the executor
+disconnected. The final GitHub blobs recover those focused source edits from
+their original published bases and pass whitespace checks, but recovered
+formatting has not been rerun natively. These integration tests were authored
+and statically reviewed but not compiled or executed; no full material,
+Cargo or DSR validation is claimed. This does not close the broader
+porous/capillary transport bead.
+
+Each material wall is still a uniform-temperature finite inventory. Links
+describe declared material heat paths between inventories, not spatially
+resolved temperature variation along one molecular bore. Geometry and wall
+mass remain fixed; expansion work, phase change, adsorption and finite flight
+time remain outside this channel model.

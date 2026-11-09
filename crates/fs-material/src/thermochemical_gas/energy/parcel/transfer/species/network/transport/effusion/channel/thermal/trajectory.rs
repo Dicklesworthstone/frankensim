@@ -11,8 +11,10 @@
 //! continuum or constitutive accuracy certificate.
 
 use super::{
-    FiniteChannelError, FiniteChannelNetworkLink, FiniteChannelNetworkStep, FixedVolumeChannelWall,
-    step_candidate,
+    FiniteChannelError, FiniteChannelNetworkLink, FiniteChannelNetworkStep, FiniteChannelWallStep,
+    FixedVolumeChannelWall,
+    conduction::{ChannelWallConduction, ChannelWallConductionStep},
+    step_candidate_with_conduction,
 };
 use crate::thermochemical_gas::energy::{
     GasEnergySolve,
@@ -279,11 +281,92 @@ pub(in super::super) fn wall_error<'l, 'p>(
     Ok(error)
 }
 
+/// Separate directions and mechanisms before reducing a heat account. In
+/// particular a wall cooled by gas and heated by conduction may barely move.
+pub(super) fn heat_error(
+    coarse: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
+    first: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
+    second: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
+    controls: EffusionAdvanceControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    if coarse.0.len() != first.0.len()
+        || coarse.0.len() != second.0.len()
+        || coarse.1.len() != first.1.len()
+        || coarse.1.len() != second.1.len()
+    {
+        return Err(Error::Invalid("adaptive material heat paths changed"));
+    }
+    let directional = |a: f64, b: f64, c: f64| -> Result<f64, Error> {
+        let mut error = 0.0_f64;
+        for sign in [-1.0, 1.0] {
+            let a = (sign * a).max(0.0);
+            let fine =
+                (Dd::from_f64((sign * b).max(0.0)) + Dd::from_f64((sign * c).max(0.0))).to_f64();
+            if a == 0.0 && fine == 0.0 {
+                continue;
+            }
+            error = error.max(ratio(
+                a,
+                fine,
+                a.max(fine),
+                controls.stream_energy_tolerance_j,
+                controls.relative_tolerance,
+            )?);
+        }
+        Ok(error)
+    };
+    let mut error = 0.0_f64;
+    for ((a, b), c) in coarse.0.iter().zip(first.0).zip(second.0) {
+        poll(cancelled)?;
+        if a.id != b.id
+            || a.id != c.id
+            || a.caloric_identity != b.caloric_identity
+            || a.caloric_identity != c.caloric_identity
+        {
+            return Err(Error::Invalid(
+                "adaptive wall heat lost its original material",
+            ));
+        }
+        error = error.max(directional(
+            a.molecular_heat_into_wall_j,
+            b.molecular_heat_into_wall_j,
+            c.molecular_heat_into_wall_j,
+        )?);
+        error = error.max(directional(
+            a.conduction_heat_into_wall_j,
+            b.conduction_heat_into_wall_j,
+            c.conduction_heat_into_wall_j,
+        )?);
+    }
+    for ((a, b), c) in coarse.1.iter().zip(first.1).zip(second.1) {
+        poll(cancelled)?;
+        if a.id != b.id
+            || a.id != c.id
+            || a.walls != b.walls
+            || a.walls != c.walls
+            || a.caloric_identities != b.caloric_identities
+            || a.caloric_identities != c.caloric_identities
+        {
+            return Err(Error::Invalid(
+                "adaptive conduction lost its original interface",
+            ));
+        }
+        error = error.max(directional(
+            a.heat_a_to_b_j,
+            b.heat_a_to_b_j,
+            c.heat_a_to_b_j,
+        )?);
+    }
+    Ok(error)
+}
+
 fn audit_window<'l, 'p>(
     before_gas: &BTreeMap<u64, ClosedGasParcel>,
     after_gas: &BTreeMap<u64, ClosedGasParcel>,
     before_walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     after_walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    steps: &[FiniteChannelNetworkStep],
     controls: GasTransportSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<FiniteChannelWindowBalance, Error> {
@@ -306,6 +389,14 @@ fn audit_window<'l, 'p>(
     })?;
     let mut wall_energy = Dd::ZERO;
     let mut wall_entropy = Dd::ZERO;
+    let mut sampled = BTreeMap::<u64, Dd>::new();
+    for step in steps {
+        for wall in &step.walls {
+            poll(cancelled)?;
+            let heat = sampled.entry(wall.id).or_insert(Dd::ZERO);
+            *heat = *heat + Dd::from_f64(wall.heat_into_wall_j);
+        }
+    }
     for (&id, old) in before_walls {
         poll(cancelled)?;
         let next = &after_walls[&id];
@@ -317,10 +408,16 @@ fn audit_window<'l, 'p>(
                 "finite-wall window changed a material inventory",
             ));
         }
-        wall_energy = wall_energy
-            + (Dd::from_f64(next.specific_energy_j_kg())
-                - Dd::from_f64(old.specific_energy_j_kg()))
-                * Dd::from_f64(old.mass_kg());
+        let energy = (Dd::from_f64(next.specific_energy_j_kg())
+            - Dd::from_f64(old.specific_energy_j_kg()))
+            * Dd::from_f64(old.mass_kg());
+        let defect = (energy - sampled.get(&id).copied().unwrap_or(Dd::ZERO)).to_f64();
+        if !defect.is_finite() || defect.abs() > controls.exchange.energy_tolerance_j {
+            return Err(Error::Invalid(
+                "finite wall exceeded its fixed window storage budget",
+            ));
+        }
+        wall_energy = wall_energy + energy;
         let ds = old
             .law()
             .specific_entropy_change_j_kg_k(old.specific_energy_j_kg(), next.specific_energy_j_kg())
@@ -370,6 +467,27 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     step_controls: GasTransportSolve,
     controls: EffusionAdvanceControls,
+    cancelled: C,
+) -> Result<FiniteChannelAdvanceCandidate<'l, 'p>, Error> {
+    advance_candidate_with_conduction(
+        parcels, walls, paths, links, &[], duration_s, endpoints, step_controls, controls, cancelled,
+    )
+}
+
+/// Resample the same sourced wall conductors on every adaptive trial snapshot.
+/// Molecular and conductive heat directions are controlled separately; internal
+/// cancellation cannot conceal inaccurate exchange through a material path.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_candidate_with_conduction<'l, 'p, C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    paths: GasTransportPaths<'_>,
+    links: &[FiniteChannelNetworkLink<'_>],
+    conduction: &[ChannelWallConduction<'_, '_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    step_controls: GasTransportSolve,
+    controls: EffusionAdvanceControls,
     mut cancelled: C,
 ) -> Result<FiniteChannelAdvanceCandidate<'l, 'p>, Error> {
     let history = advance_history(
@@ -379,11 +497,12 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         controls,
         super::super::super::trajectory::MAX_EFFUSION_RETAINED_ROWS,
         |gas, wall, dt, cancelled| {
-            step_candidate(
+            step_candidate_with_conduction(
                 gas,
                 wall,
                 paths,
                 links,
+                conduction,
                 dt,
                 endpoints,
                 step_controls,
@@ -391,9 +510,18 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
             )
             .map(|candidate| candidate.into_parts())
         },
-        |_, _, _, _| Ok(0.0),
+        |coarse, first, second, cancelled| {
+            heat_error(
+                (&coarse.walls, &coarse.conduction),
+                (&first.walls, &first.conduction),
+                (&second.walls, &second.conduction),
+                controls,
+                cancelled,
+            )
+        },
         |step| {
             step.walls.len()
+                + step.conduction.len()
                 + step.exchange.fluxes.len()
                 + step.exchange.heat.len()
                 + step.exchange.external_heat.len()
@@ -412,6 +540,7 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         &history.parcels,
         walls,
         &history.walls,
+        &history.steps,
         step_controls,
         &mut cancelled,
     )?;

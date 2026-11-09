@@ -9,11 +9,14 @@
 //! The caller must select volumetric capacity appropriate to reversible,
 //! isochoric sensible storage. The fixed-volume source adapter does not convert
 //! an isobaric Cp or an apparent capacity measurement into Cv. Expansion work,
-//! phase change, wall conduction, adsorption and wall mass exchange are absent.
+//! phase change, adsorption and wall mass exchange are absent. Optional sourced
+//! conduction links join finite walls without creating a second storage owner.
 //! An unsupported or overlarge step refuses atomically; refine the duration.
 
 /// Adaptive gas-plus-material-wall trajectories with fixed window audits.
 pub mod trajectory;
+/// Original material conduction pooled with molecular heat before wall inversion.
+pub mod conduction;
 /// Molecular channel blowdown with finite material walls and escaped energy.
 pub mod vacuum;
 
@@ -44,6 +47,22 @@ use fs_blake3::ContentHash;
 use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 use std::collections::BTreeMap;
+
+#[derive(Clone, Copy, Debug)]
+struct PooledWallHeat {
+    molecular: Dd,
+    conduction: Dd,
+}
+impl Default for PooledWallHeat {
+    fn default() -> Self {
+        Self { molecular: Dd::ZERO, conduction: Dd::ZERO }
+    }
+}
+impl PooledWallHeat {
+    fn total(self) -> Dd {
+        self.molecular + self.conduction
+    }
+}
 
 /// Immutable wall inventory on one original fixed-volume caloric law.
 ///
@@ -118,15 +137,18 @@ impl<'l, 'p> FixedVolumeChannelWall<'l, 'p> {
     fn heated_candidate(
         &self,
         id: u64,
-        pooled: Dd,
+        pooled: PooledWallHeat,
         range_k: [f64; 2],
         energy_tolerance_j: f64,
     ) -> Result<(Self, FiniteChannelWallStep, Dd, Dd), FiniteChannelError> {
-        let heat = pooled.to_f64();
+        let total = pooled.total();
+        let heat = total.to_f64();
         let new_energy = (Dd::from_f64(self.specific_energy_j_kg)
-            + pooled / Dd::from_f64(self.mass_kg))
+            + total / Dd::from_f64(self.mass_kg))
         .to_f64();
         if !heat.is_finite()
+            || !pooled.molecular.to_f64().is_finite()
+            || !pooled.conduction.to_f64().is_finite()
             || !new_energy.is_finite()
             || (heat != 0.0 && new_energy == self.specific_energy_j_kg)
         {
@@ -147,7 +169,7 @@ impl<'l, 'p> FixedVolumeChannelWall<'l, 'p> {
         }
         let energy = (Dd::from_f64(new_energy) - Dd::from_f64(self.specific_energy_j_kg))
             * Dd::from_f64(self.mass_kg);
-        let residual = (energy - pooled).to_f64();
+        let residual = (energy - total).to_f64();
         if !residual.is_finite() || residual.abs() > energy_tolerance_j {
             return Err(FiniteChannelError::WallEnergyBalance {
                 id,
@@ -180,6 +202,8 @@ impl<'l, 'p> FixedVolumeChannelWall<'l, 'p> {
                 temperatures_k: [self.temperature_k, temperature],
                 specific_energies_j_kg: [self.specific_energy_j_kg, new_energy],
                 heat_into_wall_j: heat,
+                molecular_heat_into_wall_j: pooled.molecular.to_f64(),
+                conduction_heat_into_wall_j: pooled.conduction.to_f64(),
                 energy_change_j: energy.to_f64(),
                 entropy_change_j_k: entropy_change.to_f64(),
             },
@@ -208,8 +232,12 @@ pub struct FiniteChannelWallStep {
     pub mass_kg: f64,
     pub temperatures_k: [f64; 2],
     pub specific_energies_j_kg: [f64; 2],
-    /// Pooled molecular accommodation heat, positive into this wall.
+    /// Net molecular plus conducted heat, positive into this wall.
     pub heat_into_wall_j: f64,
+    /// Molecular accommodation alone, retaining opposing conductive heat separately.
+    pub molecular_heat_into_wall_j: f64,
+    /// Net heat from the original material conduction links, positive inward.
+    pub conduction_heat_into_wall_j: f64,
     /// Actual stored change, which is independently checked against pooled heat.
     pub energy_change_j: f64,
     /// Original material integral of du/T, multiplied by the fixed mass.
@@ -226,6 +254,8 @@ pub struct FiniteChannelNetworkStep {
     pub channel_walls: BTreeMap<u64, u64>,
     pub exchange: SpeciesNetworkStep,
     pub walls: Vec<FiniteChannelWallStep>,
+    /// Original source-qualified conductive transfers in stable link-ID order.
+    pub conduction: Vec<conduction::ChannelWallConductionStep>,
     pub heat_into_walls_j: f64,
     pub wall_energy_change_j: f64,
     /// Actual total gas plus material-wall storage change in the closed system.
@@ -272,6 +302,10 @@ pub enum FiniteChannelError {
     Material(ThermalTransportError),
     Thermal(DepositionError),
     WallDomain {
+        id: u64,
+        error: DepositionError,
+    },
+    Conduction {
         id: u64,
         error: DepositionError,
     },
@@ -337,6 +371,30 @@ pub fn step_candidate<'l, 'p>(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: GasTransportSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FiniteChannelNetworkCandidate<'l, 'p>, FiniteChannelError> {
+    step_candidate_with_conduction(
+        parcels, walls, paths, links, &[], duration_s, endpoints, controls, cancelled,
+    )
+}
+
+/// Advance gas exchange and original-source wall conduction from one snapshot.
+///
+/// Conductive and molecular heats pool before each original material inversion.
+/// Conduction may reach finite walls with no channel of their own. Every native
+/// link uses the matching original wall law, temperature and fixed geometry;
+/// no thermostat, external energy, extra capacity or conduction storage is added.
+/// This explicit first-order stage retains the same fixed energy/entropy gates.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_conduction<'l, 'p>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    paths: GasTransportPaths<'_>,
+    links: &[FiniteChannelNetworkLink<'_>],
+    conduction: &[conduction::ChannelWallConduction<'_, '_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<FiniteChannelNetworkCandidate<'l, 'p>, FiniteChannelError> {
     check(&mut cancelled)?;
@@ -348,7 +406,7 @@ pub fn step_candidate<'l, 'p>(
     let mut ordered: Vec<_> = links.iter().collect();
     ordered.sort_by_key(|link| link.id);
     let mut channel_walls = BTreeMap::new();
-    let mut pools = BTreeMap::<u64, Dd>::new();
+    let mut pools = BTreeMap::<u64, PooledWallHeat>::new();
     let mut ranges = BTreeMap::<u64, [f64; 2]>::new();
     let mut held = Vec::with_capacity(ordered.len());
     for link in &ordered {
@@ -372,7 +430,7 @@ pub fn step_candidate<'l, 'p>(
                 range[1] = range[1].max(temperature);
             }
         }
-        pools.entry(link.wall).or_insert(Dd::from_f64(0.0));
+        pools.entry(link.wall).or_default();
         held.push(DiffuseChannelNetworkLink {
             id: link.id,
             parcels: link.parcels,
@@ -381,6 +439,9 @@ pub fn step_candidate<'l, 'p>(
             wall_temperature_k: wall.temperature_k,
         });
     }
+    let conduction_steps = conduction::pool(
+        walls, conduction, duration_s, &mut pools, &mut ranges, &mut cancelled,
+    )?;
     let gas_candidate = super::step_candidate(
         parcels,
         paths,
@@ -394,7 +455,7 @@ pub fn step_candidate<'l, 'p>(
         check(&mut cancelled)?;
         let id = channel_walls[&channel.id];
         let pooled = pools.get_mut(&id).expect("admitted original wall identity");
-        *pooled = *pooled + Dd::from_f64(channel.wall.heat_into_wall_j);
+        pooled.molecular = pooled.molecular + Dd::from_f64(channel.wall.heat_into_wall_j);
     }
 
     let mut next_walls = walls.clone();
@@ -411,7 +472,7 @@ pub fn step_candidate<'l, 'p>(
             ranges[&id],
             controls.exchange.energy_tolerance_j,
         )?;
-        wall_heat = wall_heat + *pooled;
+        wall_heat = wall_heat + pooled.total();
         wall_energy = wall_energy + energy;
         wall_entropy = wall_entropy + entropy_change;
         next_walls.insert(id, next);
@@ -431,6 +492,7 @@ pub fn step_candidate<'l, 'p>(
                 })?;
         }
     }
+    conduction::admit_endpoints(&next_walls, conduction, &mut cancelled)?;
     let gas_change = entropy::closed_inventory_change(
         parcels.iter().map(|(&id, old)| (id, old, &gas_candidate.parcels()[&id])),
         controls.exchange.mass_tolerance_kg, &mut cancelled,
@@ -473,6 +535,7 @@ pub fn step_candidate<'l, 'p>(
             channel_walls,
             exchange: stage.exchange,
             walls: reports,
+            conduction: conduction_steps,
             heat_into_walls_j: wall_heat.to_f64(),
             wall_energy_change_j: wall_energy.to_f64(),
             energy_residual_j,

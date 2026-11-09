@@ -381,6 +381,23 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
         self.id
     }
 
+    /// Ordered physical endpoint identities retained by the prepared interface.
+    #[must_use]
+    pub const fn cell_ids(&self) -> [CellId; 2] {
+        self.cells
+    }
+
+    /// Original caloric and conductivity owners, in the same endpoint order.
+    #[must_use]
+    pub const fn endpoint_laws(&self) -> [&'l FixedVolumeThermalLaw<'p>; 2] {
+        self.laws
+    }
+
+    #[must_use]
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
     /// Evaluate only the matching original laws, cell bases and interface geometry.
     /// Return this value in the existing `StepCoefficients::conductances_w_k`
     /// during an implicit endpoint solve, or explicitly refresh an existing link.
@@ -390,6 +407,20 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
         state: &DepositionSimulation<'_>,
     ) -> Result<f64, DepositionError> {
         let temperatures = self.temperatures_k(state)?;
+        self.conductance_at_temperatures(temperatures)
+    }
+
+    /// Evaluate this same prepared interface for a different physical state owner.
+    ///
+    /// The consumer must bind its endpoint identities, caloric laws and fixed
+    /// volume/mass basis to `cell_ids` and `endpoint_laws`, and supply its actual
+    /// supported temperatures. This method owns only the source-qualified
+    /// conductivity/geometry calculation; it creates no state or stored energy.
+    /// The ordinary timeline entry point retains its original cell admission.
+    pub fn conductance_at_temperatures(
+        &self,
+        temperatures: [f64; 2],
+    ) -> Result<f64, DepositionError> {
         let mut conductivity = [0.0; 2];
         for (i, value) in conductivity.iter_mut().enumerate() {
             *value = self.laws[i]
@@ -460,6 +491,12 @@ impl<'l, 'p> FixedVolumeLayerConduction<'l, 'p> {
         self.binding.id
     }
 
+    /// Original interface binding, including endpoint laws, IDs and geometry.
+    #[must_use]
+    pub const fn binding(&self) -> &FixedVolumeConductionLink<'l, 'p> {
+        &self.binding
+    }
+
     /// Original borrowed paths retain both caloric and conductivity receipts.
     #[must_use]
     pub fn source_paths(&self) -> [&'p PreparedVolumetricThermalTransport; 2] {
@@ -478,6 +515,21 @@ impl<'l, 'p> FixedVolumeLayerConduction<'l, 'p> {
     ) -> Result<LayerConductionResponse, DepositionError> {
         checkpoint()?;
         let temperatures = self.binding.temperatures_k(state)?;
+        self.evaluate_at_temperatures(temperatures, config, checkpoint)
+    }
+
+    /// Reuse the original prepared layer solve at actual admitted temperatures.
+    ///
+    /// A non-timeline consumer must enforce the endpoint/source/storage binding
+    /// exposed by `binding`. No conductivity chart is copied or reconstructed
+    /// here. Both source curves must support the complete temperature interval;
+    /// the existing layer kernel owns its work, heat and cancellation checks.
+    pub fn evaluate_at_temperatures(
+        &self,
+        temperatures: [f64; 2],
+        config: LayerConductionConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<LayerConductionResponse, DepositionError> {
         TwoLayerConduction::new(
             [&self.conductivity[0], &self.conductivity[1]],
             self.binding.distances_m,

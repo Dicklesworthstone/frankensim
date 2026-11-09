@@ -14,9 +14,11 @@
 use super::super::super::vacuum::{
     self as native, VacuumChannelOutletStep, VacuumChannelWindowAudit,
 };
-use super::super::trajectory::{advance_history, ratio};
-use super::super::{FiniteChannelError, FixedVolumeChannelWall};
-use super::{FiniteVacuumChannelLink, FiniteVacuumChannelStep, step_candidate};
+use super::super::trajectory::{advance_history, heat_error, ratio};
+use super::super::{FiniteChannelError, FixedVolumeChannelWall, conduction::ChannelWallConduction};
+use super::{FiniteVacuumChannelLink, FiniteVacuumChannelStep, step_candidate_with_conduction};
+#[cfg(test)]
+use super::step_candidate;
 use crate::thermochemical_gas::energy::{
     GasEnergySolve,
     parcel::{
@@ -169,7 +171,12 @@ fn stream_error(
     {
         return Err(Error::Invalid("adaptive vacuum outlet identities changed"));
     }
-    let mut error = 0.0_f64;
+    let mut error = heat_error(
+        (&coarse.walls, &coarse.conduction),
+        (&first.walls, &first.conduction),
+        (&second.walls, &second.conduction),
+        controls, cancelled,
+    )?;
     for ((a, b), c) in coarse
         .gas
         .outlets
@@ -272,6 +279,7 @@ fn audit_window<'l, 'p>(
         ));
     }
     let mut sampled = BTreeMap::<u64, Dd>::new();
+    let mut molecular = BTreeMap::<u64, Dd>::new();
     for step in steps {
         for outlet in &step.gas.outlets {
             poll(cancelled)?;
@@ -279,8 +287,13 @@ fn audit_window<'l, 'p>(
                 .channel_walls
                 .get(&outlet.id)
                 .ok_or(Error::Invalid("adaptive vacuum window lost an outlet wall"))?;
-            let sum = sampled.entry(*wall).or_insert(Dd::ZERO);
+            let sum = molecular.entry(*wall).or_insert(Dd::ZERO);
             *sum = *sum + Dd::from_f64(outlet.wall.heat_into_wall_j);
+        }
+        for wall in &step.walls {
+            poll(cancelled)?;
+            let sum = sampled.entry(wall.id).or_insert(Dd::ZERO);
+            *sum = *sum + Dd::from_f64(wall.heat_into_wall_j);
         }
     }
     let (mut stored, mut entropy, mut correction) = (Dd::ZERO, Dd::ZERO, Dd::ZERO);
@@ -318,7 +331,9 @@ fn audit_window<'l, 'p>(
             ))?;
         stored = stored + energy;
         entropy = entropy + Dd::from_f64(ds) * Dd::from_f64(wall.mass_kg());
-        correction = correction + defect;
+        // Replace only the original molecular bath account. Conductive heat
+        // cancels between finite walls and remains checked in each total above.
+        correction = correction + (energy - molecular.get(&id).copied().unwrap_or(Dd::ZERO));
     }
     let energy_residual_j = (Dd::from_f64(gas.energy_residual_j) + correction).to_f64();
     if !stored.to_f64().is_finite()
@@ -353,6 +368,27 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     step_controls: GasTransportSolve,
     controls: EffusionAdvanceControls,
+    cancelled: C,
+) -> Result<FiniteVacuumChannelAdvanceCandidate<'l, 'p>, Error> {
+    advance_candidate_with_conduction(
+        parcels, walls, paths, links, &[], duration_s, endpoints, step_controls, controls, cancelled,
+    )
+}
+
+/// Include actual wall conduction in every native adaptive blowdown trial.
+/// All link and per-wall heat mechanisms retain separate temporal error control
+/// and one fixed original-to-final storage budget for the requested window.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_candidate_with_conduction<'l, 'p, C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    paths: GasTransportPaths<'_>,
+    links: &[FiniteVacuumChannelLink<'_>],
+    conduction: &[ChannelWallConduction<'_, '_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    step_controls: GasTransportSolve,
+    controls: EffusionAdvanceControls,
     mut cancelled: C,
 ) -> Result<FiniteVacuumChannelAdvanceCandidate<'l, 'p>, Error> {
     let history = advance_history(
@@ -362,11 +398,12 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         controls,
         MAX_SNAPSHOT_TRANSFERS,
         |gas, wall, dt, cancelled| {
-            step_candidate(
+            step_candidate_with_conduction(
                 gas,
                 wall,
                 paths,
                 links,
+                conduction,
                 dt,
                 endpoints,
                 step_controls,
@@ -377,6 +414,7 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         |coarse, first, second, cancelled| stream_error(coarse, first, second, controls, cancelled),
         |step| {
             step.walls.len()
+                + step.conduction.len()
                 + step.gas.exchange.fluxes.len()
                 + step.gas.exchange.heat.len()
                 + step.gas.exchange.external_heat.len()
