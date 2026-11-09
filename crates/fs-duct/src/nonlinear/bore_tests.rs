@@ -1614,3 +1614,129 @@ fn a_bore_without_a_radius_step_is_the_scheme_before_the_junction_face_bit_for_b
         "dec58d42a8060a698ca4d645e22404667e385f66294b07172a4bf6802cd4f09b"
     );
 }
+
+// ---- the plane-mode equivalent of the flanged multimodal mouth as the radiating end (MB 14831 item 1; stamp
+// brasstap/predictions-modal-mouth-kernel-v2.txt, bounds fixed before the first run) ----
+
+fn mouth_duct() -> Duct {
+    Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 5.0e-3,
+            length: 0.5,
+        }],
+    }
+}
+
+fn mouth_bore(mouth: Option<&MouthKernel>) -> Result<NonlinearBore, NonlinearDuctError> {
+    let state = air();
+    NonlinearBore::with_mouth_kernel(
+        &mouth_duct(),
+        air_source(&state),
+        293.15,
+        101_325.0,
+        None,
+        BoreSpec {
+            maximum_cell_m: 2.4e-3,
+            inlet_volume_m3: 0.0,
+            step_s: STEP_S,
+            cfl: 0.45,
+            wall: None,
+        },
+        mouth,
+    )
+}
+
+// The piston's own weights wrapped as a kernel for the same mouth: the plumbing control.
+fn piston_as_mouth_kernel(piston: &NonlinearBore) -> MouthKernel {
+    let room = piston.room();
+    let radius = 5.0e-3;
+    MouthKernel {
+        step_s: STEP_S,
+        z_inf: room.density * room.sound_speed / (core::f64::consts::PI * radius * radius),
+        mouth_radius_m: radius,
+        weights: piston.radiation_weights().to_vec(),
+        dropped_tail_energy: 0.0,
+        dropped_sum: 0.0,
+        bin_hz: 0.0,
+        evaluated_hz: 0.0,
+    }
+}
+
+fn worst_relative_difference(a: &[f64], b: &[f64]) -> (f64, f64) {
+    let peak = a.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let worst = a.iter().zip(b).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+    (worst, peak)
+}
+
+#[test]
+fn a_mouth_kernel_of_the_pistons_own_weights_is_the_piston() {
+    // K1 (amended before any run: the last ulp of z_inf x area is not rho c, so the bound is 1e-12 of the peak, not the bits).
+    let mut piston = mouth_bore(None).unwrap();
+    let kernel = piston_as_mouth_kernel(&piston);
+    let mut through_kernel = mouth_bore(Some(&kernel)).unwrap();
+    assert_eq!(through_kernel.radiation_weights(), piston.radiation_weights());
+    let drive = |t: f64| half_cosine(t, 2.0e-4, 2.0e-5);
+    let a = drive_and_record(&mut piston, 2000, &drive);
+    let b = drive_and_record(&mut through_kernel, 2000, &drive);
+    let (worst, peak) = worst_relative_difference(&a, &b);
+    println!("K1: worst |difference| {worst:.3e} Pa against a peak of {peak:.3e} Pa");
+    assert!(peak > 0.0);
+    assert!(worst <= 1.0e-12 * peak, "{worst} against {peak}");
+}
+
+#[test]
+fn a_mouth_kernel_that_does_not_fit_the_bore_is_refused() {
+    let piston = mouth_bore(None).unwrap();
+    let kernel = piston_as_mouth_kernel(&piston);
+    let mut wrong_step = kernel.clone();
+    wrong_step.step_s *= 1.001;
+    let mut wrong_gas = kernel.clone();
+    wrong_gas.z_inf *= 1.01;
+    let mut short = kernel.clone();
+    short.weights.truncate(1);
+    let mut not_finite = kernel.clone();
+    not_finite.weights[1] = f64::NAN;
+    for (name, bad) in [
+        ("step", wrong_step),
+        ("exterior gas", wrong_gas),
+        ("one tap", short),
+        ("a NaN weight", not_finite),
+    ] {
+        assert!(mouth_bore(Some(&bad)).is_err(), "a kernel with the wrong {name} was admitted");
+    }
+    assert!(mouth_bore(Some(&kernel)).is_ok());
+}
+
+#[test]
+fn the_one_mode_equivalent_kernel_drives_the_bore_like_the_piston() {
+    // K4 (bore level, bound fixed before the first run): the one-mode plane-mode equivalent of the flanged mouth IS the baffled
+    // piston's impedance (the equivalent module pins that to 1e-10); its realized time-domain kernel (bins 20 Hz, claim 6 kHz,
+    // tail 1e-10, at the bore's own 1.953 us step) drives the bore's inlet pressure to within 5e-3 of the piston's peak.
+    use crate::modal::{MouthKernelSpec, plane_mouth_kernel};
+    let state = air();
+    let spec = MouthKernelSpec {
+        step_s: STEP_S,
+        bin_hz: 20.0,
+        band_hz: 6000.0,
+        tail_tolerance: 1.0e-10,
+    };
+    let kernel = plane_mouth_kernel(&mouth_duct(), &state, &state, LossModel::Lossless, 1, 1, spec).unwrap();
+    println!(
+        "K4: {} taps, mouth radius {:.6e} m, dropped tail energy {:.2e}, dropped sum {:.2e}, evaluated to {:.0} Hz",
+        kernel.weights.len(),
+        kernel.mouth_radius_m,
+        kernel.dropped_tail_energy,
+        kernel.dropped_sum,
+        kernel.evaluated_hz
+    );
+    assert!(kernel.weights.len() >= 2);
+    let mut piston = mouth_bore(None).unwrap();
+    let mut realized = mouth_bore(Some(&kernel)).unwrap();
+    let drive = |t: f64| half_cosine(t, 2.0e-4, 2.0e-5);
+    let a = drive_and_record(&mut piston, 2000, &drive);
+    let b = drive_and_record(&mut realized, 2000, &drive);
+    let (worst, peak) = worst_relative_difference(&a, &b);
+    println!("K4: worst |difference| {worst:.3e} Pa against a peak of {peak:.3e} Pa ({:.3e})", worst / peak);
+    assert!(peak > 0.0);
+    assert!(worst <= 5.0e-3 * peak, "{worst} against {peak}");
+}

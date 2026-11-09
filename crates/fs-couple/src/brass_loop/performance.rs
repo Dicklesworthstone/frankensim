@@ -23,6 +23,7 @@
 //! lip_response <f_hz> <q> <inverse_mu_m2_per_kg> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
+//! lip_rim_stop inelastic|elastic                           optional; the lip gap may not exceed the first bore cone's diameter (two limit cases of an unmeasured restitution)
 //! lip <mass_kg> <stiffness_n_m> <damping_n_s_m> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_source <free text to end of line>      required provenance sentence
 //! cup_volume_m3 <volume>
@@ -32,6 +33,7 @@
 //! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
 //! mouth_flow_max_taps <taps>                 optional; power of two in 512..=262144; default 65536 (the ladder's own ceiling)
 //! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
+//! mouth_load modal <n_modes> <extra_slices> <band_hz> <bin_hz> <tail_tolerance>  optional; on bore nonlinear: the bore's load is the plane-mode equivalent of the complete flanged multimodal mouth, not the baffled piston
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>            optional; constriction noise of the lip jet, Verge's fraction
 //! constriction_noise <seed> <duct_radius_m>                  optional; Oldham and Ukpoho's printed constriction noise (both bores)
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
@@ -141,6 +143,12 @@
 //! ([`super::nonlinear::NonlinearLip::with_lip_area_exponent`]). A file without the record, or with `q` exactly 1, is bit-identical
 //! to one written before it existed.
 //!
+//! `lip_rim_stop` is the opt-in upper bound of the lip gap ([`super::BrassVoice::with_lip_rim_stop`]): the gap cannot open wider than the
+//! mouthpiece rim, and the bound is not an argument but twice the entry radius of the first bore cone, a geometry the card already
+//! holds. At the bound the first lip mode's outward momentum is removed (`inelastic`) or reversed (`elastic`): the two limit cases of a
+//! restitution no source measures, reported side by side and neither called measured. Linear loop only; refused with `bore nonlinear`
+//! and with `lip_response_mode2`. A file without the record is bit-identical to one written before it existed.
+//!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
 //! stated end radii over the stated length, expanded into `pieces` cones whose
 //! end radii lie exactly on that curve (the piecewise-conic image every
@@ -245,6 +253,62 @@ pub struct FiniteMouthRecord {
     pub initial_temperature_k: f64,
 }
 
+/// A `mouth_load modal` record: the nonlinear bore's radiating end is the plane-mode equivalent of the complete flanged
+/// multimodal mouth ([`fs_duct::modal::plane_mouth_kernel`]) in place of the baffled piston. The bore's gas is the ambient gas,
+/// the exterior the same room, the kernel's step the bore's own gas step. Lossless modal propagation: the nonlinear bore
+/// carries its own wall memory, and the equivalent load needs only the modal flow ratios at the mouth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouthLoadRecord {
+    /// Modes of the multimodal solve, `1..=`[`fs_duct::modal::MAX_MODES`] (8 modes are cut on up to ka = 24, the kernel's evaluation limit).
+    pub n_modes: usize,
+    /// Extra staircase slices per cone of that solve.
+    pub extra_slices: usize,
+    /// Top of the band over which the realized load is claimed to match the equivalent load [Hz].
+    pub band_hz: f64,
+    /// Requested frequency spacing of the kernel's evaluation grid [Hz].
+    pub bin_hz: f64,
+    /// Largest fraction of the kernel's energy dropped from its tail.
+    pub tail_tolerance: f64,
+}
+
+/// What a built `mouth_load modal` kernel is, for the receipt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouthLoadInfo {
+    /// The declared record.
+    pub record: MouthLoadRecord,
+    /// Taps of the kept kernel.
+    pub taps: usize,
+    /// The multimodal solve's staircase mouth radius [m].
+    pub mouth_radius_m: f64,
+    /// `rho c / (pi a^2)` at that radius [Pa s/m^3].
+    pub z_inf: f64,
+    /// Fraction of the kernel's energy in its dropped tail.
+    pub dropped_tail_energy: f64,
+    /// Sum of the dropped weights.
+    pub dropped_sum: f64,
+    /// Frequency spacing of the evaluation grid actually used [Hz].
+    pub bin_hz: f64,
+    /// Top of the evaluated band [Hz].
+    pub evaluated_hz: f64,
+    /// Smallest `Re Z / Z_inf` of the REALIZED load on that grid: a value below zero is gain at the mouth.
+    pub minimum_resistance_ratio: f64,
+}
+
+/// The smallest realized resistance over the kernel's own evaluation grid, as a fraction of `Z_inf`.
+#[cfg(feature = "nonlinear-brass")]
+fn minimum_resistance_ratio(kernel: &fs_duct::modal::MouthKernel) -> f64 {
+    let top = (kernel.evaluated_hz / kernel.bin_hz).round() as usize;
+    (1..=top).fold(f64::INFINITY, |worst, k| {
+        let omega = core::f64::consts::TAU * k as f64 * kernel.bin_hz;
+        worst.min(kernel.impedance_at(omega).re / kernel.z_inf)
+    })
+}
+
+/// Smallest realized resistance a `mouth_load modal` kernel may have, as a fraction of `Z_inf` (the equivalent load is not
+/// certified passive; the commit that added it measured +3.1e-3 as the smallest on the tenor trombone to 3 kHz).
+#[cfg(feature = "nonlinear-brass")]
+const MOUTH_LOAD_MINIMUM_RESISTANCE_RATIO: f64 = -1.0e-3;
+
 const NONLINEAR_FEATURE: &str = "bore nonlinear needs fs-couple's nonlinear-brass feature (build music_render with --features nonlinear-brass)";
 
 /// A parsed, validated, not yet realized performance.
@@ -275,10 +339,12 @@ pub struct LipDescription {
     tension_track: Option<String>,
     nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
     mouth_reservoir: Option<FiniteMouthRecord>,
+    mouth_load: Option<MouthLoadRecord>,
     jet_noise: Option<JetNoiseCard>,
     constriction_noise: Option<ConstrictionNoiseCard>,
     lip_mode2: Option<LipMode2>,
     lip_area_exponent: Option<f64>,
+    lip_rim_stop: Option<super::RimStopKind>,
 }
 
 struct Fields<'a> {
@@ -482,6 +548,7 @@ impl LipDescription {
         let mut lip_from_response = false;
         let mut lip_mode2_raw: Option<(f64, f64, f64)> = None;
         let mut lip_area_exponent_raw: Option<f64> = None;
+        let mut lip_rim_stop_raw: Option<super::RimStopKind> = None;
         let mut lip_source: Option<String> = None;
         let mut bore_source: Option<String> = None;
         let mut cup: Option<f64> = None;
@@ -494,6 +561,7 @@ impl LipDescription {
         let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
         let mut mouth_reservoir: Option<FiniteMouthRecord> = None;
+        let mut mouth_load: Option<MouthLoadRecord> = None;
         let mut jet_noise: Option<JetNoiseCard> = None;
         let mut constriction_noise: Option<ConstrictionNoiseCard> = None;
         let mut ambient_words = None;
@@ -581,6 +649,15 @@ impl LipDescription {
                 "lip_area_exponent" => {
                     let q = f.positive()?;
                     once(&mut lip_area_exponent_raw, q, &f)?;
+                    f.finish()?;
+                }
+                "lip_rim_stop" => {
+                    let kind = match f.word()? {
+                        "inelastic" => super::RimStopKind::Inelastic,
+                        "elastic" => super::RimStopKind::Elastic,
+                        _ => return f.err("expected inelastic or elastic (the two limit cases of an unmeasured restitution)"),
+                    };
+                    once(&mut lip_rim_stop_raw, kind, &f)?;
                     f.finish()?;
                 }
                 "lip" => {
@@ -727,6 +804,20 @@ impl LipDescription {
                     }, &f)?;
                     f.finish()?;
                 }
+                "mouth_load" => {
+                    if f.word()? != "modal" {
+                        return f.err("expected modal");
+                    }
+                    let n_modes = f.count(fs_duct::modal::MAX_MODES as u64)? as usize;
+                    let extra_slices = f.count(64)? as usize;
+                    let (band_hz, bin_hz, tail_tolerance) = (f.positive()?, f.positive()?, f.positive()?);
+                    if !(band_hz > 2.0 * bin_hz) || tail_tolerance >= 1.0 {
+                        return f.err("needs a band of at least two bins and a tail tolerance below 1");
+                    }
+                    let record = MouthLoadRecord { n_modes, extra_slices, band_hz, bin_hz, tail_tolerance };
+                    once(&mut mouth_load, record, &f)?;
+                    f.finish()?;
+                }
                 "jet_noise" => {
                     // Every field is required: the gain, the band and the onset are a source's measured numbers (Verge 1995,
                     // a flue jet), and the card, not this code, says which it uses and where they come from.
@@ -824,6 +915,9 @@ impl LipDescription {
         if mouth_reservoir.is_some() && nonlinear.is_none() {
             return Err("mouth_reservoir requires bore nonlinear and its original thermochemical source".into());
         }
+        if mouth_load.is_some() && nonlinear.is_none() {
+            return Err("mouth_load requires bore nonlinear (a linear bore takes modal_baffle)".into());
+        }
         if modal_baffle.is_some()
             && (termination != Some(Termination::FlangedOpen) || nonlinear.is_some())
         {
@@ -858,6 +952,13 @@ impl LipDescription {
                 return Err(format!("lip_area_exponent must be in [1, 4] (a stated bracket), got {q}"));
             }
             Some(q) => Some(q),
+        };
+        let lip_rim_stop = match lip_rim_stop_raw {
+            None => None,
+            Some(_) if lip_mode2.is_some() => {
+                return Err("lip_rim_stop acts on the first lip mode only and is refused with lip_response_mode2".into());
+            }
+            Some(kind) => Some(kind),
         };
         let nonlinear = match nonlinear {
             None => None,
@@ -934,10 +1035,12 @@ impl LipDescription {
             tension_track,
             nonlinear,
             mouth_reservoir,
+            mouth_load,
             jet_noise,
             constriction_noise,
             lip_mode2,
             lip_area_exponent,
+            lip_rim_stop,
         })
     }
 
@@ -959,6 +1062,21 @@ impl LipDescription {
         self.lip_area_exponent
     }
 
+    /// The opt-in rim stop's limit case, if the file declared one ([`super::BrassVoice::with_lip_rim_stop`]).
+    #[must_use]
+    pub const fn lip_rim_stop(&self) -> Option<super::RimStopKind> {
+        self.lip_rim_stop
+    }
+
+    /// The largest lip gap the opt-in rim stop allows: the mouthpiece rim opening, twice the entry radius of the first bore cone.
+    fn rim_max_gap_m(&self) -> Result<f64, String> {
+        self.duct
+            .segments
+            .first()
+            .map(|segment| 2.0 * segment.inlet_radius())
+            .ok_or_else(|| "the bore has no first segment".to_string())
+    }
+
     /// The opt-in lip constriction-noise record, if the file declared one ([`crate::turbulence_noise::ConstrictionNoise`]).
     #[must_use]
     pub const fn constriction_noise(&self) -> Option<&ConstrictionNoiseCard> {
@@ -969,6 +1087,13 @@ impl LipDescription {
     #[must_use]
     pub const fn mouth_reservoir(&self) -> Option<&FiniteMouthRecord> {
         self.mouth_reservoir.as_ref()
+    }
+
+    /// The `mouth_load modal` record, if the file declares one: the nonlinear bore's load is the plane-mode equivalent of
+    /// the complete flanged multimodal mouth.
+    #[must_use]
+    pub const fn mouth_load(&self) -> Option<&MouthLoadRecord> {
+        self.mouth_load.as_ref()
     }
 
     /// The `bore nonlinear` record and the ambient source model it evolves,
@@ -1160,6 +1285,12 @@ impl LipDescription {
                 .map_err(|e| format!("lip_area_exponent refused: {e}"))?,
             None => voice,
         };
+        let voice = match self.lip_rim_stop {
+            Some(kind) => voice
+                .with_lip_rim_stop(self.rim_max_gap_m()?, kind)
+                .map_err(|e| format!("lip_rim_stop refused: {e}"))?,
+            None => voice,
+        };
         let voice = match self.constriction_noise {
             Some(card) => voice
                 .with_constriction_noise(card)
@@ -1230,6 +1361,9 @@ impl LipDescription {
         use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
         use fs_qty::Temperature;
         let gas = self.ambient_gas();
+        if self.lip_rim_stop.is_some() {
+            return Err("lip_rim_stop acts on the linear loop only and is refused with bore nonlinear".to_string());
+        }
         let [lowest, highest] = room_region(model.thermodynamics(), gas.temperature)?;
         let source = FrozenGas::new(
             model.thermodynamics().clone(),
@@ -1254,7 +1388,50 @@ impl LipDescription {
             gamma: gas.gamma,
             prandtl: gas.prandtl,
         };
-        let lip = NonlinearLip::new(
+        // The bore's load: the plane-mode equivalent of the flanged multimodal mouth, on the bore's own gas step, or the baffled piston.
+        let mouth = match self.mouth_load {
+            None => None,
+            Some(load) => Some(
+                fs_duct::modal::plane_mouth_kernel(
+                    &self.duct,
+                    gas,
+                    gas,
+                    LossModel::Lossless,
+                    load.n_modes,
+                    load.extra_slices,
+                    fs_duct::modal::MouthKernelSpec {
+                        step_s: clock.gas_step_s(),
+                        bin_hz: load.bin_hz,
+                        band_hz: load.band_hz,
+                        tail_tolerance: load.tail_tolerance,
+                    },
+                )
+                .map_err(|e| format!("mouth_load refused: {e}"))?,
+            ),
+        };
+        let mouth_info = match &mouth {
+            None => None,
+            Some(kernel) => {
+                let minimum = minimum_resistance_ratio(kernel);
+                if !(minimum >= MOUTH_LOAD_MINIMUM_RESISTANCE_RATIO) {
+                    return Err(format!(
+                        "mouth_load refused: the realized load's smallest Re Z / Z_inf is {minimum:.3e}, below {MOUTH_LOAD_MINIMUM_RESISTANCE_RATIO:e}: a negative resistance is gain at the mouth"
+                    ));
+                }
+                self.mouth_load.map(|record| MouthLoadInfo {
+                    record,
+                    taps: kernel.weights.len(),
+                    mouth_radius_m: kernel.mouth_radius_m,
+                    z_inf: kernel.z_inf,
+                    dropped_tail_energy: kernel.dropped_tail_energy,
+                    dropped_sum: kernel.dropped_sum,
+                    bin_hz: kernel.bin_hz,
+                    evaluated_hz: kernel.evaluated_hz,
+                    minimum_resistance_ratio: minimum,
+                })
+            }
+        };
+        let lip = NonlinearLip::new_with_mouth(
             &self.duct,
             source,
             gas.temperature,
@@ -1263,6 +1440,7 @@ impl LipDescription {
             self.lip.clone(),
             self.cup_volume_m3,
             clock,
+            mouth.as_ref(),
         )?;
         let lip = match self.mouth_reservoir {
             Some(record) => lip.with_finite_mouth(FiniteMouthSpec {
@@ -1302,6 +1480,7 @@ impl LipDescription {
             gas_step_s: clock.gas_step_s(),
             cells: lip.bore().centers_m().len(),
             radiation_taps: lip.bore().radiation_taps(),
+            mouth_load: mouth_info,
             wall_distinct_radii: wall.distinct_radii,
             wall_maximum_arms: wall.maximum_arms,
             wall_maximum_complex_error: wall.maximum_complex_error,
@@ -1362,6 +1541,10 @@ impl LipDescription {
             lip: self.lip.clone(),
             lip_mode2: self.lip_mode2,
             lip_area_exponent: self.lip_area_exponent,
+            rim_stop: self
+                .lip_rim_stop
+                .zip(self.rim_max_gap_m().ok())
+                .map(|(kind, max_gap_m)| RimStopInfo { kind, max_gap_m }),
             lip_source: self.lip_source.clone(),
             bore_source: self.bore_source.clone(),
             cup_volume_m3: self.cup_volume_m3,
@@ -1445,6 +1628,15 @@ fn room_region(
     Ok(domain)
 }
 
+/// The opt-in rim stop as realized: its limit case and the largest gap it allows (twice the entry radius of the first bore cone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RimStopInfo {
+    /// The limit case of the unmeasured restitution.
+    pub kind: super::RimStopKind,
+    /// The largest lip gap [m].
+    pub max_gap_m: f64,
+}
+
 /// What a realized performance reports about itself.
 #[derive(Debug, Clone)]
 pub struct LipInfo {
@@ -1468,6 +1660,8 @@ pub struct LipInfo {
     pub lip_mode2: Option<LipMode2>,
     /// The opt-in flow-area exponent, when the file declared one.
     pub lip_area_exponent: Option<f64>,
+    /// The opt-in rim stop, when the file declared one.
+    pub rim_stop: Option<RimStopInfo>,
     /// Provenance sentence of the lip numbers.
     pub lip_source: String,
     /// Provenance sentence of the bore geometry.
@@ -1531,8 +1725,10 @@ pub struct NonlinearBoreInfo {
     pub gas_step_s: f64,
     /// Gas cells.
     pub cells: usize,
-    /// Past bell flows the piston radiation convolves.
+    /// Past bell flows the radiating end convolves (the piston's, or the `mouth_load modal` kernel's).
     pub radiation_taps: usize,
+    /// The `mouth_load modal` kernel's receipts, or `None` for the baffled piston.
+    pub mouth_load: Option<MouthLoadInfo>,
     /// Distinct wall radii bound.
     pub wall_distinct_radii: usize,
     /// Largest viscous or thermal arm count in any cell.
@@ -1670,6 +1866,14 @@ impl Engine {
         }
     }
 
+    fn rim_stop_hits(&self) -> Option<u64> {
+        match self {
+            Self::Linear { voice, .. } => voice.rim_stop_hits(),
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(_) => None,
+        }
+    }
+
     fn jet_noise_coverage(&self) -> Option<crate::turbulence_noise::JetNoiseCoverage> {
         match self {
             Self::Linear { voice, .. } => voice.jet_noise_coverage(),
@@ -1730,6 +1934,12 @@ impl LipPerformance {
     #[must_use]
     pub fn first_order_fallbacks(&self) -> Option<u64> {
         self.engine.first_order_fallbacks()
+    }
+
+    /// Samples at which the opt-in rim stop acted so far; `None` without the `lip_rim_stop` row (and for `bore nonlinear`).
+    #[must_use]
+    pub fn rim_stop_hits(&self) -> Option<u64> {
+        self.engine.rim_stop_hits()
     }
 
     /// Actual accepted finite upstream pressure, temperature and gas inventory.
@@ -2120,6 +2330,41 @@ mod tests {
         );
         assert_ne!(a.input_hash, b.input_hash);
         assert_eq!(a.lip.mass_kg.to_bits(), b.lip.mass_kg.to_bits(), "the lip's own motion is untouched");
+    }
+
+    #[test]
+    fn lip_rim_stop_parses_is_refused_by_name_reads_its_bound_from_the_first_cone_and_changes_nothing_it_does_not_reach() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        assert_eq!(parse("lip_rim_stop inelastic\n").expect("parses").lip_rim_stop(), Some(crate::brass_loop::RimStopKind::Inelastic));
+        assert_eq!(parse("lip_rim_stop elastic\n").expect("parses").lip_rim_stop(), Some(crate::brass_loop::RimStopKind::Elastic));
+        assert_eq!(parse("").expect("parses").lip_rim_stop(), None);
+        for (extra, needle) in [
+            ("lip_rim_stop\n", "missing field"),
+            ("lip_rim_stop inelastic 2\n", "unexpected extra field"),
+            ("lip_rim_stop sticky\n", "expected inelastic or elastic"),
+            ("lip_rim_stop inelastic\nlip_rim_stop elastic\n", "may only appear once"),
+            ("lip_response_mode2 244.5 11.0 -0.073\nlip_rim_stop inelastic\n", "refused with lip_response_mode2"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        // The bound is read from the card's own bore: twice the entry radius of the first cone (the fixture's cylinder, 6 mm).
+        let performance = parse("lip_rim_stop inelastic\n").expect("parses").build().expect("builds");
+        let info = performance.info().rim_stop.expect("the stop is reported");
+        assert_eq!(info.kind, crate::brass_loop::RimStopKind::Inelastic);
+        assert!((info.max_gap_m - 0.012).abs() < 1e-15, "{}", info.max_gap_m);
+        assert_eq!(performance.rim_stop_hits(), Some(0));
+        // A stop the lip never reaches changes nothing and counts nothing: the fixture's lip stays far under a 12 mm gap.
+        let plain = pressure(&parse("").expect("parses"));
+        let mut run = parse("lip_rim_stop elastic\n").expect("parses").build().expect("builds");
+        let mut stopped = vec![0.0; 1200];
+        for block in stopped.chunks_mut(37) {
+            run.block(block).expect("physical pressure");
+        }
+        assert!(plain.iter().zip(&stopped).all(|(a, b)| a.to_bits() == b.to_bits()), "a stop that never acts must be bit-identical");
+        assert_eq!(run.rim_stop_hits(), Some(0), "the fixture's lip never reaches a 12 mm rim");
+        let (a, b) = (parse("").expect("parses"), parse("lip_rim_stop elastic\n").expect("parses"));
+        assert_ne!(a.input_hash, b.input_hash);
     }
 
     /// Gauntlet G0 (a gate that never opens adds exactly zero), G3 (an open gate reaches the radiated sound, is seeded and
@@ -2863,6 +3108,98 @@ mod tests {
         }
     }
 
+    const MOUTH_LOAD_RECORD: &str = "mouth_load modal 3 1 3000 100 1e-8\n";
+
+    #[test]
+    fn mouth_load_record_requires_bore_nonlinear_and_admitted_scalars() {
+        assert_eq!(LipDescription::from_bytes(fixture("").as_bytes()).unwrap().mouth_load(), None);
+        let error = LipDescription::from_bytes(fixture(MOUTH_LOAD_RECORD).as_bytes()).unwrap_err();
+        assert!(error.contains("mouth_load") && error.contains("bore nonlinear"), "{error}");
+        for (row, reason) in [
+            ("mouth_load flat 3 1 3000 100 1e-8\n", "expected modal"),
+            ("mouth_load modal 0 1 3000 100 1e-8\n", "count outside"),
+            ("mouth_load modal 9 1 3000 100 1e-8\n", "count outside"),
+            ("mouth_load modal 3 0 3000 100 1e-8\n", "count outside"),
+            ("mouth_load modal 3 1 150 100 1e-8\n", "two bins"),
+            ("mouth_load modal 3 1 3000 100 1\n", "below 1"),
+            ("mouth_load modal 3 1 3000 -100 1e-8\n", "positive"),
+            ("mouth_load modal 3 1 3000 100\n", "missing field"),
+            ("mouth_load modal 3 1 3000 100 1e-8 7\n", "extra field"),
+        ] {
+            let error = LipDescription::from_bytes(fixture(&format!("{NONLINEAR_RECORD}{row}")).as_bytes()).unwrap_err();
+            assert!(error.contains(reason), "{row}: {error}");
+        }
+        let duplicate = format!("{NONLINEAR_RECORD}{MOUTH_LOAD_RECORD}{MOUTH_LOAD_RECORD}");
+        let error = LipDescription::from_bytes(fixture(&duplicate).as_bytes()).unwrap_err();
+        assert!(error.contains("may only appear once"), "{error}");
+    }
+
+    // The flanged-equivalent load is wired into the nonlinear bore (bounds fixed before the first run, stamp W1): with the row the
+    // lip speaks on a different bore end, so the radiated sound differs from the baffled piston's by more than roundoff and less
+    // than its own size, and the bore says it convolves a kernel of at least two taps.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn the_flanged_equivalent_mouth_load_reaches_the_nonlinear_bore() {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        const STEADY: &str = "frankensim-gesture-schedule-v1\n\
+            control_rate_hz\t700\n\
+            tracks\t1\n\
+            track\tblow\tblowing-pressure\n\
+            initial\tpressure-pa\t0e0\n\
+            events\t1\n\
+            event\t0e0\t1e-2\tpressure-pa\t3e3\n";
+        let packs = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let render = |load_expected: &str| {
+            let load = load_expected;
+            let text = fixture(&format!("{NONLINEAR_RECORD}{load}"))
+                .replace("moist_air 293.15 101325 0", SPECIMEN)
+                .replace(SCHEDULE, STEADY);
+            let description = LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources)).unwrap();
+            let mut performance = description.build().unwrap();
+            let LipBoreInfo::Nonlinear(info) = &performance.info().bore else {
+                panic!("nonlinear fixture");
+            };
+            let taps = info.radiation_taps;
+            if let Some(load) = &info.mouth_load {
+                println!(
+                    "W1: kernel {} taps, mouth radius {:.6e} m, z_inf {:.6e}, dropped tail {:.2e}, dropped sum {:.2e}, evaluated to {:.0} Hz, minimum Re Z / Z_inf {:.3e}",
+                    load.taps, load.mouth_radius_m, load.z_inf, load.dropped_tail_energy, load.dropped_sum, load.evaluated_hz, load.minimum_resistance_ratio
+                );
+                assert!(load.minimum_resistance_ratio >= -1.0e-3);
+            } else {
+                assert!(load_expected.is_empty(), "the row was declared but the bore reports no kernel");
+            }
+            performance.record_mouthpiece();
+            let mut radiated = vec![0.0; 2400];
+            for block in radiated.chunks_mut(600) {
+                performance.block(block).unwrap();
+            }
+            (radiated, taps)
+        };
+        let (piston, piston_taps) = render("");
+        let (modal, modal_taps) = render(MOUTH_LOAD_RECORD);
+        fn rms(x: &[f64]) -> f64 {
+            (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt()
+        }
+        let difference: Vec<f64> = piston.iter().zip(&modal).map(|(a, b)| a - b).collect();
+        let relative = rms(&difference) / rms(&piston);
+        println!(
+            "W1: piston {piston_taps} taps rms {:.4e}, modal kernel {modal_taps} taps rms {:.4e}, relative rms difference {relative:.3e}",
+            rms(&piston),
+            rms(&modal)
+        );
+        assert!(piston.iter().chain(&modal).all(|p| p.is_finite()));
+        assert!(rms(&piston) > 0.0 && rms(&modal) > 0.0);
+        assert!(modal_taps >= 2);
+        assert!(relative > 1.0e-6 && relative < 1.0, "relative difference {relative}");
+    }
+
     #[cfg(not(feature = "nonlinear-brass"))]
     #[test]
     fn finite_mouth_record_cannot_silently_select_a_linear_engine_without_the_feature() {
@@ -2991,6 +3328,13 @@ mod tests {
         assert_eq!(both.lip_area_exponent(), Some(1.4));
         assert!(both.lip_mode2().is_some());
         assert!(both.build().is_ok());
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn lip_rim_stop_is_refused_with_bore_nonlinear_by_name() {
+        let error = finite_description("lip_rim_stop inelastic\n", "3e3").build().err().expect("refused");
+        assert!(format!("{error:?}").contains("lip_rim_stop"), "{error:?}");
     }
 
     #[cfg(feature = "nonlinear-brass")]

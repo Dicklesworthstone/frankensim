@@ -20,12 +20,18 @@
 //!   `rho c / S [1 - J1(2ka)/ka + i H1(2ka)/ka]`. It is product-integrated
 //!   against the piecewise-linear end flow on the fixed step clock and solved
 //!   implicitly with the interior's own end wave at every RK stage.
+//!   Optionally the end takes instead the plane-mode equivalent of the complete
+//!   flanged multimodal mouth ([`MouthKernel`], [`NonlinearBore::with_mouth_kernel`]):
+//!   the same pressure law `p = Z_inf (U_t - sum_j w_j U_{t-j})` with the kernel's
+//!   causal real weights, so the plane gas still sees one impedance, now the one a
+//!   plane wave at the mouth meets once the higher mouth modes are counted.
 //!
 //! The driven end is a caller-owned port. Walls are rigid, the room is at
 //! rest, and the bell radiates as a baffled piston: no flare-mode or
 //! unflanged-lip radiation is claimed.
 
 use super::{NonlinearDuctError, area, positive, profile_volume, radius, reserved, unsupported};
+use crate::modal::MouthKernel;
 use crate::{Duct, DuctError, Segment};
 use fs_gas::dynamics::{
     Boundaries, Boundary, Conserved, Error as GasError, Euler1d, FaceFlux, FrozenGas, Mesh1d,
@@ -225,6 +231,24 @@ impl NonlinearBore {
         wall_gas: Option<WallGas>,
         spec: BoreSpec,
     ) -> Result<Self, NonlinearDuctError> {
+        Self::with_mouth_kernel(duct, gas, room_temperature_k, room_pressure_pa, wall_gas, spec, None)
+    }
+
+    /// As [`Self::new`], with the radiating end optionally the plane-mode equivalent of the flanged multimodal mouth.
+    /// `None` is [`Self::new`] bit for bit. A kernel must have been built for the bore's own gas as the exterior
+    /// (`z_inf x pi a^2 = rho c` of `room`, to 1e-6), on the bore's own fixed step, and be at least two taps long.
+    ///
+    /// # Errors
+    /// As [`Self::new`], or a kernel that does not fit this bore.
+    pub fn with_mouth_kernel(
+        duct: &Duct,
+        gas: FrozenGas,
+        room_temperature_k: f64,
+        room_pressure_pa: f64,
+        wall_gas: Option<WallGas>,
+        spec: BoreSpec,
+        mouth: Option<&MouthKernel>,
+    ) -> Result<Self, NonlinearDuctError> {
         if !positive(spec.step_s) || !(spec.cfl > 0.0 && spec.cfl <= 0.45) {
             return Err(unsupported(
                 "bore step must be positive and CFL in (0, 0.45]",
@@ -242,7 +266,10 @@ impl NonlinearBore {
             .last()
             .map(Segment::outlet_radius)
             .ok_or(DuctError::EmptyDuct)?;
-        let radiation = PistonRadiation::new(mouth_radius, room, spec.step_s)?;
+        let radiation = match mouth {
+            None => PistonRadiation::new(mouth_radius, room, spec.step_s)?,
+            Some(kernel) => PistonRadiation::from_kernel(mouth_radius, room, spec.step_s, kernel)?,
+        };
         let walls = match (spec.wall, wall_gas) {
             (None, _) => None,
             (Some(_), None) => return Err(unsupported("wall memory needs the wall gas transport")),
@@ -397,8 +424,8 @@ impl NonlinearBore {
         self.radiation.weights.len()
     }
 
-    /// Product-integration weights of the regular piston kernel, newest first
-    /// (index 0 multiplies the current end flow). They sum to one: the
+    /// Product-integration weights of the regular piston kernel (or of the mouth kernel the bore was built with), newest
+    /// first (index 0 multiplies the current end flow). They sum to one (the mouth kernel's within its dropped tail): the
     /// radiation impedance vanishes at zero frequency.
     #[must_use]
     pub fn radiation_weights(&self) -> &[f64] {
@@ -590,8 +617,13 @@ struct PistonRadiation {
     history: Vec<f64>,
     newest: usize,
     pending: Option<(f64, f64)>,
+    // Read by the piston's own impedance test only; `flux` takes `flow_gain`.
+    #[allow(dead_code)]
     rho_c: f64,
     impedance: f64,
+    // Pressure per unit end velocity at the newest flow: `impedance x area`. For the piston it is `rho_c` itself (stored, not
+    // recomputed, so the piston's bits do not move); for a mouth kernel it is `z_inf x area` at the bore's own outlet area.
+    flow_gain: f64,
     area: f64,
     room: Primitive,
     step_s: f64,
@@ -613,6 +645,45 @@ impl PistonRadiation {
             pending: None,
             rho_c,
             impedance: rho_c / area,
+            flow_gain: rho_c,
+            area,
+            room,
+            step_s,
+            guess: room.pressure,
+        })
+    }
+
+    // The causal real weights of the plane-mode equivalent of the flanged multimodal mouth, in the piston's own law.
+    fn from_kernel(
+        radius_m: f64,
+        room: Primitive,
+        step_s: f64,
+        kernel: &MouthKernel,
+    ) -> Result<Self, NonlinearDuctError> {
+        let area = area(radius_m)?;
+        if !(kernel.step_s.is_finite() && (kernel.step_s - step_s).abs() <= 1e-12 * step_s) {
+            return Err(unsupported("mouth kernel step differs from the bore's fixed step"));
+        }
+        if kernel.weights.len() < 2 || !kernel.weights.iter().all(|w| w.is_finite()) {
+            return Err(unsupported("mouth kernel needs at least two finite weights"));
+        }
+        let rho_c = room.density * room.sound_speed;
+        let kernel_rho_c =
+            kernel.z_inf * core::f64::consts::PI * kernel.mouth_radius_m * kernel.mouth_radius_m;
+        if !(positive(kernel.z_inf) && (kernel_rho_c - rho_c).abs() <= 1e-6 * rho_c) {
+            return Err(unsupported("mouth kernel was not built for this bore's exterior gas"));
+        }
+        let weights = kernel.weights.clone();
+        let mut history = reserved(weights.len())?;
+        history.resize(weights.len(), 0.0);
+        Ok(Self {
+            weights,
+            history,
+            newest: 0,
+            pending: None,
+            rho_c,
+            impedance: kernel.z_inf,
+            flow_gain: kernel.z_inf * area,
             area,
             room,
             step_s,
@@ -648,7 +719,7 @@ impl PistonRadiation {
         }
         let interior = stage.right.1;
         let held = self.impedance * self.memory(stage.stage);
-        let gain = self.rho_c * (1.0 - self.weights[0]);
+        let gain = self.flow_gain * (1.0 - self.weights[0]);
         // G(p) = p - p_room - gain u(p) + held is strictly increasing in p.
         // A previous step's pressure is only a seed: a changed interior trace
         // may put that seed outside the source's caloric path. The unchanged

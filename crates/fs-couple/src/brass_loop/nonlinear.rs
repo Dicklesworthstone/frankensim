@@ -35,6 +35,7 @@
 //! state; one held bore without valves; the bell is a rigid baffled piston.
 
 use fs_duct::Duct;
+use fs_duct::modal::MouthKernel;
 use fs_duct::nonlinear::bore::{BoreSpec, NonlinearBore, WallGas, WallMemory, WallReceipt};
 use fs_duct::nonlinear::{FaceFlux, FrozenGas, PortStage, Primitive};
 use fs_gas::dynamics::Error as GasError;
@@ -141,6 +142,27 @@ impl NonlinearLip {
         cup_volume_m3: f64,
         clock: NonlinearClock,
     ) -> Result<Self, String> {
+        Self::new_with_mouth(duct, gas, room_temperature_k, room_pressure_pa, wall_gas, lip, cup_volume_m3, clock, None)
+    }
+
+    /// As [`Self::new`], with the bore's radiating end optionally the plane-mode equivalent of the complete flanged multimodal
+    /// mouth (the `mouth_load modal` row): `mouth` is the causal kernel [`fs_duct::modal::plane_mouth_kernel`] built on this
+    /// bore's own duct, with the room gas as bore and exterior, on this clock's gas step. `None` is [`Self::new`] bit for bit.
+    ///
+    /// # Errors
+    /// As [`Self::new`], or a kernel that does not fit the bore.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_mouth(
+        duct: &Duct,
+        gas: FrozenGas,
+        room_temperature_k: f64,
+        room_pressure_pa: f64,
+        wall_gas: WallGas,
+        lip: LipIsland,
+        cup_volume_m3: f64,
+        clock: NonlinearClock,
+        mouth: Option<&MouthKernel>,
+    ) -> Result<Self, String> {
         if !(1..=16).contains(&clock.mechanics_per_output) || clock.gas_steps_per_mechanics == 0 {
             return Err(
                 "nonlinear bore needs 1..=16 mechanics samples per output sample and at least one gas step per mechanics sample"
@@ -157,7 +179,7 @@ impl NonlinearLip {
             return Err("lip island parameters must be positive".into());
         }
         let (wall_viscosity_pa_s, reference_density_kg_m3) = (wall_gas.dynamic_viscosity_pa_s, wall_gas.density_kg_m3);
-        let bore = NonlinearBore::new(
+        let bore = NonlinearBore::with_mouth_kernel(
             duct,
             gas.clone(),
             room_temperature_k,
@@ -170,6 +192,7 @@ impl NonlinearLip {
                 cfl: 0.45,
                 wall: Some(clock.wall),
             },
+            mouth,
         )
         .map_err(|e| format!("nonlinear bore refused: {e}"))?;
         let lip_sys = mass_spring_damper(lip.mass_kg, lip.stiffness_n_m, lip.damping_n_s_m)

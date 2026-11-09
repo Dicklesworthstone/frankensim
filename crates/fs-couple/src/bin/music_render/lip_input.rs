@@ -220,7 +220,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
             )
         }
         LipBoreInfo::Nonlinear(n) => format!(
-            "\"nonlinear_bore\":{{\"maximum_cell_m\":{},\"cells\":{},\"mechanics_rate_hz\":{},\"gas_steps_per_mechanics\":{},\"gas_step_s\":{},\"radiation_taps\":{},\
+            "\"nonlinear_bore\":{{\"maximum_cell_m\":{},\"cells\":{},\"mechanics_rate_hz\":{},\"gas_steps_per_mechanics\":{},\"gas_step_s\":{},\"radiation_taps\":{}{},\
              \"wall\":{{\"poles\":{},\"band_hz\":[{},{}],\"tolerance\":{},\"distinct_radii\":{},\"maximum_arms\":{},\"maximum_complex_error\":{},\"maximum_loss_error\":{}}}}},\
              \"model_scope\":\"one held bore; 1-DOF outward-striking lip island metering an isentropic compressible lip jet that mixes out at the cup face; conservative nonlinear Euler gas of the ambient NASA-9 mixture on the declared cells (steepening and shocks resolved by those cells); Zwikker-Kosten wall memory admitted on its declared band; rigid baffled-piston bell radiation; baffled-disk Rayleigh radiation of the bell volume flow at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no transverse duct modes\"",
             number(n.record.maximum_cell_m),
@@ -229,6 +229,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
             n.record.gas_steps_per_mechanics,
             number(n.gas_step_s),
             n.radiation_taps,
+            mouth_load_json(n.mouth_load.as_ref()),
             n.record.wall_poles,
             number(n.record.wall_band_hz[0]),
             number(n.record.wall_band_hz[1]),
@@ -237,6 +238,31 @@ fn bore_json(bore: &LipBoreInfo) -> String {
             n.wall_maximum_arms,
             number(n.wall_maximum_complex_error),
             number(n.wall_maximum_loss_error),
+        ),
+    }
+}
+
+/// The `mouth_load modal` kernel's receipt object, with its leading comma; empty for the baffled piston, so every receipt
+/// written without the row is unchanged.
+fn mouth_load_json(info: Option<&fs_couple::brass_loop::performance::MouthLoadInfo>) -> String {
+    match info {
+        None => String::new(),
+        Some(m) => format!(
+            ",\"mouth_load\":{{\"modes\":{},\"extra_slices\":{},\"band_hz\":{},\"bin_hz\":{},\"tail_tolerance\":{},\"taps\":{},\"mouth_radius_m\":{},\"z_inf\":{},\
+             \"dropped_tail_energy\":{},\"dropped_sum\":{},\"evaluated_hz\":{},\"minimum_resistance_ratio\":{},\
+             \"scope\":\"the bore's radiating end is the plane-mode equivalent of the complete flanged multimodal mouth (lossless modal solve); the receiver is still the baffled-piston Rayleigh integral of the plane mouth flow\"}}",
+            m.record.n_modes,
+            m.record.extra_slices,
+            number(m.record.band_hz),
+            number(m.bin_hz),
+            number(m.record.tail_tolerance),
+            m.taps,
+            number(m.mouth_radius_m),
+            number(m.z_inf),
+            number(m.dropped_tail_energy),
+            number(m.dropped_sum),
+            number(m.evaluated_hz),
+            number(m.minimum_resistance_ratio),
         ),
     }
 }
@@ -268,18 +294,32 @@ fn lip_area_exponent_json(i: &LipInfo) -> String {
     }
 }
 
+/// The lip receipt's optional rim-stop object, empty for a performance without the `lip_rim_stop` record (so every receipt written
+/// before the record existed is unchanged).
+fn rim_stop_json(i: &LipInfo) -> String {
+    match i.rim_stop {
+        None => String::new(),
+        Some(stop) => format!(
+            "\"rim_stop\":{{\"kind\":\"{}\",\"max_gap_m\":{},\"rule\":\"the lip gap may not exceed twice the entry radius of the first bore cone (the mouthpiece rim opening); the first lip mode's displacement is held at the bound and its outward momentum is removed (inelastic) or reversed (elastic)\",\"restitution_measured\":false,\"note\":\"the two kinds are limit cases of a restitution no source measures; neither is a measured contact law\"}},",
+            stop.kind.label(),
+            number(stop.max_gap_m),
+        ),
+    }
+}
+
 fn input_json(i: &LipInfo) -> String {
     let lip = &i.lip;
     let mic = &i.microphone;
     let second = lip_mode2_json(i);
     let exponent = lip_area_exponent_json(i);
+    let rim_stop = rim_stop_json(i);
     let observer_gas = i.observer_gas.as_ref().map_or_else(String::new, |report| {
         format!("\"observer_gas\":{},",
             super::duct_metadata::observer_gas_provenance(Some(report)))
     });
     format!(
         "\"lip_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"bore\":{{\"segments\":{},\"length_m\":{},\"mouth_radius_m\":{},\"gas_temperature_k\":{},\"sound_speed_m_s\":{},\"source\":{}}},\
-         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}\
+         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}{}\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
          \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},{observer_gas}\
          {}}}",
@@ -300,6 +340,7 @@ fn input_json(i: &LipInfo) -> String {
         json_string(&i.lip_source),
         second,
         exponent,
+        rim_stop,
         number(i.cup_volume_m3),
         i.control_rate_hz,
         i.has_lip_tension_track,
@@ -427,6 +468,8 @@ pub(super) fn run_with_gas_sources(
     let fallbacks = performance.first_order_fallbacks().map_or_else(String::new, |n| {
         format!(",\"nonlinear_first_order_fallback_steps\":{n}")
     });
+    // Only a performance with the `lip_rim_stop` row writes the samples at which its stop acted.
+    let rim_hits = performance.rim_stop_hits().map_or_else(String::new, |n| format!(",\"rim_stop_hits\":{n}"));
     // Only a performance with the `jet_noise` row writes noise-band coverage.
     let jet_band = performance.jet_noise_coverage().map_or_else(String::new, |c| {
         format!(
@@ -463,7 +506,7 @@ pub(super) fn run_with_gas_sources(
          \"lip_windows_0p1s\":[{}],{tension_work_json},{jet_band}\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"{observation_filter}\",\
-         \"resampled\":false,\"declared_band_hz\":{}{observation_delay}}}{fallbacks}{gas_sources}{bore_gas}}}",
+         \"resampled\":false,\"declared_band_hz\":{}{observation_delay}}}{fallbacks}{rim_hits}{gas_sources}{bore_gas}}}",
         info.sample_rate_hz,
         info.full_scale_pa,
         rendered.clipped,

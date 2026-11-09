@@ -179,6 +179,36 @@ pub struct BrassBlockDiag {
     pub supply_defect: f64,
 }
 
+/// What the opt-in rim stop does to the lip's momentum when the gap reaches the mouthpiece rim. Neither is a measured contact law:
+/// they are the two limit cases that bracket a restitution no source measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RimStopKind {
+    /// The outward momentum is removed at the stop (restitution 0).
+    Inelastic,
+    /// The outward momentum is reversed at the stop (restitution 1).
+    Elastic,
+}
+
+impl RimStopKind {
+    /// The card word and the receipt label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Inelastic => "inelastic",
+            Self::Elastic => "elastic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RimStop {
+    /// Largest first-mode displacement [m]: the maximum gap less the rest gap.
+    max_displacement_m: f64,
+    kind: RimStopKind,
+    /// Samples at which the stop acted.
+    hits: u64,
+}
+
 /// The composed brass voice.
 pub struct BrassVoice {
     bank: MmLineBank,
@@ -207,6 +237,8 @@ pub struct BrassVoice {
     lip2: Option<LipSecondMode>,
     /// The opt-in flow-area exponent `q` ([`BrassVoice::with_lip_area_exponent`]); exactly 1.0 is the plain `w h`.
     area_exponent: f64,
+    /// The opt-in rim stop ([`BrassVoice::with_lip_rim_stop`]); `None` runs exactly the original loop.
+    rim_stop: Option<RimStop>,
 }
 
 impl BrassVoice {
@@ -270,6 +302,7 @@ impl BrassVoice {
             constriction_noise: None,
             lip2: None,
             area_exponent: 1.0,
+            rim_stop: None,
         })
     }
 
@@ -307,6 +340,11 @@ impl BrassVoice {
                 what: "the second lip mode (lip_response_mode2) has no printed pre-stress law and runs only at lip tension 1.0",
             });
         }
+        if self.rim_stop.is_some() {
+            return Err(MmLineError::Invalid {
+                what: "the second lip mode (lip_response_mode2) is not combined with the rim stop (lip_rim_stop)",
+            });
+        }
         let sys = mass_spring_damper(mode.mass_kg, mode.stiffness_n_m, mode.damping_n_s_m).map_err(|_| {
             MmLineError::Invalid {
                 what: "the second lip mode refused admission",
@@ -341,6 +379,36 @@ impl BrassVoice {
         Ok(self)
     }
 
+    /// Add the opt-in rim stop before any sample is rendered: the lip gap may not exceed `max_gap_m`, the mouthpiece's rim opening
+    /// (the card passes twice the entry radius of its first bore cone, a geometry the card already holds). The first lip mode's
+    /// displacement is held at `max_gap_m - rest gap`, and its outward momentum is removed ([`RimStopKind::Inelastic`]) or reversed
+    /// ([`RimStopKind::Elastic`]) when it reaches that bound. The two kinds are the limit cases of a restitution no source measures;
+    /// neither is a measured contact law. A voice without the stop steps exactly the original operations (bit for bit). The second
+    /// lip mode is not combined with it.
+    ///
+    /// # Errors
+    /// [`MmLineError::Invalid`] unless `max_gap_m` is finite and above the rest gap, or when a second lip mode is present.
+    pub fn with_lip_rim_stop(mut self, max_gap_m: f64, kind: RimStopKind) -> Result<BrassVoice, MmLineError> {
+        if !(max_gap_m.is_finite() && max_gap_m > self.lip.rest_gap_m) {
+            return Err(MmLineError::Invalid {
+                what: "the rim stop (lip_rim_stop) needs a finite maximum gap above the lip's rest gap",
+            });
+        }
+        if self.lip2.is_some() {
+            return Err(MmLineError::Invalid {
+                what: "the rim stop (lip_rim_stop) acts on the first lip mode only and is not combined with lip_response_mode2",
+            });
+        }
+        self.rim_stop = Some(RimStop { max_displacement_m: max_gap_m - self.lip.rest_gap_m, kind, hits: 0 });
+        Ok(self)
+    }
+
+    /// Samples at which the opt-in rim stop acted so far; `None` for a voice without the stop.
+    #[must_use]
+    pub fn rim_stop_hits(&self) -> Option<u64> {
+        self.rim_stop.map(|stop| stop.hits)
+    }
+
     /// The flow aperture `w h (h/H0)^(q-1)` [m^2] for the lip gap `h`; exactly `w h` when the exponent is 1 or the lip is closed.
     fn flow_width_height(&self, gap: f64) -> f64 {
         let plain = self.lip.width_m * gap;
@@ -368,6 +436,19 @@ impl BrassVoice {
         })?;
         let mut defect = record.supply_defect().abs();
         self.lip_state = record.x;
+        if let Some(stop) = self.rim_stop.as_mut() {
+            if self.lip_state[0] > stop.max_displacement_m {
+                stop.hits += 1;
+                self.lip_state[0] = stop.max_displacement_m;
+                let outward = self.lip_state[1];
+                if outward > 0.0 {
+                    self.lip_state[1] = match stop.kind {
+                        RimStopKind::Inelastic => 0.0,
+                        RimStopKind::Elastic => -outward,
+                    };
+                }
+            }
+        }
         let mut displacement = self.lip_state[0];
         if let Some(second) = self.lip2.as_mut() {
             let record2 = step_split(
@@ -476,6 +557,9 @@ impl BrassVoice {
     pub fn reset(&mut self) -> Result<(), MmLineError> {
         self.bank.reset()?;
         self.lip_state = vec![0.0, 0.0];
+        if let Some(stop) = self.rim_stop.as_mut() {
+            stop.hits = 0;
+        }
         if let Some(second) = self.lip2.as_mut() {
             second.state = vec![0.0, 0.0];
         }
@@ -1655,6 +1739,87 @@ pub(crate) mod brass_loop_tests {
             assert!(format!("{refusal:?}").contains("lip_area_exponent"), "{q}: {refusal:?}");
         }
         assert!(second_mode_voice(None).with_lip_area_exponent(4.0).is_ok());
+    }
+
+    fn rim_voice(stop: Option<(f64, RimStopKind)>) -> BrassVoice {
+        let voice = second_mode_voice(None);
+        match stop {
+            Some((max_gap_m, kind)) => voice.with_lip_rim_stop(max_gap_m, kind).expect("rim stop"),
+            None => voice,
+        }
+    }
+
+    /// The opt-in rim stop (`lip_rim_stop`): a stop far above the swing steps the original operations bit for bit; a stop the swing
+    /// reaches holds the gap at the bound, counts the samples at which it acted, and reaches the mouthpiece pressure.
+    #[test]
+    fn a_rim_stop_far_above_the_swing_is_bit_identical_and_one_the_swing_reaches_holds_the_gap() {
+        let plain = jet_render(&mut rim_voice(None), 4000.0);
+        for kind in [RimStopKind::Inelastic, RimStopKind::Elastic] {
+            let far = jet_render(&mut rim_voice(Some((1.0, kind))), 4000.0);
+            assert!(same_bits(&plain, &far), "{kind:?}: a stop that never acts steps exactly the original operations");
+        }
+        let mut free = rim_voice(None);
+        let _ = jet_render(&mut free, 4000.0);
+        let free_peak = free.diagnostics().iter().map(|d| d.gap_max_m).fold(0.0, f64::max);
+        let rest = free.lip.rest_gap_m;
+        assert!(free_peak > 1.01 * rest, "the probe lip must open past its rest gap for the stop below to bind: {free_peak:e}");
+        let bound = rest + 0.5 * (free_peak - rest);
+        for kind in [RimStopKind::Inelastic, RimStopKind::Elastic] {
+            let mut held = rim_voice(Some((bound, kind)));
+            let held_out = jet_render(&mut held, 4000.0);
+            assert!(held_out.iter().all(|x| x.is_finite()), "{kind:?}");
+            let peak = held.diagnostics().iter().map(|d| d.gap_max_m).fold(0.0, f64::max);
+            assert!(peak <= bound * (1.0 + 1e-12), "{kind:?}: gap {peak:e} over the stop {bound:e}");
+            assert!(held.rim_stop_hits().expect("a stop") > 0, "{kind:?}: the stop must act");
+            assert!(!same_bits(&plain, &held_out), "{kind:?}: a stop that acts must reach the mouthpiece pressure");
+        }
+        assert_eq!(rim_voice(None).rim_stop_hits(), None);
+    }
+
+    /// At the stop the inelastic lip loses its outward momentum and the elastic lip's is reversed (the momentum the free lip would have had).
+    #[test]
+    fn at_the_stop_the_inelastic_lip_loses_its_outward_momentum_and_the_elastic_lip_reverses_it() {
+        let reference = second_mode_voice(None);
+        let (rest, dt) = (reference.lip.rest_gap_m, reference.dt);
+        let max_gap = rest + 2.0e-4;
+        let start = vec![1.9e-4, 5.0e-4];
+        let mut free = second_mode_voice(None);
+        free.lip_state = start.clone();
+        let (free_displacement, _) = free.step_lip(0.0, dt).expect("free step");
+        assert!(free_displacement > 2.0e-4, "the free lip must cross the bound for the test to mean anything: {free_displacement:e}");
+        let free_momentum = free.lip_state[1];
+        assert!(free_momentum > 0.0);
+        for kind in [RimStopKind::Inelastic, RimStopKind::Elastic] {
+            let mut voice = rim_voice(Some((max_gap, kind)));
+            voice.lip_state = start.clone();
+            let (displacement, _) = voice.step_lip(0.0, dt).expect("stopped step");
+            assert_eq!(displacement.to_bits(), (max_gap - rest).to_bits(), "{kind:?}: the displacement is held at the bound");
+            let momentum = voice.lip_state[1];
+            match kind {
+                RimStopKind::Inelastic => assert_eq!(momentum, 0.0),
+                RimStopKind::Elastic => assert_eq!(momentum.to_bits(), (-free_momentum).to_bits()),
+            }
+            assert_eq!(voice.rim_stop_hits(), Some(1), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_rim_stop_refusals_name_the_row() {
+        let rest = second_mode_voice(None).lip.rest_gap_m;
+        for max_gap in [f64::NAN, f64::INFINITY, -1.0, 0.0, rest] {
+            let refusal = second_mode_voice(None).with_lip_rim_stop(max_gap, RimStopKind::Inelastic).err().expect("refused");
+            assert!(format!("{refusal:?}").contains("lip_rim_stop"), "{max_gap}: {refusal:?}");
+        }
+        let with_second = second_mode_voice(Some(embouchure_7_mode2())).with_lip_rim_stop(rest + 1.0e-3, RimStopKind::Elastic).err().expect("refused");
+        assert!(format!("{with_second:?}").contains("lip_response_mode2"), "{with_second:?}");
+        let stop_first = second_mode_voice(None)
+            .with_lip_rim_stop(rest + 1.0e-3, RimStopKind::Elastic)
+            .expect("stop")
+            .with_lip_mode2(embouchure_7_mode2())
+            .err()
+            .expect("refused");
+        assert!(format!("{stop_first:?}").contains("lip_rim_stop"), "{stop_first:?}");
+        assert!(second_mode_voice(None).with_lip_rim_stop(rest + 1.0e-12, RimStopKind::Inelastic).is_ok());
     }
 }
 
