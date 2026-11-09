@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: original source fins on the existing reciprocal gas/body owner.
 #[path = "fin/nonlinear.rs"]
 mod nonlinear;
+#[path = "fin/transient.rs"]
+mod transient;
 use super::*;
 use fs_airflow::graph::thermal::medium::convection::finite_gas::fin::{
     FinTipExposure, SourceFinError, SourceFinLimits, StraightFinArray,

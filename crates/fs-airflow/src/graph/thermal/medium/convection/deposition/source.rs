@@ -13,6 +13,8 @@ pub mod observer;
 pub mod links;
 /// Quasi-steady enclosed gas layers between two finite isothermal walls.
 pub mod enclosure;
+/// Source-owned axial storage, conduction and finite-fluid cooling of fins.
+pub mod fin;
 
 use super::*;
 use fs_material::fluid_transport::{ThermalFluidTransport, ThermalFluidTransportState};

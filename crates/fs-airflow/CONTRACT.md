@@ -6833,3 +6833,60 @@ uncompiled/unexecuted with the unavailable workspace constellation. Two bounded
 probes against original thermal modules separately executed the gross transfer
 and reconstructed-Euler oracle checks; they do not establish fs-airflow
 integration execution. New-file formatting and focused diff checks passed.
+
+
+## Original material and fluid sources on transient fins
+
+`deposition::source::fin::PreparedSourceTransientFin` binds the original fin
+topology to actual finite base, axial fin and fluid cells. The original
+all-solid material caloric objects own storage, including their Cp(T); explicit
+fin mass is never inferred from density or added to the base. A separate base
+material is supported. Every proposed state retains the same caloric object,
+material IDs, fixed fin masses/geometry and original surface coverage. An
+unowned contact touching a fin, an occupied insulated tip, or competing ambient
+boundary refuses. Source-domain and actual native-Kelvin support remain active.
+
+Root and interior links use `PreparedLayerConduction`, with the original exact
+k(T) integrals, half-cell distances and declared root contact resistance. Side
+films use the existing finite-fluid convection owner at each cell's actual
+surface temperature and original bulk/film/wall-property convention. The
+sampled lateral h*A_c/(k*P) must meet an explicit transverse-Biot limit. An
+exposed tip uses the original source-conjugate surface solve through the final
+axial half-cell; its actual surface temperature differs from the cell centre.
+Only the combined tip conductance is applied. Original source lines and every
+film result remain attached to the actual coefficient sample.
+
+The resolver returns ordinary native step coefficients for implicit consumers.
+`SourceTransientFinObserver` supplies the same coefficients on every actual
+explicit thermal substep and re-admits accepted endpoints. The existing native
+timeline alone owns integration, outgoing-conductance CFL, entropy options,
+energy gates and atomic publication. Target-time boundary/contact events also
+re-admit the prepared fin, so a final event cannot publish incompatible physics
+without a subsequent source step. Callback Clone must preserve the original
+transactional-history contract; external callback effects are not reversible.
+
+Reports distinguish actual root heat, side/tip heat into the finite fluid,
+authored fin source watts and original fin m*h. Their instantaneous difference
+is the physical fin storage rate contribution, not an energy defect. Native
+heat and joules are applied exactly once; these diagnostics add neither source
+power nor storage. Axial/root source-power residuals are reported separately.
+Preparation retains lookup sets; coefficient work follows the original sparse
+links plus a bounded native contact sweep, without a dense fin solve or a new
+thermal state owner.
+
+The geometry stays fixed and transverse sections are isothermal. This source
+adapter admits all-solid branches only; melting, phase geometry, fin-array flow
+interference, a resolved external boundary layer and momentum/pressure work
+are not inferred. The fluid callback retains the original finite fluid's
+material, pressure/composition and source identity. Axial mesh error, temporal
+error, sampled transverse validity and source interface-power tolerances remain
+separate controls.
+
+Four source/native integration regression groups specify startup storage and
+mass sensitivity, actual source retention, root contact and solved tip heat,
+caloric-identity/Biot/source refusals and exact retry, and occupied or changed tip/boundary
+refusal at the requested endpoint. Pinned parsing/formatting, focused diff
+checks and independent API/physics review passed. These four groups and this
+cross-crate adapter remain uncompiled and unexecuted in this environment; the
+five original-topology/native-thermal tests reported above did execute. No full
+Cargo/DSR or experimental fin-validation result is claimed.
