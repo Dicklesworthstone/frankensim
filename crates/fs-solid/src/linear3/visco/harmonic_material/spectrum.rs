@@ -23,6 +23,10 @@ pub struct ViscoHarmonicMaterialSpectrumPoint {
     /// Original compatible strains when the constitutive field uses B-bar.
     /// The complete compatible waveform independently satisfies the source limit.
     pub compatible_strain_mandel: Option<Vec<[C64; 6]>>,
+    /// Relaxed static strain from the same original constitutive kinematics.
+    pub bias_mandel: [f64; 6],
+    /// Original compatible static strain when the constitutive field uses B-bar.
+    pub compatible_bias_mandel: Option<[f64; 6]>,
     /// Physical storage, work and Kelvin/Maxwell heat densities, including
     /// equal-frequency interference and all sum/difference-frequency terms.
     pub material: TensorPronyHarmonicWindowPoint,
@@ -197,6 +201,39 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
         window: HarmonicWindow,
         cx: &Cx<'_>,
     ) -> Result<ViscoHarmonicMaterialSpectrumField, ViscoHarmonicError> {
+        self.observe(displacements, None, window, cx)
+    }
+
+    /// Observe coherent motion about an explicitly relaxed real displacement.
+    ///
+    /// `bias` uses the same complete represented-coordinate order as each AC
+    /// vector (`source().equilibrium().free_dofs`). Already eliminated fixed
+    /// coordinates remain zero. Original constitutive AND compatible B-bar
+    /// strains admit the whole offset waveform independently at every point.
+    /// A nonzero physical strain requires the material source band to include
+    /// zero; rigid translations and exact zero bias retain AC-only admission.
+    ///
+    /// Only equilibrium storage and stress work acquire DC/AC cross terms.
+    /// Relaxed static strain creates no extra Kelvin/Maxwell heat. This does
+    /// not establish static force equilibrium, geometric prestress, finite
+    /// strain, eigenstrain, thermal expansion or initial Maxwell memory.
+    pub fn observe_window_with_bias(
+        &self,
+        displacements: &[&[C64]],
+        bias: &[f64],
+        window: HarmonicWindow,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoHarmonicMaterialSpectrumField, ViscoHarmonicError> {
+        self.observe(displacements, Some(bias), window, cx)
+    }
+
+    fn observe(
+        &self,
+        displacements: &[&[C64]],
+        bias: Option<&[f64]>,
+        window: HarmonicWindow,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoHarmonicMaterialSpectrumField, ViscoHarmonicError> {
         checkpoint(cx)?;
         if window.profile() != HarmonicWindowProfile::Uniform {
             return Err(ViscoElementError::Material(ViscoError::Parameters {
@@ -206,6 +243,10 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
         }
         let tones = self.angular_frequencies_rad_s.len();
         if displacements.len() != tones
+            || bias.is_some_and(|values| {
+                values.len() != self.source.equilibrium.free_dofs.len()
+                    || values.iter().any(|value| !value.is_finite())
+            })
             || displacements.iter().any(|values| {
                 values.len() != self.source.equilibrium.free_dofs.len()
                     || values
@@ -214,7 +255,7 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
             })
         {
             return Err(ViscoElementError::InvalidHistory {
-                what: "coherent material observation needs one finite free-coordinate vector per tone",
+                what: "coherent material observation needs complete finite tone and optional bias coordinate vectors",
             }
             .into());
         }
@@ -243,6 +284,13 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
             }
             for (quadrature_point, point) in source.points.iter().enumerate() {
                 checkpoint(cx)?;
+                let bias_at =
+                    |i: usize| bias.map_or(0.0, |values| map[i].map_or(0.0, |row| values[row]));
+                let bias_mandel = point.strain_from_local(bias_at);
+                let compatible_bias = point
+                    .compatible_gradients
+                    .as_ref()
+                    .map(|_| point.compatible_strain_from_local(bias_mandel, bias_at));
                 let mut strain = Vec::with_capacity(tones);
                 let mut compatible = point
                     .compatible_gradients
@@ -259,13 +307,16 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
                         compatible.push(core::array::from_fn(|i| C64::new(re[i], im[i])));
                     }
                 }
-                if let Some(compatible) = &compatible {
+                if let (Some(compatible), Some(compatible_bias)) = (&compatible, &compatible_bias) {
                     material
-                        .validate_strains(compatible)
+                        .validate_strains_with_bias(compatible, compatible_bias)
                         .map_err(ViscoElementError::Material)?;
                 }
-                let response = prepared
-                    .evaluate_with_checkpoint::<ViscoElementError>(&strain, || checkpoint(cx))?;
+                let response = prepared.evaluate_with_bias_and_checkpoint::<ViscoElementError>(
+                    &strain,
+                    &bias_mandel,
+                    || checkpoint(cx),
+                )?;
                 let volume = Dd::from_f64(point.volume_m3);
                 for (total, value) in totals.iter_mut().zip([
                     response.start_stored_energy_j_m3,
@@ -284,6 +335,8 @@ impl<'a> ViscoHarmonicMaterialSpectrumObserver<'a> {
                     volume_m3: point.volume_m3,
                     strain_mandel: strain,
                     compatible_strain_mandel: compatible,
+                    bias_mandel,
+                    compatible_bias_mandel: compatible_bias,
                     material: response,
                 });
             }

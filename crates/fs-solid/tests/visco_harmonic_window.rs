@@ -1,6 +1,9 @@
 //! Physical interval heat/work on original tensor-Prony solid quadrature.
 //! Material coefficients and displacements are synthetic numerical fixtures.
 
+#[path = "visco_harmonic_window/bias.rs"]
+mod bias;
+
 use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
 use fs_material::visco::{Mandel6, PronyBranch, TensorProny};

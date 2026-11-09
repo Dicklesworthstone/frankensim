@@ -13848,3 +13848,17 @@ oracle, signed/rigid modes, adaptive nonuniform mass, and resource/owner refusal
 The `cutfem_prestress_modes` example demonstrates a synthetic restrained bar with
 explicit free extension and an independent native equilibrium check; it reports
 signed squared-frequency estimates without a measured-material or buckling claim.
+
+
+## Relaxed static displacement in coherent material observations
+
+`ViscoHarmonicMaterialSpectrumObserver::observe_window_with_bias` uses one real
+bias value per original represented coordinate. Original constitutive and
+compatible B-bar kinematics recover and separately admit the full DC/AC strain
+waveforms; already eliminated supports remain fixed. Point reports retain both
+static strain fields. Nonzero physical strain requires original DC applicability;
+exact zero strain, including rigid translations, preserves AC-only admission.
+The material owner retains direct equilibrium storage/work cross terms without
+adding Maxwell/Kelvin heat. Original quadrature, physical interval, cancellation
+and sizeof-based point payload bounds remain. No static equilibrium, geometric
+prestress, thermal strain or causal Maxwell memory is inferred.

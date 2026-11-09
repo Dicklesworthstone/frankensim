@@ -251,6 +251,70 @@ pub fn heat_assembly_candidate<'t, A: HeatAssembly + ?Sized>(
     controls: CircuitEnthalpySolve,
     initial_energy_increments_j: &[f64],
 ) -> Result<HarmonicSolidHeatCandidate<'t, A::Sample>, Error<A::Error>> {
+    candidate(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        observer,
+        displacements,
+        None,
+        cells,
+        controls,
+        initial_energy_increments_j,
+    )
+}
+
+/// Deposit the same coherent AC heat about an explicitly relaxed static field.
+///
+/// `bias` has one real displacement per original represented solid coordinate.
+/// The original constitutive and compatible B-bar fields must admit the full
+/// offset waveform, including original DC applicability for nonzero strain,
+/// before any caloric trial. The static field changes equilibrium storage and
+/// stress work, but contributes no dashpot heat. All source-temperature,
+/// reference-inventory, transport and energy gates of `heat_assembly_candidate`
+/// remain active. Static equilibrium, geometric prestress, thermal expansion
+/// and retained initial Maxwell memory are not inferred.
+#[allow(clippy::too_many_arguments)]
+pub fn heat_assembly_candidate_with_bias<'t, A: HeatAssembly + ?Sized>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    observer: &ViscoHarmonicMaterialSpectrumObserver<'_>,
+    displacements: &[&[C64]],
+    bias: &[f64],
+    cells: &[ElementThermalCell<'_>],
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+) -> Result<HarmonicSolidHeatCandidate<'t, A::Sample>, Error<A::Error>> {
+    candidate(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        observer,
+        displacements,
+        Some(bias),
+        cells,
+        controls,
+        initial_energy_increments_j,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate<'t, A: HeatAssembly + ?Sized>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    observer: &ViscoHarmonicMaterialSpectrumObserver<'_>,
+    displacements: &[&[C64]],
+    bias: Option<&[f64]>,
+    cells: &[ElementThermalCell<'_>],
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+) -> Result<HarmonicSolidHeatCandidate<'t, A::Sample>, Error<A::Error>> {
     poll(cx)?;
     admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
     let dt = finite(target_s - thermal.time_s())?;
@@ -370,9 +434,11 @@ pub fn heat_assembly_candidate<'t, A: HeatAssembly + ?Sized>(
         Ok(coefficients.bulk)
     };
     resolve(thermal)?;
-    let observed = observer
-        .observe_window(displacements, window, cx)
-        .map_err(observation)?;
+    let observed = match bias {
+        Some(bias) => observer.observe_window_with_bias(displacements, bias, window, cx),
+        None => observer.observe_window(displacements, window, cx),
+    }
+    .map_err(observation)?;
     balance(
         observed.energy_balance_residual_j,
         controls.total_energy_tolerance_j,

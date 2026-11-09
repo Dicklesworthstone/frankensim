@@ -16,7 +16,9 @@ use fs_couple::{
     material_circuit::MaterialCircuitSolve,
     tensor_material::solid::thermal::{
         ElementThermalCell,
-        harmonic::{HarmonicSolidHeatError, heat_assembly_candidate},
+        harmonic::{
+            HarmonicSolidHeatError, heat_assembly_candidate, heat_assembly_candidate_with_bias,
+        },
     },
 };
 use fs_material::{
@@ -550,5 +552,153 @@ fn late_provider_refusal_and_cancellation_leave_original_owners_reusable() {
         ));
         assert_eq!(thermal.cells(), &before);
         assert_eq!(thermal.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn relaxed_static_bias_changes_constitutive_work_but_not_caloric_heating() {
+    with_case(false, false, |cx, _, provider, thermal, solid, curve| {
+        let observer = solid
+            .prepare_harmonic_material_spectrum_observer(&FREQUENCIES, observation_budget(), cx)
+            .unwrap();
+        let fields = DISPLACEMENTS;
+        let displacement = fields.each_ref().map(|v| v.as_slice());
+        let ordinary = heat_assembly_candidate(
+            provider,
+            cx,
+            &thermal,
+            DT,
+            &observer,
+            &displacement,
+            &receivers(curve),
+            solve_controls(),
+            &[0.0; 2],
+        )
+        .unwrap();
+        let bias = 0.003;
+        let biased = heat_assembly_candidate_with_bias(
+            provider,
+            cx,
+            &thermal,
+            DT,
+            &observer,
+            &displacement,
+            &[bias],
+            &receivers(curve),
+            solve_controls(),
+            &[0.0; 2],
+        )
+        .unwrap();
+        let epsilon = |t: f64| {
+            FREQUENCIES
+                .into_iter()
+                .zip(DISPLACEMENTS)
+                .map(|(w, [q])| {
+                    let (s, c) = (w * t).sin_cos();
+                    q.re * c + q.im * s
+                })
+                .sum::<f64>()
+        };
+        let static_energy = 0.5 * VOLUME * 1000.0 * bias * bias;
+        let cross = |t| VOLUME * 1000.0 * bias * epsilon(t);
+        near(
+            biased.report().material.start_stored_energy_j,
+            ordinary.report().material.start_stored_energy_j + static_energy + cross(0.0),
+            1e-11,
+        );
+        near(
+            biased.report().material.end_stored_energy_j,
+            ordinary.report().material.end_stored_energy_j + static_energy + cross(DT),
+            1e-11,
+        );
+        near(
+            biased.report().material.stored_energy_change_j,
+            ordinary.report().material.stored_energy_change_j + cross(DT) - cross(0.0),
+            1e-11,
+        );
+        near(
+            biased.report().material.stress_work_j,
+            ordinary.report().material.stress_work_j + cross(DT) - cross(0.0),
+            1e-11,
+        );
+        assert_eq!(
+            biased.report().material.material_heat_j,
+            ordinary.report().material.material_heat_j
+        );
+        assert_eq!(
+            biased.report().deposited_heat_j,
+            ordinary.report().deposited_heat_j
+        );
+        assert_eq!(biased.thermal().cells(), ordinary.thermal().cells());
+        near(
+            biased.report().constitutive_thermal_energy_residual_j,
+            0.0,
+            2e-10,
+        );
+        near(biased.report().caloric_energy_residual_j, 0.0, 2e-10);
+        near(
+            biased.report().material.points[0].bias_mandel[2],
+            bias,
+            1e-14,
+        );
+        assert_eq!(thermal.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn biased_heat_refuses_invalid_whole_waveforms_without_changing_either_owner() {
+    with_case(false, false, |cx, _, provider, thermal, solid, curve| {
+        let observer = solid
+            .prepare_harmonic_material_spectrum_observer(&FREQUENCIES, observation_budget(), cx)
+            .unwrap();
+        let fields = DISPLACEMENTS;
+        let displacement = fields.each_ref().map(|v| v.as_slice());
+        let before = thermal.cells().clone();
+        for bias in [&[][..], &[0.0, 0.0][..], &[f64::NAN][..], &[0.2][..]] {
+            assert!(
+                heat_assembly_candidate_with_bias(
+                    provider,
+                    cx,
+                    &thermal,
+                    DT,
+                    &observer,
+                    &displacement,
+                    bias,
+                    &receivers(curve),
+                    solve_controls(),
+                    &[0.0; 2]
+                )
+                .is_err()
+            );
+            assert_eq!(thermal.cells(), &before);
+        }
+        let zero = heat_assembly_candidate_with_bias(
+            provider,
+            cx,
+            &thermal,
+            DT,
+            &observer,
+            &displacement,
+            &[0.0],
+            &receivers(curve),
+            solve_controls(),
+            &[0.0; 2],
+        )
+        .unwrap();
+        let original = heat_assembly_candidate(
+            provider,
+            cx,
+            &thermal,
+            DT,
+            &observer,
+            &displacement,
+            &receivers(curve),
+            solve_controls(),
+            &[0.0; 2],
+        )
+        .unwrap();
+        assert_eq!(zero.report().material, original.report().material);
+        assert_eq!(zero.thermal().cells(), original.thermal().cells());
+        assert_eq!(thermal.cells(), &before);
     });
 }

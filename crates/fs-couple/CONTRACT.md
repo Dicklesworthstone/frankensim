@@ -9608,3 +9608,16 @@ Exported moments use one declared inertial frame. Energy comparisons remove fixe
 Fixed window budgets include actual species/total mass closure, accumulated absolute native defects, initial mass remapping, momentum/energy reserves and heat-allocation error. Opposite signed residuals cannot enlarge a budget, and no budget scales with step count. Only the original typed gross-withdrawal refusal can cause a physical retry; original source, caloric, mechanical, callback and cancellation failures remain typed refusals with no endpoint publication. Original convection callbacks may observe rejected trials and must be repeatable.
 
 Six focused regression groups cover independent continuous monatomic heat/effusion/recoil equations, exact accepted-history replay and heat allocation, inertial-frame transformation of exports, emitted-energy-driven refinement and fixed budgets, represented wall-reference shifts, and retry/work/minimum-step/source/cancellation behavior. The fixed-budget tests include a stationary closed-outlet vessel with an admitted initial native mass mismatch. Pinned formatting and whitespace checks pass. These full-owner regressions are authored but not executed under the current dependency-build capacity limit.
+
+
+## Relaxed solid bias in coherent thermal handoff
+
+`tensor_material::solid::thermal::harmonic::heat_assembly_candidate_with_bias`
+shares the original unbiased candidate and caloric solve. The complete represented
+static displacement reaches original constitutive and compatible B-bar strain
+admission before caloric trials. Relaxed bias changes equilibrium storage and
+stress work while leaving independently integrated Kelvin/Maxwell heat unchanged;
+only that original physical AC heat is deposited. Source-temperature independence,
+reference mass/volume, exact caloric ownership, nonlinear transport, cancellation
+and constitutive/caloric energy gates remain unchanged. Neither static force
+balance, geometric prestress, thermal expansion nor startup memory is inferred.
