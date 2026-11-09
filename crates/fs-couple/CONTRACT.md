@@ -8401,3 +8401,38 @@ Refusal/cancellation returns no endpoint and leaves accepted field and caloric
 histories reusable. Tests compare two consecutive beat-heated intervals against
 independent physical-time integration and nonlinear contact/radiation balances,
 and cover evolving-source refusal, late heat failure, cancellation and retry.
+
+## Transient porous absorption on native acoustic and thermal cells
+
+`porous_heating::transient::TransientPorousHeating` binds each complete original
+porous DG element to one active, adjoining, full-area native thermal prism. Its
+optional local positive-source caches integrate Darcy drag and all original
+viscous/thermal memory losses along the unchanged complete DG trajectory. One
+total dense byte/work allowance is partitioned across these caches; the native
+128-state source-integral cap and original constitutive source band still apply.
+The held ports used for heat are exactly those passed to the original acoustic
+propagator. Source observation and thermal preparation never alter that step.
+
+Each original element's integrated Joules become interval-average watts on the
+existing thermal event/CFL timeline, preserving cell masses, storage laws,
+conduction, boundaries and authored sources. The acoustic interval must be
+refined to resolve thermal source timing; refining thermal substeps alone does
+not remove the interval-average approximation. This is frozen-material one-way
+coupling, without inferred fluid/skeleton temperature partition or feedback.
+Each thermal step receives its represented share of the original source Joules
+through the native interval-source hook, using the exact duration its integrator
+will apply. Whole and substep clock differences must resolve their original
+durations within `sqrt(f64::EPSILON)` relative error; larger epoch-rounding
+distortions refuse and require a local time origin.
+
+Both acoustic and thermal candidates publish together. Physical mechanism/cell
+heat and actual thermal credits are reported separately from the original port
+work and native thermal audit, which already contains deposited heat once.
+The signed remainder of acoustic energy plus work minus stored energy and
+porous heat contains any other loss and numerical residual; it is explicitly
+not an independent loss measurement and never becomes deposited heat. Clocks,
+geometry, mass and thermal-law binding are checked, including final events.
+Focused regressions exercise localized startup, native mechanics equality,
+held ports, conduction and source events, excluded matched-boundary loss,
+latent storage, shifted-clock energy preservation and underresolved-clock
+refusal, cancellation and rollback on thermal/material refusal.

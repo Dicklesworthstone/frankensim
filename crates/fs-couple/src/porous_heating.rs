@@ -16,6 +16,8 @@
 //! the original acoustic/material owner explicitly when that approximation ends.
 //! [`feedback`] instead refreshes the original gas/porous response from accepted
 //! native cell temperatures under an explicit isobaric background.
+//! [`transient`] integrates original DG element source squares over a native
+//! acoustic step and deposits their interval-average heat on the thermal grid.
 //! Passive backing losses leave the thermal system by default. The stack and
 //! feedback owners' `with_load_receiver` methods explicitly deposit that work
 //! into a distinct existing native cell, preserving its own storage and links.
@@ -37,6 +39,8 @@ use load_receiver::LoadReceiver;
 pub mod coherent;
 /// Accepted-state gas-temperature feedback through the original porous stack.
 pub mod feedback;
+/// Element-resolved transient absorption on the original DG and thermal clocks.
+pub mod transient;
 
 /// Hard preparation/storage ceiling; callers may declare a smaller cell budget.
 pub const MAX_POROUS_HEATING_CELLS: usize = 4096;
@@ -212,6 +216,98 @@ fn close_power(a: f64, b: f64, scale: f64, count: usize) -> Result<f64, PorousHe
     }
 }
 
+// Shared physical correspondence for harmonic and transient absorption. A
+// source can change its time law without acquiring a second geometry policy.
+#[allow(clippy::too_many_arguments)]
+fn bind_cell(
+    thermal: &DepositionSimulation<'_>,
+    id: CellId,
+    start: f64,
+    end: f64,
+    area: f64,
+    previous: Option<&PorousCellHeating>,
+    axis: &mut [f64; 3],
+) -> Result<PorousCellHeating, PorousHeatingError> {
+    let cell = thermal.cells().get(&id).ok_or(PorousHeatingError::Invalid(
+        "porous heat destination is not active",
+    ))?;
+    let width = end - start;
+    let delta = std::array::from_fn(|i| cell.geometry.end_m[i] - cell.geometry.start_m[i]);
+    let physical_length = finite(norm(delta))?;
+    let volume = finite(area * width)?;
+    if physical_length <= 0.0
+        || volume <= 0.0
+        || !close_geometry(physical_length, width)
+        || !close_geometry(cell.geometry.volume_m3, volume)
+        || cell.geometry.surface_area_m2 < 2.0 * area * (1.0 - 256.0 * f64::EPSILON)
+    {
+        return Err(PorousHeatingError::Invalid(
+            "porous heat requires the original full-area prismatic cell geometry",
+        ));
+    }
+    if let Some(previous) = previous {
+        if previous.geometry.end_m != cell.geometry.start_m || previous.body_id != cell.body_id {
+            return Err(PorousHeatingError::Invalid(
+                "porous heat cells must adjoin in one physical body",
+            ));
+        }
+        let misalignment = norm(std::array::from_fn(|i| delta[i] - axis[i] * width));
+        if misalignment > 256.0 * f64::EPSILON * width {
+            return Err(PorousHeatingError::Invalid(
+                "porous heat cells must share the layer normal",
+            ));
+        }
+    } else {
+        *axis = delta.map(|v| v / physical_length);
+    }
+    Ok(PorousCellHeating {
+        cell: id,
+        start_depth_m: start,
+        end_depth_m: end,
+        dissipation: PorousLayerDissipation {
+            viscous_power_w: 0.0,
+            thermal_power_w: 0.0,
+            absorbed_power_w: 0.0,
+        },
+        geometry: cell.geometry,
+        material: cell.material_id,
+        mass_kg: cell.mass_kg,
+        body_id: cell.body_id,
+        segment_id: cell.segment_id,
+        storage_basis: thermal.material_storage_basis(cell.material_id)?,
+        caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
+    })
+}
+
+fn validate_cells(
+    cells: &[PorousCellHeating],
+    thermal: &DepositionSimulation<'_>,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), PorousHeatingError> {
+    for bound in cells {
+        checkpoint()?;
+        let cell = thermal
+            .cells()
+            .get(&bound.cell)
+            .ok_or(PorousHeatingError::Invalid(
+                "porous heat destination is no longer active",
+            ))?;
+        if cell.geometry != bound.geometry
+            || cell.material_id != bound.material
+            || cell.mass_kg != bound.mass_kg
+            || cell.body_id != bound.body_id
+            || cell.segment_id != bound.segment_id
+            || thermal.material_storage_basis(cell.material_id)? != bound.storage_basis
+            || thermal.material_caloric_identity(cell.material_id)? != bound.caloric_identity
+        {
+            return Err(PorousHeatingError::Invalid(
+                "porous heat binding changed geometry, mass or original thermal material",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
     /// Bind every depth exactly once to distinct already-active thermal cells.
     ///
@@ -263,61 +359,22 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
                     "porous heat needs ordered nonoverlapping depths and unique cells",
                 ));
             }
-            let cell = thermal
-                .cells()
-                .get(&route.cell)
-                .ok_or(PorousHeatingError::Invalid(
-                    "porous heat destination is not active",
-                ))?;
-            let width = route.end_depth_m - start;
-            let delta = std::array::from_fn(|i| cell.geometry.end_m[i] - cell.geometry.start_m[i]);
-            let physical_length = finite(norm(delta))?;
-            let volume = finite(area * width)?;
-            if physical_length <= 0.0
-                || volume <= 0.0
-                || !close_geometry(physical_length, width)
-                || !close_geometry(cell.geometry.volume_m3, volume)
-                || cell.geometry.surface_area_m2 < 2.0 * area * (1.0 - 256.0 * f64::EPSILON)
-            {
-                return Err(PorousHeatingError::Invalid(
-                    "porous heat requires the original full-area prismatic cell geometry",
-                ));
-            }
-            if let Some(previous) = cells.last() {
-                if previous.geometry.end_m != cell.geometry.start_m
-                    || previous.body_id != cell.body_id
-                {
-                    return Err(PorousHeatingError::Invalid(
-                        "porous heat cells must adjoin in one physical body",
-                    ));
-                }
-                let misalignment = norm(std::array::from_fn(|i| delta[i] - axis[i] * width));
-                if misalignment > 256.0 * f64::EPSILON * width {
-                    return Err(PorousHeatingError::Invalid(
-                        "porous heat cells must share the layer normal",
-                    ));
-                }
-            } else {
-                axis = delta.map(|v| v / physical_length);
-            }
+            let mut cell = bind_cell(
+                thermal,
+                route.cell,
+                start,
+                route.end_depth_m,
+                area,
+                cells.last(),
+                &mut axis,
+            )?;
             let dissipation = excitation.dissipation_between(start, route.end_depth_m)?;
             sources_w.insert(route.cell, dissipation.absorbed_power_w);
             viscous = viscous + Dd::from_f64(dissipation.viscous_power_w);
             relaxation = relaxation + Dd::from_f64(dissipation.thermal_power_w);
             absorbed = absorbed + Dd::from_f64(dissipation.absorbed_power_w);
-            cells.push(PorousCellHeating {
-                cell: route.cell,
-                start_depth_m: start,
-                end_depth_m: route.end_depth_m,
-                dissipation,
-                geometry: cell.geometry,
-                material: cell.material_id,
-                mass_kg: cell.mass_kg,
-                body_id: cell.body_id,
-                segment_id: cell.segment_id,
-                storage_basis: thermal.material_storage_basis(cell.material_id)?,
-                caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
-            });
+            cell.dissipation = dissipation;
+            cells.push(cell);
             start = route.end_depth_m;
         }
         let dissipation = PorousLayerDissipation {
@@ -397,27 +454,7 @@ impl PreparedHeat {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), PorousHeatingError> {
-        for bound in &self.cells {
-            checkpoint()?;
-            let cell = thermal
-                .cells()
-                .get(&bound.cell)
-                .ok_or(PorousHeatingError::Invalid(
-                    "porous heat destination is no longer active",
-                ))?;
-            if cell.geometry != bound.geometry
-                || cell.material_id != bound.material
-                || cell.mass_kg != bound.mass_kg
-                || cell.body_id != bound.body_id
-                || cell.segment_id != bound.segment_id
-                || thermal.material_storage_basis(cell.material_id)? != bound.storage_basis
-                || thermal.material_caloric_identity(cell.material_id)? != bound.caloric_identity
-            {
-                return Err(PorousHeatingError::Invalid(
-                    "porous heat binding changed geometry, mass or original thermal material",
-                ));
-            }
-        }
+        validate_cells(&self.cells, thermal, checkpoint)?;
         if let Some(receiver) = &self.load_receiver {
             receiver.validate(thermal, checkpoint)?;
         }

@@ -9,6 +9,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "porous_heating/stack.rs"]
 mod stack;
+#[path = "porous_heating/transient.rs"]
+mod transient;
 
 const LENGTH: f64 = 0.08;
 const AREA: f64 = 0.004;
