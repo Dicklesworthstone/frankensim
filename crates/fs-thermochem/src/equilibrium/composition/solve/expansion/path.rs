@@ -25,6 +25,7 @@ pub struct EquilibriumIsentropeSampleV1 {
     pub temperature_iterations: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub(in crate::equilibrium::composition::solve) struct Reference {
     temperature: Temperature,
     pressure: Pressure,
@@ -180,6 +181,27 @@ pub struct EquilibriumIsentropeV1<'a> {
     controls: EquilibriumEntropySolveV1,
     current: Option<EquilibriumIsentropeSampleV1>,
 }
+/// Opaque caloric reference captured from one accepted original SP workspace.
+///
+/// This keeps the normalized species amounts and original source enthalpies
+/// before extensive totals are rounded. It does not replace an isentrope's
+/// immutable birth entropy or change any physical reservoir. Clones share the
+/// original immutable chemistry bank; reference storage retains its bounded
+/// original species/element sizes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EquilibriumCaloricAnchorV1 {
+    owner: IdealGasEquilibriumV1,
+    inventory: Vec<f64>,
+    scale: f64,
+    normalized_mass: f64,
+    reference: Reference,
+    sample: EquilibriumIsentropeSampleV1,
+}
+impl EquilibriumCaloricAnchorV1 {
+    /// Exact accepted sample at capture, still expressed on its birth reference.
+    pub const fn sample(&self) -> EquilibriumIsentropeSampleV1 { self.sample }
+}
+
 impl<'a> EquilibriumIsentropeV1<'a> {
     /// Establish an equilibrium reference at explicit T,p and feed elements.
     /// All eligible species must support the complete declared temperature path.
@@ -214,6 +236,50 @@ impl<'a> EquilibriumIsentropeV1<'a> {
     pub const fn reference_state(&self) -> &EquilibriumThermodynamicStateV1 { &self.reference_state }
     /// Original conserved feed mass [kg], independent of numerical product residuals.
     pub fn feed_mass_kg(&self) -> f64 { self.work.initial_mass * self.work.scale }
+
+    /// Capture an accepted current state's energy reference without rebasing S.
+    /// A stale/failed sample cannot be captured; cancellation returns no anchor.
+    pub fn caloric_anchor(&self, mut cancelled: impl FnMut() -> bool)
+        -> Result<EquilibriumCaloricAnchorV1, EquilibriumExpansionErrorV1> {
+        poll(&mut cancelled)?;
+        let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
+            "no accepted isentrope query for a caloric anchor"))?;
+        let mut inventory = allocated(self.work.inventory.len(), 0.0)?;
+        inventory.copy_from_slice(&self.work.inventory);
+        let reference = Reference::new(self.owner, &self.work, sample.temperature, &mut cancelled)?;
+        let anchor = EquilibriumCaloricAnchorV1 { owner: self.owner.clone(), inventory,
+            scale: self.work.scale, normalized_mass: self.work.initial_mass, reference, sample };
+        poll(&mut cancelled)?;
+        Ok(anchor)
+    }
+
+    /// Direct current-minus-anchor h [J/kg] from the same original source owner.
+    ///
+    /// This integrates each species law and amount change before summation;
+    /// it never subtracts two rounded birth-relative or absolute H values.
+    /// Source models, exact element/charge inventory and feed normalization
+    /// must match. Both this accepted current state and the opaque anchor remain
+    /// unchanged on refusal or cancellation; no entropy reference is replaced.
+    pub fn specific_enthalpy_change_from(
+        &self, anchor: &EquilibriumCaloricAnchorV1, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, EquilibriumExpansionErrorV1> {
+        poll(&mut cancelled)?;
+        let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
+            "no accepted isentrope query for a direct caloric difference"))?;
+        if anchor.owner != *self.owner || anchor.inventory != self.work.inventory
+            || anchor.scale != self.work.scale || anchor.normalized_mass != self.work.initial_mass {
+            return Err(EquilibriumExpansionErrorV1::Invalid(
+                "caloric anchor must retain the same source, inventory and normalization"));
+        }
+        let change = (anchor.reference.normalized_enthalpy_change(
+            self.owner, &self.work, sample.temperature, &mut cancelled)?
+            / Dd::from_f64(self.work.initial_mass)).to_f64();
+        if !change.is_finite() {
+            return Err(E::Arithmetic("direct anchored specific enthalpy").into());
+        }
+        poll(&mut cancelled)?;
+        Ok(change)
+    }
 
     /// Re-equilibrate at one positive pressure while preserving reference entropy.
     /// No receipt is allocated for temperature/root trial states. Relative source

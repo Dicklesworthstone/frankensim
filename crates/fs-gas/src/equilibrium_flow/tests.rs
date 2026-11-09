@@ -12,6 +12,7 @@ use fs_thermochem::{
 use std::collections::BTreeMap;
 
 mod nozzle;
+mod nozzle_prepared;
 #[cfg(feature = "material")]
 mod nozzle_material;
 

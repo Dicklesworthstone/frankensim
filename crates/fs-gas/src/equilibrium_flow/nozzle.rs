@@ -19,7 +19,7 @@ use fs_thermochem::SpeciesId;
 use fs_thermochem::equilibrium::composition::{
     CompositionEquilibriumErrorV1, EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1,
     EquilibriumThermodynamicStateV1, IdealGasEquilibriumV1,
-    isentrope::{EquilibriumIsentropeSampleV1, EquilibriumIsentropeV1},
+    isentrope::{EquilibriumCaloricAnchorV1, EquilibriumIsentropeSampleV1, EquilibriumIsentropeV1},
 };
 
 /// Original material parcels admitted against this same reacting flow law.
@@ -146,8 +146,12 @@ pub struct EquilibriumNozzleFlow {
     pub inlet: EquilibriumThermodynamicStateV1,
     /// Original source-bearing back-pressure exit or sonic throat.
     pub outlet: EquilibriumThermodynamicStateV1,
-    /// Final source-relative H/S increments and reacting derivatives.
+    /// Final source-relative H/S increments and reacting derivatives. For a
+    /// finite reservoir these retain the immutable tank-birth reference.
     pub sample: EquilibriumIsentropeSampleV1,
+    /// Actual outlet-minus-stagnation specific enthalpy [J/kg]. This is relative
+    /// to this flow's inlet, even when `sample` retains an earlier birth datum.
+    pub specific_enthalpy_change_j_kg: f64,
     /// Exact original feed mass; a normalization inventory, not a flow rate.
     pub feed_mass_kg: f64,
     /// Authored effective flow area. No empirical discharge loss is inferred.
@@ -177,6 +181,7 @@ pub struct EquilibriumNozzleFlow {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Trial {
     sample: EquilibriumIsentropeSampleV1,
+    enthalpy_change_j_kg: f64,
     velocity_squared: f64,
     sonic: f64,
 }
@@ -191,11 +196,24 @@ impl Station for Trial {
         self.sonic
     }
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Work {
     pressure: usize,
     composition: usize,
     temperature: usize,
+}
+
+/// Scalar accepted flow; allocating source receipts remains a separate final step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ResolvedNozzle {
+    accepted: Trial,
+    bracket: Option<[f64; 2]>,
+    velocity_m_s: f64,
+    mass_flux_kg_m2_s: f64,
+    mass_flow_kg_s: f64,
+    mach_number: f64,
+    energy_residual_j_kg: f64,
+    work: Work,
 }
 
 /// Resolve a one-direction converging restriction from a stationary reservoir.
@@ -218,17 +236,31 @@ pub fn equilibrium_nozzle_flow(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<EquilibriumNozzleFlow, Error> {
     poll(&mut cancelled)?;
-    controls.validate()?;
     let p0 = stagnation_pressure.value();
     let back = back_pressure.value();
     let area = effective_area.value();
-    if !positive(p0)
-        || !back.is_finite()
-        || back < 0.0
-        || back > p0
-        || !area.is_finite()
-        || area < 0.0
-    {
+    validate_flow_inputs(p0, back, area, controls)?;
+    let mut path = EquilibriumIsentropeV1::new(
+        chemistry, stagnation_temperature, stagnation_pressure, feed,
+        controls.isentropic, &mut cancelled,
+    ).map_err(|source| chemistry_error(p0, 1, source))?;
+    let inlet = path.reference_state().clone();
+    let mut stagnation = path.current_sample().expect("new isentrope has its reference");
+    stagnation.composition_iterations = 0;
+    let work = Work {
+        pressure: 1,
+        composition: inlet.equilibrium().composition_iterations(),
+        temperature: 0,
+    };
+    let resolved = resolve_on_path(&mut path, stagnation, None, back, area, controls, work, &mut cancelled)?;
+    publish_on_path(&mut path, inlet, stagnation, resolved, back, area, &mut cancelled)
+}
+
+fn validate_flow_inputs(p0: f64, back: f64, area: f64, controls: EquilibriumNozzleControl)
+    -> Result<(), Error> {
+    controls.validate()?;
+    if !positive(p0) || !back.is_finite() || back < 0.0 || back > p0
+        || !area.is_finite() || area < 0.0 {
         return Err(Error::Invalid(
             "positive stagnation pressure, nonnegative area and nonincreasing back pressure required",
         ));
@@ -239,181 +271,101 @@ pub fn equilibrium_nozzle_flow(
             "nozzle pressure floor must be below the stagnation pressure",
         ));
     }
-    let mut path = EquilibriumIsentropeV1::new(
-        chemistry,
-        stagnation_temperature,
-        stagnation_pressure,
-        feed,
-        controls.isentropic,
-        &mut cancelled,
-    )
-    .map_err(|source| chemistry_error(p0, 1, source))?;
-    let inlet = path.reference_state().clone();
-    let mass = path.feed_mass_kg();
-    let sample = EquilibriumIsentropeSampleV1 {
-        temperature: stagnation_temperature,
-        pressure: stagnation_pressure,
-        response: inlet.response(),
-        specific_enthalpy_change_j_kg: 0.0,
-        entropy_change_j_k: 0.0,
-        relative_mass_residual: inlet.equilibrium().relative_mass_residual(),
-        composition_iterations: 0,
-        temperature_iterations: 0,
-    };
-    let initial = trial(sample, false)?;
-    let mut work = Work {
-        pressure: 1,
-        composition: inlet.equilibrium().composition_iterations(),
-        temperature: 0,
-    };
+    Ok(())
+}
+
+/// Reuse a genuine birth-isentrope sample supplied by the original reservoir.
+/// Scalar pressure trials allocate no source receipts. The caller must keep the
+/// same source/control binding that prepared this path; this seam is crate-local.
+pub(crate) fn resolve_on_isentrope(
+    path: &mut EquilibriumIsentropeV1<'_>,
+    stagnation: EquilibriumIsentropeSampleV1,
+    anchor: &EquilibriumCaloricAnchorV1,
+    back: f64,
+    area: f64,
+    controls: EquilibriumNozzleControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ResolvedNozzle, Error> {
+    resolve_on_path(path, stagnation, Some(anchor), back, area, controls, Work::default(), cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_on_path(
+    path: &mut EquilibriumIsentropeV1<'_>,
+    stagnation: EquilibriumIsentropeSampleV1,
+    anchor: Option<&EquilibriumCaloricAnchorV1>,
+    back: f64,
+    area: f64,
+    controls: EquilibriumNozzleControl,
+    mut work: Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ResolvedNozzle, Error> {
+    poll(cancelled)?;
+    validate_flow_inputs(stagnation.pressure.value(), back, area, controls)?;
+    if !stagnation.entropy_change_j_k.is_finite()
+        || stagnation.entropy_change_j_k.abs() > controls.isentropic.entropy_tolerance_j_k {
+        return Err(Error::Balance("stagnation state is outside the immutable source isentrope"));
+    }
+    if anchor.is_some_and(|anchor| anchor.sample() != stagnation)
+        || (anchor.is_none() && stagnation.specific_enthalpy_change_j_kg != 0.0) {
+        return Err(Error::Balance("nozzle caloric reference differs from its stagnation sample"));
+    }
+    let initial = trial(stagnation, 0.0, false)?;
+    let moving = area > 0.0 && back < stagnation.pressure.value();
     if !moving {
-        return finish(
-            inlet.clone(),
-            inlet,
-            initial,
-            mass,
-            back,
-            area,
-            None,
-            controls,
-            work,
-            &mut cancelled,
-        );
+        return finish_scalar(initial, area, None, controls, work, cancelled);
     }
     let mut current = initial;
     let (mut accepted, bracket) = crate::nozzle::resolve(
-        initial,
-        back,
-        controls.pressure_search(),
+        initial, back, controls.pressure_search(),
         |pressure, cancelled| {
-            current = query(&mut path, pressure, controls, &mut work, cancelled)?;
+            current = query(path, pressure, anchor, controls, &mut work, cancelled)?;
             Ok(current)
-        },
-        &mut cancelled,
-    )
-    .map_err(search_error)?;
+        }, cancelled,
+    ).map_err(search_error)?;
     // The search can select the earlier endpoint of its final bracket. Reuse
     // current work when possible; otherwise charge a genuine original SP query.
     if accepted != current {
-        accepted = query(
-            &mut path,
-            accepted.pressure(),
-            controls,
-            &mut work,
-            &mut cancelled,
-        )?;
+        accepted = query(path, accepted.pressure(), anchor, controls, &mut work, cancelled)?;
     }
     if let Some(bracket) = bracket
-        && accepted.sonic.abs() > controls.pressure_search().sonic_tolerance(&accepted)
-    {
+        && accepted.sonic.abs() > controls.pressure_search().sonic_tolerance(&accepted) {
         return Err(Error::NotConverged {
             pressure_bracket_pa: bracket,
             sonic_residual_m2_s2: accepted.sonic,
         });
     }
-    let outlet = path
-        .publish_current(&mut cancelled)
-        .map_err(|source| chemistry_error(accepted.pressure(), work.pressure, source))?;
-    if outlet.equilibrium().temperature() != accepted.sample.temperature
-        || outlet.equilibrium().pressure() != accepted.sample.pressure
-        || outlet.response() != accepted.sample.response
-    {
-        return Err(Error::Balance(
-            "published source state differs from the accepted nozzle trial",
-        ));
-    }
-    finish(
-        inlet,
-        outlet,
-        accepted,
-        mass,
-        back,
-        area,
-        bracket,
-        controls,
-        work,
-        &mut cancelled,
-    )
+    finish_scalar(accepted, area, bracket, controls, work, cancelled)
 }
 
-fn query(
+/// Publish a source-complete station only after its scalar pressure solve passed.
+/// The inlet receipt is the original admitted reservoir, never a throat replay.
+pub(crate) fn publish_on_path(
     path: &mut EquilibriumIsentropeV1<'_>,
-    pressure: f64,
-    controls: EquilibriumNozzleControl,
-    work: &mut Work,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Trial, Error> {
-    poll(cancelled)?;
-    if work.pressure >= controls.maximum_pressure_evaluations {
-        return Err(Error::WorkLimit {
-            pressure_evaluations: work.pressure,
-        });
-    }
-    work.pressure += 1;
-    let sample = path
-        .sample(Pressure::new(pressure), &mut *cancelled)
-        .map_err(|source| chemistry_error(pressure, work.pressure, source))?;
-    work.composition += sample.composition_iterations;
-    work.temperature += sample.temperature_iterations;
-    trial(sample, true)
-}
-
-fn trial(sample: EquilibriumIsentropeSampleV1, moving: bool) -> Result<Trial, Error> {
-    let dh = sample.specific_enthalpy_change_j_kg;
-    let velocity_squared = -2.0 * dh;
-    let sound = sample.response.sound_speed_m_s;
-    let sonic = sound * sound - velocity_squared;
-    if !positive(sample.response.density_kg_m3)
-        || !positive(sound)
-        || !velocity_squared.is_finite()
-        || velocity_squared < 0.0
-        || !sonic.is_finite()
-        || (moving && (dh >= 0.0 || velocity_squared == 0.0))
-    {
-        return Err(Error::Balance(
-            "expansion must resolve positive original enthalpy release and reacting acoustics",
-        ));
-    }
-    Ok(Trial {
-        sample,
-        velocity_squared,
-        sonic,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish(
     inlet: EquilibriumThermodynamicStateV1,
-    outlet: EquilibriumThermodynamicStateV1,
-    accepted: Trial,
-    mass: f64,
+    stagnation: EquilibriumIsentropeSampleV1,
+    resolved: ResolvedNozzle,
     back: f64,
     area: f64,
-    bracket: Option<[f64; 2]>,
-    controls: EquilibriumNozzleControl,
-    work: Work,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EquilibriumNozzleFlow, Error> {
-    let velocity = det::sqrt(accepted.velocity_squared);
-    let flux = accepted.sample.response.density_kg_m3 * velocity;
-    let rate = area * flux;
-    let dh = accepted.sample.specific_enthalpy_change_j_kg;
-    let residual = (Dd::from_f64(dh)
-        + Dd::from_f64(0.5) * Dd::from_f64(velocity) * Dd::from_f64(velocity))
-    .to_f64();
-    let tolerance =
-        controls.absolute_energy_tolerance_j_kg + controls.relative_energy_tolerance * dh.abs();
-    let mach = velocity / accepted.sample.response.sound_speed_m_s;
-    if !flux.is_finite()
-        || !rate.is_finite()
-        || !mach.is_finite()
-        || !residual.is_finite()
-        || !tolerance.is_finite()
-        || residual.abs() > tolerance
-        || (velocity > 0.0 && (flux == 0.0 || (area > 0.0 && rate == 0.0)))
-    {
+    if inlet.equilibrium().temperature() != stagnation.temperature
+        || inlet.equilibrium().pressure() != stagnation.pressure
+        || inlet.response() != stagnation.response {
+        return Err(Error::Balance("published inlet differs from the accepted stagnation state"));
+    }
+    let accepted = resolved.accepted;
+    let outlet = if resolved.velocity_m_s == 0.0 {
+        inlet.clone()
+    } else {
+        path.publish_current(&mut *cancelled)
+            .map_err(|source| chemistry_error(accepted.pressure(), resolved.work.pressure, source))?
+    };
+    if outlet.equilibrium().temperature() != accepted.sample.temperature
+        || outlet.equilibrium().pressure() != accepted.sample.pressure
+        || outlet.response() != accepted.sample.response {
         return Err(Error::Balance(
-            "unrepresentable nozzle flow or source stagnation-enthalpy balance",
+            "published source state differs from the accepted nozzle trial",
         ));
     }
     poll(cancelled)?;
@@ -421,20 +373,93 @@ fn finish(
         inlet,
         outlet,
         sample: accepted.sample,
-        feed_mass_kg: mass,
+        specific_enthalpy_change_j_kg: accepted.enthalpy_change_j_kg,
+        feed_mass_kg: path.feed_mass_kg(),
         effective_area: Area::new(area),
-        mass_flow: MassFlowRate::new(rate),
-        mass_flux_kg_m2_s: flux,
-        velocity_m_s: velocity,
-        mach_number: mach,
-        choked: bracket.is_some(),
+        mass_flow: MassFlowRate::new(resolved.mass_flow_kg_s),
+        mass_flux_kg_m2_s: resolved.mass_flux_kg_m2_s,
+        velocity_m_s: resolved.velocity_m_s,
+        mach_number: resolved.mach_number,
+        choked: resolved.bracket.is_some(),
         back_pressure_pa: back,
-        stagnation_enthalpy_residual_j_kg: residual,
-        sonic_pressure_bracket_pa: bracket,
-        sonic_residual_m2_s2: (velocity > 0.0).then_some(accepted.sonic),
-        pressure_evaluations: work.pressure,
-        composition_iterations: work.composition,
-        temperature_iterations: work.temperature,
+        stagnation_enthalpy_residual_j_kg: resolved.energy_residual_j_kg,
+        sonic_pressure_bracket_pa: resolved.bracket,
+        sonic_residual_m2_s2: (resolved.velocity_m_s > 0.0).then_some(accepted.sonic),
+        pressure_evaluations: resolved.work.pressure,
+        composition_iterations: resolved.work.composition,
+        temperature_iterations: resolved.work.temperature,
+    })
+}
+
+fn query(
+    path: &mut EquilibriumIsentropeV1<'_>,
+    pressure: f64,
+    anchor: Option<&EquilibriumCaloricAnchorV1>,
+    controls: EquilibriumNozzleControl,
+    work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Trial, Error> {
+    poll(cancelled)?;
+    if work.pressure >= controls.maximum_pressure_evaluations {
+        return Err(Error::WorkLimit { pressure_evaluations: work.pressure });
+    }
+    work.pressure += 1;
+    let sample = path.sample(Pressure::new(pressure), &mut *cancelled)
+        .map_err(|source| chemistry_error(pressure, work.pressure, source))?;
+    work.composition += sample.composition_iterations;
+    work.temperature += sample.temperature_iterations;
+    let dh = match anchor {
+        Some(anchor) => path.specific_enthalpy_change_from(anchor, &mut *cancelled)
+            .map_err(|source| chemistry_error(pressure, work.pressure, source))?,
+        None => sample.specific_enthalpy_change_j_kg,
+    };
+    trial(sample, dh, true)
+}
+
+fn trial(sample: EquilibriumIsentropeSampleV1, dh: f64, moving: bool)
+    -> Result<Trial, Error> {
+    let velocity_squared = -2.0 * dh;
+    let sound = sample.response.sound_speed_m_s;
+    let sonic = sound * sound - velocity_squared;
+    if !positive(sample.response.density_kg_m3) || !positive(sound)
+        || !velocity_squared.is_finite() || velocity_squared < 0.0
+        || !sonic.is_finite() || (moving && (dh >= 0.0 || velocity_squared == 0.0)) {
+        return Err(Error::Balance(
+            "expansion must resolve positive original enthalpy release and reacting acoustics",
+        ));
+    }
+    Ok(Trial { sample, enthalpy_change_j_kg: dh, velocity_squared, sonic })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_scalar(
+    accepted: Trial,
+    area: f64,
+    bracket: Option<[f64; 2]>,
+    controls: EquilibriumNozzleControl,
+    work: Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ResolvedNozzle, Error> {
+    let velocity = det::sqrt(accepted.velocity_squared);
+    let flux = accepted.sample.response.density_kg_m3 * velocity;
+    let rate = area * flux;
+    let dh = accepted.enthalpy_change_j_kg;
+    let residual = (Dd::from_f64(dh)
+        + Dd::from_f64(0.5) * Dd::from_f64(velocity) * Dd::from_f64(velocity)).to_f64();
+    let tolerance = controls.absolute_energy_tolerance_j_kg
+        + controls.relative_energy_tolerance * dh.abs();
+    let mach = velocity / accepted.sample.response.sound_speed_m_s;
+    if !flux.is_finite() || !rate.is_finite() || !mach.is_finite()
+        || !residual.is_finite() || !tolerance.is_finite() || residual.abs() > tolerance
+        || (velocity > 0.0 && (flux == 0.0 || (area > 0.0 && rate == 0.0))) {
+        return Err(Error::Balance(
+            "unrepresentable nozzle flow or source stagnation-enthalpy balance",
+        ));
+    }
+    poll(cancelled)?;
+    Ok(ResolvedNozzle {
+        accepted, bracket, mass_flow_kg_s: rate, mass_flux_kg_m2_s: flux,
+        velocity_m_s: velocity, mach_number: mach, energy_residual_j_kg: residual, work,
     })
 }
 

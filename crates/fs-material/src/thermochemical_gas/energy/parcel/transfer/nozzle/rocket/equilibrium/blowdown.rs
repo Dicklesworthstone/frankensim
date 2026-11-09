@@ -14,7 +14,13 @@ use super::*;
 use fs_thermochem::equilibrium::composition::isentrope::density::{
     EquilibriumDensityErrorV1, EquilibriumDensityQueryV1, EquilibriumDensitySolveV1,
 };
+use fs_thermochem::equilibrium::composition::isentrope::EquilibriumCaloricAnchorV1;
 use std::sync::Arc;
+
+/// Shared bounded midpoint mass equation for original finite-outflow consumers.
+pub mod midpoint;
+/// Reuse the original reservoir/density/finite-energy owner across flow laws.
+pub mod prepared;
 
 /// Source-supported depletion pressure range and physical balance tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +103,7 @@ pub struct EquilibriumGasReservoir {
     mass_kg: f64,
     state: EquilibriumThermodynamicStateV1,
     sample: EquilibriumIsentropeSampleV1,
+    caloric: EquilibriumCaloricAnchorV1,
 }
 
 /// Physical extensive exchange. Individual species are not conserved in this
@@ -152,16 +159,17 @@ impl EquilibriumGasReservoir {
     ) -> Result<Self, EquilibriumBlowdownError> {
         check_cancel(&mut cancelled)?;
         if !positive(volume_m3) { return Err(EquilibriumBlowdownError::Invalid("positive finite tank volume required")); }
-        let (state, sample, basis_mass_kg) = {
+        let (state, sample, basis_mass_kg, caloric) = {
             let path = EquilibriumIsentropeV1::new(&chemistry, temperature, pressure, &feed,
                 thermochemistry, &mut cancelled)?;
-            (path.reference_state().clone(), path.current_sample().expect("new isentrope has its reference"), path.feed_mass_kg())
+            (path.reference_state().clone(), path.current_sample().expect("new isentrope has its reference"),
+                path.feed_mass_kg(), path.caloric_anchor(&mut cancelled)?)
         };
         let mass_kg = sample.response.density_kg_m3 * volume_m3;
         let reference_enthalpy_j_kg = state.equilibrium().enthalpy().value() / basis_mass_kg;
         let source = Arc::new(Source { chemistry, feed, thermochemistry, reference: state.clone(),
             basis_mass_kg, reference_enthalpy_j_kg });
-        let reservoir = Self { source, volume_m3, mass_kg, state, sample };
+        let reservoir = Self { source, volume_m3, mass_kg, state, sample, caloric };
         reservoir.validate_inventory()?;
         check_cancel(&mut cancelled)?;
         Ok(reservoir)
@@ -228,7 +236,7 @@ impl EquilibriumGasReservoir {
         let query = self.density_at_mass(path, mass, c, cancelled)?;
         let sample = query.sample;
         let dm = self.mass_kg - mass;
-        let dh = sample.specific_enthalpy_change_j_kg - self.sample.specific_enthalpy_change_j_kg;
+        let dh = path.specific_enthalpy_change_from(&self.caloric, &mut *cancelled)?;
         let dp = sample.pressure.value() - self.sample.pressure.value();
         // U=m*h-p*V. Keep all finite changes on one common reference, rather
         // than subtracting two large extensive formation-energy inventories.
@@ -245,9 +253,10 @@ impl EquilibriumGasReservoir {
         if !defect.is_finite() || defect > c.energy_tolerance_j {
             return Err(EquilibriumBlowdownError::EnergyBalance { residual_j: defect });
         }
+        let caloric = path.caloric_anchor(&mut *cancelled)?;
         let state = path.publish_current(&mut *cancelled)?;
         let endpoint = Self { source: self.source.clone(), volume_m3: self.volume_m3,
-            mass_kg: mass, state, sample };
+            mass_kg: mass, state, sample, caloric };
         endpoint.validate_inventory()?;
         check_cancel(cancelled)?;
         Ok(EquilibriumBlowdownCandidate { endpoint, step: EquilibriumBlowdownStep {
@@ -398,71 +407,47 @@ impl EquilibriumGasReservoir {
             || c.nozzle.thermochemistry != self.source.thermochemistry {
             return Err(AdvanceError::Invalid("invalid time/inventory controls or changed birth thermochemistry"));
         }
-        let limit = self.mass_kg * c.maximum_outgoing_fraction;
-        if !positive(limit) || self.mass_kg - limit == self.mass_kg {
-            return Err(AdvanceError::Invalid("unrepresentable outgoing mass allowance"));
-        }
         let mut path = self.path(&mut cancelled)?;
         let mut work = Work { composition: self.source.reference.equilibrium().composition_iterations(),
             ..Work::default() };
         let initial = flow_at(&mut path, self.state.clone(), self.sample.specific_enthalpy_change_j_kg,
             ambient_pressure_pa, nozzle, c.nozzle, &mut work, &mut cancelled)?;
-        let prediction = duration_s * initial.mass_flow_kg_s;
-        if !positive(prediction) { return Err(AdvanceError::Invalid("unrepresentable initial mass-rate increment")); }
-        let (mut low, mut high) = (0.0, limit);
-        let mut dm = prediction.min(limit);
-        let mut accepted_mass = None;
-        let mut last_residual = f64::INFINITY;
-        let mut mass_iterations = 0;
         let mut density_queries = 0;
-        for iteration in 1..=c.maximum_mass_iterations {
-            check_cancel(&mut cancelled)?;
-            mass_iterations = iteration;
-            let remaining = self.mass_kg - dm;
-            let actual = self.mass_kg - remaining;
-            let midpoint_mass = self.mass_kg - 0.5 * actual;
-            if !positive(remaining) || !positive(actual) || midpoint_mass == self.mass_kg
-                || midpoint_mass == remaining {
-                return Err(AdvanceError::Invalid("mass and midpoint must be distinct representable inventories"));
-            }
-            let query = self.density_at_mass(&mut path, midpoint_mass, c.reservoir, &mut cancelled)?;
-            density_queries += query.pressure_queries;
-            work.composition += query.composition_iterations;
-            work.temperature += query.temperature_iterations;
-            let chamber = query.sample;
-            let (_, throat) = sonic_throat(&mut path, chamber.pressure.value(),
-                chamber.specific_enthalpy_change_j_kg, c.nozzle, &mut work, &mut cancelled)?;
-            let rate = throat.flux * nozzle.throat_area_m2;
-            let requested = duration_s * rate;
-            if !positive(rate) || !positive(requested) {
-                return Err(AdvanceError::Invalid("unrepresentable midpoint mass rate"));
-            }
-            last_residual = actual - requested;
-            if last_residual.abs() <= c.reservoir.mass_tolerance_kg && actual <= limit {
-                accepted_mass = Some(remaining);
-                break;
-            }
-            if last_residual < 0.0 {
-                if dm == limit {
-                    let maximum_duration_s = actual / rate;
-                    if !positive(maximum_duration_s) { return Err(AdvanceError::Invalid("inventory retry duration")); }
-                    return Err(AdvanceError::InventoryLimit { maximum_duration_s });
+        let quadrature = midpoint::solve(self.mass_kg, initial.mass_flow_kg_s,
+            midpoint::OutflowMidpointSolve { duration_s,
+                maximum_outgoing_fraction: c.maximum_outgoing_fraction,
+                mass_tolerance_kg: c.reservoir.mass_tolerance_kg,
+                maximum_iterations: c.maximum_mass_iterations },
+            |midpoint_mass, mut cancelled| -> Result<midpoint::OutflowRate, AdvanceError> {
+                let query = self.density_at_mass(&mut path, midpoint_mass, c.reservoir, &mut cancelled)?;
+                density_queries += query.pressure_queries;
+                work.composition += query.composition_iterations;
+                work.temperature += query.temperature_iterations;
+                let chamber = query.sample;
+                let (_, throat) = sonic_throat(&mut path, chamber.pressure.value(),
+                    chamber.specific_enthalpy_change_j_kg, c.nozzle, &mut work, &mut cancelled)?;
+                let rate = throat.flux * nozzle.throat_area_m2;
+                if !positive(rate) {
+                    return Err(AdvanceError::Invalid("unrepresentable midpoint mass rate"));
                 }
-                low = dm;
-            } else { high = dm; }
-            let speed_ratio = chamber.response.sound_speed_m_s / throat.sample.response.sound_speed_m_s;
-            let slope = 1.0 + (requested / midpoint_mass) * 0.5 * speed_ratio * speed_ratio;
-            let newton = actual - last_residual / slope;
-            let next = if slope.is_finite() && slope >= 1.0 && newton.is_finite()
-                && newton > low && newton < high { newton } else { low + 0.5 * (high - low) };
-            if next == dm || next == low || next == high { break; }
-            dm = next;
-        }
-        let remaining = accepted_mass.ok_or(AdvanceError::NoConvergence {
-            mass_iterations, mass_residual_kg: last_residual,
-        })?;
+                let ratio = chamber.response.sound_speed_m_s / throat.sample.response.sound_speed_m_s;
+                let derivative = (rate / midpoint_mass) * ratio * ratio;
+                Ok(midpoint::OutflowRate { mass_flow_kg_s: rate,
+                    derivative_per_s: derivative.is_finite().then_some(derivative) })
+            }, &mut cancelled).map_err(|error| match error {
+                midpoint::OutflowMidpointError::Invalid(reason) => AdvanceError::Invalid(reason),
+                midpoint::OutflowMidpointError::Source(source) => source,
+                midpoint::OutflowMidpointError::InventoryLimit { maximum_duration_s } =>
+                    AdvanceError::InventoryLimit { maximum_duration_s },
+                midpoint::OutflowMidpointError::NoConvergence { iterations, mass_residual_kg } =>
+                    AdvanceError::NoConvergence { mass_iterations: iterations, mass_residual_kg },
+                midpoint::OutflowMidpointError::Cancelled =>
+                    AdvanceError::Reservoir(EquilibriumBlowdownError::Cancelled),
+            })?;
+        let remaining = quadrature.remaining_mass_kg;
+        let mass_iterations = quadrature.iterations;
         let actual = self.mass_kg - remaining;
-        let midpoint_mass = self.mass_kg - 0.5 * actual;
+        let midpoint_mass = quadrature.midpoint_mass_kg;
         let midpoint = self.density_at_mass(&mut path, midpoint_mass, c.reservoir, &mut cancelled)?;
         density_queries += midpoint.pressure_queries;
         work.composition += midpoint.composition_iterations;
