@@ -12299,3 +12299,91 @@ backing receiver with independent caloric mass, reactive storage without heat,
 affine envelopes and dark intervals, split versus whole advances with native
 boundary events, original source bindings, temperature support, budgets and
 late cancellation without mutation of the input histories.
+
+## Internal finite ducts between modal acoustic compartments
+
+`vibroacoustic::CavityCompartmentBasis` combines 2..=64 original sealed
+compartment bases. Every uniform compression mode is retained first, in
+compartment order; higher modes follow a deterministic frequency order.
+Original pressure normalization and modal volume norms are unchanged.
+Interface samples concatenate, with each pressure trace supported only on
+its own compartment. A caller-specified `maximum_trace_entries` bounds the
+complete zero-padded trace payload before allocation; reservations are
+fallible. The controlled constructor polls between compartments and output
+modes and can consume the existing Cx cancellation predicate.
+
+`InternalCavityDucts` connects declared pressure faces of different
+compartments with finite native cylindrical TwoPorts. Both end flows remain
+unknowns in the SAME structural/cavity/exterior solve. Positive left flow
+leaves the left compartment; positive right flow enters the right compartment.
+The two flows need not agree because a finite duct retains compressibility.
+Native scattering constraints introduce no transmission, pressure-node,
+duct-admittance or cavity-resonance division. The original compact and
+distributed exterior opening owners receive the full simultaneous matrix
+stride and retain their complete mutual wall/mouth and mouth/mouth radiation.
+A sealed exterior and a structural-only radiation attachment also remain
+available.
+
+Each duct face retains the full original local pressure projection, including
+its unit-volume-flow uniform-mode normalization. Optional unresolved entrance
+inertia is admitted independently at each end only for that compartment's
+single uniform pressure mode and reference radius ka <= 0.25. A resolved
+entrance uses no additional mass. Native right entrance composition is on the
+right side of the original cylinder. Cavity norms/volumes exclude internal
+duct volume; the exterior does not own an internal connection's reaction.
+
+The graph reuses the SAME cylinder preparation and face-work observation
+helpers as distributed exterior openings. Equilibrium propagation retains
+native Bessel viscous/thermal response. Molecular propagation retains the
+original MolecularDuct and complete RelaxationState, with the selected native
+wall spectrum or explicit adiabatic/slip choice. All compartments and ducts
+share the original gas and molecular selection. Both attachment orders refuse
+equilibrium substitution or a changed molecular law; exact source-frequency
+selection is preserved. Existing common scalar cavity loss and molecular-loss
+exclusion remain in force. Original geometry, actual pressure-trace identity,
+outward normals and structural-coupling identity remain caller-owned:
+matching spectra and norms alone cannot establish that a different mode shape
+is the same original basis.
+
+Responses expose each end pressure/flow, native TwoPortPower observations,
+signed work leaving each physical compartment, and internal duct absorption.
+Independent two-ended pressure work retains transfer and cancellation.
+Internal absorption is debited ONCE as `PowerBreakdown::internal_ducts`;
+`cavity_connections` is the signed internal transfer used in the cavity
+interface audit. The total balance includes structural loss, cavity loss,
+external opening-duct absorption, internal duct absorption and complete joint
+radiation. No recovered transfer, reactive storage or numerical work defect
+is converted into an extra heat source.
+
+Truncated solves must keep every physical compartment's uniform mode.
+Convergence keeps that minimum pressure basis and compares both internal end
+flow vectors independently of the existing modal and exterior-opening
+metrics. This observes the actual graph under reduction instead of replacing
+an omitted compartment with an unintended fixed-pressure reservoir.
+
+Scope is frozen, linear, quiescent plane-pressure propagation through straight
+mechanically rigid ducts, with original modal cavity and structural bases.
+Different compartment gas states, mean flow, nonlinear aperture exchange,
+thermal-inventory evolution, compliant duct walls and transverse duct modes
+are not inferred. Frequency-domain absorption is not a transient caloric
+update or an independently resolved local heat-density field.
+
+Verification: 12 native physical tests pass with the pinned July 2026
+compiler. The existing eight opening tests remain green. Four new tests
+cover independent finite-duct continuum transfer between sealed compartments
+at quarter/half/full waves with and without attenuation; simultaneous internal
+ducts with BOTH production compact/distributed exterior dispatchers and
+complete mutual work; duct-orientation and signed pressure-basis covariance;
+opaque internal transmission; and original combined pressure support/norms,
+trace-payload boundary and cancellation. The native source slice executes the
+actual basis, numeric operators, production opening dispatcher, original
+TwoPort wave/composition/power methods, fs-math and fs-la complex LU. Narrow
+error/data-carrier scaffolding does not replace any tested numerical owner.
+
+Three public integration tests specify native Bessel/Rayleigh composition with
+both exterior routes, exact molecular cavity/duct binding in both attachment
+orders, original complex-compliance transfer, uniform-mode truncation, and
+physical/source admission. Those public tests were syntax parsed and source/API
+reviewed but were NOT Cargo-executed. Missing sibling workspace sources and
+writable dependency/build storage still prevent a complete Cargo/DSR gate;
+the focused native result is not a whole-workspace build claim.

@@ -63,11 +63,16 @@ impl OpeningFrequency<'_> {
         matrix: &mut [C64],
         keep_s: usize,
         keep_a: usize,
+        n: usize,
     ) -> Result<(), VibroError> {
         let holes = self.count();
         let ports = self.structural_modes + holes;
         let offset = keep_s + keep_a;
-        let n = offset + holes;
+        if n.checked_mul(n) != Some(matrix.len()) || n < offset + holes {
+            return Err(invalid(
+                "opening operator requires the complete simultaneous matrix stride",
+            ));
+        }
         let rate = C64::new(0.0, -omega);
         for r in 0..keep_s {
             for s in 0..keep_s {
@@ -238,27 +243,36 @@ pub(in crate::vibroacoustic) fn flow_delta(
             &reduced.cavity_volume_flow_m3_s,
         ),
     ] {
-        if full.len() != reduced.len() {
-            return Err(invalid(
-                "opening convergence changed its original flow basis",
-            ));
-        }
-        let (mut norm, mut error) = (0.0, 0.0);
-        for (&a, &b) in full.iter().zip(reduced) {
-            norm = fs_math::det::hypot(norm, a.abs());
-            error = fs_math::det::hypot(error, (a - b).abs());
-        }
-        if !norm.is_finite() || !error.is_finite() {
-            return Err(invalid("opening convergence flow norm is unrepresentable"));
-        }
-        let delta = if norm == 0.0 {
-            if error == 0.0 { 0.0 } else { f64::INFINITY }
-        } else {
-            error / norm
-        };
+        let delta = relative_flow_delta(full, reduced)?;
         worst = worst.max(delta);
     }
     Ok(worst)
+}
+
+pub(in crate::vibroacoustic) fn relative_flow_delta(
+    full: &[C64],
+    reduced: &[C64],
+) -> Result<f64, VibroError> {
+    if full.len() != reduced.len() {
+        return Err(invalid(
+            "opening convergence changed its original flow basis",
+        ));
+    }
+    let (mut norm, mut error) = (0.0, 0.0);
+    for (&a, &b) in full.iter().zip(reduced) {
+        norm = fs_math::det::hypot(norm, a.abs());
+        error = fs_math::det::hypot(error, (a - b).abs());
+    }
+    if !norm.is_finite() || !error.is_finite() {
+        return Err(invalid("opening convergence flow norm is unrepresentable"));
+    }
+    let delta = if norm == 0.0 {
+        if error == 0.0 { 0.0 } else { f64::INFINITY }
+    } else {
+        error / norm
+    };
+
+    Ok(delta)
 }
 
 #[cfg(test)]

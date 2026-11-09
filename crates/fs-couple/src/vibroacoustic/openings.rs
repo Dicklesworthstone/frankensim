@@ -13,9 +13,16 @@ use fs_material::gas::GasState;
 mod physics;
 pub use physics::CavityOpeningResponse;
 use physics::OpeningFrequency;
-pub(super) use physics::flow_delta;
+pub(super) use physics::{flow_delta, relative_flow_delta};
 mod distributed;
+#[cfg(test)]
+pub(super) use distributed::DistributedOpeningFrequency;
 pub use distributed::{DistributedCavityOpeningRadiation, DistributedOpeningControls};
+pub(super) use distributed::{
+    DuctRow, Material as DuctMaterial, observe_duct, prepare_cylindrical_rows,
+};
+#[cfg(test)]
+pub(super) use physics::OpeningFrequency as CompactOpeningFrequency;
 
 /// Same coupled solve; the finite duct retains both of its physical end flows.
 pub(super) enum CoupledOpeningFrequency<'a> {
@@ -37,11 +44,12 @@ impl CoupledOpeningFrequency<'_> {
         matrix: &mut [C64],
         keep_s: usize,
         keep_a: usize,
+        n: usize,
     ) -> Result<(), VibroError> {
         match self {
-            Self::Compact(law) => law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a),
+            Self::Compact(law) => law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a, n),
             Self::Distributed(law) => {
-                law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a)
+                law.add_operator(omega, bulk, lambdas, matrix, keep_s, keep_a, n)
             }
         }
     }
@@ -325,6 +333,15 @@ impl VibroacousticModel {
         if self.omegas_a[0] != 0.0 {
             return Err(invalid(
                 "radiating openings require the rigid-wall cavity's uniform zero mode",
+            ));
+        }
+        if self
+            .internal_ducts
+            .as_ref()
+            .is_some_and(|ducts| ducts.gas() != openings.gas())
+        {
+            return Err(invalid(
+                "internal and exterior opening ducts must retain the same original gas",
             ));
         }
         let medium = AcousticMedium::try_from_gas(&openings.gas)?;

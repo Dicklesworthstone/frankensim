@@ -9,7 +9,8 @@ use fs_exec::Cx;
 use fs_material::{gas::GasState, relaxation::RelaxationState};
 
 mod physics;
-pub(super) use physics::DistributedOpeningFrequency;
+pub(in crate::vibroacoustic) use physics::DistributedOpeningFrequency;
+pub(in crate::vibroacoustic) use physics::observe_duct;
 
 /// Independent physical and numerical bounds for the finite opening ducts.
 #[derive(Clone, Copy, Debug)]
@@ -28,9 +29,9 @@ pub struct DistributedOpeningControls {
 }
 
 #[derive(Clone, Debug)]
-struct DuctRow {
-    omega: f64,
-    blocks: Vec<TwoPort>,
+pub(in crate::vibroacoustic) struct DuctRow {
+    pub(in crate::vibroacoustic) omega: f64,
+    pub(in crate::vibroacoustic) blocks: Vec<TwoPort>,
 }
 
 /// Original finite cylinders and one complete exterior radiation operator.
@@ -66,12 +67,12 @@ pub struct DistributedCavityOpeningRadiation {
     rows: Vec<DuctRow>,
 }
 
-enum Material<'a> {
+pub(in crate::vibroacoustic) enum Material<'a> {
     Equilibrium(&'a GasState),
     Molecular(RelaxationState, Option<MolecularWallResolution>),
 }
 impl Material<'_> {
-    fn gas(&self) -> &GasState {
+    pub(in crate::vibroacoustic) fn gas(&self) -> &GasState {
         match self {
             Self::Equilibrium(gas) => gas,
             Self::Molecular(state, _) => state.gas(),
@@ -90,6 +91,150 @@ fn molecular_error(error: MolecularDuctError) -> VibroError {
         MolecularDuctError::Duct(error) => duct_error(error),
         _ => invalid("original molecular opening material refused"),
     }
+}
+
+pub(in crate::vibroacoustic) fn prepare_cylindrical_rows(
+    ducts: &[CylindricalCavityNeck],
+    material: &Material<'_>,
+    frequencies: &[f64],
+    controls: DistributedOpeningControls,
+    cx: &Cx<'_>,
+) -> Result<Vec<DuctRow>, VibroError> {
+    poll(cx)?;
+    let count = ducts.len();
+    if count == 0
+        || count > MAX_CAVITY_OPENINGS
+        || frequencies.is_empty()
+        || frequencies.iter().any(|w| !w.is_finite() || *w <= 0.0)
+        || frequencies.windows(2).any(|w| w[0] >= w[1])
+        || !controls.maximum_isothermal_ka.is_finite()
+        || controls.maximum_isothermal_ka <= 0.0
+        || controls.maximum_isothermal_ka > 1.0
+        || !controls.maximum_composition_condition.is_finite()
+        || controls.maximum_composition_condition < 1.0
+        || !controls.boundary_relative_tolerance.is_finite()
+        || controls.boundary_relative_tolerance <= 0.0
+        || controls.boundary_relative_tolerance >= 1.0
+    {
+        return Err(invalid(
+            "native cylinders require bounded controls and an increasing positive frequency grid",
+        ));
+    }
+    let gas = *material.gas();
+    AcousticMedium::try_from_gas(&gas)?;
+    let isothermal_speed = fs_math::det::sqrt(gas.specific_gas_constant * gas.temperature);
+    if !isothermal_speed.is_finite() || isothermal_speed <= 0.0 {
+        return Err(invalid(
+            "original gas isothermal reference speed is unrepresentable",
+        ));
+    }
+    let mut inner_lengths = Vec::with_capacity(count);
+    let mut prepared = Vec::with_capacity(count);
+    for duct in ducts {
+        poll(cx)?;
+        if !duct.radius_m.is_finite()
+            || duct.radius_m <= 0.0
+            || !duct.length_m.is_finite()
+            || duct.length_m <= 0.0
+        {
+            return Err(invalid(
+                "distributed cavity duct needs finite positive radius and length",
+            ));
+        }
+        inner_lengths.push(match duct.inner_end {
+            Some(flange) => fs_phs::neck_end_correction(duct.radius_m, flange)
+                .map_err(|_| invalid("native inner duct entrance correction refused"))?,
+            None => 0.0,
+        });
+        let owner = match material {
+            Material::Equilibrium(_) => None,
+            Material::Molecular(state, wall) => Some(
+                MolecularDuct::new_controlled(
+                    &fs_duct::Duct {
+                        segments: vec![fs_duct::Segment::Cylinder {
+                            radius: duct.radius_m,
+                            length: duct.length_m,
+                        }],
+                    },
+                    state.clone(),
+                    *wall,
+                    fs_duct::ConeSlices::Fixed(1),
+                    1,
+                    &mut || cx.checkpoint().is_err(),
+                )
+                .map_err(molecular_error)?,
+            ),
+        };
+        prepared.push(owner);
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(frequencies.len())
+        .map_err(|_| invalid("distributed opening frequency table allocation failed"))?;
+    for &omega in frequencies {
+        poll(cx)?;
+        if let Material::Molecular(_, Some(wall)) = material
+            && (omega < wall.band_rad_s[0] || omega > wall.band_rad_s[1])
+        {
+            return Err(invalid(
+                "distributed opening frequency lies outside original wall-diffusion band",
+            ));
+        }
+        let mut blocks = Vec::with_capacity(count);
+        for (j, duct) in ducts.iter().enumerate() {
+            poll(cx)?;
+            let ka = omega * (duct.radius_m / isothermal_speed);
+            if !ka.is_finite() || ka > controls.maximum_isothermal_ka {
+                return Err(invalid(
+                    "distributed opening exceeds its declared transverse acoustic domain",
+                ));
+            }
+            if inner_lengths[j] != 0.0 && ka > 0.25 {
+                return Err(invalid(
+                    "compact inner entrance correction requires isothermal radius ka <= 0.25",
+                ));
+            }
+            let area = core::f64::consts::PI * duct.radius_m * duct.radius_m;
+            let mut block = if let Some(owner) = &prepared[j] {
+                let chain = owner
+                    .prepared_chain_controlled(omega, &mut || cx.checkpoint().is_err())
+                    .map_err(molecular_error)?;
+                if chain.blocks.len() != 1 {
+                    return Err(invalid(
+                        "original cylindrical molecular duct changed its one-block geometry",
+                    ));
+                }
+                chain.blocks[0]
+            } else {
+                let wave =
+                    fs_duct::segment_wave(&gas, duct.radius_m, omega, fs_duct::LossModel::Bessel)
+                        .map_err(duct_error)?;
+                TwoPort::from_uniform_wave(
+                    &wave,
+                    area,
+                    duct.length_m,
+                    gas.characteristic_impedance / area,
+                )
+                .map_err(duct_error)?
+            };
+            if inner_lengths[j] != 0.0 {
+                let entrance = C64::new(0.0, -omega * (gas.density * inner_lengths[j] / area));
+                let local = TwoPort::from_abcd(
+                    [C64::ONE, entrance, C64::ZERO, C64::ONE],
+                    block.reference_impedance,
+                )
+                .map_err(duct_error)?;
+                block = local
+                    .star(block, controls.maximum_composition_condition)
+                    .map_err(duct_error)?
+                    .0;
+            }
+            blocks.push(block);
+        }
+        rows.push(DuctRow { omega, blocks });
+    }
+    poll(cx)?;
+
+    Ok(rows)
 }
 
 impl DistributedCavityOpeningRadiation {
@@ -188,123 +333,9 @@ impl DistributedCavityOpeningRadiation {
                 "compact inner-end correction is exclusive to one uniform cavity mode",
             ));
         }
+        let frequencies: Vec<_> = exterior.angular_frequencies_rad_s().collect();
+        let rows = prepare_cylindrical_rows(ducts, &material, &frequencies, controls, cx)?;
         let gas = *material.gas();
-        AcousticMedium::try_from_gas(&gas)?;
-        let isothermal_speed = fs_math::det::sqrt(gas.specific_gas_constant * gas.temperature);
-        if !isothermal_speed.is_finite() || isothermal_speed <= 0.0 {
-            return Err(invalid(
-                "original gas isothermal reference speed is unrepresentable",
-            ));
-        }
-        let mut inner_lengths = Vec::with_capacity(count);
-        let mut prepared = Vec::with_capacity(count);
-        for duct in ducts {
-            poll(cx)?;
-            if !duct.radius_m.is_finite()
-                || duct.radius_m <= 0.0
-                || !duct.length_m.is_finite()
-                || duct.length_m <= 0.0
-            {
-                return Err(invalid(
-                    "distributed cavity duct needs finite positive radius and length",
-                ));
-            }
-            inner_lengths.push(match duct.inner_end {
-                Some(flange) => fs_phs::neck_end_correction(duct.radius_m, flange)
-                    .map_err(|_| invalid("native inner duct entrance correction refused"))?,
-                None => 0.0,
-            });
-            let owner = match &material {
-                Material::Equilibrium(_) => None,
-                Material::Molecular(state, wall) => Some(
-                    MolecularDuct::new_controlled(
-                        &fs_duct::Duct {
-                            segments: vec![fs_duct::Segment::Cylinder {
-                                radius: duct.radius_m,
-                                length: duct.length_m,
-                            }],
-                        },
-                        state.clone(),
-                        *wall,
-                        fs_duct::ConeSlices::Fixed(1),
-                        1,
-                        &mut || cx.checkpoint().is_err(),
-                    )
-                    .map_err(molecular_error)?,
-                ),
-            };
-            prepared.push(owner);
-        }
-        let mut rows = Vec::new();
-        rows.try_reserve_exact(exterior.angular_frequencies_rad_s().len())
-            .map_err(|_| invalid("distributed opening frequency table allocation failed"))?;
-        for omega in exterior.angular_frequencies_rad_s() {
-            poll(cx)?;
-            if let Material::Molecular(_, Some(wall)) = &material
-                && (omega < wall.band_rad_s[0] || omega > wall.band_rad_s[1])
-            {
-                return Err(invalid(
-                    "distributed opening frequency lies outside original wall-diffusion band",
-                ));
-            }
-            let mut blocks = Vec::with_capacity(count);
-            for (j, duct) in ducts.iter().enumerate() {
-                poll(cx)?;
-                let ka = omega * (duct.radius_m / isothermal_speed);
-                if !ka.is_finite() || ka > controls.maximum_isothermal_ka {
-                    return Err(invalid(
-                        "distributed opening exceeds its declared transverse acoustic domain",
-                    ));
-                }
-                if inner_lengths[j] != 0.0 && ka > 0.25 {
-                    return Err(invalid(
-                        "compact inner entrance correction requires isothermal radius ka <= 0.25",
-                    ));
-                }
-                let area = core::f64::consts::PI * duct.radius_m * duct.radius_m;
-                let mut block = if let Some(owner) = &prepared[j] {
-                    let chain = owner
-                        .prepared_chain_controlled(omega, &mut || cx.checkpoint().is_err())
-                        .map_err(molecular_error)?;
-                    if chain.blocks.len() != 1 {
-                        return Err(invalid(
-                            "original cylindrical molecular duct changed its one-block geometry",
-                        ));
-                    }
-                    chain.blocks[0]
-                } else {
-                    let wave = fs_duct::segment_wave(
-                        &gas,
-                        duct.radius_m,
-                        omega,
-                        fs_duct::LossModel::Bessel,
-                    )
-                    .map_err(duct_error)?;
-                    TwoPort::from_uniform_wave(
-                        &wave,
-                        area,
-                        duct.length_m,
-                        gas.characteristic_impedance / area,
-                    )
-                    .map_err(duct_error)?
-                };
-                if inner_lengths[j] != 0.0 {
-                    let entrance = C64::new(0.0, -omega * (gas.density * inner_lengths[j] / area));
-                    let local = TwoPort::from_abcd(
-                        [C64::ONE, entrance, C64::ZERO, C64::ONE],
-                        block.reference_impedance,
-                    )
-                    .map_err(duct_error)?;
-                    block = local
-                        .star(block, controls.maximum_composition_condition)
-                        .map_err(duct_error)?
-                        .0;
-                }
-                blocks.push(block);
-            }
-            rows.push(DuctRow { omega, blocks });
-        }
-        poll(cx)?;
         let (molecular, molecular_wall) = match material {
             Material::Equilibrium(_) => (None, None),
             Material::Molecular(state, wall) => (Some(state), wall),
@@ -406,6 +437,15 @@ impl VibroacousticModel {
         if self.omegas_a[0] != 0.0 {
             return Err(invalid(
                 "distributed openings require the rigid-wall cavity's uniform zero mode",
+            ));
+        }
+        if self
+            .internal_ducts
+            .as_ref()
+            .is_some_and(|ducts| ducts.gas() != openings.gas())
+        {
+            return Err(invalid(
+                "internal and exterior opening ducts must retain the same original gas",
             ));
         }
         let medium = AcousticMedium::try_from_gas(&openings.gas)?;

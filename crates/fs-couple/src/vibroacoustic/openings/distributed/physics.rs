@@ -30,12 +30,17 @@ impl DistributedOpeningFrequency<'_> {
         matrix: &mut [C64],
         keep_s: usize,
         keep_a: usize,
+        n: usize,
     ) -> Result<(), VibroError> {
         let holes = self.ducts.len();
         let ports = self.structural_modes + holes;
         let inner = keep_s + keep_a;
         let outer = inner + holes;
-        let n = outer + holes;
+        if n.checked_mul(n) != Some(matrix.len()) || n < outer + holes {
+            return Err(invalid(
+                "opening operator requires the complete simultaneous matrix stride",
+            ));
+        }
         let rate = C64::new(0.0, -omega);
         for r in 0..keep_s {
             for s in 0..keep_s {
@@ -119,52 +124,12 @@ impl DistributedOpeningFrequency<'_> {
         let mut heat = Dd::ZERO;
         let dd = Dd::from_f64;
         for (j, duct) in self.ducts.iter().enumerate() {
-            let p = [result.cavity_pressure_pa[j], result.exterior_pressure_pa[j]];
-            let q = [inner[j], -outer[j]]; // Native TwoPort flows point into BOTH faces.
-            let r = duct.reference_impedance;
-            let incoming = core::array::from_fn(|end| {
-                let rq = q[end].scale(r);
-                C64::new(
-                    f64::midpoint(p[end].re, rq.re),
-                    f64::midpoint(p[end].im, rq.im),
-                )
-            });
-            let original = duct
-                .power_for_incident_pressure(incoming)
-                .map_err(|_| invalid("native two-sided opening observation refused"))?;
-            let mut scale = 0.0_f64;
-            let mut error = 0.0_f64;
-            let mut face_work = Dd::ZERO;
-            for end in 0..2 {
-                scale = scale
-                    .max(p[end].abs())
-                    .max(original.pressure_pa[end].abs())
-                    .max(q[end].abs() * r)
-                    .max(original.inward_volume_flow_m3_s[end].abs() * r);
-                error = error
-                    .max((p[end] - original.pressure_pa[end]).abs())
-                    .max((q[end] - original.inward_volume_flow_m3_s[end]).abs() * r);
-                face_work = face_work
-                    + dd(0.5) * (dd(p[end].re) * dd(q[end].re) + dd(p[end].im) * dd(q[end].im));
-            }
-            if !scale.is_finite() || !error.is_finite() || error > self.tolerance * scale {
-                return Err(invalid(
-                    "distributed opening original scattering faces failed residual admission",
-                ));
-            }
-            let physical_work = face_work.to_f64();
-            let work_scale = original
-                .incident_power_w
-                .max(original.outgoing_power_w)
-                .max(physical_work.abs());
-            if !physical_work.is_finite()
-                || (physical_work - original.absorbed_power_w).abs() > self.tolerance * work_scale
-                || original.absorbed_power_w < -self.tolerance * work_scale
-            {
-                return Err(invalid(
-                    "distributed opening work is inconsistent or materially active",
-                ));
-            }
+            let original = observe_duct(
+                duct,
+                [result.cavity_pressure_pa[j], result.exterior_pressure_pa[j]],
+                [inner[j], -outer[j]],
+                self.tolerance,
+            )?;
             heat = heat + dd(original.absorbed_power_w);
             result.distributed_duct_power.push(original);
         }
@@ -174,6 +139,61 @@ impl DistributedOpeningFrequency<'_> {
         }
         Ok(result)
     }
+}
+
+pub(in crate::vibroacoustic) fn observe_duct(
+    duct: &TwoPort,
+    p: [C64; 2],
+    q: [C64; 2],
+    tolerance: f64,
+) -> Result<fs_duct::compose::TwoPortPower, VibroError> {
+    let dd = Dd::from_f64;
+    let r = duct.reference_impedance;
+    let incoming = core::array::from_fn(|end| {
+        let rq = q[end].scale(r);
+        C64::new(
+            f64::midpoint(p[end].re, rq.re),
+            f64::midpoint(p[end].im, rq.im),
+        )
+    });
+    let original = duct
+        .power_for_incident_pressure(incoming)
+        .map_err(|_| invalid("native two-sided opening observation refused"))?;
+    let mut scale = 0.0_f64;
+    let mut error = 0.0_f64;
+    let mut face_work = Dd::ZERO;
+    for end in 0..2 {
+        scale = scale
+            .max(p[end].abs())
+            .max(original.pressure_pa[end].abs())
+            .max(q[end].abs() * r)
+            .max(original.inward_volume_flow_m3_s[end].abs() * r);
+        error = error
+            .max((p[end] - original.pressure_pa[end]).abs())
+            .max((q[end] - original.inward_volume_flow_m3_s[end]).abs() * r);
+        face_work =
+            face_work + dd(0.5) * (dd(p[end].re) * dd(q[end].re) + dd(p[end].im) * dd(q[end].im));
+    }
+    if !scale.is_finite() || !error.is_finite() || error > tolerance * scale {
+        return Err(invalid(
+            "distributed opening original scattering faces failed residual admission",
+        ));
+    }
+    let physical_work = face_work.to_f64();
+    let work_scale = original
+        .incident_power_w
+        .max(original.outgoing_power_w)
+        .max(physical_work.abs());
+    if !physical_work.is_finite()
+        || (physical_work - original.absorbed_power_w).abs() > tolerance * work_scale
+        || original.absorbed_power_w < -tolerance * work_scale
+    {
+        return Err(invalid(
+            "distributed opening work is inconsistent or materially active",
+        ));
+    }
+
+    Ok(original)
 }
 
 #[cfg(test)]

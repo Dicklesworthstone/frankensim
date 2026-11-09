@@ -41,7 +41,7 @@ fn solve(
         }
         rhs[s + q] = C64::new(0.0, -omega * scale) * source[q];
     }
-    law.add_operator(omega, bulk, lambdas, &mut matrix, s, a)
+    law.add_operator(omega, bulk, lambdas, &mut matrix, s, a, n)
         .unwrap();
     lu_complex(&matrix, n).unwrap().solve(&mut rhs);
     let b = rhs[..s].to_vec();
