@@ -733,3 +733,159 @@ fn original_source_reference_and_fixed_temperature_calibration_cannot_be_bypasse
         }
     });
 }
+
+#[test]
+fn original_johnson_cook_fit_tracks_heated_native_endpoint_without_repartitioning_heat() {
+    use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter};
+    use fs_material::ductile::source::{
+        JOHNSON_COOK_INITIATION_LAW_ID, resolve_johnson_cook_initiation,
+    };
+    context(|cx| {
+        let mut fixture = source_fixture("synthetic temperature-dependent JC source");
+        let rate_dims = Dims([0, 0, -1, 0, 0, 0]);
+        let rate = QuantitySpec::dimensional(rate_dims);
+        let eta = QuantitySpec::dimensional(Dims::NONE);
+        let artifact = fs_blake3::hash_bytes(b"synthetic complete thermal JC fit");
+        let model = ConstitutiveModelCard {
+            law: LawId(JOHNSON_COOK_INITIATION_LAW_ID.into()),
+            law_version: 1,
+            parameters: [
+                ("d1", 0.08, Dims::NONE),
+                ("d2", 0.0, Dims::NONE),
+                ("d3", 0.0, Dims::NONE),
+                ("d4", 0.02, Dims::NONE),
+                ("d5", -0.5, Dims::NONE),
+                ("reference_strain_rate_s_inv", 1.0, rate_dims),
+                ("transition_temperature_k", 280.0, Temperature::DIMS),
+                ("melting_temperature_k", 330.0, Temperature::DIMS),
+            ]
+            .into_iter()
+            .map(|(name, value, dims)| (name.into(), LawParameter { value, dims }))
+            .collect(),
+            state_schema_version: 1,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: ValidityDomain::unconstrained()
+                .with_quantity(STRESS_TRIAXIALITY_AXIS, eta, -10.0, 10.0)
+                .with_quantity(PLASTIC_STRAIN_RATE_AXIS, rate, 1e-8, 1e6)
+                .with_quantity("T", temperature_spec(), 280.0, 320.0),
+            sources: vec![artifact],
+            provenance: Provenance {
+                source: "synthetic coupled JC regression".into(),
+                license: "test-only".into(),
+                artifact: Some(artifact),
+            },
+        };
+        let pin = model.content_hash();
+        fixture.card = MaterialCard::assemble(
+            fixture.card.id().clone(),
+            fixture.card.claims().clone(),
+            vec![model.clone()],
+        )
+        .unwrap();
+        fixture.caloric = ResolvedHeatCapacityCurve::try_new(
+            &fixture.card,
+            HeatCapacitySourceQuery {
+                heat_capacity: &PropertyKey::new(CP, CP_DIMS),
+                density: &PropertyKey::new(DENSITY_PROPERTY, Density::DIMS),
+                temperature_axis: "T",
+                lower: &typed_temperature(280.0),
+                upper: &typed_temperature(320.0),
+                selection: SelectionPolicy::SingleClaimOnly,
+            },
+            SolidLiquidPhase::Solid,
+            -2000.0,
+            1e-5,
+        )
+        .unwrap();
+        let point = typed_temperature(300.0)
+            .with_quantity(STRESS_TRIAXIALITY_AXIS, eta, 1.0 / 3.0)
+            .unwrap()
+            .with_quantity(PLASTIC_STRAIN_RATE_AXIS, rate, 1.0)
+            .unwrap();
+        let law = resolve_johnson_cook_initiation(&fixture.card, pin, &point, "T").unwrap();
+        let mut foreign_id = fixture.card.id().clone();
+        foreign_id.revision += 1;
+        let foreign_card =
+            MaterialCard::assemble(foreign_id, fixture.card.claims().clone(), vec![model]).unwrap();
+        let foreign = resolve_johnson_cook_initiation(&foreign_card, pin, &point, "T").unwrap();
+        let pressure =
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+        let pressure_point = point
+            .clone()
+            .with_quantity("ambient-pressure", pressure, 101325.0)
+            .unwrap();
+        let wrong_context =
+            resolve_johnson_cook_initiation(&fixture.card, pin, &pressure_point, "T").unwrap();
+
+        let dt = 0.001;
+        let thermal = initial(&[&fixture], &[], &[RHO * V * 100.0 * 2.0 / dt]);
+        let mut query = fixture.query();
+        query.context = typed_temperature(300.0);
+        let solid = ThermoplasticSolid::try_new(
+            &thermal,
+            &NODES,
+            &TETS,
+            vec![ThermoplasticCell {
+                cell: CellId(100),
+                query,
+            }],
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let before = solid.solution().clone();
+        let cells = thermal.cells().clone();
+        let observer = CountSteps::default();
+        let force = [(3, 3.4e6 * V / L)];
+        let solver = IncrementSettings::default();
+        let heat = thermal_config();
+        let coupled = config();
+        let native = solid
+            .advance(
+                &thermal, &observer, dt, &ROLLERS, &force, solver, heat, coupled, cx,
+            )
+            .unwrap();
+        let advance = |history| {
+            solid.advance_with_ductility(
+                history, &thermal, &observer, dt, &ROLLERS, &force, solver, heat, coupled, cx,
+            )
+        };
+        let history = DuctileHistory::virgin(DuctileLawField::Uniform(&law), 1, 1).unwrap();
+        let accepted = advance(&history).unwrap();
+        let actual = &accepted.mechanics;
+        assert_eq!(actual.solid().solution(), native.solid().solution());
+        assert_eq!(actual.thermal().cells(), native.thermal().cells());
+        let (report, baseline) = (actual.report(), native.report());
+        assert_eq!(report.physical_heat_j, baseline.physical_heat_j);
+        assert_eq!(report.numerical_loss_j, baseline.numerical_loss_j);
+        assert_eq!(actual.observer().0, native.observer().0);
+        let alpha = actual.solid().solution().element_states[0].alpha;
+        let temperature = actual.thermal().temperature_k(CellId(100)).unwrap();
+        assert!(alpha > 0.0 && temperature > 302.0 && temperature < 320.0);
+        let endpoint = actual.solid().materials()[0].material();
+        assert!(law.source().matches_material(endpoint));
+        assert_eq!(endpoint.state_coordinate("T"), Some(temperature));
+        let actual_utilization = accepted.ductility.points()[0].utilization();
+        close(
+            actual_utilization,
+            utilization(alpha, dt, temperature, 0.08),
+            1e-13,
+        );
+        assert!((actual_utilization - utilization(alpha, dt, 300.0, 0.08)).abs() > 1e-3);
+        // Neither an identical fit on another card nor a different fixed
+        // environment can authorize the same mechanical/thermal proposal.
+        for mismatched in [&foreign, &wrong_context] {
+            let bad = DuctileHistory::virgin(DuctileLawField::Uniform(mismatched), 1, 1).unwrap();
+            assert!(matches!(
+                advance(&bad),
+                Err(DuctileAdvanceError::Ductility(DuctileSolidError::Input(_)))
+            ));
+            assert_eq!(bad.points()[0].utilization(), 0.0);
+        }
+        assert_eq!(solid.solution(), &before);
+        assert_eq!(thermal.cells(), &cells);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(observer.0, 0);
+        assert_eq!(history.points()[0].utilization(), 0.0);
+    });
+}

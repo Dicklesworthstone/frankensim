@@ -6,21 +6,22 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
-    ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimSelection, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy,
+    LawId, LawParameter, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
+    Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::SmallStrainLaw;
 use fs_material::ductile::source::{
     DuctileSourceRequest, FRACTURE_PLASTIC_STRAIN_PROPERTY, LODE_PARAMETER_AXIS,
-    PLASTIC_STRAIN_RATE_AXIS, STRESS_TRIAXIALITY_AXIS, resolve_ductile_locus,
-    resolve_ductile_stress_locus,
+    JOHNSON_COOK_INITIATION_LAW_ID, PLASTIC_STRAIN_RATE_AXIS, STRESS_TRIAXIALITY_AXIS,
+    resolve_ductile_locus, resolve_ductile_stress_locus, resolve_johnson_cook_initiation,
 };
 use fs_material::plastic::source::{
     HardeningPropertyBasis, ResolvedJ2Plasticity, resolve_j2_plasticity,
 };
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Dims, Pressure, QuantitySpec};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 use fs_solid::ductile::{
     DuctileAdvanceError, DuctileHistory, DuctileLawField, DuctileSolidError, DuctileStepConditions,
     DuctileTemperatures,
@@ -392,5 +393,174 @@ fn original_lode_surface_reaches_the_assembled_tet_history() {
         assert!(
             (meridian.ductility.points()[0].utilization() - expected_alpha / 0.03).abs() < 1e-10
         );
+    });
+}
+
+fn johnson_cook_card() -> MaterialCard {
+    let base = material(0.02);
+    let thermal = ValidityDomain::unconstrained().with_quantity("T", temperature(), 300.0, 600.0);
+    let mut claims = ClaimSet::new();
+    for (_, original) in base.claims().claims_ordered() {
+        if original.key.name() != FRACTURE_PLASTIC_STRAIN_PROPERTY {
+            let mut claim = original.clone();
+            // Deliberately constant synthetic mechanical coefficients isolate
+            // the temperature/rate effects in the initiation calibration.
+            claim.validity = thermal.clone();
+            claims.insert_claim(claim).unwrap();
+        }
+    }
+    let model = ConstitutiveModelCard {
+        law: LawId(JOHNSON_COOK_INITIATION_LAW_ID.into()),
+        law_version: 1,
+        parameters: [
+            ("d1", 0.006, Dims::NONE),
+            ("d2", 0.0, Dims::NONE),
+            ("d3", 0.0, Dims::NONE),
+            ("d4", 0.04, Dims::NONE),
+            ("d5", -0.5, Dims::NONE),
+            ("reference_strain_rate_s_inv", 1.0, Dims([0, 0, -1, 0, 0, 0])),
+            ("transition_temperature_k", 300.0, Temperature::DIMS),
+            ("melting_temperature_k", 900.0, Temperature::DIMS),
+        ]
+        .into_iter()
+        .map(|(name, value, dims)| (name.into(), LawParameter { value, dims }))
+        .collect(),
+        state_schema_version: 1,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: thermal
+            .with_quantity(STRESS_TRIAXIALITY_AXIS, QuantitySpec::dimensional(Dims::NONE), -1.0, 1.0)
+            .with_quantity(
+                PLASTIC_STRAIN_RATE_AXIS,
+                QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0])),
+                1e-8, 1.0,
+            ),
+        sources: vec![fs_blake3::hash_bytes(b"synthetic native Johnson-Cook calibration")],
+        provenance: provenance(),
+    };
+    MaterialCard::assemble(base.id().clone(), claims, vec![model]).unwrap()
+}
+
+fn resolve_at(card: &MaterialCard, temperature_k: f64) -> ResolvedJ2Plasticity {
+    resolve_j2_plasticity(
+        card,
+        &QueryPoint::new().with_quantity("T", temperature(), temperature_k).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+        HardeningPropertyBasis::PlasticStrainModulus,
+        0.05,
+    ).unwrap()
+}
+
+fn axial_supports() -> Vec<(usize, f64)> {
+    NODES.iter().enumerate().flat_map(|(node, x)| {
+        let mut supports = vec![(3 * node, x[0])];
+        if x[1] == 0.0 { supports.push((3 * node + 1, 0.0)); }
+        if x[2] == 0.0 { supports.push((3 * node + 2, 0.0)); }
+        supports
+    }).collect()
+}
+
+#[test]
+fn sourced_johnson_cook_changes_native_acceptance_with_rate_and_actual_temperature() {
+    let card = johnson_cook_card();
+    let locus = resolve_johnson_cook_initiation(
+        &card, card.models()[0].content_hash(), &calibration_point(), "T",
+    ).unwrap();
+    let cold = resolve_at(&card, 300.0);
+    let hot = resolve_at(&card, 600.0);
+    assert_eq!(cold.law(), hot.law());
+    let supports = axial_supports();
+    let alpha = (1000.0 * TARGET[0] - 1.0) / 1100.0;
+    with_cx(|cx| {
+        let specimen = problem(&cold, &supports);
+        let history = DuctileHistory::from_source_bound_j2_tet(
+            &specimen, DuctileLawField::Uniform(&locus), cx,
+        ).unwrap();
+        let cold_slow = history.advance_source_bound_j2_tet(
+            &specimen, &[0.0; 12], &[cold.initial_state()],
+            DuctileStepConditions {
+                duration_s: 1.0, temperatures_k: DuctileTemperatures::Uniform(300.0),
+            }, cx,
+        ).unwrap();
+        let cold_fast = history.advance_source_bound_j2_tet(
+            &specimen, &[0.0; 12], &[cold.initial_state()],
+            DuctileStepConditions {
+                duration_s: 0.1, temperatures_k: DuctileTemperatures::Uniform(300.0),
+            }, cx,
+        ).unwrap();
+        for (accepted, dt) in [(&cold_slow, 1.0), (&cold_fast, 0.1)] {
+            let expected = alpha / (0.006 * (1.0 + 0.04 * (alpha / dt).ln()));
+            assert!((accepted.mechanics.element_states[0].alpha - alpha).abs() < 1e-10);
+            assert!((accepted.ductility.points()[0].utilization() - expected).abs() < 1e-8);
+        }
+        assert_eq!(cold_slow.mechanics, cold_fast.mechanics);
+        assert!(cold_fast.ductility.points()[0].utilization() < cold_slow.ductility.points()[0].utilization());
+        let hot_specimen = problem(&hot, &supports);
+        let refused = history.advance_source_bound_j2_tet(
+            &hot_specimen, &[0.0; 12], &[hot.initial_state()],
+            DuctileStepConditions {
+                duration_s: 1.0, temperatures_k: DuctileTemperatures::Uniform(600.0),
+            }, cx,
+        ).unwrap_err();
+        match refused {
+            DuctileAdvanceError::Ductility(DuctileSolidError::Initiated { point, candidate }) => {
+                assert_eq!(point, 0);
+                let expected = alpha / (0.006 * (1.0 + 0.04 * alpha.ln()) * 0.75);
+                assert!((candidate.state.utilization() - expected).abs() < 1e-8);
+                assert!(candidate.state.initiated());
+            }
+            other => panic!("expected physical-temperature initiation, got {other:?}"),
+        }
+        // Merely changing the criterion temperature must not silently heat a
+        // mechanical law frozen at 300 K, even though the fit supports 600 K.
+        assert!(matches!(history.advance_source_bound_j2_tet(
+            &specimen, &[0.0; 12], &[cold.initial_state()],
+            DuctileStepConditions {
+                duration_s: 1.0, temperatures_k: DuctileTemperatures::Uniform(600.0),
+            }, cx,
+        ), Err(DuctileAdvanceError::Ductility(DuctileSolidError::Input(_)))));
+        assert_eq!(history.points()[0].utilization(), 0.0);
+    });
+}
+
+#[test]
+fn sourced_coupled_candidate_binds_its_own_temperature_and_refuses_unbound_authority() {
+    let card = johnson_cook_card();
+    let locus = resolve_johnson_cook_initiation(
+        &card, card.models()[0].content_hash(), &calibration_point(), "T",
+    ).unwrap();
+    let cold = resolve_at(&card, 300.0);
+    let hot = resolve_at(&card, 450.0);
+    let supports = axial_supports();
+    with_cx(|cx| {
+        let cold_specimen = problem(&cold, &supports);
+        // Authored numerical coefficients remain usable through ordinary
+        // entry points; this specifically sourced entry cannot label them so.
+        assert!(matches!(DuctileHistory::from_source_bound_j2_tet(
+            &cold_specimen, DuctileLawField::Uniform(locus.law()), cx,
+        ), Err(DuctileSolidError::Input(_))));
+        let history = DuctileHistory::from_source_bound_j2_tet(
+            &cold_specimen, DuctileLawField::Uniform(&locus), cx,
+        ).unwrap();
+        let old = [cold.initial_state()];
+        let candidate = problem(&hot, &supports).solve_from(&[0.0; 12], &old, cx).unwrap();
+        let conditions = DuctileStepConditions {
+            duration_s: 0.1, temperatures_k: DuctileTemperatures::Uniform(450.0),
+        };
+        let gated = history.check_material_tet_candidate(
+            &old, core::slice::from_ref(&cold), &candidate, core::slice::from_ref(&hot),
+            conditions, cx,
+        ).unwrap();
+        let alpha = candidate.element_states[0].alpha;
+        let expected = alpha / (0.006 * (1.0 + 0.04 * (alpha / 0.1).ln()) * 0.875);
+        assert!((gated.points()[0].utilization() - expected).abs() < 1e-12);
+        assert!(history.check_material_tet_candidate(
+            &old, core::slice::from_ref(&cold), &candidate, core::slice::from_ref(&cold),
+            conditions, cx,
+        ).is_err());
+        assert!(history.validate_material_history(
+            &old, core::slice::from_ref(&cold), conditions, cx,
+        ).is_err());
+        assert_eq!(history.points()[0].utilization(), 0.0);
+        assert_eq!(old, [cold.initial_state()]);
     });
 }

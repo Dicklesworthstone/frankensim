@@ -51,19 +51,38 @@ pub trait PlasticStrainHistory {
 /// sourced laws must match the original card, named state and complete fixed
 /// context. There is no blanket unchecked implementation for sourced laws.
 pub trait DuctileMaterialBinding: DuctileInitiationLaw {
+    /// Whether the law is explicitly authored without material-card authority.
+    /// Missing native source metadata must otherwise refuse admission.
+    fn permits_unbound_material(&self) -> bool {
+        false
+    }
+
     /// Admit the complete source identity and fixed quantity-typed context.
     /// Authored numerical laws may explicitly carry no material-card binding.
     fn matches_material(
         &self, material: &fs_material::state_point::ResolvedMaterialStatePoint,
     ) -> bool;
+
+    /// Admit an actual mechanical endpoint at its physical temperature. A
+    /// temperature-dependent source must additionally ensure that the native
+    /// material bundle was resolved at this same temperature; model support
+    /// alone does not make a frozen mechanical law a heated material.
+    fn matches_material_temperature(
+        &self, material: &fs_material::state_point::ResolvedMaterialStatePoint,
+        _temperature_k: f64,
+    ) -> bool {
+        self.matches_material(material)
+    }
 }
 
 impl DuctileMaterialBinding for fs_material::ductile::JohnsonCookInitiation {
+    fn permits_unbound_material(&self) -> bool { true }
     fn matches_material(&self, _: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
         true
     }
 }
 impl DuctileMaterialBinding for fs_material::ductile::TabulatedDuctileLocus {
+    fn permits_unbound_material(&self) -> bool { true }
     fn matches_material(&self, _: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
         true
     }
@@ -73,9 +92,31 @@ impl DuctileMaterialBinding for fs_material::ductile::source::ResolvedDuctileLoc
         self.source().matches_material(material)
     }
 }
+impl DuctileMaterialBinding for fs_material::ductile::source::ResolvedJohnsonCookInitiation {
+    fn matches_material(&self, material: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
+        self.source().matches_material(material)
+    }
+
+    fn matches_material_temperature(
+        &self, material: &fs_material::state_point::ResolvedMaterialStatePoint,
+        temperature_k: f64,
+    ) -> bool {
+        self.matches_material(material)
+            && material.state_coordinate(self.source().temperature_axis()) == Some(temperature_k)
+    }
+}
 impl<L: DuctileMaterialBinding + ?Sized> DuctileMaterialBinding for &L {
+    fn permits_unbound_material(&self) -> bool {
+        (**self).permits_unbound_material()
+    }
     fn matches_material(&self, material: &fs_material::state_point::ResolvedMaterialStatePoint) -> bool {
         (**self).matches_material(material)
+    }
+    fn matches_material_temperature(
+        &self, material: &fs_material::state_point::ResolvedMaterialStatePoint,
+        temperature_k: f64,
+    ) -> bool {
+        (**self).matches_material_temperature(material, temperature_k)
     }
 }
 impl PlasticStrainHistory for J2State {
@@ -379,7 +420,8 @@ impl<'a, L: DuctileInitiationLaw> DuctileHistory<'a, L> {
 
 impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
     fn check_materials(
-        &self, materials: &[fs_material::plastic::source::ResolvedJ2Plasticity], cx: &Cx<'_>,
+        &self, materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
+        temperatures: Option<DuctileTemperatures<'_>>, cx: &Cx<'_>,
     ) -> Result<(), DuctileSolidError> {
         checkpoint(cx)?;
         if materials.len() != self.points.len() {
@@ -387,9 +429,14 @@ impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
         }
         for (point, material) in materials.iter().enumerate() {
             if point % 256 == 0 { checkpoint(cx)?; }
-            if !self.laws.at(point).matches_material(material.material()) {
+            let law = self.laws.at(point);
+            let matches = match temperatures {
+                Some(field) => law.matches_material_temperature(material.material(), field.at(point)),
+                None => law.matches_material(material.material()),
+            };
+            if !matches {
                 return Err(DuctileSolidError::Input(
-                    "fracture calibration does not match native material card, state and context",
+                    "fracture calibration does not match native material card, state, context and temperature",
                 ));
             }
         }
@@ -403,8 +450,8 @@ impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
         &self, states: &[S], materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
         conditions: DuctileStepConditions<'_>, cx: &Cx<'_>,
     ) -> Result<(), DuctileSolidError> {
-        self.check_materials(materials, cx)?;
-        self.prepare(states, conditions, cx)
+        self.prepare(states, conditions, cx)?;
+        self.check_materials(materials, Some(conditions.temperatures_k), cx)
     }
 
     /// Gate one already converged native tetrahedral interval, preserving the
@@ -420,8 +467,12 @@ impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
         candidate_materials: &[fs_material::plastic::source::ResolvedJ2Plasticity],
         conditions: DuctileStepConditions<'_>, cx: &Cx<'_>,
     ) -> Result<Self, DuctileSolidError> {
-        self.validate_material_history(old_states, old_materials, conditions, cx)?;
-        self.check_materials(candidate_materials, cx)?;
+        // The old and proposed mechanical bundles can have different physical
+        // temperatures. Validate history at the proposed criterion endpoint,
+        // bind both sources, and compare temperature only to that endpoint.
+        self.prepare(old_states, conditions, cx)?;
+        self.check_materials(old_materials, None, cx)?;
+        self.check_materials(candidate_materials, Some(conditions.temperatures_k), cx)?;
         if candidate.increments.len() != 1 || candidate.element_strain.len() != self.points.len() {
             return Err(DuctileSolidError::Input("one complete native tetrahedral interval required"));
         }
@@ -429,7 +480,7 @@ impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
     }
 }
 
-impl<'a> DuctileHistory<'a, fs_material::ductile::source::ResolvedDuctileLocus> {
+impl<'a, L: DuctileMaterialBinding> DuctileHistory<'a, L> {
     fn check_j2_sources(
         &self,
         problem: &SmallStrainTetProblem<'_, fs_material::plastic::source::ResolvedJ2Plasticity>,
@@ -450,7 +501,8 @@ impl<'a> DuctileHistory<'a, fs_material::ductile::source::ResolvedDuctileLocus> 
         for point in 0..self.points.len() {
             if point % 256 == 0 { checkpoint(cx)?; }
             let native = problem.laws.at(point);
-            if !self.laws.at(point).source().matches_material(native.material()) {
+            let law = self.laws.at(point);
+            if law.permits_unbound_material() || !law.matches_material(native.material()) {
                 return Err(DuctileSolidError::Input("fracture calibration does not match native material card, state and context"));
             }
         }
@@ -458,10 +510,11 @@ impl<'a> DuctileHistory<'a, fs_material::ductile::source::ResolvedDuctileLocus> 
     }
 
     /// Bind each fracture calibration to the original card, named state and
-    /// fixed external context of its native J2 tetrahedron.
+    /// fixed external context of its native J2 tetrahedron. Authored unbound
+    /// laws use `virgin` and cannot acquire source authority through this entry.
     pub fn from_source_bound_j2_tet(
         problem: &SmallStrainTetProblem<'_, fs_material::plastic::source::ResolvedJ2Plasticity>,
-        laws: DuctileLawField<'a, fs_material::ductile::source::ResolvedDuctileLocus>,
+        laws: DuctileLawField<'a, L>,
         cx: &Cx<'_>,
     ) -> Result<Self, DuctileSolidError> {
         checkpoint(cx)?;
@@ -477,9 +530,19 @@ impl<'a> DuctileHistory<'a, fs_material::ductile::source::ResolvedDuctileLocus> 
         problem: &SmallStrainTetProblem<'_, fs_material::plastic::source::ResolvedJ2Plasticity>,
         displacement_m: &[f64], states: &[J2State],
         conditions: DuctileStepConditions<'_>, cx: &Cx<'_>,
-    ) -> Result<DuctileAccepted<'a, SmallStrainTetSolution<J2State>,
-        fs_material::ductile::source::ResolvedDuctileLocus>, DuctileAdvanceError<SmallStrainTetError>> {
+    ) -> Result<DuctileAccepted<'a, SmallStrainTetSolution<J2State>, L>, DuctileAdvanceError<SmallStrainTetError>> {
         self.check_j2_sources(problem, cx)?;
+        self.prepare(states, conditions, cx)?;
+        for point in 0..self.points.len() {
+            if point % 256 == 0 { checkpoint(cx)?; }
+            if !self.laws.at(point).matches_material_temperature(
+                problem.laws.at(point).material(), conditions.temperatures_k.at(point),
+            ) {
+                return Err(DuctileSolidError::Input(
+                    "ductile temperature differs from the native material endpoint",
+                ).into());
+            }
+        }
         self.advance_tet(problem, displacement_m, states, conditions, cx)
     }
 }

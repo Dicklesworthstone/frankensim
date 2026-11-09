@@ -1,5 +1,50 @@
 # fs-solid CONTRACT
 
+## Ductile initiation on native frame fibers and sourced tetrahedra
+
+`frame2d::ductile::FrameDuctilePath` owns the original `Frame2d`, explicit
+member/section/fiber calibrations, accepted initiation histories and physical
+clock. `static_load`, `displacement_control` and `newmark_with_load` reuse the
+native observed-step owners; every accepted physical increment is evaluated.
+
+Each point consumes its original accumulated equivalent plastic strain and
+signed physical axial stress, including reversed plastic flow. Section
+resultants, total strain and backstress-shifted effective stress are never
+substituted. Static increments require explicit physical duration; Newmark
+inertia and the initiation strain rate share exactly the same `dt`.
+
+Supported fibers are native rate-independent J2, Voce, tabulated hardening and
+Chaboche with one through eight independent branches. Menegotto--Pinto,
+Mander and timed/thermal laws cannot acquire invented plastic accumulation.
+Virgin initiation cannot be attached to an already plastically loaded point.
+
+Source calibrations require the caller's original `FiberMaterial` handoff.
+Its coefficients must match the native fiber, and its card, state, fixed
+context and typed absolute temperature must match the initiation calibration.
+Raw frame fibers retain coefficients rather than card identity; equal
+coefficients cannot reconstruct source provenance that the caller discarded.
+
+A late point, step, source, domain, budget or cancellation refusal preserves
+the complete input frame, velocity, acceleration, initiation states and clock.
+The reported initiation candidate minimizes the endpoint-held plastic-increment
+fraction deterministically; fractions from different fibers do not locate the
+first physical event. The original interval is only an event bracket.
+
+`DuctileHistory` also admits source-resolved Johnson--Cook initiation through
+its existing J2 tetrahedral/source and thermoplastic candidate interfaces.
+The actual criterion temperature must equal the native endpoint's resolved
+source temperature. Temperature-dependent calibration alone cannot qualify a
+mechanical law frozen at another temperature; original endpoint bindings remain.
+
+The regression cases in `frame_ductile` and `ductile_source` exercise independent
+Prager reversals, local bending despite cancelling resultants, rate/clock
+semantics, native motion/work preservation, replay and transactional refusals.
+
+Frame gauges qualify only their selected points at fixed temperatures under
+native small-axial-strain assumptions; the declared strain bound is at most
+0.05. Endpoint quadrature supplies initiation only, without necking, progressive
+softening, finite-strain forming, fracture energy or separated members.
+
 ## Two-sided normal contact on native ductile fragments
 
 `FiniteDuctileFractureMotion::advance_with_face_contact` resolves frictionless dwell or unloaded separation on every non-tied vertex pair of the retained released faces. The existing bounded native normal-complementarity solver probes the original finite backward-Euler owner with equal/opposite nodal loads. All probes borrow the same accepted material histories, consistent mass, velocity, temperature and physical duration; only the original final response matching the solver's force/path receipt can be published.

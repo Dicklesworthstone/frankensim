@@ -57,6 +57,9 @@ pub mod creep;
 /// Strain-life observation on accepted native static and inertial fiber states.
 pub mod fatigue;
 
+/// Irreversible ductile initiation on accepted native metal-fiber histories.
+pub mod ductile;
+
 /// Source-bound axial/bending tensile limits on accepted material-frame forces.
 pub mod strength;
 
