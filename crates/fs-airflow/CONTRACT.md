@@ -6397,3 +6397,33 @@ the complete passive material/film connection. This remains a quasi-steady,
 source-free normal wall path; it introduces no extra thermal storage, radiation
 relocation, wall spreading, transient wall field, independent contact-resistance
 law, or additional heat integrator.
+
+## Adaptive source-backed collective droplet evaporation
+
+`evaporation::droplet::chamber::adaptive` connects the original stagnant and
+forced spherical film adapters to the material chamber's common adaptive time
+controller. Both phase-only and reciprocal sensible-heat entry points evolve a
+fixed positive-droplet roster in one original fixed-volume gas parcel.
+
+Each original trial interval receives its actual incoming droplet inventories
+and gas state. Geometry, selected diffusivity, and the forced adapter's admitted
+mean-film density, viscosity and Sherwood number are refreshed through the same
+original source resolution. Source identities, finite interface kinetics,
+correlation applicability and the actual-surface dilute guard remain mandatory;
+no fitted replacement source or heat/mass-transfer analogy is introduced.
+
+Only original positive phase step-size limits request smaller physical steps.
+Source, domain and cancellation failures remain terminal with their original
+error payload, including failures on a trial endpoint. The material controller
+owns local time error and the complete-window physical account; rejected and
+coarse trials contribute neither accepted transfer nor retained film receipts.
+The final payload contains only the last accepted fine interval's original film
+samples. A zero-duration request still admits original source and species
+identity and returns its original samples without physical transfer.
+
+Three regression groups cover exact two-fine-interval composition and refreshed
+films, heated accuracy rejection/permutation/atomic cancellation retry, and
+zero-time plus late source-domain refusal. Formatting and bounded static review
+passed; compilation and runtime execution remain unverified because this
+workspace has no runnable Cargo toolchain. The original source/correlation
+limits and the material controller's local-error and positive-seed limits apply.

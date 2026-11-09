@@ -1,4 +1,6 @@
 //! Shared original gas, heterogeneous sourced films and all-or-nothing support.
+#[path = "adaptive/tests.rs"]
+mod adaptive;
 #[path = "transport/tests.rs"]
 mod transport;
 

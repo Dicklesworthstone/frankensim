@@ -21,6 +21,9 @@
 //! heat/mass analogies are not supplied. Original source receipts and the
 //! explicitly bounded roster retain their ordinary allocation behavior.
 
+/// Adaptive physical time with refreshed original spherical film sources.
+pub mod adaptive;
+
 /// Original gas-network transport before one joint sourced droplet interval.
 pub mod transport;
 
