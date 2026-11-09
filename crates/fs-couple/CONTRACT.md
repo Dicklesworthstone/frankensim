@@ -10392,3 +10392,33 @@ A shared source-replay kernel serves both the unchanged snap-only route and the 
 The `dissipation::native` composition prepares actual body recoil, replays exactly the accepted source path, and checks the complete sealed successor, original normal report, rolling step and new plastic-loss increment before publication. Its combined body/contact/caloric balance counts converted plastic loss once, as caloric or named outside energy. Bodies, native lifecycle, conversion history and thermal state publish together after the final cancellation checks. The source remains frozen, normal motion prescribed, and heat a same-time impulse with no intervening transport or temperature feedback.
 
 Six added source/native integration groups cover elastic/no-heat behavior, separate partitions across yielding/separation/recontact, retained prior loss, sub-ULP loss beside snap release, actual body/contact/cell energy, caloric refusal after a real recoil proposal, final-callback cancellation and retry/stale replay. Pinned formatting and recursive syntax/module resolution passed; these cross-crate groups were not type-checked or executed under the documented unavailable remote runners and shared build-resource limits.
+
+
+## Finite and sealed acoustic source boundaries
+
+`upstream_airway::AirwayChain` admits the same passive far-source law in impedance
+or admittance coordinates. The admittance route uses
+`U_source = Y_L (P_s - p_R)` in `exp(-i omega t)`; zero admittance is sealed,
+including a compliant source's DC limit and finite-frequency antiresonance.
+Scaled boundary-wave coefficients avoid both reciprocal overflow and growing
+transfer matrices. Reflection, source-pressure transfer and input impedance
+retain the original tube radius/count, Bessel viscothermal gas, yielding walls
+and native two-port composition. An impedance pole may refuse while its
+reflected wave remains finite.
+
+`UpstreamAirway::realize_with_source_admittance` reuses the existing bounded
+reflection and source-transfer FIR ladders, one shared material/source evaluation
+per distinct frequency, their original passivity/convergence admission, and the
+same implicit realtime valve junction. Exact zero DC conductance sets
+`R(0)=1, G(0)=0`; no large finite resistance substitutes for a sealed boundary.
+Receipt resistance/conductance fields are optional finite values: the authored
+coordinate is exact, its reciprocal is present only when representable, and
+`None` never means zero. Existing finite-impedance construction retains its
+physical response.
+
+This is a fixed-geometry, zero-state linear wave realization. It supplies no
+independently initialized reservoir pressure, changing lung volume, local
+stored-energy ledger, or causal/passivity certificate for an arbitrary supplied
+frequency law. Four focused G0/G1/G3/G4/G5 groups cover loaded ABCD and closed
+limits, compliant reflection phase and FIR DC bins, reciprocal-coordinate
+realtime agreement, extreme scales, invalid inputs and callback cancellation.
