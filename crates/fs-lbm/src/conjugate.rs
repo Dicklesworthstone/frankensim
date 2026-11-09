@@ -254,6 +254,7 @@ pub use tensor_conduction::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use tensor_conduction::{
+    IsotropicPhaseConductivity, TensorCaloricConductivity, TensorCaloricConductivityPoint,
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
     TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,
     TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,

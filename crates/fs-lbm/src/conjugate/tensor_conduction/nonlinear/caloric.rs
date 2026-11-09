@@ -129,10 +129,11 @@ pub struct TensorCaloricSdirk2Step {
 ///
 /// Actual stored-energy differences feed the same independent source and
 /// reservoir heat ledger as sensible conduction. Fixed-cell storage is counted
-/// once. The mass and geometric inventory remain fixed. Conductivity still
-/// depends on temperature through the separately supplied tensor law; this
-/// entry does not add independent phase-fraction-dependent conductivity,
-/// moving fronts as prescribed geometry, expansion work or advective energy.
+/// once. The mass and geometric inventory remain fixed. The separately supplied
+/// tensor law retains its original K(T) integrals or explicitly selects cellwise
+/// K(e) with analytic dK/de, including changing phase inventory at constant
+/// temperature. This entry does not move geometric faces or add expansion work
+/// or advective energy.
 ///
 /// Backward Euler is first order. Source-support, nonlinear, Krylov and
 /// backtracking limits remain active, and no partial step is returned.

@@ -1,14 +1,82 @@
 //! Original, immutable tensor conductivity laws and a declared-frame adapter.
 //!
 //! This layer owns neither spatial discretization nor physical time/history.
-//! A law supplies both endpoint tensors and its actual interval integral.
-//! Point sampling at an averaged temperature is not an interval integral.
+//! Kelvin laws supply endpoint tensors and their actual interval integral.
+//! An original caloric law may instead declare cellwise K(e) and its analytic
+//! derivative. Point sampling is not reinterpreted as an interval integral.
 
 use super::super::ConductivityTensor;
 use crate::conjugate::{ChtError, SolidMaterial};
 
 mod source;
 pub use source::RotatedSourceConductivity;
+#[cfg(feature = "enthalpy-coupling")]
+mod phase;
+#[cfg(feature = "enthalpy-coupling")]
+pub use phase::IsotropicPhaseConductivity;
+
+/// The same original caloric state used by native cell storage.
+///
+/// A constitutive law must bind the energy basis and identity before using the
+/// numerical energy value. Temperature alone cannot select a latent fraction.
+#[cfg(feature = "enthalpy-coupling")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensorCaloricConductivityPoint {
+    /// Original absolute specific energy, including its original datum, J/kg.
+    pub specific_energy_j_kg: f64,
+    /// Temperature recovered by that same original caloric law, K.
+    pub temperature_k: f64,
+    /// Physical thermodynamic coordinate selected by the storage law.
+    pub storage_basis: fs_conduction::enthalpy::ThermalStorageBasis,
+    /// Original caloric identity, including its datum, support and source data.
+    pub caloric_identity: Option<[u8; 32]>,
+}
+
+/// A cellwise physical tensor and its analytic original-energy derivative.
+///
+/// The conductivity is positive definite; its derivative can be zero, negative
+/// or indefinite. No positive-definiteness or sign projection applies to dK/de.
+#[cfg(feature = "enthalpy-coupling")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensorCaloricConductivity {
+    conductivity: ConductivityTensor,
+    derivative_kg_w_m_k_j: [[f64; 3]; 3],
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+impl TensorCaloricConductivity {
+    /// Admit a finite, exactly symmetric derivative without projecting it.
+    ///
+    /// # Errors
+    /// A non-finite or nonsymmetric derivative is refused.
+    pub fn new(
+        conductivity: ConductivityTensor,
+        derivative_kg_w_m_k_j: [[f64; 3]; 3],
+    ) -> Result<Self, ChtError> {
+        let derivative = derivative_kg_w_m_k_j;
+        if derivative.iter().flatten().any(|value| !value.is_finite())
+            || (0..3).any(|a| (0..3).any(|b| derivative[a][b] != derivative[b][a]))
+        {
+            return Err(invalid(
+                "caloric conductivity needs a finite symmetric original-energy derivative",
+            ));
+        }
+        Ok(Self {
+            conductivity,
+            derivative_kg_w_m_k_j,
+        })
+    }
+
+    /// Physical conductivity at the supplied original cell state, W/(m K).
+    pub const fn conductivity(self) -> ConductivityTensor {
+        self.conductivity
+    }
+
+    /// Analytic dK/de in kg W/(m K J), in the same Cartesian frame as K.
+    pub const fn derivative_kg_w_m_k_j(self) -> [[f64; 3]; 3] {
+        self.derivative_kg_w_m_k_j
+    }
+}
 
 /// Original conductivity in Cartesian grid coordinates, W/(m K).
 ///
@@ -18,9 +86,10 @@ pub use source::RotatedSourceConductivity;
 /// refuse unsupported endpoints **and every unsupported part of an interval**,
 /// including interior gaps; two supported endpoints do not establish support.
 ///
-/// The nonlinear spatial owner uses the fundamental theorem of calculus:
-/// derivatives of an interval integral are the original endpoint tensors.
-/// It therefore never adds a second conductivity-temperature derivative.
+/// For the Kelvin-integrated route, the nonlinear spatial owner uses the
+/// fundamental theorem of calculus: derivatives of an interval integral are
+/// the original endpoint tensors. It adds no second temperature derivative.
+/// The optional caloric route explicitly supplies the derivative of K(e).
 /// Neither this contract nor positive point tensors establishes a discrete
 /// maximum principle, entropy inequality, or global nonlinear convergence.
 pub trait TensorConductivityLaw {
@@ -47,6 +116,31 @@ pub trait TensorConductivityLaw {
     /// Invalid temperature, unsupported interval, or an unrepresentable
     /// positive-definite average. Never extrapolate without source authority.
     fn mean_conductivity(&self, from_k: f64, to_k: f64) -> Result<ConductivityTensor, ChtError>;
+
+    /// Optional original-energy-dependent conductivity on a caloric cell.
+    ///
+    /// `None` retains this law's original K(T) interval-integrated transport.
+    /// `Some` explicitly selects cellwise K(e) on the same native HMM geometry:
+    /// all six cell/face links use the tensor at this trial cell state. The
+    /// derivative is total dK/de on that original caloric path, including phase
+    /// response when dT/de is zero. The native Jacobian also retains the
+    /// separate original dT/de contribution. No face enthalpy is inferred.
+    ///
+    /// Implementations must admit the original basis, datum/identity and source
+    /// support. A phase law without a single-valued K(T) must refuse the two
+    /// Kelvin-only methods; the sensible and steady entries never fabricate e.
+    /// This cellwise model does not claim the exact Kirchhoff integral of K(T).
+    ///
+    /// # Errors
+    /// An incompatible original caloric source, unsupported trial energy, or
+    /// unrepresentable constitutive tensor/derivative is refused.
+    #[cfg(feature = "enthalpy-coupling")]
+    fn caloric_conductivity(
+        &self,
+        _point: TensorCaloricConductivityPoint,
+    ) -> Result<Option<TensorCaloricConductivity>, ChtError> {
+        Ok(None)
+    }
 }
 
 impl TensorConductivityLaw for ConductivityTensor {

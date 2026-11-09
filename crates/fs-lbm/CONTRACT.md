@@ -4492,3 +4492,54 @@ stationary transport, before any wall entry, with `native cell mass routes do
 not close to roundoff`; that untouched baseline path is not claimed green.
 Full Cargo/workspace validation remains outside this focused execution because
 the async runtime dependency exceeds the environment's 8 GiB memory limit.
+
+## Original phase-dependent conductivity on native caloric tensor cells
+
+`TensorConductivityLaw::caloric_conductivity` is an optional original-energy
+constitutive route. Its `TensorCaloricConductivityPoint` contains the absolute
+specific energy (including its original datum), recovered temperature, storage
+basis and original caloric identity. Returning `None` retains the existing
+interval-integrated K(T) route and its original inverse-query behavior.
+Returning `Some(TensorCaloricConductivity)` explicitly selects cellwise K(e)
+on the existing HMM geometry, with a physical SPD tensor and finite symmetric
+analytic dK/de. The derivative may be negative or indefinite. A Kelvin-only
+entry never invents an energy or a phase fraction for this route.
+
+Every cell/face link uses that trial cell's tensor. The original heat is
+`q_f = -sum_g M_fg(K(e_c)) * (T_g - T_c)`, and the native Newton column is
+`dq_f/de_c = B_f(K) * dT/de - sum_g M_fg(dK/de) * (T_g - T_c)`.
+This retains phase-dependent transport even on an exactly isothermal latent
+plateau. Face unknowns remain Kelvin and contacts retain the two original
+half-cell resistances plus the authored contact. Signed cell derivatives are
+not clamped; condensation still requires a finite positive total local
+diagonal including physical storage and sinks. A nonpositive diagonal is a
+bounded refusal, not a claim that every nonlinear state is solvable. No face
+enthalpy, apparent heat capacity, duplicate latent inventory or new heat owner
+is introduced. Backward Euler, SDIRK2, adaptive, radiating and electrothermal
+caloric entries inherit this route through their shared spatial owner.
+
+`IsotropicPhaseConductivity` borrows one original `PreparedPhaseConductivity`
+without copying or resampling its paths. Constructing the view explicitly
+declares isotropy. It admits strictly positive retained conductivity, checks
+the original enthalpy basis and caloric identity, and preserves original
+source support and analytic derivatives. It also implements caloric storage:
+using the same view for storage retains restricted bounds and the source's
+selected one-sided dT/dh at an endpoint. Original density and entropy remain
+with the original caloric curve. Kelvin-only queries are refused because
+temperature alone cannot select latent inventory. The hot path uses the
+prepared owner's bounded interval lookup, without table allocation or source
+selection. This cellwise K(h) model does not claim an exact Kelvin Kirchhoff
+integral or replace the separate material P1 transport owner. Geometry and
+reference mass remain fixed; no expansion or moving geometric fronts are
+inferred.
+
+All 19 tests in the two actual numerical leaf modules pass with the pinned
+Rust compiler. They include full-tensor analytic/finite-difference Jacobians,
+latent and sensible derivatives, zero-dK/de parity, and signed Schur recovery
+against a complete independent 7-by-7 solve. Four new integration groups
+cover constant-Kelvin phase heating and datum shifts, BE refinement, spatial
+contact transfer with independent BE/SDIRK equations, source/cancellation
+refusals, and an actual MaterialCard/prepared-source solve crossing a latent
+conductivity knot. Their independent scalar references and pinned parser
+checks pass. The integration groups have not yet executed in a full native
+fs-lbm build; numerical-leaf execution is not integration-build evidence.

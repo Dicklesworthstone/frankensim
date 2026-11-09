@@ -33,7 +33,8 @@ pub(super) struct KirchhoffHeat {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KirchhoffTangent {
     /// dq_f/dx_c: initially W/K, then W per specific energy when composed
-    /// with a caloric derivative. A latent plateau has zero cell derivatives.
+    /// with a caloric derivative. K(e) adds its own signed material derivative,
+    /// including on a plateau where the temperature contribution is zero.
     pub cell: [f64; 6],
     /// dq_f/dTg in W/K, stored as row f, column g.
     pub face: [[f64; 6]; 6],
@@ -87,16 +88,23 @@ impl KirchhoffTangent {
     /// Compose only the cell column with the original dT/de. Face unknowns
     /// remain Kelvin. Zero slope is a genuine latent plateau, not infinite Cp.
     pub fn with_cell_temperature_slope(self, slope: f64) -> Option<Self> {
-        if !slope.is_finite() || slope < 0.0
+        if !slope.is_finite()
+            || slope < 0.0
             || self.cell.iter().any(|v| !v.is_finite() || *v <= 0.0)
         {
             return None;
         }
         let cell = self.cell.map(|value| value * slope);
-        if cell.iter().any(|v| !v.is_finite() || (slope > 0.0 && *v == 0.0)) {
+        if cell
+            .iter()
+            .any(|v| !v.is_finite() || (slope > 0.0 && *v == 0.0))
+        {
             return None;
         }
-        Some(Self { cell, face: self.face })
+        Some(Self {
+            cell,
+            face: self.face,
+        })
     }
 
     /// Eliminate one free cell from the exact original Newton equations.
@@ -105,8 +113,9 @@ impl KirchhoffTangent {
     /// D=sum_f dq_f/dx_c + added_diagonal, the sign-reversed face Schur
     /// matrix is -dq_f/dTg-(dq_f/dx_c)b_g/D. Its residual correction is
     /// -(dq_f/dx_c)Rc/D. The cell coordinate is temperature or original
-    /// specific energy. Positive physical storage keeps D positive even on
-    /// an isothermal latent plateau. No division by dT/de is introduced.
+    /// specific energy. A cellwise K(e) response may give signed cell columns;
+    /// the TOTAL local diagonal must remain positive and representable. No
+    /// derivative is clamped and no division by dT/de is introduced.
     pub fn condense(
         self,
         added_diagonal: f64,
@@ -115,7 +124,7 @@ impl KirchhoffTangent {
         if !added_diagonal.is_finite()
             || added_diagonal < 0.0
             || !cell_residual_w.is_finite()
-            || self.cell.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || self.cell.iter().any(|v| !v.is_finite())
             || self.face.iter().flatten().any(|v| !v.is_finite())
         {
             return None;
@@ -169,9 +178,15 @@ impl KirchhoffCell {
     /// One HMM column; only the needed entries are formed. The material owner
     /// has already admitted each full symmetric positive-definite tensor.
     fn column(&self, k: [[f64; 3]; 3], g: usize) -> Option<[f64; 6]> {
+        let column = self.linear_column(k, g)?;
+        (column[g] > 0.0).then_some(column)
+    }
+
+    /// Linear geometry map also used for dK/de, which need not be positive.
+    fn linear_column(&self, k: [[f64; 3]; 3], g: usize) -> Option<[f64; 6]> {
         let b = g / 2;
         let half = self.areas[b] * (k[b][b] / (0.5 * self.widths[b]));
-        if !half.is_finite() || half <= 0.0 {
+        if !half.is_finite() {
             return None;
         }
         let mut column = [0.0; 6];
@@ -252,6 +267,42 @@ impl KirchhoffCell {
         }
         Some(result)
     }
+
+    /// Exact Jacobian of cellwise q_f = -sum_g M_fg(K(e))*(Tg-T(e)).
+    /// The material and temperature contributions are distinct chain-rule
+    /// terms. In particular, a latent plateau retains the signed dK/de term.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub fn caloric_tangent(
+        &self,
+        conductivity: [[f64; 3]; 3],
+        derivative: [[f64; 3]; 3],
+        cell_temperature: f64,
+        face_temperature: [f64; 6],
+        temperature_slope: f64,
+    ) -> Option<KirchhoffTangent> {
+        if !cell_temperature.is_finite() || face_temperature.iter().any(|value| !value.is_finite())
+        {
+            return None;
+        }
+        let mut result = self
+            .tangent(conductivity, [conductivity; 6])?
+            .with_cell_temperature_slope(temperature_slope)?;
+        for (g, temperature) in face_temperature.into_iter().enumerate() {
+            let column = self.linear_column(derivative, g)?;
+            let difference = temperature - cell_temperature;
+            if !difference.is_finite() {
+                return None;
+            }
+            for (f, coefficient) in column.into_iter().enumerate() {
+                result.cell[f] = (-coefficient).mul_add(difference, result.cell[f]);
+            }
+        }
+        result
+            .cell
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(result)
+    }
 }
 
 #[cfg(test)]
@@ -298,7 +349,9 @@ mod tests {
         let trace_increment = [0.2, -0.4, 0.7, 0.1, -0.3, 0.5];
         let energy_increment = condensed.cell_increment(trace_increment).unwrap();
         let expected = (-residual
-            + (0..6).map(|g| -kelvin.face[g][g] * trace_increment[g]).sum::<f64>())
+            + (0..6)
+                .map(|g| -kelvin.face[g][g] * trace_increment[g])
+                .sum::<f64>())
             / storage;
         assert!((energy_increment - expected).abs() < 1e-13);
         assert!(latent.condense(0.0, residual).is_none());
@@ -325,6 +378,126 @@ mod tests {
             + (0..6).map(|g| kelvin.face[g][g] * trace[g]).sum::<f64>()
             + residual;
         assert!(direct.abs() < 1e-12);
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    #[test]
+    fn caloric_tensor_chain_rule_keeps_signed_phase_and_temperature_terms() {
+        let geometry = KirchhoffCell::new([0.3, 0.7, 1.1]).unwrap();
+        // The derivative is indefinite even though K(e) stays positive definite.
+        let derivative: [[f64; 3]; 3] = [
+            [0.01, -0.003, 0.002],
+            [-0.003, -0.005, 0.001],
+            [0.002, 0.001, 0.008],
+        ];
+        let faces = [410.0, 290.0, 370.0, 320.0, 280.0, 390.0];
+        let energy = 20.0;
+        for slope in [0.0_f64, 0.4] {
+            let at_energy = |e: f64| {
+                let k = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| derivative[i][j].mul_add(e - energy, BASE[i][j]))
+                });
+                let t = slope.mul_add(e - energy, 340.0);
+                (k, t)
+            };
+            let tangent = geometry
+                .caloric_tangent(BASE, derivative, 340.0, faces, slope)
+                .unwrap();
+            let epsilon = 1e-4;
+            let (kp, tp) = at_energy(energy + epsilon);
+            let (km, tm) = at_energy(energy - epsilon);
+            let plus = geometry.heat(tp, faces, [kp; 6]).unwrap();
+            let minus = geometry.heat(tm, faces, [km; 6]).unwrap();
+            for f in 0..6 {
+                let reference = (plus.outward_w[f] - minus.outward_w[f]) / (2.0 * epsilon);
+                assert!((tangent.cell[f] - reference).abs() < 2e-7 * reference.abs().max(1.0));
+            }
+            for g in 0..6 {
+                let mut plus = faces;
+                let mut minus = faces;
+                plus[g] += epsilon;
+                minus[g] -= epsilon;
+                let plus = geometry.heat(340.0, plus, [BASE; 6]).unwrap();
+                let minus = geometry.heat(340.0, minus, [BASE; 6]).unwrap();
+                for f in 0..6 {
+                    let reference = (plus.outward_w[f] - minus.outward_w[f]) / (2.0 * epsilon);
+                    assert!(
+                        (tangent.face[f][g] - reference).abs() < 2e-7 * reference.abs().max(1.0)
+                    );
+                }
+            }
+            if slope == 0.0 {
+                assert!(tangent.cell.iter().any(|value| *value < 0.0));
+                assert!(tangent.cell.iter().any(|value| *value > 0.0));
+            }
+            let constant = geometry
+                .caloric_tangent(BASE, [[0.0; 3]; 3], 340.0, faces, slope)
+                .unwrap();
+            let original = geometry
+                .tangent(BASE, [BASE; 6])
+                .unwrap()
+                .with_cell_temperature_slope(slope)
+                .unwrap();
+            assert_eq!(constant.cell, original.cell);
+            assert_eq!(constant.face, original.face);
+        }
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    #[test]
+    fn signed_phase_columns_condense_against_the_complete_newton_system() {
+        let geometry = KirchhoffCell::new([0.3, 0.7, 1.1]).unwrap();
+        let derivative = [
+            [0.01, -0.003, 0.002],
+            [-0.003, -0.005, 0.001],
+            [0.002, 0.001, 0.008],
+        ];
+        let tangent = geometry
+            .caloric_tangent(
+                BASE,
+                derivative,
+                340.0,
+                [410.0, 290.0, 370.0, 320.0, 280.0, 390.0],
+                0.0,
+            )
+            .unwrap();
+        assert!(tangent.cell.iter().any(|value| *value < 0.0));
+        let storage = 50.0;
+        let cell_residual = 17.25;
+        let face_rhs = [11.0, -8.0, 6.0, 3.0, -4.0, 13.0];
+        let boundary = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+        let reduced = tangent.condense(storage, cell_residual).unwrap();
+        let mut full = [[0.0; 7]; 7];
+        let mut rhs = [0.0; 7];
+        full[0][0] = storage + tangent.cell.iter().sum::<f64>();
+        rhs[0] = -cell_residual;
+        for f in 0..6 {
+            full[0][f + 1] = tangent.face[f][f];
+            full[f + 1][0] = -tangent.cell[f];
+            rhs[f + 1] = face_rhs[f];
+            for g in 0..6 {
+                full[f + 1][g + 1] = -tangent.face[f][g];
+            }
+            full[f + 1][f + 1] += boundary[f];
+        }
+        let expected = dense_solve(full, rhs);
+        let mut matrix = reduced.matrix;
+        let mut load = reduced.load;
+        for f in 0..6 {
+            matrix[f][f] += boundary[f];
+            load[f] += face_rhs[f];
+        }
+        let trace = dense_solve(matrix, load);
+        let recovered = reduced.cell_increment(trace).unwrap();
+        assert!((recovered - expected[0]).abs() < 2e-12);
+        for f in 0..6 {
+            assert!((trace[f] - expected[f + 1]).abs() < 2e-12);
+        }
+        let mut singular = tangent;
+        singular.cell = [-10.0; 6];
+        assert!(singular.condense(60.0, cell_residual).is_none());
+        assert!(singular.condense(59.0, cell_residual).is_none());
+        assert!(singular.condense(61.0, cell_residual).is_some());
     }
 
     #[test]

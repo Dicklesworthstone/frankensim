@@ -1,10 +1,11 @@
 //! Original-law nonlinear conduction on the native full-tensor face topology.
 //!
 //! Traces remain physical Kelvin temperatures. Cell unknowns are temperature
-//! or the original caloric energy coordinate. Exact conductivity interval
-//! averages drive physical heat; endpoint tensors and the original dT/de
-//! give the Newton derivative. Cells are statically condensed, leaving only
-//! face increments in the native sparse solve.
+//! or the original caloric energy coordinate. Conductivity laws retain their
+//! exact Kelvin interval integrals or explicitly select cellwise K(e). The
+//! original endpoint tensors, dT/de and optional analytic dK/de give the Newton
+//! derivative. Cells are statically condensed, leaving only face increments
+//! in the native sparse solve.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
@@ -43,6 +44,10 @@ use coordinate::{CellCoordinate, KelvinCoordinate};
 use super::contact::{ContactHeat, PreparedSources, joint_heat};
 use local::{KirchhoffCell, KirchhoffRecovery};
 pub use material::{RotatedSolidConductivity, RotatedSourceConductivity, TensorConductivityLaw};
+#[cfg(feature = "enthalpy-coupling")]
+pub use material::{
+    IsotropicPhaseConductivity, TensorCaloricConductivity, TensorCaloricConductivityPoint,
+};
 pub use sdirk::{TensorNonlinearSdirk2Step, advance_nonlinear_tensor_conduction_sdirk2};
 pub use transient::{TensorNonlinearStep, advance_nonlinear_tensor_conduction};
 
@@ -199,6 +204,33 @@ struct Direction {
     relative_residual: f64,
 }
 
+/// The temperature primitive remains the default. A caloric constitutive law
+/// explicitly selects cellwise K(e) without assigning an enthalpy to a face.
+#[derive(Clone, Copy)]
+enum CellLaw {
+    Kirchhoff,
+    #[cfg(feature = "enthalpy-coupling")]
+    Caloric(material::TensorCaloricConductivity),
+}
+
+fn cell_law<C: CellCoordinate>(
+    coordinate: &C,
+    law: &dyn TensorConductivityLaw,
+    cell: usize,
+    value: f64,
+    temperature: f64,
+) -> Result<CellLaw, ChtError> {
+    #[cfg(feature = "enthalpy-coupling")]
+    if let Some(point) = coordinate.conductivity_point(cell, value, temperature)?
+        && let Some(response) = law.caloric_conductivity(point)?
+    {
+        return Ok(CellLaw::Caloric(response));
+    }
+    #[cfg(not(feature = "enthalpy-coupling"))]
+    let _ = (coordinate, law, cell, value, temperature);
+    Ok(CellLaw::Kirchhoff)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn solve_inner(
     domain: &VoxelDomain,
@@ -302,7 +334,13 @@ fn solve_coordinate<C: CellCoordinate>(
             poll(gate)?;
         }
         finite_positive("thermal.tensor_conduction.initial_temperature_k", temperature[cell])?;
-        point.push(laws[cell].conductivity_at_temperature(temperature[cell])?);
+        point.push(match cell_law(
+            coordinate, laws[cell], cell, values[cell], temperature[cell],
+        )? {
+            CellLaw::Kirchhoff => laws[cell].conductivity_at_temperature(temperature[cell])?,
+            #[cfg(feature = "enthalpy-coupling")]
+            CellLaw::Caloric(response) => response.conductivity(),
+        });
         geometry.push(
             KirchhoffCell::new(domain.widths(cell))
                 .ok_or_else(|| invalid("nonlinear tensor cell geometry is unrepresentable"))?,
@@ -562,10 +600,18 @@ fn evaluate<C: CellCoordinate>(
         let t = temperature[c];
         finite_positive("thermal.tensor_conduction.temperature_k", t)?;
         let face = data.face_ids[c].map(|id| trace[id]);
-        let mut means = [[[0.0; 3]; 3]; 6];
-        for f in 0..6 {
-            means[f] = laws[c].mean_conductivity(t, face[f])?.as_array();
-        }
+        let value = coordinates.as_ref().map_or(t, |values| values[c].value);
+        let means = match cell_law(coordinate, laws[c], c, value, t)? {
+            CellLaw::Kirchhoff => {
+                let mut means = [[[0.0; 3]; 3]; 6];
+                for f in 0..6 {
+                    means[f] = laws[c].mean_conductivity(t, face[f])?.as_array();
+                }
+                means
+            }
+            #[cfg(feature = "enthalpy-coupling")]
+            CellLaw::Caloric(response) => [response.conductivity().as_array(); 6],
+        };
         let actual = geometry[c]
             .heat(t, face, means)
             .ok_or_else(|| invalid("original tensor integral heat is unrepresentable"))?;
@@ -576,7 +622,6 @@ fn evaluate<C: CellCoordinate>(
                 - sink.relative_load
                 - setup.power_w.get(c).copied().unwrap_or(0.0)
                 - carried_power_w.map_or(0.0, |carry| carry[c]);
-            let value = coordinates.as_ref().map_or(t, |values| values[c].value);
             cell_residual[c] += coordinate.storage_rate(c, value)?.power_w;
         }
         for (f, &q) in actual.outward_w.iter().enumerate() {
@@ -669,17 +714,43 @@ fn linearize<C: CellCoordinate>(
         if c.is_multiple_of(256) {
             poll(gate)?;
         }
-        let center = laws[c]
-            .conductivity_at_temperature(endpoint.solution.temperature[c])?
-            .as_array();
-        let mut faces = [[[0.0; 3]; 3]; 6];
-        for (f, face) in faces.iter_mut().enumerate() {
-            *face = laws[c]
-                .conductivity_at_temperature(endpoint.trace[data.face_ids[c][f]])?
-                .as_array();
-        }
-        let tangent = geometry[c]
-            .tangent(center, faces)
+        let (tangent, compose_temperature) = match cell_law(
+            coordinate,
+            laws[c],
+            c,
+            endpoint.value(c),
+            endpoint.solution.temperature[c],
+        )? {
+            CellLaw::Kirchhoff => {
+                let center = laws[c]
+                    .conductivity_at_temperature(endpoint.solution.temperature[c])?
+                    .as_array();
+                let mut faces = [[[0.0; 3]; 3]; 6];
+                for (f, face) in faces.iter_mut().enumerate() {
+                    *face = laws[c]
+                        .conductivity_at_temperature(endpoint.trace[data.face_ids[c][f]])?
+                        .as_array();
+                }
+                (geometry[c].tangent(center, faces), !C::IS_TEMPERATURE)
+            }
+            #[cfg(feature = "enthalpy-coupling")]
+            CellLaw::Caloric(response) => {
+                let tensor = response.conductivity().as_array();
+                let tangent = if data.fixed[c].is_some() {
+                    geometry[c].tangent(tensor, [tensor; 6])
+                } else {
+                    geometry[c].caloric_tangent(
+                        tensor,
+                        response.derivative_kg_w_m_k_j(),
+                        endpoint.solution.temperature[c],
+                        data.face_ids[c].map(|id| endpoint.trace[id]),
+                        endpoint.temperature_slope(c),
+                    )
+                };
+                (tangent, false)
+            }
+        };
+        let tangent = tangent
             .ok_or_else(|| invalid("original tensor endpoint tangent is unrepresentable"))?;
         let (matrix, load) = if data.fixed[c].is_some() {
             recovery.push(None);
@@ -687,11 +758,11 @@ fn linearize<C: CellCoordinate>(
         } else {
             let slope = endpoint.temperature_slope(c);
             let added = data.sinks[c].conductance * slope + coordinate.storage_tangent(c);
-            let tangent = if C::IS_TEMPERATURE {
-                tangent
-            } else {
+            let tangent = if compose_temperature {
                 tangent.with_cell_temperature_slope(slope)
                     .ok_or_else(|| invalid("original caloric tensor tangent is unrepresentable"))?
+            } else {
+                tangent
             };
             let condensed = tangent
                 .condense(added, endpoint.cell_residual[c])
