@@ -24,6 +24,8 @@ pub use fs_modal::relaxation_modes::{
     MaxwellDampingBranch, MaxwellModeError, PoleOptions, PreparedMaxwellModes,
 };
 use fs_phs::harmonic::resonance::search_resonance;
+
+mod synchronous;
 pub use fs_phs::harmonic::resonance::{DrivenResonance, ResonanceControls, ResonanceSearchError};
 
 /// Native dense spectrum has at most 2*MAX_ROTOR_DOFS + this many states.

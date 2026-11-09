@@ -9202,3 +9202,27 @@ physical response peak and optional half-height width using original dispersion.
 Branch count is capped at64; native cancellation and resource refusals remain
 explicit. Coefficients describe the supplied operating state, without inferred
 preload, temperature or speed-dependent constitutive laws.
+
+
+## Hereditary synchronous and unbalance resonances
+
+`RotorMaxwellOperatingPoint::synchronous_response_with_derivative` follows
+`omega = order * Omega` for finite nonzero signed order and signed shaft speed.
+It retains source phase, the separate gyroscopic direction, and every original
+relaxation derivative in the same native factor solve. `synchronous_resonance`
+samples the same immutable model and branches over positive shaft speeds. Peak,
+brackets, half-height width and observation derivative use **shaft-speed** units,
+including when order differs from one.
+
+`RigidRotor::unbalance_maxwell_response_with_derivative` and
+`unbalance_maxwell_resonance` reuse original station, phase and moment forcing
+`F = U * Omega^2` and its total derivative, with zero source and derivative at
+rest. Original branch stresses, passive heat and physical residuals remain in the
+returned response. No frozen-force or frozen-loss approximation is introduced.
+The existing model stiffness is the relaxed stiffness; branch stiffness is not
+counted twice. These compare steady operating points with supplied coefficients,
+not startup history or inferred bearing/preload/temperature laws.
+
+`rotor_maxwell_synchronous` supplies five independent native test groups,
+including a rational hereditary unbalance peak and both half-height roots,
+signed-order shaft-unit scaling, source moments, cancellation and refusals.
