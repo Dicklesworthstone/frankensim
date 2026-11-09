@@ -204,6 +204,49 @@ incompressible materials, or establish an inf-sup/coercivity theorem for every
 cut, pressure mode, penalty, contrast or refinement pattern. Conditioning and
 physical convergence remain properties of the actual resolved problem.
 
+## Prescribed eigenstrain in three-dimensional elasticity
+
+Cartesian and adaptive `prepare_eigenstrain` retain prescribed global-frame
+tensor strains on the original physical cut rules. Thermal callers supply
+source-integrated expansion from their actual stress-free reference; the same
+interface also supports authored transformation or manufacturing strain. The
+original material tensor supplies `C:(epsilon-epsilon_free)`. No replacement
+material, invented expansion coefficient, density update or geometry rebuild is
+introduced. The preparation is bound to the original immutable operator owner.
+
+Reference cell columns contain `integral B^T C epsilon_free dV` and the
+**negative** eigenstress traction on selected embedded Nitsche supports.
+Current cell scales multiply both these loads and the original stiffness.
+B-bar projects both total and free dilatation over physical cut volume while
+retaining local deviatoric strain. Adaptive forces and observations use the
+existing transpose/reconstruction maps, including homogeneous master clamps.
+
+`eigenstrain_response` reports actual total, prescribed free, actual elastic
+and constitutive elastic strains separately. Physical stresses and recoverable
+elastic energy exclude ghost/Nitsche stabilization and thermal internal
+energy. The original material envelope is applied to actual and projected
+**elastic** strain; a separately supplied total Frobenius-strain budget in
+`(0,1)` controls the declared small-deformation regime. This numerical budget
+does not certify finite rotation, orientation, a linearization error bound or
+an arbitrary callback between retained samples. Use the algebraic
+`solve_controlled` followed by this physical response; the existing zero-free-
+strain physical admission and stress queries do not describe thermal stress.
+
+Prepared load actions and exact scale transposes never reevaluate the source
+field. Stress VJPs differentiate the physical offset stress. Equilibrium
+gradients include `z^T db_free/dscale - z^T dK/dscale u`; complete-load
+compliance has **two** load-work terms. Native density and mass are independent
+of this stiffness scaling. Geometry, free-strain and source-temperature
+derivatives, thermal back-reaction and continuum certification remain outside
+these fixed-field APIs. Point allowances and cancellation refuse unpublished
+preparations/observations without changing the original operator.
+
+Focused G0/G1/G3 regressions in `eigenstrain3`, `eigenstrain3_sensitivity` and
+`adaptive_eigenstrain3` cover compatible nonuniform expansion, restrained
+compression and storage, physical-cut B-bar averages, full coupled tensors,
+Nitsche boundary signs, unchanged material inventory, distinct strain domains,
+hanging-node reconstruction and independent finite-difference adjoints.
+
 ## Consistent native material inertia in three dimensions
 
 `CutElasticity3::prepare_material_mass` and the adaptive equivalent prepare

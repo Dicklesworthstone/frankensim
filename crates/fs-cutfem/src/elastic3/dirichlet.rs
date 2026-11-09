@@ -52,6 +52,11 @@ pub(super) struct DirichletData3 {
     beta: f64,
     area: f64,
 }
+impl DirichletData3 {
+    pub(super) fn selected_points(&self, cell: usize) -> &[usize] {
+        &self.points[cell]
+    }
+}
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
     if checkpoint().is_break() {
         Err(ElasticityError3::Cancelled)

@@ -1065,5 +1065,8 @@ pub mod surface;
 /// Bulk quadrature stress observations and exact state/material pullbacks.
 pub mod stress;
 
+/// Prescribed thermal or transformation strain on the original material tensor.
+pub mod eigenstrain;
+
 /// Weak prescribed displacement on selected zero-level surface patches.
 pub mod dirichlet;
