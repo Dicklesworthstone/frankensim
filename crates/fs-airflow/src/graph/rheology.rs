@@ -284,14 +284,14 @@ impl CarreauPipeGraph {
     ) -> Result<Self, CarreauGraphError> {
         checkpoint(cx)?;
         if temperatures_k.len() != self.branches.len() {
-            return Err(GraphError::InvalidInput("one prescribed temperature per Carreau branch required").into());
+            return Err(GraphError::InvalidInput(
+                "one prescribed temperature per Carreau branch required",
+            )
+            .into());
         }
         let mut graph = self.clone();
-        for (branch, (owner, &temperature)) in graph
-            .branches
-            .iter_mut()
-            .zip(temperatures_k)
-            .enumerate()
+        for (branch, (owner, &temperature)) in
+            graph.branches.iter_mut().zip(temperatures_k).enumerate()
         {
             checkpoint(cx)?;
             owner.pipe = owner

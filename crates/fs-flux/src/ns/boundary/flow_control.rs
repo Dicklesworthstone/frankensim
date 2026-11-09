@@ -6,6 +6,10 @@ use fs_math::dd::Dd;
 use super::{StokesAssembly, StokesBoundaryError, StokesSolution};
 use crate::ns::FluxSolution;
 
+#[path = "flow_control/resistance.rs"]
+mod resistance;
+pub use resistance::{StokesResistancePort, StokesResistanceSolution};
+
 /// Resolved flow and the uniform pressure increments required at controlled ports.
 pub struct StokesFlowControlSolution<S = StokesSolution> {
     /// Accepted linear or rheological flow, including its boundary reactions.
@@ -221,6 +225,25 @@ impl PreparedStokesFlowControl<'_, '_> {
         if pressures.iter().any(|value| !value.is_finite()) {
             return Err(invalid("unrepresentable controlled port pressure"));
         }
+        let flow = self.report_pressures(&pressures)?;
+        let (flows, maximum_flow_residual_m2_s) = checked_port_flows(
+            &self.assembly,
+            &self.ports,
+            outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+            &flow.field.x,
+        )?;
+        Ok(StokesFlowControlSolution {
+            flow,
+            pressure_offsets_m2_s2: pressures,
+            outward_volume_rates_m2_s: flows,
+            maximum_flow_residual_m2_s,
+        })
+    }
+
+    // Every cached port solve uses the same compensated superposition,
+    // original-equation check and pressure-aware boundary reactions.
+    fn report_pressures(&self, pressures: &[f64]) -> Result<StokesSolution, StokesBoundaryError> {
         let mut x = self.baseline.clone();
         for (i, value) in x.iter_mut().enumerate() {
             let mut sum = Dd::from_f64(*value);
@@ -229,7 +252,7 @@ impl PreparedStokesFlowControl<'_, '_> {
             }
             *value = sum.to_f64();
         }
-        let rhs = pressure_rhs(&self.assembly, &self.ports, &pressures)?;
+        let rhs = pressure_rhs(&self.assembly, &self.ports, pressures)?;
         if x.iter().any(|value| !value.is_finite()) {
             return Err(invalid("unrepresentable controlled flow field or load"));
         }
@@ -244,21 +267,9 @@ impl PreparedStokesFlowControl<'_, '_> {
             scaled_rel_residual,
         };
         check_convergence(&self.assembly, &field)?;
-        let (flows, maximum_flow_residual_m2_s) = checked_port_flows(
-            &self.assembly,
-            &self.ports,
-            outward_volume_rates_m2_s,
-            absolute_tolerance_m2_s,
-            &field.x,
-        )?;
         let mut flow = self.assembly.report_solution(field)?;
-        flow.reactions.add_port_pressures(&self.ports, &pressures)?;
-        Ok(StokesFlowControlSolution {
-            flow,
-            pressure_offsets_m2_s2: pressures,
-            outward_volume_rates_m2_s: flows,
-            maximum_flow_residual_m2_s,
-        })
+        flow.reactions.add_port_pressures(&self.ports, pressures)?;
+        Ok(flow)
     }
 
     /// Kinetic energy per depth divided by the same reference density.

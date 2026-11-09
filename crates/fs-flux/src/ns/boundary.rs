@@ -35,7 +35,10 @@ mod navier_stokes;
 mod transient;
 /// Source-derived thermal dilation on the original mixed Stokes operator.
 pub mod thermal_dilation;
-pub use flow_control::{PreparedStokesFlowControl, StokesFlowControlSolution};
+pub use flow_control::{
+    PreparedStokesFlowControl, StokesFlowControlSolution, StokesResistancePort,
+    StokesResistanceSolution,
+};
 pub use navier_stokes::{
     NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
 };
@@ -157,6 +160,15 @@ pub enum StokesBoundaryError {
         actual_m2_s: f64,
         /// Absolute plus relative flow allowance [m²/s].
         tolerance_m2_s: f64,
+    },
+    /// The returned field missed an external reservoir/resistance port law.
+    ResistanceLawNotConverged {
+        /// Prepared port in caller order.
+        port: usize,
+        /// Absolute |p - p_reservoir - R*Q_outward| [m²/s²].
+        residual_m2_s2: f64,
+        /// Absolute plus relative accepted pressure defect [m²/s²].
+        tolerance_m2_s2: f64,
     },
     /// An explicitly recomputed residual did not meet the requested tolerance.
     NotConverged {

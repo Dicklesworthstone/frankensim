@@ -45,7 +45,8 @@ mod sgs;
 pub use mixed::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
     MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
-    MaterialStokesFlowControlSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
+    MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{

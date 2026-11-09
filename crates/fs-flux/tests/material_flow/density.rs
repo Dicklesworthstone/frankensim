@@ -1,6 +1,250 @@
 //! G1/G3: original cell material states drive inertia, stress and SI reporting.
 
 use super::*;
+use fs_flux::MaterialStokesResistancePort;
+
+/// G1/G3: a constant-stress two-layer Couette field has an independent integral
+/// flow, source-viscosity heat and external-resistor power. The pressure drop
+/// cancels an authored body force, so its exact piecewise-affine velocity is
+/// representable without a fitted channel profile.
+#[test]
+fn resistance_ports_retain_layer_viscosity_sources_and_separate_external_heat() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    for mu in [[0.4, 0.4], [0.2, 1.4]] {
+        let lower = Counted {
+            material: transport(2.0, mu[0]),
+            queries: Cell::new(0),
+        };
+        let upper = Counted {
+            material: transport(7.0, mu[1]),
+            queries: Cell::new(0),
+        };
+        let reference = transport(11.0, 0.4);
+        let binding =
+            MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default()).unwrap();
+        let sources: Vec<&dyn FluidTransport> = mesh
+            .centroids
+            .iter()
+            .map(|point| {
+                if point[1] < 0.5 {
+                    &lower as &dyn FluidTransport
+                } else {
+                    &upper as &dyn FluidTransport
+                }
+            })
+            .collect();
+        let field = binding.bind_stokes_materials(sources).unwrap();
+        let calls = (lower.queries.get(), upper.queries.get());
+        let (tau, offset, drop, datum, resistance) = (0.1, 0.3, 1.8, 3.0, 9.0);
+        let slope = [tau / mu[0], tau / mu[1]];
+        let velocity = |point: [f64; 2]| {
+            [
+                if point[1] < 0.5 {
+                    offset + slope[0] * point[1]
+                } else {
+                    offset + 0.5 * slope[0] + slope[1] * (point[1] - 0.5)
+                },
+                0.0,
+            ]
+        };
+        let mean = offset + 0.375 * slope[0] + 0.125 * slope[1];
+        let traction =
+            |_: [f64; 2], n: [f64; 2]| [tau * n[1] - datum * n[0], tau * n[0] - datum * n[1]];
+        let inlet: Vec<_> = (0..mesh.edges.len())
+            .filter(|&edge| mesh.is_boundary(edge) && mesh.edges[edge].normal[0] < -0.5)
+            .collect();
+        let boundaries: Vec<_> = (0..mesh.edges.len())
+            .filter(|&edge| mesh.is_boundary(edge))
+            .map(|edge| {
+                if mesh.edges[edge].normal[1].abs() > 0.5 {
+                    MaterialStokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
+                } else {
+                    MaterialStokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                }
+            })
+            .collect();
+        let loads = [MaterialStokesResistancePort {
+            reservoir_pressure_pa: drop + resistance * mean,
+            resistance_pa_s_per_m2: resistance,
+        }];
+        let solved = field
+            .solve_stokes_mixed_resistance_ports(
+                &|_| [-drop, 0.0],
+                &boundaries,
+                &[&inlet],
+                &loads,
+                1e-11,
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&solved.flow.discrete().x, &velocity);
+        assert!(error < 2e-9 && divergence < 2e-9, "{error}, {divergence}");
+        near(solved.pressure_offsets_pa[0], drop, 2e-9);
+        near(solved.outward_volume_rates_m2_s[0], -mean, 2e-10);
+        near(
+            solved.resistance_dissipation_w_per_m[0],
+            resistance * mean * mean,
+            2e-9,
+        );
+        let bulk_heat = 0.5 * tau * tau * (1.0 / mu[0] + 1.0 / mu[1]);
+        near(
+            solved.flow.viscous_dissipation().total_power_w_per_m(),
+            bulk_heat,
+            2e-9,
+        );
+        for (&pressure, point) in solved.flow.pressure_pa().iter().zip(&mesh.centroids) {
+            near(pressure, datum + drop * (1.0 - point[0]), 2e-9);
+        }
+        assert_eq!((lower.queries.get(), upper.queries.get()), calls);
+        if mu[0] == mu[1] {
+            let homogeneous = binding
+                .solve_stokes_mixed_resistance_ports(
+                    &|_| [-drop, 0.0],
+                    &boundaries,
+                    &[&inlet],
+                    &loads,
+                    1e-11,
+                )
+                .unwrap();
+            near(homogeneous.outward_volume_rates_m2_s[0], -mean, 2e-10);
+            near(homogeneous.pressure_offsets_pa[0], drop, 2e-9);
+        }
+    }
+}
+
+/// G1: both source-bound transient owners solve physical pressure and inertia
+/// simultaneously. The independent variable-step BDF2 plug equation supplies
+/// the expected endpoint; no precomputed or prescribed port velocity is used.
+#[test]
+fn resistance_ports_use_physical_density_and_both_bdf_histories() {
+    let (length, height, dt, old_dt) = (2.0, 1.5, 0.07, 0.1);
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(length, height, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let previous = flow_control_history(&mesh, &|_| [0.1, 0.0]);
+    let older = flow_control_history(&mesh, &|_| [0.2, 0.0]);
+    let histories = (previous.clone(), older.clone());
+    let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
+    let inlet: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge) && mesh.edges[edge].normal[0] < -0.5)
+        .collect();
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| {
+            if mesh.edges[edge].normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value: &no_slip,
+                    tangential_resistance_pa_s_per_m: 0.0,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    for rho in [2.0, 7.0] {
+        let source = Counted {
+            material: transport(rho, 0.4),
+            queries: Cell::new(0),
+        };
+        let binding =
+            MaterialFluxSystem::new(&system, &source, MaterialFluxNumerics::default()).unwrap();
+        let field = binding
+            .bind_stokes_materials(vec![&source; mesh.tris.len()])
+            .unwrap();
+        let calls = source.queries.get();
+        for old in [None, Some((older.as_slice(), old_dt))] {
+            let (a0, history) = if old.is_some() {
+                let r = dt / old_dt;
+                (
+                    (1.0 + 2.0 * r) / (1.0 + r),
+                    (1.0 + r) * 0.1 - r * r / (1.0 + r) * 0.2,
+                )
+            } else {
+                (1.0, 0.1)
+            };
+            let loads = [MaterialStokesResistancePort {
+                reservoir_pressure_pa: -20.0,
+                resistance_pa_s_per_m2: 5.0,
+            }];
+            let expected =
+                (rho * length * history / dt - 20.0) / (rho * length * a0 / dt + 5.0 * height);
+            let solved = binding
+                .bdf2_stokes_mixed_variable_step_resistance_ports(
+                    &zero_force,
+                    &boundaries,
+                    &[&inlet],
+                    &loads,
+                    &previous,
+                    old,
+                    dt,
+                    1e-10,
+                )
+                .unwrap();
+            let layered = field
+                .bdf2_stokes_mixed_variable_step_resistance_ports(
+                    &zero_force,
+                    &boundaries,
+                    &[&inlet],
+                    &loads,
+                    &previous,
+                    old,
+                    dt,
+                    1e-10,
+                )
+                .unwrap();
+            for (q, p, energy) in [
+                (
+                    solved.outward_volume_rates_m2_s[0],
+                    solved.pressure_offsets_pa[0],
+                    solved.flow.kinetic_energy_j_per_m(),
+                ),
+                (
+                    layered.outward_volume_rates_m2_s[0],
+                    layered.pressure_offsets_pa[0],
+                    layered.flow.kinetic_energy_j_per_m(),
+                ),
+            ] {
+                near(q, -height * expected, 3e-10);
+                near(p, rho * length * (a0 * expected - history) / dt, 3e-9);
+                near(
+                    energy,
+                    0.5 * rho * length * height * expected * expected,
+                    3e-10,
+                );
+            }
+        }
+        for resistance in [-f64::from_bits(1), f64::from_bits(1)] {
+            let bad = [MaterialStokesResistancePort {
+                reservoir_pressure_pa: 1.0,
+                resistance_pa_s_per_m2: resistance,
+            }];
+            assert!(matches!(
+                binding.bdf2_stokes_mixed_variable_step_resistance_ports(
+                    &zero_force,
+                    &boundaries,
+                    &[&inlet],
+                    &bad,
+                    &previous,
+                    None,
+                    dt,
+                    1e-10,
+                ),
+                Err(MaterialFluxError::Invalid(_))
+            ));
+        }
+        assert_eq!(source.queries.get(), calls);
+    }
+    assert_eq!((previous, older), histories, "neither history is mutated");
+}
 
 struct Counted<G> {
     material: G,

@@ -9,7 +9,8 @@ use super::super::{
 };
 use super::{
     MaterialBoundaryLoad, MaterialStokesBoundary, MaterialStokesFlowControlSolution,
-    flow_control::physical_control, physical_boundary_load, with_physical_boundaries,
+    MaterialStokesResistancePort, MaterialStokesResistanceSolution, flow_control::physical_control,
+    physical_boundary_load, resistance::solve_resistance_assembly, with_physical_boundaries,
 };
 use crate::ns::boundary::{StokesAssembly, StokesPressureReference, StokesSolution};
 use crate::ns::{FluxParams, FluxSolution, FluxSystem};
@@ -132,6 +133,87 @@ impl<'s, 'm, G> MaterialStokesField<'s, 'm, G> {
     #[must_use]
     pub const fn reference_density_kg_m3(&self) -> f64 {
         self.reference_density_kg_m3
+    }
+
+    /// Resolve steady laminar port resistances through frozen material layers.
+    ///
+    /// Reservoir increments and tolerance are Pa, force density is N/m³ and
+    /// resistance is Pa s/m² for flow per depth. The same reference density
+    /// normalizes every port, while each cell retains its OWN dynamic viscosity.
+    /// Source snapshots, bulk heat and reactions are retained without re-query.
+    /// External R*Q² heat remains separate. Each controlled component retains
+    /// an uncontrolled traction datum; this does not advect material layers.
+    ///
+    /// # Errors
+    /// Preserves native port/equation refusals and physical output checks.
+    pub fn solve_stokes_mixed_resistance_ports(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        loads: &[MaterialStokesResistancePort],
+        absolute_pressure_tolerance_pa: f64,
+    ) -> Result<MaterialStokesResistanceSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let reference = self.reference_density_kg_m3;
+        let assembly = with_physical_boundaries(boundaries, reference, |primitive| {
+            self.system.assemble_stokes_mixed_variable_density(
+                self.params,
+                &|cell, _| self.samples[cell].relative_density,
+                &|cell, _| self.samples[cell].normalized_viscosity,
+                &|point| force_density(point).map(|f| f / reference),
+                primitive,
+            )
+        })
+        .map_err(MaterialFluxError::Boundary)?;
+        solve_resistance_assembly(
+            assembly,
+            reference,
+            ports,
+            loads,
+            absolute_pressure_tolerance_pa,
+            |flow, energy| self.recover_solution(flow, energy),
+        )
+    }
+
+    /// Couple endpoint reservoir resistances to density-weighted BDF2 Stokes.
+    ///
+    /// `older_history=None` performs BDF1 startup. Source snapshots and the
+    /// density metric stay frozen; both histories, endpoint pressure and all
+    /// port interactions use the original momentum operator. Physical units
+    /// and external-model scope match the steady resistance entry.
+    ///
+    /// # Errors
+    /// Preserves native history/ratio, port/equation and physical output checks.
+    /// Both caller histories and all material owners remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_stokes_mixed_variable_step_resistance_ports(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        loads: &[MaterialStokesResistancePort],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        absolute_pressure_tolerance_pa: f64,
+    ) -> Result<MaterialStokesResistanceSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let assembly = self.assemble_material_stokes_bdf2(
+            force_density,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+        )?;
+        solve_resistance_assembly(
+            assembly,
+            self.reference_density_kg_m3,
+            ports,
+            loads,
+            absolute_pressure_tolerance_pa,
+            |flow, energy| self.recover_solution(flow, energy),
+        )
     }
 
     /// Resolve the pressures needed for total port flows through frozen materials.

@@ -185,10 +185,8 @@ fn g1_g3_regional_temperatures_change_the_original_hydraulic_split_and_power() {
     // Independent Arrhenius viscosity and Poiseuille conductance, followed by
     // an explicit two-unknown Kirchhoff solve; no native material evaluation.
     let conductances: [f64; 5] = core::array::from_fn(|i| {
-        let viscosity = 3.0
-            * ((12_000.0 / 8.314_462_618_153_24)
-                * (1.0 / temperatures[i] - 1.0 / 300.0))
-                .exp();
+        let viscosity =
+            3.0 * ((12_000.0 / 8.314_462_618_153_24) * (1.0 / temperatures[i] - 1.0 / 300.0)).exp();
         core::f64::consts::PI * 0.01_f64.powi(4) / (8.0 * viscosity * lengths[i])
     });
     let [g0, g1, g2, g3, g4] = conductances;
@@ -225,10 +223,16 @@ fn g1_g3_regional_temperatures_change_the_original_hydraulic_split_and_power() {
         );
         assert_eq!(graph.branches()[i].pipe.temperature_k(), 300.0);
         assert_eq!(regional.branches()[i].pipe.temperature_k(), temperatures[i]);
-        assert_eq!(regional.branches()[i].pipe.law(), graph.branches()[i].pipe.law());
+        assert_eq!(
+            regional.branches()[i].pipe.law(),
+            graph.branches()[i].pipe.law()
+        );
         assert_eq!(
             regional.branches()[i].pipe,
-            graph.branches()[i].pipe.at_temperature(temperatures[i]).unwrap()
+            graph.branches()[i]
+                .pipe
+                .at_temperature(temperatures[i])
+                .unwrap()
         );
         assert_eq!(actual.profile.pipe(), &regional.branches()[i].pipe);
     }
@@ -638,7 +642,10 @@ fn g0_invalid_topology_boundaries_controls_and_mixed_materials_refuse() {
     assert!(
         CarreauPipeGraph::new(
             3,
-            vec![branch("first", 0, 1, physical), branch("different", 1, 2, different)]
+            vec![
+                branch("first", 0, 1, physical),
+                branch("different", 1, 2, different)
+            ]
         )
         .is_err()
     );

@@ -12,6 +12,40 @@ convection, Picard steady solves, IMEX and fully implicit rheological BDF1
 transients, discrete
 adjoints.
 
+## Laminar flow through external hydraulic resistances
+
+`PreparedStokesFlowControl::solve_resistance_ports` couples the resolved native
+flow to `p_i = p_reservoir_i + R_i Q_outward_i` at each prepared port. Pressure
+is an increment to the original total traction; tangential traction remains
+unchanged. The full cached port-response matrix couples every port, so only a
+small dense system is factored for new reservoir/resistance loads. It rechecks
+the original continuum equations and each port law at the returned field.
+Zero resistance prescribes reservoir pressure; reverse flow reverses the
+pressure drop and preserves nonnegative external `R Q²` loss.
+
+Homogeneous and frozen cell-material entries share this native owner for
+steady Stokes, BDF1 startup and variable-step BDF2. Source density consistently
+normalizes pressure, resistance, inertia and power; each material retains its
+own dynamic viscosity. Physical resistance is Pa s/m² for volume flow per
+depth, pressure is Pa and external dissipation is W/m. External heat is kept
+separate from resolved bulk viscous heat and wall-slip losses. Material owners,
+histories and prepared caches remain immutable on success or refusal.
+
+G1/G3 tests in `stokes_boundary/flow_control.rs` and `material_flow/density.rs`
+compare reversible transient plug momentum and pressure work, an independent
+full-field Robin assembly with interacting ports, and exact layered Couette
+stress/heat. Scope remains fixed-mesh linear Stokes with an uncontrolled
+traction datum per controlled component. The external law has no compliance,
+inertia, turbulence or automatic thermal deposition; frozen nonlinear operators
+remain frozen. This does not claim full hydraulic-network or FSI closure.
+
+These regressions are authored but were not executed. The original single-worker
+Cargo build was killed by signal 9 while compiling the pinned asupersync
+dependency, before it reached the changed FEM/material modules; no source/type
+diagnostic was emitted. Source parsing and whitespace checks passed before the
+final concurrent-change merge, and bounded numerical/API review found no
+concrete issue. Native integration compilation and execution remain unverified.
+
 ## Public types and semantics
 
 - `TriMesh` (`trimesh`): triangles + a GLOBALLY ORIENTED edge table

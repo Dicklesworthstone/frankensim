@@ -546,8 +546,7 @@ fn storage_matrix_at_temperatures(temperatures: [f64; 2]) {
     let mut old_u = vec![vec![0.0; 6]; 2];
     let mut old_p = [12.0, -7.0];
     for pressure in [200.0, 50.0, -100.0, 0.0, 150.0] {
-        let (expected_u, mid_p) =
-            dense_storage_step(&old_u, old_p, pressure, 0.003, viscosities);
+        let (expected_u, mid_p) = dense_storage_step(&old_u, old_p, pressure, 0.003, viscosities);
         let report = with_cx(|cx| {
             model.step(
                 &mut state,

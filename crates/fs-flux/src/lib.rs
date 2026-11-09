@@ -85,8 +85,9 @@ pub use material::{
     MaterialFluxSolution, MaterialFluxSystem, MaterialFluxViscosityTangent,
     MaterialForchheimerSolution, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
     MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
-    MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesRheologySolution,
-    MaterialStokesSolution, MaterialViscousDissipation,
+    MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
+    MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
@@ -95,8 +96,8 @@ pub use ns::boundary::{
     BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryTransport, BoundaryWrench,
     DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls, NavierStokesStep,
     OpenBoundaryPolicy, PreparedStokesFlowControl, StokesAssembly, StokesBoundary,
-    StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference,
-    StokesRheologyControls, StokesRheologySolution, StokesSolution,
+    StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
+    StokesResistanceSolution, StokesRheologyControls, StokesRheologySolution, StokesSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{

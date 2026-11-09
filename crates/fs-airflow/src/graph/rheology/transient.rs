@@ -408,7 +408,10 @@ impl TransientCarreauGraph {
     ) -> Result<Self, TransientCarreauError> {
         checkpoint(cx)?;
         if temperatures_k.len() != self.pipes.len() {
-            return Err(GraphError::InvalidInput("one prescribed temperature per transient Carreau branch required").into());
+            return Err(GraphError::InvalidInput(
+                "one prescribed temperature per transient Carreau branch required",
+            )
+            .into());
         }
         let mut pipes = Vec::new();
         pipes
