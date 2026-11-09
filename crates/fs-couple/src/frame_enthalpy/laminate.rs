@@ -1,18 +1,20 @@
 //! Finite heating, thermal bending and prestress on the original frame timeline.
 //!
 //! Every trial uses the native implicit caloric residual and native linear-
-//! geometry force-based frame equilibrium at held nodal loads. The original
-//! free-sided laminate potential supplies each layer's endpoint-average stress
-//! work and internal-energy change. Their difference enters its original
+//! geometry force-based equilibrium or Newmark motion at held nodal loads.
+//! The original free-sided laminate potential supplies each layer's endpoint-
+//! average stress work and internal-energy change. Their difference enters its original
 //! caloric cell once, with either sign. Independently integrated nodal work,
 //! cell heat, thermal energy and combined energy must all pass admission.
 //!
-//! This is a quasistatic endpoint scheme, generally first order in physical
+//! Both thermal endpoint schemes are generally first order in physical
 //! time. Refine the thermal cells, member stations and time intervals separately.
 //! Lobatto tributary volumes are the explicit thermal spatial approximation;
 //! they do not resolve temperature inside a declared uniform layer. Reference
-//! geometry, mass and transport paths stay fixed. Inertia, finite rotations,
-//! phase changes and deformation-dependent transport require their own owners.
+//! geometry, mass and transport paths stay fixed. The explicit inertial route
+//! retains the original native mass and undamped average-acceleration Newmark
+//! owner. Finite rotations, phase changes, material damping and deformation-
+//! dependent transport require their own owners.
 
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
@@ -27,6 +29,7 @@ use fs_material::laminate::thermal::beam::thermoelastic::{
 };
 use fs_material::phase::PhaseStateError;
 use fs_math::dd::Dd;
+use fs_solid::frame2d::{DynamicHistory, laminate_thermal::dynamics::FrameLaminateNewmarkControls};
 use fs_solid::{SolidError, frame2d::Frame2d};
 use fs_solver::NewtonReport;
 use fs_thermal::enthalpy::{CellId, DepositedCell, DepositionSimulation, EnergyAudit, ThermalLaw};
@@ -124,11 +127,13 @@ struct Station {
     cells: Vec<usize>,
 }
 
-/// Native accepted equilibrium and immutable original thermal correspondence.
-/// Construction explicitly equilibrates the supplied frame at its current
+/// Native accepted mechanics and immutable original thermal correspondence.
+/// Quasistatic construction explicitly equilibrates the frame at its current
 /// temperatures and held load. That equilibrium defines the initial state;
-/// initialization is not a simulated heating interval. Existing nonzero
-/// velocities/accelerations refuse rather than discard an inertial history.
+/// initialization is not a simulated heating interval. The explicit dynamic
+/// constructor instead retains the actual displacement and velocity, including
+/// unequilibrated launch states and impulses. These evolution choices remain
+/// fixed across accepted steps and retries.
 #[derive(Clone)]
 pub struct ReciprocalLaminateFrame<'n, 'a> {
     frame: Frame2d,
@@ -138,6 +143,7 @@ pub struct ReciprocalLaminateFrame<'n, 'a> {
     stations: Vec<Station>,
     held_load: Vec<f64>,
     time_s: f64,
+    dynamics: Option<FrameLaminateNewmarkControls>,
 }
 
 /// One source-owned exchange per reference length; multiply by `weight_m` once.
@@ -152,13 +158,31 @@ pub struct LaminateFrameLayerExchange {
 pub struct LaminateFrameMechanicalExchange {
     pub layers: Vec<LaminateFrameLayerExchange>,
     pub stress_work_j: f64,
-    /// Held original nodal loads dotted with actual displacement changes.
+    /// Held original nodal loads dotted with the original native displacement
+    /// increment (the represented increment for quasistatic equilibrium).
     pub external_work_j: f64,
-    /// Layer stress work minus independently contracted native nodal work.
+    /// Layer stress work plus native kinetic change minus nodal-load work.
     pub work_residual_j: f64,
     pub internal_energy_change_j: f64,
     /// Signed exchange into the caloric owner, never numerical dissipation.
     pub reversible_heat_j: f64,
+    /// Original native inertial interval, absent for quasistatic equilibrium.
+    pub dynamics: Option<LaminateFrameDynamicExchange>,
+}
+
+/// Actual original Newmark trajectory and its independently audited work.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaminateFrameDynamicExchange {
+    /// Times are relative to the beginning of this coupled interval.
+    pub history: DynamicHistory,
+    /// Stable average(v) dot M delta(v), not absolute kinetic subtraction.
+    pub kinetic_energy_change_j: f64,
+    pub native_internal_work_j: f64,
+    pub native_external_work_j: f64,
+    pub native_energy_residual_j: f64,
+    /// Zero for this undamped average-acceleration method. A residual is never
+    /// relabeled as numerical loss, and numerical loss is never caloric heat.
+    pub numerical_dissipation_j: f64,
 }
 
 pub struct LaminateFrameEnthalpyReport {
@@ -208,6 +232,63 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
     /// material contexts must agree, including their typed temperature axis.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
+        frame: Frame2d,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        mapping: &[LaminateFrameCell],
+        held_load: &[f64],
+        caloric_reference: LaminateCaloricReference,
+        maximum_layer_points: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        Self::bind(
+            frame,
+            thermal,
+            source,
+            mapping,
+            held_load,
+            caloric_reference,
+            maximum_layer_points,
+            None,
+            cx,
+        )
+    }
+
+    /// Bind actual native motion to finite caloric storage without static
+    /// reinitialization or a velocity reset. Every thermal trial starts from
+    /// this SAME displacement/velocity and original-temperature force. Native
+    /// Newmark computes consistent initial acceleration from the held load;
+    /// its endpoint force uses the newly solved layer temperatures. Initial
+    /// kinetic energy, original mass and attached source/strength selections
+    /// remain physical state. Only the original undamped linear-geometry
+    /// laminate Newmark domain is admitted, using its physical work controls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_dynamic(
+        frame: Frame2d,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        mapping: &[LaminateFrameCell],
+        held_load: &[f64],
+        caloric_reference: LaminateCaloricReference,
+        maximum_layer_points: usize,
+        dynamics: FrameLaminateNewmarkControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        Self::bind(
+            frame,
+            thermal,
+            source,
+            mapping,
+            held_load,
+            caloric_reference,
+            maximum_layer_points,
+            Some(dynamics),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind(
         mut frame: Frame2d,
         thermal: &DepositionSimulation<'_>,
         source: &'n MaterialNetwork<'a>,
@@ -215,6 +296,7 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
         held_load: &[f64],
         _caloric_reference: LaminateCaloricReference,
         maximum_layer_points: usize,
+        dynamics: Option<FrameLaminateNewmarkControls>,
         cx: &Cx<'_>,
     ) -> Result<Self> {
         check(cx)?;
@@ -229,10 +311,16 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
                 .velocities()
                 .iter()
                 .chain(frame.accelerations())
-                .any(|&v| v != 0.0)
+                .any(|v| !v.is_finite())
+            || dynamics.is_none()
+                && frame
+                    .velocities()
+                    .iter()
+                    .chain(frame.accelerations())
+                    .any(|&v| v != 0.0)
         {
             return Err(invalid(
-                "complete bounded laminate frame, finite held loads and zero inertial history required",
+                "complete bounded laminate frame, finite held loads/motion and zero quasistatic inertial history required",
             ));
         }
         let transport = Arc::new(
@@ -413,10 +501,12 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             }
             cell.minimum_capacity_j_k = Some(floor);
         }
-        // Initialization is explicit and performed only on this owned trial.
-        frame
-            .static_load_with_cx(held_load, 1, cx)
-            .map_err(mechanical)?;
+        // Dynamic initialization must retain actual motion and prestress.
+        if dynamics.is_none() {
+            frame
+                .static_load_with_cx(held_load, 1, cx)
+                .map_err(mechanical)?;
+        }
         for element in 0..frame.element_count() {
             frame
                 .laminate_thermoelastic_energy(element, cx)
@@ -431,6 +521,7 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             stations,
             held_load: held_load.to_vec(),
             time_s: thermal.time_s(),
+            dynamics,
         })
     }
 
@@ -439,6 +530,10 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
     }
     pub const fn time_s(&self) -> f64 {
         self.time_s
+    }
+    /// Immutable native evolution policy; None denotes quasistatic equilibrium.
+    pub const fn dynamics(&self) -> Option<FrameLaminateNewmarkControls> {
+        self.dynamics
     }
     /// Conservative total capacity of each mapped cell at fixed station strains.
     /// Native stable quasistatic mechanical relaxation adds a nonnegative term.
@@ -487,6 +582,7 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
     fn proposal(
         &self,
         thermal: &DepositionSimulation<'_>,
+        duration_s: f64,
         tolerance: f64,
         cx: &Cx<'_>,
     ) -> Result<Proposal> {
@@ -518,13 +614,43 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             field.push(temperatures);
             start = end;
         }
-        let mut frame = self
-            .frame
-            .with_laminate_temperature_field(&field, cx)
-            .map_err(mechanical)?;
-        frame
-            .static_load_with_cx(&self.held_load, 1, cx)
-            .map_err(mechanical)?;
+        let (frame, kinetic, displacement_increment, dynamics) =
+            if let Some(controls) = self.dynamics {
+                let native = self
+                    .frame
+                    .laminate_newmark_candidate(&field, &self.held_load, duration_s, controls, cx)
+                    .map_err(mechanical)?;
+                let kinetic = native.retained_kinetic_energy_change_j();
+                let report = LaminateFrameDynamicExchange {
+                    history: native.history,
+                    kinetic_energy_change_j: native.kinetic_energy_change_j,
+                    native_internal_work_j: native.internal_work_j,
+                    native_external_work_j: native.external_work_j,
+                    native_energy_residual_j: native.energy_balance_residual_j,
+                    numerical_dissipation_j: 0.0,
+                };
+                let increment: Vec<_> = native
+                    .displacement_increment
+                    .into_iter()
+                    .map(Dd::from_f64)
+                    .collect();
+                (native.frame, kinetic, increment, Some(report))
+            } else {
+                let mut frame = self
+                    .frame
+                    .with_laminate_temperature_field(&field, cx)
+                    .map_err(mechanical)?;
+                frame
+                    .static_load_with_cx(&self.held_load, 1, cx)
+                    .map_err(mechanical)?;
+                let increment = frame
+                    .displacements()
+                    .iter()
+                    .zip(self.frame.displacements())
+                    .map(|(&after, &before)| Dd::from_f64(after) - Dd::from_f64(before))
+                    .collect();
+                (frame, Dd::ZERO, increment, None)
+            };
         let mut layers = Vec::new();
         let mut cell_heat = vec![Dd::ZERO; self.cells.len()];
         let (mut work, mut energy, mut heat) = (Dd::ZERO, Dd::ZERO, Dd::ZERO);
@@ -567,19 +693,26 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             }
         }
         let mut external = Dd::ZERO;
-        for ((&p, &before), &after) in self
-            .held_load
-            .iter()
-            .zip(self.frame.displacements())
-            .zip(frame.displacements())
-        {
+        for (&p, &increment) in self.held_load.iter().zip(&displacement_increment) {
             check(cx)?;
-            external = external + Dd::from_f64(p) * (Dd::from_f64(after) - Dd::from_f64(before));
+            external = external + Dd::from_f64(p) * increment;
         }
-        let residual = finite((work - external).to_f64())?;
+        if let Some(native) = &dynamics {
+            for difference in [
+                work - Dd::from_f64(native.native_internal_work_j),
+                external - Dd::from_f64(native.native_external_work_j),
+            ] {
+                if finite(difference.to_f64())?.abs() > tolerance {
+                    return Err(invalid(
+                        "layer stress or nodal-load work differs from the original Newmark account",
+                    ));
+                }
+            }
+        }
+        let residual = finite((work + kinetic - external).to_f64())?;
         if residual.abs() > tolerance {
             return Err(invalid(
-                "original layer stress work does not match held native nodal-load work",
+                "original layer stress work and kinetic change do not match held native nodal-load work",
             ));
         }
         let account = LaminateFrameMechanicalExchange {
@@ -589,6 +722,7 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             work_residual_j: residual,
             internal_energy_change_j: finite(energy.to_f64())?,
             reversible_heat_j: finite(heat.to_f64())?,
+            dynamics,
         };
         let cell_heat = self
             .cells
@@ -601,11 +735,13 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             frame,
             account,
             cell_heat,
-            retained: energy - external,
+            stored_change_j: finite((energy + kinetic).to_f64())?,
+            retained: energy + kinetic - external,
         })
     }
 
-    /// Advance finite heat and compatible shape/prestress on one physical clock.
+    /// Advance finite heat and compatible shape, prestress or native motion on
+    /// one physical clock, using the immutable construction-time evolution.
     /// The existing implicit energy-coordinate Newton solve owns all stencils,
     /// work limits and acceptance. `maximum_circuit_trials` bounds mechanical/
     /// material proposals here; there is no electrical state. Original native
@@ -623,6 +759,15 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
         if thermal.time_s() != self.time_s {
             return Err(invalid("native mechanical and caloric clocks disagree"));
         }
+        if self.dynamics.is_some_and(|d| {
+            !d.maximum_energy_defect_j.is_finite()
+                || d.maximum_energy_defect_j < 0.0
+                || d.maximum_energy_defect_j > controls.total_energy_tolerance_j
+        }) {
+            return Err(invalid(
+                "native mechanical energy allowance must fit the combined thermal allowance",
+            ));
+        }
         self.check_thermal(thermal, true, cx)?;
         let (thermal, frame, report) = cell_driver_candidate(
             thermal,
@@ -634,7 +779,12 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
                     .transport
                     .resolve(state, || cx.checkpoint().is_err())
                     .map_err(network)?;
-                let circuit = self.proposal(state, controls.total_energy_tolerance_j, cx)?;
+                let circuit = self.proposal(
+                    state,
+                    target_s - self.time_s,
+                    controls.total_energy_tolerance_j,
+                    cx,
+                )?;
                 Ok(DrivenCoefficients {
                     circuit,
                     sources_w: transport.sources_w,
@@ -667,6 +817,7 @@ impl<'n, 'a> ReciprocalLaminateFrame<'n, 'a> {
             stations: self.stations.clone(),
             held_load: self.held_load.clone(),
             time_s: thermal.time_s(),
+            dynamics: self.dynamics,
         };
         for cell in &mut next.cells {
             cell.original = thermal.cells()[&cell.original.id].clone();
@@ -694,6 +845,7 @@ struct Proposal {
     account: LaminateFrameMechanicalExchange,
     cell_heat: BTreeMap<CellId, f64>,
     retained: Dd,
+    stored_change_j: f64,
 }
 impl ThermalDriver for Proposal {
     type Model = Frame2d;
@@ -704,7 +856,7 @@ impl ThermalDriver for Proposal {
             contacts: &[],
             heat_j: self.account.reversible_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.account.internal_energy_change_j,
+            stored_change_j: self.stored_change_j,
             supplied_j: self.account.external_work_j,
         }
     }

@@ -34,6 +34,7 @@ use fs_qty::{
     Density, Dims, Pressure, QuantitySpec, Temperature,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
+use fs_solid::frame2d::FrameMassFormulation;
 use fs_solid::{Frame2d, Geometry};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
@@ -203,6 +204,28 @@ fn fixture<R>(
     cx: &Cx<'_>,
     run: impl FnOnce(Frame2d, DepositionSimulation<'_>, &MaterialNetwork<'_>) -> R,
 ) -> R {
+    fixture_with_mass(
+        plies,
+        length,
+        temperatures,
+        powers,
+        linked,
+        FrameMassFormulation::Lumped,
+        cx,
+        run,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn fixture_with_mass<R>(
+    plies: &[Ply],
+    length: f64,
+    temperatures: &[f64],
+    powers: &[f64],
+    linked: bool,
+    mass: FrameMassFormulation,
+    cx: &Cx<'_>,
+    run: impl FnOnce(Frame2d, DepositionSimulation<'_>, &MaterialNetwork<'_>) -> R,
+) -> R {
     let cards: Vec<_> = plies.iter().enumerate().map(|(i, &p)| card(i, p)).collect();
     let curves: Vec<_> = cards
         .iter()
@@ -261,7 +284,7 @@ fn fixture<R>(
         )
         .unwrap(),
     );
-    let mut frame = Frame2d::new(Geometry::Linear);
+    let mut frame = Frame2d::with_mass_formulation(Geometry::Linear, mass);
     frame.add_node(0.0, 0.0);
     frame.add_node(length, 0.0);
     frame.fix(0, [true; 3]);
@@ -399,6 +422,9 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
         "{actual:.16e} != {expected:.16e}; allowance {tolerance:e}"
     );
 }
+
+#[path = "frame_laminate_enthalpy/dynamics.rs"]
+mod dynamics;
 
 #[test]
 fn finite_source_heat_distinguishes_free_expansion_and_restrained_prestress() {
