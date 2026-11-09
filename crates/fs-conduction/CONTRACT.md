@@ -3764,6 +3764,40 @@ authority.
   sums. `tests/scanning_sensitivity.rs` checks those controls against finite
   differences with nonlinear conductivity, radiation and reverse propagation.
 
+  Whole-scan objectives, point responses and smooth peak responses retain the
+  original radiative reservoir and emissivity pullbacks. The shared reverse
+  sweep contracts each endpoint reservoir seed into its authored constant,
+  ramp, table or Chebyshev values on the same side of every event. One
+  emissivity control per patch accumulates across the whole history, in
+  original patch order. Full-tape and checkpointed evaluation share this path
+  and its transpose work; neither solves radiation a second time. Objective
+  and response scalar allowances include these returned controls. Value-only
+  evaluation keeps the original physical signal admission, including valid
+  chirps and constitutive corners, without demanding a derivative. Knot times,
+  material claims and interpolation modes remain fixed. The focused
+  `tests/scan_objective/radiation.rs` regressions compare whole-history and
+  response derivatives with physical finite differences and check checkpoint
+  identity, held-event sides and exact scalar allowances.
+
+  A scan can also retain the original `TemperatureContacts` owner through
+  `with_contacts` or `with_contacts_newton`. Each moving-source trial updates
+  live contact temperatures and, for coupled Newton, independently bound liquid
+  fractions on both material traces. The same owner handles explicit endpoints,
+  held-event sides, adaptive half steps and replay, retaining original contact
+  states and the physical heat account in `ScanTransport::Contact`. Temperature
+  contact iteration supports the existing area-mean ambient radiation; coupled
+  Newton refuses that radiation convention, which requires the owner's separate
+  pointwise model. Fixed geometry, source claims and prescribed pressure remain
+  unchanged. Endpoint adjoints bind the accepted complete contact residual and
+  use one transpose for source, history, radiation and whole-law resistance
+  multipliers. Contact feedback remains active in whole-scan source and radiation
+  derivatives; aggregate objective APIs do not yet return contact-law controls.
+  `tests/temperature_contact_enthalpy/scanning.rs` and
+  `tests/phase_contact/scanning.rs` cover moving deposition, independent total
+  energy and latent-contact balances, supported radiation, control derivatives,
+  reverse propagation through melting and atomic refusal. Native execution of
+  these additions remains unverified while the pinned dependency build fails.
+
   Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
   remapping, phase kinetics or vaporization. The basic `advance` entry point

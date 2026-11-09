@@ -11,9 +11,13 @@
 pub mod objective;
 mod fraction;
 
-use super::{ScanningEnthalpyRun, ScanStep, events, patches_before, poll};
+use super::{ScanningEnthalpyRun, ScanStep, ScanTransport, events, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
 use crate::{ConductionError, LinearConfig};
+use crate::interface::ContactResistanceGradient;
+use crate::interface::temperature::enthalpy::{
+    ContactEnthalpyLinearization, ContactEnthalpyRadiationLinearization,
+};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use crate::transient::enthalpy::adjoint::{EnthalpyAdjointError, EnthalpyStepLinearization};
 use crate::transient::enthalpy::heterogeneous::{HeterogeneousEnthalpyError,
@@ -85,6 +89,9 @@ pub struct ScanStepGradient {
     pub sources: Vec<MovingHeatGradient>,
     /// Original radiative parameters, or None when no radiation is attached.
     pub radiation: Option<ScanRadiationGradient>,
+    /// Whole-law resistance multipliers for the attached live contact model,
+    /// in its original canonical interface order. Empty without that model.
+    pub contact_resistance_multipliers: Vec<ContactResistanceGradient>,
 }
 
 // Preserve each native owner's physical parameters alongside its common
@@ -94,20 +101,25 @@ pub struct ScanStepGradient {
 enum ScanTangent<'m> {
     Storage(HeterogeneousEnthalpyStepLinearization<'m>),
     Radiation(HeterogeneousEnthalpyRadiationStepLinearization<'m>),
+    Contact { binding: ContactEnthalpyLinearization<'m>, max_face_pairs: usize },
+    ContactRadiation { binding: ContactEnthalpyRadiationLinearization<'m>, max_face_pairs: usize },
 }
 impl<'m> ScanTangent<'m> {
     fn transport(&self) -> &EnthalpyStepLinearization<'_> {
         match self {
             Self::Storage(binding) => binding.transport(),
             Self::Radiation(binding) => binding.transport(),
+            Self::Contact { binding, .. } => binding.transport().transport(),
+            Self::ContactRadiation { binding, .. } => binding.transport().transport(),
         }
     }
 
     fn pullback(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
-        -> Result<(HeterogeneousEnthalpyStepGradient, Option<ScanRadiationGradient>), EnthalpyAdjointError>
+        -> Result<(HeterogeneousEnthalpyStepGradient, Option<ScanRadiationGradient>,
+            Vec<ContactResistanceGradient>), EnthalpyAdjointError>
     {
         match self {
-            Self::Storage(binding) => Ok((binding.pullback(cx, seed, linear)?, None)),
+            Self::Storage(binding) => Ok((binding.pullback(cx, seed, linear)?, None, Vec::new())),
             Self::Radiation(binding) => {
                 let gradient = binding.pullback(cx, seed, linear)?;
                 let radiation = ScanRadiationGradient {
@@ -115,7 +127,20 @@ impl<'m> ScanTangent<'m> {
                     reservoir_temperatures: gradient.reservoir_temperatures,
                     emissivities: gradient.emissivities,
                 };
-                Ok((gradient.storage, Some(radiation)))
+                Ok((gradient.storage, Some(radiation), Vec::new()))
+            }
+            Self::Contact { binding, max_face_pairs } => {
+                let gradient = binding.pullback_with_resistance_controls(cx, seed, linear, *max_face_pairs)?;
+                Ok((gradient.storage, None, gradient.resistance_multipliers))
+            }
+            Self::ContactRadiation { binding, max_face_pairs } => {
+                let gradient = binding.pullback_with_resistance_controls(cx, seed, linear, *max_face_pairs)?;
+                let radiation = ScanRadiationGradient {
+                    radiation_regions: gradient.radiation.radiation_regions,
+                    reservoir_temperatures: gradient.radiation.reservoir_temperatures,
+                    emissivities: gradient.radiation.emissivities,
+                };
+                Ok((gradient.radiation.storage, Some(radiation), gradient.resistance_multipliers))
             }
         }
     }
@@ -150,8 +175,9 @@ impl ScanStepLinearization<'_> {
     pub fn transport(&self) -> &EnthalpyStepLinearization<'_> { self.transport.transport() }
 
     /// Pull back an objective seed in nodal specific-enthalpy coordinates.
-    /// Complete radiation feedback and its reservoir/emissivity controls use
-    /// the same transpose as all moving sources, with no additional primal solve.
+    /// Complete contact and radiation feedback, whole-law resistance multipliers
+    /// and reservoir/emissivity controls use the same transpose as all moving
+    /// sources, with no additional primal solve or frozen contact approximation.
     /// Prescribed nodal bath-temperature gradients remain in `storage.transport`;
     /// their constraint multipliers never enter physical heat-input pullbacks.
     /// Geometry, phase charts, conductivity, time grid and event side remain
@@ -160,14 +186,15 @@ impl ScanStepLinearization<'_> {
     pub fn pullback(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
         -> Result<ScanStepGradient, ScanSensitivityError>
     {
-        let (storage, radiation) = self.transport.pullback(cx, seed, linear)?;
+        let (storage, radiation, contact_resistance_multipliers) =
+            self.transport.pullback(cx, seed, linear)?;
         let mut sources = Vec::with_capacity(self.sources.len());
         for (i, binding) in self.sources.iter().enumerate() {
             poll(cx, i)?;
             sources.push(binding.pullback(cx, &storage.transport.source_density)?);
         }
         poll(cx, sources.len())?;
-        Ok(ScanStepGradient { storage, sources, radiation })
+        Ok(ScanStepGradient { storage, sources, radiation, contact_resistance_multipliers })
     }
 
     /// Pull back a nodal temperature objective through the original dT/dh.
@@ -273,23 +300,47 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, _) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
-        let accepted = report.solution().clone();
-        let transport = match &self.radiation {
-            None => ScanTangent::Storage(self.run.storage.linearize_accepted(cx, problem,
-                self.run.problem.interfaces, &self.run.specific_h, end - start, config, accepted)?),
-            Some(radiation) => {
-                let patches = if left { patches_before(cx, &radiation.patches, end)? }
-                    else {
-                        let mut patches = Vec::with_capacity(radiation.patches.len());
-                        for (i, patch) in radiation.patches.iter().enumerate() {
-                            poll(cx, i)?;
-                            patches.push(patch.at(end)?);
-                        }
-                        patches
-                    };
-                ScanTangent::Radiation(self.run.storage.linearize_accepted_parameters_with_ambient_radiation(
-                    cx, problem, self.run.problem.interfaces, &self.run.specific_h, end - start,
-                    config, &patches, accepted, budget.max_radiation_feedback_entries)?)
+        let patches = if let Some(radiation) = &self.radiation {
+            Some(if left { patches_before(cx, &radiation.patches, end)? } else {
+                let mut patches = Vec::with_capacity(radiation.patches.len());
+                for (i, patch) in radiation.patches.iter().enumerate() {
+                    poll(cx, i)?;
+                    patches.push(patch.at(end)?);
+                }
+                patches
+            })
+        } else { None };
+        let transport = if let Some(contacts) = &self.contacts {
+            let ScanTransport::Contact(accepted) = &report.transport else {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "scan contact tangent requires its original accepted contact report").into());
+            };
+            let max_face_pairs = contacts.max_face_pairs;
+            let residual = contacts.physical_residual_tolerance_j();
+            match patches.as_deref() {
+                None => ScanTangent::Contact {
+                    binding: contacts.contacts.linearize_accepted_enthalpy(cx,
+                        &self.run.storage, problem, &self.run.specific_h, end - start,
+                        config, residual, accepted.as_ref().clone(), max_face_pairs)?,
+                    max_face_pairs,
+                },
+                Some(patches) => ScanTangent::ContactRadiation {
+                    binding: contacts.contacts.linearize_accepted_enthalpy_with_ambient_radiation(cx,
+                        &self.run.storage, problem, &self.run.specific_h, end - start,
+                        config, residual, patches, accepted.as_ref().clone(),
+                        budget.max_radiation_feedback_entries, max_face_pairs)?,
+                    max_face_pairs,
+                },
+            }
+        } else {
+            let accepted = report.solution().clone();
+            match patches.as_deref() {
+                None => ScanTangent::Storage(self.run.storage.linearize_accepted(cx, problem,
+                    self.run.problem.interfaces, &self.run.specific_h, end - start, config, accepted)?),
+                Some(patches) => ScanTangent::Radiation(
+                    self.run.storage.linearize_accepted_parameters_with_ambient_radiation(
+                        cx, problem, self.run.problem.interfaces, &self.run.specific_h, end - start,
+                        config, patches, accepted, budget.max_radiation_feedback_entries)?),
             }
         };
         let fraction_derivatives = fraction::bind(cx, &self.run.storage,

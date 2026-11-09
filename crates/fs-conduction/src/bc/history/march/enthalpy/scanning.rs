@@ -2,7 +2,9 @@
 //!
 //! This owns the scan declarations for the entire trajectory. Background source
 //! histories, distinct phase charts, reference masses, k(T), phase conductivity
-//! and fixed matching contacts stay with the original run. There is no alternate
+//! and fixed matching contacts stay with the original run. Optional source-backed
+//! thermal contacts retain their full temperature/phase feedback and physical
+//! heat accounts through the existing contact solvers. There is no alternate
 //! heat equation, phase update or implicit reset of history. A source is a
 //! discretely normalized deposition profile, not an optical or melt-flow model.
 //! Prescribed temperatures resolve through each node's original caloric chart;
@@ -11,6 +13,7 @@
 
 /// Implicit endpoint derivatives with respect to moving-source controls.
 pub mod sensitivity;
+mod contact;
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, poll};
@@ -21,6 +24,7 @@ use super::super::events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
 use crate::{AmbientRadiationConfig, ScalarField};
+use crate::interface::temperature::enthalpy::ContactEnthalpyStep;
 use crate::transient::enthalpy::radiation::EnthalpyRadiationStepSolution;
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
@@ -53,6 +57,9 @@ pub enum ScanTransport {
     Conduction(EnthalpyStepSolution),
     /// The same storage with separate convection and physical radiation audits.
     Radiation(Box<EnthalpyRadiationStepSolution>),
+    /// Source-backed contacts, their local states and complete physical balance.
+    /// Optional ambient radiation remains inside the same coupled response.
+    Contact(Box<ContactEnthalpyStep>),
 }
 
 /// Accepted endpoint plus source observations. The solver's source_w includes
@@ -69,11 +76,14 @@ impl ScanStep {
     /// For radiation, the Robin totals and `dirichlet_in_w` use the retained
     /// inner boundary. Its variant also retains `physical_dirichlet_in_w` and
     /// the nonlinear radiative heat for the separately checked physical balance.
+    /// With source-backed contacts, use the Contact variant's physical report for
+    /// the freshly queried contact/radiation residual and complete heat balance.
     #[must_use]
     pub fn solution(&self) -> &EnthalpyStepSolution {
         match &self.transport {
             ScanTransport::Conduction(step) => step,
             ScanTransport::Radiation(step) => &step.conduction,
+            ScanTransport::Contact(step) => &step.conduction,
         }
     }
 }
@@ -85,6 +95,7 @@ pub struct ScanningEnthalpyRun<'h, 'm, 'c> {
     sources: Vec<MovingHeatSource>,
     radiation: Option<ScanRadiation>,
     motion_limit: Option<ScanMotionLimit>,
+    contacts: Option<contact::ScanContactBinding<'m, 'c>>,
 }
 impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     /// Attach one or more independently moving/controlled sources before the
@@ -106,7 +117,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             radiation.config.validate().map_err(conduction)?;
             admit_histories(cx, run.problem.boundary, run.time_s(), &radiation.patches).map_err(conduction)?;
         }
-        let model = Self { run, sources, radiation, motion_limit: None };
+        let model = Self { run, sources, radiation, motion_limit: None, contacts: None };
         model.source_at(cx, model.run.time_s(), false)?;
         poll(cx, 0).map_err(conduction)?;
         Ok(model)
@@ -283,15 +294,23 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, deposition) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
-        let transport = match &self.radiation {
-            None => ScanTransport::Conduction(self.run.storage.advance(cx, problem,
-                self.run.problem.interfaces, old, end - start, config)?),
-            Some(radiation) => {
-                let patches = if left { patches_before(cx, &radiation.patches, end) } else {
-                    radiation.patches.iter().map(|p| p.at(end)).collect()
-                }.map_err(conduction)?;
-                ScanTransport::Radiation(Box::new(self.run.storage.advance_with_ambient_radiation(cx,
-                    problem, self.run.problem.interfaces, old, end - start, config, &patches, radiation.config)?))
+        let patches = self.radiation.as_ref().map(|radiation| {
+            if left { patches_before(cx, &radiation.patches, end) } else {
+                radiation.patches.iter().map(|patch| patch.at(end)).collect()
+            }
+        }).transpose().map_err(conduction)?;
+        let radiation = self.radiation.as_ref().zip(patches.as_deref())
+            .map(|(policy, patches)| (patches, policy.config));
+        let transport = if let Some(contacts) = &self.contacts {
+            ScanTransport::Contact(Box::new(contacts.advance(cx, &self.run.storage,
+                problem, old, end - start, config, radiation)?))
+        } else {
+            match radiation {
+                None => ScanTransport::Conduction(self.run.storage.advance(cx, problem,
+                    self.run.problem.interfaces, old, end - start, config)?),
+                Some((patches, radiation_config)) =>
+                    ScanTransport::Radiation(Box::new(self.run.storage.advance_with_ambient_radiation(cx,
+                        problem, self.run.problem.interfaces, old, end - start, config, patches, radiation_config)?)),
             }
         };
         Ok(ScanStep { transport, deposition })

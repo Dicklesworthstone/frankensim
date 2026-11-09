@@ -4,6 +4,8 @@
 mod common;
 #[path = "phase_contact/history.rs"]
 mod history;
+#[path = "phase_contact/scanning.rs"]
+mod scanning;
 mod support;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;

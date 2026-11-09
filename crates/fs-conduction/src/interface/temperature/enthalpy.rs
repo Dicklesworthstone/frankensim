@@ -16,7 +16,7 @@ use crate::transient::enthalpy::heterogeneous::{
 use super::{ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts, invalid, poll};
 
 /// One accepted enthalpy field and the original and re-evaluated contact laws.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ContactEnthalpyStep {
     /// Last counted nonlinear response. Advance history with its specific h,
     /// never by attempting to invert its possibly isothermal temperature field.
@@ -608,6 +608,7 @@ impl TemperatureContacts<'_, '_> {
 
 /// Rechecked heterogeneous enthalpy endpoint with the complete source-backed
 /// contact Jacobian expressed in specific-enthalpy coordinates.
+#[derive(Debug)]
 pub struct ContactEnthalpyLinearization<'m> {
     step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyStepLinearization<'m>,
     contact: super::tangent::ContactTemperatureLinearization,
@@ -711,6 +712,7 @@ impl TemperatureContacts<'_, '_> {
 }
 
 
+#[derive(Debug)]
 pub struct ContactEnthalpyRadiationLinearization<'m> {
     step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyRadiationStepLinearization<'m>,
     contact: super::tangent::ContactTemperatureLinearization,

@@ -11,6 +11,8 @@ mod pointwise_adjoint;
 mod adaptive;
 #[path = "temperature_contact_enthalpy/adjoint.rs"]
 mod adjoint;
+#[path = "temperature_contact_enthalpy/scanning.rs"]
+mod scanning;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, ConductivityTable,
