@@ -326,3 +326,98 @@ fn crossing_material_knots_observes_cancellation() {
         ));
     });
 }
+
+fn skew_mesh() -> ConductionMesh {
+    ConductionMesh::new(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [1.0, 7.0, 0.0],
+            [2.0, 4.0, 11.0],
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn uniform_skew_tetrahedron_has_no_conductive_flux_or_material_sensitivity() {
+    with_cx(|_, cx| {
+        let mesh = skew_mesh();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let source = ScalarField::Uniform(0.0);
+        for material in [curve(), anisotropic()] {
+            let temperature = [350.1; 4];
+            assert_eq!(
+                element_heat_flux(&mesh, &material, &temperature).unwrap(),
+                [[0.0; 3]]
+            );
+            let assigned = ElementMaterials::new(
+                MaterialTable::new([(MaterialId(7), material.clone())]).unwrap(),
+                vec![MaterialId(7)],
+            )
+            .unwrap();
+            assert_eq!(
+                element_heat_flux_assigned(&mesh, &assigned, &temperature).unwrap(),
+                [[0.0; 3]]
+            );
+            let problem = ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                element_materials: Some(&assigned),
+                source: &source,
+            };
+            let dual = [0.3, -0.2, 0.4, 0.1];
+            assert_eq!(
+                RobinResponse::conductivity_scale_pullback(cx, problem, &temperature, &dual, 1)
+                    .unwrap(),
+                [0.0]
+            );
+            assert_eq!(
+                RobinResponse::conductivity_rotation_pullback(cx, problem, &temperature, &dual, 1)
+                    .unwrap(),
+                [[0.0; 3]]
+            );
+            let operator =
+                assemble_operator(cx, &mesh, &boundary, &material, &source, &temperature).unwrap();
+            let jacobian =
+                assemble_jacobian(cx, &mesh, &boundary, &material, &temperature).unwrap();
+            let latent = assemble_enthalpy_jacobian_with_optional_interfaces(
+                cx, &mesh, &boundary, &material, &temperature, &[0.0; 4], Some(&[1.7]),
+                Some(&[[0.3, -0.2, 0.4, 0.1]]), None, None, None,
+            )
+            .unwrap();
+            for row in 0..4 {
+                assert_eq!(
+                    operator.operator.row(row), jacobian.row(row),
+                    "uniform state has no K'(T)*grad(T) correction"
+                );
+                assert!(
+                    latent.row(row).1.iter().all(|&entry| entry == 0.0),
+                    "phase conductivity cannot transport heat along an isothermal latent plateau"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn affine_skew_flux_keeps_absolute_constitutive_temperature() {
+    let mesh = skew_mesh();
+    let material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 10.0), (450.0, 210.0)]).unwrap(),
+    );
+    // T=300+2x-3y+4z. Its mean is 305.75 K and k(T)=T-240.
+    // Translating T changes k, even though the physical gradient is unchanged.
+    for offset in [0.0, 32.0] {
+        let temperature = [300.0, 306.0, 281.0, 336.0].map(|t| t + offset);
+        let flux = element_heat_flux(&mesh, &material, &temperature).unwrap();
+        for (actual, slope) in flux[0].into_iter().zip([2.0, -3.0, 4.0]) {
+            close(actual, -(65.75 + offset) * slope, 2e-14);
+        }
+    }
+}

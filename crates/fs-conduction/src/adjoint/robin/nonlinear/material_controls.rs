@@ -3,7 +3,7 @@
 
 use super::super::{RobinResponse, vector};
 use super::{ConductionError, ConductionProblem, Cx, checked, invalid, material_is_smooth, poll};
-use crate::assemble::{checked_element_conductivity, element_stiffness};
+use crate::assemble::{checked_element_conductivity, element_conduction_action};
 
 impl RobinResponse {
     /// Pull a complete nodal-load adjoint back to independent conductivity scales.
@@ -63,16 +63,11 @@ impl RobinResponse {
             let tensor =
                 checked_element_conductivity(Some(cx), problem.mesh, e, model, temperature, false)?
                     .tensor;
-            let stiffness = element_stiffness(problem.mesh, e, &tensor);
+            let load = element_conduction_action(problem.mesh, e, &tensor, temperature);
             let mut value = 0.0;
             for (a, &v) in tet.iter().enumerate() {
-                for (b, &w) in tet.iter().enumerate() {
-                    let contribution = checked(
-                        checked(nodal_load_adjoint[v as usize] * checked(stiffness[a][b])?)?
-                            * temperature[w as usize],
-                    )?;
-                    value = checked(value - contribution)?;
-                }
+                let contribution = checked(nodal_load_adjoint[v as usize] * checked(load[a])?)?;
+                value = checked(value - contribution)?;
             }
             result.push(value);
         }
@@ -103,8 +98,8 @@ impl RobinResponse {
     /// body, modify a source claim's support, or differentiate an interface
     /// orientation law. Add explicit objective dependence separately.
     ///
-    /// One 24-byte-per-element result vector is allocated. Three local 4x4
-    /// contractions per element reuse the native stiffness kernel; no global
+    /// One 24-byte-per-element result vector is allocated. Three local
+    /// contractions reuse the native matrix-free conductive action; no global
     /// matrix, extra primal solve or extra transpose solve is formed.
     ///
     /// # Errors
@@ -134,15 +129,10 @@ impl RobinResponse {
                     .tensor;
             let mut gradient = [0.0; 3];
             for (axis, derivative) in rotation_tangents(tensor).iter().enumerate() {
-                let stiffness = element_stiffness(problem.mesh, e, derivative);
+                let load = element_conduction_action(problem.mesh, e, derivative, temperature);
                 for (a, &v) in tet.iter().enumerate() {
-                    for (b, &w) in tet.iter().enumerate() {
-                        let contribution = checked(
-                            checked(nodal_load_adjoint[v as usize] * checked(stiffness[a][b])?)?
-                                * temperature[w as usize],
-                        )?;
-                        gradient[axis] = checked(gradient[axis] - contribution)?;
-                    }
+                    let contribution = checked(nodal_load_adjoint[v as usize] * checked(load[a])?)?;
+                    gradient[axis] = checked(gradient[axis] - contribution)?;
                 }
             }
             result.push(gradient);

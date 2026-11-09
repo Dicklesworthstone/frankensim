@@ -119,14 +119,7 @@ fn homogeneous(design: &ConductivityDesign<'_>, free: &[f64]) -> Vec<f64> {
     full
 }
 fn element_action(design: &ConductivityDesign<'_>, e: usize, full: &[f64]) -> [f64;4] {
-    let mesh = design.problem.mesh;
-    let tet = mesh.complex().tets[e];
-    let ke = crate::assemble::element_stiffness(mesh,e,&design.element_tensors[e]);
-    let mut values = [0.0;4];
-    for a in 0..4 { for b in 0..4 {
-        values[a] = ke[a][b].mul_add(full[tet[b] as usize],values[a]);
-    }}
-    values
+    crate::assemble::element_conduction_action(design.problem.mesh, e, &design.element_tensors[e], full)
 }
 fn pullback(cx: &Cx<'_>, design: &ConductivityDesign<'_>, left: &[f64], full: &[f64])
     -> Result<Vec<f64>,ConductionError>

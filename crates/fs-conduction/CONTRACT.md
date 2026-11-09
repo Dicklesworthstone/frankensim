@@ -1,5 +1,28 @@
 # CONTRACT: fs-conduction
 
+## Constant-temperature invariance of native conductive loads
+
+Bulk P1 gradients use the three original nodal differences before multiplying
+by FEEC shape gradients. Uniform temperature therefore gives exactly zero
+local gradient, recovered heat flux and material-control load, including
+source-bound phase and melting fields. Material tensors and their derivatives
+are still evaluated at the original absolute temperature/enthalpy coordinates;
+subtracting a reference does not change k(T) or its source support.
+
+The element stiffness computes six independent contractions in the symmetric
+three-edge basis and completes the constant null mode. Local matrix-free loads
+and nonlinear coefficient columns use the same independent gradients and
+balanced fourth nodal load. Steady, nonlinear Robin, first/second-order design
+and enthalpy-stage conductivity pullbacks reuse these loads. This removes
+absolute-temperature cancellation from these local operations, not all sparse
+assembly, solve or global energy roundoff. No mesh-accuracy or measured-speed
+claim follows from the reduced arithmetic.
+
+Focused G0/G1/G3 tests check exact uniform-state zeros, skew affine Fourier
+flux/dissipation, symmetric weak-form stiffness and representable temperature
+translations. Native source-law regressions also check that shifting a
+nonuniform absolute temperature still changes a temperature-dependent k(T).
+
 ## Material-phase transport on the original lumped enthalpy owner
 
 `lumped::LumpedPhaseThermalTransport` binds the original prepared conductivity

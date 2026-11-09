@@ -48,6 +48,8 @@ use crate::interface::ThermalInterfaces;
 use crate::material::{ConductivityModel, ElementConductivity, ElementMaterials};
 use crate::mesh::ConductionMesh;
 
+mod element;
+
 /// Elements (or faces) processed between cancellation polls.
 pub const ASSEMBLY_TILE: usize = 512;
 
@@ -202,28 +204,48 @@ fn checkpoint(cx: &Cx<'_>, stage: &'static str, at: usize) -> Result<(), Conduct
         .map_err(|_| ConductionError::Cancelled { stage, at })
 }
 
-/// The 4×4 element conduction matrix `V · gᵀ_a K g_b` for one tet.
+/// The symmetric 4×4 conduction matrix `V · gᵀ_a K g_b` for one tet.
+/// `k` is the symmetric physical conductivity or its symmetric differential.
+/// The three independent shape gradients determine the constant null mode.
 #[must_use]
 pub fn element_stiffness(
     mesh: &ConductionMesh,
     element: usize,
     k: &[[f64; 3]; 3],
 ) -> [[f64; 4]; 4] {
-    let volume = mesh.element_volume(element);
-    let g = &mesh.geometry().grads[element];
-    let mut out = [[0.0f64; 4]; 4];
-    for a in 0..4 {
-        // K·g_a, then dot with g_b.
-        let mut kga = [0.0f64; 3];
-        for (i, kg) in kga.iter_mut().enumerate() {
-            *kg = k[i][0].mul_add(g[a][0], k[i][1].mul_add(g[a][1], k[i][2] * g[a][2]));
-        }
-        for b in 0..4 {
-            let v = g[b][0].mul_add(kga[0], g[b][1].mul_add(kga[1], g[b][2] * kga[2]));
-            out[a][b] = volume * v;
-        }
-    }
-    out
+    element::stiffness(
+        mesh.element_volume(element),
+        &mesh.geometry().grads[element],
+        k,
+    )
+}
+
+/// P1 gradient from nodal differences. Constitutive queries still receive
+/// absolute temperatures; only the derivative removes the constant mode.
+pub(crate) fn element_gradient(
+    mesh: &ConductionMesh,
+    element: usize,
+    temperature: &[f64],
+) -> [f64; 3] {
+    element::gradient(
+        &mesh.geometry().grads[element],
+        mesh.complex().tets[element].map(|v| temperature[v as usize]),
+    )
+}
+
+/// Matrix-free local conductive load, with zero response to a uniform field.
+pub(crate) fn element_conduction_action(
+    mesh: &ConductionMesh,
+    element: usize,
+    k: &[[f64; 3]; 3],
+    temperature: &[f64],
+) -> [f64; 4] {
+    element::action(
+        mesh.element_volume(element),
+        &mesh.geometry().grads[element],
+        k,
+        mesh.complex().tets[element].map(|v| temperature[v as usize]),
+    )
 }
 
 /// Element-mean temperature — for P₁ this IS the exact element average
@@ -922,6 +944,8 @@ fn assemble_transport_jacobian(
             };
             let ke = element_stiffness(mesh, e, &moments.tensor);
             let scale = element_scales.map_or(1.0, |scales| scales[e]);
+            let phase_load = element_scale_derivatives
+                .map(|_| element_conduction_action(mesh, e, &moments.tensor, temperature));
             for a in 0..4 {
                 for b in 0..4 {
                     let mut entry = ke[a][b];
@@ -932,11 +956,8 @@ fn assemble_transport_jacobian(
                     }
                     coo.push(tet[a] as usize, tet[b] as usize, entry);
                 }
-                if let Some(derivatives) = element_scale_derivatives {
-                    let mut residual = 0.0f64;
-                    for (b, &vertex) in tet.iter().enumerate() {
-                        residual = ke[a][b].mul_add(temperature[vertex as usize], residual);
-                    }
+                if let (Some(derivatives), Some(load)) = (element_scale_derivatives, phase_load) {
+                    let residual = load[a];
                     for c in 0..4 {
                         let entry = residual * derivatives[e][c];
                         crate::require_finite("enthalpy phase conductivity Jacobian", entry)?;
@@ -950,13 +971,7 @@ fn assemble_transport_jacobian(
             let g = &mesh.geometry().grads[e];
             let volume = mesh.element_volume(e);
             // ∇T_h on this element (constant).
-            let mut grad_t = [0.0f64; 3];
-            for (b, gb) in g.iter().enumerate() {
-                let tb = temperature[tet[b] as usize];
-                for i in 0..3 {
-                    grad_t[i] = tb.mul_add(gb[i], grad_t[i]);
-                }
-            }
+            let grad_t = element_gradient(mesh, e, temperature);
             // <λ_c K'(T_h)>·∇T_h. Distinct columns are necessary when
             // the P1 field crosses a source knot.
             let mut kpg = [[0.0f64; 3]; 4];
@@ -966,11 +981,10 @@ fn assemble_transport_jacobian(
                         .mul_add(grad_t[0], kp[i][1].mul_add(grad_t[1], kp[i][2] * grad_t[2]));
                 }
             }
-            for a in 0..4 {
-                for c in 0..4 {
-                    let ga_kpg =
-                        g[a][0].mul_add(kpg[c][0], g[a][1].mul_add(kpg[c][1], g[a][2] * kpg[c][2]));
-                    let mut entry = volume * ga_kpg;
+            for c in 0..4 {
+                let column = element::weak_load(volume, g, kpg[c]);
+                for a in 0..4 {
+                    let mut entry = column[a];
                     if let Some(slopes) = temperature_derivatives {
                         entry *= scale;
                         // Original phase moments already differentiate K with

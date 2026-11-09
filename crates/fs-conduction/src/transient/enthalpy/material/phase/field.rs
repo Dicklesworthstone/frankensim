@@ -266,12 +266,7 @@ impl<'c> PhaseFieldTransport<'c> {
                 .for_element(element)
                 .element_moments(cx, vertices.map(|v| h[v as usize]), false)?
                 .tensor;
-            let mut gradient = [0.0; 3];
-            for (&vertex, shape_gradient) in vertices.iter().zip(&mesh.geometry().grads[element]) {
-                for (value, &shape) in gradient.iter_mut().zip(shape_gradient) {
-                    *value = temperature[vertex as usize].mul_add(shape, *value);
-                }
-            }
+            let gradient = crate::assemble::element_gradient(mesh, element, &temperature);
             flux.push([
                 finite(-k[0][0].mul_add(
                     gradient[0],

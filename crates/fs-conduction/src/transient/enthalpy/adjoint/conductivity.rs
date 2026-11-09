@@ -4,14 +4,14 @@
 //! boundary, contact or source terms and no second state derivative.
 
 use super::super::EnthalpyConductivity;
-use crate::assemble::{checked_element_conductivity, element_stiffness};
+use crate::assemble::{checked_element_conductivity, element_conduction_action};
 
 use super::{
     ASSEMBLY_TILE, ConductionProblem, Cx, EnthalpyAdjointError, EnthalpyStepLinearization, finite,
     poll, vector,
 };
 
-/// Reuse the production constitutive integral and stiffness scaling order.
+/// Reuse the production constitutive integral and conservative local action.
 /// Source tensors and phase scales come only from StepContext's typed laws at
 /// the accepted nodal enthalpies, including all directional phase responses.
 pub(super) fn element_loads(
@@ -40,7 +40,7 @@ pub(super) fn element_loads(
     loads.try_reserve_exact(elements).map_err(|_| {
         EnthalpyAdjointError::InvalidInput("enthalpy conductivity load allocation refused")
     })?;
-    for (element, tet) in mesh.complex().tets.iter().enumerate() {
+    for element in 0..mesh.element_count() {
         if element % ASSEMBLY_TILE == 0 {
             poll(cx, element)?;
         }
@@ -55,7 +55,7 @@ pub(super) fn element_loads(
                     .tensor
             }
         };
-        let mut stiffness = element_stiffness(mesh, element, &tensor);
+        let mut local = element_conduction_action(mesh, element, &tensor, temperature);
         if let Some(scales) = phase_scales {
             let scale = finite(scales[element])?;
             if scale <= 0.0 {
@@ -63,17 +63,12 @@ pub(super) fn element_loads(
                     "enthalpy conductivity requires positive phase scales",
                 ));
             }
-            for row in &mut stiffness {
-                for entry in row {
-                    *entry = finite(*entry * scale)?;
-                }
+            for load in &mut local {
+                *load = finite(*load * scale)?;
             }
         }
-        let mut local = [0.0; 4];
-        for (a, row) in stiffness.iter().enumerate() {
-            for (b, &vertex) in tet.iter().enumerate() {
-                local[a] = finite(finite(row[b])?.mul_add(temperature[vertex as usize], local[a]))?;
-            }
+        for &load in &local {
+            finite(load)?;
         }
         loads.push(local);
     }

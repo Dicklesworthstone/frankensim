@@ -1496,7 +1496,6 @@ pub fn element_heat_flux(
     }
     let mut out = Vec::with_capacity(mesh.element_count());
     for e in 0..mesh.element_count() {
-        let tet = mesh.complex().tets[e];
         let k = crate::assemble::checked_element_conductivity(
             None,
             mesh,
@@ -1506,14 +1505,7 @@ pub fn element_heat_flux(
             false,
         )?
         .tensor;
-        let g = &mesh.geometry().grads[e];
-        let mut grad = [0.0f64; 3];
-        for (b, gb) in g.iter().enumerate() {
-            let tb = temperature[tet[b] as usize];
-            for i in 0..3 {
-                grad[i] = tb.mul_add(gb[i], grad[i]);
-            }
-        }
+        let grad = crate::assemble::element_gradient(mesh, e, temperature);
         let mut q = [0.0f64; 3];
         for (i, qi) in q.iter_mut().enumerate() {
             *qi = -k[i][0].mul_add(grad[0], k[i][1].mul_add(grad[1], k[i][2] * grad[2]));
@@ -1542,7 +1534,6 @@ pub fn element_heat_flux_assigned(
     }
     let mut out = Vec::with_capacity(mesh.element_count());
     for e in 0..mesh.element_count() {
-        let tet = mesh.complex().tets[e];
         let material = materials.model_for(e)?;
         let k = crate::assemble::checked_element_conductivity(
             None,
@@ -1553,14 +1544,7 @@ pub fn element_heat_flux_assigned(
             false,
         )?
         .tensor;
-        let g = &mesh.geometry().grads[e];
-        let mut grad = [0.0f64; 3];
-        for (b, gb) in g.iter().enumerate() {
-            let tb = temperature[tet[b] as usize];
-            for i in 0..3 {
-                grad[i] = tb.mul_add(gb[i], grad[i]);
-            }
-        }
+        let grad = crate::assemble::element_gradient(mesh, e, temperature);
         let mut q = [0.0f64; 3];
         for (i, qi) in q.iter_mut().enumerate() {
             *qi = -k[i][0].mul_add(grad[0], k[i][1].mul_add(grad[1], k[i][2] * grad[2]));

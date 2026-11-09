@@ -49,7 +49,7 @@ pub use fs_solver::goal::inverse::spectral::{
 
 use crate::ConductionError;
 use crate::assemble::{
-    DofMap, assemble_operator_scaled_with_interfaces, element_stiffness, reduce,
+    DofMap, assemble_operator_scaled_with_interfaces, reduce,
 };
 use crate::interface::ThermalInterfaces;
 use crate::material::{ElementMaterials, TemperatureSpan};
@@ -485,16 +485,17 @@ impl<'m> ConductivityDesign<'m> {
         let mut out = vec![0.0f64; mesh.element_count()];
         for (e, slot) in out.iter_mut().enumerate() {
             let tet = mesh.complex().tets[e];
-            let ke = element_stiffness(mesh, e, &self.element_tensors[e]);
+            let load = crate::assemble::element_conduction_action(
+                mesh,
+                e,
+                &self.element_tensors[e],
+                temperature,
+            );
             let mut acc = 0.0f64;
             for a in 0..4 {
                 let ia = self.dofs.slot_of(tet[a] as usize);
                 let Some(ia) = ia else { continue };
-                let mut row = 0.0f64;
-                for b in 0..4 {
-                    row = ke[a][b].mul_add(temperature[tet[b] as usize], row);
-                }
-                acc = lambda[ia].mul_add(row, acc);
+                acc = lambda[ia].mul_add(load[a], acc);
             }
             *slot = acc;
         }
