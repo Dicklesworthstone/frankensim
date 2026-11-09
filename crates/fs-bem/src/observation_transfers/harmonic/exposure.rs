@@ -14,6 +14,8 @@ use fs_fft::harmonic_window::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+mod positive_band;
+
 mod array;
 pub use array::{
     HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse,
@@ -108,7 +110,9 @@ pub struct HarmonicExposureLimits {
     /// Four complex p/u source-transfer products per source, receiver and line.
     pub maximum_transfer_products: usize,
     /// Receiver count times sum of squared line counts over mean/factor banks.
-    /// Each pair has a fixed four-component (ten unique moments) contraction.
+    /// This is a structural source-pair cap. Admitted short uniform bands use
+    /// at most 64 source columns and 17 temporal modes per receiver instead;
+    /// each mode contracts the same four components and ten unique moments.
     pub maximum_receiver_frequency_pairs: usize,
     /// Logical heap payload: retained fields, line/factor vector headers,
     /// grouping indices, query accumulators and one returned point array.
@@ -160,9 +164,10 @@ struct Bank {
 ///
 /// Preparation contracts existing transfers once in O(receivers * sources *
 /// lines), without a BEM solve. Equal frequencies field-sum in source order
-/// before products. Repeated queries share one temporal kernel per frequency
-/// pair across all receivers and components. Double-double sums and products
-/// improve cancellation, but are not a relative error certificate near nulls.
+/// before products. Short uniform windows share one positive temporal factor
+/// per bank across receivers and components; other queries share one kernel
+/// per frequency pair. Fixed band scratch adds no heap payload. Double-double
+/// sums and products are not a relative error certificate near arbitrary nulls.
 pub struct PreparedHarmonicExposure<'a> {
     reference: &'a PreparedHarmonicObservation,
     source_clock: &'a str,
@@ -431,7 +436,8 @@ impl<'a> PreparedHarmonicExposure<'a> {
     ) -> impl ExactSizeIterator<Item = HarmonicExposureFactorStatistics> + '_ {
         self.factors.iter().map(|bank| bank.statistics)
     }
-    /// Actual receiver/frequency work after exact-frequency grouping.
+    /// Structural receiver/frequency-pair count after exact-frequency grouping.
+    /// Short uniform bands have an additional fixed 64-column/17-mode bound.
     pub fn receiver_frequency_pairs(&self) -> usize {
         self.receiver_frequency_pairs
     }
@@ -454,24 +460,31 @@ impl<'a> PreparedHarmonicExposure<'a> {
         let receivers = self.reference.receivers.len();
         let mut sums = storage(receivers)?;
         sums.resize(receivers, [Dd::ZERO; 14]);
-        for line in &self.mean.lines {
+        for (bank_index, bank) in core::iter::once(&self.mean)
+            .chain(self.factors.iter())
+            .enumerate()
+        {
             poll(&mut cancelled)?;
-            // Integrate against an exact unit DC field: do not round the mean
-            // phase to C64 before cancellation between large spectral lines.
-            let kernel = window
-                .product_kernel(line.omega, 0.0)
-                .map_err(window_error)?;
-            for (sum, field) in sums.iter_mut().zip(&line.fields) {
-                for c in 0..4 {
-                    sum[c] = sum[c]
-                        + kernel
-                            .mean_real_product_parts_dd(component(field, c), [Dd::ONE, Dd::ZERO])
-                            .map_err(window_error)?;
+            if positive_band::accumulate(bank, window, bank_index == 0, &mut sums, &mut cancelled)? {
+                continue;
+            }
+            if bank_index == 0 {
+                for line in &bank.lines {
+                    poll(&mut cancelled)?;
+                    // The exact DC product remains the mean-field fallback.
+                    let kernel = window
+                        .product_kernel(line.omega, 0.0)
+                        .map_err(window_error)?;
+                    for (sum, field) in sums.iter_mut().zip(&line.fields) {
+                        for c in 0..4 {
+                            sum[c] = sum[c]
+                                + kernel
+                                    .mean_real_product_parts_dd(component(field, c), [Dd::ONE, Dd::ZERO])
+                                    .map_err(window_error)?;
+                        }
+                    }
                 }
             }
-        }
-        for bank in core::iter::once(&self.mean).chain(self.factors.iter()) {
-            poll(&mut cancelled)?;
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
                     poll(&mut cancelled)?;
@@ -674,3 +687,6 @@ mod mixed_tests;
 
 #[cfg(test)]
 mod realization_tests;
+
+#[cfg(test)]
+mod positive_band_tests;

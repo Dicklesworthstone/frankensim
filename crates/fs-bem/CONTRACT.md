@@ -3998,3 +3998,43 @@ trace-error bounds. Normal velocity near the rigid complement at z=+/-0.001 m
 is below 3e-6 m/s in that fixture. No finite baffle, wall thickness, material
 impedance, motion, source feedback or compact multipole-array qualification is
 added.
+
+## Positive finite-window receiver interference
+
+`PreparedHarmonicExposure::observe_window_cancellable` now contracts admitted
+short uniform bands through the shared positive temporal factor. It prepares
+one factor per deterministic/factor bank, then projects the original retained
+pressure and three velocity components once per receiver. All ten unique
+second moments share those projections. Pressure/velocity powers remain sums
+of squared temporal fields, while intensity and off-diagonal velocity moments
+retain their physical signs. Receiver/source identities, producer uncertainty,
+original transfer rows and authored source laws remain with the same owner.
+
+Native angular frequencies enter the shared rad/s preparation without a
+rounded Hz conversion. Proper complex peak factors use scale 0.5 inside each
+modal product, so a finite physical half-power can survive when an unscaled
+analytic squared norm would overflow. Deterministic and explicitly real
+factors retain the absolute carrier and sum-frequency terms. The deterministic
+mean comes from the same real factor's constant mode; zero-mean fluctuation
+factors do not add a mean.
+
+The shared admission is 3..64 close analytic tones, or 3..32 actual-real tones
+whose absolute carrier half-width is at most 0.5. Unsupported counts, broader
+bands and nonuniform windows use the original temporal pair kernels.
+Coalesced receiver/frequency-pair counts remain structural source admission
+bounds. The additional factor is bounded by 64 columns and 17 temporal modes;
+four projections and ten modal products supply each receiver. Fixed scratch
+adds no logical heap payload. Cancellation is polled around preparation,
+between component projections and between temporal modes. Refusal discards
+the local result, and the immutable prepared owner remains reusable.
+
+Five focused native regressions pass against the actual receiver preparation
+and observation implementation with the production math and harmonic owners;
+three failed before this change. Synthetic original transfer rows exercise
+proper fourth-order nulls, real even/odd nulls, all signed p/u cross moments,
+actual field means, mixed real/proper independent time quadrature, triangular
+fallback, finite proper power for amplitude 1.5e154, cancellation/replay and
+the original source caps. The deepest 1ps odd null is tested with a
+conditioning-aware 5e-8 relative tolerance; no arbitrary-null relative error
+certificate is claimed. The narrow execution isolates unrelated solver and
+adapter boundaries and does not substitute for the full BEM/Cargo/DSR suite.
