@@ -21,7 +21,10 @@ pub(in crate::compressible) enum Slip {
 pub(in crate::compressible) enum GradientSample<const D: usize> {
     /// An actual neighbor, periodic neighbor, or the center at a zero-flux end.
     Cell([f64; D]),
-    Wall { velocity: [f64; D], slip: Slip },
+    Wall {
+        velocity: [f64; D],
+        slip: Slip,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,7 +98,11 @@ fn product_over_length(a: f64, b: f64, distance: f64, length: f64) -> f64 {
 
 fn average(a: f64, b: f64) -> f64 {
     let sum = a + b;
-    if sum.is_finite() { 0.5 * sum } else { 0.5 * a + 0.5 * b }
+    if sum.is_finite() {
+        0.5 * sum
+    } else {
+        0.5 * a + 0.5 * b
+    }
 }
 
 fn numerator(x: f64, y: f64, alpha: f64, delta: f64) -> f64 {
@@ -175,8 +182,19 @@ pub(in crate::compressible) fn velocity_gradient<const D: usize>(
         let mut derivative = [[0.0; D]; 2];
         let mut phi = [1.0; 2];
         let mut response = [0.0; 2];
-        pure_free[axis] = matches!(lower, GradientSample::Wall { slip: Slip::Free, .. })
-            && matches!(upper, GradientSample::Wall { slip: Slip::Free, .. });
+        pure_free[axis] = matches!(
+            lower,
+            GradientSample::Wall {
+                slip: Slip::Free,
+                ..
+            }
+        ) && matches!(
+            upper,
+            GradientSample::Wall {
+                slip: Slip::Free,
+                ..
+            }
+        );
         for (side, value) in [lower, upper].into_iter().enumerate() {
             let sign = if side == 0 { -1.0 } else { 1.0 };
             match value {
@@ -185,9 +203,12 @@ pub(in crate::compressible) fn velocity_gradient<const D: usize>(
                         derivative[side][a] = sign * (other[a] - velocity[a]) / h;
                     }
                 }
-                GradientSample::Wall { velocity: wall, slip } => {
-                    if wall[axis] != 0.0 || !wall.iter().all(|v| v.is_finite()) {
-                        return Err("compatible wall requires finite tangential velocity");
+                GradientSample::Wall {
+                    velocity: wall,
+                    slip,
+                } => {
+                    if !wall.iter().all(|v| v.is_finite()) {
+                        return Err("compatible wall requires finite physical velocity");
                     }
                     (phi[side], response[side]) = slip.weights(distance)?;
                     for a in 0..D {
@@ -200,7 +221,9 @@ pub(in crate::compressible) fn velocity_gradient<const D: usize>(
                                 Slip::Length(length) => {
                                     let value = divide_length(relative, distance, length);
                                     if value == 0.0 && relative != 0.0 {
-                                        return Err("relative Navier wall gradient is unrepresentable");
+                                        return Err(
+                                            "relative Navier wall gradient is unrepresentable",
+                                        );
                                     }
                                     sign * value
                                 }
@@ -232,7 +255,14 @@ pub(in crate::compressible) fn velocity_gradient<const D: usize>(
         for t in n + 1..D {
             let (x, y) = (gradient[t][n], gradient[n][t]);
             let (gn, gt) = if alpha[n] == 0.0 {
-                (x, if alpha[t] == 0.0 { y } else { uncoupled_difference(y, x, alpha[t], delta[t]) })
+                (
+                    x,
+                    if alpha[t] == 0.0 {
+                        y
+                    } else {
+                        uncoupled_difference(y, x, alpha[t], delta[t])
+                    },
+                )
             } else if alpha[t] == 0.0 {
                 (uncoupled_difference(x, y, alpha[n], delta[n]), y)
             } else if delta[n] == 0.0 && delta[t] == 0.0 {
@@ -292,32 +322,56 @@ pub(in crate::compressible) fn wall_stress<const D: usize>(
     cell: Viscosity,
     gradient: impl Fn(usize, usize) -> f64,
 ) -> Result<WallStress<D>, &'static str> {
-    if (D != 2 && D != 3) || axis >= D || !matches!(outward_sign, -1.0 | 1.0)
-        || !cell.valid() || !velocity.iter().chain(&wall_velocity).all(|v| v.is_finite())
-        || wall_velocity[axis] != 0.0
+    if (D != 2 && D != 3)
+        || axis >= D
+        || !matches!(outward_sign, -1.0 | 1.0)
+        || !cell.valid()
+        || !velocity.iter().chain(&wall_velocity).all(|v| v.is_finite())
     {
         return Err("compatible wall stress dimensions, state or coefficients");
     }
     let (_, response) = slip.weights(wall_distance)?;
     if matches!(slip, Slip::Length(length) if length == 0.0) {
         let traction = no_slip_traction(
-            axis, outward_sign, wall_distance, velocity, wall_velocity, cell, gradient,
+            axis,
+            outward_sign,
+            wall_distance,
+            velocity,
+            wall_velocity,
+            cell,
+            gradient,
         );
         return if traction.iter().all(|v| v.is_finite()) {
-            Ok(WallStress { traction, slip_dissipation: 0.0 })
+            Ok(WallStress {
+                traction,
+                slip_dissipation: 0.0,
+            })
         } else {
             Err("nonfinite compatible no-slip traction")
         };
     }
-    let mut result = WallStress { traction: [0.0; D], slip_dissipation: 0.0 };
+    let mut result = WallStress {
+        traction: [0.0; D],
+        slip_dissipation: 0.0,
+    };
     let divergence: f64 = (0..D).filter(|&a| a != axis).map(|a| gradient(a, a)).sum();
-    result.traction[axis] = ((4.0 / 3.0) * cell.shear + cell.bulk)
-        * (-outward_sign * velocity[axis] / wall_distance)
+    // Keep the established stationary arithmetic, including signed zero.
+    // A moving-volume owner supplies its actual normal plane velocity; the
+    // stress acts on relative motion and its work uses the full laboratory
+    // wall velocity. Tangential Navier elimination remains unchanged.
+    let normal = if wall_velocity[axis] == 0.0 {
+        -outward_sign * velocity[axis] / wall_distance
+    } else {
+        outward_sign * (wall_velocity[axis] - velocity[axis]) / wall_distance
+    };
+    result.traction[axis] = ((4.0 / 3.0) * cell.shear + cell.bulk) * normal
         + (cell.bulk - (2.0 / 3.0) * cell.shear) * divergence;
     if let Slip::Length(length) = slip {
         if cell.shear != 0.0 {
             for a in 0..D {
-                if a == axis { continue; }
+                if a == axis {
+                    continue;
+                }
                 let relative = (outward_sign * wall_distance)
                     .mul_add(gradient(axis, a), wall_velocity[a] - velocity[a]);
                 if !relative.is_finite() {
@@ -337,7 +391,8 @@ pub(in crate::compressible) fn wall_stress<const D: usize>(
         }
     }
     if !result.traction.iter().all(|v| v.is_finite())
-        || !result.slip_dissipation.is_finite() || result.slip_dissipation < 0.0
+        || !result.slip_dissipation.is_finite()
+        || result.slip_dissipation < 0.0
     {
         return Err("nonfinite compatible Navier wall transport");
     }

@@ -2,6 +2,9 @@ use super::*;
 use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
 use crate::compressible::molecular::stabilized::StepWork;
 
+mod moving;
+pub use moving::MovingMolecularStepReport3d;
+
 #[cfg(feature = "experimental-sgs")]
 mod lagrangian_channel;
 
@@ -1054,6 +1057,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         mut profiles: Option<&mut timed::TimedSource<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
+        // An unpublished moving proposal may have used a different box.
+        self.trial.grid = self.accepted.grid;
         if let Some(work) = stabilization.as_deref() {
             work.controls.controller(controls.molecular)?;
             self.molecular

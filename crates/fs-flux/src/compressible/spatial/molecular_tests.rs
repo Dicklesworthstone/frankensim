@@ -42,6 +42,9 @@ mod walls;
 #[path = "molecular/compatible_tests.rs"]
 mod compatible;
 
+#[path = "molecular/moving_tests.rs"]
+mod moving;
+
 #[path = "molecular/vorticity_tests.rs"]
 mod vorticity;
 

@@ -3420,6 +3420,46 @@ remains spatially uniform and frozen; evolving-species diffusion and reactions
 use their separate admitted owners. Boundary-layer accuracy requires adequate
 normal resolution and appropriate source coefficients.
 
+### Molecular transport on moving volumetric frozen gas
+
+`spatial::molecular::MolecularEuler3d::step_moving` composes the original
+Newtonian/Fourier SSP half step on the old volume, native extensive ALE
+advection, and the second molecular half on the actual new volume. The same
+source, cell/face buffers, conservative energy flux and boundary quadrature
+remain the numerical owners. No second stress model or viscous-heating source
+is added. Every complete trial retains one physical duration; shortened
+advection or a later source refusal restarts both halves from accepted cells.
+
+The compatible gradient and its stress adjoint now admit the actual normal
+wall velocity as well as authored tangential velocity. No-slip, finite Navier
+slip and free-slip walls retain their original traces, including normal
+viscous recoil and cross-strain coupling. Their full laboratory traction work
+enters energy with the same impulse. `MovingMolecularStepReport3d` separately
+retains mechanical molecular wall work and nonmechanical wall heat on all six
+sides. Fourier heat and the authored Navier friction-heat partition are
+integrated directly at each SSP stage, without subtracting large work terms
+from a combined energy account.
+
+Cells, geometry, time, source binding, boundary loads and reports publish
+atomically. The prepared operator binds to the new accepted geometry only
+after complete acceptance; failed moving proposals cannot poison subsequent
+stationary operations. Zero-motion comparisons retain the stationary
+numerical result, including nonzero thermal and tangential wall transfer.
+
+Six native moving-field regressions cover all-side stress/work/heat for three
+slip laws, comoving full momentum, zero-motion parity, actual-volume balances,
+cancellation/replay, complete-interval retry and affine viscous-heating
+refinement. Sixteen compatible-stress regressions, including three new moving
+normal-trace cases, independently close the quadratic dissipation and wall
+power identity at corners, singleton axes and variable viscosity.
+
+This entry admits closed reflecting or periodic domains, translation and
+single-axis affine deformation. Reservoir profiles, hydrostatics, SGS,
+simultaneous multi-axis deformation and moving chemistry remain outside this
+composition. Original source-domain and parabolic/acoustic limits still apply;
+these numerical checks do not establish general FSI stability or experimental
+accuracy.
+
 ### Exploratory subgrid stress and heat in the three-dimensional gas
 
 With `experimental-sgs`, `MolecularTransport3d::with_sgs` and

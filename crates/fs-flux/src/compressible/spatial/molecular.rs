@@ -21,7 +21,10 @@ pub use fs_gas::multicomponent::dissipation::WallThermalCondition;
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
-pub use coupled::{MolecularEuler3d, MolecularStepReport3d, StabilizedMolecularStepReport3d};
+pub use coupled::{
+    MolecularEuler3d, MolecularStepReport3d, MovingMolecularStepReport3d,
+    StabilizedMolecularStepReport3d,
+};
 mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
 mod reservoir;
@@ -283,12 +286,37 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         duration: Time,
         controls: MolecularControl,
         clock: timed::Clock,
-        mut profiles: Option<&mut timed::TimedSource<'_>>,
-        mut cancelled: impl FnMut() -> bool,
+        profiles: Option<&mut timed::TimedSource<'_>>,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularReport3d, MolecularError> {
+        self.advance_at_geometry(
+            flow, duration, controls, clock, profiles, None, true, cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
+    // The coupled moving owner passes only its private trial field. Geometry
+    // belongs to that particular half step, while this operator remains bound
+    // to the accepted box until the complete D/2--ALE--D/2 transaction succeeds.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_at_geometry(
+        &mut self,
+        flow: &mut Euler3d,
+        duration: Time,
+        controls: MolecularControl,
+        clock: timed::Clock,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
+        motion: Option<MeshMotion>,
+        publish: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(MolecularReport3d, WallTransfer), MolecularError> {
         poll(&mut cancelled)?;
         controls.validate()?;
-        if self.gas != flow.gas || self.grid != flow.grid || self.boundaries != flow.boundaries {
+        if self.gas != flow.gas
+            || self.boundaries != flow.boundaries
+            || self.grid.shape != flow.grid.shape
+            || (motion.is_none() && self.grid != flow.grid)
+        {
             return Err(MolecularError::Invalid(
                 "molecular operator and flow differ",
             ));
@@ -299,9 +327,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         if profiles.is_some() {
             clock.admit(duration.value())?;
         }
-        let before = checked_totals(&flow.states, self.grid.cell_volume(), &mut cancelled)?;
+        let grid = flow.grid;
+        let before = checked_totals(&flow.states, grid.cell_volume(), &mut cancelled)?;
         self.work.current.copy_from_slice(&flow.states);
         self.work.boundary_trial.fill(Totals::default());
+        let mut wall_power = WallTransfer::default();
+        let mut wall_transfer = WallTransfer::default();
         let mut elapsed = 0.0;
         let mut accepted = 0;
         let mut rejected = 0;
@@ -319,16 +350,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut flow.reservoirs,
                 profiles.as_deref_mut(),
                 &self.gas,
-                &self.grid,
+                &grid,
                 clock.at(elapsed, duration.value()),
                 self.reservoir_exchange,
                 &mut cancelled,
             )?;
-            let first_rate = spatial(
+            let first_rate = spatial_with_motion(
                 &self.gas,
-                &self.grid,
+                &grid,
                 self.boundaries,
                 &self.walls,
+                motion,
+                motion.map(|_| &mut wall_power),
                 reservoirs,
                 &self.work.current,
                 &mut self.law,
@@ -361,6 +394,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 {
                     return Err(MolecularError::Invalid("unrepresentable molecular substep"));
                 }
+                let mut wall_step = WallTransfer::default();
                 let trial = (|| {
                     // First-trial faces are already prepared for the CFL. Only
                     // a retry needs to reconstruct them after stage two reused
@@ -372,16 +406,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut flow.reservoirs,
                             profiles.as_deref_mut(),
                             &self.gas,
-                            &self.grid,
+                            &grid,
                             clock.at(elapsed, duration.value()),
                             self.reservoir_exchange,
                             &mut cancelled,
                         )?;
-                        spatial(
+                        spatial_with_motion(
                             &self.gas,
-                            &self.grid,
+                            &grid,
                             self.boundaries,
                             &self.walls,
+                            motion,
+                            motion.map(|_| &mut wall_power),
                             reservoirs,
                             &self.work.current,
                             &mut self.law,
@@ -396,9 +432,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         )?
                     };
                     parabolic(r1 * dt, controls.parabolic_cfl)?;
+                    wall_step.add_scaled(wall_power, 0.5 * dt)?;
                     evolve::update(
                         &self.gas,
-                        &self.grid,
+                        &grid,
                         &self.work.current,
                         &self.work.current,
                         &self.work.flux,
@@ -410,7 +447,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut cancelled,
                     )?;
                     evolve::capture_boundaries(
-                        &self.grid,
+                        &grid,
                         &self.work.flux,
                         0.5 * dt,
                         &mut self.work.boundary_step,
@@ -426,16 +463,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut flow.reservoirs,
                         profiles.as_deref_mut(),
                         &self.gas,
-                        &self.grid,
+                        &grid,
                         clock.at(endpoint, duration.value()),
                         self.reservoir_exchange,
                         &mut cancelled,
                     )?;
-                    let r2 = spatial(
+                    let r2 = spatial_with_motion(
                         &self.gas,
-                        &self.grid,
+                        &grid,
                         self.boundaries,
                         &self.walls,
+                        motion,
+                        motion.map(|_| &mut wall_power),
                         reservoirs,
                         &self.work.stage,
                         &mut self.law,
@@ -449,9 +488,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut cancelled,
                     )?;
                     parabolic(r2 * dt, controls.parabolic_cfl)?;
+                    wall_step.add_scaled(wall_power, 0.5 * dt)?;
                     evolve::update(
                         &self.gas,
-                        &self.grid,
+                        &grid,
                         &self.work.current,
                         &self.work.stage,
                         &self.work.flux,
@@ -463,7 +503,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut cancelled,
                     )?;
                     evolve::capture_boundaries(
-                        &self.grid,
+                        &grid,
                         &self.work.flux,
                         0.5 * dt,
                         &mut self.work.boundary_step,
@@ -474,6 +514,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 })();
                 match trial {
                     Ok(number) => {
+                        wall_transfer.add_scaled(wall_step, 1.0)?;
                         maximum_parabolic = maximum_parabolic.max(number);
                         for (i, (total, step)) in self
                             .work
@@ -516,7 +557,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 }
             }
         }
-        let after = checked_totals(&self.work.current, self.grid.cell_volume(), &mut cancelled)?;
+        let after = checked_totals(&self.work.current, grid.cell_volume(), &mut cancelled)?;
         let outward = sum_arrays(
             self.work.boundary_trial.iter().map(|q| q.array()),
             &mut cancelled,
@@ -525,21 +566,26 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let conservation_residual = balance(before, after, boundary_change)?;
         poll(&mut cancelled)?;
         flow.states.copy_from_slice(&self.work.current);
-        self.boundary_impulses
-            .copy_from_slice(&self.work.boundary_trial);
+        if publish {
+            self.boundary_impulses
+                .copy_from_slice(&self.work.boundary_trial);
+        }
         if profiles.is_some() {
             flow.reservoirs.profiles.publish();
         }
-        Ok(MolecularReport3d {
-            elapsed: duration,
-            accepted_steps: accepted,
-            rejected_steps: rejected,
-            maximum_parabolic_number: maximum_parabolic,
-            before,
-            after,
-            boundary_change,
-            conservation_residual,
-        })
+        Ok((
+            MolecularReport3d {
+                elapsed: duration,
+                accepted_steps: accepted,
+                rejected_steps: rejected,
+                maximum_parabolic_number: maximum_parabolic,
+                before,
+                after,
+                boundary_change,
+                conservation_residual,
+            },
+            wall_transfer,
+        ))
     }
 }
 
@@ -568,6 +614,27 @@ fn balance(before: Totals, after: Totals, boundary: Totals) -> Result<Totals, Mo
     Ok(result)
 }
 
+/// Separate inward mechanical and thermal transfers, in boundary-side order.
+/// Used as power during a face pass and as energy after SSP quadrature.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WallTransfer {
+    work: [f64; 6],
+    heat: [f64; 6],
+}
+
+impl WallTransfer {
+    fn add_scaled(&mut self, rhs: Self, scale: f64) -> Result<(), MolecularError> {
+        for side in 0..6 {
+            self.work[side] += scale * rhs.work[side];
+            self.heat[side] += scale * rhs.heat[side];
+        }
+        if !self.work.into_iter().chain(self.heat).all(f64::is_finite) {
+            return Err(MolecularError::Invalid("nonfinite moving wall transfer"));
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spatial<L: TransportLaw>(
     gas: &FrozenGas,
@@ -582,9 +649,52 @@ fn spatial<L: TransportLaw>(
     viscosity: &mut [crate::compressible::stress::Viscosity],
     fluxes: &mut [Vec<SpatialFaceFlux>; 3],
     binary: &mut [f64],
+    #[cfg(feature = "experimental-sgs")] subgrid: Option<&mut sgs::SubgridTransport>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, MolecularError> {
+    spatial_with_motion(
+        gas,
+        grid,
+        boundaries,
+        walls,
+        None,
+        None,
+        reservoirs,
+        states,
+        law,
+        primitive,
+        gradient,
+        viscosity,
+        fluxes,
+        binary,
+        #[cfg(feature = "experimental-sgs")]
+        subgrid,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_motion<L: TransportLaw>(
+    gas: &FrozenGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    walls: &[MolecularWall3d; 6],
+    motion: Option<MeshMotion>,
+    mut wall_power: Option<&mut WallTransfer>,
+    reservoirs: Option<super::reservoir::View<'_>>,
+    states: &[State],
+    law: &mut L,
+    primitive: &mut [Primitive],
+    gradient: &mut [[[f64; 3]; 3]],
+    viscosity: &mut [crate::compressible::stress::Viscosity],
+    fluxes: &mut [Vec<SpatialFaceFlux>; 3],
+    binary: &mut [f64],
     #[cfg(feature = "experimental-sgs")] mut subgrid: Option<&mut sgs::SubgridTransport>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
+    if let Some(power) = wall_power.as_deref_mut() {
+        *power = WallTransfer::default();
+    }
     if reservoirs.is_some_and(|view| view.has_stagnation()) {
         return Err(MolecularError::Invalid(
             "compact stagnation reservoirs do not specify a molecular face bath",
@@ -597,6 +707,11 @@ fn spatial<L: TransportLaw>(
         && subgrid
             .as_ref()
             .is_none_or(|sgs| !sgs.has_equilibrium_wall());
+    if motion.is_some() && !compatible {
+        return Err(MolecularError::Invalid(
+            "moving molecular walls require the compatible molecular stress",
+        ));
+    }
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
     for (q, p) in states.iter().zip(primitive.iter_mut()) {
@@ -656,7 +771,14 @@ fn spatial<L: TransportLaw>(
                         && let AxisBoundaries::Ends { lower, upper } = boundaries.axis(axis)
                         && [lower, upper][side] == BoundaryCondition::Reflecting
                     {
-                        let (velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        let (mut velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        if let Some(motion) = motion {
+                            velocity[axis] = if side == 0 {
+                                motion.lower_velocity[axis]
+                            } else {
+                                motion.upper_velocity[axis]
+                            };
+                        }
                         return crate::compressible::stress::GradientSample::Wall {
                             velocity,
                             slip,
@@ -927,7 +1049,12 @@ fn spatial<L: TransportLaw>(
             maximum_diffusivity = maximum_diffusivity.max(diffusivity);
             let normal_derivative = if wall {
                 let sign = if face == 0 { 1.0 } else { -1.0 };
-                sign * 2.0 * pl.velocity[axis] / grid.spacing[axis]
+                let wall_speed = motion.map_or(0.0, |m| m.velocity(grid, axis, face));
+                if wall_speed == 0.0 {
+                    sign * 2.0 * pl.velocity[axis] / grid.spacing[axis]
+                } else {
+                    sign * 2.0 * (pl.velocity[axis] - wall_speed) / grid.spacing[axis]
+                }
             } else {
                 (pr.velocity[axis] - pl.velocity[axis]) / distance
             };
@@ -952,7 +1079,10 @@ fn spatial<L: TransportLaw>(
                 longitudinal * normal_derivative + cross * transverse_divergence;
             let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
                 if compatible {
-                    let (wall_velocity, slip, heat_fraction) = model.stress_boundary();
+                    let (mut wall_velocity, slip, heat_fraction) = model.stress_boundary();
+                    if let Some(motion) = motion {
+                        wall_velocity[axis] = motion.velocity(grid, axis, face);
+                    }
                     let stress = crate::compressible::stress::wall_stress(
                         axis,
                         sign,
@@ -973,10 +1103,29 @@ fn spatial<L: TransportLaw>(
                         0.5 * grid.spacing[axis],
                         conductivity,
                     );
-                    let energy = -shear[0] * wall_velocity[tangential[0]]
+                    let tangential_work = -shear[0] * wall_velocity[tangential[0]]
+                        - shear[1] * wall_velocity[tangential[1]];
+                    let mechanical_flux = if wall_velocity[axis] == 0.0 {
+                        tangential_work
+                    } else {
+                        -normal_stress * wall_velocity[axis] + tangential_work
+                    };
+                    let thermal_flux =
+                        sign * (1.0 - heat_fraction) * stress.slip_dissipation + heat;
+                    if let Some(power) = wall_power.as_deref_mut() {
+                        let side = 2 * axis + usize::from(face == count);
+                        let inward_area = -sign * grid.face_area(BoundarySide::ALL[side]);
+                        power.work[side] += inward_area * mechanical_flux;
+                        power.heat[side] += inward_area * thermal_flux;
+                    }
+                    // Keep the stationary expression's evaluation order.
+                    let mut energy = -shear[0] * wall_velocity[tangential[0]]
                         - shear[1] * wall_velocity[tangential[1]]
                         + sign * (1.0 - heat_fraction) * stress.slip_dissipation
                         + heat;
+                    if wall_velocity[axis] != 0.0 {
+                        energy -= normal_stress * wall_velocity[axis];
+                    }
                     (shear, energy)
                 } else {
                     let (shear, energy) = model.shear_and_energy(

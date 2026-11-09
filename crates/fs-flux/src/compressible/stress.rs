@@ -97,7 +97,7 @@ pub(super) fn traction<const D: usize>(
     })
 }
 
-/// Complete compatible traction at a prescribed tangential-velocity wall.
+/// Complete compatible traction at a prescribed physical-velocity wall.
 ///
 /// `outward_sign` is -1 on a lower plane and +1 on an upper plane;
 /// `wall_distance` is the positive center-to-wall distance (half a grid cell).
@@ -105,7 +105,8 @@ pub(super) fn traction<const D: usize>(
 /// axis, not outward traction. Inputs use the same cell source viscosities and
 /// cached gradient as the interior operator; `gradient(component, derivative)`
 /// must include the actual wall's odd velocity ghost. Geometry owners admit the
-/// wall velocity's zero normal component before calling this helper.
+/// normal wall speed against their conservative stage geometry before calling
+/// this helper. Stationary owners continue to require zero normal velocity.
 ///
 /// Both cross terms belong to the discrete adjoint, even for constant viscosity.
 /// Replacing them by derivatives of a constant boundary trace breaks the energy
