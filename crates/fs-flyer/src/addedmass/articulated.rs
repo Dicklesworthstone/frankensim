@@ -27,6 +27,7 @@ use crate::Refusal;
 use fs_ga::{Twist, Vec3, Wrench};
 use fs_mbd::articulated::generalized::GeneralizedKinematics;
 
+#[path = "articulated/affine.rs"]
 mod affine;
 pub use affine::{AffineFlow, AffineFlowAssembly, assemble_articulated_strips_in_affine_flow};
 

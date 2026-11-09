@@ -24,6 +24,7 @@ use fs_airfoil::unsteady::{
 use fs_wing::nonlinear::{SectionFrame, StripRegime};
 use std::cell::RefCell;
 
+#[path = "unsteady/gust.rs"]
 pub(super) mod gust;
 use gust::GustInput;
 

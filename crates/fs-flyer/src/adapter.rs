@@ -166,7 +166,8 @@ impl RigidBody {
         self.admit()?;
         let tensor = self.inertia_tensor();
         let principal = tensor.principal_moments();
-        let axes = tensor.principal_to_body().as_quat();
+        let principal_to_body = tensor.principal_to_body();
+        let axes = principal_to_body.as_quat();
         let properties = MassProperties::from_principal_frame(
             self.mass_kg,
             MbdVec3::ZERO,
