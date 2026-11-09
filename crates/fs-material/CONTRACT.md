@@ -22918,3 +22918,30 @@ calculation supports the authored discretization tolerances. Pinned Rustfmt
 and whitespace checks pass; native material/thermal integration remains
 unexecuted because the shared build filesystem lacks capacity and DSR/RCH are
 unavailable. This does not close the broader porous/capillary transport bead.
+
+
+## Coherent plane-stress harmonic spectra
+
+`TensorProny::prepare_plane_stress_harmonic_spectrum` accepts bounded settled
+engineering strain lines in an explicitly ordered material plane. Every distinct
+frequency retains the full original complex transverse constraint, including
+Kelvin viscosity and all Maxwell branches. No constant Poisson ratio or
+independently condensed branch replaces that frequency-dependent recovery.
+Exact equal-frequency coordinates combine before recovery and admission; both
+compensated words survive the full six-component Mandel map and original energy
+contractions. The conservative whole-waveform strain envelope includes eliminated
+normal and shear strains and preserves the original material ceiling.
+
+`PlaneStressSpectrumWindow` reuses the original full-tensor finite-window owner
+for independent stress work, stored energy change, Kelvin heat and Maxwell heat,
+including carrier and beat cross terms. Results are energy densities [J/m³];
+plate/shell callers supply their actual thickness quadrature volumes. Up to 64
+positive source-admitted authored lines are supported; empty input is zero AC.
+Uniform windows, explicit numeric payload accounting, fixed point scratch and
+caller cancellation preserve the tensor spectrum contract. DC/prestrain, causal
+startup, spatial convergence and temperature feedback are not inferred.
+
+`visco_plane_stress_spectrum` checks independent real-field integration with
+frequency-dependent transverse relaxation, all ordered anisotropic planes,
+finite-beat heating, equal-frequency cancellation, source-clock invariance,
+original full-strain admission, payload bounds and cancellation reuse.

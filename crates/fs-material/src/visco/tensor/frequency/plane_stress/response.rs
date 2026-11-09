@@ -3,6 +3,9 @@
 use super::{MaterialPlane, TensorProny, ViscoError};
 use fs_math::c64::C64;
 
+mod spectrum;
+pub use spectrum::{PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow};
+
 /// Immutable frequency-specific plane-stress material for `exp(-i omega t)`.
 ///
 /// The full original tensor is eliminated once. Storage/loss and the complete

@@ -118,13 +118,21 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
     /// assumed. This bound can refuse a valid waveform whose separate peaks can
     /// never coincide. It is not a certified supremum or spatial error bound.
     pub fn validate_strains(&self, strains: &[[C64; 6]]) -> Result<(), ViscoError> {
-        self.admitted_strains(strains).map(|_| ())
+        let grouped = self.group_strains(strains)?;
+        self.admit_grouped_strains(&grouped[..self.frequencies.len()])
     }
 
-    fn admitted_strains(
+    pub(in crate::visco::tensor::frequency) fn distinct_frequencies(&self) -> &[f64] {
+        &self.frequencies
+    }
+
+    // Equal-frequency authored coordinates must combine before a physical
+    // constraint is recovered. In particular, separately admitting thin-body
+    // strains would reject a cancelling field or overflow its transverse map.
+    pub(in crate::visco::tensor::frequency) fn group_strains<const N: usize>(
         &self,
-        strains: &[[C64; 6]],
-    ) -> Result<[StrainParts; MAX_SPECTRUM_LINES], ViscoError> {
+        strains: &[[C64; N]],
+    ) -> Result<[[[Dd; 2]; N]; MAX_SPECTRUM_LINES], ViscoError> {
         if strains.len() != self.authored_frequencies.len()
             || strains
                 .iter()
@@ -132,27 +140,33 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
                 .any(|z| !z.re.is_finite() || !z.im.is_finite())
         {
             return Err(ViscoError::Parameters {
-                what: "one finite Mandel strain phasor per original spectral line required",
+                what: "one finite strain phasor per original spectral line required",
             });
         }
-        let mut sums = [[[Sum::default(); 2]; 6]; MAX_SPECTRUM_LINES];
+        let mut sums = [[[Sum::default(); 2]; N]; MAX_SPECTRUM_LINES];
         for (strain, &group) in strains.iter().zip(&self.groups) {
-            for i in 0..6 {
+            for i in 0..N {
                 sums[group][i][0].add([strain[i].re, 1.0, 1.0, 1.0]);
                 sums[group][i][1].add([strain[i].im, 1.0, 1.0, 1.0]);
             }
         }
-        let mut result = [[[Dd::ZERO; 2]; 6]; MAX_SPECTRUM_LINES];
+        Ok(sums.map(|strain| strain.map(|z| z.map(Sum::retained_value))))
+    }
+
+    pub(in crate::visco::tensor::frequency) fn admit_grouped_strains(
+        &self,
+        strains: &[StrainParts],
+    ) -> Result<(), ViscoError> {
+        if strains.len() != self.frequencies.len() {
+            return Err(invalid());
+        }
         let mut envelope = Dd::ZERO;
-        for group in 0..self.frequencies.len() {
-            for i in 0..6 {
-                result[group][i] = sums[group][i].map(Sum::retained_value);
-            }
+        for strain in strains {
             // Retain the low words in subsequent material contractions. Their
             // separate norm contributes conservatively to source admission.
             for word in 0..2 {
                 let phasor: [C64; 6] = core::array::from_fn(|i| {
-                    let z = result[group][i];
+                    let z = strain[i];
                     if word == 0 {
                         C64::new(z[0].hi, z[1].hi)
                     } else {
@@ -177,7 +191,7 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
                 what: "coherent waveform strain bound exceeds the original tensor material domain",
             });
         }
-        Ok(result)
+        Ok(())
     }
 
     /// Cache unweighted physical interval products once, for every source point.
@@ -235,9 +249,22 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
         mut checkpoint: impl FnMut() -> Result<(), E>,
     ) -> Result<TensorPronyHarmonicWindowPoint, E> {
         checkpoint()?;
-        let grouped = self.source.admitted_strains(strains)?;
-        let n = self.source.frequencies.len();
-        let strains = &grouped[..n];
+        let grouped = self.source.group_strains(strains)?;
+        self.evaluate_grouped_with_checkpoint(&grouped[..self.source.frequencies.len()], checkpoint)
+    }
+
+    // Shared by source-native constrained materials. The retained low words
+    // survive their transverse recovery and every original energy contraction.
+    pub(in crate::visco::tensor::frequency) fn evaluate_grouped_with_checkpoint<
+        E: From<ViscoError>,
+    >(
+        &self,
+        strains: &[StrainParts],
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<TensorPronyHarmonicWindowPoint, E> {
+        checkpoint()?;
+        self.source.admit_grouped_strains(strains)?;
+        let n = strains.len();
         let law = self.source.law;
         let mut spectrum = [[(1.0, 0), (0.0, 0)]; MAX_SPECTRUM_LINES];
         let equilibrium = self

@@ -5,7 +5,7 @@ use fs_math::c64::C64;
 
 pub(super) mod projection;
 mod response;
-pub use response::PlaneStressHarmonic;
+pub use response::{PlaneStressHarmonic, PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow};
 
 impl TensorProny {
     /// Differentiate the full complex plane-stress modulus with respect to omega.
