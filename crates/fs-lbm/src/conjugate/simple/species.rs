@@ -5,8 +5,9 @@
 //! their fractions partition unity. See NASA/TM-2022-0008776, VULCAN-CFD
 //! Theory Manual, equation (46):
 //! https://vulcan-cfd.larc.nasa.gov/WebPage/Documentation/manual_theory.pdf.
-//! This transports resolved composition; no species variance or reaction-rate
-//! model, molecular diffusion or partial-enthalpy closure is inferred.
+//! The generic inventory entry is isothermal. The thermochemical entry below
+//! delegates original constituent enthalpy and calorics to the material owner.
+//! Neither entry infers species variance, reaction rates or molecular diffusion.
 
 use super::FvFlow;
 use crate::conjugate::{
@@ -14,6 +15,9 @@ use crate::conjugate::{
     SpeciesDiffusionStep, VoxelDomain, poll,
 };
 use fs_exec::CancelGate;
+
+mod thermochemical;
+pub use thermochemical::TurbulentGasSpeciesStep;
 
 fn refuse(reason: &str) -> ChtError {
     ChtError::InvalidInput {
@@ -65,7 +69,9 @@ impl FvFlow {
     ) -> Result<SpeciesDiffusionStep<N>, ChtError> {
         poll(gate)?;
         if !turbulent_schmidt.is_finite() || turbulent_schmidt <= 0.0 {
-            return Err(refuse("turbulent Schmidt number must be finite and positive"));
+            return Err(refuse(
+                "turbulent Schmidt number must be finite and positive",
+            ));
         }
         let cells = domain.cell_count();
         if N == 0

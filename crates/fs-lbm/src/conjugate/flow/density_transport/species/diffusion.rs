@@ -108,11 +108,34 @@ fn positive(value: f64) -> Result<f64, ChtError> {
     if value.is_finite() && value > 0.0 {
         Ok(value)
     } else {
-        Err(refuse("positive diffusion geometry or coefficient is unrepresentable"))
+        Err(refuse(
+            "positive diffusion geometry or coefficient is unrepresentable",
+        ))
     }
 }
 
 impl MaterialAdvectionStep {
+    /// The shared native half-cell resistance, after carrier/domain admission.
+    /// Both supplied diffusivities must be strictly positive.
+    pub(in crate::conjugate) fn diffusion_face_conductance(
+        &self,
+        domain: &VoxelDomain,
+        cells: [usize; 2],
+        axis: usize,
+        diffusivity_m2_s: [f64; 2],
+    ) -> Result<f64, ChtError> {
+        let [c, next] = cells;
+        let rho_left = positive(self.mass_kg[c] / domain.volume(c))?;
+        let rho_right = positive(self.mass_kg[next] / domain.volume(next))?;
+        let left =
+            positive((0.5 * domain.widths(c)[axis]) / positive(rho_left * diffusivity_m2_s[0])?)?;
+        let right = positive(
+            (0.5 * domain.widths(next)[axis]) / positive(rho_right * diffusivity_m2_s[1])?,
+        )?;
+        let largest = left.max(right);
+        positive((domain.face_area(c, axis) / largest) / (1.0 + left.min(right) / largest))
+    }
+
     /// Diffuse two constituent masses on this step's accepted carrier field.
     ///
     /// Supply post-advection masses, e.g. from advect_species::<2>, or the
@@ -151,7 +174,12 @@ impl MaterialAdvectionStep {
         gate: &CancelGate,
     ) -> Result<BinarySpeciesDiffusionStep, ChtError> {
         self.diffuse_species(
-            domain, species_mass_kg, diffusivity_m2_s, duration_s, controls, gate,
+            domain,
+            species_mass_kg,
+            diffusivity_m2_s,
+            duration_s,
+            controls,
+            gate,
         )
     }
 
@@ -187,7 +215,12 @@ impl MaterialAdvectionStep {
         gate: &CancelGate,
     ) -> Result<SpeciesDiffusionStep<N>, ChtError> {
         self.diffuse_species_checked(
-            domain, species_mass_kg, diffusivity_m2_s, duration_s, controls, gate,
+            domain,
+            species_mass_kg,
+            diffusivity_m2_s,
+            duration_s,
+            controls,
+            gate,
             |_| poll(gate),
         )
     }
@@ -215,11 +248,15 @@ impl MaterialAdvectionStep {
             || controls.substeps == 0
             || controls.substeps as u64 > (1u64 << 53)
         {
-            return Err(refuse("diffusion component count, dimensions or substeps are invalid"));
+            return Err(refuse(
+                "diffusion component count, dimensions or substeps are invalid",
+            ));
         }
         positive(duration_s)?;
-        for value in controls.maximum_mass_defect_kg
-            .into_iter().chain([controls.maximum_partition_defect_kg])
+        for value in controls
+            .maximum_mass_defect_kg
+            .into_iter()
+            .chain([controls.maximum_partition_defect_kg])
         {
             nonnegative(value)?;
         }
@@ -233,7 +270,9 @@ impl MaterialAdvectionStep {
                 nonnegative(mass)?;
             }
             if domain.is_fluid(c) != (transport.row_of[c] != usize::MAX) {
-                return Err(refuse("diffusion fluid mask differs from the accepted carrier"));
+                return Err(refuse(
+                    "diffusion fluid mask differs from the accepted carrier",
+                ));
             }
             if !domain.is_fluid(c) {
                 if species_mass_kg[c] != [0.0; N] || diffusivity_m2_s[c] != 0.0 {
@@ -255,7 +294,8 @@ impl MaterialAdvectionStep {
                     && diffusivity_m2_s[c] > 0.0
                     && diffusivity_m2_s[next] > 0.0
                 {
-                    face_count = face_count.checked_add(1)
+                    face_count = face_count
+                        .checked_add(1)
                         .ok_or_else(|| refuse("diffusion face extent overflows"))?;
                 }
             }
@@ -264,10 +304,12 @@ impl MaterialAdvectionStep {
         if initial_partition.value > controls.maximum_partition_defect_kg {
             return Err(refuse("species do not partition the accepted carrier mass"));
         }
-        let pair_updates = face_count.checked_mul(2)
+        let pair_updates = face_count
+            .checked_mul(2)
             .and_then(|n| n.checked_mul(controls.substeps))
             .ok_or_else(|| refuse("diffusion work extent overflows"))?;
-        let component_updates = pair_updates.checked_mul(N)
+        let component_updates = pair_updates
+            .checked_mul(N)
             .ok_or_else(|| refuse("diffusion component work extent overflows"))?;
         if pair_updates > controls.maximum_pair_updates {
             return Err(refuse("diffusion pair-update budget exhausted"));
@@ -276,9 +318,8 @@ impl MaterialAdvectionStep {
             .checked_add(4 * core::mem::size_of::<[Sum; N]>())
             .and_then(|n| n.checked_add(core::mem::size_of::<[f64; N]>()))
             .ok_or_else(|| refuse("diffusion fixed storage extent overflows"))?;
-        let bytes = count.checked_mul(
-            core::mem::size_of::<Inventory<N>>() + core::mem::size_of::<[f64; N]>()
-        )
+        let bytes = count
+            .checked_mul(core::mem::size_of::<Inventory<N>>() + core::mem::size_of::<[f64; N]>())
             .and_then(|n| n.checked_add(face_count.checked_mul(core::mem::size_of::<Face>())?))
             .and_then(|n| n.checked_add(fixed_bytes.max(2048)))
             .ok_or_else(|| refuse("diffusion storage extent overflows"))?;
@@ -293,21 +334,19 @@ impl MaterialAdvectionStep {
                 continue;
             }
             for side in [1, 3, 5] {
-                let Some(next) = domain.neighbor(c, side).filter(|&n| domain.is_fluid(n))
-                else { continue };
+                let Some(next) = domain.neighbor(c, side).filter(|&n| domain.is_fluid(n)) else {
+                    continue;
+                };
                 if diffusivity_m2_s[next] == 0.0 {
                     continue;
                 }
                 let axis = side / 2;
-                let rho_left = positive(self.mass_kg[c] / domain.volume(c))?;
-                let rho_right = positive(self.mass_kg[next] / domain.volume(next))?;
-                let left = positive((0.5 * domain.widths(c)[axis])
-                    / positive(rho_left * diffusivity_m2_s[c])?)?;
-                let right = positive((0.5 * domain.widths(next)[axis])
-                    / positive(rho_right * diffusivity_m2_s[next])?)?;
-                let largest = left.max(right);
-                let conductance = positive((domain.face_area(c, axis) / largest)
-                    / (1.0 + left.min(right) / largest))?;
+                let conductance = self.diffusion_face_conductance(
+                    domain,
+                    [c, next],
+                    axis,
+                    [diffusivity_m2_s[c], diffusivity_m2_s[next]],
+                )?;
                 let small = self.mass_kg[c].min(self.mass_kg[next]);
                 let large = self.mass_kg[c].max(self.mass_kg[next]);
                 let capacity = positive(small / (1.0 + small / large))?;
@@ -315,7 +354,8 @@ impl MaterialAdvectionStep {
                 if !exponent.is_normal() {
                     // An infinite rate-time product means full pair equilibration;
                     // balancing the factors also retains finite scaled products.
-                    exponent = det::exp(det::ln(conductance) - det::ln(capacity) + det::ln(half_dt));
+                    exponent =
+                        det::exp(det::ln(conductance) - det::ln(capacity) + det::ln(half_dt));
                 }
                 let relaxation = -det::expm1(-exponent);
                 if !relaxation.is_finite() || !(0.0..=1.0).contains(&relaxation) {
@@ -332,7 +372,10 @@ impl MaterialAdvectionStep {
         for (c, &mass) in species_mass_kg.iter().enumerate() {
             poll_every(gate, c)?;
             inventories.push(Inventory {
-                mass: mass.map(|value| Sum { value, compensation: 0.0 }),
+                mass: mass.map(|value| Sum {
+                    value,
+                    compensation: 0.0,
+                }),
                 increment: [Sum::default(); N],
             });
         }
@@ -375,9 +418,8 @@ impl MaterialAdvectionStep {
             endpoint_partition.add(partition.value.abs());
             result.push(endpoint);
         }
-        let absolute_mass_defect_kg = core::array::from_fn(|k| {
-            defect[k].value + change[k].value.abs()
-        });
+        let absolute_mass_defect_kg =
+            core::array::from_fn(|k| defect[k].value + change[k].value.abs());
         for k in 0..N {
             for value in [before[k].value, after[k].value, absolute_mass_defect_kg[k]] {
                 nonnegative(value)?;
@@ -389,7 +431,9 @@ impl MaterialAdvectionStep {
         let partition_defect = initial_partition.value + endpoint_partition.value;
         nonnegative(partition_defect)?;
         if partition_defect > controls.maximum_partition_defect_kg {
-            return Err(refuse("diffusion does not preserve the accepted mass partition"));
+            return Err(refuse(
+                "diffusion does not preserve the accepted mass partition",
+            ));
         }
         poll(gate)?;
         Ok(SpeciesDiffusionStep {

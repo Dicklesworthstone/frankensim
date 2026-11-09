@@ -112,6 +112,27 @@ pub struct MaterialAdvectionStep {
 }
 
 impl MaterialAdvectionStep {
+    /// Check the immutable mass and original fluid mask for dependent diffusion.
+    pub(in crate::conjugate) fn validate_diffusion_carrier(
+        &self,
+        domain: &VoxelDomain,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        let transport = self.accepted_mass_transport(gate)?;
+        if self.projection.field.dims() != domain.dims()
+            || self.mass_kg.len() != domain.cell_count()
+        {
+            return Err(refuse("diffusion domain differs from the accepted carrier"));
+        }
+        for c in 0..domain.cell_count() {
+            poll_every(gate, c)?;
+            if domain.is_fluid(c) != (transport.row_of[c] != usize::MAX) {
+                return Err(refuse("diffusion fluid mask differs from the accepted carrier"));
+            }
+        }
+        Ok(())
+    }
+
     /// Original accepted transfers, never reconstructed from a returned density.
     /// The endpoint inventory is public for existing consumers; reject a caller
     /// edit before using its private, immutable transport operator.

@@ -102,6 +102,7 @@ use crate::d3q19::Face3;
 
 mod momentum_reconstruction;
 mod species;
+pub use species::TurbulentGasSpeciesStep;
 pub mod sgs;
 pub mod viscous_heat;
 pub use momentum_reconstruction::MomentumReconstruction;

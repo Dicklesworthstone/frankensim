@@ -1,3 +1,44 @@
+## Source-owned nonisothermal turbulent species mixing
+
+`FvFlow::diffuse_turbulent_gas_species` connects the original momentum eddy
+viscosity to finite `ClosedGasParcel` inventories with an explicit turbulent
+Schmidt number. Canonical source species and typed mole-to-mass conversion
+supply the fractions; the shared native graded-cell half-resistance supplies
+`G`. All faces sample one original snapshot with
+`dm_k = dt G (Y_left,k - Y_right,k)`. Exact absent species remain absent until
+an actual incoming stream introduces their original source.
+
+The existing material species-network owner transports each donor's partial
+enthalpy, combines all streams, and reconstructs each affected fixed-volume
+gas once. Its NASA caloric increments cancel arbitrary formation references
+before thermal arithmetic. The returned source state supplies the updated
+temperature, thermodynamic pressure, heat capacity, acoustic state, viscosity
+and conductivity. No mixture-average enthalpy replacement, second EOS or
+additional formation-energy heat is introduced.
+
+Native cell IDs, dimensions, fluid mask, exact parcel volumes and accepted
+carrier masses are admitted before stream construction. Common species on a
+conducting face must retain compatible caloric and transport sources. The
+original global withdrawal, local/global species and energy budgets remain
+authoritative; source partitions, face zero-net-mass defects and aggregate
+carrier-mass drift are also checked. Solid, exterior and zero-diffusivity
+faces are impermeable. Refusal/cancellation publishes no partial endpoint.
+
+This is a first-order explicit frozen-state component, retaining the original
+256-parcel and 4096-stream limits. Excessive withdrawals refuse; incoming
+material cannot replenish a donor within the same interval. Face conductances
+and typed compositions are prepared once, and no per-face gas reconstruction
+is performed. Time/mesh refinement remains necessary. Molecular diffusion,
+turbulent heat flux, reactions and subsequent pressure/momentum evolution
+retain their own operators. SIMPLEC gauge pressure is separate from the
+returned thermodynamic pressure, and the carrier's old passive enthalpy is
+not an alternate caloric state.
+
+Focused regressions exercise independent unequal-temperature NASA integrals
+on graded cells, formation-reference invariance, native Smagorinsky coupling,
+Schmidt/heat-policy separation, introduction from exact species absence,
+impermeable solids, exact null controls and immutable refusal.
+
 ## Plane-wall Mann turbulence at native D3Q19 inlets
 
 With `turbulent-inflow`, `BoundaryMannInflow3::new_with_plane_wall` binds the
