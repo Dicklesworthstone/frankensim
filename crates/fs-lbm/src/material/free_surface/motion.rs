@@ -5,7 +5,10 @@ use crate::d3q19::freesurface3::pressure::GasPressureField3;
 use crate::d3q19::freesurface3::{FreeSurfaceError3, PlanarWallMotionReport3};
 
 mod rigid;
-pub use rigid::{MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3};
+pub use rigid::{
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallPairReport3,
+    MaterialPlanarRigidWallReport3,
+};
 mod field;
 pub use field::{
     MaterialPlanarWallFaceExchange3, MaterialPlanarWallFieldReport3,

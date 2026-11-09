@@ -59,7 +59,8 @@ pub use solid_loads::{MaterialSubmergedSolid3, MaterialSubmergedSolidLoad3,
     MaterialSubmergedSolidLoads3, SubmergedSolidLoadControls3};
 mod motion;
 pub use motion::{
-    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3,
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallPairReport3,
+    MaterialPlanarRigidWallReport3,
     MaterialPlanarWallFaceExchange3, MaterialPlanarWallFieldReport3,
     MaterialPlanarWallMotionReport3, MaterialPlanarWallVelocityField3,
     MaterialWallWrenchExchange3,

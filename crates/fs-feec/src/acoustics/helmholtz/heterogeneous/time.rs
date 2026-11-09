@@ -42,6 +42,8 @@ pub mod mechanical;
 
 /// Spatial passive admittance with explicit causal boundary memories.
 pub mod relaxing;
+/// Causal molecular compressibility in full sparse pressure/potential fields.
+pub mod bulk;
 
 /// Complete-state exponential propagation with held physical source profiles.
 /// This removes midpoint's temporal frequency warping within explicit dense

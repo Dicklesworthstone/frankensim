@@ -3,6 +3,9 @@
 use super::*;
 use crate::d3q19::freesurface3::{PlanarRigidWallMotion3, PlanarRigidWallReport3};
 
+mod pair;
+pub use pair::MaterialPlanarRigidWallPairReport3;
+
 /// Rigid material motion along one fixed, fully flooded domain plane.
 /// The liquid domain's physical origin is zero. Angular speed is right handed
 /// about the positive coordinate axis normal to the selected plane.
