@@ -3,6 +3,8 @@
 
 #[path = "visco_harmonic_window/bias.rs"]
 mod bias;
+#[path = "visco_harmonic_window/causal.rs"]
+mod causal;
 
 use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};

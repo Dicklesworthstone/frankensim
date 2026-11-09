@@ -13953,3 +13953,33 @@ The material owner retains direct equilibrium storage/work cross terms without
 adding Maxwell/Kelvin heat. Original quadrature, physical interval, cancellation
 and sizeof-based point payload bounds remain. No static equilibrium, geometric
 prestress, thermal strain or causal Maxwell memory is inferred.
+
+## Causal harmonic evolution of original quadrature histories
+
+`ViscoElementState::bind_harmonic_clock` retains an accepted original history
+and a normalized DD source instant. A prepared causal harmonic material
+observer advances that history through a prescribed full nodal waveform,
+including moving supports and a real static bias. Each original integration
+point supplies its retained raw-Mandel Maxwell state to the shared material
+owner. Both constitutive and compatible B-bar strain fields pass original
+source admission. No reduced/modal strain or settled-memory substitution is
+made.
+
+The endpoint carries original per-point memory, stress, full nodal
+displacement and cumulative ledgers together with an independent interval
+work/heat/storage field. Exact source identity, start displacement/strain
+continuity and an advancing DD clock are admitted. Empty AC banks permit
+natural memory relaxation about a held field. Payload/work bounds include
+returned histories, temporal scratch, nodal reconstruction and original
+per-point constitutive/compatible strain recovery. Refusal or cancellation
+leaves the borrowed accepted history unchanged.
+
+This is constitutive evolution under prescribed displacement, not a mechanical
+equilibrium, kinetic-energy or support-work solve. Material laws remain fixed;
+histories with retained thermal eigenstrain are explicitly refused.
+Four G1/G3/G4 regression groups specify preloaded Tet4 memory and moving
+supports against independent real-time oracles, original time-domain
+continuation, free relaxation on large DD clocks, B-bar admission, and
+source/continuity/budget/cancellation refusal. They were authored and reviewed
+but not formatted, compiled or run after the execution environment became
+unavailable.

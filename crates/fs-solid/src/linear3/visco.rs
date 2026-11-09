@@ -68,6 +68,8 @@ pub use harmonic::{
 };
 mod harmonic_material;
 pub use harmonic_material::{
+    ViscoHarmonicMaterialCausalField, ViscoHarmonicMaterialCausalObserver,
+    ViscoHarmonicMaterialCausalStep, ViscoHarmonicMaterialHistory,
     ViscoHarmonicMaterialBudget, ViscoHarmonicMaterialField, ViscoHarmonicMaterialObserver,
     ViscoHarmonicMaterialPoint, ViscoHarmonicMaterialWindowField, ViscoHarmonicMaterialWindowPoint,
     ViscoHarmonicMaterialSpectrumField, ViscoHarmonicMaterialSpectrumObserver,

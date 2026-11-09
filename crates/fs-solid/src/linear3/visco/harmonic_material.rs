@@ -14,6 +14,11 @@ pub use spectrum::{
     ViscoHarmonicMaterialSpectrumField, ViscoHarmonicMaterialSpectrumObserver,
     ViscoHarmonicMaterialSpectrumPoint,
 };
+mod causal;
+pub use causal::{
+    ViscoHarmonicMaterialCausalField, ViscoHarmonicMaterialCausalObserver,
+    ViscoHarmonicMaterialCausalStep, ViscoHarmonicMaterialHistory,
+};
 
 /// Cold cache plus returned field admission. The original geometry/laws and
 /// displacement input are borrowed, not included in this additional payload.
