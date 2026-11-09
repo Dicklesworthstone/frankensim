@@ -14528,3 +14528,37 @@ and 80 time steps were `2.420e-4`, `6.048e-5` and `1.512e-5` Pa, with separately
 integrated nonnegative heat closing physical energy. The tests use the bounded
 native dependency closure documented by the FE bulk owner, not a full
 workspace/Cargo or experimental validation claim.
+
+## Two finite rigid walls sharing the original liquid history
+
+`free_surface_wall::planar::pair::FreeSurfacePlanarWallPair` retains one original
+source-bound liquid and two finite rigid bodies on distinct opposing flooded
+planes. One shared native pilot and one final replay provide both three-mode
+wall responses. The original mass-whitened midpoint solve and native rigid
+integrator retain each body's two tangent translations, principal normal spin,
+raw and physical guide reactions, orbital-plus-spin momentum and mechanical
+work. Both bodies and the one liquid clock publish together. Cell work counts
+two complete-domain trials total, not two per body; per-wall receipts contain
+small mechanical records and no duplicate liquid populations.
+
+Held applied tangent forces and axial couples, physical tolerances and work
+bounds remain explicit. Each original wall's final native replay and actual
+body endpoint must pass before combined momentum, common-origin angular
+momentum and signed-work checks admit the pair. Cross-wall influence travels
+through the evolving native liquid over subsequent ticks. Fixed fully flooded
+planes, isothermal flow and original source/VOF limits remain; this adds no
+normal displacement, tilt, finite edges, cover/vacate or whole-fluid energy
+conservation claim. Guide reactions and unrelated bulk forces retain separate
+physical ownership.
+
+Validation: four new pair tests and four original isothermal planar tests pass
+against the selected original liquid, material, cancellation, rigid-body and
+linear-algebra sources. They include an independent six-mode analytic solve on
+all axes, actual body linear/spin/orbital momentum and kinetic-work balances,
+pressure and ordering covariance, 80-step fluid-mediated momentum transfer and
+atomic second-wall refusal/retry. The one-tick oracle compares every population
+against one original native replay and checks the coupled owner's physical time
+and accepted-step count; SparseGrid3's separate standalone sweep counter is not
+a free-surface transport clock. Full Cargo remains blocked in asupersync by the
+8 GiB environment limit. Thermal regressions and the full workspace gate were
+not executed; their numerical expressions are unchanged by the helper split.

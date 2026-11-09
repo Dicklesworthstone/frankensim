@@ -16,6 +16,9 @@
 
 pub mod thermal;
 
+/// Two finite opposing walls sharing one original liquid timestep.
+pub mod pair;
+
 use super::{array, norm, normal_axis, vector};
 use fs_exec::CancelGate;
 use fs_la::factor::cholesky;
@@ -137,6 +140,13 @@ impl PlanarWallLiquid for MaterialFreeSurface3<'_> {
     }
 }
 
+impl<T: PlanarWallLiquid + ?Sized> sealed::NativeLiquid for &T {}
+impl<T: PlanarWallLiquid + ?Sized> PlanarWallLiquid for &T {
+    fn wall_flow(&self) -> &MaterialFreeSurface3<'_> {
+        <T as PlanarWallLiquid>::wall_flow(*self)
+    }
+}
+
 /// Original source-bound liquid and native finite wall retained for continuation.
 pub type FreeSurfacePlanarWall<'a> = PlanarWallMotion<MaterialFreeSurface3<'a>>;
 
@@ -220,6 +230,61 @@ pub struct PlanarWallCandidate<L, R = ()> {
     pub trial_cells: usize,
 }
 
+impl<L> PlanarWallMotion<L> {
+    /// Original accepted source-bound liquid and its population history.
+    pub const fn liquid(&self) -> &L {
+        &self.liquid
+    }
+    /// Original native body, including the actual COM and attitude.
+    pub const fn body(&self) -> RigidBodyState {
+        self.body
+    }
+    /// Original physical mass and inertia; no fluid-added surrogate replaces it.
+    pub const fn properties(&self) -> MassProperties {
+        self.properties
+    }
+    /// Physical time since binding; discarded fluid trials advance no time.
+    pub const fn elapsed_time_s(&self) -> f64 {
+        self.elapsed_time_s
+    }
+    /// Number of complete jointly admitted native timesteps.
+    pub const fn accepted_steps(&self) -> u64 {
+        self.accepted_steps
+    }
+
+    // Rebind only the read-only liquid view. Both-wall coordination retains
+    // small native mechanical records, never a second population owner.
+    fn with_liquid<M>(&self, liquid: M) -> PlanarWallMotion<M> {
+        PlanarWallMotion {
+            liquid,
+            properties: self.properties,
+            body: self.body,
+            wall: self.wall,
+            axis_body: self.axis_body,
+            inertia_kg_m2: self.inertia_kg_m2,
+            domain_cells: self.domain_cells,
+            elapsed_time_s: self.elapsed_time_s,
+            accepted_steps: self.accepted_steps,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlanarWallPreparation {
+    axis: usize,
+    a: usize,
+    b: usize,
+    dt: f64,
+    q0: [f64; 3],
+    v0: Vec3,
+    initial_center: Vec3,
+    origin: Vec3,
+    external_linear: Vec3,
+    external_spin: f64,
+    external_couple: Vec3,
+    trial_cells: usize,
+}
+
 impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
     /// Bind one fixed flooded plane to the original finite rigid-body inertia.
     ///
@@ -288,27 +353,6 @@ impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
         result.admit_endpoint(body)?;
         poll(gate)?;
         Ok(result)
-    }
-
-    /// Original accepted source-bound liquid and its population history.
-    pub const fn liquid(&self) -> &L {
-        &self.liquid
-    }
-    /// Original native body, including the actual COM and attitude.
-    pub const fn body(&self) -> RigidBodyState {
-        self.body
-    }
-    /// Original physical mass and inertia; no fluid-added surrogate replaces it.
-    pub const fn properties(&self) -> MassProperties {
-        self.properties
-    }
-    /// Physical time since binding; discarded fluid trials advance no time.
-    pub const fn elapsed_time_s(&self) -> f64 {
-        self.elapsed_time_s
-    }
-    /// Number of complete jointly admitted native timesteps.
-    pub const fn accepted_steps(&self) -> u64 {
-        self.accepted_steps
     }
 
     /// Signed physical translation and normal spin of the accepted native body.
@@ -389,6 +433,43 @@ impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
         )
             -> Result<(L, MaterialPlanarRigidWallReport3, R), PlanarWallError>,
     ) -> Result<PlanarWallCandidate<L, R>, PlanarWallError> {
+        let prepared =
+            self.prepare_candidate(external_force_n, external_torque_nm, controls, gate)?;
+        let pilot = {
+            let (candidate, report, _) = trial(
+                self.prescribed(prepared.origin, prepared.q0),
+                controls.maximum_relative_mass_defect,
+                gate,
+            )?;
+            drop(candidate);
+            report
+        };
+        poll(gate)?;
+        let imposed = self.solve_midpoint(&prepared, &pilot)?;
+        let (liquid, wall, liquid_report) = trial(
+            self.prescribed(prepared.origin, imposed),
+            controls.maximum_relative_mass_defect,
+            gate,
+        )?;
+        self.finish_candidate(
+            &prepared,
+            &pilot,
+            imposed,
+            liquid,
+            wall,
+            liquid_report,
+            controls,
+            gate,
+        )
+    }
+
+    fn prepare_candidate(
+        &self,
+        external_force_n: Vec3,
+        external_torque_nm: f64,
+        controls: PlanarWallControls,
+        gate: &CancelGate,
+    ) -> Result<PlanarWallPreparation, PlanarWallError> {
         poll(gate)?;
         controls.validate()?;
         let axis = normal_axis(self.wall);
@@ -425,16 +506,36 @@ impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
         let external_linear = checked_vector(external_force_n.scale(dt))?;
         let external_spin = finite(external_torque_nm * dt)?;
         let external_couple = axis_vector(axis).scale(external_spin);
-        let pilot = {
-            let (candidate, report, _) = trial(
-                self.prescribed(origin, q0),
-                controls.maximum_relative_mass_defect,
-                gate,
-            )?;
-            drop(candidate);
-            report
-        };
-        poll(gate)?;
+        Ok(PlanarWallPreparation {
+            axis,
+            a,
+            b,
+            dt,
+            q0,
+            v0,
+            initial_center,
+            origin,
+            external_linear,
+            external_spin,
+            external_couple,
+            trial_cells,
+        })
+    }
+
+    fn solve_midpoint(
+        &self,
+        prepared: &PlanarWallPreparation,
+        pilot: &MaterialPlanarRigidWallReport3,
+    ) -> Result<[f64; 3], PlanarWallError> {
+        let PlanarWallPreparation {
+            axis,
+            a,
+            b,
+            q0,
+            external_linear,
+            external_spin,
+            ..
+        } = *prepared;
         let pilot_load = [
             pilot.wall_impulse_kg_m_s[a],
             pilot.wall_impulse_kg_m_s[b],
@@ -489,11 +590,40 @@ impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
                 (Dd::from_f64(q0[i]) + Dd::from_f64(change[i]) / Dd::from_f64(roots[i])).to_f64(),
             )?;
         }
-        let (liquid, wall, liquid_report) = trial(
-            self.prescribed(origin, imposed),
-            controls.maximum_relative_mass_defect,
-            gate,
-        )?;
+        Ok(imposed)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn finish_candidate<M, R>(
+        &self,
+        prepared: &PlanarWallPreparation,
+        pilot: &MaterialPlanarRigidWallReport3,
+        imposed: [f64; 3],
+        liquid: M,
+        wall: MaterialPlanarRigidWallReport3,
+        liquid_report: R,
+        controls: PlanarWallControls,
+        gate: &CancelGate,
+    ) -> Result<PlanarWallCandidate<M, R>, PlanarWallError> {
+        let PlanarWallPreparation {
+            axis,
+            a,
+            b,
+            dt,
+            q0,
+            v0,
+            initial_center,
+            origin,
+            external_linear,
+            external_spin,
+            external_couple,
+            trial_cells,
+        } = *prepared;
+        let pilot_load = [
+            pilot.wall_impulse_kg_m_s[a],
+            pilot.wall_impulse_kg_m_s[b],
+            pilot.wall_angular_impulse_kg_m2_s[axis],
+        ];
         if wall.fluid_work_j.abs() > controls.maximum_absolute_wall_work_j {
             return Err(invalid(
                 "planar wall work exceeds the declared exchange bound",
@@ -741,7 +871,7 @@ impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
             .transpose()?;
         poll(gate)?;
         Ok(PlanarWallCandidate {
-            motion: Self {
+            motion: PlanarWallMotion {
                 liquid,
                 properties: self.properties,
                 body,

@@ -16,6 +16,9 @@ const SPIN_IMPEDANCE: f64 = 224.0 * CELL_MASS * DX * DX;
 #[path = "planar/thermal.rs"]
 mod thermal;
 
+#[path = "planar/pair.rs"]
+mod pair;
+
 fn controls() -> PlanarWallControls {
     PlanarWallControls {
         maximum_trial_cells: 2 * CELLS,
@@ -334,10 +337,9 @@ fn translated_com_continuation_replays_fluid_and_balances_full_orbital_momentum(
             2e-18,
         );
         assert_eq!(step.motion.accepted_steps(), index as u64 + 1);
-        assert_eq!(
-            step.motion.liquid().lattice().grid().steps(),
-            index as u64 + 1
-        );
+        // VOF owns its collision/transport separately from sparse sweep counts.
+        // The exact native replay above and this owner clock admit one interval.
+        near(step.motion.elapsed_time_s(), (index + 1) as f64 * DT, 1e-17);
         motion = step.motion;
     }
 }
