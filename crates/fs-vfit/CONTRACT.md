@@ -728,3 +728,25 @@ This seam supports atomic initialized source/network coupling without a
 second network solve or history clone. The source regressions in fs-couple
 and the five existing reactive-impedance regressions pass in focused native
 builds; this is not a full workspace verification.
+
+### Original MIMO impedance curvature and coefficient jets
+
+`MimoModel::eval_jet` and `eval_parameter_jet` retain Z, Z_s, Z_ss,
+Z_theta and Z_s_theta in the original port chart. Authored fixed-group
+pole/residue/direct/improper directions include every mutual entry and both
+conjugate members; either nonzero stored-pair orientation is accepted.
+On exp(-i*omega*t), the derivatives are -i*Z_s, -Z_ss and -i*Z_s_theta.
+Signed local tangents confer no passivity, causality, finite parameter-domain
+or fit-identification derivative claim.
+
+Binary-separated real/imaginary double-double quotient chains preserve weak
+components until final output rounding without an explicit pole reciprocal
+or squared/cubed denominator. Work is O(p*p*order), with 48*p*p bytes for
+frequency outputs or 80*p*p for parameter outputs and constant scratch.
+Source band, enclosing work/memory budgets and cancellation remain caller
+owned. Shape/nonfinite/grouping, true-pole and unrepresentable-total refusals
+publish no partial jet; source data and runtime history remain unchanged.
+Native regressions in `mimo_derivatives.rs` independently differentiate the
+original real-state resolvent and Maxwell strength/time-constant laws, and
+check conjugate charts, time dilation, extreme unit scales and weak mixed
+quadrature recovery.

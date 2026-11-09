@@ -32,8 +32,12 @@ use fs_math::{c64::C64, det};
 
 /// Exact held-input realization of entrywise propagation delays.
 pub mod delayed;
+mod derivatives;
 /// Shared bounded admission and original exact ZOH runtime for causal loads.
 pub mod load;
+pub use derivatives::{
+    MimoDerivativeError, MimoLaplaceJet, MimoLaplaceParameterJet, MimoParameterDirection,
+};
 
 mod relocation;
 pub use relocation::shared_pole_relocation_scratch_bytes;
