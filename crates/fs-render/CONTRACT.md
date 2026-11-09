@@ -12073,3 +12073,28 @@ to zero. This is an estimator-variance result, not a wall-clock speed claim or
 inter-facet multiple-scattering closure. Existing native scalar/polarized scene
 regressions also exercise the changed owners; their execution remains pending
 the unavailable constellation dependency checkouts in this environment.
+
+## Positive narrow-band temporal interference
+
+Scalar exposure, full Jones coherency, analyzer projections and scalar/Jones
+interferometers share `fs-fft::harmonic_window::PreparedUniformHarmonicBand`
+when the original uniform shutter admits its bounded narrow-band factor.
+The same temporal modes determine diagonal powers, complex cross-arm moments
+and polarized coherency. Original source covariance columns remain independent;
+equal-frequency fields still combine before projection. This retains small
+positive multi-tone null signals without subtracting nearly equal powers or
+clamping a negative result. Wide-band and one/two-tone observations retain the
+existing analytic pair kernels. Spatial quadrature and authored propagation
+phases are unchanged. The shared owner documents its absolute truncation bound;
+this is not a relative floating-point accuracy certificate at arbitrary nulls.
+
+Preparation preflights the selected representation before temporal allocation.
+For N distinct frequencies and M retained modes, scalar power costs S=M*(N+1),
+complex mutual coherence C=M*(2*N+1), and full Jones coherency H=M*(2*N+4) per
+source bank. Two active scalar arms cost 4*S+C; two active Jones arms cost
+4*S+2*H+2*C. A single active arm costs S or H respectively. Counts include all
+independent source banks and every spatial quadrature sample. Observations use
+fixed scratch, no allocation, and bounded cancellation; no carrier-time raster
+is introduced. Regression fixtures retain positive fourth-order three-tone
+nulls through the original chromatic pupil, source-column identity, full Stokes,
+passive port closure, finite-pixel energy and exact work-budget boundaries.

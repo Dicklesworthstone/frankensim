@@ -58,7 +58,7 @@ pub struct PolarizedCoherentInterferometerExposureSample {
     pub output_coherency_energy_density_j: [PolarizedDiffractionCoherency; 2],
     /// Original pupil transfers, including every retained patterned-pupil mode.
     pub pupil_evaluations: usize,
-    /// Real frequency contractions, charged before any pupil transfer.
+    /// Prepared temporal mode/pair work, charged before any pupil transfer.
     pub pair_contractions: usize,
 }
 
@@ -91,9 +91,12 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
     /// Orthogonal arm fields may carry polarization interference even when
     /// their trace mutual coherence is zero. Passive loss is never normalized.
     ///
-    /// With N distinct frequencies and B source banks, two active arms cost
-    /// B*2*N*(6*N+1) real contractions; one active arm costs B*N*(3*N+1).
-    /// Closed/empty receivers do no pupil or pair work. Explicit observation
+    /// With B source banks and per-bank scalar power, full coherency and
+    /// complex mutual work S, H and C, two active arms cost B*(4*S+2*H+2*C);
+    /// one costs B*H. The short-band path counts its retained mode work using
+    /// the same factors for powers, coherencies and mutual coherence. Pairwise
+    /// fallback recovers B*2*N*(6*N+1) or B*N*(3*N+1) for N frequencies.
+    /// Closed/empty receivers do no pupil or temporal work. Explicit observation
     /// limits admit this query independently of preparation's original
     /// single-detector budget. Scratch is fixed and observation allocates nothing.
     /// Cancellation publishes no partial result and leaves preparation reusable.
@@ -171,14 +174,21 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let contractions = if evaluations == 0 {
             0
         } else {
-            let n = self.frequency_count();
-            // Arm traces: 2*N*(N+1). Output coherencies: 2*N*(3*N+1).
-            // Trace mutual coherence: 2*N*(2*N-1). A single active arm
-            // shares one coherency contraction between its two half-power ports.
+            // Two arm traces use four scalar powers, two output ports use
+            // two full coherencies, and the trace mutual coherence uses two
+            // complex crosses. All share the original temporal factorization.
+            // A single arm shares one coherency between its half-power ports.
             let per_bank = if active == 1 {
-                n * (3 * n + 1)
+                self.optics.coherency_component_work()
             } else {
-                2 * n * (6 * n + 1)
+                self.optics
+                    .power_component_work()
+                    .checked_mul(4)
+                    .and_then(|x| {
+                        x.checked_add(self.optics.coherency_component_work().checked_mul(2)?)
+                    })
+                    .and_then(|x| x.checked_add(self.optics.cross_component_work().checked_mul(2)?))
+                    .ok_or_else(|| limit(quantity, limits.maximum_pair_contractions))?
             };
             self.factors
                 .checked_add(1)

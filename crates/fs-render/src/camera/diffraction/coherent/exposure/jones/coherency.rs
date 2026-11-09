@@ -6,12 +6,14 @@
 //! owned by the existing Jones exposure. A finite shutter can depolarize
 //! deterministic multicolor illumination by resolving its polarization beats.
 //!
-//! The two diagonal norms use the original Hermitian contraction. The complex
-//! cross moment is contracted directly, never recovered by subtracting powers
-//! measured through different analyzers. The cached kernel returns half of
-//! Re[a conj(b) K_ij]; using i*b gives half of Im[a conj(b) K_ij]. For i>j the
-//! cross entry is X_i conj(Y_j) K_ij + conj(Y_i conj(X_j) K_ij).
-//! Thus both real terms add while their imaginary terms subtract.
+//! Short spectral bands share one positive temporal expansion between both
+//! Jones axes. Weighted outer products of their projected fields retain weak
+//! coherent nulls and a positive semidefinite polarization matrix. Wider bands
+//! use the original Hermitian contraction. Its complex cross moment is
+//! contracted directly, never recovered by subtracting analyzer powers.
+//! The pair kernel returns half of Re[a conj(b) K_ij]; using i*b gives half of
+//! Im[a conj(b) K_ij]. For i>j the cross entry is
+//! X_i conj(Y_j) K_ij + conj(Y_i conj(X_j) K_ij).
 //!
 //! Camera right/up and incoming -forward define the same transverse frame as
 //! monochromatic coherency, including native V = +2 Im(C_xy). The scalar
@@ -25,6 +27,7 @@ use super::{
     JonesFields, MAX_COHERENT_DIFFRACTION_TONES, PreparedCoherentJonesDiffractionExposure,
     admit_coordinate, admit_count, limit, pixel, poll, rounded,
 };
+use fs_fft::harmonic_window::MAX_UNIFORM_HARMONIC_BAND_MODES;
 
 type Moments = [Dd; 4];
 
@@ -53,7 +56,7 @@ pub struct PolarizedCoherentDiffractionPixelExposure {
     pub fluctuation_coherency_j: PolarizedDiffractionCoherency,
     /// Total time-integrated coherency and signed Stokes energy in joules.
     pub coherency_j: PolarizedDiffractionCoherency,
-    /// Real frequency-pair contractions over all source banks and pixel samples.
+    /// Temporal projection/pair contractions over all banks and pixel samples.
     pub pair_contractions: usize,
 }
 
@@ -65,8 +68,9 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
     /// each frequency pair use the original analytic window and sensor phase.
     /// A common optical carrier is not time-stepped or rounded away.
     ///
-    /// Full coherency costs n*(3*n+1) real contractions per source bank for n
-    /// distinct frequencies: four diagonal moments and six per unequal pair.
+    /// Full coherency costs (2*n+4)*m contractions per source bank for an
+    /// admitted positive band with n frequencies and m temporal modes. The
+    /// pair fallback costs n*(3*n+1): four diagonal and six unequal-pair moments.
     /// This is admitted against the original preparation's pair limit before
     /// pupil work. Detector-power queries retain their original smaller cost.
     pub fn observe_coherency(
@@ -151,9 +155,10 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
     }
 
     fn coherency_work(&self) -> Result<usize, CoherentDiffractionError> {
-        let n = self.frequency_count();
-        let contractions = (n * (3 * n + 1))
-            .checked_mul(self.factors + 1)
+        let contractions = self
+            .factors
+            .checked_add(1)
+            .and_then(|banks| self.optics.coherency_component_work().checked_mul(banks))
             .ok_or_else(|| {
                 limit(
                     "Jones coherency pair contractions",
@@ -196,9 +201,6 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         rotations: &[[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Moments, CoherentDiffractionError> {
-        let two = Dd::from_f64(2.0);
-        let four = Dd::from_f64(4.0);
-        let mut moment = [Dd::ZERO; 4];
         for i in 0..self.frequency_count() {
             poll(cancelled)?;
             let [cr, ci] = rotations[i];
@@ -211,6 +213,57 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
                     return Err(CoherentDiffractionError::Unrepresentable);
                 }
             }
+        }
+        let mut moment = [Dd::ZERO; 4];
+        if let Some(band) = &self.optics.band {
+            let count = self.frequency_count();
+            let modes = band.mode_count();
+            let mut axis = [[Dd::ZERO; 2]; MAX_COHERENT_DIFFRACTION_TONES];
+            let mut x = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
+            let mut y = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
+            let mut active = [false; 2];
+            for i in 0..count {
+                axis[i] = fields[i][0];
+            }
+            poll(cancelled)?;
+            band.project_parts_dd(&axis[..count], &mut x[..modes])?;
+            for i in 0..count {
+                axis[i] = fields[i][1];
+            }
+            poll(cancelled)?;
+            band.project_parts_dd(&axis[..count], &mut y[..modes])?;
+            for mode in 0..modes {
+                poll(cancelled)?;
+                // Both axes use the SAME temporal coordinate. Separate power
+                // factors would lose their complex correlation. This is an
+                // analytic Jones outer product, with no real-phasor half.
+                let xx = band.mode_cross_parts_dd(mode, x[mode], x[mode])?;
+                let yy = band.mode_cross_parts_dd(mode, y[mode], y[mode])?;
+                let xy = band.mode_cross_parts_dd(mode, x[mode], y[mode])?;
+                let positive = [xx[0], yy[0], xy[0], xy[1]];
+                for k in 0..4 {
+                    moment[k] = moment[k] + positive[k];
+                }
+                for (flag, field) in active.iter_mut().zip([x[mode], y[mode]]) {
+                    *flag |= field.into_iter().any(|value| !is_zero(value));
+                }
+            }
+            // The native product weights before multiplication, retaining
+            // subnormal mode power. A negligible underflowed mode cannot erase
+            // another mode's finite population; refuse only a nonzero axis
+            // whose COMPLETE positive population was lost.
+            for i in 0..2 {
+                if active[i] && is_zero(moment[i]) {
+                    return Err(CoherentDiffractionError::Unrepresentable);
+                }
+            }
+            physical(moment)?;
+            return Ok(moment);
+        }
+        let two = Dd::from_f64(2.0);
+        let four = Dd::from_f64(4.0);
+        for i in 0..self.frequency_count() {
+            poll(cancelled)?;
             let diagonal = outer(fields[i])?;
             for k in 0..4 {
                 moment[k] = moment[k] + diagonal[k];
@@ -277,4 +330,3 @@ pub(super) fn physical(
     }
     Ok(result)
 }
-

@@ -4,7 +4,8 @@
 //! watts as in the monochromatic query. This is the usual cycle-averaged
 //! photodetector law, not a subcycle measurement of the real electric field:
 //! optical sum-frequency terms are outside this scalar model. Difference
-//! frequencies survive exactly through the uniform shutter's analytic kernel.
+//! frequencies survive through the uniform shutter's analytic kernels and
+//! bounded positive modal factor, without a time raster.
 //!
 //! Monochromatic intensity can omit the sensor's common Fresnel phase; a line
 //! spectrum cannot. For x=d*theta, each line contributes
@@ -20,7 +21,7 @@ use super::{
     PhysicalCamera, PreparedCoherentDiffraction, admit_coordinate, admit_count, pixel, poll,
     rounded, square,
 };
-use fs_fft::harmonic_window::{HarmonicWindow, ProperHarmonicProduct};
+use fs_fft::harmonic_window::{HarmonicWindow, PreparedUniformHarmonicBand, ProperHarmonicProduct};
 use fs_math::det;
 
 mod interferometer;
@@ -30,9 +31,8 @@ pub use interferometer::{
 };
 
 mod jones;
-pub use jones::{CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer};
-pub use jones::PolarizedCoherentInterferometerPixelExposure;
 pub use jones::PolarizedCoherentInterferometerExposureSample;
+pub use jones::PolarizedCoherentInterferometerPixelExposure;
 pub use jones::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
     CoherentJonesPupilLayer, CoherentJonesPupilLimits, CoherentJonesPupilResponse,
@@ -40,6 +40,7 @@ pub use jones::{
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
     PreparedCoherentJonesDiffractionExposure,
 };
+pub use jones::{CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer};
 
 const C_M_S: f64 = 299_792_458.0;
 const TAU: Dd = Dd {
@@ -92,8 +93,10 @@ pub struct CoherentDiffractionExposureLimits {
     pub maximum_tones: usize,
     /// Global authored wave count and shared covariance-column count.
     pub sources: CoherentDiffractionLimits,
-    /// Upper-triangular frequency contractions across mean and all factors.
-    /// Includes diagonal norms; checked before temporal kernels are allocated.
+    /// Temporal projection/product work across mean and all factors. A narrow
+    /// band with N frequencies and M modes costs M*(N+1) per source bank;
+    /// the wider-band pair contraction costs N*(N+1)/2. Checked before the
+    /// temporal plan or pupil transfers are allocated.
     pub maximum_pair_contractions: usize,
 }
 
@@ -134,16 +137,19 @@ struct FrequencyGroup {
 /// Cached original pupil transfers and analytic shutter kernels.
 ///
 /// Equal frequencies are reduced in DD before squaring. Different frequencies
-/// use analytic difference-only kernels, so cost does not grow with optical
-/// carrier frequency or shutter duration. Observation allocates nothing and
-/// retains bounded cancellation points. The analytic kernel is not a relative
-/// error certificate at an arbitrary null; negative/unrepresentable contracted
+/// use analytic difference-only kernels. Narrow bands use a positive modal
+/// factor of the uniform shutter, retaining weak multi-tone interference
+/// without subtracting nearly equal powers. The bounded modal truncation is
+/// documented by `fs_fft::harmonic_window::PreparedUniformHarmonicBand`; it is
+/// not a relative error certificate at an arbitrary null. Observation allocates
+/// nothing and retains bounded cancellation points. Unrepresentable contracted
 /// powers are refused, never clamped to a plausible positive measurement.
 pub struct PreparedCoherentDiffractionExposure<'camera, 'source> {
     tones: Vec<PreparedCoherentDiffraction<'camera, 'source>>,
     tone_groups: Vec<usize>,
     groups: Vec<FrequencyGroup>,
     kernels: Vec<ProperHarmonicProduct>,
+    band: Option<PreparedUniformHarmonicBand>,
     shutter: CoherentDiffractionShutter,
     sensor_distance_m: f64,
     minimum_scale: f64,
@@ -217,19 +223,26 @@ impl PhysicalCamera {
             });
             tone_groups.push(group);
         }
-        let contractions = (group_count * (group_count + 1) / 2)
-            .checked_mul(factors + 1)
-            .ok_or_else(|| {
-                limit(
-                    "exposure pair contractions",
-                    limits.maximum_pair_contractions,
-                )
-            })?;
+        let band_modes = shutter
+            .0
+            .uniform_band_mode_count_hz(&frequencies[..group_count])?;
+        let component_work = band_modes.map_or(group_count * (group_count + 1) / 2, |modes| {
+            modes * (group_count + 1)
+        });
+        let contractions = component_work.checked_mul(factors + 1).ok_or_else(|| {
+            limit(
+                "exposure pair contractions",
+                limits.maximum_pair_contractions,
+            )
+        })?;
         admit_count(
             "exposure pair contractions",
             contractions,
             limits.maximum_pair_contractions,
         )?;
+        let band = shutter
+            .0
+            .prepare_uniform_band_hz(&frequencies[..group_count])?;
         let mut prepared = Vec::with_capacity(tones.len());
         let mut groups = Vec::with_capacity(group_count);
         let mut minimum_scale = f64::INFINITY;
@@ -281,15 +294,18 @@ impl PhysicalCamera {
             }
             prepared.push(pupil);
         }
-        let mut kernels = Vec::with_capacity(group_count * group_count.saturating_sub(1) / 2);
-        for (i, group) in groups.iter().enumerate() {
-            for previous in &groups[..i] {
-                poll(&mut cancelled)?;
-                kernels.push(
-                    shutter
-                        .0
-                        .proper_product_kernel_hz(group.frequency_hz, previous.frequency_hz)?,
-                );
+        let mut kernels = Vec::new();
+        if band.is_none() {
+            kernels.reserve_exact(group_count * group_count.saturating_sub(1) / 2);
+            for (i, group) in groups.iter().enumerate() {
+                for previous in &groups[..i] {
+                    poll(&mut cancelled)?;
+                    kernels.push(
+                        shutter
+                            .0
+                            .proper_product_kernel_hz(group.frequency_hz, previous.frequency_hz)?,
+                    );
+                }
             }
         }
         let wavenumber_span = maximum_k - minimum_k;
@@ -302,6 +318,7 @@ impl PhysicalCamera {
             tone_groups,
             groups,
             kernels,
+            band,
             shutter,
             sensor_distance_m,
             minimum_scale,
@@ -314,6 +331,29 @@ impl PhysicalCamera {
 }
 
 impl PreparedCoherentDiffractionExposure<'_, '_> {
+    // Per-source-bank work from the same temporal representation used by all
+    // scalar, polarized, and mutual-coherence consumers. N is hard-bounded.
+    fn power_component_work(&self) -> usize {
+        self.band.as_ref().map_or_else(
+            || self.groups.len() * (self.groups.len() + 1) / 2,
+            PreparedUniformHarmonicBand::power_work,
+        )
+    }
+
+    fn cross_component_work(&self) -> usize {
+        self.band.as_ref().map_or_else(
+            || self.groups.len() * (2 * self.groups.len()).saturating_sub(1),
+            PreparedUniformHarmonicBand::cross_work,
+        )
+    }
+
+    fn coherency_component_work(&self) -> usize {
+        self.band.as_ref().map_or_else(
+            || self.groups.len() * (3 * self.groups.len() + 1),
+            PreparedUniformHarmonicBand::coherency_work,
+        )
+    }
+
     #[must_use]
     pub const fn shutter(&self) -> CoherentDiffractionShutter {
         self.shutter
@@ -342,7 +382,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         Ok(result)
     }
 
-    /// Integrate the original spatial rule and exact uniform-shutter beats.
+    /// Integrate the original spatial rule and analytic uniform-shutter beats.
     ///
     /// Spatial resolution includes both the shortest physical wavelength's
     /// pupil bandwidth and the mixed-frequency sensor-chirp gradient. Time is
@@ -447,6 +487,20 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         rotations: &[[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Dd, CoherentDiffractionError> {
+        if let Some(band) = &self.band {
+            for i in 0..self.groups.len() {
+                poll(cancelled)?;
+                let [ar, ai] = fields[i];
+                let [cr, ci] = rotations[i];
+                fields[i] = [ar * cr - ai * ci, ar * ci + ai * cr];
+            }
+            let moment = band.mean_square_parts_dd(&fields[..self.groups.len()])?;
+            if rounded(moment)? < 0.0 {
+                return Err(CoherentDiffractionError::Unrepresentable);
+            }
+            poll(cancelled)?;
+            return Ok(moment);
+        }
         let mut moment = Dd::ZERO;
         for i in 0..self.groups.len() {
             poll(cancelled)?;

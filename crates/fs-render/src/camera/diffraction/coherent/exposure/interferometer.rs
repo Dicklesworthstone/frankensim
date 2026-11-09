@@ -22,9 +22,11 @@ type Fields = [[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES];
 pub struct CoherentInterferometerExposureLimits {
     /// Original pupil-wave evaluations across active arms and all source banks.
     pub maximum_pupil_evaluations: usize,
-    /// Each power diagonal, complex mutual diagonal, or cached real temporal
-    /// contraction counts once. For scalar detection with N frequencies and B
-    /// source banks, two active arms use B*N*(4*N+1); one uses B*N*(N+1)/2.
+    /// Prepared temporal work across every source bank. If S is one scalar
+    /// power contraction's work and C one complex mutual contraction's work,
+    /// two active scalar arms use B*(4*S+C); one uses B*S, for B source banks.
+    /// The short-band path counts its retained mode projections and products;
+    /// pairwise fallback has S=N*(N+1)/2 and C=N*(2*N-1), for N frequencies.
     /// Full Jones coherency uses the larger counts documented by that query.
     /// A closed receiver or a preparation with no waves uses zero contractions.
     pub maximum_pair_contractions: usize,
@@ -60,8 +62,10 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
     ///
     /// Identical frequencies coalesce before any products. Each source bank's
     /// arm fields combine before squaring, rather than subtracting bright powers
-    /// to obtain a dark port. Fixed scratch and preflighted O(B*N^2 + waves)
-    /// work are independent of carrier frequency and shutter duration. This is
+    /// to obtain a dark port. Powers and mutual coherence use the same prepared
+    /// short-band modes when available, preserving their common Gram structure.
+    /// Fixed scratch and preflighted temporal/source work require no carrier
+    /// or shutter time stepping. The pairwise fallback costs O(B*N^2 + waves). This is
     /// a scalar paraxial, cycle-averaged detector, not subcycle electric-field
     /// sampling, a polarization model, detector noise, or an error certificate.
     #[allow(clippy::float_cmp)] // The prepared sensor plane is an authored value.
@@ -196,14 +200,21 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         let quantity = "interferometer exposure pair contractions";
         let work = if active == 0 || self.waves == 0 {
             0
-        } else if active == 1 {
-            self.contractions
         } else {
-            let n = self.groups.len();
-            n.checked_mul(4)
-                .and_then(|x| x.checked_add(1))
-                .and_then(|x| n.checked_mul(x))
-                .and_then(|x| x.checked_mul(self.factors.checked_add(1)?))
+            let per_bank = if active == 1 {
+                self.power_component_work()
+            } else {
+                self.power_component_work()
+                    .checked_mul(4)
+                    .and_then(|x| x.checked_add(self.cross_component_work()))
+                    .ok_or_else(|| limit(quantity, maximum))?
+            };
+            per_bank
+                .checked_mul(
+                    self.factors
+                        .checked_add(1)
+                        .ok_or_else(|| limit(quantity, maximum))?,
+                )
                 .ok_or_else(|| limit(quantity, maximum))?
         };
         admit_count(quantity, work, maximum)?;
@@ -273,6 +284,15 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         right: &Fields,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[Dd; 2], CoherentDiffractionError> {
+        poll(cancelled)?;
+        if let Some(band) = &self.band {
+            let count = self.groups.len();
+            let cross = band.mean_cross_parts_dd(&left[..count], &right[..count])?;
+            poll(cancelled)?;
+            rounded(cross[0])?;
+            rounded(cross[1])?;
+            return Ok(cross);
+        }
         let mut cross = [Dd::ZERO; 2];
         let two = Dd::from_f64(2.0);
         for i in 0..self.groups.len() {

@@ -1641,3 +1641,12 @@ mod interferometer_arm_spectrum;
 
 #[path = "coherent_diffraction/linewidth.rs"]
 mod linewidth;
+
+#[path = "coherent_diffraction/short_band.rs"]
+mod short_band;
+
+#[path = "coherent_diffraction/exposure_jones_short_window.rs"]
+mod exposure_jones_short_window;
+
+#[path = "coherent_diffraction/interferometer_short_band.rs"]
+mod interferometer_short_band;
