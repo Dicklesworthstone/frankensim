@@ -2377,6 +2377,32 @@ equations in both directions, changing surface temperature, tangent and wrapper
 composition, one material query per state, uniform fast-path equality, original
 thermal delegation, scalar/network heat balance and cached inventory retries.
 
+`evaporation::droplet` adds a spherical pure-liquid inventory whose only retained
+coordinates are mass and original specific enthalpy. Radius, area and volume
+are derived from mass and the original liquid density at the actual temperature;
+accepted geometry is rebuilt from both final mass and final density. The
+stagnant continuum sphere uses the diameter-based `Sh=2` result, `k_m=D_AB/r`,
+with explicitly supplied binary molecular diffusivity. The original nonlinear
+Stefan film, selected finite interface kinetics, heat balance, latent energy,
+inventory refusals and cancellation remain the sole phase/thermal owners.
+Geometry construction and the adapter allocate no memory.
+
+`advance_droplet_with_heat` freezes initial area, radius and molecular diffusivity
+within one interval and refreshes them after acceptance. This geometric split
+is first order; refine the whole timestep. The receipt retains both spherical
+geometries and the original phase/heat account. Its planar recession coordinate
+is not the spherical radius change. Constant-property, constant-driving-force
+steps converge toward the classical diameter-squared law; finite humidity,
+thermal cooling, density variation and finite kinetics need not follow that law.
+Added regressions cover independent sphere geometry and `D/r`, timestep
+convergence with the original caloric inverse, heat-driven density/size changes
+at zero mass transfer, finite-kinetic sealing, input and inventory refusals, and
+cancellation. These tests were added but could not be executed in this session:
+the pinned build was killed in the unchanged upstream dependency `asupersync`.
+The isolated, uniform-temperature sphere assumes quasi-steady continuum radial
+transport and negligible forced/buoyant convection; it adds no moving spray,
+Kelvin correction, rarefaction, nucleation or complete-dryout event.
+
 `enthalpy::evaporation` connects the continuum liquid/gas-film owner to the
 actual `DepositionSimulation` cell mass and original caloric enthalpy.
 `evaporate_cell` changes these two coordinates atomically and leaves the clock,

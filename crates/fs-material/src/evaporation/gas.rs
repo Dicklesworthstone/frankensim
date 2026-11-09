@@ -25,6 +25,8 @@
 
 /// Simultaneous retained liquid films sharing one finite gas inventory.
 pub mod chamber;
+/// Shrinking or growing spherical liquid inventory on the original phase owner.
+pub mod droplet;
 /// Liquid-interface exchange with sensible and fusion storage in one condensed body.
 pub mod equilibrium;
 /// Implicit reciprocal sensible film heat, separately from vapor-carried energy.

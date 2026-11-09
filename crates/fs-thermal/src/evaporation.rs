@@ -21,7 +21,8 @@
 //!
 //! The implicit surface step uses the original liquid enthalpy inverse. Area
 //! stays fixed during a step; no mesh or liquid-flow state is changed. It is a
-//! first-order, uniform-liquid model, not a spatial Stefan or droplet solver.
+//! first-order, uniform-liquid model. The [`droplet`] adapter derives spherical
+//! geometry from the same mass and original material density between steps.
 //! Scalar rates and the bounded nonlinear solves allocate no memory. Shared
 //! deterministic elementary functions retain same-ISA arithmetic repeatability.
 
@@ -31,6 +32,8 @@ pub use kinetics::{InterfaceKinetics, KineticEvaporation};
 /// Parallel exposed patches sharing one original liquid inventory.
 pub mod parallel;
 pub use parallel::{EvaporationPatch, ParallelFilmEvaporation};
+/// Spherical liquid geometry and the original phase-transfer owners.
+pub mod droplet;
 
 /// Molar gas constant from the exact SI defining constants [J/(mol K)].
 pub const MOLAR_GAS_CONSTANT: f64 = 8.314_462_618_153_24;

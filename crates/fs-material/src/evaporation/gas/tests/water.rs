@@ -718,3 +718,98 @@ fn original_water_films_share_reciprocal_heat_before_joint_condensation_and_evap
     );
     assert!(candidate.step().sum_absolute_energy_residual_j <= phase.gas.energy_tolerance_j);
 }
+
+#[test]
+fn original_if97_droplet_shrinks_or_grows_with_nasa_species_and_energy_conserved() {
+    use crate::evaporation::gas::droplet::{SphericalDropletState, advance_droplet_with_gas};
+    let source = original_gas();
+    let water = original_water();
+    let vapor = SpeciesId::new("H2O").unwrap();
+    let nitrogen = SpeciesId::new("N2").unwrap();
+    let droplet = SphericalDropletState {
+        mass_kg: 1e-6,
+        specific_enthalpy_j_kg: water.liquid_state(300.0).unwrap().specific_enthalpy_j_kg(),
+    };
+    let binding = GasLiquidBinding {
+        species: vapor.clone(),
+        liquid_enthalpy_offset_j_kg: source
+            .species_specific_enthalpy_j_kg(&vapor, 300.0)
+            .unwrap()
+            - water.vapor_specific_enthalpy_j_kg(300.0).unwrap(),
+    };
+    let mut solve = controls();
+    solve.gas.gas.minimum_temperature_k = 280.0;
+    solve.gas.gas.maximum_temperature_k = 340.0;
+    solve.gas.gas.energy_tolerance_j_kg = 1e-6;
+    solve.gas.energy_tolerance_j = 1e-9;
+    solve.maximum_temperature_increment_k = 1.0;
+    solve.latent_compatibility_tolerance_j_kg = 5.0;
+    for (x, gas_t) in [(0.01, 300.0), (0.05, 310.0)] {
+        let original = ClosedGasParcel::new(
+            source
+                .with_composition(
+                    Composition::new(CompositionBasis::MoleFraction, vec![x, 1.0 - x]).unwrap(),
+                )
+                .unwrap(),
+            point(gas_t, 100_000.0),
+            1e-5,
+        )
+        .unwrap();
+        let saved = original.clone();
+        // Explicit illustrative molecular diffusivity, not a fitted water card.
+        let candidate = advance_droplet_with_gas(
+            &water,
+            &binding,
+            droplet,
+            &original,
+            &source,
+            |h| water.temperature_at_specific_enthalpy_k(h),
+            2e-5,
+            0.01,
+            solve,
+            || false,
+        )
+        .unwrap();
+        let step = candidate.step();
+        let [before, after] = *candidate.geometry();
+        let density = water
+            .properties(step.surface_temperature_k[1])
+            .unwrap()
+            .liquid_density_kg_m3;
+        assert_eq!(after.liquid_density_kg_m3(), density);
+        assert_ne!(after.liquid_density_kg_m3(), before.liquid_density_kg_m3());
+        near(
+            after.radius_m(),
+            (3.0 * candidate.droplet().mass_kg / (4.0 * core::f64::consts::PI * density)).cbrt(),
+            2e-17,
+        );
+        assert_eq!(step.transferred_mass_kg > 0.0, x == 0.01);
+        assert_eq!(
+            after.radius_m() < before.radius_m(),
+            step.transferred_mass_kg > 0.0
+        );
+        assert_eq!(
+            step.surface_temperature_k[1] < 300.0,
+            step.transferred_mass_kg > 0.0
+        );
+        near(
+            candidate.gas().species_mass_kg(&vapor).unwrap() + candidate.droplet().mass_kg,
+            original.species_mass_kg(&vapor).unwrap() + droplet.mass_kg,
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            candidate.gas().species_mass_kg(&nitrogen).unwrap(),
+            original.species_mass_kg(&nitrogen).unwrap(),
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            step.liquid_enthalpy_change_j + step.gas_internal_energy_change_j,
+            0.0,
+            solve.gas.energy_tolerance_j,
+        );
+        near(step.energy_residual_j, 0.0, solve.gas.energy_tolerance_j);
+        assert_eq!(candidate.gas().volume_m3(), original.volume_m3());
+        assert!(std::ptr::eq(candidate.catalog(), &source));
+        assert_eq!(original, saved);
+    }
+}
