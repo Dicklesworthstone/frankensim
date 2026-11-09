@@ -1094,6 +1094,7 @@ dependencies = [
  "fs-exec",
  "fs-fft",
  "fs-fmm",
+ "fs-ga",
  "fs-geom",
  "fs-ivl",
  "fs-la",

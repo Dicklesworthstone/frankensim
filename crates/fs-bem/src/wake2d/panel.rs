@@ -15,12 +15,15 @@ mod adaptive;
 pub use adaptive::{PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport};
 mod incident;
 use incident::IncidentField;
+mod motion;
+pub use motion::PanelFrame2d;
 
 #[derive(Debug, Clone)]
 pub(super) struct PanelCoupling {
     panels: PreparedPanel2d,
     state: Option<PanelState2d>,
     steady_basis: [f64; 2],
+    frame: Option<PanelFrame2d>,
 }
 
 /// Explicit transport refinement within ONE existing shedding interval.
@@ -118,6 +121,7 @@ impl WakeSim {
                 panels,
                 state: None,
                 steady_basis: [steady_x, steady_y],
+                frame: None,
             }),
         };
         state.validate_state()?;
@@ -314,7 +318,7 @@ impl WakeSim {
         // Fixed refinement admitted the complete count before preparation;
         // ordinary one-step dispatch always requires exactly three solves.
         let mut budget = CoupledSolveBudget::new(usize::MAX);
-        let candidate = PreparedTransport::new(self, alpha, cancelled)?.integrate(
+        let candidate = PreparedTransport::new(self, alpha, incident, cancelled)?.integrate(
             substeps,
             max_displacement_fraction,
             &mut budget,
@@ -353,6 +357,10 @@ impl WakeSim {
             .as_mut()
             .expect("native mode dispatch")
             .state = Some(candidate.endpoint);
+        self.panel_coupling
+            .as_mut()
+            .expect("native mode dispatch")
+            .frame = candidate.frame;
         self.history.push(candidate.row);
         Ok(())
     }
@@ -383,12 +391,14 @@ struct TransportCandidate {
     steady_gamma: f64,
     row: WakeStep,
     report: PanelWakeTransportReport,
+    frame: Option<PanelFrame2d>,
 }
 
 impl<'a> PreparedTransport<'a> {
     fn new(
         wake: &'a WakeSim,
         alpha: f64,
+        incident: &mut IncidentField<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, BemError> {
         checkpoint(cancelled)?;
@@ -410,6 +420,11 @@ impl<'a> PreparedTransport<'a> {
             })?;
         validate_direct_wake_work(count)?;
         let coupling = wake.panel_coupling.as_ref().expect("native mode dispatch");
+        incident.begin(
+            wake.history.len() as f64 * wake.dt,
+            coupling.frame,
+            cancelled,
+        )?;
         let newborn = WakeVortex {
             pos: [wake.te[0] + 0.3 * wake.dt, wake.te[1]],
             gamma: 0.0,
@@ -559,6 +574,7 @@ impl<'a> PreparedTransport<'a> {
                 coupled_solves: budget.used - started,
                 max_displacement_fraction: maximum_fraction,
             },
+            frame: incident.accepted_frame(),
         })
     }
 }

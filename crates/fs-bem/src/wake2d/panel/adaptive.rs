@@ -124,7 +124,7 @@ impl WakeSim {
         )
     }
 
-    fn advance_panel_adaptive(
+    pub(super) fn advance_panel_adaptive(
         &mut self,
         alpha_chord: f64,
         options: PanelWakeAdaptiveOptions,
@@ -134,7 +134,7 @@ impl WakeSim {
         checkpoint(cancelled)?;
         self.admit_panel_incidence(alpha_chord)?;
         admit_options(self.dt, options)?;
-        let mut transport = PreparedTransport::new(self, alpha_chord, cancelled)?;
+        let mut transport = PreparedTransport::new(self, alpha_chord, incident, cancelled)?;
         let mut budget = CoupledSolveBudget::new(options.max_coupled_solves);
         let mut substeps = options.initial_substeps;
         let mut coarse = None;

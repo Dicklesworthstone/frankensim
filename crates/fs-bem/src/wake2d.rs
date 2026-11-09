@@ -24,7 +24,7 @@ mod convection;
 mod convection_tests;
 mod panel;
 pub use panel::{
-    PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport, PanelWakeTransportOptions,
+    PanelFrame2d, PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport, PanelWakeTransportOptions,
     PanelWakeTransportReport,
 };
 
@@ -97,6 +97,8 @@ impl std::fmt::Write for ByteCounter {
 pub struct WakeVortex {
     /// Position in the section's chord frame: leading edge (0, 0), trailing
     /// edge (1, 0), positive y toward the upper surface. Units are chord lengths.
+    /// In prescribed-motion mode this is the CURRENT accepted body frame;
+    /// [`WakeSim::wake_in_world`] exports the same physical wake in world axes.
     pub pos: [f64; 2],
     /// Nondimensional circulation (unit chord and freestream), positive
     /// clockwise. This is the opposite sign to [`fs_vpm::VortexParticle`].
@@ -127,6 +129,8 @@ pub struct WakeStep {
     pub vortices: usize,
     /// Peak total speed among wake vortices at the start of convection,
     /// including freestream, bound circulation and mutual induction.
+    /// Prescribed-motion mode reports the coordinate speed relative to the
+    /// moving chord frame, as used by transport and its displacement guard.
     pub peak_speed: f64,
 }
 
@@ -350,6 +354,9 @@ impl WakeSim {
     }
 
     /// Canonical JSON ledger rows for every `stride`-th step.
+    /// Moving-body traces identify the moving chord coordinates explicitly:
+    /// `alpha_rad` is the nominal reference diagnostic, and the reported peak
+    /// speed is body-relative coordinate speed divided by the fixed `U_ref`.
     pub fn trace_json(&self, stride: usize) -> Result<String, BemError> {
         self.validate_state()?;
         if stride == 0 {
@@ -388,10 +395,13 @@ impl WakeSim {
 
     fn write_trace(&self, stride: usize, out: &mut impl std::fmt::Write) -> std::fmt::Result {
         let core = fs_math::det::sqrt(self.core2);
+        let moving = self.panel_frame().is_some();
         write!(
             out,
-            "{{\"schema\":\"fs-bem.wake-trace.v1\",\"model\":\"{}\",\"alpha_rad\":{},\"dt_nondimensional\":{},\"core_radius_chord\":{},\"stride\":{},\"rows\":[",
-            if self.panel_coupling.is_some() {
+            "{{\"schema\":\"fs-bem.wake-trace.v1\",\"model\":\"{}\",\"alpha_rad\":{},\"dt_nondimensional\":{},\"core_radius_chord\":{},\"stride\":{}{},\"rows\":[",
+            if moving {
+                "inviscid-panel-kelvin-moving-frame"
+            } else if self.panel_coupling.is_some() {
                 "inviscid-panel-kelvin"
             } else {
                 "inviscid-screening"
@@ -399,7 +409,12 @@ impl WakeSim {
             self.alpha,
             self.dt,
             core,
-            stride
+            stride,
+            if moving {
+                ",\"coordinate_frame\":\"moving-body-chord\",\"alpha_role\":\"nominal-reference-diagnostic\""
+            } else {
+                ""
+            },
         )?;
         let mut first = true;
         for (i, st) in self.history.iter().enumerate() {
@@ -412,8 +427,16 @@ impl WakeSim {
             first = false;
             write!(
                 out,
-                "{{\"time_nondimensional\":{},\"bound_circulation_nondimensional\":{},\"vortices\":{},\"peak_speed_freestream_ratio\":{}}}",
-                st.t, st.bound, st.vortices, st.peak_speed
+                "{{\"time_nondimensional\":{},\"bound_circulation_nondimensional\":{},\"vortices\":{},\"{}\":{}}}",
+                st.t,
+                st.bound,
+                st.vortices,
+                if moving {
+                    "peak_body_relative_speed_reference_ratio"
+                } else {
+                    "peak_speed_freestream_ratio"
+                },
+                st.peak_speed
             )?;
         }
         out.write_str("]}")

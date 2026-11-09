@@ -387,6 +387,56 @@ Regressions use uniform gusts and irrotational trace-free strain, reconstruct th
 accepted boundary independently, check changed circulation/shedding/trajectories,
 stage-time refinement/adaptive replay, exact zero-field parity and atomic refusal.
 
+### Prescribed body translation, heave and pitch
+
+`WakeSim::new_panel_coupled_with_motion` selects prescribed planar rigid motion
+within the SAME panel/Kutta/Kelvin and midpoint/adaptive owners. `PanelFrame2d`
+supplies the leading-edge world position X, unwrapped body-to-world angle,
+world translation velocity and angular rate; these must describe one consistent
+pose and its derivatives. This is a kinematic adapter, not another motion
+integrator. The foil remains normalized in body chord coordinates, so every
+stage reuses the original panel geometry and LU factorization.
+
+At body point r and absolute stage time t, the owner samples the total external
+world air at `x = X + R*r` and uses
+`R^-1*(U_world - X_dot) - omega*perp(r)` in BOTH the boundary solve and wake
+advection. Shared `fs-ga::So3` transforms implement R; one bounded cached frame
+serves all points at each consecutive stage time. Translation is subtracted
+before rotation to preserve resolved slip under a common world boost. The
+rotation term is coordinate kinematics: it injects no fictitious physical
+circulation. The physical bound-plus-internally-shed Kelvin inventory retains
+its original sign and closure. External air must exclude body/wake induction;
+the preceding prescribed-flow domain and external-source responsibilities apply.
+
+Lengths, linear velocities, time and circulation retain fixed scales `c`,
+`U_ref`, `c/U_ref`, `U_ref*c`; angular rate uses `U_ref/c`. `wake()` positions
+are in the current accepted body frame; `wake_in_world()` exports the same
+physical vortices at the accepted world pose without changing circulation.
+The nominal steady diagnostic remains unit chordwise flow, while accepted
+circulation responds to actual relative air. Peak speeds and displacement
+guards measure body-relative coordinate motion. The adaptive endpoint error
+is compared in a common endpoint frame and has the same Euclidean norm after
+world placement; relative tolerance retains its body-coordinate meaning.
+Moving traces identify `inviscid-panel-kelvin-moving-frame`, declare the body
+coordinate frame and nominal-reference role of `alpha_rad`, and report
+`peak_body_relative_speed_reference_ratio` against fixed `U_ref`. Fixed-frame
+trace bytes and stepping arithmetic remain unchanged.
+
+Both moving-step APIs require the callback's start origin and unwrapped angle
+to exactly continue the last accepted pose. Fixed and moving stepping modes
+cannot be interchanged. Motion/air callbacks must replay consistently during
+adaptive retries. Endpoint motion and boundary equations are admitted before
+atomic publication of wake, panel state, frame and history; callback errors,
+cancellation, budget exhaustion and discontinuous start poses withhold all
+trial physical state. Callback side effects are external. Smooth prescribed
+motion/air support the original midpoint convergence; split discontinuities at
+interval boundaries. Original finite packet release, inviscid attached-flow
+and core approximations remain, without actuator dynamics/work, unsteady
+Bernoulli pressures or loads. `tests/moving_panel_wake.rs` checks exact identity
+and translation equivalence, Galilean boosts, genuine pitch/heave in spatial
+gust/strain, independent endpoint boundary/Kelvin reconstruction, world export,
+stage reuse, second-order and adaptive convergence, mode guards and rollback.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

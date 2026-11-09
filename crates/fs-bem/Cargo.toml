@@ -18,6 +18,7 @@ fs-fft = { path = "../fs-fft" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 fs-fmm = { path = "../fs-fmm" }
+fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
