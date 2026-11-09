@@ -4,10 +4,13 @@
 //! flux, then evaluates material data at its actual midpoint E/J. Iterating a
 //! constitutive law never advances electrical time or deposits trial heat.
 
+/// Native RLC coupling to original prescribed-motion E'/J response.
+pub mod motion;
 /// Source-backed R/C/L and reversible field heat inside the nonlinear solve.
 pub mod thermal;
 
 use super::*;
+use fs_em::conduction::motion::{ConductionMotion, ConductionMotionReport};
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, ConductionResponseReport,
     ConductionResponseSample, ConductionResponseSources, MAX_RESPONSE_ITERATIONS,
@@ -26,17 +29,25 @@ pub struct ConductionResponseCircuit {
 }
 
 /// Actual circuit/field work plus separately reported constitutive defects.
-/// Native bulk E.J and exact surface-contact losses are the spatial heat
-/// account; neither constitutive defects nor circuit reduction add more heat.
+/// Native conductor-frame E'.J and exact surface-contact losses are the spatial
+/// heat account; neither constitutive defects nor circuit lowering add heat.
 #[derive(Clone, Debug)]
 pub struct ConductionResponseCircuitStep {
     /// Native charge/flux storage, port work and local field/graph heat.
     pub circuit: ConductionCircuitStep,
+    /// Actual conductor-frame field and signed Lorentz account when moving.
+    /// The native descriptor record then includes an internal Norton port;
+    /// authored electrical work remains circuit.supplied_work_j.
+    pub motion: Option<ConductionMotionReport>,
+    /// Signed work out to prescribed conductor motion; zero when stationary.
+    pub mechanical_work_j: f64,
     /// Original source evaluations and defects at the actual midpoint E/J.
     pub evaluated: Vec<ConductionResponseSample>,
     /// Original nonlinear interface laws at the actual midpoint trace fields.
     pub evaluated_contacts: Vec<fs_em::conduction::response::contact::ContactResponseSample>,
-    /// Complete native circuit/field trials in this constitutive solve.
+    /// Complete charged native circuit/field trials in this constitutive solve.
+    /// Moving trials charge two sparse preparation solves plus one descriptor
+    /// solve per constitutive callback; actual-voltage recovery adds no solve.
     pub field_solves: usize,
     /// Original material evaluations across all constitutive trials.
     pub source_evaluations: usize,
@@ -72,7 +83,7 @@ impl ThermalDriver for ConductionResponseCircuitCandidate {
             heat_j: step.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: step.stored_change_j,
-            supplied_j: step.supplied_work_j,
+            supplied_j: step.supplied_work_j - self.step.mechanical_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -236,6 +247,8 @@ impl ConductionResponseCircuit {
             self.circuit.material_resistors.clone(),
             target_s,
             ports,
+            None,
+            usize::MAX,
             assembly,
             field,
             response,
@@ -255,6 +268,8 @@ impl ConductionResponseCircuit {
         material_resistors: Vec<MaterialResistor>,
         target_s: f64,
         ports: &[f64],
+        motion: Option<ConductionMotion<'_>>,
+        maximum_work_trials: usize,
         assembly: WeightedAssemblyLimits,
         field: ConductionControls,
         response: ConductionResponseControls,
@@ -273,6 +288,25 @@ impl ConductionResponseCircuit {
             return Err(invalid(
                 "positive circuit interval and finite positive balance allowances required",
             ));
+        }
+        if let Some(motion) = motion {
+            return self.trial_with_motion(
+                driver,
+                problem,
+                sources,
+                contact_sources,
+                material_resistors,
+                target_s,
+                ports,
+                motion,
+                maximum_work_trials,
+                assembly,
+                field,
+                response,
+                controls,
+                contact_heat,
+                cancel,
+            );
         }
         let (candidate, trial) = problem.solve_coupled_with_materials_and_contacts_candidate(
             sources,
@@ -311,6 +345,8 @@ impl ConductionResponseCircuit {
             },
             step: ConductionResponseCircuitStep {
                 circuit: native.step,
+                motion: None,
+                mechanical_work_j: 0.0,
                 evaluated,
                 evaluated_contacts,
                 field_solves,
@@ -491,6 +527,7 @@ impl ConductionThermalNetwork<'_> {
             material_resistors,
             contact_bindings,
             field_bindings,
+            None,
             assembly,
             field,
             response,
@@ -541,6 +578,7 @@ impl ConductionThermalNetwork<'_> {
             &[],
             contact_bindings,
             None,
+            None,
             assembly,
             field,
             response,
@@ -570,6 +608,7 @@ impl ConductionThermalNetwork<'_> {
         material_resistors: &[CellResistor],
         contact_bindings: &[contacts::ConductionContactThermal<'_>],
         field_bindings: Option<&[FieldThermalBinding]>,
+        motion: Option<ConductionMotion<'_>>,
         assembly: WeightedAssemblyLimits,
         field: ConductionControls,
         response: ConductionResponseControls,
@@ -695,8 +734,17 @@ impl ConductionThermalNetwork<'_> {
                 let contact_sources = contacts
                     .refresh_contacts(problem.contacts(), sample(&coefficients.source), cancel)
                     .map_err(map_conduction_error)?;
+                let trial_cost = if motion.is_some() {
+                    motion::TRIAL_WORK
+                } else {
+                    1
+                };
+                let allowance = remaining / trial_cost;
+                if allowance == 0 {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
                 let bounded = ConductionResponseControls {
-                    maximum_iterations: response.maximum_iterations.min(remaining),
+                    maximum_iterations: response.maximum_iterations.min(allowance),
                     ..response
                 };
                 let refreshed = fields
@@ -727,6 +775,8 @@ impl ConductionThermalNetwork<'_> {
                         coefficients.resistors,
                         target_s,
                         ports,
+                        motion,
+                        remaining,
                         assembly,
                         field,
                         bounded,

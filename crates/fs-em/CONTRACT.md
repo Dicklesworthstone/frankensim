@@ -9147,3 +9147,23 @@ Selection, geometry, cancellation and workspace bounds remain active. The
 candidate owns the source/field pairing; an arbitrary external snapshot cannot
 be substituted into this handoff. Physical mechanical feedback belongs to the
 coupling owner, and heat remains the original conductor-frame dissipation.
+
+
+### Frozen moving conductor response for native RLC circuits
+
+PlanarConduction::moving_resistance prepares the exact frozen relation
+I=V/R+I_motion using one homogeneous and one zero-voltage moving sparse solve.
+PlanarMovingResistance::field_at_voltage superposes retained potentials and
+freshly recovers native current, contact response, conductor-frame Joule heat,
+Lorentz force and signed work at the actual voltage without a third solve.
+This response belongs to its original frozen material and prescribed motion;
+nonlinear operating points are never scaled. The generic moving coupled source
+seam reuses original relaxation and contact refinement and evaluates original
+laws at the recovered E'=E+u cross B and J.
+
+Fixed geometry, prescribed velocity, imposed B, native source/budget/cancellation
+gates and stationary contact-adjacent cells remain authoritative. Focused
+regressions compare direct and affine native recovery with tensor/nonuniform
+motion, circulating currents and signed work. Pinned formatting and bounded
+exact-production type checks with opaque dependencies passed; full crate
+integration execution remains outstanding.

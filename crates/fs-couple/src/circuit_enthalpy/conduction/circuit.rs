@@ -9,6 +9,8 @@
 //! Scalar and oriented tensor materials use that same field extraction; both
 //! principal source properties and the fixed frame survive every thermal trial.
 
+/// Exact internal affine-current ports shared by original planar/spatial circuits.
+pub(in crate::circuit_enthalpy::conduction) mod affine;
 /// Field-dependent material response inside the same native circuit and heat solve.
 pub mod response;
 /// Source-derived C/L and explicit fixed-coordinate reconfiguration work.
@@ -361,6 +363,62 @@ pub struct ConductionCircuitStep {
     pub graph_resistors: Vec<ConductionCircuitResistorHeat>,
     pub heat_j: f64,
     pub energy_residual_j: f64,
+}
+
+fn graph_resistor_heat(
+    graph: &CircuitGraph,
+    spatial_branch: usize,
+    materials: &[MaterialResistor],
+    voltage: impl Fn(usize) -> f64,
+    dt: f64,
+    controls: MaterialCircuitSolve,
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<(Vec<ConductionCircuitResistorHeat>, f64), Error> {
+    let mut graph_resistors = Vec::new();
+    let mut heat_j = 0.0;
+    for (branch, &(a, b, law)) in graph.branches.iter().enumerate() {
+        check(cancel)?;
+        if branch == spatial_branch {
+            continue;
+        }
+        if let Branch::Resistor { ohms } = law {
+            let conductor = materials
+                .iter()
+                .find(|r| r.branch == branch)
+                .map(|r| &r.conductor);
+            let voltage_v = finite(voltage(a) - voltage(b))?;
+            let current_a = finite(voltage_v / ohms)?;
+            let electrical_power_w = finite(voltage_v * current_a)?;
+            let power_w = match conductor {
+                Some(source) => source
+                    .joule_power_w(current_a)
+                    .map_err(MaterialCircuitError::Conductor)?,
+                None => electrical_power_w,
+            };
+            let q = finite(dt * power_w)?;
+            if power_w < 0.0
+                || (voltage_v != 0.0 && power_w == 0.0)
+                || (power_w != 0.0 && q == 0.0)
+                || finite(current_a * ohms * current_a - power_w)?.abs()
+                    > controls.power_tolerance_w
+                || finite(electrical_power_w - power_w)?.abs() > controls.power_tolerance_w
+            {
+                return Err(invalid(
+                    "graph-resistor work/heat is unrepresentable or inconsistent",
+                ));
+            }
+            heat_j = finite(heat_j + q)?;
+            graph_resistors.push(ConductionCircuitResistorHeat {
+                branch,
+                conductor: conductor.cloned(),
+                voltage_v,
+                current_a,
+                power_w,
+                heat_j: q,
+            });
+        }
+    }
+    Ok((graph_resistors, heat_j))
 }
 
 struct CircuitFieldCandidate<C> {
@@ -986,67 +1044,40 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             supplied_work_j: finite(dt * finite(power - field.power_balance_residual_w())?)?,
             linear: field.report().cloned(),
         };
-        let mut graph_resistors = Vec::new();
-        let mut heat_j = spatial_heat;
-        for (branch, &(a, b, law)) in graph.branches.iter().enumerate() {
-            check(cancel)?;
-            if branch == self.terminal.branch {
-                continue;
-            }
-            if let Branch::Resistor { ohms } = law {
-                let conductor = material_resistors
-                    .iter()
-                    .find(|r| r.branch == branch)
-                    .map(|r| &r.conductor);
-                let voltage_v = finite(voltage(a) - voltage(b))?;
-                let current_a = finite(voltage_v / ohms)?;
-                let electrical_power_w = finite(voltage_v * current_a)?;
-                let power_w = match conductor {
-                    Some(source) => source
-                        .joule_power_w(current_a)
-                        .map_err(MaterialCircuitError::Conductor)?,
-                    None => electrical_power_w,
-                };
-                let q = finite(dt * power_w)?;
-                if power_w < 0.0
-                    || (voltage_v != 0.0 && power_w == 0.0)
-                    || (power_w != 0.0 && q == 0.0)
-                    || finite(current_a * ohms * current_a - power_w)?.abs()
-                        > controls.power_tolerance_w
-                    || finite(electrical_power_w - power_w)?.abs() > controls.power_tolerance_w
-                {
-                    return Err(invalid(
-                        "graph-resistor work/heat is unrepresentable or inconsistent",
-                    ));
-                }
-                heat_j = finite(heat_j + q)?;
-                graph_resistors.push(ConductionCircuitResistorHeat {
-                    branch,
-                    conductor: conductor.cloned(),
-                    voltage_v,
-                    current_a,
-                    power_w,
-                    heat_j: q,
-                });
-            }
-        }
+        let (graph_resistors, graph_heat_j) = graph_resistor_heat(
+            &graph,
+            self.terminal.branch,
+            &material_resistors,
+            voltage,
+            dt,
+            controls,
+            cancel,
+        )?;
+        let heat_j = finite(spatial_heat + graph_heat_j)?;
         // Reuse the original constitutive storage owner. Subtracting two total
         // Hamiltonians loses active Joule heat beside a large dormant store.
         // This bounded kernel also compensates the representable midpoint and
         // sums the coordinate work without allocating or refactorizing.
         let stored_change_j = crate::material_circuit::capacitance::storage_change(
-            &graph, &[], &dae, &x0, &native.x,
+            &graph,
+            &[],
+            &dae,
+            &x0,
+            &native.x,
         )?;
         let mut source_power = 0.0;
         let mut source_correction = 0.0;
         for (&input, &output) in ports.iter().zip(&native.y) {
             let term = finite(input * output)?;
             let next = finite(source_power + term)?;
-            source_correction = finite(source_correction + if source_power.abs() >= term.abs() {
-                (source_power - next) + term
-            } else {
-                (term - next) + source_power
-            })?;
+            source_correction = finite(
+                source_correction
+                    + if source_power.abs() >= term.abs() {
+                        (source_power - next) + term
+                    } else {
+                        (term - next) + source_power
+                    },
+            )?;
             source_power = next;
         }
         let supplied_work_j = finite(dt * finite(source_power + source_correction)?)?;

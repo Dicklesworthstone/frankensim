@@ -256,20 +256,8 @@ impl PlanarConductionResponse {
             |driver: &(ConductionMotionReport, Option<ConductionTerminalReport>),
              observation,
              cancelled| {
-                let motion = &driver.0;
-                // Refinement must also resolve signed work; equal heat alone
-                // cannot hide unresolved opposing Lorentz transfers.
-                for &power in &motion.cell_mechanical_power_w {
-                    if cancelled() {
-                        return Err(ConductionResponseError::Cancelled);
-                    }
-                    observation.power_w.push(power);
-                }
-                observation.power_w.extend([
-                    motion.mechanical_power_w,
-                    motion.electrical_power_w,
-                    motion.terminal_power_w,
-                ]);
+                // Signed work must resolve alongside the local Joule heat.
+                refine_motion_work(&driver.0, observation, cancelled)?;
                 if let Some(terminals) = &driver.1 {
                     // Preserve all direct current constraints, including the
                     // net reaction of each floating electrode, at refinement.
@@ -292,4 +280,86 @@ impl PlanarConductionResponse {
             },
         })
     }
+}
+
+impl PlanarConductionResponse {
+    /// Close original nonlinear sources through a native moving physical driver.
+    ///
+    /// Each callback receives the exact frozen operator for one constitutive
+    /// trial and must return its freshly admitted moving field and private driver
+    /// proposal. The driver holds its accepted history fixed across all trials.
+    /// A circuit may lower this frozen operator's affine terminal response, then
+    /// recover the actual moving field at its native midpoint voltage.
+    ///
+    /// Original bulk laws see E'=E+u cross B; stationary contact laws see their
+    /// actual local jump/current. Native field and mechanical work participate
+    /// in contact refinement. Preparation/descriptor work beyond one callback
+    /// remains the driver's responsibility and must be bounded before starting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_coupled_with_motion_and_materials_and_contacts_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+        mut solve: impl for<'p> FnMut(
+            &'p PlanarConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<
+            (crate::conduction::motion::MovingConductionField<'p>, D),
+            E,
+        >,
+    ) -> Result<(MovingConductionResponseCandidate, D), E>
+    where
+        E: From<ConductionResponseError>,
+    {
+        let (candidate, (motion, driver)) = self.solve_source_frame_candidate(
+            seeds,
+            contacts,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+            |native, cancelled| {
+                let (field, driver) = solve(native, cancelled)?;
+                let (field, motion) = field.into_response_parts();
+                Ok::<_, E>((field, (motion, driver)))
+            },
+            |_, driver: &(ConductionMotionReport, D), cell| driver.0.conductor_field_v_m[cell],
+            |driver, observation, cancelled| refine_motion_work(&driver.0, observation, cancelled),
+        )?;
+        let (problem, field) = candidate.into_parts();
+        Ok((
+            MovingConductionResponseCandidate {
+                problem,
+                report: MovingConductionResponseReport {
+                    field,
+                    motion,
+                    terminals: None,
+                },
+            },
+            driver,
+        ))
+    }
+}
+
+fn refine_motion_work(
+    motion: &ConductionMotionReport,
+    observation: &mut ContactQuadratureSnapshot,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), ConductionResponseError> {
+    for &power in &motion.cell_mechanical_power_w {
+        if cancelled() {
+            return Err(ConductionResponseError::Cancelled);
+        }
+        observation.power_w.push(power);
+    }
+    observation.power_w.extend([
+        motion.mechanical_power_w,
+        motion.electrical_power_w,
+        motion.terminal_power_w,
+    ]);
+    Ok(())
 }

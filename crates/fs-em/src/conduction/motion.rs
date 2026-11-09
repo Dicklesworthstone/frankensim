@@ -510,3 +510,166 @@ impl<'a, C: PlanarConductorMaterial> MovingConductionField<'a, C> {
         self.report.as_ref()
     }
 }
+
+/// Exact affine two-electrode response of ONE frozen conductivity and motion
+/// snapshot. Preparation uses one homogeneous resistance solve and one native
+/// zero-voltage moving solve. Actual-drive recovery superposes their potentials
+/// and re-evaluates original cell/contact current, heat and Lorentz work.
+///
+/// This response is invalid after changing material, geometry, motion or B.
+/// A nonlinear owner must prepare it anew on every original constitutive trial;
+/// it is never an accepted nonlinear resistance or a scalable heat field.
+pub struct PlanarMovingResistance<'p, 'm, C = ResolvedConductorState> {
+    resistance: super::PlanarResistance<'p, C>,
+    prepared: PreparedMotion<'m>,
+    zero_relative_voltage_v: Vec<f64>,
+    motion_current_a: f64,
+    controls: ConductionControls,
+}
+
+impl<C: PlanarConductorMaterial> PlanarConduction<C> {
+    /// Prepare I=V/R+I_motion on the original frozen material operator.
+    /// Positive current enters the positive electrode. Both electrodes are
+    /// complete disjoint exterior traces, with the original native resistance
+    /// and stationary-contact admission. Every recovered actual field retains
+    /// source validity, charge/current and local/global work gates.
+    ///
+    /// Two sparse field solves are required; later actual-voltage recovery
+    /// performs no sparse solve. Their preparation buffers remain bounded by
+    /// this already admitted original mesh and the caller's field/work limits.
+    pub fn moving_resistance<'p, 'm>(
+        &'p self,
+        positive: &[usize],
+        negative: &[usize],
+        motion: ConductionMotion<'m>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarMovingResistance<'p, 'm, C>, ConductionError> {
+        poll(cancelled)?;
+        let prepared = self.prepare_motion(motion, cancelled)?;
+        let resistance = self.resistance(positive, negative, controls, cancelled)?;
+        let mut prescribed = vec![None; self.mesh.vertices().len()];
+        for &vertex in positive.iter().chain(negative) {
+            poll(cancelled)?;
+            prescribed[vertex] = Some(0.0);
+        }
+        let solved = scalar_potential::solve_relative(
+            &self.stiffness,
+            &prepared.load_a,
+            &prescribed,
+            controls.linear,
+            cancelled,
+        )?;
+        let zero = self.recover_moving_field(
+            solved.relative,
+            solved.references,
+            &prescribed,
+            vec![None; self.mesh.vertices().len()],
+            &prepared,
+            controls,
+            solved.report,
+            cancelled,
+        )?;
+        let mut current = fs_math::dd::Dd::from_f64(0.0);
+        for &vertex in positive {
+            poll(cancelled)?;
+            current = current
+                + fs_math::dd::Dd::from_f64(zero.nodal_boundary_current_a()[vertex].ok_or(
+                    ConductionError::Invalid("moving affine electrode lost its reaction"),
+                )?);
+        }
+        let motion_current_a = finite(current.to_f64())?;
+        poll(cancelled)?;
+        Ok(PlanarMovingResistance {
+            resistance,
+            prepared,
+            zero_relative_voltage_v: zero.relative_voltage_v,
+            motion_current_a,
+            controls,
+        })
+    }
+}
+
+impl<'p, C: PlanarConductorMaterial> PlanarMovingResistance<'p, '_, C> {
+    /// Homogeneous resistance of the SAME frozen bulk/contact operator [ohm].
+    pub fn resistance_ohm(&self) -> f64 {
+        self.resistance.resistance_ohm()
+    }
+    /// Signed inward positive-electrode current at zero voltage [A].
+    pub fn motion_current_a(&self) -> f64 {
+        self.motion_current_a
+    }
+
+    /// Recover the original moving field at an actual voltage [V], without
+    /// another sparse solve. Only native potentials are superposed; current,
+    /// source-field admission, contact loss, heat and mechanical work are all
+    /// freshly recovered. No accepted nonlinear field or heat is scaled.
+    pub fn field_at_voltage(
+        &self,
+        voltage_v: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MovingConductionField<'p, C>, ConductionError> {
+        use fs_math::dd::Dd;
+        poll(cancelled)?;
+        finite(voltage_v)?;
+        let basis = self.resistance.reference_field();
+        let reference = self.resistance.reference_voltage_v();
+        let mut relative = Vec::with_capacity(self.zero_relative_voltage_v.len());
+        let mut references = Vec::with_capacity(self.zero_relative_voltage_v.len());
+        for vertex in 0..self.zero_relative_voltage_v.len() {
+            poll(cancelled)?;
+            relative.push(finite(
+                (Dd::from_f64(self.zero_relative_voltage_v[vertex])
+                    + Dd::from_f64(basis.relative_voltage_v()[vertex] / reference)
+                        * Dd::from_f64(voltage_v))
+                .to_f64(),
+            )?);
+            references.push(finite(
+                (basis.reference_voltage_v()[vertex] / reference) * voltage_v,
+            )?);
+        }
+        let problem = self.resistance.field.problem;
+        let mut prescribed = vec![None; relative.len()];
+        for (vertices, value) in self.resistance.terminals.iter().zip([voltage_v, 0.0]) {
+            for &vertex in vertices {
+                poll(cancelled)?;
+                prescribed[vertex] = Some(value);
+            }
+        }
+        let field = problem.recover_moving_field(
+            relative,
+            references,
+            &prescribed,
+            vec![None; self.zero_relative_voltage_v.len()],
+            &self.prepared,
+            self.controls,
+            None,
+            cancelled,
+        )?;
+        let mut actual = Dd::from_f64(0.0);
+        for &vertex in &self.resistance.terminals[0] {
+            poll(cancelled)?;
+            actual = actual
+                + Dd::from_f64(field.nodal_boundary_current_a()[vertex].ok_or(
+                    ConductionError::Invalid("moving affine electrode lost its actual reaction"),
+                )?);
+        }
+        let expected =
+            Dd::from_f64(voltage_v / self.resistance_ohm()) + Dd::from_f64(self.motion_current_a);
+        let current_defect = finite((actual - expected).to_f64())?;
+        let power_defect = finite(
+            (Dd::from_f64(field.terminal_power_w()) - Dd::from_f64(voltage_v) * expected).to_f64(),
+        )?;
+        if current_defect.abs() > self.controls.current_tolerance_a
+            || power_defect.abs() > self.controls.power_tolerance_w
+        {
+            return Err(ConductionError::Balance {
+                current_residual_a: current_defect,
+                maximum_free_current_residual_a: field.maximum_free_current_residual_a(),
+                power_residual_w: power_defect,
+            });
+        }
+        poll(cancelled)?;
+        Ok(field)
+    }
+}

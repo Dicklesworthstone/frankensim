@@ -485,3 +485,74 @@ fn zero_motional_emf_preserves_stationary_solve_and_stationary_lorentz_force() {
         Err(ConductionError::Cancelled)
     ));
 }
+
+#[test]
+fn frozen_affine_recovery_matches_native_moving_solves_with_local_circulation() {
+    // G1/G3: tensor rotation, changing local motion/B and signed actual voltage.
+    for angle in [0.0, 0.7] {
+        let source = conductor([2.0, 8.0], ElectricalPropertyBasis::Conductivity, angle);
+        let problem =
+            PlanarConduction::new(square(0.3), vec![source; 4], limits(), &mut || false).unwrap();
+        let motion = ConductionMotion {
+            velocity_m_s: &[[0.0, 2.0], [1.0, -0.5], [-0.5, 1.0], [0.25, 3.0]],
+            normal_flux_density_t: &[1.0, -0.5, 0.25, 2.0],
+        };
+        let affine = problem
+            .moving_resistance(&[1, 2], &[0, 3], motion, controls(), &mut || false)
+            .unwrap();
+        for voltage in [-3.0, 0.0, 0.5, 4.0] {
+            let recovered = affine.field_at_voltage(voltage, &mut || false).unwrap();
+            let direct = problem
+                .solve_with_motion(
+                    &[(0, 0.0), (3, 0.0), (1, voltage), (2, voltage)],
+                    &[],
+                    motion,
+                    controls(),
+                    &mut || false,
+                )
+                .unwrap();
+            for cell in 0..4 {
+                for axis in 0..2 {
+                    near(
+                        recovered.current_density_a_m2()[cell][axis],
+                        direct.current_density_a_m2()[cell][axis],
+                    );
+                    near(
+                        recovered.conductor_field_v_m()[cell][axis],
+                        direct.conductor_field_v_m()[cell][axis],
+                    );
+                }
+                near(
+                    recovered.cell_joule_power_w()[cell],
+                    direct.cell_joule_power_w()[cell],
+                );
+                near(
+                    recovered.cell_mechanical_power_w()[cell],
+                    direct.cell_mechanical_power_w()[cell],
+                );
+            }
+            near(recovered.terminal_power_w(), direct.terminal_power_w());
+            near(recovered.power_balance_residual_w(), 0.0);
+            let current = recovered.nodal_boundary_current_a()[1].unwrap()
+                + recovered.nodal_boundary_current_a()[2].unwrap();
+            near(
+                current,
+                voltage / affine.resistance_ohm() + affine.motion_current_a(),
+            );
+            assert!(recovered.solve_report().is_none());
+            if voltage == 0.0 {
+                assert!(recovered.joule_power_w() > 0.0);
+                near(recovered.terminal_power_w(), 0.0);
+                near(recovered.mechanical_power_w(), -recovered.joule_power_w());
+            }
+        }
+        assert!(matches!(
+            affine.field_at_voltage(1.0, &mut || true),
+            Err(ConductionError::Cancelled)
+        ));
+        assert!(matches!(
+            affine.field_at_voltage(f64::INFINITY, &mut || false),
+            Err(ConductionError::Invalid(_))
+        ));
+    }
+}

@@ -7,6 +7,8 @@ use fs_phs::circuit::{Branch, CircuitGraph};
 
 #[path = "circuit/contacts.rs"]
 mod contacts;
+#[path = "circuit/motion.rs"]
+mod motion;
 
 const C: f64 = 0.5;
 const L: f64 = 0.05;
@@ -87,7 +89,11 @@ fn dormant_storage_preserves_nonlinear_resistance_work_and_thermal_continuation(
             assert_eq!(next.circuit().charges_c()[1], 1e12);
             near(circuit.charges_c()[0], sign * charge);
             near(
-                report.electrical.evaluated[0].conductor.material().query().axes()["operating"],
+                report.electrical.evaluated[0]
+                    .conductor
+                    .material()
+                    .query()
+                    .axes()["operating"],
                 current,
             );
             let (accepted_thermal, accepted_circuit, _) = next.into_parts();

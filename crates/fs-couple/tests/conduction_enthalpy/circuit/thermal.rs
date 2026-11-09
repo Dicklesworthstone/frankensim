@@ -250,7 +250,8 @@ fn initial_circuit(
     let selection = MaterialPropertySelection::SingleClaimOnly;
     let (kind, element, law) = if magnetic {
         let value =
-            ResolvedInductor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0, 1).unwrap();
+            ResolvedInductor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0, 1)
+                .unwrap();
         let law = ThermalFieldStorage::inductor(&cards[2], &value, "T", [250.0, 500.0]).unwrap();
         (
             Branch::Inductor { henries: f64::NAN },
@@ -259,7 +260,8 @@ fn initial_circuit(
         )
     } else {
         let value =
-            ResolvedCapacitor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0).unwrap();
+            ResolvedCapacitor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0)
+                .unwrap();
         let law = ThermalFieldStorage::capacitor(&cards[2], &value, "T", [250.0, 500.0]).unwrap();
         (
             Branch::Capacitor { farads: f64::NAN },
@@ -338,15 +340,28 @@ fn oracle(
     z0: f64,
     external_heat: f64,
 ) -> (f64, f64, f64, f64) {
+    oracle_with_motion(magnetic, alpha, dt, tr0, tf0, z0, external_heat, 0.0)
+}
+
+fn oracle_with_motion(
+    magnetic: bool,
+    alpha: f64,
+    dt: f64,
+    tr0: f64,
+    tf0: f64,
+    z0: f64,
+    external_heat: f64,
+    motional_voltage: f64,
+) -> (f64, f64, f64, f64) {
     let at_field_temperature = |tf: f64| {
         let k = 1.0 + alpha * (tf - 300.0);
         let resistance = |i: f64| 3.0 * (1.0 + BETA * (tr0 - 300.0)) / (1.0 - BETA * dt * i * i);
         let current = bisect(
             |i| {
                 if magnetic {
-                    i * (k + 0.5 * dt * resistance(i)) - z0
+                    i * (k + 0.5 * dt * resistance(i)) - z0 + 0.5 * dt * motional_voltage
                 } else {
-                    i * (k * resistance(i) + 0.5 * dt) - z0
+                    i * (k * resistance(i) + 0.5 * dt) - z0 + k * motional_voltage
                 }
             },
             0.0,
@@ -354,7 +369,7 @@ fn oracle(
         );
         let heat = dt * current * current * resistance(current);
         let z = if magnetic {
-            z0 - dt * resistance(current) * current
+            z0 - dt * (resistance(current) * current + motional_voltage)
         } else {
             z0 - dt * current
         };
@@ -362,10 +377,11 @@ fn oracle(
     };
     let tf = bisect(
         |tf| {
-            let (tr, z, _) = at_field_temperature(tf);
+            let (tr, z, current) = at_field_temperature(tf);
             3.0 * (tr - tr0) + 2.0 * (tf - tf0) + potential(alpha, tf, z)
                 - potential(alpha, tf0, z0)
                 - external_heat
+                + dt * motional_voltage * current
         },
         280.0,
         330.0,
@@ -374,45 +390,91 @@ fn oracle(
     (tr, tf, z, current)
 }
 
-
 #[test]
 fn dormant_source_field_cannot_hide_active_physical_energy_or_joule_heat() {
     for alpha in [-0.001, 0.001] {
         for sign in [-1.0, 1.0] {
-            let cards = [card(false, 0.0, 1.0), card(false, 0.0, 1.0), card(false, alpha, 2.0)];
+            let cards = [
+                card(false, 0.0, 1.0),
+                card(false, 0.0, 1.0),
+                card(false, alpha, 2.0),
+            ];
             let curves = cards.each_ref().map(caloric);
             let mut thermal = history(&curves, 0.0);
             let context = point(300.0);
             let cells = cells(&cards, &curves, &context);
             let resistors = [resistor()];
-            let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+            let material = MaterialNetwork {
+                cells: &cells,
+                resistors: &resistors,
+                links: &[],
+            };
             let (original, active) = initial_circuit(&material, &thermal, &cards, false);
-            let dormant = ResolvedCapacitor::resolve(&cards[1], &point(300.0),
-                MaterialPropertySelection::SingleClaimOnly, 1.0, 1.0).unwrap();
-            let dormant_law = ThermalFieldStorage::capacitor(
-                &cards[1], &dormant, "T", [250.0, 500.0]).unwrap();
+            let dormant = ResolvedCapacitor::resolve(
+                &cards[1],
+                &point(300.0),
+                MaterialPropertySelection::SingleClaimOnly,
+                1.0,
+                1.0,
+            )
+            .unwrap();
+            let dormant_law =
+                ThermalFieldStorage::capacitor(&cards[1], &dormant, "T", [250.0, 500.0]).unwrap();
             let mut graph = original.graph().clone();
             graph.node_count = 4;
-            graph.branches.push((3, 0, Branch::Capacitor { farads: f64::NAN }));
+            graph
+                .branches
+                .push((3, 0, Branch::Capacitor { farads: f64::NAN }));
             let mut storage = original.storage().to_vec();
-            storage.push(MaterialStorage { branch: 3,
-                element: MaterialStorageElement::Capacitor(dormant) });
+            storage.push(MaterialStorage {
+                branch: 3,
+                element: MaterialStorageElement::Capacitor(dormant),
+            });
             let mut circuit = ConductionCircuit::new_with_material_storage(
-                original.problem().clone(), graph, original.terminal().clone(),
-                original.material_resistors().to_vec(), storage, 0.0, vec![],
-                vec![sign * 4.0, 1e12], &[], field_controls(), || false).unwrap();
+                original.problem().clone(),
+                graph,
+                original.terminal().clone(),
+                original.material_resistors().to_vec(),
+                storage,
+                0.0,
+                vec![],
+                vec![sign * 4.0, 1e12],
+                &[],
+                field_controls(),
+                || false,
+            )
+            .unwrap();
             // The existing owner permits independent field coordinates in a
             // shared whole caloric volume. This dormant constant-C field has
             // no entropy or capacity contribution as that load cell heats.
-            let bindings = [active, FieldThermalBinding { branch: 3, cell: IDS[1],
-                law: dormant_law, maximum_abs_coordinate: 1e12 }];
+            let bindings = [
+                active,
+                FieldThermalBinding {
+                    branch: 3,
+                    cell: IDS[1],
+                    law: dormant_law,
+                    maximum_abs_coordinate: 1e12,
+                },
+            ];
             let layout = network(&cells);
             let (mut tr0, mut tf0, mut z0) = (300.0, 300.0, 4.0);
             let dt = 0.2;
             for interval in 1..=2 {
-                let next = layout.step_field_circuit_candidate(
-                    &thermal, interval as f64 * dt, &circuit, &[], &resistors, &bindings,
-                    limits(), field_controls(), config(), &[0.0; 3], || false).unwrap();
+                let next = layout
+                    .step_field_circuit_candidate(
+                        &thermal,
+                        interval as f64 * dt,
+                        &circuit,
+                        &[],
+                        &resistors,
+                        &bindings,
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0; 3],
+                        || false,
+                    )
+                    .unwrap();
                 let (tr, tf, z, current) = oracle(false, alpha, dt, tr0, tf0, z0, 0.0);
                 let report = next.report();
                 let source = &report.coupled.source;
@@ -420,10 +482,15 @@ fn dormant_source_field_cannot_hide_active_physical_energy_or_joule_heat() {
                 let physical_change = potential(alpha, tf, z) - potential(alpha, tf0, z0);
                 // Endpoint totals really do erase the active U change. They
                 // remain diagnostics, never the enclosing conservation input.
-                assert_eq!(source.field_internal_energy_j[1] - source.field_internal_energy_j[0], 0.0);
+                assert_eq!(
+                    source.field_internal_energy_j[1] - source.field_internal_energy_j[0],
+                    0.0
+                );
                 near(source.field_internal_energy_change_j, physical_change);
-                near(source.fields[1].state[0].internal_energy_j,
-                    source.fields[1].state[1].internal_energy_j);
+                near(
+                    source.fields[1].state[0].internal_energy_j,
+                    source.fields[1].state[1].internal_energy_j,
+                );
                 assert_eq!(source.fields[1].reversible_heat_j, 0.0);
                 near(electrical.spatial_current_a, sign * current);
                 near(electrical.heat_j, 3.0 * (tr - tr0));
@@ -431,13 +498,19 @@ fn dormant_source_field_cannot_hide_active_physical_energy_or_joule_heat() {
                 near(source.fields[0].reversible_heat_j, 2.0 * (tf - tf0));
                 near(next.thermal().temperature_k(IDS[0]).unwrap(), tr);
                 near(next.thermal().temperature_k(IDS[2]).unwrap(), tf);
-                near(source.field_internal_energy_change_j
-                    + report.coupled.thermal.stored_energy_change_j, 0.0);
+                near(
+                    source.field_internal_energy_change_j
+                        + report.coupled.thermal.stored_energy_change_j,
+                    0.0,
+                );
                 near(report.external_heat_j, 0.0);
                 near(report.total_energy_residual_j, 0.0);
                 // Physical U includes temperature/entropy work; the frozen
                 // native coordinate increment of psi is a different quantity.
-                assert!((source.field_internal_energy_change_j - electrical.stored_change_j).abs() > 1e-5);
+                assert!(
+                    (source.field_internal_energy_change_j - electrical.stored_change_j).abs()
+                        > 1e-5
+                );
                 near(next.circuit().charges_c()[0], sign * z);
                 assert_eq!(next.circuit().charges_c()[1], 1e12);
                 let (accepted_thermal, accepted_circuit, _) = next.into_parts();
@@ -796,4 +869,227 @@ fn g4_field_admission_budget_and_late_cancellation_preserve_all_histories() {
     let replay = solve(&bindings, config()).unwrap();
     assert_eq!(replay.circuit().charges_c(), accepted.circuit().charges_c());
     assert_eq!(replay.thermal().cells(), accepted.thermal().cells());
+}
+
+#[test]
+fn moving_nonlinear_circuit_keeps_source_field_entropy_and_lorentz_work_distinct() {
+    use fs_couple::circuit_enthalpy::{
+        conduction::circuit::response::{
+            ConductionResponseCircuit, thermal::step_moving_response_field_circuit_candidate,
+        },
+        contacts::{heat::MaterialHeatNetwork, material::ElectricalContactNetwork},
+    };
+    use fs_em::conduction::{
+        motion::ConductionMotion,
+        response::{ConductionResponseControls, PlanarConductionResponse},
+    };
+    use fs_material::conductor::response::{ConductorMagnitude, ScalarConductorResponse};
+
+    for (alpha, velocity_y) in [(-0.001, -0.5), (0.001, 0.5)] {
+        let cards = [
+            card(false, 0.0, 1.0),
+            card(false, 0.0, 1.0),
+            card(false, alpha, 2.0),
+        ];
+        let curves = cards.each_ref().map(caloric);
+        let mut thermal = history(&curves, 0.0);
+        let context = point(300.0)
+            .with_quantity(
+                "operating",
+                ConductorMagnitude::ElectricField.quantity(),
+                0.0,
+            )
+            .unwrap();
+        let cells = cells(&cards, &curves, &context);
+        let resistors = [resistor()];
+        let material = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &[],
+        };
+        let selection = MaterialPropertySelection::SingleClaimOnly;
+        let conductor = resolve_conductor_state_with_basis(
+            &cards[0],
+            &context,
+            selection.clone(),
+            ElectricalPropertyBasis::Resistivity,
+        )
+        .unwrap();
+        let source = ScalarConductorResponse::new(
+            &cards[0],
+            conductor,
+            &[("operating", ConductorMagnitude::ElectricField)],
+        )
+        .unwrap();
+        let problem =
+            PlanarConductionResponse::new(mesh(1.0), vec![source; 4], limits(), &mut || false)
+                .unwrap();
+        let capacitor =
+            ResolvedCapacitor::resolve(&cards[2], &context, selection, 1.0, 1.0).unwrap();
+        let fields = [FieldThermalBinding {
+            branch: 2,
+            cell: IDS[2],
+            law: ThermalFieldStorage::capacitor(&cards[2], &capacitor, "T", [250.0, 500.0])
+                .unwrap(),
+            maximum_abs_coordinate: 4.0,
+        }];
+        let velocity = [[0.0, velocity_y]; 4];
+        let motion = ConductionMotion {
+            velocity_m_s: &velocity,
+            normal_flux_density_t: &[1.0; 4],
+        };
+        let response = ConductionResponseControls {
+            maximum_iterations: 100,
+            absolute_conductivity_tolerance_s_m: 1e-12,
+            relative_conductivity_tolerance: 1e-12,
+            current_density_tolerance_a_m2: 1e-10,
+        };
+        let mut circuit = ConductionResponseCircuit::new_with_motion_and_material_storage(
+            problem,
+            CircuitGraph {
+                node_count: 3,
+                branches: vec![
+                    (2, 0, Branch::Resistor { ohms: 99.0 }),
+                    (1, 2, Branch::Resistor { ohms: 99.0 }),
+                    (1, 0, Branch::Capacitor { farads: f64::NAN }),
+                ],
+                transformers: vec![],
+            },
+            terminal(),
+            material.resolve(&thermal, || false).unwrap().resistors,
+            vec![MaterialStorage {
+                branch: 2,
+                element: MaterialStorageElement::Capacitor(capacitor),
+            }],
+            0.0,
+            vec![],
+            vec![4.0],
+            &[],
+            motion,
+            limits(),
+            field_controls(),
+            response,
+            1000,
+            || false,
+        )
+        .unwrap();
+        let electrical = ElectricalContactNetwork {
+            bulk: &material,
+            contacts: &[],
+            electrical_bases: &[],
+        };
+        let heat = MaterialHeatNetwork {
+            electrical: &electrical,
+            thermal_contacts: &[],
+            radiation: None,
+        };
+        let gate = fs_exec::CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = fs_exec::Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 79,
+                    kernel_id: 66,
+                    tile: 0,
+                    iteration: 0,
+                },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            let prepared = heat.prepare(&cx, &thermal).unwrap();
+            let initial_total = thermal.energy_j() + potential(alpha, 300.0, 4.0);
+            let mut mechanical_total = 0.0;
+            let mut expected = (300.0, 300.0, 4.0);
+            for interval in 1..=2 {
+                let target = interval as f64 * 0.2;
+                let next = step_moving_response_field_circuit_candidate(
+                    &prepared,
+                    &cx,
+                    &thermal,
+                    target,
+                    &circuit,
+                    &[],
+                    motion,
+                    &[],
+                    &fields,
+                    &REGIONS,
+                    1e-12,
+                    limits(),
+                    field_controls(),
+                    response,
+                    config(),
+                    &[0.0; 3],
+                )
+                .unwrap();
+                let ordinary = network(&cells)
+                    .step_moving_response_field_circuit_candidate(
+                        &thermal,
+                        target,
+                        &circuit,
+                        &[],
+                        motion,
+                        &resistors,
+                        &[],
+                        &fields,
+                        limits(),
+                        field_controls(),
+                        response,
+                        config(),
+                        &[0.0; 3],
+                        || false,
+                    )
+                    .unwrap();
+                let report = next.report();
+                let step = &report.coupled.electrical;
+                let storage = &report.coupled.source.fields[0];
+                let t = next.thermal().temperature_k(IDS[2]).unwrap();
+                let q = next.circuit().charges_c()[0];
+                let j = step.circuit.spatial_current_a;
+                let (tr, tf, z, current) = oracle_with_motion(
+                    false,
+                    alpha,
+                    0.2,
+                    expected.0,
+                    expected.1,
+                    expected.2,
+                    0.0,
+                    2.0 * velocity_y,
+                );
+                near(next.thermal().temperature_k(IDS[0]).unwrap(), tr);
+                near(next.thermal().temperature_k(IDS[1]).unwrap(), tr);
+                near(t, tf);
+                near(q, z);
+                near(j, current);
+                expected = (tr, tf, z);
+                near(step.mechanical_work_j, 0.2 * 2.0 * velocity_y * j);
+                near(
+                    step.motion.as_ref().unwrap().mechanical_power_w,
+                    2.0 * velocity_y * j,
+                );
+                near(storage.state[1].internal_energy_j, potential(alpha, t, q));
+                near(report.total_energy_residual_j, 0.0);
+                near(report.external_heat_j, 0.0);
+                near(step.circuit.supplied_work_j, 0.0);
+                near(report.coupled.deposited_joule_j, step.circuit.heat_j);
+                assert!(storage.reversible_heat_j.abs() > 1e-8);
+                for id in IDS {
+                    near(
+                        next.thermal().temperature_k(id).unwrap(),
+                        ordinary.thermal().temperature_k(id).unwrap(),
+                    );
+                }
+                near(q, ordinary.circuit().charges_c()[0]);
+                mechanical_total += step.mechanical_work_j;
+                near(
+                    next.thermal().energy_j()
+                        + storage.state[1].internal_energy_j
+                        + mechanical_total,
+                    initial_total,
+                );
+                (thermal, circuit, _) = next.into_parts();
+            }
+        });
+    }
 }

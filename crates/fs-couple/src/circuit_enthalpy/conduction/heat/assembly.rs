@@ -279,66 +279,24 @@ pub fn step_response_field_circuit_candidate<'t, A: HeatAssembly + ?Sized>(
     ConductionResponseFieldThermalCandidate<'t, A::Sample>,
     CircuitEnthalpyError<ConductionHeatError<A::Error>>,
 > {
-    let cancel = RefCell::new(|| cx.checkpoint().is_err());
-    check(&cancel).map_err(map_conduction_error)?;
-    let prepared = heat.prepared_heat_network();
-    let bulk = prepared
-        .field_material_network()
-        .map_err(assembly_heat_error)?;
-    let layout = ConductionThermalNetwork {
-        cells: bulk.cells,
-        links: bulk.links,
-        regions,
-        volume_tolerance_m3,
-    };
-    if regions.len() != circuit.sources().len() || regions.len() > assembly.max_cells {
-        return Err(map_conduction_error(invalid(
-            "one bounded heat route per original circuit triangle required",
-        )));
-    }
-    let mut field_axes = Vec::new();
-    for region in regions {
-        check(&cancel).map_err(map_conduction_error)?;
-        let source = circuit
-            .sources()
-            .get(region.triangle)
-            .ok_or_else(|| invalid("thermal route names an absent circuit conductor"))
-            .map_err(map_conduction_error)?;
-        for (axis, _) in source.axes() {
-            field_axes.push((region.cell, axis.as_str()));
-        }
-    }
-    prepared
-        .admit_field_independent_boundaries(cx, &field_axes)
-        .map_err(assembly_heat_error)?;
-    let destinations = prepared.resistor_destinations();
-    let next = layout.step_response_circuit_resolved_bound(
+    let next = super::super::circuit::response::thermal::step_response_circuit_with_heat(
+        heat,
+        cx,
         thermal,
         target_s,
         circuit,
         ports,
-        &destinations,
-        bulk.resistors,
+        None,
+        &[],
         contacts,
         Some(fields),
+        regions,
+        volume_tolerance_m3,
         assembly,
         field_controls,
         response,
         controls,
         initial_energy_increments_j,
-        |trial| {
-            let coefficients = heat
-                .resolve_heat(cx, trial)
-                .map_err(|error| error.map_source(ConductionHeatError::Heat))?;
-            if !coefficients.contacts.is_empty() {
-                return Err(map_conduction_error(invalid(
-                    "spatial field-storage circuit cannot omit series electrical-contact work",
-                )));
-            }
-            Ok(coefficients.bulk)
-        },
-        |sample: &A::Sample| &sample.as_ref().material,
-        &cancel,
     )?;
     let internal_heat_j = finite(
         (target_s - thermal.time_s())
@@ -352,6 +310,7 @@ pub fn step_response_field_circuit_candidate<'t, A: HeatAssembly + ?Sized>(
     let next = next
         .close_field_report(internal_heat_j, controls.total_energy_tolerance_j)
         .map_err(map_conduction_error)?;
-    check(&cancel).map_err(map_conduction_error)?;
+    cx.checkpoint()
+        .map_err(|_| CircuitEnthalpyError::Cancelled)?;
     Ok(next)
 }
