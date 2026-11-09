@@ -349,6 +349,50 @@ componentwise residual gate; that gate is not a blanket forward-error bound.
 
 Focused native tests compare independent scalar quotient and Maxwell cubic derivatives, actual added mass/stiffness/damping, full gyroscopic and nonproportional directions, extreme coordinate units, DC, and compact mutual/nonreciprocal loading. End-to-end tests differentiate the distinct displacement and velocity peaks and the actual two-mass cancellation notch. These are local derivatives of the authored physical model, with no modal truncation, broadband passivity, finite-parameter-step or global peak selection guarantee.
 
+### `harmonic`: changing attachments and dispersive material laws
+
+`solve_with_frequency_parameter_and_port_derivative` extends the native mixed
+jet to complete authored B_theta, Z_theta and Z_omega_theta, alongside explicit
+Z_omega and Z_omegaomega. B and B_theta are frequency independent; original
+coordinate/port dimensions and the physical coordinate basis remain fixed.
+M/C/K directions retain the existing frequency-independent contract. The
+derivative of a passive material need not itself be passive.
+
+With L=B*Z*B^T, the additional mixed source is
+`-L_theta*v_omega-L_omega_theta*v`. Both attachment occurrences are retained:
+`L_theta=B_theta*Z*B^T+B*Z_theta*B^T+B*Z*B_theta^T` and
+`L_omega_theta=B_theta*Z_omega*B^T+B*Z_omega_theta*B^T+B*Z_omega*B_theta^T`.
+The existing complete `-A_omega*q_theta` action is included once. Binary-normalized
+factored contractions take O(n*p+p*p) work and O(p) scratch, reusing the admitted
+factor without dense load derivatives, perturbed models or finite differences.
+A changing load adds 384*p numerical bytes and
+`512*(n*p+p*p)+512*p` to the native baseline work score; coupled LU/compact
+owners reserve three times the complete score. All authored directions are
+admitted before the first solve/allocation.
+
+`HarmonicPortFrequencyParameterResponse` publishes original-unit flow and effort
+mixed derivatives, including `B_theta^T*v_omega` and all four terms of
+`(Z*u)_omega_theta`. Its signed boundary-work derivative retains both distinct
+cross contractions for mutual/nonreciprocal ports. The parent response also
+reports independently differentiated input work, full symmetric-C viscous work
+and their balance against port work. Symmetrizing C and C_theta before contraction
+prevents changing gyroscopic coupling from creating direct heat. Normalized
+double-double products retain finite cancellation before overflow; boundary
+work is not reclassified as constitutive heat or storage. Fixed-load and unloaded
+mixed entry points receive the same complete physical work accounting.
+
+Focused regressions compare an independently assembled dense mass/damper/spring
+pencil and the original Maxwell-memory rational quotient, with changing
+attachments, material relaxation, all source jets, mutual/nonreciprocal loads,
+DC and resonance. Port-unit changes by 2^+/-400 preserve mechanical motion and
+work; individually overflowing reactive mixed-work terms cancel to finite zero.
+End-to-end queries differentiate actual peak locations, both asymmetric
+half-power crossings, bandwidth and Q for attachment, load mass, loss and
+stiffness directions. Exact resource limits, invalid data, cancellation and
+reusable-owner refusal are checked. A separate admission regression verifies
+that coupled first-frequency solves actually reserve the documented three-pass
+work allowance while scalar owners retain their direct baseline.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.

@@ -8,6 +8,10 @@ use crate::quadratic_fraction;
 use fs_exec::Cx;
 use fs_math::{c64::C64, dd::Dd};
 
+mod mixed;
+pub use mixed::HarmonicPortFrequencyParameterDirection;
+pub(super) use mixed::frequency_parameter_action;
+
 /// Authored load derivatives along the same physical scalar parameter.
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicPortParameterDirection<'a> {
@@ -154,24 +158,42 @@ impl PortAction<'_> {
         owner: &PreparedHarmonicResponse,
         response: &HarmonicResponse,
         cx: &Cx<'_>,
+        visit: impl FnMut(usize, usize, Term, Term) -> Result<(), HarmonicResponseError>,
+    ) -> Result<(), HarmonicResponseError> {
+        let Some(primal) = &response.port_load else {
+            return Err(invalid(
+                "prepared port action lost its original physical load",
+            ));
+        };
+        self.visit_projected_rhs(owner, &primal.effort, cx, visit)
+    }
+
+    // Share the original factored force projection between parameter and
+    // mixed-frequency directions. The caller chooses the matching physical
+    // effort (e or e_omega), without constructing a fictitious response.
+    fn visit_projected_rhs(
+        &self,
+        owner: &PreparedHarmonicResponse,
+        effort: &[C64],
+        cx: &Cx<'_>,
         mut visit: impl FnMut(usize, usize, Term, Term) -> Result<(), HarmonicResponseError>,
     ) -> Result<(), HarmonicResponseError> {
-        let (Some(load), Some(primal)) = (&owner.port_load, &response.port_load) else {
+        let Some(load) = &owner.port_load else {
             return Err(invalid(
                 "prepared port action lost its original physical load",
             ));
         };
         let p = load.ports;
+        if effort.len() != p {
+            return Err(invalid("one original effort per physical port required"));
+        }
         for i in 0..owner.n {
             poll(cx)?;
             let shift = -owner.coordinate_exponents[i];
             for a in 0..p {
                 if let Some(map) = self.map_direction {
                     let db = map[i * p + a];
-                    for (axis, e) in [primal.effort[a].re, primal.effort[a].im]
-                        .into_iter()
-                        .enumerate()
-                    {
+                    for (axis, e) in [effort[a].re, effort[a].im].into_iter().enumerate() {
                         let term = Term::product([-db, e, 1.0, 1.0], shift);
                         visit(i, axis, term, term.abs())?;
                     }

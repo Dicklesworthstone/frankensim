@@ -7,10 +7,15 @@ use super::super::{
     HarmonicFrequencyCurvatureControls, HarmonicFrequencyCurvatureResponse, HarmonicResponseError,
     PreparedHarmonicResponse, finite, invalid, poll, scale_complex,
 };
+use super::load::{self, HarmonicPortFrequencyParameterDirection};
 use super::{HarmonicParameterControls, HarmonicParameterResponse, PowerSum, Term};
 use crate::quadratic_modes::QuadraticParameterDirection;
 use fs_exec::Cx;
 use fs_math::{c64::C64, dd::Dd};
+
+mod ports;
+pub use ports::HarmonicPortFrequencyParameterResponse;
+mod work;
 
 /// Total resources for the original response, both frequency derivatives,
 /// one physical-parameter derivative and their mixed derivative.
@@ -19,12 +24,15 @@ pub struct HarmonicFrequencyParameterControls {
     /// Conservative added numerical payload: 3072*n bytes when unloaded;
     /// 8*n*p+3072*n+1536*p+128*k for p ports and compact-factor dimension k.
     /// Excludes the immutable factor, borrowed source/direction arrays and
-    /// allocator metadata. Dense derivative matrices are never allocated.
+    /// allocator metadata. A changing attachment/impedance direction adds
+    /// 384*p bytes for its normalized factored action. Dense derivative
+    /// matrices are never allocated.
     pub maximum_additional_payload_bytes: usize,
     /// Conservative work score: 1024*n*n+2048*n when unloaded; loading adds
     /// 512*(n*p+p*p+k*k)+2048*(p+k), plus 512*n*n*p for a compact factor.
-    /// Includes all same-factor solves, complete physical directions and
-    /// original-equation audits. Owners with a cached LU/compact factor reserve
+    /// A changing attachment/impedance direction adds
+    /// 512*(n*p+p*p)+512*p to this baseline. Includes all same-factor solves,
+    /// complete physical directions, mixed physical work and original-equation audits. Owners with a cached LU/compact factor reserve
     /// three times this score for bounded same-factor residual corrections.
     /// Direct scalar/diagonal owners keep the baseline score. A dense physical
     /// direction can still couple an exactly diagonal base.
@@ -46,6 +54,14 @@ pub struct HarmonicFrequencyParameterResponse {
     pub displacement_mixed_derivative: Vec<C64>,
     /// -i*(q_theta + omega*q_omega_theta), including the DC kinematic term.
     pub velocity_mixed_derivative: Vec<C64>,
+    /// Original conjugate port flow, effort and signed boundary-work mixed derivatives.
+    pub port_load: Option<HarmonicPortFrequencyParameterResponse>,
+    /// Mixed derivative of original cycle-mean input work.
+    pub average_input_power_mixed_derivative: f64,
+    /// Mixed derivative of the full original symmetric viscous work.
+    pub average_viscous_power_mixed_derivative: f64,
+    /// Input minus independently differentiated viscous and boundary work.
+    pub power_balance_residual_mixed_derivative: f64,
     /// Maximum same-factor solve and published-coordinate mixed-equation
     /// backward residual. This is not a forward-error bound near a pole.
     pub relative_mixed_derivative_residual: f64,
@@ -105,6 +121,7 @@ impl PreparedHarmonicResponse {
             force_frequency_parameter_derivative,
             None,
             None,
+            None,
             controls,
             cx,
         )
@@ -161,6 +178,64 @@ impl PreparedHarmonicResponse {
             force_frequency_parameter_derivative,
             Some(impedance_derivative),
             Some(impedance_second_derivative),
+            None,
+            controls,
+            cx,
+        )
+    }
+
+    /// Evaluate complete mixed jets when physical attachments and load laws change.
+    ///
+    /// The existing loaded entry fixes B and Z with respect to theta. This entry
+    /// additionally accepts the complete B_theta, Z_theta and Z_omega_theta at
+    /// the same original frequency/parameter. Both occurrences of the attachment
+    /// map remain in the mechanical action. B and B_theta are independent of
+    /// frequency; coordinate and port dimensions stay fixed.
+    ///
+    /// With L=B*Z*B^T, the added mixed source is
+    /// -L_theta*v_omega - L_omega_theta*v, where
+    /// L_theta=B_theta*Z*B^T+B*Z_theta*B^T+B*Z*B_theta^T and
+    /// L_omega_theta=B_theta*Z_omega*B^T+B*Z_omega_theta*B^T
+    ///               +B*Z_omega*B_theta^T.
+    /// Complete source jets, mechanical directions and the existing full
+    /// -A_omega*q_theta action are retained. The factor and numerical scaling
+    /// remain fixed; no perturbed model or dense load derivative is formed.
+    ///
+    /// All three impedance derivatives Z_omega, Z_omegaomega and Z_omega_theta
+    /// are explicit complete finite matrices. Signed/nonreciprocal directions
+    /// need not themselves be passive. The load owner supplies constitutive
+    /// derivatives; this query does not identify them from frequency samples.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_frequency_parameter_and_port_derivative(
+        &self,
+        force: &[C64],
+        direction: QuadraticParameterDirection<'_>,
+        force_frequency_derivative: Option<&[C64]>,
+        force_frequency_second_derivative: Option<&[C64]>,
+        force_parameter_derivative: Option<&[C64]>,
+        force_frequency_parameter_derivative: Option<&[C64]>,
+        impedance_derivative: &[C64],
+        impedance_second_derivative: &[C64],
+        port_direction: HarmonicPortFrequencyParameterDirection<'_>,
+        controls: HarmonicFrequencyParameterControls,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicFrequencyParameterResponse, HarmonicResponseError> {
+        poll(cx)?;
+        if self.port_load.is_none() {
+            return Err(invalid(
+                "changing-port mixed derivatives require an attached physical load",
+            ));
+        }
+        self.solve_frequency_parameter_jet(
+            force,
+            direction,
+            force_frequency_derivative,
+            force_frequency_second_derivative,
+            force_parameter_derivative,
+            force_frequency_parameter_derivative,
+            Some(impedance_derivative),
+            Some(impedance_second_derivative),
+            Some(port_direction),
             controls,
             cx,
         )
@@ -177,10 +252,11 @@ impl PreparedHarmonicResponse {
         force_frequency_parameter_derivative: Option<&[C64]>,
         impedance_derivative: Option<&[C64]>,
         impedance_second_derivative: Option<&[C64]>,
+        port_direction: Option<HarmonicPortFrequencyParameterDirection<'_>>,
         controls: HarmonicFrequencyParameterControls,
         cx: &Cx<'_>,
     ) -> Result<HarmonicFrequencyParameterResponse, HarmonicResponseError> {
-        self.admit_frequency_parameter(controls)?;
+        self.admit_frequency_parameter(port_direction.is_some(), controls)?;
         match (
             &self.port_load,
             impedance_derivative,
@@ -205,6 +281,25 @@ impl PreparedHarmonicResponse {
                 return Err(invalid(
                     "loaded mixed jets require both impedance frequency derivatives; unloaded jets require none",
                 ));
+            }
+        }
+        if let Some(direction) = port_direction {
+            let load = self.port_load.as_ref().ok_or_else(|| {
+                invalid("a mixed port direction requires an attached physical load")
+            })?;
+            let values = direction.impedance_angular_parameter_derivative;
+            if values.len() != load.ports * load.ports {
+                return Err(invalid(
+                    "complete ports*ports mixed impedance derivative required",
+                ));
+            }
+            for row in values.chunks_exact(load.ports) {
+                poll(cx)?;
+                if row.iter().any(|&value| !finite(value)) {
+                    return Err(invalid(
+                        "finite original mixed impedance derivative required",
+                    ));
+                }
             }
         }
         for values in [
@@ -232,7 +327,7 @@ impl PreparedHarmonicResponse {
         self.admit_parameter(
             direction,
             force_parameter_derivative,
-            None,
+            port_direction.map(|d| d.parameter),
             0.0,
             parameter_controls,
             cx,
@@ -249,10 +344,12 @@ impl PreparedHarmonicResponse {
             },
             cx,
         )?;
-        let parameter_response = self.solve_with_parameter_derivative(
+        let parameter_response = self.solve_with_total_parameter_derivative(
             force,
             direction,
             force_parameter_derivative,
+            port_direction.map(|d| d.parameter),
+            0.0,
             parameter_controls,
             cx,
         )?;
@@ -265,6 +362,13 @@ impl PreparedHarmonicResponse {
         } else {
             None
         };
+        let load_action = load::frequency_parameter_action(
+            self,
+            &frequency_response.frequency_response,
+            port_direction,
+            impedance_derivative,
+            cx,
+        )?;
         let mut rhs_exponent = i32::MIN;
         self.frequency_parameter_terms(
             &frequency_response,
@@ -290,12 +394,31 @@ impl PreparedHarmonicResponse {
                 }
             }
         }
+        if let Some(action) = &load_action {
+            action.visit_frequency_rhs(
+                self,
+                &frequency_response.frequency_response,
+                cx,
+                |_, _, term, envelope| {
+                    for value in [term, envelope] {
+                        if value.fraction.hi != 0.0 {
+                            rhs_exponent = rhs_exponent.max(value.exponent);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        let columns = self
+            .n
+            .checked_add(load_action.as_ref().map_or(0, |a| a.ports()))
+            .ok_or_else(|| invalid("mixed source extent overflow"))?;
         rhs_exponent = if rhs_exponent == i32::MIN {
             0
         } else {
             // Room for every binary-fraction product and its uncancelled
             // row envelope, including both original complex quadratures.
-            rhs_exponent + self.n.next_power_of_two().ilog2() as i32 + 8
+            rhs_exponent + columns.next_power_of_two().ilog2() as i32 + 8
         };
         let mut sums = vec![[Dd::ZERO; 2]; self.n];
         let mut envelopes = vec![Dd::ZERO; self.n];
@@ -323,6 +446,18 @@ impl PreparedHarmonicResponse {
                 envelopes[i] = envelopes[i]
                     + Term::product([bounds[i], 1.0, 1.0, 1.0], *exponent).scaled(rhs_exponent)?;
             }
+        }
+        if let Some(action) = &load_action {
+            action.visit_frequency_rhs(
+                self,
+                &frequency_response.frequency_response,
+                cx,
+                |row, axis, term, envelope| {
+                    sums[row][axis] = sums[row][axis] + term.scaled(rhs_exponent)?;
+                    envelopes[row] = envelopes[row] + envelope.scaled(rhs_exponent)?;
+                    Ok(())
+                },
+            )?;
         }
         let rhs: Vec<_> = sums
             .iter()
@@ -358,18 +493,45 @@ impl PreparedHarmonicResponse {
             rhs_exponent,
             cx,
         )?;
+        let port_load = ports::observe(
+            self,
+            &frequency_response,
+            &parameter_response,
+            &velocity_mixed_derivative,
+            impedance_derivative,
+            port_direction,
+            cx,
+        )?;
+        let power = work::observe(
+            self,
+            &frequency_response,
+            &parameter_response,
+            &velocity_mixed_derivative,
+            force,
+            force_frequency_derivative,
+            force_parameter_derivative,
+            force_frequency_parameter_derivative,
+            direction,
+            port_load.as_ref(),
+            cx,
+        )?;
         poll(cx)?;
         Ok(HarmonicFrequencyParameterResponse {
             frequency_response,
             parameter_response,
             displacement_mixed_derivative,
             velocity_mixed_derivative,
+            port_load,
+            average_input_power_mixed_derivative: power.input,
+            average_viscous_power_mixed_derivative: power.viscous,
+            power_balance_residual_mixed_derivative: power.balance,
             relative_mixed_derivative_residual: solve_residual.max(residual),
         })
     }
 
     fn admit_frequency_parameter(
         &self,
+        changing_load: bool,
         controls: HarmonicFrequencyParameterControls,
     ) -> Result<(), HarmonicResponseError> {
         self.n
@@ -381,8 +543,10 @@ impl PreparedHarmonicResponse {
             .compact_port_factor
             .as_ref()
             .map_or(0, |factor| factor.dimension()) as u128;
-        let bytes = usize::try_from(8 * n * p + 3072 * n + 1536 * p + 128 * k)
-            .map_err(|_| invalid("mixed frequency/parameter payload extent overflow"))?;
+        let bytes = usize::try_from(
+            8 * n * p + 3072 * n + 1536 * p + 128 * k + if changing_load { 384 * p } else { 0 },
+        )
+        .map_err(|_| invalid("mixed frequency/parameter payload extent overflow"))?;
         if bytes > controls.maximum_additional_payload_bytes {
             return Err(HarmonicResponseError::Budget {
                 quantity: "mixed frequency/parameter additional payload bytes",
@@ -394,7 +558,12 @@ impl PreparedHarmonicResponse {
             + 2048 * n
             + 512 * (n * p + p * p + k * k)
             + 2048 * (p + k)
-            + if k == 0 { 0 } else { 512 * n * n * p };
+            + if k == 0 { 0 } else { 512 * n * n * p }
+            + if changing_load {
+                512 * (n * p + p * p) + 512 * p
+            } else {
+                0
+            };
         // Coupled LU/compact solves reserve the original solve plus at most
         // two same-factor residual corrections; scalar owners stay direct.
         let work = if self.factor.is_some() || self.compact_port_factor.is_some() {

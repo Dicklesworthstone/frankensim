@@ -16,10 +16,13 @@ use fs_exec::Cx;
 use fs_math::{c64::C64, dd::Dd};
 
 mod mixed;
-pub use mixed::{HarmonicFrequencyParameterControls, HarmonicFrequencyParameterResponse};
+pub use mixed::{
+    HarmonicFrequencyParameterControls, HarmonicFrequencyParameterResponse,
+    HarmonicPortFrequencyParameterResponse,
+};
 
 mod load;
-pub use load::HarmonicPortParameterDirection;
+pub use load::{HarmonicPortFrequencyParameterDirection, HarmonicPortParameterDirection};
 
 /// Additional resources for one physical parameter direction and its response.
 #[derive(Clone, Copy, Debug)]

@@ -491,6 +491,7 @@ fn admit(
         nn * nn
     };
     let work = 64 * (structural_entries + nn * pp + pp * pp + kk * kk) + 256 * (nn + pp + kk);
+    let work = if coupled_factor { 3 * work } else { work };
     let requested = u64::try_from(work).map_err(|_| invalid("frequency work extent overflow"))?;
     if requested > controls.maximum_work {
         return Err(HarmonicResponseError::WorkBudget {
