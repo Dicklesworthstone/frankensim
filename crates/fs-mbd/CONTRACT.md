@@ -9124,3 +9124,29 @@ Physical modes and one-pole residues do not substitute for a driven peak,
 complete modal expansion, crossing identity or stability certificate.
 Repeated/defective roots, resource limits and cancellation retain the shared
 owners' explicit refusals.
+
+### Hereditary rotor-bearing resonance
+
+`RotorBearingModel::at_speed_with_maxwell_memory` retains original scalar strain
+channels, positive branch stiffnesses and relaxation times at a signed operating
+point. The supplied K is the relaxed stiffness. Each original branch obeys
+`sigma_dot + sigma/tau = k*b^T*q_dot`; its unrelaxed stiffness must not already
+be added to K. Original nonsymmetric/active C and K and signed gyroscopic forces
+remain in the mechanical equations.
+
+Harmonic response uses the exact original Maxwell transfer and factors only
+the mechanical n coordinates, at O(n^3+b*n^2) work. The same LU supplies complete
+source/frequency/spin derivatives. Every original branch stress, cycle-mean
+stress work, passive heat and constitutive residual is recovered, and mechanical
+equilibrium plus signed power balance are separately checked. A vanished
+nonzero-frequency loss quadrature refuses rather than silently dropping heat.
+No sampled loss factor or damping-ratio fit replaces the branch law.
+
+`poles` delegates the complete 2n+b state spectrum to the shared Maxwell owner,
+retaining equal-rate dark and uncoupled material poles. `prepare_modes` retains
+the shared local mechanical-mode/residue domain, which excludes pure material
+poles and the relaxation denominators. `driven_resonance` resolves the selected
+physical response peak and optional half-height width using original dispersion.
+Branch count is capped at64; native cancellation and resource refusals remain
+explicit. Coefficients describe the supplied operating state, without inferred
+preload, temperature or speed-dependent constitutive laws.

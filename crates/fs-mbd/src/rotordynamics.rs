@@ -30,6 +30,9 @@ pub mod transient;
 /// Original forced-response tangents, observed peaks and synchronous unbalance.
 pub mod resonance;
 
+/// Original generalized Maxwell bearing memory, forced response and full poles.
+pub mod relaxation;
+
 /// Small dense operating-point bound; the quadratic companion has twice this size.
 pub const MAX_ROTOR_DOFS: usize = 32;
 /// Maximum operating points in one cancellable fixed-coefficient sweep.
