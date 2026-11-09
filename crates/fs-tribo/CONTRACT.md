@@ -1753,6 +1753,15 @@ carries no bow geometry. The g0 reachability scan still guards
 - Time stepping: backward Euler in the losses, with friction from the step-start temperature, over a declared uniform step. The paper uses a forward difference.
 - Refusals: a different step length, zero load, a temperature above the calibrated range, a history beyond the declared capacity (at most `MAX_HISTORY_STEPS`), and non-positive parameters.
 
+Each checkpoint retains its full original law parameters, including the uniform
+time grid, heat kernels, calibration and history capacity. Rebuilding the same
+law permits exact replay; changing those parameters refuses the old checkpoint.
+The binding copies only parameters, not the precomputed Green-function weights.
+A new endpoint temperature outside the calibrated domain refuses before
+returning a candidate thermal history. Consumers retain ownership of mechanical
+and thermal step publication. Loaded zero-slip cooling remains supported;
+zero-load off-contact cooling still refuses.
+
 ## Conformance tests
 
 Inline and external G0/G1/G3 tests cover identity/dry/tangent refusals;

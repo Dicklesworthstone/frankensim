@@ -377,3 +377,111 @@ fn g0_calibration_curves_refuse_by_name() {
     ));
     println!("{{\"law\":\"rosin-thermal\",\"test\":\"calibration_refusals\",\"pass\":true}}");
 }
+
+/// G1/G3: pulse ages and temperatures belong to the original thermal law.
+/// Reconstructing the same law replays exactly; changing a kernel does not
+/// silently reinterpret already heated material as another physical contact.
+#[test]
+fn g3_warmed_history_binds_thermal_law_and_time_grid() {
+    let cal = RosinCalibration::woodhouse_galluzzo_2025_eq13(PERSPEX).unwrap();
+    let p = params(cal, 1e-4, 32);
+    let law = SmithWoodhouse::new(p).unwrap();
+    let input = step(3.0, 0.05 * p.step_s, p.step_s);
+    let warm = |owner: &SmithWoodhouse| {
+        let mut state = owner.initial_state();
+        for _ in 0..4 {
+            state = owner.advance(&state, &input).unwrap().state;
+        }
+        state
+    };
+    let checkpoint = warm(&law);
+    assert!(checkpoint.temperature_rise_k() > 0.0);
+    let snapshot = checkpoint.clone();
+    let expected = law.advance(&checkpoint, &input).unwrap();
+    let rebuilt = SmithWoodhouse::new(p).unwrap();
+    assert_eq!(rebuilt.advance(&checkpoint, &input).unwrap(), expected);
+
+    let mut changed = p;
+    changed.contact.stationary.conductivity_w_per_m_k *= 2.0;
+    let conducting = SmithWoodhouse::new(changed).unwrap();
+    let its_history = warm(&conducting);
+    assert!(its_history.temperature_rise_k() < checkpoint.temperature_rise_k());
+    assert!(matches!(
+        conducting.advance(&checkpoint, &input),
+        Err(TriboError::InvalidInput {
+            field: "smith_woodhouse_checkpoint_owner",
+        })
+    ));
+    assert!(conducting.stored_energy_j(&checkpoint).is_nan());
+
+    let mut variants = [p; 7];
+    variants[0].step_s *= 2.0;
+    variants[1].contact.layer_thickness_m *= 2.0;
+    variants[2].contact.moving.conductivity_w_per_m_k *= 2.0;
+    variants[3].contact.radius_m *= 1.5;
+    variants[4].rosin_specific_heat_j_per_kg_k *= 1.25;
+    variants[5].calibration.moving.conductivity_w_per_m_k *= 2.0;
+    variants[6].steady_fit = SteadySlidingCurve::from_friction_law(&FrictionLaw::ShiftedPower {
+        static_mu: 1.3,
+        kinetic_mu: 0.0,
+        characteristic_speed: 0.011,
+        exponent: 0.4,
+    })
+    .unwrap();
+    for variant in variants {
+        let foreign = SmithWoodhouse::new(variant).unwrap();
+        // The input itself uses the new valid step: the refusal must come
+        // from the old history, not the existing per-call dt check.
+        let next = step(3.0, 0.05 * variant.step_s, variant.step_s);
+        assert!(matches!(
+            foreign.advance(&checkpoint, &next),
+            Err(TriboError::InvalidInput {
+                field: "smith_woodhouse_checkpoint_owner",
+            })
+        ));
+        assert!(foreign.advance(&foreign.initial_state(), &next).is_ok());
+    }
+    assert_eq!(checkpoint, snapshot);
+    assert_eq!(law.advance(&checkpoint, &input).unwrap(), expected);
+}
+
+/// G1/G4: a finite mechanical step cannot commit a temperature at which the
+/// original friction law is undefined. Failed heating leaves cooling/replay
+/// from the previously accepted warm checkpoint available.
+#[test]
+fn g4_calibration_temperature_is_checked_before_publishing_history() {
+    let cal = RosinCalibration::woodhouse_galluzzo_2025_eq13(PERSPEX).unwrap();
+    let p = params(cal, 1e-4, 32);
+    let law = SmithWoodhouse::new(p).unwrap();
+    let input = step(3.0, 0.05 * p.step_s, p.step_s);
+    let mut checkpoint = law.initial_state();
+    for _ in 0..4 {
+        checkpoint = law.advance(&checkpoint, &input).unwrap().state;
+    }
+    assert!(checkpoint.temperature_rise_k() > 0.0);
+    assert!(checkpoint.temperature_rise_k() < law.temperature_limit_k());
+    let snapshot = checkpoint.clone();
+    let expected = law.advance(&checkpoint, &input).unwrap();
+
+    assert!(matches!(
+        law.advance(&checkpoint, &step(3.0, 1e-3, p.step_s)),
+        Err(TriboError::OutsideApplicability {
+            field: "smith_woodhouse_temperature_rise",
+            value,
+            minimum,
+            maximum,
+        }) if value > maximum && minimum == 0.0
+            && maximum.to_bits() == law.temperature_limit_k().to_bits()
+    ));
+    assert_eq!(checkpoint, snapshot);
+    assert_eq!(law.advance(&checkpoint, &input).unwrap(), expected);
+
+    // A loaded contact can cool without slip. Detachment and off-contact
+    // cooling still need their own physical model.
+    let cooling = law.advance(&checkpoint, &step(3.0, 0.0, p.step_s)).unwrap();
+    assert_eq!(cooling.dissipated_j, 0.0);
+    assert!(cooling.state.temperature_rise_k() < checkpoint.temperature_rise_k());
+    assert_eq!(cooling.state.steps(), checkpoint.steps() + 1);
+    assert!(law.advance(&checkpoint, &step(0.0, 0.0, p.step_s)).is_err());
+    assert_eq!(checkpoint, snapshot);
+}

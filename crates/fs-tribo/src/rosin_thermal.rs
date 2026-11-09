@@ -717,9 +717,12 @@ impl core::fmt::Debug for History {
 }
 
 /// Smith & Woodhouse checkpoint: the temperature and slip history from
-/// the ambient start, and the accumulated slip.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// the ambient start, and the accumulated slip. The original law parameters
+/// bind the pulse ages, heat kernels and calibrated shear strength. A different
+/// law needs a new ambient state or an explicit physical history-transfer model.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SmithWoodhouseState {
+    owner: SmithWoodhouseParams,
     history: History,
     slip_m: [f64; 2],
 }
@@ -755,11 +758,19 @@ impl TangentialLaw for SmithWoodhouse {
 
     /// The paper's initial condition: rosin at ambient temperature.
     fn initial_state(&self) -> Self::State {
-        SmithWoodhouseState::default()
+        SmithWoodhouseState {
+            owner: self.params,
+            history: History::default(),
+            slip_m: [0.0; 2],
+        }
     }
 
-    fn stored_energy_j(&self, _s: &Self::State) -> f64 {
-        0.0
+    fn stored_energy_j(&self, s: &Self::State) -> f64 {
+        if s.owner == self.params {
+            0.0
+        } else {
+            f64::NAN
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -769,6 +780,11 @@ impl TangentialLaw for SmithWoodhouse {
         x: &TangentialStepInput,
     ) -> Result<TangentialStep<Self::State>, TriboError> {
         let p = &self.params;
+        if s.owner != *p {
+            return Err(TriboError::InvalidInput {
+                field: "smith_woodhouse_checkpoint_owner",
+            });
+        }
         let distance = admit_input(x)?;
         positive_finite(x.normal_n, "smith_woodhouse_normal_force")?;
         if x.dt_s.to_bits() != p.step_s.to_bits() {
@@ -861,6 +877,16 @@ impl TangentialLaw for SmithWoodhouse {
             "smith_woodhouse_temperature_rise",
         )?;
         nonnegative_finite(t_next, "smith_woodhouse_temperature_rise")?;
+        if t_next > self.temperature_limit_k {
+            // Friction on the next step requires k_y(T_next). Do not publish
+            // a thermal checkpoint outside that law's calibrated domain and
+            // only discover its invalidity after the mechanical step commits.
+            return Err(outside(
+                "smith_woodhouse_temperature_rise",
+                t_next,
+                [0.0, self.temperature_limit_k],
+            ));
+        }
 
         let direction = if distance == 0.0 {
             [0.0; 2]
@@ -896,7 +922,11 @@ impl TangentialLaw for SmithWoodhouse {
         Ok(TangentialStep {
             traction_n,
             slip_increment_m,
-            state: SmithWoodhouseState { history, slip_m },
+            state: SmithWoodhouseState {
+                owner: self.params,
+                history,
+                slip_m,
+            },
             regime,
             stored_change_j: 0.0,
             dissipated_j: work,

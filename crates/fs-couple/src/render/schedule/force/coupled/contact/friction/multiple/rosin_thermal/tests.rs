@@ -348,19 +348,34 @@ fn refusals_are_named_and_leave_the_histories_unchanged() {
     for _ in 0..2 { capped.accept(&frame(vec![sliding(1.5, 0.2 * h); 2])).unwrap(); }
     let e = capped.accept(&frame(vec![sliding(1.5, 0.2 * h); 2])).unwrap_err();
     assert!(message(e).contains("smith_woodhouse_history_steps"));
-    // A temperature above what the calibration defines: calibrated only to
-    // 2 mm/s, then slid at 0.3 m/s until the next coefficient has no k_y.
+    // An endpoint above the calibration refuses before publishing either
+    // cell. Cell 0 remains inside the calibrated range and stages first;
+    // cell 1 slides at 0.3 m/s beyond this 2 mm/s calibration's heat range.
     let mut hot = RosinThermalPorts::new(params(&two, 4_000, 0.002), vec![0, 1], &mut two).unwrap();
     let limit = hot.law().temperature_limit_k();
+    let snapshot = |r: &RosinThermalPorts| (
+        r.states.clone(), r.phases().to_vec(), r.accepted_steps(),
+        r.coefficients().to_vec(), r.heat_seconds(),
+    );
     let mut refused = None;
     for k in 0..4_000 {
-        hot.accept(&frame(vec![sliding(1.5, 0.3 * h); 2])).unwrap();
-        if let Err(e) = hot.apply(&mut two) {
+        let before = snapshot(&hot);
+        if let Err(e) = hot.accept(&frame(vec![sliding(1.5, 0.001 * h), sliding(1.5, 0.3 * h)])) {
+            assert_eq!(snapshot(&hot), before, "refused step {k} must commit no cell");
             refused = Some((k, message(e)));
             break;
         }
+        hot.apply(&mut two).unwrap();
     }
     let (k, text) = refused.expect("the temperature limit is reached");
     assert!(text.contains("smith_woodhouse_temperature_rise"), "{text}");
-    assert!(hot.temperatures_k()[0] > limit, "step {k}");
+    assert!(hot.temperatures_k().iter().all(|&t| t <= limit), "step {k}");
+    assert_eq!((hot.accepted_steps(), hot.heat_steps()), (k, vec![k; 2]));
+    // The last valid checkpoint still defines both coefficients and can
+    // continue loaded cooling, without resetting either thermal history.
+    let before = snapshot(&hot);
+    hot.apply(&mut two).unwrap();
+    assert_eq!(snapshot(&hot), before);
+    hot.accept(&frame(vec![sliding(1.5, 0.0); 2])).unwrap();
+    assert_eq!(hot.heat_steps(), vec![k + 1; 2]);
 }
