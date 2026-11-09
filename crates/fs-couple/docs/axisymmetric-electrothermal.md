@@ -93,6 +93,32 @@ retained storage, dense work and probe/source support. This adds held ideal
 terminal control, without circuit storage, finite electrode impedance or a new
 contact law.
 
+## Field-dependent bulk and interface transport
+
+`step_axisymmetric_response_candidate` and
+`step_axisymmetric_response_contact_candidate` accept the native
+`AxisymmetricConductionResponse`. Original scalar conductivity/resistivity
+sources can depend on temperature, a declared liquid fraction and actual
+electric-field/current-density magnitudes. The same enthalpy residual refreshes
+thermal coordinates, then the existing electrical response owner closes its
+own coordinates at the actual voltage/current/power drive. Accepted nonlinear
+fields are never scaled as if their coefficients were independent of drive.
+
+Explicit nonlinear contact sources likewise close against original surface
+voltage jumps/current densities. Their native uniform-trace requirement remains
+binding; nonuniform electrically varying interfaces refuse. Thermal/phase
+coordinates come from both original caloric receivers, with fixed context and
+authored two-sided heat fractions retained. Bulk and surface losses enter the
+same energy account once; constitutive defects remain numerical diagnostics.
+
+Every actual native field solve consumes the original thermal trial budget,
+including discarded constitutive iterates and final fresh endpoint admission.
+Source-derived caloric response/applicability and Fourier conductivity must
+remain independent of electrical coordinates. This memoryless scalar model
+adds no reversible field storage or thermal-expansion law and promises neither
+nonlinear uniqueness nor convergence. Source, budget, compliance or
+cancellation failures leave both accepted input histories reusable.
+
 Focused regression definitions cover sector scaling, unequal swept triangle
 volumes, local current heating with material Fourier transfer, opposite
 voltage/current feedback, regulated-power continuation, latent-phase source

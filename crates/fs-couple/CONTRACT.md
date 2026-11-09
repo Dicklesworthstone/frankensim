@@ -10173,6 +10173,41 @@ four contraction controls. Full `fs-couple` Cargo integration tests were not run
 in the disk-constrained session; syntax/static checks and independent complex
 work-balance calculations are distinct from that missing execution.
 
+## Axisymmetric nonlinear electrothermal feedback
+
+`step_axisymmetric_response_candidate` and
+`step_axisymmetric_response_contact_candidate` advance the original finite
+enthalpy history with `AxisymmetricConductionResponse`. Each thermal residual
+trial refreshes the complete original temperature/phase sources, then closes
+their electrical-field and current-density coordinates at the actual drive.
+Voltage, total current, current-density traces and regulated power use the
+native nonlinear electrical iteration; no frozen field is rescaled.
+
+Explicit electrically varying contacts close their original voltage-jump or
+normal-current coordinates under the native uniform-trace requirement. The
+existing contact bindings retain both receiving bodies, their actual thermal
+and phase states, ordered source identities, fixed external context and authored
+heat fractions. Exact swept bulk and surface losses enter the original
+enthalpy residual once, alongside the original Fourier links. Independent
+terminal work must close with total deposited heat; constitutive defects are
+not thermal sources.
+
+Every native field solve, including discarded nonlinear iterates and fresh
+final admission, consumes the existing circuit budget. Accepted continuation
+returns both updated owners and their common report. Source/domain refusal,
+budget exhaustion, compliance failure and cancellation publish neither owner.
+Caloric response/applicability and Fourier conductivity dependent on electrical
+coordinates remain refused; the scalar memoryless model retains fixed geometry
+and the original constant-density caloric charts.
+
+Focused regression definitions cover E/J-dependent bulk laws, all four drives,
+sector scaling and unequal swept cell heat, nonlinear contact/temperature
+feedback, two-sided surface heat, latent then sensible heating, source pins,
+continuation, budget accounting and atomic retry. Pinned syntax checks and
+independent body/contact/phase balance calculations were performed; the new
+native coupled integration regressions remain unexecuted in the current
+dependency environment.
+
 ## Axisymmetric multi-terminal electrothermal controls
 
 `axisymmetric::terminals::AxisymmetricTerminalDrive` binds complete terminal

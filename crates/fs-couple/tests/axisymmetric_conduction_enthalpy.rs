@@ -4,6 +4,8 @@
 mod common;
 #[path = "axisymmetric_conduction_enthalpy/contacts.rs"]
 mod contacts;
+#[path = "axisymmetric_conduction_enthalpy/response.rs"]
+mod response;
 #[path = "axisymmetric_conduction_enthalpy/terminals.rs"]
 mod terminals;
 

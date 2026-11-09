@@ -13,6 +13,8 @@
 //! authored two-sided heat partitions; the bulk-only entry refuses them.
 
 pub mod contacts;
+/// Source-bound nonlinear electric transport through the original enthalpy residual.
+pub mod response;
 /// Refreshed multi-terminal current, voltage and floating-electrode feedback.
 pub mod terminals;
 

@@ -1,5 +1,7 @@
 //! G1/G3/G4: source phi/E and phi/J surfaces close the original latent balance.
 //! Explicit manufactured data; no empirical metal or higher-dimensional fit.
+#[path = "response/axisymmetric.rs"]
+mod axisymmetric;
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::response::ConductionResponseEnthalpyCandidate;
 use fs_em::conduction::{
