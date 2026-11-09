@@ -238,6 +238,62 @@ pub struct TiedShellModel {
 }
 
 impl TiedShellModel {
+    /// Assemble signed component stiffnesses through these exact retained
+    /// junction rows, including the original compliant-interface stiffness.
+    ///
+    /// Each input uses its original component-free coordinates. This changes
+    /// no support, tie, mass, geometry or damping map. In particular a native
+    /// initial-stress tangent can replace component elastic stiffness without
+    /// rebuilding mortar quadrature or accidentally adding glue twice.
+    pub fn assemble_component_stiffness(
+        &self,
+        stiffnesses: &[&Csr],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Csr, PlateError> {
+        if cancelled() { return Err(PlateError::Cancelled); }
+        if stiffnesses.len() != self.comp_t.len() {
+            return Err(PlateError::BadConstraint {
+                what: "one stiffness per original junction component required",
+            });
+        }
+        let mut sum = Coo::new(self.model.free, self.model.free);
+        for (matrix, rows) in stiffnesses.iter().zip(&self.comp_t) {
+            if cancelled() { return Err(PlateError::Cancelled); }
+            if matrix.nrows() != rows.len() || matrix.ncols() != rows.len() {
+                return Err(PlateError::BadConstraint {
+                    what: "junction component stiffness coordinates changed",
+                });
+            }
+            for row in 0..matrix.nrows() {
+                if row % 64 == 0 && cancelled() { return Err(PlateError::Cancelled); }
+                if matrix.row(row).1.iter().any(|x| !x.is_finite()) {
+                    return Err(PlateError::BadConstraint {
+                        what: "finite signed component stiffness required",
+                    });
+                }
+            }
+            accumulate_congruence(matrix, rows, &mut sum, &mut cancelled)?;
+        }
+        for row in 0..self.model.free {
+            if row % 64 == 0 && cancelled() { return Err(PlateError::Cancelled); }
+            let (columns, values) = self.glue_stiffness.row(row);
+            for (&column, &value) in columns.iter().zip(values) {
+                sum.push(row, column, value);
+            }
+        }
+        let result = sum.assemble();
+        for row in 0..result.nrows() {
+            if row % 64 == 0 && cancelled() { return Err(PlateError::Cancelled); }
+            if result.row(row).1.iter().any(|x| !x.is_finite()) {
+                return Err(PlateError::BadConstraint {
+                    what: "assembled signed component stiffness overflow",
+                });
+            }
+        }
+        if cancelled() { return Err(PlateError::Cancelled); }
+        Ok(result)
+    }
+
     /// Eliminated slave DOF coupling rows in deterministic order.
     #[must_use]
     pub fn slave_couplings(&self) -> &[SlaveDofCoupling] {

@@ -3,10 +3,48 @@
 //! Prescribed loads and thermal eigenstrains may change between solves. The
 //! original model, support map and stiffness must stay paired with their factor.
 
-use super::{MitcShellModel, PlateError, dd_add, two_prod};
+use super::{MitcShellModel, PlateError, ShellModel, dd_add, two_prod};
 use fs_math::det;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, NdOptions, SymbolicLdlt};
 use std::sync::Arc;
+
+/// Borrowed native shell pencil and its immutable static factorization.
+///
+/// This also serves work-conjugate junction pencils. Loads and responses are
+/// in the pencil's retained coordinates; their physical maps remain with the
+/// original shell/junction owner. The same equilibration, inertia admission,
+/// compensated refinement and true-residual checks as `PreparedMitcStatic`
+/// apply. No regularization or mass enters the equilibrium solve.
+#[derive(Debug)]
+pub struct PreparedShellStatic<'a> {
+    model: &'a ShellModel,
+    factor: StaticFactor,
+}
+
+impl<'a> PreparedShellStatic<'a> {
+    pub fn try_new(
+        model: &'a ShellModel,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PlateError> {
+        checkpoint(&mut cancelled)?;
+        if model.free == 0 || model.k.nrows() != model.free || model.k.ncols() != model.free {
+            return Err(PlateError::StaticSolve {
+                what: "nonempty square static shell pencil required",
+            });
+        }
+        let factor = StaticFactor::try_new(&model.k, &mut cancelled)?;
+        Ok(Self { model, factor })
+    }
+
+    /// Solve one retained-coordinate force vector without changing the owner.
+    pub fn solve_reduced(
+        &self,
+        force: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, PlateError> {
+        self.factor.solve_reduced(&self.model.k, force, &mut cancelled)
+    }
+}
 
 /// An immutable shell and its positive-definite static factorization.
 ///

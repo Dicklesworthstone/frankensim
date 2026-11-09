@@ -103,6 +103,8 @@ pub mod compact_wall_radiation;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
 pub mod assembly_harmonic;
+/// Joint native shear-shell equilibrium, signed membrane prestress and modes.
+pub mod body_assembly;
 /// Original-coordinate tensor-Prony shell loading and coherent acoustic receivers.
 pub mod tensor_shell_radiation;
 pub mod bakeoff;

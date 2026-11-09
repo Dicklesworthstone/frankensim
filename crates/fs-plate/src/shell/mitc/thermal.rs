@@ -299,6 +299,14 @@ impl MitcShellModel {
 }
 
 impl PreparedThermalShell<'_> {
+    /// Exact immutable elastic owner whose sections, supports and condensed
+    /// interior modes prepared this thermal field. Joint equilibrium consumers
+    /// must use this pencil and recover against this same preparation.
+    #[must_use]
+    pub const fn model(&self) -> &MitcShellModel {
+        self.model
+    }
+
     /// Recover physical laminate shear with the SAME thermally induced
     /// condensed director motion as this prepared solve. The source stack,
     /// section orientation and inertia must match the retained shell assembly.

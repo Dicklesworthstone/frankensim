@@ -24,7 +24,7 @@ pub use inertia::{ShearShellInertia, assemble_mitc3p_with_reference_inertia};
 mod body_acceleration;
 use super::body_acceleration::ShellBodyAcceleration;
 mod static_solver;
-pub use static_solver::PreparedMitcStatic;
+pub use static_solver::{PreparedMitcStatic, PreparedShellStatic};
 /// Reusable observation of the original condensed MITC strain field.
 pub mod strain;
 /// Layer-resolved physical shear from the original equilibrated laminate law.
@@ -519,6 +519,13 @@ impl MitcShellModel {
     #[must_use]
     pub const fn pencil(&self) -> &ShellModel {
         &self.pencil
+    }
+    /// Whether the support-coordinate map is exactly the Cartesian world map.
+    /// Generic junctions using only `ShellModel::dof_map` must check this before
+    /// interpreting its entries as physical translations and rotations.
+    #[must_use]
+    pub fn has_global_support_coordinates(&self) -> bool {
+        self.frames.iter().all(|frame| *frame == IDENTITY)
     }
     /// Retained caller mass choice.
     #[must_use]
