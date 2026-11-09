@@ -38,6 +38,9 @@ use crate::stokes_motion::heating::{StokesHeatFailure, StokesSlipHeatRoute, Stok
 mod binding;
 use binding::ThermalBinding;
 
+/// Joint native momentum/enthalpy temporal accuracy and whole-window acceptance.
+pub mod adaptive;
+
 /// Source-density buoyancy on the same coupled native thermal/momentum owner.
 pub mod boussinesq;
 use boussinesq::LaminarBuoyancyReport;

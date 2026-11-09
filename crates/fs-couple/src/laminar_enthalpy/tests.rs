@@ -1,5 +1,6 @@
 //! Independent control-volume, source-rheology and physical heat regressions.
 
+mod adaptive;
 mod buoyancy;
 
 use super::*;

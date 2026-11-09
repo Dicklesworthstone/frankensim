@@ -12836,3 +12836,81 @@ failures; native numerical nonconvergence and temporal error can reduce the
 interval. A late refusal publishes no partial window. Final source evidence is
 refreshed after target-time events. Entropy retains unclassified source terms;
 local temporal error control does not establish global or model accuracy.
+
+### Adaptive original continuum momentum and caloric evolution
+
+The opt-in fs-couple laminar-enthalpy feature exposes
+laminar_enthalpy::adaptive through LaminarEnthalpy::advance_adaptive and
+advance_boussinesq_adaptive. Both compose the original coupled native BDF1
+step without replacing its convective momentum, source-rheology, same-endpoint
+density-buoyancy, sign-split BDM transport, caloric inventory, or local/global
+thermal acceptance owners. The original force, physical boundary and slip
+routes remain held for the whole window. Material/exchange callbacks must be
+pure and smooth throughout the window and valid on native nonlinear probes.
+No thermal event strictly inside the window is consumed: original
+BackwardEulerStep admission refuses before a native step. Events exactly at
+the target remain pending in the original left-limit state.
+
+Each comparison solves one coarse interval and two original fine intervals
+from the same accepted joint history. The second fine interval uses the first
+fine thermal state and actual BDM velocity. Only both fine reports and the
+final original field/material state survive acceptance; no Richardson field,
+interpolated material, or extrapolated heat is substituted. The existing
+ConductionTimeOrder::First owner supplies the fine-error correction for the
+actual two representable spans and the accepted/rejected step multipliers.
+The final suggested_step_s can seed the next window without resetting the
+controller; it remains a proposal subject to new admission, not an error bound.
+A computed endpoint exactly one representable floating-point value below the
+target rounds to that target. Actual spans, including this cap-rounding
+effect, still enter all original solves, work and error arithmetic; no broad
+epsilon drops an unresolved physical interval.
+
+The joint local-error maximum compares original per-cell stored-energy
+changes in joules, original caloric temperature, and physical affine BDM
+velocity at every original triangle vertex. Energy differences are formed
+before mass multiplication and relative tolerances scale interval changes,
+so a formation-enthalpy datum, absolute Kelvin value or uniform velocity
+translation cannot inflate an error allowance. The Euclidean affine error
+attains its maximum at a triangle vertex; raw edge-moment orientation and
+centroid-only sampling do not define the momentum norm. Original energy
+coordinates still detect latent storage when temperature remains flat.
+Separate coarse-versus-summed-fine discrepancies also bound integrated bulk
+strain heat, routed slip heat, signed external stream enthalpy, other external
+heat and mechanical buoyancy work. Cancellation between these accounts
+cannot make inaccurate transfer reports pass merely because total thermal
+storage is unchanged. These are local estimates; finite sampling does not
+certify unresolved source oscillations, a global trajectory error, pressure
+accuracy, or whole-system passivity.
+
+Global native-step and endpoint-evaluation ceilings include coarse and
+rejected comparisons. Every native call receives only the remaining
+endpoint allowance, and a terminal failed call reports that upper allowance
+beside completed native evaluation counts. Original source, nonlinear,
+momentum, thermal, event and cancellation failures are terminal; only a
+successful but inaccurate comparison may refine. The original thermal
+inventory's substep ceiling and the explicit accepted-report cap both bound
+retained fine intervals. The minimum step bounds full comparisons; accepted
+halves and a target-clipped final comparison can be shorter. An unresolved
+comparison at its allowed floor refuses rather than claiming convergence.
+
+Only accepted fine reports enter compensated physical accounts. Final
+storage is independently measured as the sum of original mass times each
+cell's final-minus-initial specific stored energy. Its difference from
+accepted strain/slip/stream/other heat must satisfy the separate whole-window
+joule gate. Buoyancy work remains an independently integrated mechanical
+observation and never enters that thermal balance. Coarse/rejected heat,
+SIP/upwind/backflow/BDF numerical loss and partial accepted prefixes are never
+published as physical heat or replacement histories. All input histories
+remain immutable through late failure.
+
+Five native regression groups are authored: reversible two-cell transport
+against an independent backward-Euler recurrence and continuous exact
+solution under two caloric datums; naturally loaded uniform Boussinesq
+acceleration with independent accepted-interval velocity/work quadrature and
+24 J original caloric heating; fixed-temperature flow whose time-varying
+stream heat and explicit cooling cancel; bounded work/source/late-cancellation
+rollback; and original pending-event left limits, decimal endpoint rounding
+and accuracy-floor refusal. The new Rust source and these tests have received
+bounded source/API review only in this session: executor availability
+prevented parser/formatter, compiler and native FEM/thermal test execution.
+No passing integration-test claim is made.
