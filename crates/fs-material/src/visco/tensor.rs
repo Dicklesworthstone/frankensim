@@ -26,7 +26,7 @@ use fs_math::det;
 pub mod lower;
 pub use lower::*;
 mod frequency;
-pub(crate) use frequency::HarmonicWorkSum;
+pub(crate) use frequency::{HarmonicEnergySpectrum, HarmonicWorkSum, StrainParts};
 pub use frequency::{
     MAX_HARMONIC_MATERIAL_LINES, NormalStressHarmonic, PlaneStressHarmonic,
     PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow,

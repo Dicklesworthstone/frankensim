@@ -29,6 +29,10 @@ use std::sync::Arc;
 mod mixed;
 mod prepare;
 pub use mixed::PreparedTensorMixedControl;
+mod harmonic;
+pub use harmonic::{
+    TensorPlaneStressHarmonicBudget, TensorPlaneStressHarmonicPoint, TensorPlaneStressHarmonicWindow,
+};
 mod tangent;
 pub use tangent::TensorControlTangent;
 mod temperature;

@@ -23961,3 +23961,36 @@ Rust files. The material integration tests exercise partial-reset wall-speed
 scaling, pressure/momentum closure, matching heat weights, inactive species
 sources and actual vacuum/reciprocal accepted impulses; those integration tests
 were statically reviewed but not compiled or executed in this workspace.
+
+## Causal harmonic plane stress on the original mixed-control history
+
+`PreparedTensorMixedControl::prepare_plane_stress_harmonic_window` drives ordered
+engineering strain carriers through the existing source-bound, full-tensor
+Maxwell realization. The original coupled memory modes enforce zero transverse
+stress throughout the interval. No independent branchwise plane-stress fit or
+settled-state initialization replaces the accepted history.
+
+Equal carriers combine before admission. The common exp(-i omega t) clock keeps
+its double-double start and separate duration; point evaluation checks strain
+continuity, original source identity, the matching plane partition, and the
+complete imposed/transient strain envelope. Preparation and evaluation retain
+explicit payload/work ceilings and cancellation. Refusal returns no candidate
+and never changes the borrowed accepted history.
+
+Physical Maxwell heat integrates positive modal squares. Stress work uses the
+original constrained reaction ports independently of direct spring-storage
+increments; the original work/storage/heat balance must resolve before a
+candidate can be accepted. Endpoint strain, stress, all branch coordinates and
+cumulative work/heat remain in the original `TensorPronyHistory`, allowing
+continued mixed-control ramps and further harmonic intervals.
+
+This lane retains the mixed controller's fixed-material, fixed-temperature and
+zero-Kelvin domain. It does not certify a structural force equation, evolve
+temperature, or substitute a sampled maximum for its conservative strain bound.
+
+Focused physical tests: `tests/visco_plane_stress_causal.rs` compares all four
+ordered material planes with an independently integrated original-tensor ODE,
+then resumes the accepted history through the existing ramp controller. It also
+covers retained tiny-interval heat, large-clock subdivision, duplicate carrier
+cancellation with memory, transient transverse strain admission, and atomic
+source/domain/budget/cancellation refusals.

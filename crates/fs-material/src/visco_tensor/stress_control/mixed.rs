@@ -33,6 +33,25 @@ pub struct PreparedTensorMixedControl {
 }
 
 impl PreparedTensorMixedControl {
+    /// Prepare coherent engineering-strain loading of this original plane-stress
+    /// partition. All coupled three-dimensional Maxwell memories are retained;
+    /// the source-bound history is supplied separately to each point evaluation.
+    /// Nonzero Kelvin viscosity retains this controller's original refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_plane_stress_harmonic_window(
+        &self,
+        plane: crate::plane_stress_viscosity::MaterialPlane,
+        angular_frequencies_rad_s: &[f64],
+        start_s: fs_math::dd::Dd,
+        duration_s: f64,
+        budget: super::TensorPlaneStressHarmonicBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<super::TensorPlaneStressHarmonicWindow<'_>> {
+        super::TensorPlaneStressHarmonicWindow::new(
+            &self.inner, plane, angular_frequencies_rad_s, start_s, duration_s, budget, cancelled,
+        )
+    }
+
     /// Bind a control partition to the immutable model of an existing history.
     /// All-stress and all-strain masks are permitted.
     ///

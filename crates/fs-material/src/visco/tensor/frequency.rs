@@ -8,6 +8,7 @@ mod plane_stress;
 mod normal_stress;
 pub use normal_stress::NormalStressHarmonic;
 pub(crate) use plane_stress::projection::Sum as HarmonicWorkSum;
+pub(crate) use plane_stress::projection::window::{HarmonicEnergySpectrum, StrainParts};
 mod strain;
 pub use plane_stress::{PlaneStressHarmonic, PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow};
 mod response;
