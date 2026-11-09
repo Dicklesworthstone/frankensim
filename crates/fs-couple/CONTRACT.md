@@ -2822,6 +2822,30 @@ Authored G1 regressions exercise analytic hot-source flux, principal-axis
 refresh, degenerate-front wetting, history invariance, late-cell refusal,
 boundary/reservoir temperature agreement and the retained strain refusal.
 
+## Second-order slab diffusion with finite vapor
+
+`FiniteMoistureAtmosphere::advance_sdirk2` couples the original one-dimensional
+slab and its actual finite vapor inventory at both Alexander SDIRK2 stages.
+The native O(N) tridiagonal diffusion solve, pinned source D(M), optional
+Kirchhoff integral, sorption and finite surface-transfer laws remain in use.
+Each stage resolves its own RH and material state. Stage two retains the
+original solid and gas storage and adds the actual first-stage face load once;
+the intermediate gas/solid reports are diagnostic, not additional inventories.
+
+The first-stage physical moisture envelope remains available to the second
+stage's source integral. Only current boundaries with nonzero conductance
+extend the range check. Invalid stages, source trials, work limits and
+cancellation refuse the whole proposal without clipping, partial publication
+or a first-order fallback. The returned slab keeps its original ordinary
+integration mode. Temperature, gas volume and reference skeleton remain fixed;
+sorption heat, condensation and a global temporal-error certificate are absent.
+
+Added regressions in `tests/moisture/atmosphere.rs` specify exact coupled
+two-store uptake/drying, second-order refinement, weighted face/vapor accounts,
+Kirchhoff bracket support, replay and transactional refusal. These authored
+numerical fixtures have not been executed in the editing environment and do
+not establish experimental validation.
+
 ## Second-order spatial moisture diffusion
 
 `MoistureCartesian::advance_sdirk2` applies the existing Alexander two-stage

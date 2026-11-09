@@ -729,7 +729,9 @@ impl MoistureSlab {
         let reference = diffusion_reference(&self.moisture, &faces);
         let start = self.transport_states(&self.moisture, cx)?;
         let profile = self.kirchhoff_diffusivity
-            .map(|_| self.kirchhoff_profile(surface, cx))
+            // A finite reservoir changes between RK stages. The already
+            // admitted first-stage load retains its original source envelope.
+            .map(|_| self.kirchhoff_profile(surface, known.map(|load| load.source_bounds()), cx))
             .transpose()?;
         let (solution, endpoint, coupling, nonlinear) =
             if let Some(controls) = self.kirchhoff_diffusivity.or(self.implicit_diffusivity) {
@@ -762,8 +764,7 @@ impl MoistureSlab {
             if !new.is_finite()
                 || new < 0.0
                 || new > self.geometry.maximum_moisture
-                || new < lower - roundoff
-                || new > upper + roundoff
+                || (known.is_none() && (new < lower - roundoff || new > upper + roundoff))
             {
                 return Err(MoistureError::Invalid(
                     "candidate violates moisture maximum principle or domain",

@@ -24,6 +24,166 @@ const SORPTION_PROPERTY: &str = "equilibrium_dry_basis_moisture";
 fn saturation_pressure() -> f64 {
     fs_material::gas::saturation_pressure_water_pa(TEMPERATURE).unwrap()
 }
+fn nonlinear() -> MoistureNonlinearConfig {
+    MoistureNonlinearConfig {
+        relative_tolerance: 1e-12,
+        maximum_iterations: 128,
+        relaxation: 1.0,
+    }
+}
+
+fn sdirk_decay(z: f64) -> f64 {
+    let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+    (1.0 - (1.0 - 2.0 * gamma) * z) / (1.0 + gamma * z).powi(2)
+}
+
+#[test]
+fn finite_slab_sdirk_has_native_two_store_flux_and_source_envelope() {
+    with_cx(|cx| {
+        let slope = 0.25;
+        let diffusion = 1e-4;
+        let length = 0.1;
+        let initial_m = 0.1;
+        let dt = 0.25;
+        let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+        let boundaries = [Some(sorption(slope)), Some(sorption(slope))];
+        let capacity = saturation_pressure() * WATER_MOLAR_MASS / (R * TEMPERATURE);
+        for initial_rh in [0.8, 0.2] {
+            for kirchhoff in [false, true] {
+                let mut original = slab(card([diffusion; 2], 0.3), length, vec![initial_m], cx);
+                if kirchhoff {
+                    original = original.with_kirchhoff_diffusivity(nonlinear()).unwrap();
+                }
+                let air = atmosphere(initial_rh, 1.0);
+                let original_air = air.clone();
+                let dry = original.dry_mass_kg();
+                // Eliminate RH using C*RH + dry*M = initial water. Two
+                // half-cell faces give the independent scalar rate 4D/L².
+                let rate = 4.0 * diffusion / length.powi(2);
+                let total = capacity * initial_rh + dry * initial_m;
+                let equilibrium = slope * total / (capacity + slope * dry);
+                let lambda = rate * (1.0 + slope * dry / capacity);
+                let first = equilibrium + (initial_m - equilibrium)
+                    / (1.0 + gamma * lambda * dt);
+                let first_rh = (total - dry * first) / capacity;
+                let expected = equilibrium + (initial_m - equilibrium) * sdirk_decay(lambda * dt);
+                let expected_rh = (total - dry * expected) / capacity;
+                // Dry/wet bracket probes at stage two still carry stage one's
+                // physical load. Its admitted source range must be retained.
+                let known = (1.0 - gamma) * dt * rate * (slope * first_rh - first);
+                let probe_rh = if initial_rh > 0.4 { 0.0 } else { 1.0 };
+                let probe = (initial_m + known + gamma * dt * rate * slope * probe_rh)
+                    / (1.0 + gamma * dt * rate);
+                if probe_rh == 0.0 {
+                    assert!(probe > initial_m && probe < slope * first_rh);
+                }
+                let accepted = air.advance_sdirk2(
+                    &original, dt, &boundaries, config(), nonlinear(), controls(), cx,
+                ).unwrap();
+                let report = accepted.step();
+                near(accepted.moisture().moisture()[0], expected, 3e-12);
+                near(accepted.atmosphere().relative_humidity().unwrap(), expected_rh, 3e-11);
+                near(report.transport.first_stage.stored_water_kg[1] / dry, first, 3e-12);
+                assert_eq!(report.transport.first_stage.interval_s, [0.0, gamma * dt]);
+                assert_eq!(report.transport.endpoint.interval_s, [0.0, dt]);
+                let water = dry * (expected - initial_m);
+                for face in report.transport.endpoint.boundary_water_kg {
+                    near(face, 0.5 * water, 1e-13);
+                }
+                near(report.water_to_solid_kg, water, 1e-13);
+                near(report.vapor_mass_kg[0] - report.vapor_mass_kg[1], water, 1e-13);
+                near(accepted.atmosphere().vapor_mass_kg().unwrap()
+                    + accepted.moisture().water_mass_kg(), total, 1e-13);
+                near(carrier_mass(accepted.atmosphere()), carrier_mass(&air), 2e-14);
+                assert_eq!(report.transport.endpoint.kirchhoff_source.is_some(), kirchhoff);
+                near(report.transport.endpoint.reservoir_moisture[0].unwrap(),
+                    slope * expected_rh, 3e-11);
+                near(report.transport.first_stage.reservoir_moisture[0].unwrap(),
+                    slope * first_rh, 3e-11);
+                let replay = air.advance_sdirk2(
+                    &original, dt, &boundaries, config(), nonlinear(), controls(), cx,
+                ).unwrap();
+                assert_eq!(replay.moisture().moisture(), accepted.moisture().moisture());
+                assert_eq!(replay.atmosphere(), accepted.atmosphere());
+                // The opt-in method must not change ordinary advance's choice.
+                let ordinary = accepted.atmosphere().advance(
+                    accepted.moisture(), dt, &boundaries, config(), controls(), cx,
+                ).unwrap();
+                assert_eq!(ordinary.step().transport.nonlinear.is_some(), kirchhoff);
+                assert_eq!(air, original_air);
+                assert_eq!(original.time_s(), 0.0);
+                assert_eq!(original.moisture(), &[initial_m]);
+            }
+        }
+    });
+}
+
+#[test]
+fn finite_slab_sdirk_converges_quadratically_for_uptake_and_drying() {
+    with_cx(|cx| {
+        let slope = 0.25;
+        let diffusion = 0.01;
+        let boundaries = [Some(sorption(slope)), Some(sorption(slope))];
+        let original = slab(card([diffusion; 2], 0.3), 1.0, vec![0.1], cx);
+        let capacity = saturation_pressure() * WATER_MOLAR_MASS / (R * TEMPERATURE);
+        let dry = original.dry_mass_kg();
+        let lambda = 4.0 * diffusion * (1.0 + slope * dry / capacity);
+        let duration = 0.8 / lambda;
+        for rh in [0.8, 0.2] {
+            let total = capacity * rh + dry * 0.1;
+            let equilibrium = slope * total / (capacity + slope * dry);
+            let exact = equilibrium + (0.1 - equilibrium) * (-lambda * duration).exp();
+            let errors = [4, 8, 16].map(|steps| {
+                let mut state = original.clone();
+                let mut air = atmosphere(rh, 1.0);
+                for _ in 0..steps {
+                    let accepted = air.advance_sdirk2(
+                        &state, duration / steps as f64, &boundaries,
+                        config(), nonlinear(), controls(), cx,
+                    ).unwrap();
+                    (air, state, _) = accepted.into_parts();
+                    near(air.vapor_mass_kg().unwrap() + state.water_mass_kg(), total, 2e-12);
+                    assert!((0.0..=1.0).contains(&air.relative_humidity().unwrap()));
+                }
+                (state.moisture()[0] - exact).abs()
+            });
+            assert!(errors[0] / errors[1] > 3.8, "{errors:?}");
+            assert!(errors[1] / errors[2] > 3.8, "{errors:?}");
+            assert!(errors[1] / errors[2] < 4.5, "{errors:?}");
+        }
+    });
+}
+
+#[test]
+fn finite_slab_sdirk_refuses_stages_and_cancellation_without_partial_water() {
+    with_cx(|cx| {
+        let original = slab(card([0.01; 2], 0.3), 1.0, vec![0.1], cx);
+        let air = atmosphere(0.8, 1.0);
+        let before_air = air.clone();
+        let boundaries = [Some(sorption(0.25)), Some(sorption(0.25))];
+        let mut limited = config();
+        limited.maximum_content_increment = 1e-15;
+        assert!(matches!(air.advance_sdirk2(
+            &original, 1.0, &boundaries, limited, nonlinear(), controls(), cx,
+        ), Err(AtmosphereMoistureError::Moisture(MoistureError::ContentIncrement { .. }))));
+        assert_eq!(air, before_air);
+        assert_eq!(original.time_s(), 0.0);
+        assert_eq!(original.moisture(), &[0.1]);
+
+        let gate = CancelGate::new();
+        gate.request();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cancelled = Cx::new(&gate, arena, StreamKey {
+                seed: 3, kernel_id: 17, tile: 0, iteration: 0,
+            }, Budget::INFINITE, ExecMode::Deterministic);
+            assert!(matches!(air.advance_sdirk2(
+                &original, 0.1, &boundaries, config(), nonlinear(), controls(), &cancelled,
+            ), Err(AtmosphereMoistureError::Moisture(MoistureError::Cancelled))));
+        });
+        assert_eq!(air, before_air);
+        assert_eq!(original.time_s(), 0.0);
+    });
+}
 pub(super) fn atmosphere(rh: f64, volume: f64) -> FiniteMoistureAtmosphere {
     let carrier = gas_support::packs("carrier", CARRIER_MOLAR_MASS, 3.5, 200.0);
     let water = gas_support::packs("water", WATER_MOLAR_MASS, 4.5, 200.0);

@@ -130,7 +130,8 @@ impl MoistureSlab {
     ///
     /// A large step may fail `StageRange` despite linear stability. Reduce dt
     /// rather than clipping water or interpreting a failed stage as physical.
-    /// No temporal/global error bound or finite-reservoir RK coupling is inferred.
+    /// No temporal/global error bound is inferred. The finite-atmosphere owner
+    /// supplies coupled RK stages with its actual evolving vapor inventory.
     pub fn advance_sdirk2(
         &self,
         dt_s: f64,
@@ -159,8 +160,6 @@ impl MoistureSlab {
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,
         ];
-        let surface = [boundaries[0].equilibrium, boundaries[1].equilibrium];
-
         // Stage configuration is private. The physical old state and the
         // caller's method selection are unchanged by either failed stage.
         let mut staged = self.clone();
@@ -169,17 +168,39 @@ impl MoistureSlab {
             staged.kirchhoff_diffusivity = Some(nonlinear);
         }
         let (first, first_stage) = staged.advance(implicit_dt, faces, config, cx)?;
+        let known = staged.sdirk_load(dt_s, &first, &first_stage, &boundaries, cx)?;
+        let (mut next, endpoint) =
+            staged.advance_stage(dt_s, implicit_dt, boundaries, config, Some(&known), cx)?;
+        next.implicit_diffusivity = self.implicit_diffusivity;
+        next.kirchhoff_diffusivity = self.kirchhoff_diffusivity;
+        poll(cx)?;
+        Ok((
+            next,
+            MoistureSdirk2Report {
+                endpoint,
+                first_stage,
+            },
+        ))
+    }
 
-        // Integrate the SAME first-stage flux with its explicit RK weight.
-        // Equal-and-opposite interior transfers cancel before the external
-        // account is formed; no large stored-water difference defines a rate.
-        let profile = staged
+    /// Integrate the same first-stage face rates for fixed or evolving reservoirs.
+    /// The physical storage reference remains the original accepted slab.
+    pub(in crate::moisture) fn sdirk_load(
+        &self,
+        dt_s: f64,
+        first: &Self,
+        first_stage: &MoistureStepReport,
+        boundaries: &[ResolvedMoistureFace; 2],
+        cx: &Cx<'_>,
+    ) -> Result<StageLoad, MoistureError> {
+        let surface = [boundaries[0].equilibrium, boundaries[1].equilibrium];
+        let profile = self
             .kirchhoff_diffusivity
-            .map(|_| staged.kirchhoff_profile(surface, cx))
+            .map(|_| self.kirchhoff_profile(surface, None, cx))
             .transpose()?;
-        let (operator, _, coupling) = staged.transport_system(
+        let (operator, _, coupling) = self.transport_system(
             (1.0 - GAMMA) * dt_s,
-            &boundaries,
+            boundaries,
             &first_stage.transport_end,
             profile.as_ref(),
             cx,
@@ -204,34 +225,15 @@ impl MoistureSlab {
                 "SDIRK moisture face increment overflow",
             ));
         }
-        let known = StageLoad {
+        let active = || (0..2).filter(|&side| coupling[side].0 != 0.0)
+            .filter_map(|side| surface[side]);
+        Ok(StageLoad {
             increment,
-            boundary_water_kg: staged.boundary_transfer(&first.moisture, &boundaries, &coupling),
+            boundary_water_kg: self.boundary_transfer(&first.moisture, boundaries, &coupling),
             bounds: [
-                diffusion_reference(&self.moisture, &boundaries),
-                self.moisture
-                    .iter()
-                    .copied()
-                    .chain(
-                        boundaries
-                            .iter()
-                            .filter(|face| face.coefficient_m_s != Some(0.0))
-                            .filter_map(|face| face.equilibrium),
-                    )
-                    .fold(0.0, f64::max),
+                self.moisture.iter().copied().chain(active()).fold(f64::INFINITY, f64::min),
+                self.moisture.iter().copied().chain(active()).fold(0.0, f64::max),
             ],
-        };
-        let (mut next, endpoint) =
-            staged.advance_stage(dt_s, implicit_dt, boundaries, config, Some(&known), cx)?;
-        next.implicit_diffusivity = self.implicit_diffusivity;
-        next.kirchhoff_diffusivity = self.kirchhoff_diffusivity;
-        poll(cx)?;
-        Ok((
-            next,
-            MoistureSdirk2Report {
-                endpoint,
-                first_stage,
-            },
-        ))
+        })
     }
 }

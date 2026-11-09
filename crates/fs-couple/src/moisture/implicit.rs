@@ -99,7 +99,13 @@ impl MoistureSlab {
             // Unsupported intermediate or final states refuse transactionally.
             let candidate: Vec<_> = solution.x.iter().map(|m| m + reference).collect();
             if let Some(known) = known {
-                known.check_range(&candidate, self.geometry.maximum_moisture, cx)?;
+                known.check_range_with(
+                    &candidate,
+                    self.geometry.maximum_moisture,
+                    (0..2).filter(|&side| system.2[side].0 != 0.0)
+                        .filter_map(|side| faces[side].equilibrium),
+                    cx,
+                )?;
             }
             let endpoint = self.transport_states(&candidate, cx)?;
             let mut endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
@@ -129,6 +135,15 @@ impl MoistureSlab {
                 && water_balance.is_finite()
                 && water_balance.abs() <= step.water_balance_tolerance_kg
             {
+                if let Some(known) = known {
+                    known.check_range_with(
+                        &candidate,
+                        self.geometry.maximum_moisture,
+                        (0..2).filter(|&side| endpoint_system.2[side].0 != 0.0)
+                            .filter_map(|side| faces[side].equilibrium),
+                        cx,
+                    )?;
+                }
                 solution.x = candidate;
                 return Ok((solution, endpoint, endpoint_system.2, Some(report)));
             }

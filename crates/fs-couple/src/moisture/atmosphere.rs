@@ -19,7 +19,8 @@ pub mod pair;
 mod sdirk;
 pub use sdirk::{
     CartesianAtmosphereSdirk2Candidate, CartesianAtmosphereSdirk2Step,
-    SharedCartesianAtmosphereSdirk2Candidate,
+    SharedCartesianAtmosphereSdirk2Candidate, SlabAtmosphereSdirk2Candidate,
+    SlabAtmosphereSdirk2Step,
 };
 
 use super::cartesian::{MoistureCartesian, MoistureCartesianReport};

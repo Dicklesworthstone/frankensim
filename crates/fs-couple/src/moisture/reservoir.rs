@@ -135,6 +135,49 @@ pub(super) struct ReservoirParticipant<'a, F: ReservoirField<N>, const N: usize>
 
 // Borrow the original storage/load during scalar reservoir trials. Successful
 // proposals own the native field; source fields and loads are not cloned per trial.
+pub(super) struct SlabSdirkStage<'a> {
+    field: Cow<'a, MoistureSlab>,
+    known: &'a StageLoad,
+    implicit_dt_s: f64,
+}
+
+impl<'a> SlabSdirkStage<'a> {
+    pub(super) fn new(
+        field: &'a MoistureSlab,
+        known: &'a StageLoad,
+        implicit_dt_s: f64,
+    ) -> Self {
+        Self { field: Cow::Borrowed(field), known, implicit_dt_s }
+    }
+
+    pub(super) fn into_field(self) -> MoistureSlab {
+        self.field.into_owned()
+    }
+}
+
+impl ReservoirField<2> for SlabSdirkStage<'_> {
+    type Report = MoistureStepReport;
+    type Controls = MoistureStepConfig;
+
+    fn inventory(&self) -> MoistureField<'_> {
+        self.field.field()
+    }
+
+    fn advance_resolved(
+        &self,
+        dt_s: f64,
+        boundary: [ResolvedMoistureFace; 2],
+        controls: Self::Controls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Self::Report), MoistureError> {
+        let (field, report) = self.field.advance_stage(
+            dt_s, self.implicit_dt_s, boundary, controls, Some(self.known), cx,
+        )?;
+        Ok((Self { field: Cow::Owned(field), known: self.known,
+            implicit_dt_s: self.implicit_dt_s }, report))
+    }
+}
+
 pub(super) struct CartesianSdirkStage<'a> {
     field: Cow<'a, MoistureCartesian>,
     known: &'a StageLoad<6>,

@@ -19,6 +19,7 @@ impl MoistureSlab {
     pub(super) fn kirchhoff_profile(
         &self,
         surface: [Option<f64>; 2],
+        prior_bounds: Option<[f64; 2]>,
         cx: &Cx<'_>,
     ) -> Result<KirchhoffMoistureDiffusivity, MoistureError> {
         poll(cx)?;
@@ -29,6 +30,7 @@ impl MoistureSlab {
             .iter()
             .copied()
             .chain(surface.into_iter().flatten())
+            .chain(prior_bounds.into_iter().flatten())
             .enumerate()
         {
             if i % 128 == 0 {
