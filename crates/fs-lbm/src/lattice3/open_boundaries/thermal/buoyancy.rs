@@ -31,6 +31,12 @@ use fs_math::dd::Dd;
 mod sgs;
 pub use sgs::{BoussinesqOpenSgsError3, BoussinesqOpenSgsStep3};
 
+mod material;
+pub use material::{
+    BoussinesqOpenMaterialConfig3, BoussinesqOpenMaterialError3, BoussinesqOpenMaterialStep3,
+    BoussinesqOpenMaterialWorkspace3,
+};
+
 /// Additional resource and constitutive-consistency limits for this owner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoussinesqOpenLimits3 {
@@ -571,11 +577,36 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        let (report, step) = self.stage_with_diffusion_poll(
+            background_at_end.as_deref().map(Vec::as_slice),
+            collisions,
+            heat_per_step,
+            thermal_relaxation,
+            diffusion,
+            origin,
+            poll,
+        )?;
+        poll()?;
+        self.publish_step(step, report, background_at_end);
+        Ok(report)
+    }
+
+    // The original numerical transaction stops before publication so a
+    // composing material owner can admit its actual temperature endpoint.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_with_diffusion_poll(
+        &mut self,
+        background_at_end: Option<&[[f64; 3]]>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
+        origin: [f64; 3],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(BoussinesqOpenStep3, usize), BoussinesqOpenError3<L::Error>> {
         poll()?;
         let cells = self.thermal.populations().len();
-        let endpoint_background = background_at_end
-            .as_deref()
-            .map_or(self.background.as_slice(), Vec::as_slice);
+        let endpoint_background = background_at_end.unwrap_or(self.background.as_slice());
         if endpoint_background.len() != cells {
             return Err(BoussinesqOpenError3::Invalid(
                 "endpoint background field shape",
@@ -729,15 +760,24 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             buoyancy_impulse,
             maximum_force_defect,
         };
-        poll()?;
+        Ok((report, step))
+    }
+
+    // Every composing owner must pass its last cancellation/admission gate
+    // before entering this common, infallible physical publication point.
+    fn publish_step(
+        &mut self,
+        step: usize,
+        report: BoussinesqOpenStep3,
+        background_at_end: Option<&mut Vec<[f64; 3]>>,
+    ) {
         self.flow
             .publish_with_force_swap(step, &mut self.pending_force);
         if let Some(background_at_end) = background_at_end {
             core::mem::swap(&mut self.background, background_at_end);
         }
-        self.thermal.publish(step, heat);
+        self.thermal.publish(step, report.heat);
         self.last_step = Some(report);
-        Ok(report)
     }
 }
 

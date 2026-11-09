@@ -406,6 +406,11 @@ impl ThermalOpenField3 {
     pub fn dimensions(&self) -> [usize; 3] {
         self.dims
     }
+    /// Fixed scalar-temperature envelope admitted throughout every source,
+    /// transport and boundary substep. Physical adapters may bind its units.
+    pub fn temperature_range(&self) -> [f64; 2] {
+        self.limits.temperature_range
+    }
     pub fn boundaries(&self) -> ThermalOpenBoundaries3 {
         self.boundaries
     }

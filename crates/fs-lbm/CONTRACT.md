@@ -2416,3 +2416,41 @@ deviatoric stress, harmonic work partition, molecular-only walls/heat, every
 adjacent edge cap, zero-model identity and refusal/replay. Source parsing,
 scoped formatting and independent arithmetic were checked; native execution
 remains blocked before fs-lbm by the pinned asupersync dependency build.
+
+## Native open-grid Boussinesq material transport
+
+`BoussinesqOpenGrid3::material_transport_workspace` binds an original
+`MaterialScaling` reference, physical dx/dt and an explicit signed Kelvin/theta
+map to reusable collision, thermal-relaxation and query-temperature arrays.
+The complete native scalar-temperature envelope must map to positive finite
+Kelvin. Workspace and both returned source-sample vectors have explicit payload
+budgets; original source owners' internal allocations are outside those caps.
+
+`step_serial_with_material_transport` and
+`advance_serial_with_material_transport` sample each original fluid material
+once at opening and once at the actual candidate endpoint. The existing
+`BoussinesqMaterial` admission bounds density/Cp departures and retains reference
+rho/Cp for storage while using local viscosity and conductivity. The original
+material planner supplies momentum relaxation and the distinct D3Q7 thermal
+relaxation. Native collision families, independent bulk/higher-order choices
+and TRT wall-placement parameters are preserved through
+`ViscousLattice3::with_shear_relaxation`.
+
+Opening coefficients are held over the original step; endpoint queries admit
+and retain the next state without a second transport step or nonlinear iteration.
+The existing affine law remains the sole buoyancy force owner. This adapter
+adds molecular transport, not variable-mass storage, a source-density buoyancy
+law, mechanical work heating, turbulence closure or a new temporal-order claim.
+Original heat/source/impulse receipts retain their lattice units.
+
+Endpoint material refusal or cancellation precedes the original joint
+flow/force/heat/finite-wall publication. A refused step leaves accepted physical
+state and the caller's endpoint-background buffer unchanged; workspace scratch
+may contain a refused prefix. Source callbacks must be repeatable; their external
+effects remain caller-owned. Existing scalar, tensor and SGS entry points retain
+the same numerical transaction and publication point.
+
+Two focused regression groups compare explicit local SI-to-lattice rates and
+original source samples on D3Q19/D3Q27, then check conducting-wall heat accounts,
+late source refusal, final cancellation and exact retry. Their execution is not
+claimed by this implementation checkpoint.
