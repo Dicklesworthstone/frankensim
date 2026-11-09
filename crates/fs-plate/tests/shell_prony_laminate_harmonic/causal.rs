@@ -1,4 +1,5 @@
 //! Causal CST/DKT layer histories, original reference volumes and real heat.
+#[path = "causal/viscoelastic.rs"]
 mod viscoelastic;
 
 use super::*;
