@@ -1,8 +1,9 @@
 # CONTRACT: fs-lbm
 
-> **Layout (restored 2026-11-09).** This contract is an index plus part files. A file larger than
-> 1 MiB (1,048,576 bytes) comes back with empty content from the GitHub contents API; a writer using
-> that API then saw an empty file and replaced the whole contract with its one new section.
+> **Layout (restored 2026-11-09).** This contract is an index plus part files. Once this file grew
+> past 1 MiB (1,048,576 bytes), an edit through one write path replaced the whole contract with its
+> one new section. The likely cause is the GitHub contents API, which returns empty content for
+> files above 1 MB, so that writer saw an empty file.
 > That happened to this file once, at 23b90dcc17 (2026-11-07 02:15), when it was 1,050,479 bytes; the
 > text written before that cut was absent from then until this restore and is now in the parts.
 >

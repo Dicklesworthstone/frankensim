@@ -1,8 +1,9 @@
 # fs-material — CONTRACT
 
-> **Layout (restored 2026-11-09).** This contract is an index plus part files. A file larger than
-> 1 MiB (1,048,576 bytes) comes back with empty content from the GitHub contents API; a writer using
-> that API then saw an empty file and replaced the whole contract with its one new section.
+> **Layout (restored 2026-11-09).** This contract is an index plus part files. Once this file grew
+> past 1 MiB (1,048,576 bytes), edits through one write path replaced the whole contract with their
+> one new section; no edit below that size ever did. The likely cause is the GitHub contents API,
+> which returns empty content for files above 1 MB, so that writer saw an empty file.
 > This file was cut to a single section 8 times between 2026-11-05 and 2026-11-09; the last cut (2026-11-09 12:27) removed 1.7 MB.
 >
 > - All earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
