@@ -6,6 +6,9 @@
 //! Ideal-source work retains its sign, including regeneration. Resistance is
 //! refreshed at each thermal endpoint trial; original flux/charges are retained.
 
+/// Regulated loads and finite source impedance on the same material/heat timeline.
+pub mod power_load;
+
 use super::*;
 use fs_math::dd::Dd;
 use fs_phs::circuit::converter::{

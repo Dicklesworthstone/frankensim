@@ -7843,6 +7843,37 @@ chemical depletion/calorimetry, foldback and current limits, shared-body thermal
 feedback, disabled-load history, invalid mapping, caloric-domain refusal and
 late-cancellation rollback/retry.
 
+## Finite source impedance, regulated demand and material heat
+
+`converter::voltage::power_load` adds `step_power_loaded_candidate` to the
+existing seven-channel voltage-driven thermal network. Both held ideal voltage
+sources, their physical series resistances, the original converter flux/charges
+and both optional regulated loads share the native nonlinear electrical solve.
+Every caloric trial resolves the same seven material resistance sources at its
+actual endpoint; source sag and negative incremental load conductance therefore
+respond to that same thermal state. Equal resistance tuples reuse the original
+electrical result without bypassing material or caloric admission.
+
+Each load may remain exported or explicitly heat one finite material receiver
+as a wholly dissipative device. The actual accepted load work, including current
+limiting and voltage foldback, is deposited once; curtailed/requested demand
+never supplies heat. Shared receivers sum resistance and load energy before
+deposition. The native converter, each source/resistor/load path and complete
+electrical balance are checked before internal routing. Routed work cancels in
+the combined external account; signed ideal-source regeneration remains visible.
+The source sample separately records each load's receiver and actual joules.
+
+These are ideal supplies with finite impedance, not finite-energy reservoirs.
+The new path uses the original discrete-gradient effort and midpoint work,
+with endpoint material feedback requiring temporal refinement. It does not
+change the existing exact linear voltage-driven/PWM paths or infer efficiency,
+source capacity, C/L parameter work, or semiconductor switching losses.
+Receiver mapping, original material support, clocks, numerical budgets and
+cancellation admit both histories together. Five focused regression definitions
+cover independent two-bus calorimetry, shared/partial routing and turn-off,
+source-resistance feedback, regenerative RC work, actual curtailed delivery,
+unsupported caloric states and transactional cancellation/retry.
+
 ## Native structural vibration from harmonic induction forces
 
 `spatial_induction_vibration::SpatialInductionVibration` transfers the original

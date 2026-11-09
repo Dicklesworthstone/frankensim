@@ -1,6 +1,8 @@
 //! Independent RC/enthalpy balance plus the original loaded PWM trajectory.
 #[path = "voltage/capacitor.rs"]
 mod capacitor;
+#[path = "voltage/power_load.rs"]
+mod power_load;
 use super::*;
 use fs_couple::circuit_enthalpy::converter::voltage::*;
 use fs_phs::circuit::converter::switching::voltage_driven::PreparedVoltageDrivenSwitchCycle;
