@@ -372,6 +372,10 @@ impl PreparedLayerFields {
                         fluid,
                         thickness_m: distance,
                     },
+                    Layer::RelaxingFluid { relaxation, .. } => Layer::RelaxingFluid {
+                        relaxation,
+                        thickness_m: distance,
+                    },
                 },
                 ..*layer
             };

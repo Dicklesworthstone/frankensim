@@ -385,3 +385,303 @@ fn local_molecular_and_pore_heat_equals_intensity_loss_and_layer_absorption() {
     assert!((integral - account.absorbed_power_w).abs()
         < 1.0e-7 * account.absorbed_power_w);
 }
+
+// Independent conventional matrix for a moderate free-gas layer. The bulk
+// modulus is reconstructed from the original reservoir sum, without using the
+// production caloric response, equivalent-fluid sample or layer propagator.
+fn free_layer_reference(
+    relaxation: &RelaxationState,
+    incident: &GasState,
+    receiver: &GasState,
+    omega: f64,
+    thickness: f64,
+    cosine: f64,
+) -> (C64, C64, C64, C64) {
+    let gas = relaxation.gas();
+    let cv = relaxation.processes().iter().fold(
+        C64::from_re(relaxation.frozen_cv_j_kg_k()),
+        |sum, process| {
+            sum + C64::from_re(process.heat_capacity_j_kg_k)
+                / C64::new(1.0, omega * process.relaxation_time_s)
+        },
+    );
+    let bulk = ((cv + C64::from_re(gas.specific_gas_constant)) / cv).scale(gas.pressure);
+    let kt = omega / incident.sound_speed * (1.0 - cosine * cosine).sqrt();
+    let k = (C64::from_re(gas.density) / bulk).sqrt().scale(omega);
+    let kn = (k * k - C64::from_re(kt * kt)).sqrt();
+    let zn = C64::from_re(omega * gas.density) / kn;
+    let zn1 = incident.characteristic_impedance / cosine;
+    let kn3 = ((omega / receiver.sound_speed).powi(2) - kt * kt).sqrt();
+    let zn3 = omega * receiver.density / kn3;
+    let phase = kn.scale(thickness);
+    let sin = C64::new(
+        phase.re.sin() * phase.im.cosh(),
+        phase.re.cos() * phase.im.sinh(),
+    );
+    let cos = C64::new(
+        phase.re.cos() * phase.im.cosh(),
+        -phase.re.sin() * phase.im.sinh(),
+    );
+    let i_sin = C64::new(-sin.im, sin.re);
+    let pressure = cos + i_sin * zn.scale(1.0 / zn3);
+    let velocity = i_sin * C64::from_re(zn1) / zn + cos.scale(zn1 / zn3);
+    (
+        (pressure - velocity) / (pressure + velocity),
+        C64::from_re(2.0) / (pressure + velocity),
+        bulk,
+        kn,
+    )
+}
+
+#[test]
+fn free_relaxing_layer_refracts_with_original_calorics_and_no_fictitious_drag() {
+    let relaxation = relaxing_gas(&[(1000.0, 2.0e-4)]);
+    let incident =
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 270.0, 101_325.0).unwrap();
+    let receiver =
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 290.0, 120_000.0).unwrap();
+    let thickness = 0.035;
+    for omega in [50.0, 5000.0, 5.0e5] {
+        let stack = TransmittingLayers::new(
+            &incident,
+            &receiver,
+            omega,
+            &[Layer::RelaxingFluid {
+                relaxation: &relaxation,
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        let response = stack.prepared_layers().material_response(0).unwrap();
+        assert_eq!(response.flow_resistivity_pa_s_m2(), 0.0);
+        assert_eq!(
+            response.dynamic_density_kg_m3(),
+            C64::from_re(relaxation.gas().density)
+        );
+        relative(
+            response.characteristic().1,
+            relaxation.relaxing_wavenumber(omega).unwrap().conj(),
+            4e-15,
+        );
+        assert!(matches!(stack.prepared_layers().layer(0),
+            Some(Layer::RelaxingFluid { relaxation: original, .. }) if core::ptr::eq(original, &relaxation)));
+        for cosine in [1.0, 0.8, 0.4] {
+            let actual = stack.scattering(cosine).unwrap();
+            let (reflection, transmission, bulk, _) = free_layer_reference(
+                &relaxation,
+                &incident,
+                &receiver,
+                omega,
+                thickness,
+                cosine,
+            );
+            relative(actual.pressure_reflection, reflection, 2e-12);
+            relative(actual.pressure_transmission, transmission, 2e-12);
+            relative(response.dynamic_bulk_modulus_pa(), bulk, 3e-15);
+            let heat = stack
+                .layer_absorption(
+                    cosine,
+                    3.0,
+                    LayerAbsorptionBudget { max_layers: 1 },
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(heat.layers()[0].viscous_absorbed_fraction, 0.0);
+            assert!(heat.layers()[0].thermal_absorbed_fraction > 0.0);
+            assert!(
+                (heat.reflected_fraction + heat.transmitted_fraction + heat.absorbed_fraction - 1.0)
+                    .abs()
+                    < 2e-13
+            );
+        }
+    }
+}
+
+#[test]
+fn free_relaxing_layer_interior_heat_closes_flux_and_independent_spatial_integral() {
+    let relaxation = relaxing_gas(&[(1000.0, 2.0e-4)]);
+    let gas = relaxation.gas();
+    let omega = 5000.0;
+    let thickness = 0.045;
+    let cosine = 0.8;
+    let stack = TransmittingLayers::new(
+        gas,
+        gas,
+        omega,
+        &[Layer::RelaxingFluid {
+            relaxation: &relaxation,
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let spectrum = stack
+        .prepare_angular_spectrum(
+            &[IncidentPlaneWave {
+                direction: [0.6, 0.0, cosine],
+                pressure_pa: C64::ONE,
+            }],
+            AngularSpectrumBudget { max_components: 1 },
+            &mut || false,
+        )
+        .unwrap();
+    let interior = spectrum.prepare_layer_field(0, &mut || false).unwrap();
+    let (_, transmitted, bulk, kn) =
+        free_layer_reference(&relaxation, gas, gas, omega, thickness, cosine);
+    let zn = C64::from_re(omega * gas.density) / kn;
+    let reference = gas.characteristic_impedance / cosine;
+    let intervals = 1024;
+    let dz = thickness / f64::from(intervals);
+    let mut integrated_heat = 0.0;
+    for index in 0..=intervals {
+        let depth = f64::from(index) * dz;
+        let phase = kn.scale(thickness - depth);
+        let sin = C64::new(
+            phase.re.sin() * phase.im.cosh(),
+            phase.re.cos() * phase.im.sinh(),
+        );
+        let cos = C64::new(
+            phase.re.cos() * phase.im.cosh(),
+            -phase.re.sin() * phase.im.sinh(),
+        );
+        let pressure =
+            transmitted * (cos + C64::new(-sin.im, sin.re) * zn.scale(1.0 / reference));
+        let expected_heat = -0.5 * omega * bulk.recip().im * pressure.norm_sq();
+        let actual = interior
+            .field_with_heat([0.0, 0.0, depth], &mut || false)
+            .unwrap();
+        relative(actual.field.pressure_pa, pressure, 4e-14);
+        assert_eq!(actual.viscous_heating_w_m3, 0.0);
+        assert!((actual.thermal_heating_w_m3 / expected_heat - 1.0).abs() < 8e-14);
+        let weight = if index == 0 || index == intervals {
+            1.0
+        } else if index % 2 == 0 {
+            2.0
+        } else {
+            4.0
+        };
+        integrated_heat += weight * expected_heat;
+    }
+    integrated_heat *= dz / 3.0;
+    let entrance = interior.field([0.0, 0.0, 0.0], &mut || false).unwrap();
+    let exit = interior
+        .field([0.0, 0.0, thickness], &mut || false)
+        .unwrap();
+    let flux_drop = entrance.active_intensity_w_m2[2] - exit.active_intensity_w_m2[2];
+    let account = stack
+        .layer_absorption(
+            cosine,
+            1.0,
+            LayerAbsorptionBudget { max_layers: 1 },
+            || false,
+        )
+        .unwrap();
+    assert!((flux_drop / integrated_heat - 1.0).abs() < 3e-12);
+    assert!(
+        (account.absorbed_fraction / (2.0 * reference * integrated_heat) - 1.0).abs() < 3e-12
+    );
+}
+
+#[test]
+fn absent_free_reservoirs_preserve_lossless_refraction_and_critical_incidence() {
+    let absent = relaxing_gas(&[]);
+    let zero = relaxing_gas(&[(1e8, 2e-4)]);
+    let incident = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(1.0, 0.8 * absent.gas().sound_speed).unwrap(),
+        FluidTransportState::try_new(1.0, 1000.0, 0.02, 1e-5).unwrap(),
+        1.4,
+    )
+    .unwrap();
+    for relaxation in [&absent, &zero] {
+        let gas = relaxation.gas();
+        let original = TransmittingLayers::new(
+            &incident,
+            &incident,
+            5000.0,
+            &[Layer::FluidLayer {
+                fluid: gas,
+                thickness_m: 0.04,
+            }],
+        )
+        .unwrap();
+        let new = TransmittingLayers::new(
+            &incident,
+            &incident,
+            5000.0,
+            &[Layer::RelaxingFluid {
+                relaxation,
+                thickness_m: 0.04,
+            }],
+        )
+        .unwrap();
+        assert!(new.prepared_layers().material_response(0).is_none());
+        for cosine in [1.0, 0.8, 0.6, 0.4, 1e-8] {
+            let a = new.scattering(cosine).unwrap();
+            let b = original.scattering(cosine).unwrap();
+            assert_eq!(a.pressure_reflection, b.pressure_reflection);
+            assert_eq!(a.pressure_transmission, b.pressure_transmission);
+            assert_eq!(a.absorbed_fraction, 0.0);
+        }
+    }
+}
+
+#[test]
+fn free_relaxing_layer_split_and_thick_limits_preserve_passive_transport() {
+    let relaxation = relaxing_gas(&[(1000.0, 2e-4)]);
+    let gas = relaxation.gas();
+    for thickness in [0.0, 1e-9, 0.04, 1e4] {
+        let whole = TransmittingLayers::new(
+            gas,
+            gas,
+            5000.0,
+            &[Layer::RelaxingFluid {
+                relaxation: &relaxation,
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        let split = TransmittingLayers::new(
+            gas,
+            gas,
+            5000.0,
+            &[Layer::RelaxingFluid {
+                relaxation: &relaxation,
+                thickness_m: thickness * 0.5,
+            }; 2],
+        )
+        .unwrap();
+        for cosine in [1.0, 0.5, 0.1] {
+            let a = whole.scattering(cosine).unwrap();
+            let b = split.scattering(cosine).unwrap();
+            assert!((a.pressure_reflection - b.pressure_reflection).abs() < 2e-13);
+            assert!((a.pressure_transmission - b.pressure_transmission).abs() < 2e-13);
+            let heat = whole
+                .layer_absorption(
+                    cosine,
+                    1.0,
+                    LayerAbsorptionBudget { max_layers: 1 },
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(heat.layers()[0].viscous_absorbed_fraction, 0.0);
+            if thickness == 0.0 {
+                assert_eq!(heat.absorbed_fraction, 0.0);
+                assert_eq!(a.transmitted_fraction, 1.0);
+            } else {
+                assert!(heat.absorbed_fraction > 0.0);
+            }
+            if thickness == 1e4 {
+                assert_eq!(a.transmitted_fraction, 0.0);
+            }
+        }
+        assert!(
+            whole
+                .layer_absorption(
+                    0.8,
+                    1.0,
+                    LayerAbsorptionBudget { max_layers: 1 },
+                    || true,
+                )
+                .is_err()
+        );
+    }
+}

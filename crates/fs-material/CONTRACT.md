@@ -15788,6 +15788,29 @@ incident fluid, and porous constitutive responses still use the original pore
 fluid. No viscosity, thermal loss or source calibration is inferred from the
 lossless finite-layer view.
 
+`Layer::RelaxingFluid` carries the original `RelaxationState` through these
+same finite layers without a porous skeleton. Its equilibrium gas supplies
+the real density; the original molecular reservoir sum supplies the complex
+bulk modulus, conjugated once into the layer owner's `exp(+i omega t)`
+convention. Frequency-dependent phase, refraction, attenuation and positive
+compression heat therefore remain one constitutive response. The numerical
+`PorousFluidResponse` view has exactly zero static resistivity and real density
+in this source role. No shear viscosity, Fourier heat diffusion, interface
+thermal mode, wall loss or artificial attenuation is inferred. Lossless
+exterior fluids retain their declared approximation.
+
+Repeated references share one prepared dynamic response. With no active
+reservoirs the existing lossless `FluidLayer` path is used exactly, retaining
+critical and evanescent limits. Coherent exterior/interior beams, elastic
+terminations, layer-resolved local heating and angular power all consume the
+existing bounded propagator and original source identity. Free-layer tests
+reconstruct the molecular modulus and conventional transfer matrix
+independently, integrate local heat against intensity loss, check differing
+fluid states, zero-reservoir/zero-thickness limits, splitting invariance,
+opaque attenuation and cancellation. This remains a linear stationary
+infinite-plane molecular model, without a measured-spectrum qualification or
+transient source feedback claim.
+
 Critical-angle classification retains the original sound-speed pair. Factored
 source contrast preserves nearly matched grazing propagation, and only
 cancelling critical evaluations use the existing double-double precision ladder

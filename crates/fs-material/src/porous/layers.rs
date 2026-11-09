@@ -5,7 +5,9 @@
 //! remain owned by PorousFluidLaw. Gaps use the same fluid's lossless acoustics;
 //! explicit fluid layers retain their own original acoustic source. Declared
 //! relaxing porous layers couple their original molecular reservoirs to pore
-//! heat diffusion. Exterior fluids and gaps remain lossless. No elastic frame,
+//! heat diffusion. Explicit free relaxing layers retain the same molecular
+//! dispersion and loss without inventing a porous skeleton or thermoviscosity.
+//! Exterior fluids and gaps remain lossless. No elastic frame,
 //! lateral finite-size effect or unspecified fluid attenuation is invented.
 //!
 //! exp(+i omega t), forward exp(-i k_n z). Tangential wavenumber is conserved,
@@ -91,6 +93,17 @@ pub enum Layer<'a> {
         fluid: &'a dyn FluidAcoustics,
         thickness_m: f64,
     },
+    /// Homogeneous free gas with its original molecular reservoirs. Its real
+    /// density and complex bulk modulus supply frequency-dependent refraction
+    /// and positive compression loss. Pressure and normal velocity are
+    /// continuous; no pore drag, shear viscosity, heat diffusion or interface
+    /// thermal conditions are added. The source's equilibrium state may differ
+    /// from the incident/pore fluid. With no active reservoirs this uses the
+    /// original lossless-fluid path, including its exact critical-angle limit.
+    RelaxingFluid {
+        relaxation: &'a RelaxationState,
+        thickness_m: f64,
+    },
 }
 impl core::fmt::Debug for Layer<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -118,6 +131,14 @@ impl core::fmt::Debug for Layer<'_> {
                 .debug_struct("FluidLayer")
                 .field("thickness_m", thickness_m)
                 .finish_non_exhaustive(),
+            Self::RelaxingFluid {
+                relaxation,
+                thickness_m,
+            } => f
+                .debug_struct("RelaxingFluid")
+                .field("relaxation", relaxation)
+                .field("thickness_m", thickness_m)
+                .finish(),
         }
     }
 }
@@ -127,7 +148,8 @@ impl Layer<'_> {
             Self::Porous { thickness_m, .. }
             | Self::RelaxingPorous { thickness_m, .. }
             | Self::FluidGap { thickness_m }
-            | Self::FluidLayer { thickness_m, .. } => thickness_m,
+            | Self::FluidLayer { thickness_m, .. }
+            | Self::RelaxingFluid { thickness_m, .. } => thickness_m,
         }
     }
 }
@@ -246,6 +268,13 @@ fn retained_fluid_snapshot(
     } else {
         layers.iter().find_map(|layer| match layer.source {
             Layer::FluidLayer { fluid, .. } if core::ptr::eq(original, fluid) => layer.fluid,
+            Layer::RelaxingFluid { relaxation, .. }
+                if core::ptr::eq(original, relaxation.gas() as &dyn FluidAcoustics) =>
+            {
+                layer
+                    .fluid
+                    .or_else(|| layer.porous.map(|r| r.fluid().acoustic()))
+            }
             _ => None,
         })
     }
@@ -292,12 +321,36 @@ impl<'a> RigidBackedLayers<'a> {
                     }
                     Some(response)
                 }
+                Layer::RelaxingFluid { relaxation, .. } => {
+                    if relaxation
+                        .processes()
+                        .iter()
+                        .any(|process| process.heat_capacity_j_kg_k > 0.0)
+                    {
+                        let cached = prepared.iter().find_map(|layer| match layer.source {
+                            Layer::RelaxingFluid {
+                                relaxation: prior, ..
+                            } if core::ptr::eq(relaxation, prior) => layer.porous,
+                            _ => None,
+                        });
+                        Some(match cached {
+                            Some(response) => response,
+                            None => PorousFluidResponse::relaxing_fluid(relaxation, omega)?,
+                        })
+                    } else {
+                        None
+                    }
+                }
                 Layer::FluidGap { .. } | Layer::FluidLayer { .. } => None,
             };
-            let layer_fluid = if let Layer::FluidLayer {
-                fluid: original, ..
-            } = source
-            {
+            let original_fluid: Option<&dyn FluidAcoustics> = match source {
+                Layer::FluidLayer { fluid, .. } => Some(fluid),
+                Layer::RelaxingFluid { relaxation, .. } if porous.is_none() => {
+                    Some(relaxation.gas())
+                }
+                _ => None,
+            };
+            let layer_fluid = if let Some(original) = original_fluid {
                 let incident: &dyn FluidAcoustics = fluid;
                 let prior = retained_fluid_snapshot(original, incident, acoustic, &prepared);
                 Some(match prior {
@@ -341,11 +394,15 @@ impl<'a> RigidBackedLayers<'a> {
     pub fn layer(&self, index: usize) -> Option<Layer<'a>> {
         self.layers.get(index).map(|l| l.source)
     }
+    /// Prepared complex response of a porous or molecular-relaxing fluid layer.
+    /// A free gas has zero resistivity and its original real density. A free
+    /// source with no active reservoirs instead uses `fluid_response` exactly.
     pub fn material_response(&self, index: usize) -> Option<&PorousFluidResponse> {
         self.layers.get(index).and_then(|l| l.porous.as_ref())
     }
-    /// Coherent snapshot of an explicitly sourced finite fluid layer.
-    /// Shared-fluid gaps and porous layers retain their existing response views.
+    /// Coherent snapshot of an explicitly sourced lossless finite fluid layer,
+    /// including a free relaxing source with no active reservoirs. Shared-fluid
+    /// gaps and dynamic layers retain their existing response views.
     pub fn fluid_response(&self, index: usize) -> Option<&FluidAcousticState> {
         self.layers.get(index).and_then(|l| l.fluid.as_ref())
     }

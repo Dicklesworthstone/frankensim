@@ -45,9 +45,11 @@ pub struct PorousFluidLaw {
 /// Existing gas-facing spelling of the same source and numerical owner.
 pub type PorousGasLaw = PorousFluidLaw;
 
-/// One evaluated rigid-frame response retaining the actual coherent fluid.
-/// The original material and pore calibration retain source authority; this
-/// numerical sample neither selects new claims nor extends their domains.
+/// One evaluated equivalent-fluid response retaining the actual coherent fluid.
+/// A porous source retains its pore calibration; a free relaxing layer has
+/// exactly zero static resistivity and no skeleton. The original source role
+/// remains in its layer, and this sample neither selects new claims nor extends
+/// their domains.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PorousFluidResponse {
     fluid: ThermoviscousFluidState,
@@ -60,6 +62,20 @@ pub struct PorousFluidResponse {
 }
 
 impl PorousFluidResponse {
+    /// Reuse the equivalent-fluid propagation and local-work owner for a free
+    /// molecular-relaxing gas. This adds no pore drag, thermoviscosity, thermal
+    /// diffusion mode or wall conditions. Conjugate the original caloric law
+    /// exactly once from exp(-i omega t) into exp(+i omega t).
+    pub(super) fn relaxing_fluid(
+        relaxation: &RelaxationState,
+        omega: f64,
+    ) -> Result<Self, MaterialError> {
+        let fluid = relaxation.gas().thermoviscous_state()?;
+        let density = C64::from_re(fluid.acoustic().density_kg_m3());
+        let bulk = relaxation.caloric_response(omega)?.bulk_modulus_pa.conj();
+        Self::from_coefficients(fluid, omega, 0.0, density, bulk)
+    }
+
     fn from_coefficients(
         fluid: ThermoviscousFluidState,
         omega: f64,
@@ -106,6 +122,7 @@ impl PorousFluidResponse {
         self.omega
     }
     /// Current static resistivity mu/k0 [Pa s/m²], not a new measurement.
+    /// Exactly zero for an explicitly free molecular-relaxing fluid layer.
     pub const fn flow_resistivity_pa_s_m2(&self) -> f64 {
         self.flow_resistivity
     }

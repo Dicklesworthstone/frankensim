@@ -100,7 +100,8 @@ fn matrix_response(stack: &RigidBackedLayers<'_>, cosine: f64, load: C64) -> (C6
                 )
             }
             Layer::Porous { thickness_m, .. }
-            | Layer::RelaxingPorous { thickness_m, .. } => {
+            | Layer::RelaxingPorous { thickness_m, .. }
+            | Layer::RelaxingFluid { thickness_m, .. } => {
                 let (zc, k) = stack.material_response(i).unwrap().characteristic();
                 let mut kn = (k * k - C64::from_re(kt * kt)).sqrt();
                 if kn.im > 0.0 {
@@ -1554,7 +1555,9 @@ fn layer_loss_oracle(
     let parameters: Vec<_> = (0..stack.layer_count())
         .map(|i| {
             let (k, density, d) = match stack.layer(i).unwrap() {
-                Layer::Porous { thickness_m, .. } => {
+                Layer::Porous { thickness_m, .. }
+                | Layer::RelaxingPorous { thickness_m, .. }
+                | Layer::RelaxingFluid { thickness_m, .. } => {
                     let response = stack.material_response(i).unwrap();
                     (
                         response.characteristic().1,

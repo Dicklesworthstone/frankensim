@@ -410,7 +410,9 @@ fn independent_layer_heat(
     let kt = omega / fluid.sound_speed_m_s() * (1.0 - cosine * cosine).sqrt();
     let wave = |index| {
         let (rho, k, d) = match prepared.layer(index).unwrap() {
-            Layer::Porous { thickness_m, .. } => {
+            Layer::Porous { thickness_m, .. }
+            | Layer::RelaxingPorous { thickness_m, .. }
+            | Layer::RelaxingFluid { thickness_m, .. } => {
                 let response = prepared.material_response(index).unwrap();
                 (
                     response.dynamic_density_kg_m3(),
