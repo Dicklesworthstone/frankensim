@@ -222,6 +222,17 @@ impl<'w> PositiveLayerMoments<'w> {
         field: impl Fn(usize) -> [Dd; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Dd, MomentError> {
+        self.square_scaled(field, Dd::ONE, cancelled)
+    }
+
+    // Positive material normalization joins the real/proper temporal weight
+    // before products, preserving both extreme range and authored sigma.
+    fn square_scaled(
+        &self,
+        field: impl Fn(usize) -> [Dd; 2],
+        material_scale: Dd,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, MomentError> {
         if cancelled() {
             return Err(MomentError::Cancelled);
         }
@@ -241,7 +252,7 @@ impl<'w> PositiveLayerMoments<'w> {
         self.factor
             .project_parts_dd(&amplitudes[..self.frequencies], &mut modes[..count])
             .map_err(MomentError::Product)?;
-        let scale = if self.proper { half } else { Dd::ONE };
+        let scale = material_scale * if self.proper { half } else { Dd::ONE };
         let mut power = Dd::ZERO;
         for (mode, &field) in modes[..count].iter().enumerate() {
             power = power

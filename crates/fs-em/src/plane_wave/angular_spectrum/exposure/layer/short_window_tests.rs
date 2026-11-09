@@ -1,6 +1,7 @@
 //! Positive film populations at coherent nulls, retaining the real source clock.
 
 use super::*;
+use fs_fft::harmonic_window::HarmonicWindowProfile;
 
 fn proper_kernels(
     frequencies: &[f64],

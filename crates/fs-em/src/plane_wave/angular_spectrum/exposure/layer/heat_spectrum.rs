@@ -4,6 +4,8 @@
 //! Debye/Lorentz friction channels are sums of squared REAL reservoir fields; their
 //! sum/difference tones are prepared by the shared analytic spectrum owner.
 //! Reversible electromagnetic/polarization storage is deliberately separate.
+//! Admitted short uniform shutters retain the original positive reservoir
+//! factors instead of recovering a weak heat residual from bright signed tones.
 
 use super::*;
 use fs_fft::harmonic_window::{
@@ -55,12 +57,19 @@ pub struct AngularSpectrumExposureHeatSpectrumLimits {
 /// by their authored second moments; real factors retain phase-locked noise.
 /// No switch-on state, material-temperature feedback, source calibration,
 /// stationary spectrum or relative numerical certificate at a null is added.
+/// The prepared owner retains its original DD reservoir fields and source-bank
+/// boundaries within the already admitted preparation workspace. Short uniform
+/// window observations reuse them without a field FFT or material solve. The
+/// exported spectrum and instantaneous evaluation retain the signed-tone law.
 pub struct AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's, 'm> {
     layer: &'p PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm>,
     depth_m: f64,
     point_index: usize,
     channel: AngularSpectrumExposureHeatChannel,
     spectrum: PreparedHarmonicProductSpectrum,
+    heat_banks: Vec<HeatBank>,
+    heat_lines: Vec<HeatLine>,
+    reservoirs_per_source: usize,
     workspace_bytes: usize,
 }
 
@@ -105,14 +114,26 @@ impl<'p, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's
         )
     }
     /// Detector-weighted expected heat density [W/m³] for either profile.
+    /// When every source bank admits the shared positive temporal factor,
+    /// coherent nulls are resolved before squaring each original reservoir.
+    /// Other windows retain the prepared spectrum's original analytic law.
     pub fn observe_window(&self, window: HarmonicWindow) -> Result<f64, AngularSpectrumError> {
         self.observe_window_cancellable(window, || false)
     }
     pub fn observe_window_cancellable(
         &self,
         window: HarmonicWindow,
-        cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, AngularSpectrumError> {
+        if let Some(heat) = positive_heat_mean(
+            &self.heat_banks,
+            &self.heat_lines,
+            self.reservoirs_per_source,
+            window,
+            &mut cancelled,
+        )? {
+            return Ok(heat);
+        }
         nonnegative_heat(
             self.spectrum
                 .mean_cancellable(window, cancelled)
@@ -331,6 +352,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             point_index,
             channel,
             spectrum,
+            heat_banks,
+            heat_lines,
+            reservoirs_per_source: reservoirs,
             workspace_bytes,
         })
     }
@@ -367,6 +391,93 @@ fn filtered_negative_time_parts(e: C64, transfer: C64) -> [Dd; 2] {
     let (a, b) = (Dd::from_f64(e.re), Dd::from_f64(e.im));
     let (c, d) = (Dd::from_f64(transfer.re), Dd::from_f64(transfer.im));
     [a * c - b * d, -(a * d + b * c)]
+}
+
+// Preparation already admits and constructs these buffers. Retaining them
+// preserves the positive reservoir factorization without another source/FFT
+// query, a larger preparation peak, or an observation allocation. Consecutive
+// reservoir groups share one original source bank and one temporal factor.
+fn positive_heat_mean(
+    banks: &[HeatBank],
+    fields: &[HeatLine],
+    reservoirs_per_source: usize,
+    window: HarmonicWindow,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<f64>, AngularSpectrumError> {
+    poll(cancelled)?;
+    if banks.is_empty() {
+        return Ok(Some(0.0));
+    }
+    if reservoirs_per_source == 0 || banks.len() % reservoirs_per_source != 0 {
+        return Err(bad("retained heat reservoir groups are inconsistent"));
+    }
+    let mut frequencies = [0.0; MAX_UNIFORM_HARMONIC_BAND_TONES];
+    // Admit every source first, so a mixed unsupported observation takes its
+    // original spectrum path before any positive projections are performed.
+    for source in banks.chunks_exact(reservoirs_per_source) {
+        poll(cancelled)?;
+        let first = &source[0];
+        let lines = &fields[first.start..first.end];
+        let proper = first.law == HarmonicProductLaw::ProperComplex;
+        if positive_band_tones(lines.len(), proper).is_none() {
+            return Ok(None);
+        }
+        for (frequency, line) in frequencies.iter_mut().zip(lines) {
+            *frequency = line.omega;
+        }
+        let admitted = if proper {
+            window.uniform_band_mode_count_rad_s(&frequencies[..lines.len()])
+        } else {
+            window.uniform_real_band_mode_count_rad_s(&frequencies[..lines.len()])
+        }
+        .map_err(|_| bad("retained heat temporal factor is unrepresentable"))?;
+        if admitted.is_none() {
+            return Ok(None);
+        }
+    }
+    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut heat = Dd::ZERO;
+    for source in banks.chunks_exact(reservoirs_per_source) {
+        poll(cancelled)?;
+        let first = &source[0];
+        let lines = &fields[first.start..first.end];
+        for (frequency, line) in frequencies.iter_mut().zip(lines) {
+            *frequency = line.omega;
+        }
+        let positive = PositiveLayerMoments::prepare(
+            window,
+            &frequencies[..lines.len()],
+            first.law == HarmonicProductLaw::ProperComplex,
+            &mut workspace,
+            cancelled,
+        )?
+        .ok_or_else(|| bad("retained heat temporal admission changed"))?;
+        for bank in source {
+            let lines = &fields[bank.start..bank.end];
+            for axis in 0..3 {
+                heat = heat
+                    + positive
+                        .square_scaled(
+                            |i| {
+                                // The retained filter already uses negative
+                                // time. Restore the layer helper's native EM
+                                // input convention without rounding a field.
+                                let [real, imaginary] = lines[i].field[axis];
+                                [real, -imaginary]
+                            },
+                            bank.left_scale,
+                            cancelled,
+                        )
+                        .map_err(moment_error)?;
+            }
+        }
+    }
+    let heat = heat.to_f64();
+    if !heat.is_finite() {
+        return Err(bad("retained heat moment is unrepresentable"));
+    }
+    poll(cancelled)?;
+    nonnegative_heat(heat).map(Some)
 }
 
 fn prepare_products(
@@ -412,3 +523,6 @@ pub(super) fn spectrum_error(error: ProductSpectrumError) -> AngularSpectrumErro
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod positive_window_tests;
