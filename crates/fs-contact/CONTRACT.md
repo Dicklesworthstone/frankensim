@@ -4712,3 +4712,45 @@ the integration groups are authored but uncompiled and unexecuted because the
 full dependency build remains blocked by workspace disk and memory limits.
 This source operation supplies no pose path, contact migration, slip, release,
 material refresh, impulse, work or heat.
+
+## First failure under simultaneous prescribed shear and twist
+
+`combined::loading::JkrCombinedLoading` continues the original common-radius
+I/II/III contact at held normal approach along
+q=[delta,lambda*u1,lambda*u2,lambda*phi]. The signed dimensionless load factor
+scales explicit metre/radian directions. A bounded scalar preparation solve
+locates the first radial fold or opening edge without branch scanning or
+inverting a vanishing tangent. It exposes numerical radius brackets and
+original stationarity/curvature residuals and tolerances; this is not an
+interval certificate. The existing response assembly remains the sole owner
+of forces, four stored energies and source admission.
+
+The source-owned history supports loading, unloading and sign reversal. Radius
+decreases with absolute load, so the endpoints and cached zero-load state
+enclose the complete admitted path. Original radius and joint nominal
+shear/twist screens remain active, including when source applicability ends
+before the ideal mathematical limit. The accepted prefix returns unused load
+travel explicitly. Fixed-size states and reports and the cached preparation
+avoid a new root search or redundant zero-load query on each ordinary step.
+
+Prescribed work is a factored difference of the original normal, shear,
+torsional and surface potentials, independently checked against total endpoint
+storage. A separate irreversible operation admits release only from the sealed
+radial-fold state at negative approach. The complete released potential stays
+an explicit unresolved mechanical transfer. Opening-edge limits and folds at
+nonnegative approach cannot authorize a separated landing. Detached histories
+retain their release and do not rebond when loading reverses. No dynamic
+impulse, heat fraction, partial-slip or thermal-path law is inferred.
+
+Three production scalar-kernel tests were compiled and executed successfully
+with the pinned Rust compiler and retained original fs-math library: a
+manufactured simultaneous fold and stationarity check, competing boundaries
+and pure-mode limits, and cancellation/probe/iteration bounds. The test wrapper
+imports the actual production kernel directly without replacement equations
+or stubs. Four additional source integration groups specify independent
+four-store work/release, force-plus-torque quadrature and reversal, opening/fold
+competition and pure-mode reductions, and source/identity/budget/cancellation
+refusal with retry. Those four integration groups remain uncompiled and
+unexecuted because the full dependency build is resource-blocked. Pinned
+formatting, recursive parsing and scoped whitespace checks pass. The narrow
+kernel execution does not establish whole-crate or native integration success.

@@ -24,6 +24,9 @@ pub mod path;
 /// Fully coupled normal, two-shear and torsional inertia on the original area.
 pub mod motion;
 
+/// Proportional shear/twist loading through the first original contact boundary.
+pub mod loading;
+
 use super::{
     JkrMixedModeError, SourceJkrMixedMode,
     torsion::{JkrTorsionalError, JkrTorsionalLimitKind},
@@ -173,7 +176,6 @@ impl SourceJkrMixedMode {
             radius::Error::Unresolved => JkrCombinedError::Unresolved,
         })?;
         let a = self.normal.spinodal_radius_m * root.radius;
-        self.normal.check_applicability(a)?;
         let hertz = a * (a / self.normal.radius_m);
         let opening = hertz - q[0];
         if opening < 0.0 {
@@ -186,6 +188,36 @@ impl SourceJkrMixedMode {
         } else {
             None
         };
+        let curvature = ((stationary_scale / radial_scale) * dd(root.derivative)).to_f64();
+        if root.marginal
+            && (self.combined_radial_residual(q, a) != 0.0
+                || self.combined_radial_curvature(q, a) != 0.0)
+        {
+            return Err(JkrCombinedError::Unresolved);
+        }
+        self.combined_response_at_radius(q, a, curvature, boundary)
+    }
+
+    // The loading owner authenticates its bounded first-boundary root before
+    // using this same response assembly. No second contact potential or
+    // independently clipped shear/twist patch is introduced.
+    fn combined_response_at_radius(
+        &self,
+        q: [f64; 4],
+        a: f64,
+        curvature: f64,
+        boundary: Option<JkrCombinedBoundary>,
+    ) -> Result<JkrCombinedResponse, JkrCombinedError> {
+        self.normal.validate_indentation(q[0])?;
+        self.normal.check_applicability(a)?;
+        let e = self.normal.normal_state().elastic().reduced_modulus_pa();
+        let w = self.normal.normal_state().adhesion_energy_j_per_m2();
+        let gbar = self.torsional_reduced_shear_modulus_pa();
+        let hertz = a * (a / self.normal.radius_m);
+        let opening = hertz - q[0];
+        if opening < 0.0 {
+            return Err(JkrCombinedError::OpeningEdge);
+        }
         let magnitude = q[1].hypot(q[2]);
         self.admit_combined_nominal_bounds(magnitude, q[3].abs(), a)?;
         let k = self.tangential_stiffness_per_radius;
@@ -201,19 +233,7 @@ impl SourceJkrMixedMode {
         let shear_release = shear_energy / (2.0 * area);
         let twist_release = (4.0 / PI) * (gbar * q[3]) * (a * q[3]);
         let residual = normal_release + shear_release + twist_release - w;
-        let curvature = ((stationary_scale / radial_scale) * dd(root.derivative)).to_f64();
         let radial_residual = self.combined_radial_residual(q, a);
-        if root.marginal {
-            let original_opening = dd(a) * (dd(a) / dd(self.normal.radius_m)) - dd(q[0]);
-            let actual_curvature = (dd(4.0) * dd(e) * dd(a) / dd(self.normal.radius_m)
-                * original_opening
-                + dd(16.0) * dd(gbar) * dd(a) * dd(q[3]) * dd(q[3])
-                - dd(2.0) * dd(PI) * dd(w))
-            .to_f64();
-            if radial_residual != 0.0 || actual_curvature != 0.0 {
-                return Err(JkrCombinedError::Unresolved);
-            }
-        }
         let diagonal = [
             2.0 * e * a,
             shear_stiffness,
@@ -380,6 +400,20 @@ impl SourceJkrMixedMode {
                 * dd(q[3])
                 * dd(q[3])
             - dd(2.0) * dd(PI) * dd(w) * dd(a))
+        .to_f64()
+    }
+
+    fn combined_radial_curvature(&self, q: [f64; 4], a: f64) -> f64 {
+        let opening = dd(a) * (dd(a) / dd(self.normal.radius_m)) - dd(q[0]);
+        (dd(4.0) * dd(self.normal.normal_state().elastic().reduced_modulus_pa()) * dd(a)
+            / dd(self.normal.radius_m)
+            * opening
+            + dd(16.0)
+                * dd(self.torsional_reduced_shear_modulus_pa())
+                * dd(a)
+                * dd(q[3])
+                * dd(q[3])
+            - dd(2.0) * dd(PI) * dd(self.normal.normal_state().adhesion_energy_j_per_m2()))
         .to_f64()
     }
 

@@ -1,6 +1,8 @@
 //! Joint original I/II/III equilibrium, complete tangent and applicability.
 #[path = "source_point/common.rs"]
 mod common;
+#[path = "adhesive_combined/loading.rs"]
+mod loading;
 #[path = "adhesive_combined/motion.rs"]
 mod motion;
 #[path = "adhesive_combined/path.rs"]
