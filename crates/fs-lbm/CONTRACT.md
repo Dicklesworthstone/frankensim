@@ -1867,6 +1867,58 @@ Regression definitions cover variable-Cp analytic binary exchange, formation
 reference invariance, graded physical face interpolation, absent species,
 source-dependent diffusivity, validity axes and atomic refusals.
 
+## Enthalpy through original species reservoirs
+
+`diffuse_species_with_enthalpy_and_boundaries` observes each actual signed
+constituent transfer from the existing positive reservoir/interior maps.
+One original partial-specific-enthalpy vector in J/kg is supplied per active
+boundary face. The same local face law applies to counterdiffusing species;
+the common carrier flux is zero. The original film/half-cell conductance,
+ordered sweeps, positive species inventory and mass/partition gates remain
+authoritative. Empty boundaries reproduce the closed enthalpy entry exactly.
+
+Interior and boundary energy share the original centered partial differences
+and error-free products. A boundary credits the same retained energy components
+to its cell and the independent external account once. The shared endpoint
+audit compares represented storage and transported energy with external heat,
+rather than incorrectly requiring a closed-domain zero. Per-cell storage
+mismatches and every boundary mass-frame defect still cost absolute joules.
+Internal cumulative energy and species receipts retain low parts; public
+scalar readbacks round only at the reporting boundary.
+
+Per-face and aggregate receipts retain signed energy and positive/negative
+NET map energy after cancellation among species. Large opposing reservoirs
+or a reversal during an interval cannot disappear behind net domain heat.
+This energy is already contained in the returned enthalpy. The generic
+reservoir observer forwards both kinds of transfers; the mass-only consumer
+is a zero-sized no-op. Active thermal face caches, retained accounts and
+readbacks are admitted against storage before allocation, and source refusal
+or cancellation publishes no candidate.
+
+`GasSpeciesEnthalpyBoundarySource` binds the exact canonical reservoir list to
+explicit PHYSICAL face temperatures and the original gas source. Its partial
+enthalpies use the same NASA evaluations as interior faces, including species
+absent from a cell. `diffuse_thermochemical_species_with_boundaries` resolves
+the endpoint composition and total enthalpy together, refreshes gas transport,
+and charges initial/endpoint caloric residuals alongside native open-energy
+defects. Species-specific formation shifts transform external chemical energy
+and stored enthalpy together; a common mass-specific datum cancels from the
+zero-carrier diffusion flux.
+
+Reservoir composition and a finite mass-film resistance do not prescribe a
+thermal interface temperature. The supplied face trace must come from its
+own thermal boundary/interface owner; no donor-temperature, Fourier-film,
+reaction, extra mixing-heat or pressure-work source is inferred here. The
+reservoir is fixed and owns no evolved storage. Source coefficients are frozen
+over this entry's interval; coupled temporal refresh has its own driver.
+
+Focused regressions include exact finite-film exchange, simultaneous interior
+and boundary transport, empty-boundary equivalence, signed/gross heat reversals,
+common-reference invariance, retained formation and species-product remainders,
+and source/storage/cancellation refusals. Original gas integration fixtures
+exercise an explicit face temperature distinct from cell temperature and
+formation-reference covariance.
+
 ## Adaptive species and enthalpy with original material feedback
 
 `SpeciesEnthalpyDiffusionModel` provides one original state-dependent caloric

@@ -13,6 +13,7 @@ use super::{
 };
 
 pub mod adaptive;
+pub mod boundary;
 
 /// The SAME accepted constituent and thermal inventories after diffusion.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,24 +30,30 @@ pub struct SpeciesEnthalpyDiffusionStep<const N: usize> {
     pub report: SpeciesEnthalpyDiffusionReport,
 }
 
-/// Direct closed-domain thermal storage and transfer admission, in joules.
+/// Direct thermal storage and transfer admission, in joules.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeciesEnthalpyDiffusionReport {
     /// Sum of representable m*(h_after-h_before), without subtracting huge totals.
     pub stored_enthalpy_change_j: f64,
-    /// Sum of the paired transported-energy increments (zero to roundoff).
+    /// Sum of the actual transported-energy increments. Closed domains sum to
+    /// zero; reservoir entries include the independently reported external heat.
     pub transported_enthalpy_change_j: f64,
     /// Rounded nonzero sums of constituent face transfers, weighted by the
     /// largest partial-enthalpy difference. Physical mass-frame diffusion
     /// has exactly zero summed carrier flux.
     pub mass_frame_enthalpy_defect_j: f64,
-    /// Absolute local storage/transport mismatches, closed-domain storage and
-    /// transport changes, and mass-frame defects. No reference energy scales it.
+    /// Absolute local storage/transport mismatches, storage/external and
+    /// transport/external residuals, and mass-frame defects. External heat is
+    /// zero for a closed domain. No reference energy scales this budget.
     pub absolute_enthalpy_defect_j: f64,
 }
 
 struct CaloricFace<const N: usize> {
     cells: [usize; 2],
+    partials: PartialEnthalpy<N>,
+}
+
+struct PartialEnthalpy<const N: usize> {
     relative_partial_h: [f64; N],
     relative_partial_h_error: [f64; N],
     maximum_partial_difference: f64,
@@ -92,8 +99,10 @@ where
         cells
             .checked_mul(core::mem::size_of::<EnergySum>() + 2 * core::mem::size_of::<f64>())?
             .checked_add(faces.checked_mul(core::mem::size_of::<CaloricFace<N>>())?)?
-            .checked_add(core::mem::size_of::<Self>()
-                + core::mem::size_of::<SpeciesEnthalpyDiffusionStep<N>>())
+            .checked_add(
+                core::mem::size_of::<Self>()
+                    + core::mem::size_of::<SpeciesEnthalpyDiffusionStep<N>>(),
+            )
     }
 
     fn prepare_storage(&mut self, cells: usize, faces: usize) {
@@ -103,6 +112,33 @@ where
 
     fn prepare(&mut self, cells: [usize; 2], axis: usize) -> Result<(), ChtError> {
         let partial_h = (self.source)(cells, axis)?;
+        self.faces.push(CaloricFace {
+            cells,
+            partials: PartialEnthalpy::new(partial_h)?,
+        });
+        Ok(())
+    }
+
+    fn transferred(&mut self, face: usize, transfers: [f64; N]) -> Result<(), ChtError> {
+        let face = &self.faces[face];
+        let (energy, frame_defect) = face.partials.transfer(transfers)?;
+        self.mass_frame_defect.add(frame_defect);
+        for (cell, sign) in [(face.cells[0], -1.0), (face.cells[1], 1.0)] {
+            let increment = &mut self.increments[cell];
+            // A later face or sweep may cancel the large part. Keep its
+            // remainder until all transfers into this cell have met.
+            increment.add(sign * energy.sum);
+            increment.add(sign * energy.correction);
+            if !increment.value().is_finite() {
+                return Err(refuse("diffusive enthalpy inventory overflowed"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<const N: usize> PartialEnthalpy<N> {
+    fn new(partial_h: [f64; N]) -> Result<Self, ChtError> {
         if partial_h.iter().any(|h| !h.is_finite()) {
             return Err(refuse("partial specific enthalpies must be finite J/kg"));
         }
@@ -122,24 +158,21 @@ where
             maximum_partial_difference =
                 maximum_partial_difference.max(difference.abs() + tail.abs());
         }
-        self.faces.push(CaloricFace {
-            cells,
+        Ok(Self {
             relative_partial_h,
             relative_partial_h_error,
             maximum_partial_difference,
-        });
-        Ok(())
+        })
     }
 
-    fn transferred(&mut self, face: usize, transfers: [f64; N]) -> Result<(), ChtError> {
-        let face = &self.faces[face];
+    fn transfer(&self, transfers: [f64; N]) -> Result<(EnergySum, f64), ChtError> {
         let mut energy = EnergySum::default();
         let mut carrier_transfer = EnergySum::default();
         for (k, &dm) in transfers.iter().enumerate() {
             // Preserve the original subtraction AND product low parts until
             // different species have cancelled. Summing rounded products alone
             // can report zero heat for a finite change in chemical inventory.
-            for dh in [face.relative_partial_h[k], face.relative_partial_h_error[k]] {
+            for dh in [self.relative_partial_h[k], self.relative_partial_h_error[k]] {
                 if dh == 0.0 || dm == 0.0 {
                     continue;
                 }
@@ -155,22 +188,11 @@ where
         if !energy.value().is_finite() {
             return Err(refuse("diffusive enthalpy sum overflowed"));
         }
-        let frame_defect = carrier_transfer.value().abs() * face.maximum_partial_difference;
+        let frame_defect = carrier_transfer.value().abs() * self.maximum_partial_difference;
         if !frame_defect.is_finite() {
             return Err(refuse("diffusive mass-frame energy defect overflowed"));
         }
-        self.mass_frame_defect.add(frame_defect);
-        for (cell, sign) in [(face.cells[0], -1.0), (face.cells[1], 1.0)] {
-            let increment = &mut self.increments[cell];
-            // A later face or sweep may cancel the large part. Keep its
-            // remainder until all transfers into this cell have met.
-            increment.add(sign * energy.sum);
-            increment.add(sign * energy.correction);
-            if !increment.value().is_finite() {
-                return Err(refuse("diffusive enthalpy inventory overflowed"));
-            }
-        }
-        Ok(())
+        Ok((energy, frame_defect))
     }
 }
 
@@ -218,9 +240,17 @@ impl MaterialAdvectionStep {
         gate: &CancelGate,
     ) -> Result<SpeciesEnthalpyDiffusionStep<N>, ChtError> {
         self.diffuse_species_with_enthalpy_accounted(
-            domain, species_mass_kg, specific_enthalpy_j_kg, diffusivity_m2_s,
-            duration_s, face_partial_enthalpy, controls, maximum_enthalpy_defect_j, gate,
-        ).map(|(step, _)| step)
+            domain,
+            species_mass_kg,
+            specific_enthalpy_j_kg,
+            diffusivity_m2_s,
+            duration_s,
+            face_partial_enthalpy,
+            controls,
+            maximum_enthalpy_defect_j,
+            gate,
+        )
+        .map(|(step, _)| step)
     }
 
     // Internal composition retains the original transported-energy low parts.
@@ -239,17 +269,12 @@ impl MaterialAdvectionStep {
         maximum_enthalpy_defect_j: f64,
         gate: &CancelGate,
     ) -> Result<(SpeciesEnthalpyDiffusionStep<N>, Vec<EnergySum>), ChtError> {
-        poll(gate)?;
-        nonnegative(maximum_enthalpy_defect_j)?;
-        if specific_enthalpy_j_kg.len() != domain.cell_count() {
-            return Err(refuse("enthalpy field must match the diffusion domain"));
-        }
-        for (cell, &h) in specific_enthalpy_j_kg.iter().enumerate() {
-            poll_every(gate, cell)?;
-            if !h.is_finite() || (!domain.is_fluid(cell) && h != 0.0) {
-                return Err(refuse("fluid enthalpy must be finite and solid entries zero"));
-            }
-        }
+        validate_enthalpy(
+            domain,
+            specific_enthalpy_j_kg,
+            maximum_enthalpy_defect_j,
+            gate,
+        )?;
         let mut thermal = EnthalpyTransfers {
             source: face_partial_enthalpy,
             faces: Vec::new(),
@@ -257,9 +282,42 @@ impl MaterialAdvectionStep {
             mass_frame_defect: EnergySum::default(),
         };
         let species = self.diffuse_species_observed(
-            domain, species_mass_kg, diffusivity_m2_s, duration_s, controls, gate,
-            |_| poll(gate), &mut thermal,
+            domain,
+            species_mass_kg,
+            diffusivity_m2_s,
+            duration_s,
+            controls,
+            gate,
+            |_| poll(gate),
+            &mut thermal,
         )?;
+        self.finish_diffusive_enthalpy(
+            domain,
+            specific_enthalpy_j_kg,
+            species,
+            thermal.increments,
+            thermal.mass_frame_defect,
+            EnergySum::default(),
+            maximum_enthalpy_defect_j,
+            gate,
+        )
+    }
+
+    /// Shared original storage admission. The external account is retained in
+    /// its two components until it meets stored and transported energy; a large
+    /// formation datum must not erase a small physical boundary exchange.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_diffusive_enthalpy<const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        specific_enthalpy_j_kg: &[f64],
+        species: SpeciesDiffusionStep<N>,
+        increments: Vec<EnergySum>,
+        mass_frame_defect: EnergySum,
+        external: EnergySum,
+        maximum_enthalpy_defect_j: f64,
+        gate: &CancelGate,
+    ) -> Result<(SpeciesEnthalpyDiffusionStep<N>, Vec<EnergySum>), ChtError> {
         let mut specific_h = Vec::with_capacity(specific_enthalpy_j_kg.len());
         let mut changes = Vec::with_capacity(specific_enthalpy_j_kg.len());
         let mut stored = EnergySum::default();
@@ -267,7 +325,7 @@ impl MaterialAdvectionStep {
         let mut defect = EnergySum::default();
         for (cell, &initial_h) in specific_enthalpy_j_kg.iter().enumerate() {
             poll_every(gate, cell)?;
-            let increment = thermal.increments[cell];
+            let increment = increments[cell];
             let exchange = increment.value();
             let mass = self.mass_kg[cell];
             let h = if domain.is_fluid(cell) {
@@ -302,8 +360,16 @@ impl MaterialAdvectionStep {
             transported.add(increment.correction);
             defect.add(local_defect.value().abs());
         }
-        let absolute_enthalpy_defect_j = defect.value() + stored.value().abs()
-            + transported.value().abs() + thermal.mass_frame_defect.value();
+        let mut stored_residual = stored;
+        let mut transported_residual = transported;
+        for residual in [&mut stored_residual, &mut transported_residual] {
+            residual.add(-external.sum);
+            residual.add(-external.correction);
+        }
+        let absolute_enthalpy_defect_j = defect.value()
+            + stored_residual.value().abs()
+            + transported_residual.value().abs()
+            + mass_frame_defect.value();
         nonnegative(absolute_enthalpy_defect_j)?;
         if absolute_enthalpy_defect_j > maximum_enthalpy_defect_j {
             return Err(refuse("diffusion exceeds its enthalpy balance budget"));
@@ -316,10 +382,32 @@ impl MaterialAdvectionStep {
             report: SpeciesEnthalpyDiffusionReport {
                 stored_enthalpy_change_j: stored.value(),
                 transported_enthalpy_change_j: transported.value(),
-                mass_frame_enthalpy_defect_j: thermal.mass_frame_defect.value(),
+                mass_frame_enthalpy_defect_j: mass_frame_defect.value(),
                 absolute_enthalpy_defect_j,
             },
         };
-        Ok((step, thermal.increments))
+        Ok((step, increments))
     }
+}
+
+fn validate_enthalpy(
+    domain: &VoxelDomain,
+    specific_enthalpy_j_kg: &[f64],
+    maximum_enthalpy_defect_j: f64,
+    gate: &CancelGate,
+) -> Result<(), ChtError> {
+    poll(gate)?;
+    nonnegative(maximum_enthalpy_defect_j)?;
+    if specific_enthalpy_j_kg.len() != domain.cell_count() {
+        return Err(refuse("enthalpy field must match the diffusion domain"));
+    }
+    for (cell, &h) in specific_enthalpy_j_kg.iter().enumerate() {
+        poll_every(gate, cell)?;
+        if !h.is_finite() || (!domain.is_fluid(cell) && h != 0.0) {
+            return Err(refuse(
+                "fluid enthalpy must be finite and solid entries zero",
+            ));
+        }
+    }
+    Ok(())
 }

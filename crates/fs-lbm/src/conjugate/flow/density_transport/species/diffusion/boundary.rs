@@ -79,7 +79,29 @@ struct BoundaryMap<const N: usize> {
     outgoing: [Sum; N],
 }
 
-struct ReservoirTransfers<'a, const N: usize> {
+/// Optional consumer of the SAME original reservoir maps. The unit consumer
+/// compiles to the existing mass-only path without thermal allocation or work.
+pub(super) trait ReservoirObserver<const N: usize>: DiffusionObserver<N> {
+    fn reservoir_storage_bytes(&self, _: usize, _: usize) -> Option<usize> {
+        Some(0)
+    }
+    fn prepare_reservoir_storage(&mut self, _: usize, _: usize) {}
+    fn prepare_reservoir(
+        &mut self,
+        _: usize,
+        _: &SpeciesDiffusionBoundary<N>,
+        _: &CancelGate,
+    ) -> Result<(), ChtError> {
+        Ok(())
+    }
+    fn reservoir_transferred(&mut self, _: usize, _: [f64; N]) -> Result<(), ChtError> {
+        Ok(())
+    }
+}
+
+impl<const N: usize> ReservoirObserver<N> for () {}
+
+pub(super) struct ReservoirTransfers<'a, const N: usize, O = ()> {
     domain: &'a VoxelDomain,
     carrier: &'a MaterialAdvectionStep,
     diffusivity: &'a [f64],
@@ -89,9 +111,12 @@ struct ReservoirTransfers<'a, const N: usize> {
     signed: [Sum; N],
     carrier_defect: Sum,
     maximum_relaxation: f64,
+    pub(super) observer: O,
 }
 
-impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
+impl<const N: usize, O: ReservoirObserver<N>> DiffusionObserver<N>
+    for ReservoirTransfers<'_, N, O>
+{
     fn boundary_faces(&mut self, gate: &CancelGate) -> Result<usize, ChtError> {
         let mut previous = None;
         for (index, boundary) in self.boundaries.iter().enumerate() {
@@ -127,7 +152,7 @@ impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
         Ok(self.active_faces)
     }
 
-    fn storage_bytes(&self, _: usize, _: usize) -> Option<usize> {
+    fn storage_bytes(&self, cells: usize, faces: usize) -> Option<usize> {
         self.active_faces
             .checked_mul(core::mem::size_of::<BoundaryMap<N>>())?
             .checked_add(
@@ -137,11 +162,27 @@ impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
             )?
             .checked_add(core::mem::size_of::<Self>())?
             .checked_add(core::mem::size_of::<BoundarySpeciesDiffusionStep<N>>())?
-            .checked_add(4 * core::mem::size_of::<[f64; N]>())
+            .checked_add(4 * core::mem::size_of::<[f64; N]>())?
+            .checked_add(self.observer.storage_bytes(cells, faces)?)?
+            .checked_add(
+                self.observer
+                    .reservoir_storage_bytes(self.boundaries.len(), self.active_faces)?,
+            )
     }
 
-    fn prepare_storage(&mut self, _: usize, _: usize) {
+    fn prepare_storage(&mut self, cells: usize, faces: usize) {
         self.maps.reserve_exact(self.active_faces);
+        self.observer.prepare_storage(cells, faces);
+        self.observer
+            .prepare_reservoir_storage(self.boundaries.len(), self.active_faces);
+    }
+
+    fn prepare(&mut self, cells: [usize; 2], axis: usize) -> Result<(), ChtError> {
+        self.observer.prepare(cells, axis)
+    }
+
+    fn transferred(&mut self, face: usize, transfers: [f64; N]) -> Result<(), ChtError> {
+        self.observer.transferred(face, transfers)
     }
 
     fn prepare_boundaries(&mut self, half_dt: f64, gate: &CancelGate) -> Result<(), ChtError> {
@@ -175,6 +216,8 @@ impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
                 ));
             }
             self.maximum_relaxation = self.maximum_relaxation.max(relaxation);
+            self.observer
+                .prepare_reservoir(input_index, boundary, gate)?;
             self.maps.push(BoundaryMap {
                 input_index,
                 conductance,
@@ -240,6 +283,7 @@ impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
             }
             self.carrier_defect.add(carrier_transfer.value.abs());
             nonnegative(self.carrier_defect.value)?;
+            self.observer.reservoir_transferred(index, transfers)?;
         }
         Ok(())
     }
@@ -255,8 +299,32 @@ impl<const N: usize> DiffusionObserver<N> for ReservoirTransfers<'_, N> {
     }
 }
 
-impl<const N: usize> ReservoirTransfers<'_, N> {
-    fn report(&self, gate: &CancelGate) -> Result<SpeciesBoundaryDiffusionReport<N>, ChtError> {
+impl<'a, const N: usize, O: ReservoirObserver<N>> ReservoirTransfers<'a, N, O> {
+    pub(super) fn new(
+        domain: &'a VoxelDomain,
+        carrier: &'a MaterialAdvectionStep,
+        diffusivity: &'a [f64],
+        boundaries: &'a [SpeciesDiffusionBoundary<N>],
+        observer: O,
+    ) -> Self {
+        Self {
+            domain,
+            carrier,
+            diffusivity,
+            boundaries,
+            observer,
+            active_faces: 0,
+            maps: Vec::new(),
+            signed: [Sum::default(); N],
+            carrier_defect: Sum::default(),
+            maximum_relaxation: 0.0,
+        }
+    }
+
+    pub(super) fn report(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<SpeciesBoundaryDiffusionReport<N>, ChtError> {
         let mut faces = Vec::with_capacity(self.boundaries.len());
         for (index, boundary) in self.boundaries.iter().enumerate() {
             poll_every(gate, index)?;
@@ -357,17 +425,7 @@ impl MaterialAdvectionStep {
         controls: SpeciesDiffusionControls<N>,
         gate: &CancelGate,
     ) -> Result<BoundarySpeciesDiffusionStep<N>, ChtError> {
-        let mut observer = ReservoirTransfers {
-            domain,
-            carrier: self,
-            diffusivity: diffusivity_m2_s,
-            boundaries,
-            active_faces: 0,
-            maps: Vec::new(),
-            signed: [Sum::default(); N],
-            carrier_defect: Sum::default(),
-            maximum_relaxation: 0.0,
-        };
+        let mut observer = ReservoirTransfers::new(domain, self, diffusivity_m2_s, boundaries, ());
         let step = self.diffuse_species_observed(
             domain,
             species_mass_kg,
@@ -468,4 +526,3 @@ impl MaterialAdvectionStep {
         })
     }
 }
-

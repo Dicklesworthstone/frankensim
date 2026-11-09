@@ -20,6 +20,8 @@ use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Amount, Temperature};
 
 mod adaptive;
+mod boundary;
+pub use boundary::{BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource};
 mod diffusivity;
 pub use diffusivity::GasSpeciesDiffusivity;
 
@@ -362,6 +364,17 @@ impl<'a, const N: usize> GasSpeciesEnthalpySource<'a, N> {
         let tl = field.temperatures_k[left];
         let tr = field.temperatures_k[right];
         let temperature = right_weight.mul_add(tr - tl, tl);
+        self.partials_at_temperature(temperature, gate)
+    }
+
+    // Interior and prescribed physical boundary faces share the original
+    // canonical source evaluation. No donor-temperature or mixture-h closure.
+    fn partials_at_temperature(
+        &self,
+        temperature: f64,
+        gate: &CancelGate,
+    ) -> Result<[f64; N], ChtError> {
+        poll(gate)?;
         if !temperature.is_finite()
             || temperature < self.controls.minimum_temperature_k
             || temperature > self.controls.maximum_temperature_k

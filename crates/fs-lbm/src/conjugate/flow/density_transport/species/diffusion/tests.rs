@@ -1432,3 +1432,7 @@ fn reservoir_faces_refuse_wrong_ownership_bad_data_and_cumulative_budgets_atomic
 
 #[path = "tests/enthalpy_adaptive.rs"]
 mod enthalpy_adaptive;
+
+
+#[path = "tests/enthalpy_boundary.rs"]
+mod enthalpy_boundary;

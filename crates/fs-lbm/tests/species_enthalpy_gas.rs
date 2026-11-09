@@ -316,3 +316,7 @@ fn g3_exact_absence_preserves_isothermal_source_identity_and_refuses_atomically(
 
 #[path = "species_enthalpy_gas/adaptive.rs"]
 mod adaptive;
+
+
+#[path = "species_enthalpy_gas/boundary.rs"]
+mod boundary;

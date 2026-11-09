@@ -36,12 +36,17 @@ pub use boundary::{
 };
 mod enthalpy;
 pub use enthalpy::{SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep};
+pub use enthalpy::boundary::{
+    BoundarySpeciesEnthalpyDiffusionStep, SpeciesBoundaryEnthalpyDiffusionReport,
+    SpeciesBoundaryEnthalpyTransfer,
+};
 pub use enthalpy::adaptive::{
     AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
     AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
 };
 mod gas;
 pub use gas::{
+    BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource,
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,
     ThermochemicalSpeciesDiffusionReport, ThermochemicalSpeciesDiffusionStep,
 };
