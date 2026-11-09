@@ -15,6 +15,7 @@ pub(crate) struct HarmonicEnergySpectrum {
     center: Vec<[Dd; 2]>,
     end: Vec<[Dd; 2]>,
     gram: Vec<[Dd; 2]>,
+    means: Vec<Dd>,
 }
 
 fn project_parts(row: &[f64; 6], strain: &StrainParts, spectrum: Spectrum) -> Channel {
@@ -39,12 +40,17 @@ impl HarmonicEnergySpectrum {
         let mut start = Vec::with_capacity(frequencies.len());
         let mut center = Vec::with_capacity(frequencies.len());
         let mut end = Vec::with_capacity(frequencies.len());
+        let mut means = Vec::with_capacity(frequencies.len());
         for &omega in frequencies {
             // Same separated clock/width rotations as the single-tone owner.
             let temporal = HarmonicEnergyWindow::new(omega, window)?;
             start.push(temporal.start);
             center.push(temporal.center);
             end.push(temporal.end);
+            // Integral of the centered carrier cosine. The sine mean is zero.
+            // The original zero-frequency product retains arbitrarily short
+            // windows without subtracting two rounded endpoint phases.
+            means.push(window.product_kernel(omega, 0.0)?.centered_gram_dd()[0]);
         }
         let mut gram = Vec::with_capacity(frequencies.len() * frequencies.len());
         for &a in frequencies {
@@ -59,13 +65,16 @@ impl HarmonicEnergySpectrum {
             center,
             end,
             gram,
+            means,
         })
     }
 
     pub(crate) fn numerical_payload_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + self.frequencies.len()
-                * (core::mem::size_of::<f64>() + 3 * core::mem::size_of::<[Dd; 2]>())
+                * (core::mem::size_of::<f64>()
+                    + 3 * core::mem::size_of::<[Dd; 2]>()
+                    + core::mem::size_of::<Dd>())
             + self.gram.len() * core::mem::size_of::<[Dd; 2]>()
     }
 
@@ -108,10 +117,28 @@ impl HarmonicEnergySpectrum {
         spectrum: &[Spectrum],
         tau: Option<f64>,
     ) -> Result<[f64; 4], WindowError> {
+        self.spring_with_bias(gram, strains, spectrum, tau, &[Dd::ZERO; 6])
+    }
+
+    // A relaxed constant strain belongs only to the equilibrium spring. The
+    // caller supplies zero bias for every Maxwell branch; no DC memory is made.
+    pub(crate) fn spring_with_bias(
+        &self,
+        gram: &[[f64; 6]; 6],
+        strains: &[StrainParts],
+        spectrum: &[Spectrum],
+        tau: Option<f64>,
+        bias: &[Dd; 6],
+    ) -> Result<[f64; 4], WindowError> {
         let n = self.frequencies.len();
         let mut totals = [Sum::default(); 4];
         for row in gram {
-            let mut endpoints = [Sum::default(); 2];
+            let mut constant = Sum::default();
+            for (&map, value) in row.iter().zip(bias) {
+                constant.add([map, value.hi, 1.0, 1.0]);
+                constant.add([map, value.lo, 1.0, 1.0]);
+            }
+            let mut endpoints = [constant; 2];
             for i in 0..n {
                 let z = project_parts(row, &strains[i], spectrum[i]);
                 add(&mut endpoints[0], rotate(z, self.start[i])[0]);
@@ -129,6 +156,16 @@ impl HarmonicEnergySpectrum {
             }
             let values = self.centered(row, strains, spectrum);
             for i in 0..n {
+                if constant.fraction != Dd::ZERO {
+                    weighted(
+                        &mut totals[2],
+                        constant,
+                        values[i][1],
+                        self.means[i],
+                        &[self.frequencies[i], self.duration],
+                        &[],
+                    );
+                }
                 let g = self.gram[i * n + i];
                 weighted(
                     &mut totals[2],
@@ -212,8 +249,26 @@ impl HarmonicEnergySpectrum {
         spectrum: &[Spectrum],
         total: &mut Sum,
     ) {
+        self.add_stress_work_with_bias(matrix, strains, spectrum, &[Dd::ZERO; 6], total);
+    }
+
+    /// The equilibrium DC stress works on the actual AC strain increment.
+    /// Its original constitutive tensor remains independent of storage factors.
+    pub(crate) fn add_stress_work_with_bias(
+        &self,
+        matrix: &[[f64; 6]; 6],
+        strains: &[StrainParts],
+        spectrum: &[Spectrum],
+        bias: &[Dd; 6],
+        total: &mut Sum,
+    ) {
         let n = self.frequencies.len();
         for (i, row) in matrix.iter().enumerate() {
+            let mut constant = Sum::default();
+            for (&map, value) in row.iter().zip(bias) {
+                constant.add([map, value.hi, 1.0, 1.0]);
+                constant.add([map, value.lo, 1.0, 1.0]);
+            }
             let stress = self.centered(row, strains, spectrum);
             let mut rate = [[Sum::default(); 2]; MAX_SPECTRUM_LINES];
             let mut unit = [0.0; 6];
@@ -223,6 +278,16 @@ impl HarmonicEnergySpectrum {
                     project_parts(&unit, &strains[j], [(0.0, 0), (self.frequencies[j], 0)]),
                     self.center[j],
                 );
+                if constant.fraction != Dd::ZERO {
+                    weighted(
+                        total,
+                        constant,
+                        rate[j][0],
+                        self.means[j],
+                        &[self.duration],
+                        &[],
+                    );
+                }
             }
             self.product_integral(&stress[..n], &rate[..n], &[], total);
         }

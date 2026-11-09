@@ -22,6 +22,9 @@ use fs_math::{c64::C64, dd::Dd};
 pub struct PlaneStressHarmonicSpectrum<'a> {
     source: TensorPronyHarmonicSpectrum<'a>,
     responses: Vec<PlaneStressHarmonic>,
+    // Cache the original DC constraint or its refusal without requiring DC
+    // applicability from callers observing an exactly zero static strain.
+    relaxed_response: Result<PlaneStressHarmonic, ViscoError>,
     plane: MaterialPlane,
 }
 
@@ -59,6 +62,7 @@ impl TensorProny {
         Ok(PlaneStressHarmonicSpectrum {
             source,
             responses,
+            relaxed_response: self.prepare_plane_stress_harmonic(plane, 0.0),
             plane,
         })
     }
@@ -97,6 +101,41 @@ impl<'a> PlaneStressHarmonicSpectrum<'a> {
         let strains = self.recover_grouped_strains(in_plane)?;
         self.source
             .admit_grouped_strains(&strains[..self.responses.len()])
+    }
+
+    /// Admit a relaxed in-plane DC bias together with the complete AC waveform.
+    /// The bias uses the original zero-frequency transverse constraint, while
+    /// each AC line retains its own dispersive constraint. Nonzero bias requires
+    /// original DC applicability; an exactly zero bias leaves AC admission intact.
+    pub fn validate_strains_with_bias(
+        &self,
+        in_plane: &[[C64; 3]],
+        bias: &[f64; 3],
+    ) -> Result<(), ViscoError> {
+        let strains = self.recover_grouped_strains(in_plane)?;
+        self.source.admit_grouped_strains_with_bias(
+            &strains[..self.responses.len()],
+            &self.recover_bias(bias)?,
+        )
+    }
+
+    fn recover_bias(&self, bias: &[f64; 3]) -> Result<[Dd; 6], ViscoError> {
+        if bias.iter().any(|value| !value.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "relaxed plane-stress bias must be a finite engineering strain",
+            });
+        }
+        if bias.iter().all(|&value| value == 0.0) {
+            return Ok([Dd::ZERO; 6]);
+        }
+        let response = self.relaxed_response.as_ref().map_err(Clone::clone)?;
+        Ok(response.strain_map.map(|row| {
+            let mut value = Sum::default();
+            for (map, &strain) in row.iter().zip(bias) {
+                value.add([map.re, strain, 1.0, 1.0]);
+            }
+            value.retained_value()
+        }))
     }
 
     fn recover_grouped_strains(
@@ -165,6 +204,38 @@ impl<'p, 'a> PlaneStressSpectrumWindow<'p, 'a> {
         in_plane: &[[C64; 3]],
     ) -> Result<TensorPronyHarmonicWindowPoint, ViscoError> {
         self.evaluate_with_checkpoint(in_plane, || Ok(()))
+    }
+
+    /// Observe the real thin-body waveform with an explicitly relaxed DC bias.
+    ///
+    /// Only the original equilibrium spring carries the static strain. Its
+    /// transverse recovery uses omega=0, not an AC Poisson ratio or branchwise
+    /// condensation. DC/AC storage and stress-work cross terms are retained;
+    /// the original Maxwell/Kelvin heat is unchanged. Outputs remain energy
+    /// densities per material volume. No startup memory, finite-strain or
+    /// geometric-stiffness/prestress effects are inferred.
+    pub fn evaluate_with_bias(
+        &self,
+        in_plane: &[[C64; 3]],
+        bias: &[f64; 3],
+    ) -> Result<TensorPronyHarmonicWindowPoint, ViscoError> {
+        self.evaluate_with_bias_and_checkpoint(in_plane, bias, || Ok(()))
+    }
+
+    /// Biased observation with the same bounded caller-owned cancellation.
+    pub fn evaluate_with_bias_and_checkpoint<E: From<ViscoError>>(
+        &self,
+        in_plane: &[[C64; 3]],
+        bias: &[f64; 3],
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<TensorPronyHarmonicWindowPoint, E> {
+        checkpoint()?;
+        let strains = self.source.recover_grouped_strains(in_plane)?;
+        self.response.evaluate_grouped_with_bias_and_checkpoint(
+            &strains[..self.source.responses.len()],
+            &self.source.recover_bias(bias)?,
+            checkpoint,
+        )
     }
 
     /// Caller-owned cancellation before recovery and between original branches.

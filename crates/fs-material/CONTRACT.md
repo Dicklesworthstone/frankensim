@@ -23098,3 +23098,30 @@ A `DiffuseMolecularChannel` may bind a complete canonical species-to-coefficient
 All distinct per-collision coefficients resolve through one shared Clausing kernel and mass solution on each refinement grid. Duplicate coefficients reuse thermal work. Refinement accepts only when the common mass transmission and both heat probabilities for every distinct interior coefficient meet their estimates. Responses preserve input order; exact zero remains elastic, and coefficient one uses the final shared geometry. Numerical reports distinguish authored batch size, distinct interior thermal solves, shared work, and each response's heat estimates. Storage remains linear in ring count plus bounded coefficient count.
 
 Species-specific weights change only thermal exchange. Transmission and gross reflected species inventories remain geometric. Held-wall, finite-wall, vacuum and trajectory consumers share the existing original-source caloric owner. Absent species and present exactly elastic species do not query inactive wall calorics; thermally active species and accepted endpoints retain their original support checks. No thermodynamic storage, material source or species coefficient is inferred. Coefficients remain authored constant total-energy accommodation laws for stationary diffuse walls within their qualified domains.
+
+
+## Relaxed DC strain in coherent harmonic observations
+
+The full-tensor and plane-stress spectrum windows expose `evaluate_with_bias`
+and `evaluate_with_bias_and_checkpoint`; source `validate_strains_with_bias`
+admits the complete prescribed waveform. A finite nonzero DC strain requires
+zero frequency in the original material band. Exactly zero bias preserves the
+existing AC-only applicability and numerical result. The full six-component
+strain envelope includes the constant norm and every coherent AC ellipse.
+
+Only the equilibrium spring carries the explicitly relaxed static strain.
+Endpoint storage combines DC and AC before squaring original Gram channels;
+its change and independent stress work retain the cross terms through original
+zero-frequency FFT moments, without subtracting rounded endpoint energies.
+Maxwell and Kelvin heat remains the independently computed AC heat. The
+plane-stress bias uses its original zero-frequency transverse constraint,
+separate from every frequency-dependent AC constraint; the prepared source
+caches that map or its original refusal without adding per-point solves.
+
+This is settled linear constitutive accounting, not a causal startup, retained
+initial Maxwell memory, finite-strain response, or geometric prestress model.
+The existing line, payload, physical-window and cancellation bounds remain.
+The spectrum tests check independent real-field biased energy, unchanged heat,
+pure relaxed static storage, a positive 1e-20-second storage/work increment
+below endpoint-energy resolution, original DC applicability, duplicate-tone
+cancellation, complete strain admission and dispersive plane-stress recovery.

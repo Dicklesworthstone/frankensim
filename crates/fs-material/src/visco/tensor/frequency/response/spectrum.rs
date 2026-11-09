@@ -122,6 +122,22 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         self.admit_grouped_strains(&grouped[..self.frequencies.len()])
     }
 
+    /// Admit settled AC strains superposed on an explicitly relaxed DC strain.
+    /// A nonzero bias also requires zero frequency in the original source band.
+    /// The all-time bound is the DC norm plus the distinct AC ellipse bounds;
+    /// initial Maxwell memory or geometric prestress effects are not inferred.
+    pub fn validate_strains_with_bias(
+        &self,
+        strains: &[[C64; 6]],
+        bias: &[f64; 6],
+    ) -> Result<(), ViscoError> {
+        let grouped = self.group_strains(strains)?;
+        self.admit_grouped_strains_with_bias(
+            &grouped[..self.frequencies.len()],
+            &bias.map(Dd::from_f64),
+        )
+    }
+
     pub(in crate::visco::tensor::frequency) fn distinct_frequencies(&self) -> &[f64] {
         &self.frequencies
     }
@@ -157,10 +173,35 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         &self,
         strains: &[StrainParts],
     ) -> Result<(), ViscoError> {
+        self.admit_grouped_strains_with_bias(strains, &[Dd::ZERO; 6])
+    }
+
+    pub(in crate::visco::tensor::frequency) fn admit_grouped_strains_with_bias(
+        &self,
+        strains: &[StrainParts],
+        bias: &[Dd; 6],
+    ) -> Result<(), ViscoError> {
         if strains.len() != self.frequencies.len() {
             return Err(invalid());
         }
+        if bias
+            .iter()
+            .any(|value| !value.hi.is_finite() || !value.lo.is_finite())
+        {
+            return Err(ViscoError::Parameters {
+                what: "relaxed material bias must be a finite Mandel strain",
+            });
+        }
+        if bias.iter().any(|&value| value != Dd::ZERO) {
+            super::super::admit_frequency(self.law, 0.0)?;
+        }
         let mut envelope = Dd::ZERO;
+        for word in 0..2 {
+            let phasor =
+                bias.map(|value| C64::from_re(if word == 0 { value.hi } else { value.lo }));
+            envelope = envelope
+                + Dd::from_f64(super::super::strain::peak_norm(&phasor).ok_or_else(invalid)?);
+        }
         for strain in strains {
             // Retain the low words in subsequent material contractions. Their
             // separate norm contributes conservatively to source admission.
@@ -253,6 +294,39 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
         self.evaluate_grouped_with_checkpoint(&grouped[..self.source.frequencies.len()], checkpoint)
     }
 
+    /// Observe a relaxed static strain plus the original coherent AC waveform.
+    ///
+    /// Only the equilibrium spring carries the DC bias. Its cross terms enter
+    /// actual endpoint storage, directly integrated storage change and the
+    /// independent stress-work integral. Maxwell and Kelvin heat remain their
+    /// original AC values. Nonzero bias requires original source admission at
+    /// zero frequency; exactly zero preserves the existing AC-only contract.
+    /// This is a settled constitutive observation, not a startup/state advance,
+    /// finite-strain or geometric-stiffness/prestress calculation.
+    pub fn evaluate_with_bias(
+        &self,
+        strains: &[[C64; 6]],
+        bias: &[f64; 6],
+    ) -> Result<TensorPronyHarmonicWindowPoint, ViscoError> {
+        self.evaluate_with_bias_and_checkpoint(strains, bias, || Ok(()))
+    }
+
+    /// Same biased observation with the original bounded cancellation points.
+    pub fn evaluate_with_bias_and_checkpoint<E: From<ViscoError>>(
+        &self,
+        strains: &[[C64; 6]],
+        bias: &[f64; 6],
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<TensorPronyHarmonicWindowPoint, E> {
+        checkpoint()?;
+        let grouped = self.source.group_strains(strains)?;
+        self.evaluate_grouped_with_bias_and_checkpoint(
+            &grouped[..self.source.frequencies.len()],
+            &bias.map(Dd::from_f64),
+            checkpoint,
+        )
+    }
+
     // Shared by source-native constrained materials. The retained low words
     // survive their transverse recovery and every original energy contraction.
     pub(in crate::visco::tensor::frequency) fn evaluate_grouped_with_checkpoint<
@@ -260,23 +334,39 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
     >(
         &self,
         strains: &[StrainParts],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<TensorPronyHarmonicWindowPoint, E> {
+        self.evaluate_grouped_with_bias_and_checkpoint(strains, &[Dd::ZERO; 6], checkpoint)
+    }
+
+    pub(in crate::visco::tensor::frequency) fn evaluate_grouped_with_bias_and_checkpoint<
+        E: From<ViscoError>,
+    >(
+        &self,
+        strains: &[StrainParts],
+        bias: &[Dd; 6],
         mut checkpoint: impl FnMut() -> Result<(), E>,
     ) -> Result<TensorPronyHarmonicWindowPoint, E> {
         checkpoint()?;
-        self.source.admit_grouped_strains(strains)?;
+        self.source.admit_grouped_strains_with_bias(strains, bias)?;
         let n = strains.len();
         let law = self.source.law;
         let mut spectrum = [[(1.0, 0), (0.0, 0)]; MAX_SPECTRUM_LINES];
         let equilibrium = self
             .temporal
-            .spring(&law.equilibrium_gram, strains, &spectrum[..n], None)
+            .spring_with_bias(&law.equilibrium_gram, strains, &spectrum[..n], None, bias)
             .map_err(|_| invalid())?;
         let mut storage = [equilibrium[0], equilibrium[1], equilibrium[2]].map(Dd::from_f64);
         let mut heat = Dd::ZERO;
         let mut work = Sum::default();
         checkpoint()?;
-        self.temporal
-            .add_stress_work(&law.c_eq, strains, &spectrum[..n], &mut work);
+        self.temporal.add_stress_work_with_bias(
+            &law.c_eq,
+            strains,
+            &spectrum[..n],
+            bias,
+            &mut work,
+        );
         for (index, branch) in law.branches.iter().enumerate() {
             checkpoint()?;
             for i in 0..n {

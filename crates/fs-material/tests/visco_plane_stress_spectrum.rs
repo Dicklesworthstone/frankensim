@@ -430,3 +430,90 @@ fn cancelled_observation_keeps_caller_error_and_prepared_source_reusable() {
             > 0.0
     );
 }
+
+#[test]
+fn relaxed_plane_bias_uses_its_dc_constraint_and_keeps_ac_heat_unchanged() {
+    let law = law().with_band((0.0, 100.0)).unwrap();
+    let frequencies = [1.3, 4.1, 9.7];
+    let coordinates = [
+        in_plane(),
+        in_plane().map(|z| z * C64::new(0.6, -0.3)),
+        in_plane().map(|z| z.scale(0.2)),
+    ];
+    let bias = [0.006, 0.002, -0.001];
+    let full =
+        core::array::from_fn::<_, 3, _>(|i| closed_form_strain(frequencies[i], coordinates[i]));
+    let full_bias = closed_form_strain(0.0, bias.map(C64::from_re)).map(|z| z.re);
+    let ac_bias = closed_form_strain(frequencies[1], bias.map(C64::from_re));
+    assert!((ac_bias[2] - C64::from_re(full_bias[2])).abs() > 0.001);
+    let spectrum = law
+        .prepare_plane_stress_harmonic_spectrum(MaterialPlane::Axes12, &frequencies)
+        .unwrap();
+    spectrum
+        .validate_strains_with_bias(&coordinates, &bias)
+        .unwrap();
+    let window = HarmonicWindow::new(0.37, 1.7).unwrap();
+    let prepared = spectrum.prepare_window(window).unwrap();
+    let actual = prepared.evaluate_with_bias(&coordinates, &bias).unwrap();
+    let expected = law
+        .prepare_harmonic_spectrum(&frequencies)
+        .unwrap()
+        .prepare_window(window)
+        .unwrap()
+        .evaluate_with_bias(&full, &full_bias)
+        .unwrap();
+    compare(&actual, &expected);
+    let ac = prepared.evaluate(&coordinates).unwrap();
+    assert_eq!(actual.material_heat_j_m3, ac.material_heat_j_m3);
+    assert_ne!(actual.start_stored_energy_j_m3, ac.start_stored_energy_j_m3);
+    assert_ne!(actual.stress_work_j_m3, ac.stress_work_j_m3);
+}
+
+#[test]
+fn plane_bias_retains_full_static_strain_domain_and_optional_dc_applicability() {
+    let law = law();
+    let spectrum = law
+        .prepare_plane_stress_harmonic_spectrum(MaterialPlane::Axes12, &[3.1])
+        .unwrap();
+    let window = HarmonicWindow::new(0.3, 1.7).unwrap();
+    let prepared = spectrum.prepare_window(window).unwrap();
+    let ordinary = prepared.evaluate(&[in_plane()]).unwrap();
+    let zero = prepared
+        .evaluate_with_bias(&[in_plane()], &[0.0; 3])
+        .unwrap();
+    assert_eq!(quantities(&zero), quantities(&ordinary));
+    assert!(matches!(
+        prepared.evaluate_with_bias(&[in_plane()], &[0.001; 3]),
+        Err(ViscoError::OutOfBand { omega: 0.0, .. })
+    ));
+    assert!(
+        spectrum
+            .validate_strains_with_bias(&[in_plane()], &[0.001; 3])
+            .is_err()
+    );
+    assert!(
+        prepared
+            .evaluate_with_bias(&[in_plane()], &[f64::NAN; 3])
+            .is_err()
+    );
+    let stiff = TensorProny::new_mandel(isotropic(100.0, 1.0), vec![], 0.05).unwrap();
+    let static_source = stiff
+        .prepare_plane_stress_harmonic_spectrum(MaterialPlane::Axes12, &[])
+        .unwrap();
+    assert!(
+        static_source
+            .validate_strains_with_bias(&[], &[0.03, 0.03, 0.0])
+            .is_err()
+    );
+    let bias = [0.005, -0.003, 0.001];
+    let point = static_source
+        .prepare_window(window)
+        .unwrap()
+        .evaluate_with_bias(&[], &bias)
+        .unwrap();
+    assert!(point.start_stored_energy_j_m3 > 0.0);
+    assert_eq!(point.start_stored_energy_j_m3, point.end_stored_energy_j_m3);
+    assert_eq!(point.stored_energy_change_j_m3, 0.0);
+    assert_eq!(point.stress_work_j_m3, 0.0);
+    assert_eq!(point.material_heat_j_m3, 0.0);
+}
