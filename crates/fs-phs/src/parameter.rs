@@ -26,6 +26,50 @@ fn invalid(what: &'static str) -> PhsError {
 }
 
 impl PortHamiltonian {
+    /// Gradient of the original resistive power `e^T R e` with respect to
+    /// the complete original storage effort. Computes `(R + R^T) e` with
+    /// one compensated sum per output, retaining the source's actual R.
+    ///
+    /// A trusted raw-parts source may be nonsymmetric or active; neither a
+    /// symmetry shortcut nor positivity repair is applied. Composing this
+    /// covector with the original storage Hessian gives its state gradient.
+    /// Work is O(n²), with no allocation and constant scratch.
+    ///
+    /// # Errors
+    /// Incomplete/nonfinite source or efforts, or unrepresentable contraction.
+    /// Extent/input failures precede writes. Arithmetic refusal leaves scratch.
+    pub fn resistance_power_effort_gradient_into(
+        &self,
+        effort: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), PhsError> {
+        if effort.len() != self.n
+            || out.len() != self.n
+            || self.n.checked_mul(self.n) != Some(self.r.len())
+            || effort.iter().chain(&self.r).any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "complete finite resistance power gradient inputs required",
+            ));
+        }
+        for (i, value) in out.iter_mut().enumerate() {
+            let mut sum = Sum::default();
+            for (j, &e) in effort.iter().enumerate() {
+                for r in [self.r[i * self.n + j], self.r[j * self.n + i]] {
+                    if r != 0.0 && e != 0.0 {
+                        sum.product(r, e).ok_or_else(|| {
+                            invalid("resistance power gradient is not representable")
+                        })?;
+                    }
+                }
+            }
+            *value = sum
+                .value()
+                .ok_or_else(|| invalid("resistance power gradient is not representable"))?;
+        }
+        Ok(())
+    }
+
     /// Bind complete finite coefficient derivatives to this original system.
     /// Reuses the source's skew/symmetry admission without symmetrizing or
     /// imposing positivity on a signed derivative. No storage inverse,

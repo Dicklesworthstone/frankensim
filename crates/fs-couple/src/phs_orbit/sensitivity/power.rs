@@ -1,0 +1,188 @@
+//! Original physical supplied/resistive power and complete state covectors.
+
+use super::{
+    ForcedMeanObjective, ForcedMeanObjectiveControls, ForcedSensitivityError,
+    PhsForcedSensitivityError, PhsOrbitError, PhsStorageHessianAction,
+    PreparedPhsForcedSensitivity, bad,
+};
+use crate::phs_orbit::tangent::StorageTangent;
+use fs_phs::PortHamiltonian;
+
+impl PreparedPhsForcedSensitivity<'_> {
+    /// Cycle mean of the ORIGINAL `grad(H)^T R grad(H)` and its complete state
+    /// covector, including nonlinear storage and explicit memory. The stored
+    /// source's exact continuous Hessian is required; no quadratic substitute
+    /// or finite-difference fallback is introduced.
+    ///
+    /// Direct parameter dependence of R or H remains an explicit objective
+    /// partial for the adjoint. Signed raw-parts resistance stays signed; this
+    /// observation neither certifies passivity nor assigns loss to a heat sink.
+    pub fn mean_resistance_power(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        self.mean_physical_power(false, controls, None, cancelled)
+    }
+
+    /// The same original resistance-power observation with an explicitly
+    /// authored COMPLETE original Hamiltonian Hessian action.
+    pub fn mean_resistance_power_analytic(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        hessian: &PhsStorageHessianAction<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        self.mean_physical_power(false, controls, Some(hessian), cancelled)
+    }
+
+    /// Cycle mean of the original supplied power `grad(H)^T G u(t)` and its
+    /// complete state covector. Uses the EXACT drive retained by preparation,
+    /// with its DC, phases and every admitted harmonic. Positive and negative
+    /// port contributions remain signed and are contracted by the pHS owner.
+    ///
+    /// The state gradient is `Hxx G u`; source/port/material dependence is a
+    /// separate explicit adjoint partial. In the original fixed-phase Fourier
+    /// chart this observation has no direct clock dependence at fixed source
+    /// coefficients. It is not reconstructed from resistance power or energy
+    /// balance, so a finite-order orbit's accounting defect remains observable.
+    pub fn mean_supplied_power(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        self.mean_physical_power(true, controls, None, cancelled)
+    }
+
+    /// Supplied power under the same retained drive with an explicit complete
+    /// original Hessian. No source or tangent is inferred from an accepted orbit.
+    pub fn mean_supplied_power_analytic(
+        &mut self,
+        controls: ForcedMeanObjectiveControls,
+        hessian: &PhsStorageHessianAction<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        self.mean_physical_power(true, controls, Some(hessian), cancelled)
+    }
+
+    fn mean_physical_power(
+        &mut self,
+        supplied: bool,
+        controls: ForcedMeanObjectiveControls,
+        hessian: Option<&PhsStorageHessianAction<'_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
+        if cancelled() {
+            return Err(ForcedSensitivityError::Cancelled.into());
+        }
+        let mut observation = PowerObservation::new(self.system, hessian)?;
+        let mut input = vec![f64::NAN; self.system.port_dim()];
+        let drive = &self.input;
+        self.prepared
+            .mean_objective(
+                controls,
+                |time, state, value, gradient| {
+                    if !observation.load(state) {
+                        return false;
+                    }
+                    if supplied {
+                        input.fill(f64::NAN);
+                        drive.sample_into(time, &mut input)
+                            && observation.supplied(state, &input, value, gradient)
+                    } else {
+                        observation.resistance(state, value, gradient)
+                    }
+                },
+                cancelled,
+            )
+            .map_err(Into::into)
+    }
+}
+
+// Shared by forced and autonomous observations. Original pHS kernels own all
+// R/G contractions; the same storage tangent owner used by HB supplies Hxx.
+// Scratch is O(n), plus any source-owned quadratic metadata. As with generic
+// mean_objective, source callbacks/metadata are outside fs-orbit's numerical
+// work/payload budget; evaluations occur only on its two admitted AFT grids.
+pub(in crate::phs_orbit) struct PowerObservation<'a> {
+    system: &'a PortHamiltonian,
+    tangent: StorageTangent<'a>,
+    effort: Vec<f64>,
+    effort_gradient: Vec<f64>,
+}
+
+impl<'a> PowerObservation<'a> {
+    pub(in crate::phs_orbit) fn new(
+        system: &'a PortHamiltonian,
+        hessian: Option<&'a PhsStorageHessianAction<'a>>,
+    ) -> Result<Self, PhsOrbitError> {
+        let n = system.state_dim();
+        let tangent = match hessian {
+            Some(hessian) => StorageTangent::hessian(n, hessian),
+            None => StorageTangent::from_storage(system),
+        };
+        if !tangent.available() {
+            return Err(bad(
+                "physical power requires the complete original continuous storage tangent",
+            ));
+        }
+        Ok(Self {
+            system,
+            tangent,
+            effort: vec![f64::NAN; n],
+            effort_gradient: vec![f64::NAN; n],
+        })
+    }
+
+    pub(in crate::phs_orbit) fn load(&mut self, state: &[f64]) -> bool {
+        self.effort.fill(f64::NAN);
+        self.system.storage().gradient(state, &mut self.effort);
+        self.effort.iter().all(|v| v.is_finite())
+    }
+
+    pub(in crate::phs_orbit) fn flows(&self, out: &mut [f64]) -> bool {
+        self.system
+            .output_from_effort_into(&self.effort, out)
+            .is_ok()
+    }
+
+    pub(in crate::phs_orbit) fn resistance(
+        &mut self,
+        state: &[f64],
+        value: &mut f64,
+        gradient: &mut [f64],
+    ) -> bool {
+        let Ok(power) = self.system.resistance_power_from_effort(&self.effort) else {
+            return false;
+        };
+        *value = power;
+        self.system
+            .resistance_power_effort_gradient_into(&self.effort, &mut self.effort_gradient)
+            .is_ok()
+            && self
+                .tangent
+                .apply_hessian(state, &self.effort_gradient, gradient)
+    }
+
+    pub(in crate::phs_orbit) fn supplied(
+        &mut self,
+        state: &[f64],
+        input: &[f64],
+        value: &mut f64,
+        gradient: &mut [f64],
+    ) -> bool {
+        let Ok(power) = self.system.supplied_power_from_effort(&self.effort, input) else {
+            return false;
+        };
+        *value = power;
+        self.system
+            .input_flow_into(input, &mut self.effort_gradient)
+            .is_ok()
+            && self
+                .tangent
+                .apply_hessian(state, &self.effort_gradient, gradient)
+    }
+}
+
+#[cfg(test)]
+mod tests;

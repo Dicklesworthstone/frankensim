@@ -9,16 +9,21 @@ use fs_orbit::sensitivity::{
     ForcedSensitivityControls, ForcedSensitivityDirection, ForcedSensitivityError,
     PreparedForcedSensitivity,
 };
-use fs_phs::PortHamiltonian;
+use fs_phs::{PhsError, PortHamiltonian};
 
 mod adjoint;
 pub use adjoint::PreparedPhsForcedAdjoint;
+mod parameter;
+pub(super) mod power;
+pub use parameter::PhsForcedParameterDirection;
 
 /// Source admission and exact shared harmonic derivative refusals.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PhsForcedSensitivityError {
     /// Original input/storage/source failed its authored domain.
     Source(PhsOrbitError),
+    /// Original physical coefficient direction or contraction refused.
+    Physical(PhsError),
     /// Shared exact AFT derivative or numerical admission failed.
     Sensitivity(ForcedSensitivityError),
 }
@@ -38,6 +43,11 @@ impl From<ForcedSensitivityError> for PhsForcedSensitivityError {
         Self::Sensitivity(value)
     }
 }
+impl From<PhsError> for PhsForcedSensitivityError {
+    fn from(value: PhsError) -> Self {
+        Self::Physical(value)
+    }
+}
 
 /// One original pHS tangent/factor shared by arbitrary physical directions.
 ///
@@ -46,6 +56,8 @@ impl From<ForcedSensitivityError> for PhsForcedSensitivityError {
 /// the same owner as forced HB; no linearized replacement Hamiltonian is built.
 pub struct PreparedPhsForcedSensitivity<'a> {
     system: &'a PortHamiltonian,
+    // Immutable original Fourier drive, bound to the prepared trajectory.
+    input: PeriodicPortInput,
     prepared: PreparedForcedSensitivity,
 }
 
@@ -90,11 +102,14 @@ impl<'a> PreparedPhsForcedSensitivity<'a> {
         system: &'a PortHamiltonian,
         input: &PeriodicPortInput,
         orbit: &HbOrbit,
-        controls: ForcedSensitivityControls,
+        mut controls: ForcedSensitivityControls,
         scales: &HbScales,
         hessian: Option<&PhsStorageHessianAction<'_>>,
-        cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PhsForcedSensitivityError> {
+        if cancelled() {
+            return Err(ForcedSensitivityError::Cancelled.into());
+        }
         let harmonics = orbit
             .coeffs
             .first()
@@ -105,17 +120,41 @@ impl<'a> PreparedPhsForcedSensitivity<'a> {
             )
             .into());
         }
+        let coefficients = input
+            .coefficients
+            .iter()
+            .map(|row| row.len() as u128)
+            .sum::<u128>();
+        let source_bytes = core::mem::size_of::<PeriodicPortInput>() as u128
+            + (input.port_count() as u128) * core::mem::size_of::<Vec<fs_math::c64::C64>>() as u128
+            + coefficients * core::mem::size_of::<fs_math::c64::C64>() as u128
+            + 16 * (system.state_dim() as u128 + system.port_dim() as u128);
+        if source_bytes > controls.maximum_payload_bytes as u128 {
+            return Err(ForcedSensitivityError::Budget {
+                quantity: "physical forced drive and direction payload",
+                requested: source_bytes,
+                cap: controls.maximum_payload_bytes as u128,
+            }
+            .into());
+        }
+        controls.maximum_payload_bytes -= source_bytes as usize;
         let mut problem = forced_problem(system, input)?;
         if let Some(action) = hessian {
             problem.tangent = StorageTangent::hessian(system.state_dim(), action);
         }
-        let result = PreparedForcedSensitivity::new(&problem, orbit, controls, scales, cancelled);
+        let result =
+            PreparedForcedSensitivity::new(&problem, orbit, controls, scales, &mut cancelled);
         if problem.source_refused() {
             return Err(PhsOrbitError::SourceRefused.into());
         }
+        let prepared = result?;
+        if cancelled() {
+            return Err(ForcedSensitivityError::Cancelled.into());
+        }
         Ok(Self {
             system,
-            prepared: result?,
+            input: input.clone(),
+            prepared,
         })
     }
 

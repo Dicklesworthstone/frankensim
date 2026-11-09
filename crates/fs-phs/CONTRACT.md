@@ -3834,3 +3834,17 @@ refusal publishes neither output buffer. Callbacks and accounts allocate no
 per-step storage. Discrete quadrature, source interpolation and averaging limits
 remain unchanged; convergence does not certify continuous-time overshoot,
 stability, nonlinear-root uniqueness or regulator bandwidth.
+
+
+### Original resistive-power effort covector
+
+`PortHamiltonian::resistance_power_effort_gradient_into` supplies the original
+power's complete effort covector `(R + R^T)*e` using the existing two-word
+accumulator. Row and transposed-row products share one final rounding;
+trusted nonsymmetric/active raw sources retain their actual signed law. The
+method allocates nothing, uses O(n^2) work and constant scratch, and refuses
+incomplete/nonfinite or unrepresentable inputs. Composing it with the original
+Hamiltonian Hessian gives the state gradient; it is not a replacement
+dissipation model or passivity certificate. Physical harmonic consumers
+exercise nonlinear memory, nonsymmetric raw R and weak derivatives between
+opposing strong entries.

@@ -30,7 +30,8 @@ pub use tangent::{
 
 mod sensitivity;
 pub use sensitivity::{
-    PhsForcedSensitivityError, PreparedPhsForcedAdjoint, PreparedPhsForcedSensitivity,
+    PhsForcedParameterDirection, PhsForcedSensitivityError,
+    PreparedPhsForcedAdjoint, PreparedPhsForcedSensitivity,
 };
 
 mod backbone_sensitivity;

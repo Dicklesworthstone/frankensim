@@ -11074,3 +11074,54 @@ frequency warping. It is not a finite thermochemical inventory, changing
 reservoir volume, inferred anatomical law, validated player population, or
 storage certificate for an independently fitted airway FIR. Such a FIR must
 not receive a second copy of its already included termination.
+
+
+### Complete physical forced directions and harmonic power objectives
+
+`PreparedPhsForcedSensitivity::solve_parameter` and
+`PreparedPhsForcedAdjoint::gradient_parameter` accept one complete
+`PhsForcedParameterDirection` for simultaneous original J/R/G, storage and
+Fourier-drive changes, with a prescribed clock derivative in the existing
+`ForcedSensitivityDirection`. The shared original physical parameter owner
+forms `(J-R)h_p + (J_p-R_p)e + G_p*u + G*u_p`. The shared fs-orbit split
+projection adds the actual pHS `s*I` clock column `i*n*Omega_p*X_n` while
+retaining every nonlinear and memory state. Fourier input coefficients are
+held in the fixed-phase chart; adding their fixed-time carrier derivative
+would double-count the clock. Returned coefficients are fixed-phase
+sensitivities; fixed-time observations additionally differentiate phase.
+
+Preparation retains an immutable copy of the exact original drive, with its
+payload and physical direction scratch reserved before numerical preparation.
+Existing constructor input lifetimes remain unchanged. Direction port count,
+base clock and retained bandwidth must match, including arbitrarily small
+nonzero coefficients. Signed structure directions retain original skew and
+symmetry admission. No perturbed model, fitted replacement storage or
+per-parameter objective waveform solve is constructed. Source/arithmetic
+refusal and cancellation publish no result and preserve reusable factors.
+Tests compare simultaneous matrix/material/source/clock changes with analytic
+mechanics and independently solved nonlinear-memory neighbors, including
+changed-period objectives and malformed/cancelled direction recovery.
+
+Both physical forced and autonomous sensitivity preparations expose
+`mean_supplied_power` and `mean_resistance_power`, with `_analytic` variants
+for explicit complete original storage Hessians. Values use the original
+compensated pHS supplied/resistive-power owners independently; equality is
+never imposed through energy balance. State covectors use the same complete
+StorageTangent owner as HB, including nonlinear and memory states. Forced
+supply uses the exact prepared drive snapshot. Autonomous supply requires the
+same TOTAL original feedback Jacobian and includes
+`Hxx*G*u + (du_total/dx)^T*y`, with its direct flow chain once.
+
+The mean and complete coefficient covector pass shared two-grid admission;
+autonomous fixed-state clock partials are zero. Per-cycle energy additionally
+requires the period chain. Direct source/material/port objective partials
+remain explicit caller inputs. Signed raw R remains signed; no heat destination,
+passivity, stability or harmonic-tail certificate is inferred. Observation
+scratch is O(n+nports) plus original Hessian metadata, with O(n*nports) extra
+feedback-Jacobian scratch for autonomous supply. Source callback work/metadata
+retain the generic mean-objective budget exclusion; evaluations are bounded
+by the original two AFT grids. Cancellation, unavailable/partial Hessians,
+partial feedback derivatives and arithmetic refusal publish no objective.
+Six physical power regression groups verify complete analytic covectors,
+independent nonlinear-memory neighbors, changed-frequency feedback cycles and
+per-cycle energy, original nonsymmetric/cancelling resistance, and refusal/retry.

@@ -6,6 +6,8 @@ use fs_math::c64::C64;
 use fs_orbit::HbBudget;
 use fs_phs::{ContinuousStorageTangent, Storage};
 
+mod parameter;
+
 fn controls() -> ForcedSensitivityControls {
     ForcedSensitivityControls {
         samples_per_period: 128,

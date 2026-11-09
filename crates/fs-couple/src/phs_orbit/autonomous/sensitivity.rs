@@ -56,6 +56,7 @@ type Result<T> = core::result::Result<T, PhsAutonomousSensitivityError>;
 
 mod adjoint;
 pub use adjoint::PreparedPhsAutonomousAdjoint;
+mod power;
 
 /// One source-bound exact tangent/factor for many physical parameter directions.
 ///

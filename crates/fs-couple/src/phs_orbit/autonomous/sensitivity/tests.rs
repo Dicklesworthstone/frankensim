@@ -3,6 +3,9 @@ use fs_math::{c64::C64, det};
 use fs_orbit::HbAnchor;
 use fs_phs::QuadraticStorage;
 
+#[path = "power/tests.rs"]
+mod power;
+
 // An active saturating physical-port source feeds a passive rotating pair and
 // two passive relaxation stores. Neither material resistance nor stored energy
 // is replaced by a fitted amplitude/decay law. The circular solution is an
