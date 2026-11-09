@@ -29,6 +29,7 @@ pub mod immersed;
 
 // Time-dependent boundary inputs on the retained thermal state.
 mod inputs;
+mod profiles;
 
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +143,9 @@ pub struct ThermalOpenField3 {
     pub(crate) dims: [usize; 3],
     pub(crate) solid: Vec<bool>,
     boundaries: ThermalOpenBoundaries3,
+    reservoir_profiles: [Option<Vec<f64>>; 6],
+    // Original arrays use this admitted payload; optional profiles share the cap.
+    base_storage_bytes: usize,
     limits: ThermalOpenLimits3,
     tau: f64,
     populations: Vec<[f64; 7]>,
@@ -347,6 +351,8 @@ impl ThermalOpenField3 {
             dims,
             solid: filled(cells, false)?,
             boundaries,
+            reservoir_profiles: core::array::from_fn(|_| None),
+            base_storage_bytes: bytes,
             limits,
             tau,
             populations: filled(cells, [0.0; 7])?,
@@ -443,6 +449,7 @@ impl ThermalOpenField3 {
 
     /// Replace a reservoir temperature without stepping either physical field.
     /// Face kind is preserved; the value is admitted even if currently outflow.
+    /// Clear an attached spatial profile first, or update that profile instead.
     pub fn set_reservoir_temperature(
         &mut self,
         face: usize,
@@ -453,6 +460,11 @@ impl ThermalOpenField3 {
             Some(ThermalOpenFace3::Reservoir { .. })
         ) {
             return Err(invalid("thermal target is not a reservoir face"));
+        }
+        if self.reservoir_profiles[face].is_some() {
+            return Err(invalid(
+                "clear or update the reservoir profile before changing its uniform target",
+            ));
         }
         check_boundary_temperature(face, temperature, self.limits)?;
         self.boundaries.faces[face] = ThermalOpenFace3::Reservoir { temperature };
@@ -610,6 +622,12 @@ impl ThermalOpenField3 {
                                 } else {
                                     self.velocities[cell][axis]
                                 };
+                                let plane = cell / (strides[axis] * self.dims[axis])
+                                    * strides[axis]
+                                    + cell % strides[axis];
+                                let temperature = self.reservoir_profiles[face]
+                                    .as_ref()
+                                    .map_or(temperature, |profile| profile[plane]);
                                 let incoming = reservoir_incoming(outgoing, u, temperature);
                                 let trace = (0.5 * incoming + 0.5 * outgoing) / weight;
                                 check_boundary_temperature(face, trace, self.limits)?;

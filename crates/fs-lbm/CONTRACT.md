@@ -3269,3 +3269,35 @@ parity, nonlinear means and source gaps, analytic graded heat with crossed
 conductivity knots, formation-reference covariance, constant-k BE/SDIR parity
 and transactional work/source/cancellation refusal. Pinned parsing passed;
 the full material and native spatial tests remain unexecuted.
+
+### Spatial thermal reservoir profiles
+
+`ThermalOpenField3::{set_reservoir_temperature_profile,clear_reservoir_temperature_profile,reservoir_temperature_profile}`
+hold independent temperature values on each original reservoir plane. Face
+order is XMin/XMax/YMin/YMax/ZMin/ZMax; plane entries are x-fast with the normal
+coordinate omitted, matching native momentum profiles. Each incoming fluid
+link uses its own authored temperature in the original Danckwerts total-flux
+condition. Outflow retains its existing zero normal conductive flux and uses
+the actual outgoing fluid state; flow reversal selects that same link's held
+reservoir value. Original scalar-population heat, inflow/outflow-volume and
+resolved-trace receipts remain authoritative. There is no additional heat
+source, thermal state or per-step allocation.
+
+All authored entries, including currently outflow and inactive solid slots,
+must pass the original finite scalar-temperature bounds before any input
+changes. Native theta may be signed; material adapters retain their physical
+Kelvin admission. `BoussinesqOpenGrid3` additionally admits every profile
+temperature against its affine density-departure envelope, both when setting
+a profile and when attaching a pre-profiled thermal field. Actual candidate
+boundary traces still pass the original gates before joint publication.
+
+Profiles share `ThermalOpenLimits3.maximum_storage_bytes` with the original
+thermal arrays and other installed profiles. Initial installation allocates
+one face vector; subsequent same-face updates reuse its storage. Failed
+admission or allocation preserves the previous complete profile and physical
+state. The scalar boundary declaration remains an admitted fallback:
+uniform-target updates refuse while a profile is installed, and clearing
+restores that unchanged fallback without advancing heat, finite walls, flow,
+forces, time or history. Thermal face kinds remain fixed; profile operations
+on non-reservoir faces refuse. A later refused or cancelled coupled step
+retains the previously authored profile and all accepted physical state.

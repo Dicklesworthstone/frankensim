@@ -246,6 +246,16 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         }
         flow.admit_thermal_faces(thermal.boundaries())?;
         admit_boundary_data(law, thermal.boundaries())?;
+        for face in 0..6 {
+            if let Some(profile) = thermal.reservoir_temperature_profile(face) {
+                for (index, &temperature) in profile.iter().enumerate() {
+                    if index % 64 == 0 {
+                        poll()?;
+                    }
+                    admit_boundary_temperature(law, face, temperature)?;
+                }
+            }
+        }
         let mut initial_force = force_buffer(cells)?;
         let pending_force = force_buffer(cells)?;
         for cell in 0..cells {
@@ -311,6 +321,32 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             .set_reservoir_temperature(face, temperature)
             .map_err(Into::into)
     }
+    /// Prescribe one reservoir's spatial theta field in x-fast plane order.
+    /// Every authored value, including currently outflow/inactive slots, must
+    /// satisfy the affine buoyancy envelope before any input is changed. The
+    /// original thermal storage cap and actual boundary-trace checks still apply.
+    /// Populations, finite walls, force history and accepted time are unchanged.
+    pub fn set_reservoir_temperature_profile(
+        &mut self,
+        face: usize,
+        temperatures: &[f64],
+    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+        for &temperature in temperatures {
+            admit_boundary_temperature(self.law, face, temperature)?;
+        }
+        self.thermal
+            .set_reservoir_temperature_profile(face, temperatures)
+            .map_err(Into::into)
+    }
+
+    /// Restore the admitted uniform fallback without advancing heat or flow.
+    pub fn clear_reservoir_temperature_profile(
+        &mut self,
+        face: usize,
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal.clear_reservoir_temperature_profile(face)
+    }
+
     /// Change an existing stateless wall's held thermal input. Prescribed
     /// temperatures also obey the buoyancy envelope; film/flux laws are
     /// checked against their actual fluid traces during the original step.

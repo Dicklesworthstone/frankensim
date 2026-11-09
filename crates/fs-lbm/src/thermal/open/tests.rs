@@ -344,3 +344,5 @@ fn heated_danckwerts_channel_converges_to_independent_continuum_solution() {
 }
 
 mod inputs;
+
+mod profiles;
