@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chronomètre Souverain · Calibre FS-1903 Tourbillon — FrankenSim Multiphysics Horology Lab</title>
+  </head>
+  <body>
+    <div id="app-shell">
+      <!-- Top Metrology Header -->
+      <header id="top-bar">
+        <div class="brand-block">
+          <div class="brand-kicker">FRANKENSIM MULTIPHYSICS &amp; MATERIALS CONTINUUM · CALIBRE FS-1903</div>
+          <h1 class="brand-title">CHRONOMÈTRE SOUVERAIN <span>1-Minute Tourbillon · 21 Ruby Jewels · 18k Gold</span></h1>
+        </div>
+
+        <div class="clocks-strip">
+          <div class="clock-card">
+            <span class="clock-label">MECHANICAL WATCH HANDS</span>
+            <span id="hud-watch-time" class="clock-value">10:10:30.0</span>
+          </div>
+          <div class="clock-card">
+            <span class="clock-label">ATOMIC LAB REFERENCE</span>
+            <span id="hud-lab-time" class="clock-value muted">10:10:30.0</span>
+          </div>
+          <div class="clock-card">
+            <span class="clock-label">CUMULATIVE DRIFT (Δt)</span>
+            <span id="hud-time-drift" class="clock-value accent">+0.00 s</span>
+          </div>
+          <div class="clock-card">
+            <span class="clock-label">TIMEGRAPHER RATE</span>
+            <span id="hud-rate-s-day" class="clock-value">+0.0 s/d</span>
+          </div>
+        </div>
+
+        <div class="status-block">
+          <div id="hud-status-pill" class="status-pill status-ok">RUNNING — CHRONOMETER CERTIFIED</div>
+          <div class="digest-line">BLAKE3 <code id="hud-digest">initializing…</code></div>
+        </div>
+      </header>
+
+      <!-- Main 3-Column Interactive Workspace -->
+      <main id="workspace">
+        <!-- Left Dock: Horological Controls & Perturbation Bench -->
+        <aside id="left-dock" class="dock-panel">
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>1. Crown Winding &amp; Calibre Architecture</h2>
+              <span id="hud-power-reserve-pct" class="badge">88% · 37.0 h</span>
+            </div>
+            <div class="meter-bar-wrap">
+              <div id="hud-power-reserve-bar" class="meter-bar-fill" style="width: 88%"></div>
+            </div>
+            <div class="kv-grid compact">
+              <div><span>Barrel Torque</span><strong id="hud-barrel-torque">8.20 mN·m</strong></div>
+              <div><span>Balance Amp</span><strong id="hud-balance-amp">285.0°</strong></div>
+              <div><span>Pivot Clearance</span><strong id="hud-pivot-clearance">4.50 µm</strong></div>
+              <div><span>Beat Count</span><strong id="hud-total-beats">0</strong></div>
+            </div>
+            <div class="btn-row">
+              <button id="btn-wind-crown" class="btn btn-gold" title="Wind the 18k gold crown (adds mainspring turns with audible ratchet clicks)">
+                ⟳ Wind Crown (+1.5 Turns)
+              </button>
+              <button id="btn-reset-watch" class="btn btn-secondary" title="Restore pristine 20°C chronometer state">
+                ↺ Reset Watch
+              </button>
+            </div>
+            <div class="control-row">
+              <label for="slider-exploded">Exploded Calibre Stack</label>
+              <input id="slider-exploded" type="range" min="0" max="1" step="0.01" value="0" />
+            </div>
+            <div class="toggle-grid">
+              <label class="check-label">
+                <input id="chk-open-case" type="checkbox" checked />
+                <span>Exhibition Dial Cutaway</span>
+              </label>
+              <label class="check-label">
+                <input id="chk-invar-spring" type="checkbox" />
+                <span>Invar Fe-36Ni Hairspring</span>
+              </label>
+              <label class="check-label">
+                <input id="chk-slow-mo" type="checkbox" />
+                <span>0.15× Escapement Slow-Mo</span>
+              </label>
+              <label class="check-label">
+                <input id="chk-thermal-overlay" type="checkbox" checked />
+                <span>Thermal &amp; Melt Shader</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>2. Active 3D Perturbation Tool</h2>
+              <span class="badge">Drag on Watch in 3D</span>
+            </div>
+            <p class="helper-note">
+              Select a tool below to aim/drag directly across the 3D pocket watch, or use the continuous laboratory sliders below.
+            </p>
+            <div class="tool-selector" role="radiogroup" aria-label="Active 3D Tool">
+              <button data-tool="inspect" class="tool-btn active">🔍 Orbit / Inspect</button>
+              <button data-tool="torch" class="tool-btn">🔥 Blowtorch (2250 K)</button>
+              <button data-tool="ln2" class="tool-btn">❄️ Pour LN₂ (77 K)</button>
+              <button data-tool="oil" class="tool-btn">💧 Pour Watch Oil</button>
+              <button data-tool="magnet" class="tool-btn">🧲 NdFeB Magnet</button>
+              <button data-tool="mic" class="tool-btn">🎙️ Move 3D Mic</button>
+            </div>
+
+            <!-- Blowtorch Controls -->
+            <div class="subtool-box torch-box">
+              <div class="subtool-title">
+                <span>🔥 Oxy-Butane Blowtorch (<code>gold-pure-nbs-c447</code> $T_m=1337\text{ K}$)</span>
+                <strong id="lbl-torch-power">0% (0 W)</strong>
+              </div>
+              <input id="slider-torch-power" type="range" min="0" max="1" step="0.01" value="0" />
+              <div class="target-chips">
+                <span>Aim:</span>
+                <button data-torch-aim="0,-24,2" class="chip active">6h Gold Case &amp; Tourbillon</button>
+                <button data-torch-aim="0,24,2" class="chip">12h Gold Case &amp; Barrel</button>
+                <button data-torch-aim="-24,0,2" class="chip">9h Case &amp; Train</button>
+              </div>
+            </div>
+
+            <!-- Liquid Nitrogen Controls -->
+            <div class="subtool-box ln2-box">
+              <div class="subtool-title">
+                <span>❄️ Cryogenic Liquid Nitrogen ($\text{LN}_2$, $77.36\text{ K}$)</span>
+                <strong id="lbl-ln2-rate">0% (0 W)</strong>
+              </div>
+              <input id="slider-ln2-rate" type="range" min="0" max="1" step="0.01" value="0" />
+            </div>
+
+            <!-- Watch Oil Controls -->
+            <div class="subtool-box oil-box">
+              <div class="subtool-title">
+                <span>💧 Horological Oil (<code>pennzane-shf-x-2000</code>)</span>
+                <strong id="lbl-oil-rate">1.6 µm EHL</strong>
+              </div>
+              <input id="slider-oil-rate" type="range" min="0" max="1" step="0.01" value="0" />
+              <div class="btn-row mini">
+                <button id="btn-flood-oil" class="btn btn-mini">Flood Movement with Oil</button>
+                <button id="btn-clean-oil" class="btn btn-mini">Ultrasonic Clean Oil</button>
+              </div>
+            </div>
+
+            <!-- Super-Magnet Controls -->
+            <div class="subtool-box magnet-box">
+              <div class="subtool-title">
+                <span>🧲 Sintered $\text{NdFeB N42}$ Magnet ($B_r = 1.32\text{ T}$)</span>
+                <strong id="lbl-b-field">0.0 mT</strong>
+              </div>
+              <div class="control-row">
+                <label class="check-label">
+                  <input id="chk-magnet-on" type="checkbox" />
+                  <span>Engage Magnet</span>
+                </label>
+                <input id="slider-magnet-dist" type="range" min="8" max="80" step="1" value="28" title="Magnet distance from escapement (mm)" />
+              </div>
+              <div class="btn-row mini">
+                <span class="rem-label">Remanence $M_{\text{rem}}$: <b id="lbl-remanence">0.0 mT</b></span>
+                <button id="btn-degauss" class="btn btn-mini">⚡ Fire AC Degauss Coil</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>3. Guided Multiphysics Scenarios</h2>
+            </div>
+            <div class="preset-grid">
+              <button data-preset="chronometer" class="preset-btn">
+                <b>1. Pristine Chronometer (20 °C)</b>
+                <span>18,000 vph · 285° amp · ±0.0 s/d</span>
+              </button>
+              <button data-preset="thermal-drift" class="preset-btn">
+                <b>2. Thermal Expansion Time Drift</b>
+                <span>Gentle blowtorch heats balance &amp; hairspring → watch loses time</span>
+              </button>
+              <button data-preset="melt-gold" class="preset-btn">
+                <b>3. Melt 18k Gold Case Into Gears</b>
+                <span>Sustained 2250 K torch liquefies gold case; molten gold jams tourbillon</span>
+              </button>
+              <button data-preset="melt-then-ln2" class="preset-btn">
+                <b>4. Quench Melted Gold with LN₂</b>
+                <span>Pour 77 K liquid nitrogen onto melted gold → freezes in deformed shape!</span>
+              </button>
+              <button data-preset="cryo-freeze" class="preset-btn">
+                <b>5. Deep LN₂ Cryo-Shrink &amp; Oil Freeze</b>
+                <span>77 K bath freezes Pennzane oil &amp; pinches brass-to-steel clearances</span>
+              </button>
+              <button data-preset="oil-flood" class="preset-btn">
+                <b>6. Flood with Watch Oil</b>
+                <span>Capillary meniscus bridges hairspring coils (+fast rate → viscous stall)</span>
+              </button>
+              <button data-preset="magnet-attack" class="preset-btn">
+                <b>7. NdFeB Super-Magnet Lockup</b>
+                <span>Strong magnetic gradient skews beat error &amp; pins steel pallet fork</span>
+              </button>
+            </div>
+          </section>
+        </aside>
+
+        <!-- Center Interactive 3D Viewport -->
+        <section id="center-stage">
+          <div id="canvas-container">
+            <canvas id="viewport-canvas"></canvas>
+
+            <!-- Floating Camera & View Quick-Bar -->
+            <div id="camera-bar">
+              <span>CAMERA:</span>
+              <button data-cam="overview" class="cam-btn active">Full Pocket Watch</button>
+              <button data-cam="tourbillon" class="cam-btn">Tourbillon &amp; Escapement Macro</button>
+              <button data-cam="barrel" class="cam-btn">Mainspring &amp; Gear Train</button>
+              <button data-cam="side" class="cam-btn">Coaxial Profile</button>
+            </div>
+
+            <!-- Floating Multiphysics Telemetry Overlay -->
+            <div id="stage-hud-overlay">
+              <div class="hud-chip">
+                <span>6h Gold Case $T$:</span>
+                <strong id="ov-case-temp">293.2 K (20.0 °C)</strong>
+              </div>
+              <div class="hud-chip">
+                <span>Gold Melt $\phi_{\text{liq}}$:</span>
+                <strong id="ov-gold-melt">0.0%</strong>
+              </div>
+              <div class="hud-chip">
+                <span>Fouled Gold (Liq / Solid):</span>
+                <strong id="ov-fouled-gold">0.00 g / 0.00 g</strong>
+              </div>
+              <div class="hud-chip">
+                <span>Escapement $|\mathbf{B}|$:</span>
+                <strong id="ov-b-field">0.0 mT</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right Dock: Virtual Microphone, Timegrapher & 12-Node Material Matrix -->
+        <aside id="right-dock" class="dock-panel">
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>4. 3D Virtual Microphone &amp; Modal Audio</h2>
+              <button id="btn-toggle-audio" class="btn btn-gold btn-sm">🔊 Enable Live 48 kHz Mic</button>
+            </div>
+            <p class="helper-note">
+              Synthesizes physical contact impulses (<i>unlock</i>, <i>ruby pallet slide</i>, <i>tooth drop/lock</i>, <i>ratchet clicks</i>, <i>torch roar</i>, <i>LN₂ Leidenfrost sizzle</i>) through 12 structural modes to the 3D microphone.
+            </p>
+            <div class="mic-controls">
+              <div class="target-chips">
+                <span>Mic Probe:</span>
+                <button data-mic-pos="0,-11,11" class="chip active">Tourbillon (11 mm)</button>
+                <button data-mic-pos="0,11.5,12" class="chip">Barrel (12 mm)</button>
+                <button data-mic-pos="0,0,24" class="chip">Dial (24 mm)</button>
+                <button data-mic-pos="0,-25,45" class="chip">Ambient (45 mm)</button>
+              </div>
+              <div class="control-row">
+                <label for="slider-mic-gain">Preamp Gain</label>
+                <input id="slider-mic-gain" type="range" min="0.1" max="3.5" step="0.05" value="1.4" />
+                <span id="lbl-mic-spl" class="mono-val">42.0 dB</span>
+              </div>
+            </div>
+            <canvas id="canvas-oscilloscope" width="360" height="86"></canvas>
+          </section>
+
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>5. Horological Timegrapher (18,000 vph)</h2>
+              <span class="badge">Lift 52.0°</span>
+            </div>
+            <div class="tg-metrics">
+              <div class="tg-metric">
+                <span>RATE</span>
+                <strong id="tg-rate">+0.0 s/d</strong>
+              </div>
+              <div class="tg-metric">
+                <span>AMPLITUDE</span>
+                <strong id="tg-amp">285°</strong>
+              </div>
+              <div class="tg-metric">
+                <span>BEAT ERROR</span>
+                <strong id="tg-beat-err">0.0 ms</strong>
+              </div>
+            </div>
+            <canvas id="canvas-timegrapher" width="360" height="120"></canvas>
+          </section>
+
+          <section class="panel-card">
+            <div class="section-header">
+              <h2>6. 12-Node Material &amp; Phase Ledger</h2>
+              <span class="badge"><code>fs-matdb</code> seed-v1</span>
+            </div>
+            <div class="node-table-wrap">
+              <table id="node-ledger-table">
+                <thead>
+                  <tr>
+                    <th>Component Node</th>
+                    <th>Temp</th>
+                    <th>Melt / Au</th>
+                    <th>Oil / Frost</th>
+                  </tr>
+                </thead>
+                <tbody id="node-ledger-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

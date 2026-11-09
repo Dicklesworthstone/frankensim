@@ -1,0 +1,28 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_pocketwatchsim_free: (a: number, b: number) => void;
+export const pocketwatchsim_case_shell_snapshot: (a: number) => [number, number];
+export const pocketwatchsim_clean_excess_oil: (a: number) => void;
+export const pocketwatchsim_click_lever_angle_rad: (a: number) => number;
+export const pocketwatchsim_crown_wheel_angle_rad: (a: number) => number;
+export const pocketwatchsim_mainspring_coils_mm: (a: number) => [number, number];
+export const pocketwatchsim_new: () => number;
+export const pocketwatchsim_render_audio_block: (a: number, b: number) => [number, number];
+export const pocketwatchsim_reset: (a: number) => void;
+export const pocketwatchsim_set_blowtorch: (a: number, b: number, c: number, d: number, e: number) => void;
+export const pocketwatchsim_set_compensated_hairspring: (a: number, b: number) => void;
+export const pocketwatchsim_set_liquid_nitrogen: (a: number, b: number, c: number, d: number, e: number) => void;
+export const pocketwatchsim_set_magnet: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const pocketwatchsim_set_microphone: (a: number, b: number, c: number, d: number, e: number) => void;
+export const pocketwatchsim_set_oil_pour: (a: number, b: number, c: number, d: number, e: number) => void;
+export const pocketwatchsim_snapshot: (a: number) => [number, number];
+export const pocketwatchsim_spatial_grid_snapshot: (a: number) => [number, number];
+export const pocketwatchsim_state_digest_hex: (a: number) => [number, number];
+export const pocketwatchsim_status_label: (a: number) => [number, number];
+export const pocketwatchsim_step: (a: number, b: number) => void;
+export const pocketwatchsim_trigger_degauss: (a: number) => void;
+export const pocketwatchsim_wind_crown: (a: number, b: number) => void;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

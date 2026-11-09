@@ -1,0 +1,26 @@
+{
+  "name": "pocket-watch",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chronomètre Souverain (Calibre FS-1903 Tourbillon) — FrankenSim interactive multiphysics horology, phase-change melting, cryogenic quenching, tribology, magnetostatics, and 3D virtual microphone lab.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "test": "node --test test/watchEngine.test.mjs",
+    "wasm": "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_frankensim_watch cargo lbuild --offline --manifest-path engine-watch/Cargo.toml --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/wasm-pkg ${TMPDIR:-/tmp}/rch_target_frankensim_watch/wasm32-unknown-unknown/release/fs_pocket_watch.wasm"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/fraunces": "^5.2.5",
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "three": "^0.186.0"
+  }
+}
