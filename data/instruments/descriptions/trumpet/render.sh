@@ -35,10 +35,13 @@
 # Needs a music_render with the DC-bin fix of the mouth-flow line (bin da31fbd67ee9 or later): without it the
 # default mouth-flow ladder cannot converge on this bore (see the head).
 #
-# Clock: 32 kHz mechanics = output, not 48 kHz. The fs-duct flanged radiation load is admitted only to
-# ka = 20, and the 0.061 m bell reaches ka = 20 at 17.9 kHz, so Nyquist 16 kHz (ka 17.9) is admitted and
-# 48 kHz (Nyquist 24 kHz, ka 26.8) would be refused. The radiation receiver's resolved band is 6.9 kHz
-# (see the microphone record). The WAV is written at 32000 Hz and never resampled; grade up to 6.9 kHz.
+# Clock: 48 kHz mechanics = output (RATE below). The fs-duct flanged radiation load is admitted to ka = 28 since
+# 2b07ecc28 (FLANGED_MAX_KA was 24 before it, and this comment said 20), and the 0.061 m bell reaches ka = 26.8 at
+# the 24 kHz Nyquist of a 48 kHz clip, so 48 kHz is admitted. The V1 modal-bell pages G3, Bb3 and E4 are posted at
+# 48 kHz. The V2 gas-bore pages F4, Bb4 and D5 are not rendered by this script (their cards carry a `bore nonlinear`
+# row) and are posted at 32 kHz; RATE=32000 reproduces a 32 kHz V1 hold. The radiation receiver's resolved band is
+# 6.9 kHz (see the microphone record): the added rate is time resolution, not graded band. The WAV is written at
+# RATE and never resampled; grade up to 6.9 kHz.
 #
 # References (grading only, never an input): UIowa MIS Trumpet.novib.mf.* range files (the recording
 # uses a vibrato set too), ids uiowa-bbtrumpet-trumpet-novib-mf-e3b3 / -c4b4 / -c5b5 in references.json;
@@ -51,7 +54,7 @@ BIN=${BIN:-/data/tmp/wa-inst/bin/$BIN_SHA12/music_render}
 SNAP=${SNAP:-/data/tmp/wa-inst/snap/$SHA12/frankensim}
 OUT=${OUT:-/data/tmp/wa-inst/renders/trumpet/$SHA12}
 DIR=data/instruments/descriptions/trumpet
-RATE=32000
+RATE=${RATE:-48000}
 RAMP_TENSIONS=${RAMP_TENSIONS-"1e0 1.25e0 1.5e0 1.75e0 2e0 2.5e0"}
 RAMP_PEAK=${RAMP_PEAK:-2.5e4}
 # Held notes use an attack: mouth pressure rises to an ATTACK pressure in 50 ms, stays there for ATTACK_SECONDS,
