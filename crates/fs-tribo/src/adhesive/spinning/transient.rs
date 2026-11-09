@@ -172,7 +172,13 @@ pub(crate) struct CircularTransientLaw<F> {
     pub spinning_capacity_nm: f64,
     /// `C * bounds[0] * |q| <= H(q) <= C * bounds[1] * |q|`.
     pub power_norm_bounds: [f64; 2],
+    pub quadrature: CircularTransientQuadrature,
     pub evaluate: F,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum CircularTransientQuadrature {
+    BogackiShampine,
+    Rk4Doubling,
 }
 pub(crate) struct CircularTransientTraction {
     pub force_n: [f64; 2],
@@ -225,6 +231,7 @@ impl AdhesiveWrenchContact {
                 sliding_capacity_n: self.kinetic_patch().sliding_capacity_n(),
                 spinning_capacity_nm: self.kinetic_patch().spinning_capacity_nm(),
                 power_norm_bounds: [2.0 / root_thirteen, root_thirteen / 3.0],
+                quadrature: CircularTransientQuadrature::BogackiShampine,
                 evaluate: |velocity, spin| {
                     let native = self
                         .kinetic_patch()
@@ -370,7 +377,12 @@ where
             Some(value) => value,
             None => work.sample(q)?,
         };
-        let step = step(&mut work, matrix, q, first, h)?;
+        let step = match work.law.quadrature {
+            CircularTransientQuadrature::BogackiShampine => step(&mut work, matrix, q, first, h)?,
+            CircularTransientQuadrature::Rk4Doubling => {
+                doubled_rk4(&mut work, matrix, q, first, h)?
+            }
+        };
         let local_errors = [
             metric.rate_error(step.impulse_error)?,
             norm(step.impulse_error),
@@ -435,7 +447,11 @@ where
         // Recompute at the actual accumulated-impulse endpoint. Reusing a
         // different rounded stage endpoint would obscure native work closure.
         cached = None;
-        next_step = if ratio < 0.125 {
+        let growth_threshold = match work.law.quadrature {
+            CircularTransientQuadrature::BogackiShampine => 0.125,
+            CircularTransientQuadrature::Rk4Doubling => 1.0 / 32.0,
+        };
+        next_step = if ratio < growth_threshold {
             (2.0 * h).min(controls.maximum_step_s)
         } else {
             h
@@ -529,6 +545,76 @@ where
         }),
         heat: finite(combine([a.power, b.power, c.power]))?,
         heat_error: finite(error([a.power, b.power, c.power, d.power]))?,
+    })
+}
+
+struct Integral {
+    impulse: Vector,
+    travel: Vector,
+    heat: f64,
+}
+
+// All classical RK4 stage and accepted quadrature weights are nonnegative.
+// The second half starts at a positive first-half combination, so EVERY stage
+// stays within h*beta of the original mass-metric point. The existing safe-step
+// proof therefore applies to the coarse path and both fine half-steps.
+fn rk4<F, C>(
+    work: &mut Work<'_, F, C>,
+    matrix: [[f64; 3]; 3],
+    q: Vector,
+    a: Sample,
+    h: f64,
+) -> Result<Integral, Error>
+where
+    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
+    C: FnMut() -> bool,
+{
+    let b = work.sample(add(q, multiply(matrix, a.wrench.map(|v| 0.5 * h * v))))?;
+    let c = work.sample(add(q, multiply(matrix, b.wrench.map(|v| 0.5 * h * v))))?;
+    let d = work.sample(add(q, multiply(matrix, c.wrench.map(|v| h * v))))?;
+    let combine =
+        |values: [f64; 4]| (h / 6.0) * (values[0] + 2.0 * values[1] + 2.0 * values[2] + values[3]);
+    Ok(Integral {
+        impulse: core::array::from_fn(|i| {
+            combine([a.wrench[i], b.wrench[i], c.wrench[i], d.wrench[i]])
+        }),
+        travel: core::array::from_fn(|i| {
+            combine([a.velocity[i], b.velocity[i], c.velocity[i], d.velocity[i]])
+        }),
+        heat: finite(combine([a.power, b.power, c.power, d.power]))?,
+    })
+}
+
+fn doubled_rk4<F, C>(
+    work: &mut Work<'_, F, C>,
+    matrix: [[f64; 3]; 3],
+    q: Vector,
+    first: Sample,
+    h: f64,
+) -> Result<Step, Error>
+where
+    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
+    C: FnMut() -> bool,
+{
+    let coarse = rk4(work, matrix, q, first, h)?;
+    let left = rk4(work, matrix, q, first, 0.5 * h)?;
+    let middle = add(q, multiply(matrix, left.impulse));
+    let middle_rate = work.sample(middle)?;
+    let right = rk4(work, matrix, middle, middle_rate, 0.5 * h)?;
+    let impulse = add(left.impulse, right.impulse);
+    let travel = add(left.travel, right.travel);
+    let heat = finite(left.heat + right.heat)?;
+    // The fine fourth-order solution has 1/16 of the leading full-step error.
+    // Only the difference/15 estimates error. Richardson extrapolation is NOT
+    // applied to physical impulse, travel or heat: every accepted heat weight
+    // remains positive, and actual-matrix work is checked independently.
+    Ok(Step {
+        impulse,
+        impulse_error: core::array::from_fn(|i| (impulse[i] - coarse.impulse[i]) / 15.0),
+        travel,
+        travel_error: core::array::from_fn(|i| (travel[i] - coarse.travel[i]) / 15.0),
+        heat,
+        heat_error: finite((heat - coarse.heat) / 15.0)?,
     })
 }
 

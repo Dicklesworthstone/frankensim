@@ -2,8 +2,10 @@
 //!
 //! In scaled coordinates `q=[u_x,u_y,a*omega]`, the complete original mobility
 //! drives `q'=W*w(q)`. The shared circular-traction integrator evaluates this
-//! Hertz law at every positive Bogacki--Shampine 3(2) stage. Its independent
-//! physical-power quadrature never absorbs the numerical work residual.
+//! Hertz law at every positive classical RK4 stage. Two half-steps supply the
+//! physical candidate; their difference from one full step estimates error.
+//! No Richardson-extrapolated physical state or negative heat weight is used.
+//! The independent power quadrature never absorbs the numerical work residual.
 //!
 //! Let `C=mu*N`, `s=a*omega`, and `k=3*pi/16`, the Hertz pressure's mean radius
 //! divided by the outer radius. The dissipation integral is even and convex in
@@ -22,8 +24,8 @@
 use super::relaxation::{CircularRelaxationInput, HertzRelaxationError, HertzRelaxationInput};
 use super::{HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, SPIN_RADIUS};
 use crate::adhesive::spinning::transient::{
-    CircularTransientError, CircularTransientLaw, CircularTransientTraction, TransientError,
-    advance_circular_transient,
+    CircularTransientError, CircularTransientLaw, CircularTransientQuadrature,
+    CircularTransientTraction, TransientError, advance_circular_transient,
 };
 use fs_math::det;
 
@@ -115,6 +117,7 @@ impl HertzWrenchContact {
                     (SPIN_RADIUS / upper) * (1.0 - 32.0 * f64::EPSILON),
                     upper * (1.0 + 32.0 * f64::EPSILON),
                 ],
+                quadrature: CircularTransientQuadrature::Rk4Doubling,
                 evaluate: |velocity, spin| {
                     let native = self
                         .kinetic_patch

@@ -111,21 +111,28 @@ fn travel(r: &HertzTransientReport) -> V {
 // Classical RK4 at an independently fixed physical grid. No production
 // adaptive stages, matrix metric, extinction bounds or step decisions are used.
 fn reference(input: HertzRelaxationInput, count: usize) -> (V, V, V, f64) {
-    let law = patch();
+    reference_for_patch(input, count, patch())
+}
+fn reference_for_patch(
+    input: HertzRelaxationInput,
+    count: usize,
+    law: HertzSlidingPatch,
+) -> (V, V, V, f64) {
+    let radius = law.parameters().contact_radius_m;
     let h = input.dt_s / count as f64;
     let mut q = [
         input.velocity_m_s[0],
         input.velocity_m_s[1],
-        RADIUS * input.spin_rate_rad_s,
+        radius * input.spin_rate_rad_s,
     ];
     let (mut impulse, mut travel, mut heat) = ([0.0; 3], [0.0; 3], 0.0);
     let sample = |q: V| {
-        let value = law.evaluate([q[0], q[1]], q[2] / RADIUS).unwrap();
+        let value = law.evaluate([q[0], q[1]], q[2] / radius).unwrap();
         (
             [
                 value.force_n[0],
                 value.force_n[1],
-                value.spin_moment_nm / RADIUS,
+                value.spin_moment_nm / radius,
             ],
             value.dissipated_power_w,
         )
@@ -148,6 +155,106 @@ fn reference(input: HertzRelaxationInput, count: usize) -> (V, V, V, f64) {
         heat += h * (pa + 2.0 * pb + 2.0 * pc + pd) / 6.0;
     }
     (q, impulse, travel, heat)
+}
+
+#[test]
+fn small_patch_strict_thermal_accuracy_finishes_within_the_original_work_budget() {
+    // The original finite-body thermal fixture has fast shear and much slower
+    // torsional recoil. Its strict controls previously consumed 100,000 BS3(2)
+    // attempts before reaching even one eighth of this physical interval.
+    let radius = (0.001 / PI).sqrt();
+    let original = HertzSlidingPatch::new(HertzSlidingPatchParameters {
+        normal_force_n: 10.0,
+        contact_radius_m: radius,
+        friction_coefficient: 0.4,
+    })
+    .unwrap();
+    let law = HertzWrenchContact::new(HertzWrenchParameters {
+        normal_force_n: 10.0,
+        contact_radius_m: radius,
+        static_mu: 0.8,
+        kinetic_mu: 0.4,
+    })
+    .unwrap();
+    let input = HertzRelaxationInput {
+        velocity_m_s: [0.1, 0.0],
+        spin_rate_rad_s: 3.0,
+        scaled_mobility_per_kg: [
+            [
+                1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.10 + 0.15 * 0.15 / 0.20,
+                0.0,
+                0.0,
+            ],
+            [
+                0.0,
+                1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.08 + 0.15 * 0.15 / 0.15,
+                0.0,
+            ],
+            [0.0, 0.0, radius * radius * (1.0 / 0.12 + 1.0 / 0.25)],
+        ],
+        dt_s: 0.2,
+    };
+    let controls = HertzTransientControls {
+        maximum_step_s: 0.02,
+        minimum_step_s: 1e-15,
+        maximum_attempts: 100_000,
+        maximum_evaluations: 400_001,
+        scaled_rate_tolerance_m_s: 1e-11,
+        scaled_impulse_tolerance_ns: 1e-10,
+        scaled_travel_tolerance_m: 1e-10,
+        heat_tolerance_j: 1e-12,
+        stopping_time_tolerance_s: 1e-7,
+    };
+    let config = HertzWrenchConfig {
+        maximum_force_n: 20.0,
+        maximum_spin_moment_nm: 2.0,
+        energy_tolerance_j: 2e-11,
+        ..config()
+    };
+    let reference = reference_for_patch(input, 16_384, original);
+    let coarse_reference = reference_for_patch(input, 8_192, original);
+    let result = law
+        .advance_transient(&input, config, controls, || false)
+        .unwrap();
+    let rate = [
+        result.velocity_after_m_s[0],
+        result.velocity_after_m_s[1],
+        radius * result.spin_rate_after_rad_s,
+    ];
+    let impulse = [
+        result.force_impulse_ns[0],
+        result.force_impulse_ns[1],
+        result.spin_angular_impulse_nms / radius,
+    ];
+    let travel = [
+        result.slip_increment_m[0],
+        result.slip_increment_m[1],
+        radius * result.spin_increment_rad,
+    ];
+    for i in 0..3 {
+        close(reference.0[i], coarse_reference.0[i], 2e-13);
+        close(rate[i], reference.0[i], controls.scaled_rate_tolerance_m_s);
+        close(
+            impulse[i],
+            reference.1[i],
+            controls.scaled_impulse_tolerance_ns,
+        );
+        close(
+            travel[i],
+            reference.2[i],
+            controls.scaled_travel_tolerance_m,
+        );
+    }
+    close(
+        result.dissipated_energy_j,
+        reference.3,
+        controls.heat_tolerance_j,
+    );
+    assert_eq!(result.integrated_until_s, input.dt_s);
+    assert!(result.stopping_time_bracket_s.is_none());
+    assert!(result.accepted_steps + result.rejected_steps < controls.maximum_attempts);
+    assert!(result.evaluations <= controls.maximum_evaluations);
+    assert!(result.work_residual_j.abs() <= config.energy_tolerance_j);
 }
 fn inverse(m: M, b: V) -> V {
     let [a, d, g] = m[0];
