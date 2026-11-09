@@ -275,7 +275,8 @@ they do not certify continuum quadrature convergence or measured wind spectra.
   opting into the new fs-atmo API elsewhere.
 - Neutral stability only (declared, per air-state-v1); other classes are
   future additive modes.
-- No gust events, no thermals, no site heterogeneity (E3.3c territory).
+- No measured/historical gust trace or modeled thermals. Compact gust events
+  use only the explicit kinematic potential construction below.
 - `DEC17_AIR` is the ensemble MEAN of the pre-registered distributions;
   H-case members draw their own scenario per the frozen registry.
 
@@ -581,3 +582,59 @@ error estimates, wall-envelope derivatives and slip, reordered bridge stages,
 representability, cancellation and zero fields. The actual atmospheric crate
 and its unit-test modules passed a pinned compiler metadata check using real
 dependencies; these new tests were not linked or executed.
+
+## Compact advecting turbulent gust packets
+
+`mann_field::wall::gust::MannWallGust::new(wall, center_m, half_width_m,
+reference_time_s, strength)` defines a compact envelope on the original
+wall-blocked Mann realization. Both `HomogeneousMannField::sample_wall_gust`
+and `FixedStepMannField::sample_wall_gust` return its velocity and all nine
+analytic spatial derivatives. Coordinates use the original upward Mann frame.
+The center moves with the source model's uniform advection at its accepted
+physical time. The same spectral polarizations, quadratures and OU histories
+drive every point; observation introduces no new random process, clock,
+checkpoint format or numerical allocation. Preserve the immutable packet
+definition alongside the original source checkpoint for replay.
+
+For wall-blocked velocity `v`, the fixed gauge is
+`A = (integral_wall^z v_y ds, -integral_wall^z v_x ds, 0)`, with `curl(A)=v`.
+The compact potential envelope is
+`e = strength * product((1-s_i²)^3)` for every `|s_i|<1`, zero otherwise,
+where `s_i` is the advected center-relative coordinate divided by its half
+width. The returned velocity is `curl(e*A) = e*v + grad(e) cross A`.
+Its gradient includes the full product rule, envelope Hessian and analytic
+derivatives of `A`. Scaling only velocity would create spurious divergence
+`grad(e) dot v`; the curl correction removes it. The tangential potential
+vanishes at the wall, preserving exact zero normal velocity and its two
+tangential derivatives even when the packet intersects the plane.
+
+Vertical Fourier integrals use stable analytic sinc/expm1 expressions,
+including zero vertical or horizontal wavenumber and thin near-wall limits.
+The C2 potential envelope makes velocity and its first spatial derivatives
+continuous across the compact support boundary. Sampling outside support
+returns exact zeros before any spectral work. Inside support, cost is
+O(modes), without quadrature or per-query allocation. Invalid geometry,
+nonrepresentable reciprocal-square widths, below-plane queries, or
+nonrepresentable evolved positions, velocities or gradients refuse without
+changing the source. Strength is a nonnegative potential multiplier, not a
+peak gust velocity or prescribed RMS. At the packet center only the velocity
+is strength times the original wall velocity; the gradient still contains
+the envelope curvature contribution.
+
+The potential construction follows the divergence constraint used in
+inhomogeneous synthetic turbulence (Yu & Bai, JCP 256 (2014), 234–253,
+doi:10.1016/j.jcp.2013.08.055). This explicit gauge and compact envelope define
+a prescribed inhomogeneous gust, not that paper's calibrated construction.
+They change the stationary Mann spectrum/covariance; existing homogeneous
+covariance and filter APIs are not reinterpreted as packet statistics. There
+is no momentum/pressure solve, buoyancy, resolved transition or measured-gust
+calibration. Native wind consumers can use the returned velocity/gradient
+through their existing callbacks; no legacy flight forcing is changed.
+
+Eight native regression groups cover a curl oracle built from independent
+vertical integration of the public wall velocity, all nine gradients by
+spatial differences, closed-surface mass flux without using analytic
+gradients, exact wall/support zeros and edge smoothness, degenerate Fourier
+limits, source advection and both OU checkpoint histories, strength scaling,
+and invalid/unrepresentable queries. These test the prescribed kinematic
+construction and its integration with the existing clocks.

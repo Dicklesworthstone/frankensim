@@ -547,6 +547,26 @@ impl HomogeneousMannField {
         density.compose_anelastic(None, self.sample_wall_blocked(point_m, wall)?, point_m[2])
     }
 
+    /// A compact turbulent gust from these same quadratures and physical clock.
+    /// Localization acts inside the wall-compatible vector potential, preserving
+    /// divergence and zero wall penetration. It changes the local statistics;
+    /// this is neither a stationary Mann field nor an additional random process.
+    /// The packet follows this model's advection, draws no noise and allocates
+    /// no storage.
+    pub fn sample_wall_gust(
+        &self,
+        point_m: [f64; 3],
+        gust: &wall::gust::MannWallGust,
+    ) -> Result<FlowSample, Refusal> {
+        wall::gust::sample_modes(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            gust,
+        )
+    }
+
     /// Exact box, face or line average of wall-blocked velocity and all nine
     /// gradients. Reads the original quadratures; crossing the plane refuses.
     pub fn sample_wall_blocked_filtered(

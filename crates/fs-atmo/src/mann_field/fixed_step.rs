@@ -362,6 +362,24 @@ impl FixedStepMannField {
         density.compose_anelastic(None, self.sample_wall_blocked(point_m, wall)?, point_m[2])
     }
 
+    /// Compact advecting gust evaluated from the accepted physical time and
+    /// original quadratures, with the semantics of
+    /// [`HomogeneousMannField::sample_wall_gust`]. Sampling neither allocates
+    /// nor changes this owner's clock, random streams or checkpoint.
+    pub fn sample_wall_gust(
+        &self,
+        point_m: [f64; 3],
+        gust: &wall::gust::MannWallGust,
+    ) -> Result<FlowSample, Refusal> {
+        wall::gust::sample_modes(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            gust,
+        )
+    }
+
     /// Exact finite-footprint wall-blocked observation of this accepted
     /// fixed-clock state. No temporal advance or random draw is performed.
     pub fn sample_wall_blocked_filtered(

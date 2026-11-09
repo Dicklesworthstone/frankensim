@@ -22,6 +22,9 @@ use super::*;
 /// Exact finite-footprint observations of the wall-blocked field.
 pub mod filter;
 
+/// Compact advecting gusts formed inside a wall-compatible vector potential.
+pub mod gust;
+
 /// Plane `z = height_m` in the authored Mann coordinate frame.
 /// Only points in its exact upper half-space are admitted.
 #[derive(Clone, Copy, Debug, PartialEq)]
