@@ -33,8 +33,8 @@ pub use sgs::{BoussinesqOpenSgsError3, BoussinesqOpenSgsStep3};
 
 mod material;
 pub use material::{
-    BoussinesqOpenMaterialConfig3, BoussinesqOpenMaterialError3, BoussinesqOpenMaterialStep3,
-    BoussinesqOpenMaterialWorkspace3,
+    BoussinesqOpenMaterialConfig3, BoussinesqOpenMaterialError3, BoussinesqOpenMaterialSgsError3,
+    BoussinesqOpenMaterialSgsStep3, BoussinesqOpenMaterialStep3, BoussinesqOpenMaterialWorkspace3,
 };
 
 /// Additional resource and constitutive-consistency limits for this owner.

@@ -16,6 +16,9 @@ use fs_material::{
     fluid_transport::{FluidTransport, FluidTransportState},
 };
 
+mod sgs;
+pub use sgs::{BoussinesqOpenMaterialSgsError3, BoussinesqOpenMaterialSgsStep3};
+
 /// Explicit physical coordinates, fixed-storage approximation and memory caps.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoussinesqOpenMaterialConfig3 {
@@ -279,6 +282,48 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
+        let applied = self.prepare_material(
+            background_at_end.as_deref().map(Vec::as_slice),
+            collision_templates,
+            heat_per_step,
+            workspace,
+            resolve,
+            poll,
+        )?;
+        let (transport, step) = self.stage_with_diffusion_poll(
+            background_at_end.as_deref().map(Vec::as_slice),
+            Some(&workspace.collisions),
+            heat_per_step,
+            Some(&workspace.thermal_relaxation),
+            None,
+            origin,
+            poll,
+        )?;
+        self.finish_material_with_poll(
+            background_at_end,
+            collision_templates,
+            workspace,
+            applied,
+            transport,
+            step,
+            resolve,
+            poll,
+        )
+    }
+
+    // Both molecular-only and SGS composition validate the same source payload
+    // and resolve fresh opening coefficients before staging physical state.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_material<F: FluidTransport>(
+        &self,
+        background_at_end: Option<&[[f64; 3]]>,
+        collision_templates: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        workspace: &mut BoussinesqOpenMaterialWorkspace3<L::Collision>,
+        resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<Vec<TransportSample<BoussinesqMaterial<F>>>, BoussinesqOpenMaterialError3<L::Error>>
+    {
         poll()?;
         let cells = self.thermal.populations().len();
         if workspace.dimensions != self.thermal.dimensions()
@@ -288,9 +333,7 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
             || workspace.temperatures_k.len() != cells
             || heat_per_step.len() != cells
             || collision_templates.is_some_and(|field| field.len() != cells)
-            || background_at_end
-                .as_ref()
-                .is_some_and(|field| field.len() != cells)
+            || background_at_end.is_some_and(|field| field.len() != cells)
         {
             return Err(BoussinesqOpenMaterialError3::Invalid(
                 "material workspace, geometry, temperature envelope or input field shape mismatch",
@@ -306,28 +349,35 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
                 "material source samples exceed their explicit output payload budget",
             ));
         }
-        let applied = self.sample_material(
+        self.sample_material(
             false,
             collision_templates,
             workspace,
             fluid_cells,
             resolve,
             poll,
-        )?;
-        let (transport, step) = self.stage_with_diffusion_poll(
-            background_at_end.as_deref().map(Vec::as_slice),
-            Some(&workspace.collisions),
-            heat_per_step,
-            Some(&workspace.thermal_relaxation),
-            None,
-            origin,
-            poll,
-        )?;
+        )
+    }
+
+    // This final source admission and cancellation gate is shared by every
+    // material path; publication remains with the original coupled owner.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_material_with_poll<F: FluidTransport>(
+        &mut self,
+        background_at_end: Option<&mut Vec<[f64; 3]>>,
+        collision_templates: Option<&[L::Collision]>,
+        workspace: &mut BoussinesqOpenMaterialWorkspace3<L::Collision>,
+        applied: Vec<TransportSample<BoussinesqMaterial<F>>>,
+        transport: BoussinesqOpenStep3,
+        step: usize,
+        resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
         let endpoint = self.sample_material(
             true,
             collision_templates,
             workspace,
-            fluid_cells,
+            applied.len(),
             resolve,
             poll,
         )?;
