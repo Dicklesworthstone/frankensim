@@ -1,5 +1,8 @@
 //! G0/G1/G3: original rolling release, finite calorics and atomic recontact.
 
+#[path = "rolling/native.rs"]
+mod native;
+
 use super::{close, controls, curves, source, thermal};
 use fs_contact::normal_patch::adhesive::{
     JkrBranch, JkrJumpKind, SourceJkrSphereContact,

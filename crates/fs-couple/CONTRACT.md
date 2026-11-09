@@ -10086,3 +10086,26 @@ for source, geometry, budget and continuation details. Focused manufactured
 regressions cover sector scaling, unequal radial volumes, Fourier transfer,
 temperature/latent-phase feedback, swept contact work, asymmetric heat
 partitions, source continuation, compliance, refusal and atomic retry.
+
+## Native adhesive rolling with finite-cell snap heat
+
+`friction_heat::adhesive::snap::rolling::native` stages the original unforced
+native rolling event phase and finite-cell release together. Native and heat
+owners must retain the same sealed lifecycle before preparation. The source
+comes only from the heat binding; its original ordered normal/angular replay
+must reproduce the native candidate's complete endpoint, normal report and
+rolling report exactly. No constitutive or mechanical solver is duplicated.
+
+The combined compensated audit uses actual native kinetic and mechanical
+rolling storage changes, original plastic loss, actual caloric storage and
+named outside work, with normal and rolling snap releases kept separate until
+final rounding. Existing native and thermal gates remain active. Plastic loss
+remains explicitly unconverted; it is never deposited a second time as snap
+heat. Bodies, native lifecycle, heat lifecycle and caloric cells publish only
+after every check and a final cancellation poll after the caller checkpoint.
+The G1/G3/G4 cases in `tests/adhesive_snap_heat/rolling/native.rs` specify real
+yielding recoil, loaded separation and fresh recontact, independent physical
+energy closure, and atomic caloric, history, stale-replay and final-callback
+cancellation refusal with deterministic retry. This remains a held-pose,
+prescribed-normal, frozen-source composition: mechanical duration does not
+advance the thermal clock or infer intervening transport or temperature feedback.

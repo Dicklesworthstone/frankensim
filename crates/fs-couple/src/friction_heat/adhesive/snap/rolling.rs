@@ -10,6 +10,8 @@
 //! frozen-source impulse split, with no transport between its ordered segments,
 //! no temperature feedback and no inferred conducting contact link.
 //! Call separately at physical event times when intervening transport matters.
+//! The [`native`] composition stages actual body recoil and this same heat
+//! transfer together, checking that both regenerate one original lifecycle.
 
 use super::{JkrSnapHeat, JkrSnapHeatControls, JkrSnapHeatError, Receiver};
 use fs_blake3::ContentHash;
@@ -22,6 +24,9 @@ use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
 use std::{collections::BTreeMap, sync::Arc};
+
+/// Atomic native-body recoil, original lifecycle and finite-cell snap transfer.
+pub mod native;
 
 /// One physical monotone segment. Order is part of the prescribed path;
 /// simultaneous normal/rolling motion and hidden reversals are not inferred.
@@ -207,7 +212,7 @@ impl<'s> JkrRollingSnapHeat<'s> {
     /// Rolling plastic loss stays with its explicit source account, unconverted;
     /// only outgoing snap release uses this binding's declared partition.
     /// Every source, receiver, caloric, budget or cancellation refusal is atomic.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn propose<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
