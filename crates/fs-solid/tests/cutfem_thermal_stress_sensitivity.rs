@@ -702,3 +702,6 @@ fn stress_pullback_admits_only_the_primal_and_refuses_invalid_or_cancelled_work(
         before
     );
 }
+
+#[path = "cutfem_thermal_stress_sensitivity/entropy.rs"]
+mod entropy;

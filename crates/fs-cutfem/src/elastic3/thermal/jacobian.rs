@@ -86,11 +86,11 @@ pub(in crate::elastic3) struct ThermalCoordinateMap3<'a> {
 }
 
 impl ThermalCoordinateMap3<'_> {
-    fn n(self) -> usize {
+    pub(super) fn n(self) -> usize {
         self.fixed.len() * 3
     }
 
-    fn value(self, field: &[f64], node: usize, component: usize) -> f64 {
+    pub(super) fn value(self, field: &[f64], node: usize, component: usize) -> f64 {
         if let Some(rows) = self.rows {
             rows[node]
                 .iter()
@@ -109,7 +109,7 @@ impl ThermalCoordinateMap3<'_> {
         }
     }
 
-    fn scatter(self, node: usize, component: usize, value: f64, output: &mut [f64]) {
+    pub(super) fn scatter(self, node: usize, component: usize, value: f64, output: &mut [f64]) {
         if let Some(rows) = self.rows {
             for &(master, weight) in &rows[node] {
                 if !self.fixed[master] {
@@ -121,7 +121,7 @@ impl ThermalCoordinateMap3<'_> {
         }
     }
 
-    fn terms(self, node: usize) -> usize {
+    pub(super) fn terms(self, node: usize) -> usize {
         self.rows.map_or(1, |rows| rows[node].len())
     }
 }
@@ -153,7 +153,7 @@ fn finite(
 
 // Direct derivative of the native u_a-u_0 strain reconstruction. Node zero is
 // retained as the exact negative sum, including the original B-bar projection.
-fn strain_basis(cell: &Cell3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
+pub(super) fn strain_basis(cell: &Cell3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
     let mut basis = [[0.0; 6]; 24];
     for a in 1..8 {
         for component in 0..3 {

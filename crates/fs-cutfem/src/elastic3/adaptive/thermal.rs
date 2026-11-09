@@ -10,6 +10,7 @@ use crate::elastic3::ElasticityError3;
 use crate::elastic3::eigenstrain::PreparedEigenstrain3;
 use crate::elastic3::thermal::ThermoelasticResponse3;
 
+mod entropy;
 mod jacobian;
 mod sensitivity;
 mod stress;
