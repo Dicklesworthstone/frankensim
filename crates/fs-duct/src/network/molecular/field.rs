@@ -1,6 +1,7 @@
 //! Original molecular branch fields from the same loaded graph inverse.
 
 use super::*;
+use crate::molecular::local::absorption::MolecularCylinder;
 use crate::molecular::spatial::PreparedMolecularSpatial;
 use crate::network::field::{
     NetworkFieldBudget, NetworkFieldProbe, NetworkFieldRequest, PreparedNetworkFields,
@@ -30,6 +31,9 @@ pub struct MolecularNetworkFieldRequest<'a> {
 pub struct PreparedMolecularNetworkFields<'network> {
     network: &'network MolecularNetwork,
     fields: PreparedNetworkFields,
+    // Only cylinders with retained probes, bounded by MAX_FIELD_PROBES. The
+    // exact Cp/wave are cached; material and radial spectra remain borrowed.
+    cylinders: BTreeMap<String, BTreeMap<usize, MolecularCylinder<'network>>>,
 }
 
 impl PreparedMolecularNetworkFields<'_> {
@@ -45,9 +49,22 @@ impl PreparedMolecularNetworkFields<'_> {
     ///
     /// `prepare_cylinder_absorption` explicitly refuses: equilibrium Bessel
     /// loss forms are not the solved joint molecular/thermal constitutive law.
+    /// Use this molecular wrapper's own `prepare_cylinder_absorption` instead.
     /// Signed power differences alone do not assign caloric heating.
     pub fn fields(&self) -> &PreparedNetworkFields {
         &self.fields
+    }
+
+    pub(super) fn cylinder(
+        &self,
+        edge: &str,
+        segment: usize,
+    ) -> Result<MolecularCylinder<'_>, DuctError> {
+        self.cylinders
+            .get(edge)
+            .and_then(|edge| edge.get(&segment))
+            .copied()
+            .ok_or_else(|| bad("molecular absorption needs its original retained cylinder"))
     }
 }
 
@@ -95,7 +112,7 @@ impl MolecularNetwork {
         // Filled only after the shared owner has admitted all probes, source
         // counts and transfer budgets. Subsequent closures borrow this one
         // frequency preparation; they neither re-query nor approximate it.
-        let cached: OnceCell<BTreeMap<String, PreparedMolecularSpatial>> = OnceCell::new();
+        let cached: OnceCell<BTreeMap<String, PreparedMolecularSpatial<'_>>> = OnceCell::new();
         let fields = PreparedNetworkFields::prepare_with_operators(
             &self.network,
             &native_request,
@@ -170,11 +187,34 @@ impl MolecularNetwork {
             |edge, block, _radius| {
                 cached.get().expect("loaded preparation precedes probes")[&edge.id].wave(block)
             },
-            cancelled,
+            &mut cancelled,
         )?;
+        let cached = cached
+            .into_inner()
+            .expect("loaded frequency preparation completed");
+        let mut cylinders: BTreeMap<String, BTreeMap<usize, MolecularCylinder<'_>>> =
+            BTreeMap::new();
+        for (index, location) in fields.locations().iter().enumerate() {
+            poll(&mut cancelled, index)?;
+            let segment = match location.probe.section {
+                crate::network::field::NetworkFieldSection::Inlet { segment }
+                | crate::network::field::NetworkFieldSection::Outlet { segment }
+                | crate::network::field::NetworkFieldSection::Cylinder { segment, .. } => segment,
+                _ => continue,
+            };
+            if let Some(cylinder) = cached[&location.probe.edge_id].cylinder(segment) {
+                cylinders
+                    .entry(location.probe.edge_id.clone())
+                    .or_default()
+                    .entry(segment)
+                    .or_insert(cylinder);
+            }
+        }
+        poll(&mut cancelled, fields.locations().len())?;
         Ok(PreparedMolecularNetworkFields {
             network: self,
             fields,
+            cylinders,
         })
     }
 }

@@ -20,7 +20,7 @@ mod material_tests;
 mod welch;
 pub use welch::NetworkFieldBinStatistics;
 
-mod absorption;
+pub(super) mod absorption;
 pub use absorption::{
     NetworkCylinderAbsorption, NetworkCylinderAbsorptionCell, PreparedNetworkCylinderAbsorption,
 };

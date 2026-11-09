@@ -8,13 +8,33 @@ use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 use fs_phs::ZkDiffusive;
 
+pub(crate) mod absorption;
+
+// The original thermal spectral mode in exp(-i omega t). Both propagation
+// and its positive loss forms consume this exact denominator and weight.
+fn thermal_mode(
+    state: &RelaxationState,
+    term: &fs_phs::ZkDiffusiveTerm,
+    omega: f64,
+    cp: C64,
+) -> (f64, C64, f64) {
+    let gas = state.gas();
+    let weight = term.gain_per_s / (term.rate_per_s * (gas.gamma - 1.0));
+    let wall_capacity = gas.specific_heat_cp * (term.rate_per_s / omega);
+    (weight, cp + C64::new(0.0, wall_capacity), wall_capacity)
+}
+
 pub(crate) fn caloric(
     state: &RelaxationState,
     omega: f64,
 ) -> Result<(C64, C64), MolecularDuctError> {
     let response = state.caloric_response(omega)?;
-    let k = response.bulk_modulus_pa.scale(1.0 / state.gas().density)
-        .sqrt().recip().scale(omega);
+    let k = response
+        .bulk_modulus_pa
+        .scale(1.0 / state.gas().density)
+        .sqrt()
+        .recip()
+        .scale(omega);
     if !finite(k) || k.re <= 0.0 || k.im < 0.0 {
         return Err(bad("molecular duct material wavenumber is unrepresentable").into());
     }
@@ -45,20 +65,22 @@ pub(crate) fn wave(
             shear_number: f64::INFINITY,
         });
     };
-    let (series, equilibrium_shunt) = model.response_at(omega)
-        .map_err(|reason| DuctError::WallDiffusionUnresolved {
-            reason, radius_m: radius, x_m,
-        })?;
+    let (series, equilibrium_shunt) =
+        model
+            .response_at(omega)
+            .map_err(|reason| DuctError::WallDiffusionUnresolved {
+                reason,
+                radius_m: radius,
+                x_m,
+            })?;
     let z_plus = series.scale(gas.density / area);
     let y_plus = if state.processes().is_empty() {
         equilibrium_shunt.scale(area / (gas.density * gas.sound_speed * gas.sound_speed))
     } else {
         let mut temperature = C64::ZERO;
         for term in model.shunt_terms() {
-            let weight = term.gain_per_s / (term.rate_per_s * (gas.gamma - 1.0));
             // s/(s cp+d) = 1/(cp+i d/omega), avoiding large s*cp.
-            let denominator =
-                cp + C64::new(0.0, gas.specific_heat_cp * (term.rate_per_s / omega));
+            let (weight, denominator, _) = thermal_mode(state, term, omega, cp);
             temperature = temperature + denominator.recip().scale(weight);
         }
         let kappa = (C64::ONE - temperature.scale(gas.specific_gas_constant))
@@ -67,7 +89,9 @@ pub(crate) fn wave(
     };
     let (k, zc) = crate::helmholtz_wave_from_telegraph(z_plus, y_plus);
     if !finite(k) || k.re <= 0.0 || k.im < 0.0 || !finite(zc) || zc.re <= 0.0 {
-        return Err(bad("molecular duct wave is not finite, forward and passive"));
+        return Err(bad(
+            "molecular duct wave is not finite, forward and passive",
+        ));
     }
     Ok(SegmentWave {
         wavenumber: k,

@@ -69,22 +69,56 @@ pub(super) fn cylinder_section(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CellOperator {
+pub(in crate::network) struct CylinderLossOperator<const N: usize> {
     impedance: C64,
     plus_m: f64,
     minus_m: f64,
-    viscous_weight: f64,
-    thermal_weight: f64,
+    // Channel zero weights |U|^2; all remaining channels weight |p|^2.
+    weights: [f64; N],
 }
 
-impl CellOperator {
-    const ZERO: Self = Self {
+type CellOperator = CylinderLossOperator<2>;
+
+impl<const N: usize> CylinderLossOperator<N> {
+    pub(in crate::network) const ZERO: Self = Self {
         impedance: C64::ONE,
         plus_m: 0.0,
         minus_m: 0.0,
-        viscous_weight: 0.0,
-        thermal_weight: 0.0,
+        weights: [0.0; N],
     };
+
+    pub(in crate::network) fn new(
+        k: C64,
+        impedance: C64,
+        length: f64,
+        weights: [f64; N],
+    ) -> Result<Self, DuctError> {
+        if !finite(impedance)
+            || impedance == C64::ZERO
+            || weights.into_iter().any(|v| !v.is_finite() || v < 0.0)
+        {
+            return Err(bad(
+                "cylinder absorption needs finite passive original loss forms",
+            ));
+        }
+        let (plus_m, minus_m) = pressure_wave_integral_weights(k, length)?;
+        Ok(Self {
+            impedance,
+            plus_m,
+            minus_m,
+            weights,
+        })
+    }
+}
+
+pub(in crate::network) fn admit_cells(count: usize, maximum_cells: usize) -> Result<(), DuctError> {
+    if count == 0 || count > maximum_cells || maximum_cells > MAX_FIELD_PROBES {
+        Err(bad(
+            "cylinder absorption needs a bounded nonempty cell list",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Positive cell loss forms bound to the SAME solved graph, source coordinates,
@@ -127,14 +161,7 @@ impl PreparedNetworkFields {
         let loss = self.loss.ok_or_else(|| {
             bad("cylinder heat needs the solved original constitutive loss forms")
         })?;
-        if probe_pairs.is_empty()
-            || probe_pairs.len() > maximum_cells
-            || maximum_cells > MAX_FIELD_PROBES
-        {
-            return Err(bad(
-                "cylinder absorption needs a bounded nonempty cell list",
-            ));
-        }
+        admit_cells(probe_pairs.len(), maximum_cells)?;
         if loss == LossModel::WideTube {
             return Err(bad(
                 "cylinder heat requires Bessel or exact lossless propagation",
@@ -147,6 +174,7 @@ impl PreparedNetworkFields {
         let mut constitutive = std::collections::BTreeMap::new();
         for (index, &probe_indices) in probe_pairs.iter().enumerate() {
             poll(&mut cancelled, index)?;
+            let cell = self.cylinder_absorption_cell(probe_indices)?;
             let [left, right] = probe_indices;
             let a = self
                 .cylinders
@@ -158,19 +186,7 @@ impl PreparedNetworkFields {
                 .get(right)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| bad("cell end is not an original cylinder probe"))?;
-            if self.locations[left].probe.edge_id != self.locations[right].probe.edge_id
-                || a.segment != b.segment
-                || a.offset_m > b.offset_m
-            {
-                return Err(bad(
-                    "cell endpoints must be ordered in the same original cylinder",
-                ));
-            }
             let length = b.offset_m - a.offset_m;
-            let volume_m3 = self.locations[left].area_m2 * length;
-            if !volume_m3.is_finite() || (length > 0.0 && volume_m3 == 0.0) {
-                return Err(bad("cylinder cell volume is unrepresentable"));
-            }
             let operator = if loss == LossModel::Lossless || length == 0.0 {
                 CellOperator::ZERO
             } else {
@@ -195,22 +211,9 @@ impl PreparedNetworkFields {
                         constitutive.insert(key, cached);
                         cached
                     };
-                let (plus_m, minus_m) = pressure_wave_integral_weights(k, length)?;
-                CellOperator {
-                    impedance,
-                    plus_m,
-                    minus_m,
-                    viscous_weight,
-                    thermal_weight,
-                }
+                CellOperator::new(k, impedance, length, [viscous_weight, thermal_weight])?
             };
-            cells.push(NetworkCylinderAbsorptionCell {
-                probe_indices,
-                segment: a.segment,
-                start_m: a.offset_m,
-                end_m: b.offset_m,
-                volume_m3,
-            });
+            cells.push(cell);
             operators.push(operator);
         }
         poll(&mut cancelled, cells.len())?;
@@ -218,6 +221,45 @@ impl PreparedNetworkFields {
             fields: self,
             cells,
             operators,
+        })
+    }
+
+    /// Geometry admission shared by original equilibrium and molecular loss
+    /// owners. This does not select, infer or evaluate a constitutive law.
+    pub(in crate::network) fn cylinder_absorption_cell(
+        &self,
+        probe_indices: [usize; 2],
+    ) -> Result<NetworkCylinderAbsorptionCell, DuctError> {
+        let [left, right] = probe_indices;
+        let a = self
+            .cylinders
+            .get(left)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| bad("cell start is not an original cylinder probe"))?;
+        let b = self
+            .cylinders
+            .get(right)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| bad("cell end is not an original cylinder probe"))?;
+        if self.locations[left].probe.edge_id != self.locations[right].probe.edge_id
+            || a.segment != b.segment
+            || a.offset_m > b.offset_m
+        {
+            return Err(bad(
+                "cell endpoints must be ordered in the same original cylinder",
+            ));
+        }
+        let length = b.offset_m - a.offset_m;
+        let volume_m3 = self.locations[left].area_m2 * length;
+        if !volume_m3.is_finite() || (length > 0.0 && volume_m3 == 0.0) {
+            return Err(bad("cylinder cell volume is unrepresentable"));
+        }
+        Ok(NetworkCylinderAbsorptionCell {
+            probe_indices,
+            segment: a.segment,
+            start_m: a.offset_m,
+            end_m: b.offset_m,
+            volume_m3,
         })
     }
 }
@@ -250,65 +292,89 @@ impl PreparedNetworkCylinderAbsorption<'_> {
         &self,
         mean: Option<&[C64]>,
         factors: &[&[C64]],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<NetworkCylinderAbsorption>, DuctError> {
-        poll(&mut cancelled, 0)?;
-        if factors.len() > MAX_FIELD_FACTORS {
-            return Err(bad("cylinder absorption factor cap exceeded"));
-        }
-        if let Some(values) = mean {
-            self.fields.validate_excitation(values)?;
-        }
-        for values in factors {
-            self.fields.validate_excitation(values)?;
-        }
-        let mut result = Vec::with_capacity(self.cells.len());
-        for (index, (cell, operator)) in self.cells.iter().zip(&self.operators).enumerate() {
-            poll(&mut cancelled, index)?;
-            let mut watts = [Dd::ZERO; 2];
-            if let Some(values) = mean {
-                watts = self.channels(cell, operator, values)?;
-            }
-            for (factor, values) in factors.iter().enumerate() {
-                poll(&mut cancelled, factor)?;
-                let extra = self.channels(cell, operator, values)?;
-                watts[0] = watts[0] + extra[0];
-                watts[1] = watts[1] + extra[1];
-            }
-            let output = NetworkCylinderAbsorption {
-                viscous_power_w: watts[0].to_f64(),
-                thermal_power_w: watts[1].to_f64(),
-                absorbed_power_w: (watts[0] + watts[1]).to_f64(),
-            };
-            if [
-                output.viscous_power_w,
-                output.thermal_power_w,
-                output.absorbed_power_w,
-            ]
-            .into_iter()
-            .any(|v| !v.is_finite() || v < 0.0)
-            {
-                return Err(bad("cylinder cell heating is unrepresentable"));
-            }
-            result.push(output);
-        }
-        poll(&mut cancelled, result.len())?;
-        Ok(result)
+        observe_channels(
+            self.fields,
+            &self.cells,
+            &self.operators,
+            mean,
+            factors,
+            cancelled,
+            |watts, total| NetworkCylinderAbsorption {
+                viscous_power_w: watts[0],
+                thermal_power_w: watts[1],
+                absorbed_power_w: total,
+            },
+        )
     }
+}
 
+// One source contraction and coherent axial integration implementation serves
+// both equilibrium and molecular owners. The latter supplies its own original
+// positive constitutive coefficients, not a substituted equilibrium loss law.
+pub(in crate::network) fn observe_channels<const N: usize, T>(
+    fields: &PreparedNetworkFields,
+    cells: &[NetworkCylinderAbsorptionCell],
+    operators: &[CylinderLossOperator<N>],
+    mean: Option<&[C64]>,
+    factors: &[&[C64]],
+    mut cancelled: impl FnMut() -> bool,
+    mut output: impl FnMut([f64; N], f64) -> T,
+) -> Result<Vec<T>, DuctError> {
+    poll(&mut cancelled, 0)?;
+    if factors.len() > MAX_FIELD_FACTORS {
+        return Err(bad("cylinder absorption factor cap exceeded"));
+    }
+    if let Some(values) = mean {
+        fields.validate_excitation(values)?;
+    }
+    for values in factors {
+        fields.validate_excitation(values)?;
+    }
+    let mut result = Vec::with_capacity(cells.len());
+    for (index, (cell, operator)) in cells.iter().zip(operators).enumerate() {
+        poll(&mut cancelled, index)?;
+        let mut watts = [Dd::ZERO; N];
+        if let Some(values) = mean {
+            watts = operator.channels(fields, cell, values)?;
+        }
+        for (factor, values) in factors.iter().enumerate() {
+            poll(&mut cancelled, factor)?;
+            let extra = operator.channels(fields, cell, values)?;
+            for channel in 0..N {
+                watts[channel] = watts[channel] + extra[channel];
+            }
+        }
+        let total = watts.iter().fold(Dd::ZERO, |sum, &v| sum + v).to_f64();
+        let watts = watts.map(Dd::to_f64);
+        if watts
+            .into_iter()
+            .chain([total])
+            .any(|v| !v.is_finite() || v < 0.0)
+        {
+            return Err(bad("cylinder cell heating is unrepresentable"));
+        }
+        result.push(output(watts, total));
+    }
+    poll(&mut cancelled, result.len())?;
+    Ok(result)
+}
+
+impl<const N: usize> CylinderLossOperator<N> {
     fn channels(
         &self,
+        fields: &PreparedNetworkFields,
         cell: &NetworkCylinderAbsorptionCell,
-        operator: &CellOperator,
         excitation: &[C64],
-    ) -> Result<[Dd; 2], DuctError> {
-        let op = operator;
-        if op.viscous_weight == 0.0 && op.thermal_weight == 0.0 {
-            return Ok([Dd::ZERO; 2]);
+    ) -> Result<[Dd; N], DuctError> {
+        let op = self;
+        if op.weights.into_iter().all(|v| v == 0.0) {
+            return Ok([Dd::ZERO; N]);
         }
         let [left, right] = cell.probe_indices;
-        let [p_left, u_left] = self.fields.parts(left, excitation)?;
-        let [p_right, u_right] = self.fields.parts(right, excitation)?;
+        let [p_left, u_left] = fields.parts(left, excitation)?;
+        let [p_right, u_right] = fields.parts(right, excitation)?;
         let zu_left = multiply(u_left, op.impedance);
         let zu_right = multiply(u_right, op.impedance);
         let half = Dd::from_f64(0.5);
@@ -326,22 +392,24 @@ impl PreparedNetworkCylinderAbsorption<'_> {
         let difference = [f[0] - b[0], f[1] - b[1]];
         let plus = Dd::from_f64(op.plus_m);
         let minus = Dd::from_f64(op.minus_m);
-        let viscous = if op.viscous_weight == 0.0 {
+        let mut result = [Dd::ZERO; N];
+        result[0] = if op.weights[0] == 0.0 {
             Dd::ZERO
         } else {
             (minus * norm_squared(divide(sum, op.impedance))
                 + plus * norm_squared(divide(difference, op.impedance)))
-                * Dd::from_f64(op.viscous_weight)
+                * Dd::from_f64(op.weights[0])
                 * half
         };
-        let thermal = if op.thermal_weight == 0.0 {
-            Dd::ZERO
-        } else {
-            (plus * norm_squared(sum) + minus * norm_squared(difference))
-                * Dd::from_f64(op.thermal_weight)
-                * half
-        };
-        Ok([viscous, thermal])
+        if op.weights[1..].iter().any(|&v| v != 0.0) {
+            let pressure = plus * norm_squared(sum) + minus * norm_squared(difference);
+            for channel in 1..N {
+                if op.weights[channel] != 0.0 {
+                    result[channel] = pressure * Dd::from_f64(op.weights[channel]) * half;
+                }
+            }
+        }
+        Ok(result)
     }
 }
 

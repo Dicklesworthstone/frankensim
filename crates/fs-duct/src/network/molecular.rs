@@ -29,6 +29,10 @@ use std::collections::BTreeMap;
 
 mod field;
 pub use field::{MolecularNetworkFieldRequest, PreparedMolecularNetworkFields};
+mod absorption;
+pub use absorption::{
+    MolecularNetworkCylinderAbsorption, PreparedMolecularNetworkCylinderAbsorption,
+};
 
 /// Original molecular law and explicit diffusion/geometry resolution for one
 /// authored graph edge. The state's gas must equal that edge's original media

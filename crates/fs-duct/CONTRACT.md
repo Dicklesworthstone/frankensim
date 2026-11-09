@@ -2326,6 +2326,7 @@ complex molecular wave determines actual phase, storage and attenuation.
 No independent `LossModel` overrides this path. In particular, the equilibrium
 `prepare_cylinder_absorption` API explicitly refuses these fields rather than
 reporting zero loss or assigning Bessel heat to the coupled molecular law.
+The molecular wrapper supplies the source-bound cylinder absorption below.
 Signed internal power is transported work, not a caloric-deposition partition.
 The existing mechanically rigid network scope now explicitly rejects supplied
 `NetworkMedia` wall pins instead of silently discarding their response.
@@ -2342,6 +2343,56 @@ bindings, original frequency support, budgets, probe bounds, cancellation and
 deterministic replay. Rust formatting/parser checks have passed; native test
 execution remains pending because the constrained host cannot build the real
 pinned dependency graph. Source review is not a native runtime result.
+
+#### Positive volume absorption of original molecular cylinders
+
+`PreparedMolecularNetworkFields::prepare_cylinder_absorption` binds pairs of
+existing probes in the same authored cylinder and returns the actual cell
+volume together with independently positive viscous, Fourier and molecular
+losses. `sample` combines coherent source amplitudes before squaring;
+`observe_coherence` uses the same complete source coordinates and retains
+interference inside each covariance factor. Distinct factors add positive
+cycle-mean powers. No Gaussian, proper-process, finite-shutter or additional
+cross-frequency assumption is imposed.
+
+The source-owned spatial preparation retains each probed cylinder's exact
+native complex Cp, propagation wave and borrowed material/diffusion spectra.
+Optional absorption preparation queries no new material, solves no new radial
+problem and evaluates each selected original cylinder's coefficients once.
+For the original circular thermal mode, `w_n=g_n/[lambda_n*(gamma-1)]` and
+`D_n=Cp+i*Cp_eq*lambda_n/omega` in exp(-i omega t). Fourier and reservoir
+pressure-loss coefficients are respectively proportional to
+`sum w_n*Cp_eq*lambda_n/|D_n|²` and `sum w_n*omega*Im(Cp)/|D_n|²`, with the
+original wall-law factor `A/(rho*T0)`. Their sum is the SAME native shunt's
+real part; no equilibrium thermal shunt is added to molecular absorption.
+The bare molecular modulus retains its original `A*R/p0` normalization.
+Empty-reservoir wall response retains the original equilibrium shunt exactly.
+Viscosity uses the native positive Foster series resistance.
+
+The existing endpoint-anchored positive two-wave integral and double-double
+source contractions now serve both equilibrium and molecular cylinders.
+There is no boundary-power subtraction, growing reverse propagation,
+radial/axial resampling or inferred attenuation-to-heat conversion. Peak-to-mean
+factors occur once. Pressure/velocity nodes, opaque intervals and cell
+partitions retain coherent interference. Equal endpoints give zero volume and
+loss. Overlapping cells are not automatically summed or deposited.
+
+Only `viscous_power_w` is declared direct caloric heat. `thermal_power_w` and
+`molecular_power_w` are availability losses and do not themselves specify local
+mean caloric deposition or transport between gas and walls. The total is their
+independently positive sum, separate from end loads and numerical loss.
+Cone/profile cells, probe pairs from different cylinders, reversed or invalid pairs,
+unsupported coefficients, excessive cell/factor work and cancellation refuse.
+An optional absorption refusal leaves the admitted pressure/flow field usable.
+
+`src/network/molecular/tests/absorption.rs` checks the original series/shunt
+work against independent thermal-mode and individual reservoir-temperature
+losses, physical interval work, coherent partitioning and cubic pressure-node
+loss, independent spatial quadrature and source factors, opaque and empty-law
+limits, geometry/source/budget refusals and cancellation. These are synthetic
+implementation fixtures, not empirical gas validation. Rust formatting/parser
+and whitespace checks passed; native execution remains pending because the
+host cannot build the actual pinned dependency graph within its resources.
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
 plus one independently specified homogeneous exterior. Mixture composition,

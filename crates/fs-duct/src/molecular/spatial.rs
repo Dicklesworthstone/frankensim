@@ -5,22 +5,29 @@
 //! while a profile probe uses an original Magnus-panel boundary. No new
 //! molecular state, radial spectrum or interpolated material is introduced.
 
+use super::local::absorption::MolecularCylinder;
 use super::*;
 
-pub(crate) struct PreparedMolecularSpatial {
+pub(crate) struct PreparedMolecularSpatial<'source> {
     pub(crate) chain: PreparedChain,
     pub(crate) segment_boundaries: Vec<usize>,
     // None denotes an indivisible Magnus panel; observations there use cuts.
     waves: Vec<Option<SegmentWave>>,
+    // Only authored cylinders have a homogeneous finite-volume loss law.
+    cylinders: Vec<Option<MolecularCylinder<'source>>>,
 }
 
-impl PreparedMolecularSpatial {
+impl<'source> PreparedMolecularSpatial<'source> {
     pub(crate) fn wave(&self, block: usize) -> Result<SegmentWave, MolecularDuctError> {
         self.waves
             .get(block)
             .copied()
             .flatten()
             .ok_or_else(|| bad("molecular observation needs an original local-wave block").into())
+    }
+
+    pub(crate) fn cylinder(&self, segment: usize) -> Option<MolecularCylinder<'source>> {
+        self.cylinders.get(segment).copied().flatten()
     }
 }
 
@@ -29,7 +36,7 @@ impl MolecularDuct {
         &self,
         omega: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<PreparedMolecularSpatial, MolecularDuctError> {
+    ) -> Result<PreparedMolecularSpatial<'_>, MolecularDuctError> {
         poll(cancelled, 0)?;
         let boundaries = self.segment_boundaries.as_ref().ok_or_else(|| {
             bad("molecular graph observations require an original homogeneous edge")
@@ -42,7 +49,11 @@ impl MolecularDuct {
             )
             .into());
         }
-        let (waves, min_shear) = self.waves_controlled(omega, cancelled)?;
+        let mut capacities = Vec::with_capacity(self.points.len());
+        let (waves, min_shear) =
+            self.waves_observed_controlled(omega, cancelled, &mut |_index, cp| {
+                capacities.push(cp)
+            })?;
         let (chain, _) = self.chain_from_waves_controlled(
             omega,
             &[],
@@ -60,11 +71,33 @@ impl MolecularDuct {
                 Piece::ToneHole(_) => unreachable!("compact holes refused before wave preparation"),
             })
             .collect();
+        let cylinders = boundaries
+            .windows(2)
+            .map(|cut| match &self.pieces[cut[0]] {
+                Piece::Wave {
+                    geometry: Segment::Cylinder { radius, .. },
+                    point,
+                } if cut[1] == cut[0] + 1 => {
+                    let original = &self.points[*point];
+                    Some(MolecularCylinder {
+                        state: self.state_at_point(*point),
+                        wall: original.wall.as_ref(),
+                        radius_m: *radius,
+                        x_m: original.x_m,
+                        omega,
+                        cp: capacities[*point],
+                        wave: waves[*point],
+                    })
+                }
+                _ => None,
+            })
+            .collect();
         poll(cancelled, chain.blocks.len())?;
         Ok(PreparedMolecularSpatial {
             chain,
             segment_boundaries: boundaries.clone(),
             waves: block_waves,
+            cylinders,
         })
     }
 }

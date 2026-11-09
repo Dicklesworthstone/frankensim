@@ -532,6 +532,17 @@ impl MolecularDuct {
         omega: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<SegmentWave>, f64), MolecularDuctError> {
+        self.waves_observed_controlled(omega, cancelled, &mut |_, _| {})
+    }
+
+    // Spatial consumers can retain the exact Cp used for each native wave.
+    // Port-only callers have no callback storage or extra material query.
+    fn waves_observed_controlled(
+        &self,
+        omega: f64,
+        cancelled: &mut impl FnMut() -> bool,
+        observed: &mut impl FnMut(usize, C64),
+    ) -> Result<(Vec<SegmentWave>, f64), MolecularDuctError> {
         poll(cancelled, 0)?;
         if !positive(omega) {
             return Err(bad("molecular duct frequency must be positive and finite").into());
@@ -560,6 +571,7 @@ impl MolecularDuct {
                 None => uniform,
             };
             let wave = self.wave(index, omega, cp, k)?;
+            observed(index, cp);
             min_shear = min_shear.min(wave.shear_number);
             waves.push(wave);
         }
