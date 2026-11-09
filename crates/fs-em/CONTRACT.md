@@ -8495,3 +8495,31 @@ from absorption or empirical qualification of the independently supplied loss.
 Three authored regression groups cover oblique TE/TM Airy fields and local
 work, analytic complex group/GVD and Beer attenuation, and source/cusp/domain
 admission. These tests are defined but were not executed in this environment.
+
+## Coherent film antiresonance and recovery bands
+
+`PlanarDielectricLayers::driven_antiresonance` resolves an isolated minimum of
+the original complex reflected electric, transmitted electric or transmitted
+magnetic amplitude. Exact reflection cancellation retains finite transmitted
+fields and energy flux. Peak and notch queries now share one immutable physical
+experiment: original incident/exit and film constitutive sources, original
+thicknesses, actual-frequency material evaluation, and either fixed angle or
+fixed original transverse wave number. The same native coherent carrier and
+analytic material/field tangent preserve phase and source-domain refusals.
+
+Only raw coherent field observations are admitted by the notch adapter.
+Phase-free square roots of power/absorption have a cusp at zero and are not
+substituted for a differentiable field. Reflected |r|² is actual reflectance;
+transmitted E/H observation squares retain their named field-ratio units and
+are not generally energy-flux fractions. An optional explicit recovery level
+requires both crossings and reports their width without inventing a notch Q
+or a phase delay at zero. The shared query/residual/cancellation bounds apply;
+recovery queries skip the tangent. Existing absorption and flux-peak behavior
+uses the identical shared sampling path.
+
+Three authored public regressions use independent Airy reflection and recovery
+formulas for both polarizations, retain unit flux through a half-wave reflection
+zero, test a fixed-transverse notch shifted from the prepared carrier, and check
+invalid power observations, missing brackets/edges and cancellation. The public
+EM tests remain unexecuted while the full dependency build is unavailable; the
+extraction and source/constraint/lifetime contracts were independently reviewed.

@@ -38,7 +38,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 /// Analytic coherent amplitude tangents and source-backed driven resonance.
 pub mod frequency;
 pub use frequency::{
-    AbsorbedPowerDensityDispersion, LayerAmplitudeDerivative, LayeredAbsorptionDispersion,
+    AbsorbedPowerDensityDispersion, AntiresonanceControls, AntiresonanceRecovery,
+    DrivenAntiresonance, LayerAmplitudeDerivative, LayeredAbsorptionDispersion,
     LayeredFrequencyResponse, LayeredResonanceObservation,
 };
 

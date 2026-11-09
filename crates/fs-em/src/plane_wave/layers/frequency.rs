@@ -25,6 +25,9 @@ use fs_phs::harmonic::resonance::{
 
 mod absorption;
 pub use absorption::{AbsorbedPowerDensityDispersion, LayeredAbsorptionDispersion};
+mod antiresonance;
+mod experiment;
+pub use antiresonance::{AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance};
 
 /// One coherent field amplitude and its analytic first frequency derivative.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -422,102 +425,17 @@ impl<'a> PlanarDielectricLayers<'a> {
         controls: ResonanceControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<DrivenResonance, ResonanceSearchError<ReflectionError>> {
-        if !incidence_cosine.is_finite() || incidence_cosine <= 0.0 || incidence_cosine > 1.0 {
-            return Err(ResonanceSearchError::Source(bad(
-                "incidence cosine must lie in (0,1]",
-            )));
-        }
-        let mut layers = [DielectricLayer {
-            response: self.exit,
-            thickness_m: 0.0,
-        }; MAX_LAYERS];
-        for (target, source) in layers.iter_mut().zip(&self.layers) {
-            *target = source.source;
-        }
-        let transverse =
-            self.wave_number * det::sqrt((1.0 - incidence_cosine) * (1.0 + incidence_cosine));
-        search_resonance(
-            interval_rad_s,
-            controls,
-            cancelled,
-            |omega, need_derivative, _| {
-                let sample = Self::try_new_with_incident_response(
-                    self.incident_response,
-                    self.exit,
-                    omega,
-                    &layers[..self.layers.len()],
-                )?;
-                let cosine = match constraint {
-                    IncidenceFrequencyConstraint::FixedAngle => incidence_cosine,
-                    IncidenceFrequencyConstraint::FixedTransverseWavenumber => {
-                        let sine = transverse / sample.wave_number;
-                        if !sine.is_finite() || sine >= 1.0 {
-                            return Err(bad(
-                                "fixed transverse wave number lost propagating incidence",
-                            ));
-                        }
-                        positive(det::sqrt((1.0 - sine) * (1.0 + sine)))?
-                    }
-                };
-                if let Some(value) = absorption::search_observation(
-                    &sample,
-                    cosine,
-                    polarization,
-                    constraint,
-                    observation,
-                    need_derivative,
-                )? {
-                    return Ok(value);
-                }
-                if !need_derivative {
-                    let response = sample.response(cosine, polarization)?;
-                    return Ok((
-                        select_carrier(response, observation)
-                            .ok_or_else(|| bad("absorption observation was not resolved"))?,
-                        C64::ZERO,
-                        0.0,
-                    ));
-                }
-                let response = sample.frequency_dispersion(cosine, polarization, constraint)?;
-                let jet = match observation {
-                    LayeredResonanceObservation::ReflectedElectricAmplitude => {
-                        Some(response.reflected_tangential_e())
-                    }
-                    LayeredResonanceObservation::TransmittedElectricAmplitude => {
-                        response.transmitted_tangential_e()
-                    }
-                    LayeredResonanceObservation::TransmittedMagneticAmplitude => {
-                        response.transmitted_conjugate_h()
-                    }
-                    LayeredResonanceObservation::TransmittedPowerFraction => {
-                        let power = response.transmitted_power_fraction()?.ok_or_else(|| {
-                            bad("propagation underflow has no admitted transmitted-power slope")
-                        })?;
-                        let (amplitude, scaled_derivative) =
-                            power.square_root_observation().ok_or_else(|| {
-                                bad("positive resolved flux required for a power-peak query")
-                            })?;
-                        Some(LayerAmplitudeDerivative {
-                            amplitude,
-                            omega,
-                            scaled_derivative,
-                        })
-                    }
-                    LayeredResonanceObservation::AbsorbedPowerFraction
-                    | LayeredResonanceObservation::LayerAbsorbedPowerFraction { .. }
-                    | LayeredResonanceObservation::AbsorbedPowerDensity
-                    | LayeredResonanceObservation::LayerAbsorbedPowerDensity { .. } => None,
-                }
-                .ok_or_else(|| {
-                    bad("propagation underflow has no admitted transmission frequency jet")
-                })?;
-                Ok((
-                    jet.amplitude(),
-                    jet.derivative_s(),
-                    response.relative_equation_residual(),
-                ))
-            },
+        let experiment = experiment::FrequencyExperiment::new(
+            self,
+            incidence_cosine,
+            polarization,
+            constraint,
+            observation,
         )
+        .map_err(ResonanceSearchError::Source)?;
+        search_resonance(interval_rad_s, controls, cancelled, |omega, tangent, _| {
+            experiment.sample(omega, tangent)
+        })
     }
 }
 

@@ -28,6 +28,8 @@ use fs_qty::{Dims, Time};
 
 #[path = "plane_wave_layer_frequency/absorption.rs"]
 mod absorption;
+#[path = "plane_wave_layer_frequency/antiresonance.rs"]
+mod antiresonance;
 
 const E: f64 = 1e-11;
 const M: f64 = 1e-6;
