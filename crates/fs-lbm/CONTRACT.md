@@ -804,6 +804,46 @@ small-density-departure Boussinesq assumptions. Frozen tensor coefficients and
 a common reference heat capacity do not supply variable-storage enthalpy,
 total-energy evolution, or a new temporal-order guarantee.
 
+### Binary molecular diffusion on accepted carrier mass
+
+`MaterialAdvectionStep::diffuse_binary_species` advances two original
+constituent inventories on the SAME accepted carrier mass. It can consume
+`advect_species::<2>`'s endpoint or a previous diffusion endpoint. Prescribed
+per-cell molecular diffusivity is held fixed; it is never inferred from
+viscosity or from a species index. The mass-frame law is
+`j_A = -rho D grad(Y_A)`, `j_B = -j_A`, with density from accepted mass
+and native voxel volume.
+
+Every conducting fluid-fluid face uses the two half-cell resistances in
+series, including graded Cartesian widths and spatial jumps in `rho D`.
+Stagnant faces still diffuse. Exterior, solid and zero-diffusivity interfaces
+are impermeable. Uniform mass fractions are stationary even when density
+varies. The domain must be the original geometry: dimensions and fluid mask
+are checked, while identical physical widths remain the caller's obligation.
+
+Each pair's exponential relaxation approaches its mass-weighted equilibrium.
+Forward/reverse half sweeps form a symmetric second-order diffusion splitting
+for frozen coefficients. Both original constituent inventories receive
+opposite transfers; neither clipping nor complementary-species reconstruction
+is used. The less abundant constituent supplies the gradient to preserve
+trace transport when majority fractions round to one. Prepared face factors
+keep exponentials outside repeated sweeps. Work is
+`O(cells + faces*substeps)`; storage is `O(cells + faces)`.
+
+Independent constituent-mass and carrier-partition budgets admit the complete
+result. Work/storage limits and bounded cancellation polling precede publication;
+carrier, inputs and accepted state remain unchanged on refusal. Eight regression
+definitions cover exact unequal-density pair relaxation, uniform fractions,
+barriers/solids, tiny traces and species permutation, temporal/spatial convergence,
+strong-step positivity/conservation, and invalid-data/budget/cancellation refusal.
+
+This is an isothermal, fixed-carrier binary Fick component. It supplies no EOS,
+partial-enthalpy transport, nonideal thermodynamic factor, Soret/barodiffusion or
+arbitrary multicomponent closure. Large stable sweeps still require accuracy
+refinement. The original donor advection followed by diffusion remains an
+operator split with first-order overall accuracy; second order refers only
+to the frozen diffusion sweep composition.
+
 ### Native open 3D local SGS momentum and heat
 
 `lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman

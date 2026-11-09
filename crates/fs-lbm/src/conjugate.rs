@@ -152,6 +152,7 @@ pub use energy::{
     SourceFaceContact, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
+    BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,
     ConductiveResistiveThermalVolumeMomentumStep, ConductiveThermalVolumeControls,

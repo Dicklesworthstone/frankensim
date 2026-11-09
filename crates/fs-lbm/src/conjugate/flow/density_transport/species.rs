@@ -11,6 +11,11 @@ use super::{
 use crate::conjugate::krylov::bicgstab_ilu0_prepared;
 use fs_sparse::precond::{IluControlledError, ilu0_controlled};
 
+mod diffusion;
+pub use diffusion::{
+    BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
+};
+
 /// Hard component bound; the caller also supplies solve and storage budgets.
 pub const MAX_MATERIAL_SPECIES: usize = 128;
 
