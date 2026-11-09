@@ -750,6 +750,8 @@ pub struct GlottalIsland {
     /// puts the new shape's in [`Self::constriction_kinetic`] and [`Self::constriction_viscous`]. `None` keeps the one
     /// constriction for the whole render.
     constriction_shapes: Option<Vec<Option<(f64, f64)>>>,
+    /// Whether [`GlottalIsland::with_constriction_spans`] has taken the line's own Poiseuille resistance out of K3.
+    constriction_spans_taken: bool,
 }
 
 /// `eta_k`, the nonlinear coefficient of eq 1 (p. 1237), printed as 100 for both masses (p. 1250) [m^-2]. The print
@@ -1121,6 +1123,37 @@ pub fn shadle_constriction_k3(area_k_m2: f64) -> Option<f64> {
         }
     }
     None
+}
+
+/// The tract line's own sections that a constriction at section `k` spans, for K3's overlap with the line (MB 18484):
+/// the contiguous run of sections through `k` narrower than rule R1's widest printed plug (0.318 cm^2, the last row of
+/// [`SHADLE_K3_CIRCLE_LC_1CM`]), out of `sections` given as `(area [m^2], length [m])`, glottis first. Empty when
+/// section `k` is not narrower than that plug, or is not a section.
+#[must_use]
+pub fn constriction_span(sections: &[(f64, f64)], k: usize) -> &[(f64, f64)] {
+    let widest = SHADLE_K3_CIRCLE_LC_1CM[SHADLE_K3_CIRCLE_LC_1CM.len() - 1].0;
+    let narrow = |i: usize| sections[i].0 < widest;
+    if k >= sections.len() || !narrow(k) {
+        return &[];
+    }
+    let mut first = k;
+    while first > 0 && narrow(first - 1) {
+        first -= 1;
+    }
+    let mut end = k + 1;
+    while end < sections.len() && narrow(end) {
+        end += 1;
+    }
+    &sections[first..end]
+}
+
+/// The tract line's own Poiseuille (DC) resistance over `span` [Pa s/m^3], each section a circle of its area:
+/// `8 pi mu sum(l / A^2)`, the DC limit of the line's wall loss. On Shadle's rig (the 0.0804 cm^2 plug in the 2.54 cm
+/// tube) the rendered mean flow's deficit from the held flow is this resistance in series (MB 18481, 18484).
+#[must_use]
+pub fn line_poiseuille_resistance(viscosity_pa_s: f64, span: &[(f64, f64)]) -> f64 {
+    let sum: f64 = span.iter().map(|&(area, length)| length / (area * area)).sum();
+    8.0 * core::f64::consts::PI * viscosity_pa_s * sum
 }
 
 /// The two-mass glottal channel of Ishizaka and Flanagan 1972 at one
@@ -1745,6 +1778,7 @@ impl GlottalIsland {
             constriction_kinetic: None,
             constriction_viscous: 0.0,
             constriction_shapes: None,
+            constriction_spans_taken: false,
         })
     }
 
@@ -2297,6 +2331,64 @@ impl GlottalIsland {
         self.constriction_kinetic = menu[0].map(|(kinetic, _)| kinetic);
         self.constriction_viscous = menu[0].map_or(0.0, |(_, viscous)| viscous);
         self.constriction_shapes = Some(menu);
+        Ok(self)
+    }
+
+    /// Take the tract line's own Poiseuille resistance out of each constriction's K3 (MB 18484). Shadle's measured K3
+    /// is a plug's whole linear term, the Poiseuille flow inside the plug included, and the tract line already carries
+    /// the Poiseuille (DC) resistance of its own sections at the constriction, so K3 in series with the line counts
+    /// that part twice. `spans` gives, shape 0 first, the line sections each constriction spans
+    /// ([`constriction_span`]), as `(area [m^2], length [m])`: one for [`Self::with_constriction`], one for every
+    /// shape of [`Self::with_constriction_keyframes`]. Each K3 becomes `K3_eff = K3 - 8 pi mu sum(l / A^2)` over its
+    /// span ([`line_poiseuille_resistance`], with the island's own gas viscosity, which is the line's), and never less
+    /// than zero: where the line's own resistance already exceeds the measured term, nothing is added. A shape with no
+    /// constriction takes nothing. An empty span takes nothing away, so for a constriction-free span, or without this
+    /// call, K3 is the rule's, bit for bit.
+    ///
+    /// # Errors
+    /// An island that has stepped, has no constriction, or has already taken its spans; a count that is not its
+    /// constrictions'; or a section that is not finite and positive, by name.
+    pub fn with_constriction_spans(mut self, spans: &[&[(f64, f64)]]) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0 || self.tension != 1.0 || self.constriction_spans_taken {
+            return Err(GlottisError::Invalid {
+                what: "a constriction's line spans are taken once, before the island's first step",
+            });
+        }
+        let count = match (&self.constriction_shapes, self.constriction_kinetic) {
+            (Some(menu), _) => menu.len(),
+            (None, Some(_)) => 1,
+            (None, None) => {
+                return Err(GlottisError::Invalid {
+                    what: "a constriction's line spans need a constriction (with_constriction or its keyframes)",
+                });
+            }
+        };
+        if spans.len() != count {
+            return Err(GlottisError::Invalid {
+                what: "one line span for every constriction, shape 0 first",
+            });
+        }
+        let usable =
+            |&(area, length): &(f64, f64)| area.is_finite() && length.is_finite() && area > 0.0 && length > 0.0;
+        if !spans.iter().all(|span| span.iter().all(usable)) {
+            return Err(GlottisError::Invalid {
+                what: "a constriction's line span needs finite positive areas and lengths",
+            });
+        }
+        let mu = self.viscosity_pa_s;
+        let effective = |k3: f64, span: &[(f64, f64)]| (k3 - line_poiseuille_resistance(mu, span)).max(0.0);
+        match self.constriction_shapes.as_mut() {
+            Some(menu) => {
+                for (shape, &span) in menu.iter_mut().zip(spans) {
+                    if let Some((_, viscous)) = shape.as_mut() {
+                        *viscous = effective(*viscous, span);
+                    }
+                }
+                self.constriction_viscous = menu[0].map_or(0.0, |(_, viscous)| viscous);
+            }
+            None => self.constriction_viscous = effective(self.constriction_viscous, spans[0]),
+        }
+        self.constriction_spans_taken = true;
         Ok(self)
     }
 
@@ -5596,6 +5688,117 @@ mod glottis_tests {
         near(k3(0.5), 0.88 * cgs * (0.318_f64 / 0.5).powi(2), 1.0e-12, "over the range, 1 / A^2 from 0.318 cm^2");
         for area in [0.0, -1.0e-5, f64::NAN, f64::INFINITY] {
             assert!(shadle_constriction_k3(area).is_none(), "no K3 at {area}");
+        }
+    }
+
+    /// K3_eff on a constriction-free card (MB 18484): a card with no section narrower than the rule's widest printed
+    /// plug (0.318 cm^2) at its constriction spans no line section, so the line takes nothing out of K3. The island's
+    /// K3 is the rule's, bit for bit, before and after the spans call: on a 0.5 cm^2 section in a 3.06 cm^2 duct, and
+    /// on one of exactly 0.318 cm^2 (the printed row, which is not narrower than itself).
+    #[test]
+    fn a_constriction_free_card_keeps_the_rules_k3() {
+        let hole = core::f64::consts::PI * 0.005 * 0.005;
+        for a_k in [0.5e-4, 0.318e-4] {
+            let sections = [(3.06e-4, 0.08), (a_k, 0.01), (3.06e-4, 0.08)];
+            let span = constriction_span(&sections, 1);
+            assert!(span.is_empty(), "no section narrower than 0.318 cm^2 at {a_k}");
+            let rule = shadle_constriction_k3(a_k).expect("the rule's K3");
+            let plain = island(false, 1.0)
+                .with_orifice(hole)
+                .expect("orifice")
+                .with_constriction(a_k, 3.06e-4)
+                .expect("constriction");
+            assert_eq!(plain.constriction_viscous.to_bits(), rule.to_bits(), "K3 before the spans call");
+            let spanned = plain.with_constriction_spans(&[span]).expect("spans");
+            assert_eq!(spanned.constriction_viscous.to_bits(), rule.to_bits(), "an empty span takes nothing away");
+        }
+    }
+
+    /// K3_eff on Shadle's plug geometry (MB 18484): the circular plug of 0.079 cm^2, 1.0 cm long, in the 2.54 cm tube
+    /// (TR 506, p. 27; Table 2.2: K3 8.7 g/s-cm^4), as a card's 2 mm sections. The span through the plug is its five
+    /// sections and none of the tube's. K3_eff plus the line's own Poiseuille resistance over the plug, written out
+    /// here as `8 mu L / (pi r^4)` with the island's gas viscosity, is the printed 8.7 g/s-cm^4, and the held flow
+    /// takes K3_eff. A span whose own resistance exceeds K3 leaves nothing, never a negative resistance. On a moving
+    /// constriction each shape takes its own span, and a shape without a constriction takes none. Every refusal is by
+    /// name.
+    #[test]
+    fn k3_eff_and_the_lines_own_poiseuille_resistance_make_the_printed_k3_on_shadles_plug() {
+        let pi = core::f64::consts::PI;
+        let (tube, plug) = (pi * 0.0127 * 0.0127, 0.079e-4);
+        let mut sections = vec![(tube, 2.0e-3); 40];
+        sections.extend([(plug, 2.0e-3); 5]);
+        sections.extend([(tube, 2.0e-3); 40]);
+        let span = constriction_span(&sections, 42);
+        assert_eq!(span, &sections[40..45], "the span is the plug's five sections");
+        assert_eq!(constriction_span(&sections, 40), span, "the same span from any section of the plug");
+        assert!(constriction_span(&sections, 39).is_empty(), "a tube section spans nothing");
+        assert!(constriction_span(&sections, 85).is_empty(), "past the last section: nothing");
+        let mu = air().dynamic_viscosity;
+        let radius = (plug / pi).sqrt();
+        let poiseuille = 8.0 * mu * 0.010 / (pi * radius.powi(4));
+        let line = line_poiseuille_resistance(mu, span);
+        assert!((line / poiseuille - 1.0).abs() < 1.0e-12, "the line's sum {line} against Poiseuille's {poiseuille}");
+        let hole = pi * 0.005 * 0.005;
+        let rig = || island(false, 1.0).with_orifice(hole).expect("orifice");
+        let fixed = rig()
+            .with_constriction(plug, tube)
+            .expect("constriction")
+            .with_constriction_spans(&[span])
+            .expect("spans");
+        let k3_eff = fixed.constriction_viscous;
+        assert!(((k3_eff + poiseuille) / 8.7e5 - 1.0).abs() < 1.0e-12, "K3_eff {k3_eff} + the line's {poiseuille}");
+        let inlet = pi * 0.010 * 0.010;
+        let n = hole / inlet;
+        let k_o = (1.0 - 2.0 * n * (1.0 - n)) / (hole * hole);
+        let rho_k = air().density * (k_o + (1.0 / plug - 1.0 / tube) * (1.0 / plug - 1.0 / tube));
+        let drive = 1000.0;
+        let expected = (-k3_eff + (k3_eff * k3_eff + 2.0 * rho_k * drive).sqrt()) / rho_k;
+        let held = fixed.orifice_held_flow_m3_s(drive).expect("held flow");
+        assert!((held / expected - 1.0).abs() < 1.0e-12, "held {held} against {expected}");
+        // A run long enough that its own resistance exceeds the printed K3: nothing is added, never a negative term.
+        let long = [(plug, 0.20)];
+        assert!(line_poiseuille_resistance(mu, &long) > 8.7e5);
+        let floored = rig()
+            .with_constriction(plug, tube)
+            .expect("constriction")
+            .with_constriction_spans(&[&long[..]])
+            .expect("spans");
+        assert_eq!(floored.constriction_viscous, 0.0, "K3_eff is never negative");
+        // A moving constriction: shape 0 the plug with its span, shape 1 no expansion, shape 2 the plug, no span.
+        let taps = match &rig().line {
+            ShapeLine::Fixed(line) => line.quiescent_fir().expect("a plain FIR").1.to_vec(),
+            ShapeLine::Moving(_) => panic!("a new island's line is fixed"),
+        };
+        let keyed = || rig().with_tract_keyframes(vec![taps.clone(), taps.clone()]).expect("keyframes");
+        let menu = [(plug, tube), (tube, tube), (plug, tube)];
+        let no_span: &[(f64, f64)] = &[];
+        let mut moving = keyed()
+            .with_constriction_keyframes(&menu)
+            .expect("menu")
+            .with_constriction_spans(&[span, no_span, no_span])
+            .expect("spans");
+        assert_eq!(moving.constriction_viscous.to_bits(), k3_eff.to_bits(), "shape 0 takes its own span");
+        moving.switch_tract(1, 0).expect("switch to shape 1");
+        assert_eq!(moving.constriction_viscous, 0.0, "a shape with no expansion takes no constriction");
+        moving.switch_tract(2, 0).expect("switch to shape 2");
+        assert_eq!(moving.constriction_viscous.to_bits(), 8.7e5_f64.to_bits(), "no span: the rule's K3");
+        let named = |result: Result<GlottalIsland, GlottisError>, word: &str| match result {
+            Err(GlottisError::Invalid { what }) => assert!(what.contains(word), "{what}"),
+            Err(other) => panic!("refused by another error: {other:?}"),
+            Ok(_) => panic!("admitted, but must be refused naming {word}"),
+        };
+        let plugged = || rig().with_constriction(plug, tube);
+        named(rig().with_constriction_spans(&[span]), "need a constriction");
+        named(plugged().and_then(|i| i.with_constriction_spans(&[span, span])), "every constriction");
+        let menu_of_three = keyed().with_constriction_keyframes(&menu);
+        named(menu_of_three.and_then(|i| i.with_constriction_spans(&[span])), "every constriction");
+        let twice = plugged().and_then(|i| i.with_constriction_spans(&[span]));
+        named(twice.and_then(|i| i.with_constriction_spans(&[span])), "taken once");
+        for bad in [0.0, -1.0e-3, f64::NAN, f64::INFINITY] {
+            let (short, narrow) = ([(plug, bad)], [(bad, 2.0e-3)]);
+            for row in [&short[..], &narrow[..]] {
+                named(plugged().and_then(|i| i.with_constriction_spans(&[row])), "finite positive");
+            }
         }
     }
 

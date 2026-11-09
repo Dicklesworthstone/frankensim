@@ -97,8 +97,10 @@
 //! the junction after section `k`, reaching the mouth flow and the island's returned wave through the junction lines
 //! ([`crate::driving_point::outlet::junction_source_lines`]), with the constriction's Borda-Carnot drop and Shadle's
 //! viscous term `K3 U` (MB 18431; [`crate::glottis::shadle_constriction_k3`]) in the island's junction solve
-//! ([`GlottalIsland::with_constriction`]). On the flow rig its drop and jet speed are those of the held
-//! flow through the orifice and the constriction at the schedule's pressure ([`GlottalIsland::orifice_held_flow_m3_s`]);
+//! ([`GlottalIsland::with_constriction`]), K3 less the Poiseuille resistance the line already carries over the sections
+//! the constriction spans, every shape its own (MB 18484; [`GlottalIsland::with_constriction_spans`]). On the flow rig
+//! its drop and jet speed are those of the held flow through the orifice and the constriction at the schedule's
+//! pressure ([`GlottalIsland::orifice_held_flow_m3_s`]);
 //! on the folds, which have no held flow, they are those of the island's own flow of the step before (the source reads
 //! the flow it does not yet change, as the glottal sources do), and the source is silent while that flow is not positive
 //! (no jet leaves `k` toward `j`). That flow is the glottal flow, the lumped law of the island's own drop at `k`, not the
@@ -315,7 +317,7 @@ use crate::driving_point::outlet::{
 };
 use crate::glottis::{
     FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GLOTTAL_LINE_MAX_TAPS, GlottalIsland,
-    glottal_tract_line_taps,
+    constriction_span, glottal_tract_line_taps,
 };
 use crate::keyframe_line::ShapeLine;
 use crate::pcm_wav::baffled::head::{HeadSphere, TorsoSphere, head_mouth_load, head_torso_mouth_load};
@@ -519,6 +521,15 @@ struct KeyframeDraft {
 /// largest section between `k` and the lips); 0 when none follows.
 fn widest_after(sections: &[TractSection], k: usize) -> f64 {
     sections.iter().skip(k + 1).map(|s| s.area_m2).fold(0.0, f64::max)
+}
+
+/// The line sections `fricative_noise`'s constriction at section `k` spans (MB 18484), as `(area [m^2], length [m])`:
+/// the tract's own sections, which are the line's cylinders (`TractChart::to_duct`), cut by [`constriction_span`]. The
+/// line already carries their Poiseuille resistance, so it comes out of the constriction's K3
+/// ([`GlottalIsland::with_constriction_spans`]).
+fn line_span(sections: &[TractSection], k: usize) -> Vec<(f64, f64)> {
+    let pairs: Vec<(f64, f64)> = sections.iter().map(|s| (s.area_m2, s.length_m)).collect();
+    constriction_span(&pairs, k).to_vec()
 }
 
 /// `fricative_noise`'s `k` on a moving tract's shape `shape` (MB 16891, ruling (c) on NavyTower 16887): at the card's
@@ -1588,11 +1599,14 @@ impl VoiceDescription {
             None => Ok(island),
         })
         // A moving tract takes every shape's constriction below (with_constriction_keyframes), shape 0's among them.
+        // K3 is less the line's own Poiseuille resistance over the sections the constriction spans (MB 18484).
         .and_then(|island| match self.fricative_noise {
-            Some(card) if self.tract_moves.is_empty() => island.with_constriction(
-                self.sections[card.constriction].area_m2,
-                self.sections[card.expansion].area_m2,
-            ),
+            Some(card) if self.tract_moves.is_empty() => {
+                let span = line_span(chart.sections(), card.constriction);
+                island
+                    .with_constriction(self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2)
+                    .and_then(|island| island.with_constriction_spans(&[span.as_slice()]))
+            }
             _ => Ok(island),
         })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
@@ -1639,7 +1653,13 @@ impl VoiceDescription {
                     let mut shapes =
                         vec![(self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2)];
                     shapes.extend(motion.fricative.iter().map(|f| (f.area_k_m2, f.area_j_m2)));
-                    island.with_constriction_keyframes(&shapes)
+                    // Each shape's K3 less the line's own Poiseuille resistance over that shape's span (MB 18484).
+                    let first = line_span(chart.sections(), card.constriction);
+                    let mut spans = vec![first.as_slice()];
+                    spans.extend(motion.fricative.iter().map(|f| f.span.as_slice()));
+                    island
+                        .with_constriction_keyframes(&shapes)
+                        .and_then(|island| island.with_constriction_spans(&spans))
                 }
                 None => Ok(island),
             }
@@ -2033,6 +2053,7 @@ impl VoiceDescription {
                     section: k,
                     area_k_m2: sections[k].area_m2,
                     area_j_m2: widest_after(sections, k),
+                    span: line_span(sections, k),
                 })
             }
             None => None,
@@ -2054,6 +2075,9 @@ struct FricativeShapeLines {
     area_k_m2: f64,
     /// The shape's largest section after `k` (MB 15828).
     area_j_m2: f64,
+    /// The shape's line sections its constriction spans (`line_span`): their Poiseuille resistance comes out of the
+    /// shape's K3 (MB 18484).
+    span: Vec<(f64, f64)>,
 }
 
 /// `build(0..n)` on up to `workers` scoped threads, each on one contiguous block of shapes, in the manner of the snowman's
