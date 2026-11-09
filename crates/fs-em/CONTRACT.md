@@ -1527,6 +1527,34 @@ and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQ
 and source-domain limits apply; native test execution is a separate requirement
 where the workspace dependency repositories are available.
 
+## Axisymmetric Ohmic conduction and radial current moments
+
+`conduction::axisymmetric::AxisymmetricConduction` reuses the native scalar
+conductivity Hodge, checked solve and current/Joule recovery with the exact
+`angular_span * r dr dz` measure. Source-bound scalar and oriented meridional
+conductivities retain their original material queries and physical units.
+Voltage traces and inward current-density boundaries cover actual surfaces of
+revolution; the latter integrate `N_i*r` exactly instead of dividing their
+total equally. The zero-area axis supplies natural regularity, never an
+electrode or prescribed current surface.
+
+`AxisymmetricResistance` retains one native probe solve and recovers actual
+voltage, signed total-current or compliant power drives without another
+Krylov solve. Local Joule heat, terminal current and source work are checked
+at every recovered amplitude. This is the same dissipative circuit component;
+the spatial heat must not be credited a second time. Temperature or material
+changes require a new source-bound preparation.
+
+Fields and anisotropic axes are local radial/axial components with a decoupled
+azimuthal direction. A partial angular span is a symmetry sector. This owner
+does not add azimuthal current, induction, Hall response, contact transfer,
+motion or thermal evolution. Its private core exposes no planar motion API.
+The G1/G3/G4 tests in `tests/conduction/axisymmetric.rs` use analytical axial
+cylinders, layered logarithmic coaxial resistance, exact disk-current moments,
+rotated meridional tensors, metric/axis refusals and cancellation/retry. These
+are implementation checks, not measured-material qualification or continuum
+error enclosures; executing them remains a separate validation obligation.
+
 ## Three-dimensional Ohmic transport and local Joule heat
 
 `spatial::conduction::SpatialConduction<C>` consumes the original tetrahedral

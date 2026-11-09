@@ -20,6 +20,8 @@
 mod contact;
 pub(crate) use contact::admit_contact_source;
 pub use contact::{ConductionContact, ConductionContactResponse};
+/// Meridional current and Joule heat with the exact radial volume measure.
+pub mod axisymmetric;
 /// Reusable multi-electrode resistance with voltage, current and floating controls.
 pub mod matrix;
 pub use matrix::{
@@ -232,6 +234,19 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
                 "this conductor owner requires a planar metric",
             ));
         }
+        Self::assemble_metric(mesh, conductors, limits, cancelled, admit)
+    }
+
+    // The axisymmetric facade shares the native scalar operator and recovery,
+    // while keeping planar motion and contact APIs out of its public surface.
+    fn assemble_metric(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+    ) -> Result<Self, ConductionError> {
+        poll(cancelled)?;
         if conductors.len() != mesh.faces().len()
             || mesh.vertices().len() > limits.max_dofs
             || mesh.edges().len() > limits.max_dofs
@@ -368,6 +383,9 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
         poll(cancelled)?;
         self.validate_controls(boundary_voltage_v.len(), controls)?;
         let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
+        if self.mesh.metric().is_axisymmetric() {
+            axisymmetric::admit_prescribed_traces(&self.mesh, &prescribed, cancelled)?;
+        }
         let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
         let rhs: Vec<_> = applied.iter().map(|load| load.unwrap_or(0.0)).collect();
         let solved = scalar_potential::solve_relative(
@@ -572,16 +590,31 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
                     .ok_or(ConductionError::Invalid(
                         "current trace lacks physical area",
                     ))?;
-            let half = finite(finite(area * density)? * 0.5)?;
-            if density != 0.0 && half == 0.0 {
-                return Err(ConductionError::Invalid(
-                    "applied edge current is unrepresentable",
-                ));
-            }
-            for vertex in vertices {
+            let total = finite(area * density)?;
+            let nodal = match self.mesh.metric() {
+                Metric2::Planar { .. } => [finite(total * 0.5)?; 2],
+                Metric2::Axisymmetric { .. } => {
+                    if !positive(area) {
+                        return Err(ConductionError::Invalid(
+                            "the symmetry axis cannot carry a physical current trace",
+                        ));
+                    }
+                    axisymmetric::surface_current_loads(
+                        vertices.map(|v| self.mesh.vertices()[v][0]),
+                        total,
+                    )
+                }
+            };
+            for (vertex, current) in vertices.into_iter().zip(nodal) {
+                let current = finite(current)?;
+                if density != 0.0 && current == 0.0 {
+                    return Err(ConductionError::Invalid(
+                        "applied edge current is unrepresentable",
+                    ));
+                }
                 let previous = loads[vertex].unwrap_or(0.0);
-                let sum = finite(previous + half)?;
-                if half != 0.0 && sum == previous {
+                let sum = finite(previous + current)?;
+                if current != 0.0 && sum == previous {
                     return Err(ConductionError::Invalid(
                         "applied edge current disappeared in nodal sum",
                     ));
