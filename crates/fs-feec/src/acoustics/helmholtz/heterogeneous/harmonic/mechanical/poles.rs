@@ -5,6 +5,8 @@ use fs_math::c64::C64;
 
 mod response;
 pub use response::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     MechanicalPoleResponseOptions, MechanicalResonanceResidue,
     MechanicalResonanceResponseError, MechanicalWallResidue, PreparedMechanicalResonance,
 };

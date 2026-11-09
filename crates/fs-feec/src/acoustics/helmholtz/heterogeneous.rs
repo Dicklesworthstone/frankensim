@@ -40,6 +40,8 @@ use fs_sparse::{Coo, Csr};
 
 mod harmonic;
 pub use harmonic::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
     EquivalentFluidPressureField, PreparedEquivalentFluid, PreparedEquivalentFluidTraction,
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,

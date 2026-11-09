@@ -11,6 +11,8 @@ pub use fs_la::nonlinear_eig::beyn::{
 
 mod residues;
 pub use residues::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalWallResidue,
 };
 pub(crate) use residues::PreparedCoupledResonance;

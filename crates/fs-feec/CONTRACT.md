@@ -2934,3 +2934,25 @@ cancellation and dark material modes can have zero participation. Repeated or
 defective poles can refuse; no local wall impedance is inverted, no modal
 damping is inferred, and no real-frequency-only source is analytically
 continued without caller-supplied data.
+
+### Original wall-material resonance sensitivities
+
+`PreparedMechanicalResonance::wall_parameter_derivative` differentiates the
+complete cavity/wall/Maxwell polynomial along explicitly supplied original
+surface-density, stiffness, resistance, branch-stiffness and relaxation-time
+directions. One existing bordered factor supplies the signed pole and all
+physical mode-coordinate derivatives. Original Maxwell-memory recovery
+includes the square-root stiffness coordinate's chain rule, including dark
+material modes; subnormal stiffness directions retain representable changes.
+
+Numerical congruence and the reported physical normalization pivot stay fixed.
+The full original differentiated equations are independently audited with
+double-double products. Additional physical payload is O(N), recovery/assembly
+is O(N+nnz), and the reused solve is O(N^2); `MechanicalPoleLimits` bounds the
+extra payload and one physical audit. Cancellation or refusal returns no
+partial tangent.
+
+The caller supplies coefficient derivatives per its own parameter. Geometry,
+trace operators, bulk fluid and source laws stay fixed. The API admits a local
+simple-pole derivative and does not infer a temperature law, material validity
+extension, finite design step, repeated-mode sensitivity or driven linewidth.

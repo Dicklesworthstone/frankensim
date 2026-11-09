@@ -24,6 +24,8 @@ use fs_phs::harmonic::resonance::{ResonanceSearchError, survey_resonances};
 
 mod poles;
 pub use poles::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
     MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
     MechanicalWallResidue, PreparedMechanicalResonance,

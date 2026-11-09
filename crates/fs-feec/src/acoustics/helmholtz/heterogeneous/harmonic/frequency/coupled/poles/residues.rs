@@ -14,6 +14,12 @@ use fs_la::pole_response::{PoleResponseError, PreparedPole};
 pub use fs_la::pole_response::PoleResponseOptions as MechanicalPoleResponseOptions;
 use fs_math::{c64::C64, dd::Dd};
 
+mod sensitivity;
+pub use sensitivity::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
+};
+
 /// Laplace residues of the original wall coordinates; each residue has one
 /// additional inverse second compared with the corresponding modal field.
 #[derive(Clone, Debug)]

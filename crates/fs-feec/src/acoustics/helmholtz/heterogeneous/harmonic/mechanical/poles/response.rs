@@ -14,6 +14,12 @@ pub use super::super::frequency::coupled::poles::{
 };
 use fs_math::c64::C64;
 
+mod sensitivity;
+pub use sensitivity::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
+};
+
 /// A source projection can fail independently of the accepted physical pole.
 #[derive(Debug)]
 pub enum MechanicalResonanceResponseError {

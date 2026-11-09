@@ -21,6 +21,8 @@ pub use equivalent::{
 mod frequency;
 mod mechanical;
 pub use mechanical::{
+    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
     MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
     MechanicalWallResidue, PreparedMechanicalResonance,
