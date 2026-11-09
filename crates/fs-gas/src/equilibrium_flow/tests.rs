@@ -12,6 +12,8 @@ use fs_thermochem::{
 use std::collections::BTreeMap;
 
 mod nozzle;
+#[cfg(feature = "material")]
+mod nozzle_material;
 
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const T0: f64 = 1000.0;

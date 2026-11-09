@@ -22,6 +22,10 @@ use fs_thermochem::equilibrium::composition::{
     isentrope::{EquilibriumIsentropeSampleV1, EquilibriumIsentropeV1},
 };
 
+/// Original material parcels admitted against this same reacting flow law.
+#[cfg(feature = "material")]
+pub mod material;
+
 /// Whole-call pressure work ceiling, including preparation and re-publication.
 pub const MAX_NOZZLE_PRESSURE_EVALUATIONS: usize = crate::nozzle::MAX_PRESSURE_EVALUATIONS;
 

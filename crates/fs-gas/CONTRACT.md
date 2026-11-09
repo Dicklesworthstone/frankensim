@@ -9592,3 +9592,43 @@ independence and weak pressure drive under large energy/entropy reference datums
 G0/G4 covers exact rest, shallow source support, work/floor/input refusals and
 final cancellation with deterministic retry. These are numerical conformance
 tests, not empirical validation or interval certificates.
+
+
+
+### Reacting converging-nozzle material endpoints
+
+With `material`, `equilibrium_flow::nozzle::material` publishes the native
+pressure-driven SP branch through the original
+`fs-material::EquilibriumGasEnthalpyPath`. The source bank, typed inlet context,
+feed elements and identical original Gibbs controls must reproduce exactly the
+native equilibrium inlet and conserved feed mass. The accepted SP pressure and
+source-relative enthalpy change select at most one final HP query. No alternate
+chemistry, EOS, species canonicalization or transport closure is introduced.
+
+The returned velocity comes from the **actual material** source-integrated
+enthalpy decrease per conserved feed mass; actual parcel density supplies mass
+flux and mass flow. The published HP chemical entropy must meet the original
+SP entropy allowance. Its **reacting** sound speed supplies Mach and the sonic
+residual, which must pass the original nozzle tolerance on a choked branch;
+an unchoked endpoint must remain subsonic. Independent numerical bounds compare
+material and native SP density and mass flux. A loose HP tolerance never
+replaces any of these acceptance gates. Frozen parcel Cp, entropy audits and
+sound speed remain distinct from chemical-equilibrium derivatives and entropy.
+
+The material owner retains its original source/transport domain, species,
+mass, density-volume, source-relative enthalpy and freezing admission. Equal
+pressures or zero area return the exact material inlet with zero flow and no
+final HP query. Native pressure evaluations retain their original budget;
+material work is explicitly one reference preparation plus at most one bounded
+HP query, with total actual composition and temperature iterations reported.
+Final cancellation refuses publication and all borrowed sources, feed and
+context remain unchanged. This is a steady ideal converging discharge, not a
+reservoir-depletion step, finite-rate reaction law or inferred discharge loss.
+
+Conformance is in `equilibrium_flow/tests/nozzle_material.rs`: reacting
+subsonic/choked products, original cards/transport/context/mass, independently
+rechecked source energy/chemical entropy/reacting sonic closure, original
+transport-domain refusal, mismatched Gibbs controls, loose-HP rejection,
+exact zero flow and final cancellation with deterministic retry. These material
+feature tests require the full original dependency graph; their execution is
+reported separately from the native SP/HP source-flow tests.

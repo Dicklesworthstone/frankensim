@@ -7,11 +7,14 @@
 //! the authored isentropic efficiency to select work before solving the outlet.
 //!
 //! The supplied feed declares an elemental inventory. Its equilibrium at the
-//! inlet T,p defines the inlet, not the enthalpy of an unequilibrated feed. This
-//! model neglects changes in kinetic/potential energy and does not predict mass
-//! flow, geometry, choking, finite-rate reaction, phase separation or transport.
-//! The optional material adapter retains original frozen-product transport;
-//! the separately reported response and entropy remain chemical equilibrium.
+//! inlet T,p defines the inlet, not the enthalpy of an unequilibrated feed. The
+//! machinery/throttle endpoints neglect kinetic and potential energy changes;
+//! their mass flow is prescribed. The [`nozzle`] owner converts the original
+//! isentropic enthalpy drop into kinetic energy and resolves pressure-driven
+//! converging flow with reacting sonic choking. These steady models do not
+//! supply finite-rate reaction or phase-separation dynamics. Optional material
+//! adapters retain original frozen-product transport; the separately reported
+//! response and entropy remain chemical equilibrium.
 
 use fs_qty::{Amount, Energy, MassFlowRate, Power, Pressure, Temperature};
 use fs_thermochem::SpeciesId;
