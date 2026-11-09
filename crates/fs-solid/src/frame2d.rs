@@ -70,6 +70,10 @@ pub mod strength;
 pub mod thermal;
 pub use thermal::{FrameThermalSection, FrameThermalSectionResponse};
 
+/// Source-bound laminated beams with thermal curvature and axial/bending coupling.
+pub mod laminate_thermal;
+pub use laminate_thermal::{FrameLaminateSection, FrameLaminateSectionResponse};
+
 /// Full forced resonance of the original elastic frame and its material losses.
 pub mod harmonic;
 
@@ -118,6 +122,8 @@ pub enum SectionModel {
     /// Frozen-temperature layer expansion and elastic response, retaining the
     /// shared material law instead of replacing it by a stress-free EA/EI pair.
     ThermalElastic(FrameThermalSection),
+    /// Narrow free-sided elastic laminate on its original mass-centroid axis.
+    LaminateThermal(FrameLaminateSection),
     /// A fiber section (fs-material uniaxial laws per fiber).
     Fiber(Section),
 }
@@ -129,6 +135,7 @@ impl SectionModel {
         match self {
             Self::Fiber(section) => section.try_respond(eps0, kappa),
             Self::ThermalElastic(section) => section.respond(eps0, kappa),
+            Self::LaminateThermal(section) => section.respond(eps0, kappa),
             Self::Elastic { .. } => Ok(self.respond(eps0, kappa)),
         }
     }
@@ -144,6 +151,11 @@ impl SectionModel {
             },
             SectionModel::Fiber(s) => s.respond(eps0, kappa),
             SectionModel::ThermalElastic(s) => s.respond(eps0, kappa).unwrap_or(SectionState {
+                n: f64::NAN,
+                m: f64::NAN,
+                tangent: [[f64::NAN; 2]; 2],
+            }),
+            SectionModel::LaminateThermal(s) => s.respond(eps0, kappa).unwrap_or(SectionState {
                 n: f64::NAN,
                 m: f64::NAN,
                 tangent: [[f64::NAN; 2]; 2],
@@ -240,6 +252,7 @@ pub struct FrameElement {
     rotary_inertia_per_length: f64,
     reference_inertia_profile: Option<FrameInertiaProfile>,
     material_section: Option<ConcentricElasticSection>,
+    laminate_thermal: Option<std::sync::Arc<laminate_thermal::FrameLaminateBinding>>,
     transverse_shear: Option<shear::ShearElement>,
     viscous_section: Option<FrameViscousSection>,
     sections: Vec<SectionModel>,
@@ -390,7 +403,18 @@ impl FrameElement {
             let mut resp = Vec::with_capacity(np);
             for p in 0..np {
                 let s = self.sections[p].try_respond(d[p].0, d[p].1)?;
-                let fs = if matches!(&self.sections[p], SectionModel::Fiber(section)
+                let fs = if matches!(
+                    &self.sections[p],
+                    SectionModel::ThermalElastic(_) | SectionModel::LaminateThermal(_)
+                ) {
+                    // EA and EI have different dimensions; an EA-based
+                    // determinant floor would invent rigidity for thin beams.
+                    ductile_damage::section_flexibility(s.tangent).map_err(|_| {
+                        SolidError::MaterialRefused {
+                            what: "thermal frame section flexibility is singular or unrepresentable".into(),
+                        }
+                    })?
+                } else if matches!(&self.sections[p], SectionModel::Fiber(section)
                     if section.fibers.iter().any(|fiber| matches!(fiber.law, crate::fiber::FiberLaw::DuctileJ2(_))))
                 {
                     ductile_damage::section_flexibility(s.tangent)?
@@ -874,6 +898,7 @@ impl Frame2d {
             rotary_inertia_per_length,
             reference_inertia_profile,
             material_section: None,
+            laminate_thermal: None,
             transverse_shear: None,
             viscous_section: None,
             sections: (0..np).map(|_| make_section()).collect(),

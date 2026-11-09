@@ -160,6 +160,9 @@ impl Frame2d {
                 SectionModel::Fiber(_) => {
                     return Err(invalid("thermal elastic refresh cannot replace an inelastic fiber history"));
                 },
+                SectionModel::LaminateThermal(_) => {
+                    return Err(invalid("concentric thermal refresh cannot replace a laminate source section"));
+                },
             }
             let section = FrameThermalSection {
                 source: Arc::new(source),

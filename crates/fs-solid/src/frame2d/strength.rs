@@ -135,7 +135,11 @@ impl Frame2d {
         for (element, (member, capacity)) in self.elements.iter().zip(capacities).enumerate() {
             checkpoint(cx)?;
             if member.sections.iter().any(|section| {
-                matches!(section, super::SectionModel::ThermalElastic(_))
+                matches!(
+                    section,
+                    super::SectionModel::ThermalElastic(_)
+                        | super::SectionModel::LaminateThermal(_)
+                )
             }) {
                 return Err(FrameTensileError::Invalid(
                     "thermal frame layer stresses require thermal section recovery; resultant-only strength omits thermal mismatch",

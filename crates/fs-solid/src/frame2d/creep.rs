@@ -457,7 +457,9 @@ impl Frame2d {
             element.sections.iter().any(|section| match section {
                 SectionModel::Fiber(section) => section.fibers.iter()
                     .any(|fiber| fiber.law.requires_physical_duration()),
-                SectionModel::Elastic { .. } | SectionModel::ThermalElastic(_) => false,
+                SectionModel::Elastic { .. }
+                | SectionModel::ThermalElastic(_)
+                | SectionModel::LaminateThermal(_) => false,
             })
         });
         if has_creep {
@@ -479,7 +481,9 @@ impl Frame2d {
     ) -> Option<(&UniaxialTabulatedOverstress, &UniaxialJ2State)> {
         let section = match self.elements.get(element)?.sections.get(section)? {
             SectionModel::Fiber(section) => section,
-            SectionModel::Elastic { .. } | SectionModel::ThermalElastic(_) => return None,
+            SectionModel::Elastic { .. }
+            | SectionModel::ThermalElastic(_)
+            | SectionModel::LaminateThermal(_) => return None,
         };
         match (&section.fibers.get(fiber)?.law, section.states.get(fiber)?) {
             (FiberLaw::TabulatedOverstress(law), FiberState::TabulatedOverstress(state)) => {

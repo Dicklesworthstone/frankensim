@@ -13723,3 +13723,31 @@ empty/all-support limits, close-tone beat heating, source/strain/budget refusal,
 cancellation and reuse cases. This is a particular periodic response at fixed
 material conditions; startup, actuator dynamics, evolving material state,
 spatial convergence and measured physical validation are separate concerns.
+
+
+### Source-bound laminate thermal frames
+
+`add_laminate_thermal_element` and `with_laminate_temperatures` feed the
+original laminate cards and integrated per-layer expansion into native
+force-based `Frame2d` equilibrium. The shared `PreparedLaminateBeam` reduction
+is an aligned, narrow, free-sided Euler–Bernoulli approximation: each layer
+relaxes transverse normal/shear stress independently. Mechanical or thermal
+shear/twist coupling refuses per layer; cancellation in aggregate coefficients
+does not admit an unsupported layer.
+
+Source reference temperatures, geometry, density-centroid centerline, mass and
+centered rotary inertia remain fixed while current elastic moduli, thermal
+force and thermal bending moment refresh. Axial/bending coupling survives
+mass centering. Native thermal section flexibility uses a scaled checked
+inverse without an axial-stiffness determinant floor. Recovery includes layer
+face stresses and positive residual elastic storage at zero net resultants.
+Temperature changes preserve nodal pose/velocity and solve station
+compatibility transactionally; heat and changed-storage accounting remain
+caller-owned.
+
+This is not a finite-width constrained plate, interlaminar-stress,
+transverse-mode-inertia, torsion, finite-strain or reciprocal thermal model.
+Source temperatures are piecewise constant by layer; continuous gradients
+require through-thickness refinement. `tests/frame_laminate_thermal.rs`
+defines independent free/restrained bimetal, nonuniform heating, inertia and
+modal-refresh, thin-flexibility, layer-refinement and cancellation regressions.
