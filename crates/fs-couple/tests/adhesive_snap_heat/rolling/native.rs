@@ -1,5 +1,8 @@
 //! G1/G3/G4: actual body recoil, finite snap heat and one accepted lifecycle.
 
+#[path = "native/dissipation.rs"]
+mod dissipation;
+
 use super::{CRITICAL_SHIFT, binding, controls as heat_controls, curves, events, source, thermal};
 use fs_contact::normal_patch::adhesive::{JkrBranch, rolling::events::SourceJkrRollingEvents};
 use fs_couple::friction_heat::adhesive::snap::{

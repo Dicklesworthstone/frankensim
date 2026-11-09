@@ -10382,3 +10382,13 @@ caloric continuation, and atomic late Lorentz-domain refusal. Native Rust
 execution is pending because the recovered environment has no Rust toolchain;
 an independent scalar field/heat calculation and source checks are bounded
 implementation evidence, not a runtime or measured-material validation claim.
+
+## Finite-cell conversion of rolling plastic loss and junction release
+
+`friction_heat::adhesive::snap::rolling::dissipation::JkrRollingDissipationHeat` preserves the original loaded rolling lifecycle and caloric bindings while adding an explicit partition and named outside destination for new irreversible rolling loss. Normal snap, remaining spring energy released at separation, and continuing plastic rolling loss retain distinct work ledgers. Earlier losses are not deposited again. Signed normal/area parameter work, elastic unloading and recoverable spring storage do not become heat.
+
+A shared source-replay kernel serves both the unchanged snap-only route and the complete-loss route. It regenerates every original normal/angular segment, retains the sum of original source losses in double-double arithmetic, and applies all admitted heat to the original finite caloric cells in one proposal. Capacity/domain refusal, stale history, cancellation or energy imbalance leave every accepted owner unchanged. Explicit partitions model conversion/destination; they do not claim a solved interfacial conduction split.
+
+The `dissipation::native` composition prepares actual body recoil, replays exactly the accepted source path, and checks the complete sealed successor, original normal report, rolling step and new plastic-loss increment before publication. Its combined body/contact/caloric balance counts converted plastic loss once, as caloric or named outside energy. Bodies, native lifecycle, conversion history and thermal state publish together after the final cancellation checks. The source remains frozen, normal motion prescribed, and heat a same-time impulse with no intervening transport or temperature feedback.
+
+Six added source/native integration groups cover elastic/no-heat behavior, separate partitions across yielding/separation/recontact, retained prior loss, sub-ULP loss beside snap release, actual body/contact/cell energy, caloric refusal after a real recoil proposal, final-callback cancellation and retry/stale replay. Pinned formatting and recursive syntax/module resolution passed; these cross-crate groups were not type-checked or executed under the documented unavailable remote runners and shared build-resource limits.

@@ -3,6 +3,9 @@
 #[path = "rolling/native.rs"]
 mod native;
 
+#[path = "rolling/dissipation.rs"]
+mod dissipation;
+
 use super::{close, controls, curves, source, thermal};
 use fs_contact::normal_patch::adhesive::{
     JkrBranch, JkrJumpKind, SourceJkrSphereContact,

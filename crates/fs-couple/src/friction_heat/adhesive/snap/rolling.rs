@@ -12,6 +12,8 @@
 //! Call separately at physical event times when intervening transport matters.
 //! The [`native`] composition stages actual body recoil and this same heat
 //! transfer together, checking that both regenerate one original lifecycle.
+//! [`dissipation`] additionally admits an independent partition for plastic
+//! rolling loss, preserving the snap-only behavior of this owner.
 
 use super::{JkrSnapHeat, JkrSnapHeatControls, JkrSnapHeatError, Receiver};
 use fs_blake3::ContentHash;
@@ -20,11 +22,12 @@ use fs_contact::normal_patch::adhesive::rolling::{
     events::{JkrRollingEventReport, JkrRollingEventState, SourceJkrRollingEvents},
 };
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
-use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
-use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
-use std::{collections::BTreeMap, sync::Arc};
+use fs_tribo::{HeatPartition, TriboError, WorkLedger};
+use std::sync::Arc;
 
+/// Explicit plastic rolling loss plus both release channels in one caloric impulse.
+pub mod dissipation;
 /// Atomic native-body recoil, original lifecycle and finite-cell snap transfer.
 pub mod native;
 
@@ -212,120 +215,15 @@ impl<'s> JkrRollingSnapHeat<'s> {
     /// Rolling plastic loss stays with its explicit source account, unconverted;
     /// only outgoing snap release uses this binding's declared partition.
     /// Every source, receiver, caloric, budget or cancellation refusal is atomic.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn propose<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
         expected: JkrRollingSnapHeatStamp,
         segments: &[JkrRollingSnapSegment],
         controls: JkrSnapHeatControls,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<JkrRollingSnapHeatCandidate<'s, 'm>, JkrRollingSnapHeatError> {
-        checkpoint()?;
-        if expected != self.stamp {
-            return Err(JkrSnapHeatError::HistoryMismatch.into());
-        }
-        if segments.is_empty()
-            || segments.len() > controls.maximum_segments
-            || thermal.time_s() < self.accepted_time_s
-            || [
-                controls.cell_energy_tolerance_j,
-                controls.thermal_energy_tolerance_j,
-                controls.transfer_energy_tolerance_j,
-            ]
-            .iter()
-            .any(|value| !value.is_finite() || *value < 0.0)
-        {
-            return Err(JkrSnapHeatError::Invalid("invalid segment, clock or heat budget").into());
-        }
-        let revision = self
-            .stamp
-            .revision
-            .checked_add(1)
-            .ok_or(JkrSnapHeatError::Invalid("history version exhausted"))?;
-        self.admit_receivers(thermal)?;
-        let mut state = self.stamp.state.clone();
-        let mut reports = Vec::with_capacity(segments.len());
-        let mut normal_release = WorkLedger::default();
-        let mut rolling_release = WorkLedger::default();
-        let mut work = WorkLedger::default();
-        let mut normal_release_ledger = self.normal_release_ledger;
-        let mut rolling_release_ledger = self.rolling_release_ledger;
-        for segment in segments {
-            checkpoint()?;
-            let step = match *segment {
-                JkrRollingSnapSegment::NormalIndentation(delta) => {
-                    self.source.advance_normal(&state, delta)?
-                }
-                JkrRollingSnapSegment::RollingAngleIncrement(angle) => {
-                    self.source.advance_rolling(&state, angle)?
-                }
-            };
-            let (next, report) = step.into_parts();
-            let normal =
-                DissipationStep::from_work(report.normal_released_energy_j, self.partition)?;
-            let rolling =
-                DissipationStep::from_work(report.rolling_released_energy_j, self.partition)?;
-            normal_release.record(normal)?;
-            rolling_release.record(rolling)?;
-            normal_release_ledger.record(normal)?;
-            rolling_release_ledger.record(rolling)?;
-            work.record(normal)?;
-            work.record(rolling)?;
-            reports.push(report);
-            state = next;
-        }
-        let heat = BTreeMap::from([
-            (self.receivers[0].cell, work.surface_a_heat_j()),
-            (self.receivers[1].cell, work.surface_b_heat_j()),
-        ]);
-        let (thermal, audit) = thermal.apply_heat_j(
-            &heat,
-            controls.cell_energy_tolerance_j,
-            controls.thermal_energy_tolerance_j,
-            &mut checkpoint,
-        )?;
-        let residual = (Dd::from_f64(work.surface_a_heat_j())
-            + Dd::from_f64(work.surface_b_heat_j())
-            + Dd::from_f64(work.other_work_j())
-            - Dd::from_f64(work.dissipated_work_j())
-            + Dd::from_f64(audit.residual_j))
-        .to_f64();
-        if !residual.is_finite() || residual.abs() > controls.transfer_energy_tolerance_j {
-            return Err(JkrSnapHeatError::TransferBalance(residual).into());
-        }
-        let report = JkrRollingSnapHeatReport {
-            initial_state: self.stamp.state.clone(),
-            final_state: state.clone(),
-            segments: reports,
-            normal_release,
-            rolling_release,
-            work,
-            outside_destination: self.outside_destination.clone(),
-            thermal: audit,
-            transfer_residual_j: residual,
-        };
-        let history = Self {
-            source: self.source.clone(),
-            caloric: self.caloric,
-            receivers: self.receivers,
-            partition: self.partition,
-            outside_destination: self.outside_destination.clone(),
-            stamp: JkrRollingSnapHeatStamp {
-                source: self.stamp.source,
-                revision,
-                state,
-            },
-            accepted_time_s: thermal.time_s(),
-            normal_release_ledger,
-            rolling_release_ledger,
-        };
-        checkpoint()?;
-        Ok(JkrRollingSnapHeatCandidate {
-            history,
-            thermal,
-            report,
-        })
+        dissipation::propose_snap(self, thermal, expected, segments, controls, checkpoint)
     }
 
     /// Publish the source cycle, separate release ledgers and original finite
