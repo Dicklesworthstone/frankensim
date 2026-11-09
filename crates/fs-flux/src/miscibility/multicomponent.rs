@@ -33,6 +33,10 @@ mod solve;
 /// Composition accuracy over complete physical intervals with bounded work.
 pub mod adaptive;
 
+/// Original liquid material properties retained through accepted endpoints.
+#[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+pub mod material;
+
 /// Fixed cell geometry; the common concentration sets its molar capacity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MulticomponentMiscibilityCell {
@@ -665,5 +669,7 @@ fn log_ratio(a: f64, b: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
+mod precision_tests;
 #[cfg(test)]
 mod tests;

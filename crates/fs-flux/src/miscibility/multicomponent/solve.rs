@@ -79,7 +79,7 @@ pub(super) fn rates(
                 ));
             }
             let mut jump = Sum::default();
-            jump.add(log_ratio(right[s], left[s]))?;
+            jump.add(ideal_chemical_jump(left, right, s)?)?;
             for t in 0..n {
                 jump.add(finite(
                     network.owner.chi[s * n + t] * (right[t] - left[t]),
@@ -93,10 +93,7 @@ pub(super) fn rates(
         for s in 0..n {
             poll(cancelled)?;
             for t in s + 1..n {
-                let pair = finite(
-                    (((jumps[s] - jumps[t]) * mean[s]) * mean[t]) / face.distance_m,
-                    "balanced chemical-potential force pair",
-                )?;
+                let pair = pair_force(jumps[s] - jumps[t], mean[s], mean[t], face.distance_m)?;
                 driving[s].add(pair)?;
                 driving[t].add(-pair)?;
             }
@@ -243,6 +240,131 @@ fn product3(a: f64, b: f64, c: f64) -> Result<f64> {
         ((factors[0] * factors[2]) * factors[1]).copysign(a),
         "paired species transfer",
     )
+}
+
+/// Retain the original law's abundant-carrier complement convention. A carrier
+/// may round to one while the other independent components remain real traces.
+/// Differencing those other components also retains nearby carrier potentials
+/// without subtracting two almost equal absolute logarithms.
+pub(super) fn ideal_chemical_jump(left: &[f64], right: &[f64], species: usize) -> Result<f64> {
+    if left[species] <= 0.5 && right[species] <= 0.5 {
+        return finite(
+            log_ratio(right[species], left[species]),
+            "ideal chemical jump",
+        );
+    }
+    let mut left_other = Sum::default();
+    let mut right_other = Sum::default();
+    let mut difference = Sum::default();
+    for s in 0..left.len() {
+        if s != species {
+            left_other.add(left[s])?;
+            right_other.add(right[s])?;
+            difference.add(left[s] - right[s])?;
+        }
+    }
+    let left_other = left_other.value()?;
+    let right_other = right_other.value()?;
+    let value = if left[species] > 0.5 && right[species] > 0.5 {
+        let difference = difference.value()?;
+        let relative = difference.abs() / (1.0 - left_other.max(right_other));
+        let rounded = 1.0 + relative;
+        let logarithm = if rounded == 1.0 {
+            relative
+        } else {
+            ln(rounded) * (relative / (rounded - 1.0))
+        };
+        logarithm.copysign(difference)
+    } else {
+        let logarithm = |x: f64, others: f64| {
+            if x <= 0.5 {
+                ln(x)
+            } else if others < 1e-4 {
+                // Same bounded trace expansion as the original solution law.
+                -others
+                    * (1.0 + others * (0.5 + others * (1.0 / 3.0 + others * (0.25 + others * 0.2))))
+            } else {
+                ln(1.0 - others)
+            }
+        };
+        logarithm(right[species], right_other) - logarithm(left[species], left_other)
+    };
+    finite(value, "original carrier chemical jump")
+}
+
+/// Preserve a representable force even when a trace product underflows before
+/// division by distance. Ordinary values keep the original operation order;
+/// otherwise exact binary decomposition postpones range rounding until the end.
+/// A truly unrepresentable nonzero pair refuses rather than becoming zero force.
+pub(super) fn pair_force(contrast: f64, left: f64, right: f64, distance: f64) -> Result<f64> {
+    if !contrast.is_finite() || !positive(left) || !positive(right) || !positive(distance) {
+        return Err(MulticomponentMiscibilityError::Arithmetic(
+            "finite chemical force factors required",
+        ));
+    }
+    if contrast == 0.0 {
+        return Ok(contrast);
+    }
+    let mut direct = contrast;
+    let mut ordinary = direct.is_normal();
+    for factor in [left, right] {
+        direct *= factor;
+        ordinary &= direct.is_normal();
+    }
+    direct /= distance;
+    ordinary &= direct.is_normal();
+    if ordinary {
+        return Ok(direct);
+    }
+    let mut mantissa = 1.0;
+    let mut exponent = 0_i32;
+    for value in [contrast.abs(), left, right] {
+        let (part, power) = binary_parts(value);
+        mantissa *= part;
+        exponent += power;
+        if mantissa >= 2.0 {
+            mantissa *= 0.5;
+            exponent += 1;
+        }
+    }
+    let (part, power) = binary_parts(distance);
+    mantissa /= part;
+    exponent -= power;
+    if mantissa < 1.0 {
+        mantissa *= 2.0;
+        exponent -= 1;
+    }
+    let magnitude = if exponent > 1023 {
+        f64::INFINITY
+    } else if exponent >= -1022 {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else if exponent >= -1075 {
+        (mantissa * f64::from_bits(((exponent + 2045) as u64) << 52)) * f64::MIN_POSITIVE
+    } else {
+        0.0
+    };
+    if !positive(magnitude) {
+        return Err(MulticomponentMiscibilityError::Arithmetic(
+            "nonzero chemical force is unrepresentable",
+        ));
+    }
+    Ok(magnitude.copysign(contrast))
+}
+
+/// Exact m*2^e with 1<=m<2 for each admitted normal or subnormal factor.
+fn binary_parts(value: f64) -> (f64, i32) {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & 0x000f_ffff_ffff_ffff;
+    if exponent != 0 {
+        (f64::from_bits((1023_u64 << 52) | fraction), exponent - 1023)
+    } else {
+        let highest = 63 - fraction.leading_zeros();
+        (
+            fraction as f64 / (1_u64 << highest) as f64,
+            highest as i32 - 1074,
+        )
+    }
 }
 
 /// a ln(a/b)-a+b, retaining the quadratic response near coincident amounts.

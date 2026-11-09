@@ -3,6 +3,8 @@
 
 #[path = "miscibility_material/diffusivity.rs"]
 mod diffusivity;
+#[path = "miscibility_material/multicomponent.rs"]
+mod multicomponent;
 #[path = "miscibility_material/nonisothermal.rs"]
 mod nonisothermal;
 #[path = "miscibility_material/phase_field.rs"]

@@ -1,4 +1,8 @@
-//! Conservative finite-rate binary miscibility on a closed finite-volume graph.
+//! Conservative finite-rate liquid miscibility on closed finite-volume graphs.
+//!
+//! The binary owners below resolve phase separation and thermal transport.
+//! [`multicomponent`] connects the original complete regular-solution law to
+//! coupled Maxwell–Stefan spatial mixing of convex multicomponent liquids.
 //!
 //! The original homogeneous regular-solution law supplies bulk chemical energy;
 //! positive square-gradient energy regularizes spinodal decomposition. Cells
@@ -41,10 +45,10 @@ mod solve;
 
 pub mod adaptive;
 pub mod advection;
-/// Locally nonisothermal, entropy-conjugate heat and binary species transport.
-pub mod nonisothermal;
 /// Isothermal finite-volume transport with full multicomponent Maxwell–Stefan coupling.
 pub mod multicomponent;
+/// Locally nonisothermal, entropy-conjugate heat and binary species transport.
+pub mod nonisothermal;
 pub mod temperature;
 pub mod thermal;
 pub mod transport;

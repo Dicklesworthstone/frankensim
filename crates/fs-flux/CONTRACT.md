@@ -9891,3 +9891,38 @@ Vapor occupies the geometric sphere with `m_v=rho_v(T)V` and `U_v=m_v u_v(T)`. T
 The physical acoustic source is displaced-liquid flow `Q_l=4 pi R^2 U_l` and its analytic derivative, not geometric bubble volume rate when phase exchange is present. Stage checks cover radius, actual phase density ratio, liquid/interface/vapor Mach, vapor pressure-relaxation scale, actual original liquid density/viscosity/sound-speed drift, pressure departures, omitted interface enthalpy scales and flat-interface saturation corrections. Surface tension remains explicitly frozen for the declared interface environment. These are applicability screens; the model does not claim an exact nonequilibrium-interface error bound.
 
 This lane assumes a spatially uniform, locally saturated pure vapor and an incompressible frozen bulk liquid. It does not supply noncondensable gas, kinetic phase resistance, nucleation, resolved liquid conduction, finite liquid thermal storage, Kelvin equilibrium, shock/collapse jets or phase-changing Keller-Miksis dynamics. Source: Sullivan et al., JFM 948 (2022), Eq. 2.1, with the opposite mass-flux sign convention. All 87 focused native cavitation tests passed, including five new groups covering stationary equilibrium, independent differential balances and recoil, nonlinear heating/cooling, refinement/analytic liquid-flow derivative, and failed/cancelled proposal rollback.
+
+### Original liquid materials for multicomponent spatial mixing
+
+`miscibility::multicomponent::material` binds an accepted numerical field to
+its original `MulticomponentLiquidSolutionLaw`. The complete thermodynamic
+model, canonical species and all original molar masses must agree. Independently
+reconstructed identical numerical laws are admitted; the exact borrowed
+material law is then retained through every candidate.
+
+Every returned cell is resolved through that original law at the evolved full
+composition and prescribed temperature, preserving fixed pressure, chart axes,
+selected property claims and source refusals. Source mass divided by original
+density must agree with the rigid numerical volume within the explicit retained
+allowance. A late source-domain, density/volume or cancellation refusal publishes
+no candidate. The adapter qualifies completed endpoints, not every internal
+adaptive trial, and performs no local phase flash.
+
+The original numerical full-pair diffusivity matrices remain authored data.
+Binary-only composition charts and stationary-solvent aqueous diffusion sources
+are not reinterpreted as general multicomponent liquid diffusivities. Material
+receipt allocation has its own explicit cell-count bound.
+
+Material regressions were source-reviewed and formatted but not executed in this
+environment: the actual-source material dependency closure remains blocked by a
+SIGKILL while compiling the pinned `asupersync` dependency, including the prior
+single-thread compiler attempt. This is not a passing material build claim.
+
+The finite-face force also retains the original abundant-carrier complement
+logarithm when a carrier fraction rounds to one. Range-safe binary scaling
+preserves representable trace driving forces across extreme geometry ratios;
+a truly unrepresentable nonzero force refuses explicitly. The ordinary force
+path retains direct arithmetic. Four independent precision regression groups
+bring the focused numerical suite to 107 passing tests; this does not change
+the separate unexecuted material-test status above.
+
