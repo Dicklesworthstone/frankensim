@@ -182,10 +182,16 @@ impl ImplicitConductionChain<'_> {
             }
         }
         checkpoint()?;
+        // The operating temperatures are the ones the stationary rates were taken at.
+        let temperatures_k = self
+            .ids
+            .iter()
+            .map(|&id| thermal.temperature_k(id))
+            .collect::<core::result::Result<Vec<_>, _>>()?;
         Ok(ThermalImpedanceModel {
             ids: self.ids.clone(),
             time_s: thermal.time_s,
-            temperatures_k: self.ids.iter().map(|id| rates.temperatures[id]).collect(),
+            temperatures_k,
             temperature_per_energy_k_j: slopes,
             outward_tangent_per_s: tangent,
             budget,

@@ -6,6 +6,7 @@
 //! Common temperatures use the original monotone caloric laws and sharp latent
 //! intervals. No bath, heat source, advection, elapsed time or work is invented.
 
+#[path = "isolated/caloric.rs"]
 pub mod caloric;
 use super::*;
 pub use caloric::{CaloricEquilibriumControls, CaloricEquilibriumError};

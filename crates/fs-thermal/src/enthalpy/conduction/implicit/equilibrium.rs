@@ -18,6 +18,8 @@ use super::harmonic::{ThermalImpedanceBudget, ThermalImpedanceError, ThermalImpe
 use super::*;
 
 /// Conserved original storage in closed, disconnected conducting components.
+// implicit.rs loads this file through #[path], so a bare `mod` would resolve beside it.
+#[path = "equilibrium/isolated.rs"]
 pub mod isolated;
 
 /// Bounded nonlinear work and physical heat-rate acceptance, in watts.
