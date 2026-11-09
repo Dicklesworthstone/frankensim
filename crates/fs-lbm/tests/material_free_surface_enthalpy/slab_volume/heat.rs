@@ -2,6 +2,9 @@
 #[path = "heat/bath.rs"]
 mod bath;
 
+#[path = "heat/reservoir.rs"]
+mod reservoir;
+
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::volume::{
     FreeSurfaceSlabHeatControls, FreeSurfaceSlabHeatError,

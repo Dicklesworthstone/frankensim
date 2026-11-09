@@ -13,6 +13,9 @@ mod balance;
 /// Fixed-bath/applied-power heating with the same native mechanical-work split.
 pub mod bath;
 
+/// Reciprocal original finite-reservoir exchange, then native mechanical work.
+pub mod reservoir;
+
 /// One authored heat interval and its original source/pressure accuracy limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceSlabHeatControls {
@@ -218,26 +221,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         checkpoint(gate, cx)?;
         self.admit_uniform_slab_sources(supplied_heat_j)?;
         let prepared = self.prepare_uniform_slab_heat_state(anchored_face, controls, gate, cx)?;
-        let solution = balance::solve(
-            prepared.mass,
-            supplied_heat_j,
-            controls.net_specific_enthalpy_bracket_j_kg,
-            controls.maximum_heat_defect_j,
-            controls.maximum_source_evaluations,
-            |increment| prepared.pressure_response(increment, gate, cx),
-        )
-        .map_err(|failure| match failure {
-            balance::Failure::Invalid(what) => FreeSurfaceSlabHeatError::Invalid(what),
-            balance::Failure::Evaluation(error) => FreeSurfaceSlabHeatError::Native(error),
-            balance::Failure::Balance {
-                evaluations,
-                residual_j,
-            } => FreeSurfaceSlabHeatError::Balance {
-                evaluations,
-                residual_j,
-            },
-        })?;
-        prepared.finish(solution, supplied_heat_j, gate, cx)
+        prepared.with_supplied_heat(supplied_heat_j, gate, cx)
     }
 
     // All heat-source entries share the SAME native geometry, inertia and
@@ -487,6 +471,36 @@ struct SlabHeatState<'a, 's, 'm> {
 }
 
 impl<'a, 's, 'm> SlabHeatState<'a, 's, 'm> {
+    // A finite contact must resolve its heat on THIS admitted mass/state before
+    // solving work. Keep the original single inertia preparation and root.
+    fn with_supplied_heat(
+        self,
+        supplied_heat_j: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<FreeSurfaceSlabHeatPlan<'a, 's, 'm>, FreeSurfaceSlabHeatError> {
+        let solution = balance::solve(
+            self.mass,
+            supplied_heat_j,
+            self.controls.net_specific_enthalpy_bracket_j_kg,
+            self.controls.maximum_heat_defect_j,
+            self.controls.maximum_source_evaluations,
+            |increment| self.pressure_response(increment, gate, cx),
+        )
+        .map_err(|failure| match failure {
+            balance::Failure::Invalid(what) => FreeSurfaceSlabHeatError::Invalid(what),
+            balance::Failure::Evaluation(error) => FreeSurfaceSlabHeatError::Native(error),
+            balance::Failure::Balance {
+                evaluations,
+                residual_j,
+            } => FreeSurfaceSlabHeatError::Balance {
+                evaluations,
+                residual_j,
+            },
+        })?;
+        self.finish(solution, supplied_heat_j, gate, cx)
+    }
+
     fn pressure_response(
         &self,
         increment: f64,
