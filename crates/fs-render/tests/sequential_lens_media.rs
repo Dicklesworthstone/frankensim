@@ -492,6 +492,10 @@ fn spectral_paraxial_focus_admits_phase_knots_without_inventing_group_derivative
     assert!(material.ior().group_index(550.0).is_err());
     let lens = lens(None, material, None);
     assert_eq!(lens.wavelength_bounds_nm(), (450.0, 650.0));
+    assert_eq!(
+        lens.paraxial_focus_sensitivity_at(550.0),
+        Err(CameraError::SequentialLensOutsideModel)
+    );
     for wavelength in [450.0, 550.0, 650.0] {
         let (focal, focus) = lens.paraxial_focus_at(wavelength).unwrap();
         assert!(focal > 0.0 && focus > 0.09);
@@ -539,6 +543,210 @@ fn spectral_paraxial_focus_refuses_zero_power_and_virtual_objects() {
                 lens.paraxial_focus_at(wavelength),
                 Err(CameraError::SequentialLensOutsideModel)
             );
+            assert_eq!(
+                lens.paraxial_focus_sensitivity_at(wavelength),
+                Err(CameraError::SequentialLensOutsideModel)
+            );
         }
+    }
+}
+
+
+// Closed thick-lens formula for the authored 80/90 mm, +/-20/m surfaces.
+// Differentiating these explicit optical powers is independent of the general
+// matrix recurrence, including its sensor and scene immersion-index terms.
+fn thick_lens_chromatic_oracle(indices: [f64; 3], slopes: [f64; 3]) -> [f64; 4] {
+    let [ns, ng, nc] = indices;
+    let [dns, dng, dnc] = slopes;
+    let p1 = (ng - ns) * 20.0;
+    let p2 = (ng - nc) * 20.0;
+    let dp1 = (dng - dns) * 20.0;
+    let dp2 = (dng - dnc) * 20.0;
+    let power = p1 + p2 - 0.01 * p1 * p2 / ng;
+    let dpower = dp1 + dp2
+        - 0.01 * ((dp1 * p2 + p1 * dp2) / ng - p1 * p2 * dng / ng.powi(2));
+    let b = (0.08 / ns) * (1.0 - 0.01 * p1 / ng) + 0.01 / ng;
+    let db = -0.08 * dns / ns.powi(2) * (1.0 - 0.01 * p1 / ng)
+        - 0.08 / ns * 0.01 * (dp1 / ng - p1 * dng / ng.powi(2))
+        - 0.01 * dng / ng.powi(2);
+    let d = 1.0 - p1 * 0.08 / ns - p2 * b;
+    let dd = -0.08 * (dp1 / ns - p1 * dns / ns.powi(2)) - dp2 * b - p2 * db;
+    [
+        ns / power,
+        0.09 - nc * b / d,
+        dns / power - ns * dpower / power.powi(2),
+        -dnc * b / d - nc * (db * d - b * dd) / d.powi(2),
+    ]
+}
+
+#[test]
+fn chromatic_focus_gradient_matches_thick_lens_and_native_ray_differences() {
+    with_cx(|cx, _| {
+        for immersed in [false, true] {
+            let parameters = if immersed {
+                [[1.1, 0.003], [1.8, 0.01], [1.3, 0.002]]
+            } else {
+                [[1.0, 0.0], [1.48, 0.006], [1.0, 0.0]]
+            };
+            let [sensor, interior, scene] = parameters;
+            let prescription = lens(
+                immersed.then(|| cauchy(sensor[0], sensor[1], 0.0)),
+                cauchy(interior[0], interior[1], 0.0),
+                immersed.then(|| cauchy(scene[0], scene[1], 0.0)),
+            );
+            let indices = |wavelength: f64| {
+                let inv_um2 = 1.0 / (wavelength * 1e-3).powi(2);
+                parameters.map(|[a, b]| a + b * inv_um2)
+            };
+            let exact_focus = |wavelength: f64| {
+                let ray = |height, slope| {
+                    prescription
+                        .trace_ray(
+                            cx,
+                            Ray {
+                                origin: Point3::new(height, 0.0, 0.0),
+                                dir: Vec3::new(slope, 0.0, 1.0),
+                            },
+                            wavelength,
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .ray
+                };
+                let [ns, _, nc] = indices(wavelength);
+                let height = 1e-7;
+                let parallel = ray(height, 0.0);
+                let axial = ray(0.0, 1e-7);
+                (
+                    -ns * height * parallel.dir.z / (nc * parallel.dir.x),
+                    axial.origin.z - axial.origin.x * axial.dir.z / axial.dir.x,
+                )
+            };
+            for wavelength in [450.0_f64, 650.0] {
+                let sensitivity = prescription
+                    .paraxial_focus_sensitivity_at(wavelength)
+                    .unwrap();
+                let inv_um2 = 1.0 / (wavelength * 1e-3).powi(2);
+                let slopes = parameters.map(|[_, b]| -2.0 * b * inv_um2 / wavelength);
+                let expected = thick_lens_chromatic_oracle(indices(wavelength), slopes);
+                near(sensitivity.focal_length_m, expected[0], 3e-14);
+                near(sensitivity.object_focus_m, expected[1], 3e-14);
+                near(
+                    sensitivity.focal_length_derivative_m_per_nm,
+                    expected[2],
+                    5e-16,
+                );
+                near(
+                    sensitivity.object_focus_derivative_m_per_nm,
+                    expected[3],
+                    5e-16,
+                );
+                assert_eq!(
+                    (sensitivity.focal_length_m, sensitivity.object_focus_m),
+                    prescription.paraxial_focus_at(wavelength).unwrap()
+                );
+
+                // Only this independent oracle uses a finite difference.
+                // The production query evaluates the original local derivative.
+                let step_nm = 0.05;
+                let lower = exact_focus(wavelength - step_nm);
+                let upper = exact_focus(wavelength + step_nm);
+                near(
+                    sensitivity.focal_length_derivative_m_per_nm,
+                    (upper.0 - lower.0) / (2.0 * step_nm),
+                    4e-10,
+                );
+                near(
+                    sensitivity.object_focus_derivative_m_per_nm,
+                    (upper.1 - lower.1) / (2.0 * step_nm),
+                    4e-10,
+                );
+            }
+            assert_eq!(prescription.reference_wavelength_nm(), 550.0);
+        }
+    });
+}
+
+#[test]
+fn chromatic_focus_gradient_retains_nonvisible_source_band_and_endpoint_slopes() {
+    let ior = TabulatedIor::try_new_in_band(
+        core::array::from_fn(|i| {
+            let wavelength = 1000.0 + 100.0 * i as f64;
+            DielectricIorSample::try_new_in_band(
+                wavelength,
+                1.8 - 0.0001 * (wavelength - 1000.0),
+            )
+            .unwrap()
+        }),
+        100.0,
+    )
+    .unwrap();
+    let material = DielectricGlass::new(
+        ior,
+        BeerLambertAbsorption::CLEAR,
+        GlassProvenance::Custom,
+    );
+    let prescription = SequentialLens::try_new(
+        1300.0,
+        &[
+            surface(0.08, 20.0, Some(material)),
+            surface(0.09, -20.0, None),
+        ],
+    )
+    .unwrap();
+    assert_eq!(prescription.wavelength_bounds_nm(), (1000.0, 1800.0));
+    for wavelength in [1000.0, 1225.0, 1800.0] {
+        let sensitivity = prescription
+            .paraxial_focus_sensitivity_at(wavelength)
+            .unwrap();
+        let expected = thick_lens_chromatic_oracle(
+            [1.0, 1.8 - 0.0001 * (wavelength - 1000.0), 1.0],
+            [0.0, -0.0001, 0.0],
+        );
+        near(sensitivity.focal_length_m, expected[0], 3e-14);
+        near(sensitivity.object_focus_m, expected[1], 3e-14);
+        near(
+            sensitivity.focal_length_derivative_m_per_nm,
+            expected[2],
+            5e-16,
+        );
+        near(
+            sensitivity.object_focus_derivative_m_per_nm,
+            expected[3],
+            5e-16,
+        );
+    }
+    for wavelength in [
+        1000.0_f64.next_down(),
+        1800.0_f64.next_up(),
+        550.0,
+        0.0,
+        f64::NAN,
+        f64::INFINITY,
+    ] {
+        assert_eq!(
+            prescription.paraxial_focus_sensitivity_at(wavelength),
+            Err(CameraError::SequentialLensOutsideModel)
+        );
+    }
+}
+
+#[test]
+fn nondispersive_immersion_has_exactly_zero_chromatic_focus_gradient() {
+    let prescription = lens(
+        Some(glass(1.1, 0.0)),
+        glass(1.8, 0.0),
+        Some(glass(1.3, 0.0)),
+    );
+    for wavelength in [380.0, 550.0, 780.0] {
+        let sensitivity = prescription
+            .paraxial_focus_sensitivity_at(wavelength)
+            .unwrap();
+        assert_eq!(sensitivity.focal_length_derivative_m_per_nm, 0.0);
+        assert_eq!(sensitivity.object_focus_derivative_m_per_nm, 0.0);
+        assert_eq!(
+            (sensitivity.focal_length_m, sensitivity.object_focus_m),
+            prescription.paraxial_focus_at(wavelength).unwrap()
+        );
     }
 }

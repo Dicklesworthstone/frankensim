@@ -5115,6 +5115,40 @@ and virtual-object results refuse. Focused regressions compare independent
 thick-lens formulas and exact near-axis Snell rays in vacuum and dispersive
 immersion media, plus spectral support and phase-only knot behavior.
 
+`SequentialLens::paraxial_focus_sensitivity_at` propagates the analytic first
+vacuum-wavelength derivative through the same reduced-angle transfer, in one
+allocation-free traversal. Signed focal and object-conjugate derivatives are in
+metres per nanometre and include both original immersion exteriors. The original
+phase/group laws supply the derivatives without wavelength perturbation or
+refitting. Undefined source-table derivatives refuse while ordinary phase-only
+focus remains available. Coating phase, finite-aperture aberrations, ghosts and
+diffraction retain their separate models.
+
+`SequentialLens::refocused_for_object` explicitly translates the complete
+authored prescription to image a prescribed finite axial plane with a fixed
+sensor. The caller supplies inclusive mechanical travel and an absolute
+paraxial object-focus tolerance. The original thick-system matrix yields both
+conjugate positions; double-double coefficients and stable quadratic roots
+retain cancellation-sensitive terms. The nearest admissible position wins,
+with the lower signed shift breaking an exact tie. Positive power, finite
+arithmetic, original spectral support, ordered cap bounds wholly between
+sensor and object, and the actual focus recomputed from rounded translated
+coordinates are required. A currently virtual conjugate may be repositioned
+into a real one; an unreachable target explicitly refuses.
+
+The returned `SequentialLensFocus` owns the complete new prescription and
+reports requested/achieved distance and common axial shift. Its reference
+wavelength is the explicit focusing wavelength, so the existing
+`PhysicalCamera::with_sequential_lens` directly consumes that same focus.
+Surface shapes, original media, stops, compact/spectral coatings and ghost
+sampling remain intact; the input prescription is unchanged. This operation
+moves the whole lens, not selected internal groups, and does not choose scene
+targets or optimize finite-aperture spot size. Regression cases cover vacuum
+and dispersive immersion, the native exact-Snell camera path, both conjugates,
+travel/refusal boundaries, retained optical metadata and physical length
+scaling. Chromatic-gradient cases compare closed thick-lens laws and near-axis
+exact rays, including nonvisible source support and derivative-domain refusals.
+
 `LensSurface::with_coating` binds the existing coherent dielectric coating
 owner at each physical hit, with layers explicitly ordered sensor to scene.
 Its original Fresnel/Mueller response retains spectral interference, s/p phase

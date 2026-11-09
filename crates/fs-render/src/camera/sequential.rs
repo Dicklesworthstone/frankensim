@@ -6,8 +6,8 @@
 //! authored explicitly; the original constructor retains index-one exteriors.
 //! The direct transmitted image is the default. An explicit proposal also
 //! admits incoherent two-reflection ghost paths through these same surfaces.
-//! Higher-order ghosts, coherent bulk etalons, diffraction and automatic
-//! focusing remain separate models.
+//! Higher-order ghosts, coherent bulk etalons, diffraction and scene-based
+//! autofocus remain separate models.
 //!
 //! We sample the actual rear cap, not a guessed exit-pupil bounding box. The
 //! projected-area to sensor-solid-angle Jacobian retains obliquity and clipping
@@ -33,6 +33,10 @@ pub use coating::{LensCoating, LensCoatingLayer};
 mod ghost;
 pub use ghost::LensGhostPath;
 use ghost::{GhostSampling, PathSteps};
+mod focus;
+pub use focus::SequentialLensFocus;
+mod paraxial;
+pub use paraxial::ParaxialFocusSensitivity;
 
 /// A rotationally symmetric surface, ordered from sensor to scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -591,64 +595,6 @@ impl SequentialLens {
     /// current positive-focus camera, but remain usable through `trace_ray`.
     pub fn reference_focus(&self) -> Result<(f64, f64), CameraError> {
         self.paraxial_focus_at(self.reference_wavelength_nm)
-    }
-
-    /// Sensor-side effective focal length and axial object focus, in metres,
-    /// at an explicitly admitted vacuum wavelength. The object focus is
-    /// measured from the sensor, not from the last vertex or a principal plane.
-    /// Differences between wavelengths expose longitudinal chromatic aberration
-    /// without changing the prescription's reference focus or tracing probe rays.
-    ///
-    /// This uses the original phase indices of every bulk medium, including
-    /// both exteriors, with the reduced-angle coordinates `(height, n*angle)`.
-    /// It needs no group index or spectral derivative, so an admitted tabulated
-    /// phase-index knot remains usable even when its derivative is undefined.
-    /// The complete lens wavelength band, including attached coatings, applies.
-    ///
-    /// This is the paraxial direct-image limit. Aperture clipping, finite-angle
-    /// aberrations, coating phase, ghosts and diffraction do not alter this
-    /// geometric focus. Afocal/diverging systems, virtual object focus and
-    /// unrepresentable results refuse with `SequentialLensOutsideModel`, as
-    /// they do for [`Self::reference_focus`]. Exact rays retain their own model.
-    pub fn paraxial_focus_at(&self, wavelength_nm: f64) -> Result<(f64, f64), CameraError> {
-        let (lo, hi) = self.wavelength_bounds_nm;
-        if !wavelength_nm.is_finite()
-            || wavelength_nm <= 0.0
-            || wavelength_nm < lo
-            || wavelength_nm > hi
-        {
-            return Err(CameraError::SequentialLensOutsideModel);
-        }
-        let (mut a, mut b, mut c, mut d) = (1.0, 0.0, 0.0, 1.0);
-        let sensor_index = self
-            .sensor_medium
-            .map_or(Ok(1.0), |glass| glass.ior().eval(wavelength_nm))
-            .map_err(|_| CameraError::SequentialLensOutsideModel)?;
-        let (mut z, mut n) = (0.0, sensor_index);
-        for surface in self.surfaces() {
-            let travel = (surface.vertex_z_m - z) / n;
-            a += travel * c;
-            b += travel * d;
-            let next = surface
-                .medium_after
-                .map_or(Ok(1.0), |glass| glass.ior().eval(wavelength_nm))
-                .map_err(|_| CameraError::SequentialLensOutsideModel)?;
-            let power = (n - next) * surface.curvature_per_m;
-            c += power * a;
-            d += power * b;
-            z = surface.vertex_z_m;
-            n = next;
-        }
-        let focal = -sensor_index / c;
-        let beyond_front = -n * (b / d);
-        let focus = z + beyond_front;
-        if ![focal, beyond_front, focus]
-            .iter()
-            .all(|v| v.is_finite() && *v > 0.0)
-        {
-            return Err(CameraError::SequentialLensOutsideModel);
-        }
-        Ok((focal, focus))
     }
 
     /// Trace a ray from the sensor plane in local SI coordinates. Aperture
