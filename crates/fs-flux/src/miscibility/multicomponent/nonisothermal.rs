@@ -40,6 +40,10 @@ mod solve;
 /// Coupled composition and local-temperature accuracy over a physical interval.
 pub mod adaptive;
 
+/// Original material sources refreshed at every accepted local temperature.
+#[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+pub mod material;
+
 /// Independent kinetic data in the original network's canonical face order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MulticomponentNonisothermalFace {

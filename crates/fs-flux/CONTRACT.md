@@ -10465,3 +10465,31 @@ Final storage, resistor loss, pressure/reaction work and original dynamic-law re
 External energies/powers remain J/m and W/m, while the nested density-step inventories already include declared depth. Multiply external accounts by that depth for total J/W.
 Physical resistor loss and the reported BDF1 numerical energy defect remain separate from transported caloric inventory; no external EOS, material reservoir inventory or thermal deposition is implied.
 Original transport/hydraulic error owners and late cancellation refuse the complete fluid/storage result atomically. Two-step physical-oracle regressions cover heterogeneous inertia, both compliance histories, normalization, per-port work, storage-driven reverse flow and immutable refusal.
+
+## Original-source local-temperature multicomponent material fields
+
+`ResolvedMulticomponentMiscibilityField::bind_nonisothermal` requires the exact
+original liquid-law instance retained by the supplied multicomponent caloric
+law. It preserves canonical species/molar masses, the original interaction
+model and pure Cp sources, fixed pressure, geometry, cell-count budget and
+source-volume allowance. Mixture transport Cp is never substituted for the
+original pure-liquid calorics. Face conductivity and heats of transport remain
+explicit numerical data.
+
+Fixed and adaptive molecular/heat candidates first complete the numerical
+transaction, then qualify every endpoint through the original material law
+at its actual local temperature and independent component amounts. Source
+identity, composition axes and selected receipts remain observable. A late
+source-domain, density/volume or cancellation refusal publishes no endpoint.
+Final source qualification is not a claim that every rejected trial remains
+inside a material-card domain.
+
+Two added original-source regression groups exercise variable pure Cp plus
+B/T enthalpy, actual-temperature transport properties, exact liquid/caloric
+identity, pressure and geometry, unchanged numerical receipts, cancellation
+and replay, and late original composition/volume refusal. They are formatted
+and source-reviewed. The selected material metadata check was killed while
+compiling the prerequisite asupersync crate, before these adapters/tests were
+type-checked; no material test execution or full workspace validation is
+claimed. The separate numerical lane has 134 passing miscibility tests and
+seven passing original-source caloric transport cases.
