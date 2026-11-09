@@ -1,7 +1,6 @@
 //! Restore the affine AL state and independently re-solve its physical endpoints.
 use super::*;
 use fs_ascent::projected_al::{ProjectedAlCheckpoint, ProjectedAlSample, ProjectedAlState};
-use fs_topopt::sdf3::robust::envelope::affine_load_space::constraints::AffineLoadSpaceConstraintPolicy3;
 use std::io::Write as _;
 
 pub(super) const KIND: &str = "study-sdf3-affine-load-space-checkpoint";
@@ -115,7 +114,7 @@ fn gradient(report: &JsonValue, spec: &Spec) -> Result<AffineLoadSpaceGradientCh
         params: spec.schedule[0],
         goal: GOAL,
         options: config.options.gradient_check,
-        constraints: AffineLoadSpaceConstraintPolicy3::default(),
+        constraints: config.constraints().policy(),
         baseline_objective: real(data, "baseline_objective")?,
         baseline_constraint: real(data, "baseline_constraint")?,
         objective_relative_error: real(data, "objective_relative_error")?,

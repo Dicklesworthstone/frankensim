@@ -2012,8 +2012,61 @@ optimizer checkpoint remain exportable but refuse resume. Failed restoration
 and work lost after a crash cannot be durably charged; previous accepted
 results remain intact. The example is
 `examples/marquee/bracket-3d-affine-load-space.fsim`. Authority is Estimated,
-with no stress, buckling, continuum error, manufacturing tolerance, global
-design-optimality, safety or experimental-validation claim.
+with no buckling, continuum error, manufacturing tolerance, global
+design-optimality, safety or experimental-validation claim. The base form
+declares no strength limit; the optional section below adds sampled strength.
+
+### Joint strength under self-weight and uncertain loads
+
+The affine minimum-material mode accepts an optional final `affine-strength`
+section after `material-acceleration`, with these ordered fields:
+
+```lisp
+(affine-strength
+  :stress-limit-pa 40.0
+  :relaxation-power 1.0
+  :aggregation-power 8.0
+  :max-stress-point-fields 100000
+  :joint-sharpness 40.0)
+```
+
+The explicit allowable is physical stress data, never inferred from Young's
+modulus. Each retained bulk quadrature point maximizes its own affine quadratic
+von Mises stress over the complete load ball, including material self-weight.
+The native unweighted p-norm conservatively bounds both relaxed and physical
+sampled stresses in exact arithmetic. Different points can have different
+adverse coefficients; the compliance witness alone does not enforce strength.
+This is a sampled, fixed-grid estimate with numerical oracle diagnostics,
+not a continuum maximum or floating-point enclosure.
+
+Compliance and strength use the native joint upper aggregate and share the
+prepared stiffness and offset/basis primal fields. Stress adjoints factor by
+that same field family, using at most the basis dimension plus one solves
+regardless of sample count. The initial independent directional audit checks
+the complete joint derivative. Only accepted points passing every original
+physical cap and the joint aggregate can enter the feasible archive or report
+feasible completion; AL stopping tolerances do not relax the caps.
+
+Admission requires a stress cap in `[1e-12,1e15]` Pa, `1 <= q < penal`,
+aggregation power in `[2,64]`, and joint sharpness in `[1e-6,1e6]`. The eroded
+projected density floor must stay above native ersatz stress foldback; a raw
+density floor alone is not sufficient. `max-stress-point-fields` is bounded
+by 1,000,000 and counts every sampled point for the common offset and every
+uncertain basis field, not just the number of geometric points. It contributes
+to the memory admission envelope and is enforced before native sample output
+allocation. The source section is refused in other optimizer modes.
+
+Reports retain selected and last-accepted joint constraints, stress aggregates,
+sampled maxima, counts, and distinct governing physical and relaxed witnesses
+with their load coefficients, positions, stress tensors and oracle residuals.
+The sealed design also retains compact per-cell envelope maxima and sample
+counts. Continuation preserves the entire strength policy, original gradient
+experiment, work allowances and feasible archive, and independently re-solves
+both retained endpoints with strength enabled. Changing the load basis,
+allowable, relaxation, aggregation or joint sharpness changes the problem and
+cannot reuse the old optimizer state. The numerical demonstration is
+`examples/marquee/bracket-3d-affine-strength.fsim`; its illustrative allowable
+does not certify a physical part.
 
 ### Scientific field export for 3-D studies
 

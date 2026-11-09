@@ -96,6 +96,23 @@ pub struct AffineLoadSpaceDesignPoint3 {
     pub rho: Vec<f64>,
     pub evaluation: AffineLoadSpaceEvaluation3,
 }
+impl AffineLoadSpaceDesignPoint3 {
+    /// The actual conservative joint constraint, including every declared
+    /// response and strength family. Nonpositive values pass the numerical
+    /// aggregate; use `physically_feasible` to also check original physical caps.
+    pub fn constraint(&self, goal: AffineLoadSpaceDesignGoal3) -> Result<f64, EvaluationStop> {
+        constraint_value(&self.evaluation, goal)
+    }
+
+    /// Check the bound load policy, complete joint constraint and every original
+    /// physical cap with the same rule used by the native feasible archive.
+    /// Optimizer stopping tolerances never excuse a physical-cap excess.
+    #[must_use]
+    pub fn physically_feasible(&self, goal: AffineLoadSpaceDesignGoal3,
+        policy: &AffineLoadSpace3) -> bool {
+        self.evaluation.policy == *policy && physical_feasible(&self.evaluation, goal, policy)
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffineLoadSpaceDesignIteration3 {
     pub iteration: usize,

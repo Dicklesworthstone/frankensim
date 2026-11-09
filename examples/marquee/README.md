@@ -129,6 +129,44 @@ dilated volume. Under self-weight this does not establish erosion as the worst
 manufacturing realization. The example uses numerical demonstration inputs
 and makes the same limited linear-elastic claims as the robust example above.
 
+## Joint compliance and strength with uncertain loads
+
+`bracket-3d-affine-strength.fsim` adds a physical stress allowable to the
+self-weight/load-ball problem. Run and continue it with the same commands:
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-strength.fsim strength.db --budget 2
+frankensim --json report study-<receipt-hash> strength.db
+frankensim --json study --resume study-<receipt-hash> strength.db --budget 2
+```
+
+The final `affine-strength` section declares `stress-limit-pa`,
+`relaxation-power`, `aggregation-power`, `max-stress-point-fields` and
+`joint-sharpness`, in that order. The example uses a numerical demonstration
+allowable of 40 Pa. Choose the allowable from the intended material model;
+the modulus does not determine it.
+
+Strength is evaluated over the entire affine load ball at every retained bulk
+quadrature point. Each point has its own adverse load coefficients, which can
+differ from the worst-compliance coefficients. The conservative p-norm includes
+both relaxed and physical stress envelopes. Native primal fields are shared;
+stress adjoints scale with the number of load-basis fields rather than with
+the number of sample points. Both compliance and strength must pass before a
+design enters the least-material feasible archive.
+
+Reports show selected and last-accepted stress aggregates, physical and
+relaxed governing witnesses, numerical oracle diagnostics and the complete
+joint constraint. Resume retains the strength policy and initial joint
+gradient evidence under the original budgets. The point-field allowance
+counts the common offset plus all uncertainty columns at every sampled point;
+it is not a geometric point count. The density floor must remain above the
+native stress foldback threshold after eroded projection.
+
+These are fixed-grid sampled strength estimates. They do not bound the
+continuum stress maximum or certify safety, fatigue, buckling or manufacturing
+tolerance. The example's geometry, stiffness and allowable are demonstration
+inputs, and its feasibility must be assessed from the actual computed report.
+
 ## Thermal cooling-hole radius study
 
 `thermal-2d.fsim` runs normalized scalar Poisson physics through the CLI,

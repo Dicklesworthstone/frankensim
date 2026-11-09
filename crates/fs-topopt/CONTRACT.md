@@ -546,6 +546,13 @@ feasibility uses the actual cap, independently of AL stopping tolerances, and
 `recheck_best` recomputes the complete envelope without advancing the optimizer.
 No monotonic feasibility restoration is assumed for design-dependent gravity.
 
+`AffineLoadSpaceDesignPoint3::constraint(goal)` exposes the same complete
+conservative constraint used by the optimizer, including declared response
+and strength families. `physically_feasible(goal, policy)` checks the bound
+load policy, that aggregate and every original physical cap with the native
+archive rule. Callers should use these accessors instead of reconstructing
+feasibility from compliance alone.
+
 `AffineLoadSpaceDesignCheckpoint3` and the matching `restore` variants retain
 the original AL multiplier, penalty, spectral schedule, gradient experiment,
 accepted history and physically feasible incumbent. Restoration binds exact
