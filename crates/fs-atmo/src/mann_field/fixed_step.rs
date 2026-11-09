@@ -459,6 +459,39 @@ impl FixedStepMannField {
         )
     }
 
+    /// Prepare a zero-net-flux turbulent inlet from these accepted quadratures
+    /// and their actual physical phase. The underlying source is unchanged.
+    pub fn inflow_frame(
+        &self,
+        patch: inflow::MannInflowPatch,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<inflow::MannInflowFrame, Refusal> {
+        inflow::prepare(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            patch,
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    /// Atomically refresh a matching inlet frame from this accepted clock.
+    pub fn refresh_inflow_frame(
+        &self,
+        frame: &mut inflow::MannInflowFrame,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
+        inflow::refresh(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            frame,
+            cancelled,
+        )
+    }
+
     fn sample_with_gains(
         &self,
         point_m: [f64; 3],

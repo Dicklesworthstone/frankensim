@@ -42,6 +42,9 @@ mod importance;
 /// Exact OU evolution on a separately declared fixed physical time step.
 pub mod fixed_step;
 
+/// Finite-patch inflow fields with zero instantaneous turbulent mass flux.
+pub mod inflow;
+
 /// Harmonic no-penetration correction above a plane in the Mann frame.
 pub mod wall;
 use wall::MannPlaneWall;
@@ -716,6 +719,41 @@ impl HomogeneousMannField {
             core::array::from_fn(|i| self.paths[i].amplitudes()),
             point_m,
             observation,
+            cancelled,
+        )
+    }
+
+    /// Prepare a derived inflow field whose exact normal average over one
+    /// fixed patch is zero. This preserves the original OU state and draws
+    /// no new noise; its explicitly constrained covariance differs from Mann's.
+    pub fn inflow_frame(
+        &self,
+        patch: inflow::MannInflowPatch,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<inflow::MannInflowFrame, Refusal> {
+        inflow::prepare(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            patch,
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    /// Refresh a matching derived inlet from this accepted source. Publication
+    /// of all projected quadratures and time is atomic on success.
+    pub fn refresh_inflow_frame(
+        &self,
+        frame: &mut inflow::MannInflowFrame,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
+        inflow::refresh(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            frame,
             cancelled,
         )
     }

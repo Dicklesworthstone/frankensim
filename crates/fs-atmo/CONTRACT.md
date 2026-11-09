@@ -735,3 +735,54 @@ Appendix A:
 https://ntrs.nasa.gov/api/citations/20010067781/downloads/20010067781.pdf.
 The anelastic background constraint is described by the ERF governing equations:
 https://erf.readthedocs.io/en/latest/theory/GoverningEquations.html.
+
+## Turbulent inlet with prescribed bulk mass flow
+
+`mann_field::inflow::{MannInflowPatch, MannInflowFrame}` supplies a derived
+field whose area-averaged normal turbulent velocity is zero through one fixed,
+nondegenerate parallelogram, up to representable roundoff. The caller's
+prescribed mean inflow remains separate, while local normal fluctuations and
+spatial gradients remain available. Both original temporal owners expose
+`inflow_frame` and `refresh_inflow_frame`.
+
+The existing exact face filter defines the linear functional `L*a` on the
+four original unit-variance Gaussian modal quadratures. The frame applies
+`a_c = a - L^T*(L*a)/(L*L^T)`, giving their exact one-time Gaussian law
+conditioned on zero patch flux. Its covariance changes to
+`I - L^T*L/(L*L^T)`; modal independence and the unconditioned Mann covariance
+no longer apply. No variance or energy is restored. The coefficients use a
+scaled norm and the actual accepted advection phase on either clock.
+An identically zero functional leaves the source amplitudes unchanged.
+
+The retained transverse basis preserves local solenoidality. Existing point,
+gradient, exact spatial-moment and Favre-moment kernels consume the projected
+amplitudes. Because the original anelastic construction has
+`rho*u = rho_ref*v`, the same projection also makes the turbulent mass-flux
+integral vanish when the whole inlet lies inside the density domain.
+Subdivided faces recover the same whole-patch flux and represented momentum.
+
+Preparation and refresh cost O(modes), and point sampling uses the original
+O(modes) kernel. Successful refresh and queries allocate no storage or draw
+randomness. Numerical capacity includes copied spectral geometry, face gains,
+projection coefficients, and all accepted/trial arrays: 168 bytes per mode
+on this layout, with actual capacities checked. Cancelled/refused refresh
+preserves the prior projected amplitudes and time. Restore the original
+source checkpoint and rebuild the derived frame for identical replay.
+
+Six focused groups verify independent Gaussian-matrix and numerical-area
+oracles, changed full two-point covariance, local gradients and closed-surface
+conservation, subdivided inlet/Favre fluxes, both clocks, rollback,
+geometry/storage/source admission, and the zero-functional identity.
+All 94 atmospheric unit tests and 47 integration tests passed in the complete
+native atmospheric build with real pinned dependencies; full Cargo/workspace
+validation was not run. This is an instantaneous projection of the original
+OU history, not conditioning its complete path on every future constraint.
+It introduces no wall model, new stochastic process or empirical inflow
+calibration.
+
+Gaussian construction reference: Hoffman & Ribak (1991), DOI 10.1086/186160;
+original paper https://adsabs.harvard.edu/pdf/1991ApJ...380L...5H .
+Existing CFD motivation: OpenFOAM's DFSEM inlet source explicitly corrects
+flow rate,
+https://api.openfoam.com/2506/turbulentDFSEMInletFvPatchVectorField_8C_source.html .
+This projection is distinct from its rescaling implementation.
