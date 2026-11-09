@@ -11,6 +11,11 @@
 //! bond after a geometry change. A changed normal approach requires a compatible
 //! geometry owner before another phase. Relative rolling, slip, debonding and
 //! detached trajectories are outside this attached full-stick source.
+//! [`temperature`] continues the same loaded source at held geometry with
+//! explicit normal, shear, torsional and surface parameter work.
+
+/// Original material-temperature continuation of the loaded four-coordinate pair.
+pub mod temperature;
 
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::normal_patch::adhesive::mixed_mode::{
@@ -305,6 +310,12 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
 
     pub const fn contact(&self) -> RigidJkrCombinedContact<'a> {
         self.contact
+    }
+    pub const fn bodies(&self) -> &[RigidBodyState; 2] {
+        &self.before
+    }
+    pub const fn properties(&self) -> &[MassProperties; 2] {
+        &self.properties
     }
     pub const fn approach_m(&self) -> f64 {
         self.approach_m

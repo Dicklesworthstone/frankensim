@@ -10081,3 +10081,26 @@ Reaction increments are recovered using the original QR owner with the admitted 
 A fully locked mechanism has a legitimate empty reduced response and recovers support forces without probing fictitious dynamic directions. Repeated loads reuse the native dynamic and reaction factors. Singular resonance, unrepresentable arithmetic, exceeded work or payload bounds, violated physical residuals, and cancellation refuse publication without changing the source model. The existing modal and unconstrained response APIs retain their admission rules.
 
 Five original-mechanism regressions and one additional native modal power regression were authored and independently source-reviewed. They remain uncompiled and unexecuted during the executor outage.
+
+## Native four-coordinate adhesive temperature continuation
+
+`jkr_combined::temperature` retains the original normal/vector-shear/twist
+native pair through an authenticated material-temperature update. The existing
+native history check admits the actual body association, held poses, marker
+datum and all four rates first. The original combined source then re-evaluates
+one relaxed contact radius and supplies all four signed storage changes.
+No normal-only or independently refreshed mode response substitutes for it.
+
+Bodies, momenta, mass/inertia, full 4x4 mobility, contact frame, material and
+reaction arms, coordinates, rates, pending COM/angular travel, time, steps and
+budgets remain fixed. Only the source binding and cached combined response
+change. Native energy tolerance applies to parameter-work closure, and final
+cancellation leaves no successor. A temperature update cannot repair stale
+geometry or consume pending finite travel.
+
+Three integration groups exercise all four loads and independent temperatures,
+continued native recoil, full off-diagonal mobility, common native motion and
+nonzero pending travel/chronology, exact round-trip retention, and transactional
+foreign/wrong-source/stale-body/stale-geometry/cancellation refusal. Pinned
+formatting, recursive parsing and source review passed. These cross-crate tests
+were not compiled or run under the session's memory/disk constraint.

@@ -2,6 +2,9 @@
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
 
+#[path = "adhesive_jkr_combined/temperature.rs"]
+mod temperature;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{
     JkrEnvelope, SourceJkrSphereContact,
