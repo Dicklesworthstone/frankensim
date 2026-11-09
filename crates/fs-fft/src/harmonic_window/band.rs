@@ -22,7 +22,10 @@
 //! NIST DLMF 10.60.7 and 10.53.1 supply the expansion and power series:
 //! <https://dlmf.nist.gov/10.60.E7>, <https://dlmf.nist.gov/10.53.E1>.
 
-use super::{Dd, HarmonicWindow, HarmonicWindowProfile, WindowError, check_amplitude, checked};
+use super::{
+    Dd, HarmonicWindow, HarmonicWindowProfile, WindowError, check_amplitude, checked,
+    half_product_sum,
+};
 
 mod basis;
 mod workspace;
@@ -190,12 +193,12 @@ impl PreparedUniformHarmonicBand {
 }
 
 fn weighted_cross(left: [Dd; 2], right: [Dd; 2], weight: Dd) -> Result<[Dd; 2], WindowError> {
-    let real = checked(
+    let mut real = checked(
         weighted_product(left[0], right[0], weight)? + weighted_product(left[1], right[1], weight)?,
     )?;
     // A norm needs two scalar squares, and its imaginary part is exactly zero.
     // Sharing this path preserves identical scalar and Jones diagonal moments.
-    let imaginary = if left == right {
+    let mut imaginary = if left == right {
         Dd::ZERO
     } else {
         checked(
@@ -203,6 +206,16 @@ fn weighted_cross(left: [Dd; 2], right: [Dd; 2], weight: Dd) -> Result<[Dd; 2], 
                 - weighted_product(left[0], right[1], weight)?,
         )?
     };
+    // At the proper peak half-weight, combine subnormal components before
+    // rounding away each half. Normal modal products keep the path above.
+    if weight == HALF {
+        if real.hi.abs() < f64::MIN_POSITIVE {
+            real = half_product_sum(left[0], right[0], left[1], right[1], false)?;
+        }
+        if left != right && imaginary.hi.abs() < f64::MIN_POSITIVE {
+            imaginary = half_product_sum(left[1], right[0], left[0], right[1], true)?;
+        }
+    }
     Ok([real, imaginary])
 }
 

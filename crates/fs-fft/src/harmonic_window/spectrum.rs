@@ -331,17 +331,16 @@ impl PreparedHarmonicProductSpectrum {
             }
             let fa = Dd::from_f64(input.left_frequency);
             let fb = Dd::from_f64(input.right_frequency);
-            let half = Dd::from_f64(0.5);
             let difference = [
-                checked(half * checked(a[0] * b[0] + a[1] * b[1])?)?,
-                checked(half * checked(a[1] * b[0] - a[0] * b[1])?)?,
+                half_product_sum(a[0], b[0], a[1], b[1], false)?,
+                half_product_sum(a[1], b[0], a[0], b[1], true)?,
             ];
             let order = tones.len();
             tones.push(tone(checked(fa - fb)?, difference, order, angular)?);
             if input.law == HarmonicProductLaw::Real {
                 let sum = [
-                    checked(half * checked(a[0] * b[0] - a[1] * b[1])?)?,
-                    checked(half * checked(a[0] * b[1] + a[1] * b[0])?)?,
+                    half_product_sum(a[0], b[0], a[1], b[1], true)?,
+                    half_product_sum(a[0], b[1], a[1], b[0], false)?,
                 ];
                 let order = tones.len();
                 tones.push(tone(checked(fa + fb)?, sum, order, angular)?);
@@ -512,3 +511,6 @@ fn spectrum_poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ProductSpec
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod normalization_tests;

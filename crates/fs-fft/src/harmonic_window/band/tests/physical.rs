@@ -168,6 +168,10 @@ fn scaled_products_preserve_proper_range_and_tiny_real_components() {
         .unwrap();
     close(cross[0], tiny * 5e299, 2e-15);
     assert_eq!(cross[1], Dd::ZERO);
+    let subnormal = analytic
+        .mode_cross_parts_dd_scaled(0, field(tiny, tiny), field(1.0, 1.0), HALF)
+        .unwrap();
+    assert_eq!(subnormal, [Dd::from_f64(tiny), Dd::ZERO]);
     for scale in [Dd::ZERO, Dd::from_f64(-1.0)] {
         assert_eq!(
             analytic.mode_cross_parts_dd_scaled(0, field(1.0, 0.0), field(1.0, 0.0), scale),

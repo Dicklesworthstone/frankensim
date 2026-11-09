@@ -1340,3 +1340,7 @@ coherent duplicate/conjugate carriers, stiff decay, budgets and cancellation.
 They were authored and reviewed but not compiled or run: the execution
 environment became unavailable. Independent equation checks are not native
 Rust test evidence.
+
+## Physical peak normalization across numerical range
+
+Product-spectrum preparation and proper-field pair contraction preserve the physical factor of one half when an unnormalized intermediate would overflow. Finite ordinary DD component sums retain their existing contraction order, including representable subnormal sums. Only overflowing intermediates move the half into individual products, scaling the larger operand to preserve a small partner. The exact half-weight modal cross path also combines subnormal components before rounding away each half. Native clocks, real sum tones, signed cross moments, source statistics and admission limits are unchanged; truly unrepresentable physical results remain refusals. `harmonic_window/spectrum/normalization_tests.rs` covers finite proper power, real difference/sum signs, signed pair fallback, tiny products and genuine overflow.

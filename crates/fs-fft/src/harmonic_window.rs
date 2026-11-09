@@ -13,8 +13,7 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod band;
 pub use band::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
-    PreparedUniformHarmonicBand,
+    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, PreparedUniformHarmonicBand,
     UniformHarmonicBandRef, UniformHarmonicBandWorkspace,
 };
 mod spectrum;
@@ -26,6 +25,7 @@ pub use spectrum::{
 pub use spectrum::{
     AngularHarmonicSpectrumTerm, HarmonicCausalIntegral, HarmonicSpectrumTermLimits,
 };
+
 pub use spectrum::{
     HarmonicDecayIntervalLimits, HarmonicDecayMoments, HarmonicPhaseInterval,
     MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval,
@@ -685,9 +685,18 @@ impl ProperHarmonicProduct {
         }
         let [ar, ai] = a;
         let [br, bi] = b;
-        let real = checked(ar * br + ai * bi)?;
-        let imaginary = checked(ai * br - ar * bi)?;
-        checked(checked(real * self.real)? - checked(imaginary * self.imaginary)?)
+        let real = ar * br + ai * bi;
+        let imaginary = ai * br - ar * bi;
+        if let (Ok(real), Ok(imaginary)) = (checked(real), checked(imaginary)) {
+            return checked(checked(real * self.real)? - checked(imaginary * self.imaginary)?);
+        }
+        // The kernel already contains the physical peak factor 1/2. Move it
+        // into an overflowing field product, preserving the ordinary path's
+        // DD contraction and decorrelation when both components fit.
+        let real = half_product_sum(ar, br, ai, bi, false)?;
+        let imaginary = half_product_sum(ai, br, ar, bi, true)?;
+        let two = Dd::from_f64(2.0);
+        checked(checked(real * (two * self.real))? - checked(imaginary * (two * self.imaginary))?)
     }
 }
 
@@ -704,6 +713,36 @@ fn checked(x: Dd) -> Result<Dd, WindowError> {
     } else {
         Err(WindowError::Unrepresentable)
     }
+}
+
+// Physical peak normalization of (a*b +/- c*d). Keep a representable sum
+// before halving: two half-subnormal products can have a representable sum.
+// Only an overflowing intermediate needs the half moved into each product;
+// halve its larger operand so a tiny operand beside a large one survives.
+fn half_product_sum(a: Dd, b: Dd, c: Dd, d: Dd, subtract: bool) -> Result<Dd, WindowError> {
+    let half = Dd::from_f64(0.5);
+    let sum = if subtract {
+        a * b - c * d
+    } else {
+        a * b + c * d
+    };
+    if let Ok(sum) = checked(sum) {
+        return checked(half * sum);
+    }
+    let product = |left: Dd, right: Dd| {
+        checked(if left.abs().lt(right.abs()) {
+            left * (half * right)
+        } else {
+            (half * left) * right
+        })
+    };
+    let first = product(a, b)?;
+    let second = product(c, d)?;
+    checked(if subtract {
+        first - second
+    } else {
+        first + second
+    })
 }
 
 // Mathematical 2*pi to DD precision, using fs-math's existing pi-tail
