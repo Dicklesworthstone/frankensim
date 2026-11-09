@@ -23,6 +23,9 @@ use fs_math::dd::Dd;
 mod cycle;
 pub use cycle::PreparedCommutatedSwitchCycle;
 
+/// Centered complementary PWM with explicit non-overlap and physical gate timing.
+pub mod pwm;
+
 /// Authored static forward law I=max(0,(V_source-drain−Vf)/Rd).
 /// Reverse current is carried only by the separate OFF/ON channel resistance;
 /// no avalanche, recovery charge or exponential leakage is inferred.

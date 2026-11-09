@@ -480,6 +480,33 @@ state and seven-heat refinement, resolved winding ripple heat, changing commands
 over shared caches, actual branch curtailment, numerical work limits, and
 transactional retry.
 
+## Centered complementary PWM gate programs
+
+`circuit::converter::commutation::pwm::CenterAlignedPwm` prepares a bounded
+periodic gate program for the existing independent-device terminal contract.
+Each leg supplies its own high fraction and dead time. Symmetric blanking
+places half of each dead interval on each side of the ideal centered edge,
+so actual interior high/low ON times are `d*T-t_dead` and
+`(1-d)*T-t_dead`. This convention is not turn-ON-only delay.
+Exact zero/one fractions hold the low/high gate continuously.
+
+The fixed eight-edge/nine-interval representation allocates no heap storage.
+Coincident transitions apply atomically, including zero-dead-time OFF/ON pairs.
+Compensated duration accumulation preserves every represented edge and the
+period; actual channel-ON and both-OFF durations are exposed separately.
+An erased interior pulse or unrepresentable positive blanking interval refuses
+instead of clipping duty or silently suppressing switching.
+
+Programs repeat with the same boundary gates. `PwmProgram::admit_after`
+checks direct concatenation; a different boundary gate command requires an
+explicit transition interval. The native commutation owner still resolves all
+currents, diode distortion, heat, storage and source/load work. The scheduler
+claims neither feedback stability nor device transition/recovery/gate dynamics.
+Focused regressions cover the maximal two-leg deck, coincident edges, held
+endpoints and boundary refusal, invalid/erased pulses, an independent triangular
+carrier and time-rescaling oracle, and native diode-cycle parity with a
+hand-authored physical gate deck.
+
 ## Explicit dead-time and body-diode conduction
 
 `circuit::converter::commutation::PreparedCommutatedSwitchCycle`
