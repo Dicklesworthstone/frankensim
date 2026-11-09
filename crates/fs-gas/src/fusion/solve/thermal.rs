@@ -1,6 +1,8 @@
 //! Original-source thermal operators within the finite-fuel midpoint solve.
 
-use super::super::thermal::{confined_energy, evaluate, exchange_energy, radiated_energy};
+use super::super::thermal::{
+    admit_confinement_resolution, confined_energy, evaluate, exchange_energy, radiated_energy,
+};
 use super::*;
 
 pub(super) use super::super::thermal::ThermalSources as Sources;
@@ -28,6 +30,19 @@ impl Problem<'_> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, DtFusionError> {
+        if self.transport.energy_confinement.is_some() {
+            let reacting = old.limiting_fuel > 0.0;
+            admit_confinement_resolution(
+                self.transport,
+                sources,
+                dt,
+                [
+                    reacting || self.heating.heavy_power.value() != 0.0,
+                    (reacting && self.heating.alpha_electron_fraction > 0.0)
+                        || self.heating.electron_power.value() != 0.0,
+                ],
+            )?;
+        }
         let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
         let first = self.thermal_step(supplied, 0.5 * dt, sources, cancelled)?;
         let burned = self.frozen_step(first, dt, sources.temperatures[0])?;

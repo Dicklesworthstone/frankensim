@@ -199,6 +199,80 @@ fn g1_stiff_confinement_reaches_finite_exteriors_without_negative_energy() {
 }
 
 #[test]
+fn g1_stiff_confinement_resolves_continuous_heating_in_each_pool() {
+    let (model, initial) = source::plasma([0.0, 0.0, 5e19], 1.0, [5.0, 5.0]);
+    let original = initial.clone();
+    let duration = 0.1;
+    let power = 10_000.0;
+    let tau = 0.001;
+    for pool in 0..2 {
+        // The other pool is unforced and exactly relaxes to its original
+        // temperature. Its much shorter time must not force tiny global steps.
+        let mut times = [1e-12; 2];
+        times[pool] = tau;
+        let transport = DtFusionTransport {
+            energy_confinement: Some(law(times, [5.0; 2])),
+            ..DtFusionTransport::default()
+        };
+        let mut heat = heating(0.8);
+        if pool == 0 {
+            heat.heavy_power = Power::new(power);
+        } else {
+            heat.electron_power = Power::new(power);
+        }
+        let mut c = controls();
+        c.initial_step_s = duration;
+        c.maximum_step_s = duration;
+        let result = advance_dt_fusion_with_transport(
+            &initial,
+            &model,
+            heat,
+            &transport,
+            Time::new(duration),
+            c,
+            || false,
+        )
+        .unwrap();
+        let before = [initial.heavy_internal_energy(), initial.electron_internal_energy()];
+        let after = [
+            result.state().heavy_internal_energy(),
+            result.state().electron_internal_energy(),
+        ];
+        // Independent forced linear ODE, not a composition of solver maps:
+        // U-Uext = P*tau*(1-exp(-t/tau)). Saturated coarse/fine split maps
+        // previously agreed within 7e-9 J while losing this entire 10 J store.
+        let expected = power * tau * -(-duration / tau).exp_m1();
+        close(after[pool].value() - before[pool].value(), expected, 5e-5, 1e-7);
+        close(after[1 - pool].value(), before[1 - pool].value(), 2e-13, 1e-7);
+        let outgoing = [
+            result.balance().heavy_transport_energy_out_j,
+            result.balance().electron_transport_energy_out_j,
+        ];
+        close(outgoing[pool], power * duration - expected, 1e-6, 1e-7);
+        assert!(result.balance().rejected_steps > 0);
+        assert!(result.balance().total_energy_residual_j.abs() < 1e-6);
+
+        // Insufficient resolution must refuse, never certify that false
+        // equilibrium. The caller's state stays unchanged in both cases.
+        c.minimum_step_s = duration;
+        c.maximum_steps = 1;
+        assert_eq!(
+            advance_dt_fusion_with_transport(
+                &initial,
+                &model,
+                heat,
+                &transport,
+                Time::new(duration),
+                c,
+                || false,
+            ),
+            Err(DtFusionError::StepBudget),
+        );
+    }
+    assert_eq!(initial, original);
+}
+
+#[test]
 fn g3_confinement_changes_burn_while_all_thermal_and_nuclear_accounts_close() {
     let (model, initial) = source::plasma([5e19, 5e19, 0.0], 1.0, [10.0, 5.0]);
     let mut transport = thermal_sources(&initial);

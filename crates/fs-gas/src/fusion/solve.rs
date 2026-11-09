@@ -532,6 +532,16 @@ impl<'a> Problem<'a> {
                     continue;
                 }
                 Ok((_, error)) => Some(error),
+                Err(DtFusionError::StepBudget) => {
+                    // This is a local frozen-source resolution refusal. The
+                    // outer attempt/minimum-step budgets remain authoritative.
+                    balance.rejected_steps += 1;
+                    step = 0.5 * dt;
+                    if step < self.controls.minimum_step_s {
+                        return Err(DtFusionError::StepBudget);
+                    }
+                    continue;
+                }
                 Err(
                     DtFusionError::OutsideDomain
                     | DtFusionError::Plasma(DtFusionPlasmaErrorV1::Domain(_))

@@ -6,6 +6,84 @@ use crate::fusion::volume::FusionVolumeKnot;
 use fs_qty::Volume;
 
 #[test]
+fn g1_kinetic_rigid_and_volume_paths_resolve_stiff_thermal_heating() {
+    // No fast particles or enabled reactions: this isolates the shared
+    // Maxwellian confinement equation inside both kinetic entrypoints.
+    let grid = AlphaEnergyGrid::new(
+        vec![Energy::new(KEV_J), Energy::new(100.0 * KEV_J)],
+        || false,
+    )
+    .unwrap();
+    let (initial, alpha) = scenario(0.0, &grid);
+    let duration = 0.1;
+    let tau = 0.001;
+    let power = 10_000.0;
+    let thermal = FusionNetworkTransport {
+        energy_confinement: Some(
+            FusionEnergyConfinement::new(
+                Time::new(tau),
+                Time::new(1e-12),
+                initial.background_heavy_temperature(),
+                initial.electron_temperature(),
+            )
+            .unwrap(),
+        ),
+        ..FusionNetworkTransport::default()
+    };
+    let mut heat = heating();
+    heat.heavy_power = Power::new(power);
+    let mut c = controls();
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    c.relative_tolerance = 1e-9;
+    let rigid = advance_kinetic_fusion(
+        &initial,
+        FusionNetworkChannels::NONE,
+        heat,
+        &thermal,
+        &alpha,
+        Time::new(duration),
+        c,
+        || false,
+    )
+    .unwrap();
+    let history = FusionVolumeHistory::new(
+        [0.0, duration]
+            .map(|time| FusionVolumeKnot {
+                time: Time::new(time),
+                volume: initial.volume(),
+            })
+            .to_vec(),
+        || false,
+    )
+    .unwrap();
+    let moving = advance_kinetic_fusion_with_volume(
+        &initial,
+        FusionNetworkChannels::NONE,
+        heat,
+        &thermal,
+        &alpha,
+        &history,
+        c,
+        || false,
+    )
+    .unwrap();
+    for result in [&rigid, &moving] {
+        close(
+            result.state().thermal_heavy_energy().value() - initial.thermal_heavy_energy().value(),
+            power * tau * -(-duration / tau).exp_m1(),
+            2e-4,
+            1e-7,
+        );
+        assert!(result.balance().rejected_steps > 0);
+        assert_eq!(result.state().alpha_amount().value(), 0.0);
+        assert_eq!(result.state().amounts(), initial.amounts());
+        check_accounts(result);
+    }
+    assert_eq!(rigid.state(), moving.state());
+}
+
+#[test]
 fn g3_kinetic_confinement_couples_births_slowing_radiation_and_pressure_work() {
     let (initial, alpha) = scenario(1e16, &grid(5000.0));
     let original = initial.clone();

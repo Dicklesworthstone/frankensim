@@ -16,6 +16,57 @@ fn confinement() -> FusionEnergyConfinement {
 }
 
 #[test]
+fn g1_network_stiff_confinement_retains_the_forced_steady_energy() {
+    let (plasma, initial) = fixture::plasma(MIXED_DENSITY, 0.025, [15.0, 4.0]);
+    let duration = 0.1;
+    let tau = 0.001;
+    let power = 1000.0;
+    let transport = FusionNetworkTransport {
+        energy_confinement: Some(
+            FusionEnergyConfinement::new(
+                Time::new(tau),
+                Time::new(1e-12),
+                initial.heavy_temperature(),
+                initial.electron_temperature(),
+            )
+            .unwrap(),
+        ),
+        ..FusionNetworkTransport::default()
+    };
+    let mut heat = heating();
+    heat.heavy_power = Power::new(power);
+    let mut c = controls();
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    let run = |c| {
+        advance_fusion_network(
+            &initial,
+            &plasma,
+            FusionNetworkChannels::NONE,
+            heat,
+            &transport,
+            Time::new(duration),
+            c,
+            || false,
+        )
+    };
+    let result = run(c).unwrap();
+    let expected = power * tau * -(-duration / tau).exp_m1();
+    close(
+        result.state().heavy_internal_energy().value() - initial.heavy_internal_energy().value(),
+        expected,
+        1e-4,
+        1e-7,
+    );
+    assert!(result.balance().rejected_steps > 0);
+    assert_eq!(result.state().amounts(), initial.amounts());
+    check_accounts(&result);
+    c.minimum_step_s = duration;
+    c.maximum_steps = 1;
+    assert_eq!(run(c), Err(FusionNetworkError::StepBudget));
+}
+
+#[test]
 fn g1_confinement_during_compression_matches_independent_linear_ode() {
     let (plasma, initial) = fixture::plasma(MIXED_DENSITY, 0.025, [15.0, 4.0]);
     let duration = 0.1;

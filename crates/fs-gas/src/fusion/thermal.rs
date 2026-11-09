@@ -17,6 +17,39 @@ pub(super) struct ThermalSources {
     pub(super) radiation_w_per_sqrt_k: f64,
 }
 
+/// Resolve confinement when another split source acts on the same pool.
+/// Saturated full/two-half cooling maps can otherwise agree after erasing a
+/// continuously supplied energy: for U' = P - (U-Uext)/tau, that false fixed
+/// point misses P*tau. Pure relaxation remains exact for arbitrarily large
+/// exposure; an inactive pool must not constrain the other pool's timestep.
+pub(super) fn admit_confinement_resolution(
+    transport: &DtFusionTransport,
+    sources: ThermalSources,
+    dt: f64,
+    other_sources: [bool; 2],
+) -> Result<(), DtFusionError> {
+    let Some(confinement) = transport.energy_confinement else {
+        return Ok(());
+    };
+    let particles = transport.particles.is_some_and(|law| {
+        law.injection_rates_mol_s().iter().any(|rate| *rate > 0.0)
+            || law.removal_hazards().iter().any(|rate| rate.value() > 0.0)
+    });
+    let reciprocal = sources.conductance_w_k > 0.0 || particles;
+    let affected = [
+        other_sources[0] || reciprocal,
+        other_sources[1] || reciprocal || sources.radiation_w_per_sqrt_k > 0.0,
+    ];
+    if affected
+        .iter()
+        .zip(confinement.confinement_times())
+        .any(|(&active, tau)| active && dt > tau.value())
+    {
+        return Err(DtFusionError::StepBudget);
+    }
+    Ok(())
+}
+
 /// Refresh the selected thermal laws at the actual admitted populations and
 /// temperatures. The owning integrator checks their original-bank identity.
 pub(super) fn evaluate(

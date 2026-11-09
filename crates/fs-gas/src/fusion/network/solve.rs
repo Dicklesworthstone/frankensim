@@ -581,6 +581,36 @@ impl<'a> Problem<'a> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Point, [f64; 2]), FusionNetworkError> {
+        if self.transport.energy_confinement.is_some() {
+            let indices = self.plasma.indices();
+            let reacting = FusionReactionV1::ALL.iter().enumerate().any(|(r, reaction)| {
+                sources.events[r].is_some()
+                    && reaction
+                        .reactants()
+                        .iter()
+                        .all(|&s| old.amounts[indices[species_slot(s)]].value > 0.0)
+            });
+            // Existing kinetic alphas and births can heat both baths through
+            // the collision owner surrounding this same source step.
+            let kinetic_heat = self.kinetic_alphas
+                && (old.kinetic_alpha_amount.value > 0.0 || reacting);
+            let electron_products = reacting
+                && sources.events.iter().enumerate().any(|(r, event)| {
+                    event.is_some()
+                        && self.heating.product_electron_fractions[r]
+                            .iter()
+                            .any(|fraction| *fraction > 0.0)
+                });
+            thermal::admit_confinement_resolution(
+                self.transport,
+                sources.thermal,
+                dt,
+                [
+                    reacting || kinetic_heat || self.heating.heavy_power.value() != 0.0,
+                    electron_products || kinetic_heat || self.heating.electron_power.value() != 0.0,
+                ],
+            )?;
+        }
         let mut births = [Sum::default(); 2];
         let supplied = self.exchange_particles(old, 0.5 * dt, cancelled)?;
         let mut next = self.thermal_step(supplied, 0.5 * dt, sources.thermal, cancelled)?;
@@ -941,6 +971,16 @@ impl<'a> Problem<'a> {
                     continue;
                 }
                 Ok((_, error)) => Some(error),
+                Err(FusionNetworkError::StepBudget) => {
+                    // A frozen split source requests finer resolution before
+                    // saturated coarse/fine maps can hide its physical effect.
+                    balance.rejected_steps += 1;
+                    step = 0.5 * dt;
+                    if step < self.controls.minimum_step_s {
+                        return Err(FusionNetworkError::StepBudget);
+                    }
+                    continue;
+                }
                 Err(
                     FusionNetworkError::OutsideDomain
                     | FusionNetworkError::Plasma(DtFusionPlasmaErrorV1::Domain(_))
