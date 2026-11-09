@@ -1260,3 +1260,33 @@ The split regression checks unchanged source/tangent call counts, agreement
 with original island-only derivatives, incomplete and grid-inconsistent port
 refusal, adjoint contraction and cancellation recovery. These remain local
 finite-order derivatives, not stability or harmonic-tail convergence evidence.
+
+### Sampled direct parameter partials of cycle-mean objectives
+
+`PreparedForcedAdjoint::gradient_mean_split_direction` samples a complete
+explicit integrand parameter partial on both original cached AFT trajectories
+and composes it with the existing local-island and linear frequency-port
+partials. The island-only entry holds the prescribed clock/linear port fixed;
+`PreparedAutonomousAdjoint::gradient_mean_island_direction` retains the original
+bordered dual and its solved-frequency chain. The scalar callback holds the
+original Fourier coefficients and phase fixed, includes authored direct
+parameter/time-chart dependence, and does not add the state chain again.
+Autonomous direct partials also hold the unknown frequency fixed.
+
+The shared compensated accumulation forms each physical scalar mean without a
+raw sample sum. Independent explicit-partial agreement is normalized by the
+declared parameter increment and the original objective units. Each grid's own
+mean participates in `q_p - lambda^T R_p`; both the full residual-column change
+and the complete contracted-gradient change retain their original independent
+admission. Separately small objective and residual changes therefore cannot
+hide an excessive combined gradient change. Every scalar is reset to NaN;
+incomplete, nonfinite, refused or cancelled callbacks publish no gradient.
+
+This adds constant scalar scratch and two cached sample passes within the
+existing numerical query allowance. It introduces no baseline source/tangent
+calls, waveform solve, factorization or synthetic state-gradient callback.
+Source callback work/storage retain their existing exclusions, and two-grid
+agreement does not certify the omitted harmonic tail. Four focused regressions
+cover independently scaled physical derivatives, direct and combined aliasing,
+refusal/cancellation recovery, representable extreme DC means, and an autonomous
+cycle-energy direction with an independently known changing-period response.

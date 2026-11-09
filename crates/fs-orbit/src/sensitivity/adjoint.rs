@@ -7,6 +7,8 @@ use super::{
 };
 use fs_math::{dd::Dd, det};
 
+mod mean;
+
 /// One physical objective derivative, without a full waveform-direction solve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForcedObjectiveGradient {
@@ -317,7 +319,18 @@ impl PreparedForcedAdjoint<'_> {
         fine: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ForcedObjectiveGradient> {
-        let mut values = [Dd::from_f64(explicit); 2];
+        self.contract_sampled(direction, [explicit; 2], coarse, fine, cancelled)
+    }
+
+    fn contract_sampled(
+        &self,
+        direction: ForcedSensitivityDirection,
+        explicit: [f64; 2],
+        coarse: &[f64],
+        fine: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ForcedObjectiveGradient> {
+        let mut values = explicit.map(Dd::from_f64);
         let mut direction_sampling_defect = 0.0;
         // The authored phase reference is fixed, so its direct parameter
         // partial is zero. Its weight still participates in the dual solve.

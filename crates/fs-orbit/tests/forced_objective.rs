@@ -13,6 +13,9 @@ use std::cell::Cell;
 
 const OMEGA: f64 = 0.9;
 
+#[path = "forced_objective/mean_partial.rs"]
+mod mean_partial;
+
 fn controls(samples: usize) -> ForcedSensitivityControls {
     ForcedSensitivityControls {
         samples_per_period: samples,

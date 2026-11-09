@@ -84,6 +84,33 @@ impl PreparedAutonomousSensitivity {
 }
 
 impl PreparedAutonomousAdjoint<'_> {
+    /// Complete cycle-mean parameter derivative with its explicit integrand
+    /// partial sampled on both original cached trajectories. The callback
+    /// holds all Fourier coefficients AND omega fixed, includes direct
+    /// physical parameter dependence, and writes a finite scalar at every
+    /// sample. The bordered dual supplies state and solved-frequency chains.
+    ///
+    /// Each grid's direct mean participates in its own physical contraction.
+    /// The independent direct-partial and total-gradient sampling defects use
+    /// the original objective units and derivative allowance. No new source,
+    /// tangent, frequency-column or factorization evaluation occurs.
+    pub fn gradient_mean_island_direction(
+        &mut self,
+        parameter_scale: f64,
+        objective_partial: impl FnMut(f64, &[f64], &mut f64) -> bool,
+        island_direction: impl FnMut(f64, &[f64], &mut [f64]) -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AutonomousObjectiveGradient> {
+        self.adjoint
+            .gradient_mean_island_direction(
+                direction(parameter_scale),
+                objective_partial,
+                island_direction,
+                cancelled,
+            )
+            .map(Into::into)
+    }
+
     /// Original physical balance weights in canonical real coefficient order.
     pub fn residual_weights(&self) -> &[f64] {
         let weights = self.adjoint.residual_weights();

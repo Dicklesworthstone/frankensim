@@ -179,6 +179,78 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn sampled_direct_partial_keeps_the_solved_frequency_chain_once() {
+    for converted in [false, true] {
+        let problem = Cycle::new(converted);
+        let orbit = problem.orbit(0.63);
+        let mut prepared = problem.prepare(&orbit);
+        let baseline = (problem.source_calls.get(), problem.tangent_calls.get());
+        // Q(alpha) = alpha * energy_per_cycle(alpha). Its direct alpha term
+        // coexists with the full state and unknown-period response.
+        let objective = prepared
+            .mean_objective(
+                problem.controls(),
+                |_, x, value, gradient, frequency| {
+                    problem.energy(orbit.omega, x, value, gradient, frequency);
+                    *value *= problem.alpha;
+                    *frequency *= problem.alpha;
+                    for entry in gradient {
+                        *entry *= problem.alpha;
+                    }
+                    true
+                },
+                || false,
+            )
+            .unwrap();
+        let mut adjoint = prepared
+            .prepare_adjoint(
+                &objective.gradient,
+                objective.angular_frequency_partial,
+                problem.objective_unit,
+                || false,
+            )
+            .unwrap();
+        let count = Cell::new(0);
+        let result = adjoint
+            .gradient_mean_island_direction(
+                problem.parameter_unit,
+                |_, x, out| {
+                    count.set(count.get() + 1);
+                    let (x, y) = (x[0] / problem.units[0], x[1] / problem.units[1]);
+                    *out = TAU * problem.clock / orbit.omega
+                        * problem.objective_unit
+                        * (0.4 * (x * x + y * y) + 0.2 * x.powi(4))
+                        / problem.parameter_unit;
+                    true
+                },
+                |_, x, out| {
+                    for j in 0..2 {
+                        out[j] = problem.clock * problem.equations[j] * x[j]
+                            / problem.units[j]
+                            / problem.parameter_unit;
+                    }
+                    true
+                },
+                || false,
+            )
+            .unwrap();
+        let a = problem.alpha;
+        let w = 1.3 + 0.4 * a;
+        let power = 0.4 * a + 0.075 * a * a;
+        let expected = TAU * (power / w + a * ((0.4 + 0.15 * a) / w - 0.4 * power / (w * w)));
+        close(
+            result.derivative * problem.parameter_unit / problem.objective_unit,
+            expected,
+        );
+        assert_eq!(count.get(), 97);
+        assert_eq!(
+            baseline,
+            (problem.source_calls.get(), problem.tangent_calls.get())
+        );
+    }
+}
+
+#[test]
 fn energy_per_cycle_includes_waveform_period_and_independent_units() {
     for converted in [false, true] {
         for phase in [0.0, 0.47, -1.2] {
