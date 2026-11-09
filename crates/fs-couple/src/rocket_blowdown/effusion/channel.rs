@@ -17,9 +17,15 @@
 //! dry mass. Channels can share a wall ID; its mass and storage count once.
 //! The quasistatic, first-order stage holds geometry, normals, fluxes and loads;
 //! repeat with accepted gas/walls to resolve thermal and composition feedback.
+//! Prepared material conduction can connect distinct finite wall inventories;
+//! its equal and opposite heat joins molecular heat before one wall inversion.
+//! Internal conduction changes subsequent escape without adding external thrust.
 //! Rotation, transit delay, spatial gas gradients and continuum pressure thrust
 //! are outside this point-vessel owner. Native source and gross withdrawal
 //! limits remain active, and refusal publishes none of the physical endpoints.
+
+/// Adaptive finite-channel gas, material-wall and vessel evolution.
+pub mod trajectory;
 
 use super::{
     EffusionRocketEnvironment, EffusionRocketError, EffusionRocketSolve, GasRocketState, Sum,
@@ -39,6 +45,7 @@ use fs_material::thermochemical_gas::energy::{
                     GasTransportPaths,
                     effusion::channel::thermal::{
                         FiniteChannelError, FixedVolumeChannelWall,
+                        conduction::ChannelWallConduction,
                         vacuum::{self, FiniteVacuumChannelLink, FiniteVacuumChannelStep},
                     },
                 },
@@ -195,6 +202,39 @@ impl GasRocketState {
         duration_s: f64,
         endpoint: GasEnergySolve,
         controls: EffusionRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<EffusionChannelCandidate<'l, 'p>, EffusionChannelError> {
+        self.advance_effusion_channels_with_conduction(
+            environment,
+            walls,
+            outlets,
+            &[],
+            duration_s,
+            endpoint,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance molecular escape and heat spreading through connected walls.
+    ///
+    /// Each prepared conduction link retains the original wall caloric and
+    /// conductivity sources, aligned transfer distances, area and contact
+    /// resistance. All conductive and molecular heat uses the same initial
+    /// snapshot and one material inversion per affected wall. Wall inventories
+    /// without an outlet may conduct heat and still belong to the dry mass.
+    /// Conductive heat is internal to this vessel; only escaping molecular
+    /// momentum and the explicit environment supply external mechanical loads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_effusion_channels_with_conduction<'l, 'p>(
+        &self,
+        environment: EffusionRocketEnvironment,
+        walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+        outlets: &[EffusionChannelOutlet<'_>],
+        conduction: &[ChannelWallConduction<'_, '_>],
+        duration_s: f64,
+        endpoint: GasEnergySolve,
+        controls: EffusionRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EffusionChannelCandidate<'l, 'p>, EffusionChannelError> {
         poll(&mut cancelled)?;
@@ -247,11 +287,12 @@ impl GasRocketState {
                 wall: outlet.wall,
             })
             .collect();
-        let candidate = vacuum::step_candidate(
+        let candidate = vacuum::step_candidate_with_conduction(
             &BTreeMap::from([(0, self.reservoir.clone())]),
             walls,
             GasTransportPaths::default(),
             &links,
+            conduction,
             duration_s,
             &BTreeMap::from([(0, endpoint)]),
             controls.transport,

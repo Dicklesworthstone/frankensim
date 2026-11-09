@@ -1,4 +1,7 @@
 //! G1/G3/G4: resolved channel recoil, actual finite wall storage and atomic refusal.
+mod conduction;
+mod trajectory;
+
 use super::super::channel::*;
 use super::*;
 use fs_evidence::ValidityDomain;

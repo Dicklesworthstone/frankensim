@@ -11598,3 +11598,97 @@ not inferred. `tests/laminate_harmonic_heat.rs` contains independent startup
 heat and three-cell thermal references plus retained-memory, source, late
 failure, retry and cancellation cases. Source checks do not establish executed
 runtime validation.
+
+## Conducting finite channel walls in molecular vessel recoil
+
+`GasRocketState::advance_effusion_channels_with_conduction` connects the
+existing finite-channel recoil transaction to prepared material conduction
+links. The original no-conduction API delegates with an empty link set. The
+material owner samples all molecular and conductive rates from one original
+snapshot, pools both heat contributions by physical wall ID, and performs one
+original caloric inversion per affected wall. Walls without an outlet can
+participate in conduction; every distinct inventory still fits within the
+vessel's existing dry mass. Original source identities, aligned distances,
+contact resistance, area, and conductivity support remain authoritative.
+
+Conductive heat is an internal transfer. The native accepted gas/wall energy
+account enters the existing complete vessel balance, while only escaping
+molecular momentum drives recoil. No conduction force, second thermal energy,
+or invented external work is added. Its physical effect on molecular escape
+appears when subsequent accepted steps sample the evolving wall temperature.
+All gas, wall, and vessel endpoints remain one atomic candidate.
+
+The model retains fixed geometry, fixed wall composition and reference volume,
+reversible isochoric sensible storage, and quasistatic collisionless transport.
+Each individual bore remains isothermal at its associated wall inventory's
+temperature; the conduction graph resolves heat between separate inventories,
+not a temperature profile along a bore. This does not add wall expansion,
+phase change, rotation, or particle residence time.
+
+Three focused G1/G3/G4 integration tests specify nonlinear original wall
+storage under conduction alone with zero additional force/work; pooled
+molecular and conductive heat with increased subsequent escape energy and
+momentum; and source-basis mismatch plus late cancellation with deterministic
+retry. The workspace implementation passed pinned Rustfmt before executor
+loss. Source recovered from its exact focused edits has received static review;
+its formatting was not rerun after recovery. These material and mechanics
+integration tests have not been compiled or executed in this environment;
+no repository-wide Cargo/DSR result is claimed.
+
+## Adaptive finite-channel recoil with conducting finite walls
+
+`rocket_blowdown::effusion::channel::trajectory` adds
+`GasRocketState::advance_effusion_channels_adaptive` and
+`advance_effusion_channels_with_conduction_adaptive`. Both use one private
+multiwall controller and the original finite-channel/material/mechanics step
+for every full and half trial. Accepted halves supply the next actual gas,
+wall and vessel states; no source flux, geometry or accommodation solve is
+duplicated to construct their impulses. The original thermal/recoil tolerance
+type is reused as `EffusionChannelAdaptiveSolve`.
+
+Local error control includes original species inventories, gas temperature and
+pressure, drift-relative vessel motion, every wall's temperature and storage
+increment, each outlet's separate gas/wall/escaping impulse, accommodation heat
+and source-relative escape energy, total inertial exported moments, separate
+molecular/conductive wall heat, and each directional conduction-link heat.
+Opposed channels or opposing physical heat paths cannot hide an inaccurate
+individual transfer behind their vanishing net result. Conduction-only wall
+inventories remain in the same state and error-control map.
+
+Escaped reference energy uses actual accepted species mass, original caloric
+integrals relative to the fixed window-start temperature, the molecular RT/2
+crossing correction, and original wall accommodation heat. It never subtracts
+large gross formation energies. The window thermal audit independently
+reconstructs original-to-final gas and every material-wall storage; internal
+wall conduction cancels over that complete inventory. Original variable-mass
+mechanical defects and remapping/gravity reserves remain explicit. Actual
+endpoint momentum is checked against accumulated original exported momentum
+and external impulses with compensated arithmetic. Species, mass, momentum
+and energy allowances stay fixed over the complete requested duration; sums
+of absolute defects and reserves cannot buy acceptance through cancellation.
+
+The existing dimensional time, species and drift-relative motion helpers own
+admission and exact final-time handling. Attempted intervals and retained
+accepted half steps are explicitly bounded. Only the reachable original
+temporal refusals allow halving: gross withdrawal, candidate gas caloric
+bracket/convergence failure, or finite-wall inversion/overshoot. Material source,
+geometry, arithmetic and physical-balance errors remain hard refusals. Failed
+windows publish no gas, vessel or wall state. Export tolerances are specific to
+the declared inertial frame; an observer boost need not preserve the adaptive
+partition. These are local first-order numerical estimates, not certified
+global or physical-model error bounds. The existing collisionless, quasistatic
+channel, finite isochoric wall and translating point-vessel qualifications
+remain binding; no entropy is assigned to the absorbing vacuum.
+
+Five G1/G3/G4 integration test groups cover independent continuous monatomic
+partial-accommodation gas/wall/recoil equations; opposed shared-wall mixture
+outlets, beam-driven refinement and exact accepted-history replay; nonlinear
+conduction-only wall convergence and overshoot retry; formation-reference and
+common-boost molecular exports; and fixed-window, work, minimum-step,
+unsupported-source, inactive-wall and cancellation refusals. The completed
+implementation passed pinned rustfmt parsing/checks and scoped whitespace
+checks before the executor became unavailable. The durable recovered source
+retains its pre-format layout; no final formatting pass is asserted for those
+reconstructed blobs. Source/API/physics review is supplementary; these
+cross-crate integration tests have not been compiled or executed, and no full
+Cargo or DSR pass is claimed.
