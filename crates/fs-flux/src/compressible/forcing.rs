@@ -77,6 +77,7 @@ pub(super) fn attempt(
     cfl: f64,
     reconstruction: Reconstruction,
     hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
+    reservoirs: &mut reservoir::FiniteReservoirs,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange2d), Error> {
     for (cell, (source, target)) in states.iter().zip(&mut forcing_work.original).enumerate() {
@@ -106,6 +107,7 @@ pub(super) fn attempt(
         reconstruction,
         Some(controls),
         hydrostatic,
+        reservoirs,
         cancelled,
     )?;
     let (second, endpoint_rate) = kick_field(

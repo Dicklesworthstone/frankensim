@@ -458,6 +458,11 @@ impl Euler2d {
                 "gravity reference must be bound once before evolution",
             ));
         }
+        if self.reservoirs.any() {
+            return Err(Error::Invalid(
+                "finite tanks need declared hydrostatic port potentials",
+            ));
+        }
         let balance = HydrostaticBalance::new(
             &self.gas,
             &self.grid,

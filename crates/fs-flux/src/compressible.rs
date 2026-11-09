@@ -25,6 +25,9 @@ pub use hydrostatic::IsothermalAtmosphere;
 pub mod mixture;
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
 pub mod molecular;
+/// Finite compact pressure tanks sharing the native planar step transaction.
+pub mod reservoir;
+pub use reservoir::{FiniteReservoirBoundary, FiniteReservoirReport};
 /// Volumetric shock propagation with three conservative momentum components.
 pub mod spatial;
 mod stress;
@@ -441,6 +444,7 @@ pub struct Euler2d {
     last_step: Option<StepReport>,
     boundary_impulses: Vec<BoundaryImpulse>,
     hydrostatic: Option<hydrostatic::HydrostaticBalance>,
+    reservoirs: reservoir::FiniteReservoirs,
     work: Workspace,
 }
 impl Euler2d {
@@ -480,6 +484,7 @@ impl Euler2d {
             last_step: None,
             boundary_impulses: allocated(2 * (nx + ny), Totals::default())?,
             hydrostatic: None,
+            reservoirs: reservoir::FiniteReservoirs::default(),
             work: Workspace {
                 primitive,
                 slopes: allocated(8 * n, 0.0)?,
@@ -608,6 +613,12 @@ impl Euler2d {
             self.hydrostatic.as_ref(),
             &mut cancelled,
         )?);
+        rate = rate.max(self.reservoirs.initial_rate(
+            &self.gas,
+            &self.grid,
+            &self.states,
+            &mut cancelled,
+        )?);
         let before = checked_totals(&self.states, self.grid.cell_volume(), &mut cancelled)?;
         let mut source_change = ForceChange2d::default();
         let accepted = cartesian::advance::<Error, _>(
@@ -619,9 +630,20 @@ impl Euler2d {
             |dt, reconstruction, cancelled| {
                 if let Some((force, force_controls, workspace)) = forcing.as_mut() {
                     let (stats, source) = forcing::attempt(
-                        &self.gas, &self.grid, self.boundaries, &self.states,
-                        &mut self.work, workspace, *force, *force_controls,
-                        dt, controls.cfl, reconstruction, self.hydrostatic.as_ref(), cancelled,
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &self.states,
+                        &mut self.work,
+                        workspace,
+                        *force,
+                        *force_controls,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        self.hydrostatic.as_ref(),
+                        &mut self.reservoirs,
+                        cancelled,
                     )?;
                     source_change = source;
                     return Ok(stats);
@@ -637,6 +659,7 @@ impl Euler2d {
                     reconstruction,
                     None,
                     self.hydrostatic.as_ref(),
+                    &mut self.reservoirs,
                     cancelled,
                 )?;
                 source_change = source;
@@ -687,6 +710,7 @@ impl Euler2d {
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
             .copy_from_slice(&self.work.boundary_trial);
+        self.reservoirs.publish();
         self.time += dt;
         self.last_step = Some(report);
         Ok(report)
@@ -705,6 +729,7 @@ fn attempt(
     reconstruction: Reconstruction,
     force_controls: Option<ForceControl2d>,
     hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
+    reservoirs: &mut reservoir::FiniteReservoirs,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange2d), Error> {
     let mut source = ForceChange2d::default();
@@ -721,6 +746,8 @@ fn attempt(
             reconstruction,
             force_controls,
             hydrostatic,
+            reservoirs,
+            final_stage,
             cancelled,
         )?;
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
@@ -768,6 +795,7 @@ fn attempt(
             final_stage,
             cancelled,
         )?;
+        reservoirs.stage(gas, grid, &work.boundary_trial, final_stage, cancelled)?;
         Ok(stats)
     })?;
     if !source
@@ -796,9 +824,13 @@ fn spatial(
     reconstruction: Reconstruction,
     force_controls: Option<ForceControl2d>,
     hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
+    reservoirs: &reservoir::FiniteReservoirs,
+    trial_reservoirs: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let mut stats = StageStats::default();
+    let mut aperture = [0.0; 4];
+    let mut aperture_correction = [0.0; 4];
     for (cell, (p, q)) in primitive.iter_mut().zip(states).enumerate() {
         *p = if let Some(balance) = hydrostatic {
             balance.primitive(gas, grid, cell, *q, cancelled)?
@@ -903,7 +935,21 @@ fn spatial(
             else {
                 unreachable!()
             };
-            match (first_order, boundary) {
+            if let Some(tank) = reservoirs.state(axis, sign, trial_reservoirs) {
+                let flux = if first_order {
+                    gas.reservoir_normal_flux(states[k].normal(axis), tank, sign, &mut *cancelled)?
+                } else {
+                    gas.reservoir_normal_flux_from_primitive(
+                        reconstruct(k, 0.5 * sign), tank, sign, &mut *cancelled,
+                    )?
+                };
+                let slot = 2 * axis + usize::from(sign > 0.0);
+                let value = grid.face_area(SIDES[slot]) * flux.signal_speed - aperture_correction[slot];
+                let next = aperture[slot] + value;
+                aperture_correction[slot] = (next - aperture[slot]) - value;
+                aperture[slot] = next;
+                flux
+            } else { match (first_order, boundary) {
                 (true, BoundaryCondition::Reflecting) => {
                     gas.stationary_wall_normal_flux(states[k].normal(axis), sign, &mut *cancelled)?
                 }
@@ -955,7 +1001,7 @@ fn spatial(
                     reference_velocity_m_s,
                     &mut *cancelled,
                 )?,
-            }
+            } }
         };
         stats.fallback += usize::from(flux.used_hll_fallback);
         if axis == 0 {
@@ -976,6 +1022,9 @@ fn spatial(
         },
         cancelled,
     )?;
+    stats.rate = stats
+        .rate
+        .max(reservoirs.aperture_rate(aperture, trial_reservoirs)?);
     Ok(stats)
 }
 

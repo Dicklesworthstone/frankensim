@@ -10675,6 +10675,51 @@ Port offsets are returned in Pa and retained in the same pressure-adjusted react
 Every trial retains original donor admission, CFL/divergence/storage limits and cancellation. Refusal publishes no density, inventory, flow or controller state; frozen pressure responses are rebuilt when candidate coefficients change.
 Focused native regressions cover heterogeneous accelerating transport, exact accepted endpoint accounting, physical pressure/work under reference-density and depth changes, actual density-dependent inertance, reversed donors, port admission and atomic cancellation.
 
+## Finite pressure tanks on planar frozen gas fields
+
+`Euler2d::with_finite_reservoirs` binds source-owned stationary `Plenum`
+inventories directly to selected physical transmissive sides. All faces of
+one side share its independent rigid, well-mixed tank. The original frozen
+caloric law supplies stagnation inflow, backpressure outflow, choking and
+reversal; outflow retains transverse kinetic energy and incoming energy
+thermalizes in the tank. No fixed gamma or independent pressure law is added.
+
+Tank and field advance together in the existing SSP RK2 transaction. The
+first weighted boundary capture forms the full forward tank stage, and that
+evolved inventory drives the second residual. The final tank receives the
+same native half-weighted mass and complete total-energy impulses that leave
+the field. The fixed tank support receives the Cartesian momentum impulse
+without mechanical work. Flow enthalpy and pressure work are counted once.
+
+Initial admission and both residuals include the compact aperture-wave rate
+`0.5 sum(A lambda)/V` alongside the field's unsplit acoustic CFL. Deterministic
+compensated face reductions and fixed four-side stage arrays require no warm
+tank allocation. The source-owned plenum candidate admits both caloric
+endpoints and refuses exhaustion or unrepresentable storage without clipping.
+Accepted cells, tank inventories, clock, loads and reports publish together
+after the final poll. Explicit body-force work stays separate. Molecular
+split preparation and retries preserve accepted tank inventories; molecular
+exchange at these open faces remains zero.
+
+The public tank report retains original/accepted inventories, complete
+transfer and mass/energy residuals in the source gauge. Independent tanks
+may fill or drain. These compact volumes do not resolve internal waves,
+neck inertia, mixing gradients, heat transfer or moving volume, and one tank
+cannot yet span multiple sides. Retained hydrostatic references refuse in
+both attachment orders until tank elevations and port-potential transport
+are explicitly declared; ordinary body forcing remains supported.
+
+Seven focused G0/G1/G4 regression groups cover all four orientations and both
+reconstruction orders, mass and full-energy conservation with shear, exact
+equilibrium and empty-binding parity, tiny-tank initial CFL, common-stage
+time refinement, independent opposing tanks with native body work, late
+cancellation/retry and source/gravity admission. All seven passed
+in a bounded actual-source inviscid build. Time-refinement errors were
+3.2199504e-4, 7.9003992e-5 and 1.9365930e-5 at 16/32/64 steps, against a
+512-step reference. The native caloric, flux, RK, forcing and hydrostatic
+sources were retained. Molecular split hooks were parsed and source-reviewed
+but not executed; full Cargo/workspace validation remains separate.
+
 ## Finite compact tanks on volumetric gas boundaries
 
 `Euler3d::with_finite_reservoirs` converts selected existing stationary uniform

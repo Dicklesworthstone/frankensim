@@ -125,6 +125,7 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             )?;
         }
         let faces = flow.boundary_impulses.len();
+        trial.reservoirs = flow.reservoirs;
         Ok(Self {
             accepted: flow,
             trial,
@@ -329,6 +330,12 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             self.accepted.hydrostatic.as_ref(),
             &mut cancelled,
         )?);
+        rate = rate.max(self.accepted.reservoirs.initial_rate(
+            &self.accepted.gas,
+            &self.accepted.grid,
+            &self.accepted.states,
+            &mut cancelled,
+        )?);
         let mut dt = maximum_duration.value().min(controls.advection.cfl / rate);
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
@@ -341,6 +348,7 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             self.trial.states.copy_from_slice(&self.accepted.states);
             self.trial.time = self.accepted.time;
             self.trial.last_step = self.accepted.last_step;
+            self.trial.reservoirs = self.accepted.reservoirs;
             self.trial
                 .boundary_impulses
                 .copy_from_slice(&self.accepted.boundary_impulses);
