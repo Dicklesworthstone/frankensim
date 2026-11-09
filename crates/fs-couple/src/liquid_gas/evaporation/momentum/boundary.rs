@@ -116,7 +116,7 @@ fn finite(value: f64) -> Result<f64, GasEnergyError> {
 // All velocities and momenta below use the declared inertial energy frame.
 // Subtract frame momentum BEFORE division and retain double-double increments;
 // neither large absolute kinetic total is ever formed and subtracted.
-fn kinetic_change(
+pub(crate) fn kinetic_change(
     m0: f64,
     m1: f64,
     p0: [f64; 3],
