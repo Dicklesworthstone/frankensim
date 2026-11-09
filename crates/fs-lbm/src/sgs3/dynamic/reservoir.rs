@@ -1,11 +1,12 @@
 //! Dynamic momentum and scalar mixing between two prescribed reservoirs.
 //!
 //! Two transverse axes are periodic. At each end of the remaining axis the
-//! caller supplies a spatially uniform primitive ghost one FULL cell spacing
+//! caller supplies a primitive ghost one FULL cell spacing
 //! from the boundary center. Its normal velocity can carry flow in or out.
-//! Physical and Favre-filtered normal derivatives use that same exterior
-//! primitive value; a constant reservoir value survives transverse Favre
-//! filtering independently of its constant exterior density.
+//! Uniform reservoirs use the same exterior primitive at both filter levels.
+//! Spatial profiles use each physical ghost and the corresponding transverse
+//! density-weighted test-filtered ghost. This preserves exterior covariance
+//! instead of silently treating a varying inlet as a uniform reservoir.
 //!
 //! The original equal-volume nine-cell transverse filter is retained, with
 //! test widths `(hn, 3hp, 3hq)` and squared volume-width ratio `9^(2/3)`.
@@ -26,6 +27,11 @@ use super::scalar::{
     DynamicScalarConfig, DynamicScalarReport, PeriodicDynamicScalar, ScalarBoundaryGradient,
 };
 use super::*;
+
+#[path = "reservoir/profile.rs"]
+mod profile;
+pub use profile::ReservoirPrimitive;
+pub(super) use profile::ProfileBoundary;
 
 /// Reused 136 numerical bytes per fluid cell; no halo arrays are constructed.
 pub struct ReservoirDynamicSgs {

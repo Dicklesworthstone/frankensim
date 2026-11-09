@@ -88,7 +88,7 @@ pub struct PeriodicDynamicScalar {
 pub(super) enum ScalarBoundaryGradient {
     Declared,
     Interior,
-    /// Uniform primitive values at full-spacing exterior reservoir ghosts.
+    /// Primitive values at full-spacing exterior reservoir ghosts.
     Reservoir,
 }
 
@@ -208,7 +208,17 @@ impl PeriodicDynamicScalar {
         walls: Option<[ScalarWall; 2]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, DynamicSgsError> {
-        let mut scale: f64 = 0.0;
+        self.normalize_boundary(scalar, walls, 0.0, cancelled)
+    }
+
+    pub(super) fn normalize_boundary(
+        &mut self,
+        scalar: &[f64],
+        walls: Option<[ScalarWall; 2]>,
+        external_extent: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, DynamicSgsError> {
+        let mut scale: f64 = external_extent;
         let reference = scalar[0];
         for (cell, (&value, normalized)) in scalar.iter().zip(&mut self.scalar).enumerate() {
             poll(cancelled, cell)?;
@@ -261,6 +271,20 @@ impl PeriodicDynamicScalar {
         scalar_scale: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DynamicScalarReport, DynamicSgsError> {
+        self.prepare_from_profile(flow, config, density, scales, scalar_scale, None, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_from_profile(
+        &mut self,
+        flow: &PeriodicDynamicSgs,
+        config: DynamicScalarConfig,
+        density: &[f64],
+        scales: InputScales,
+        scalar_scale: f64,
+        profile: Option<&reservoir::ProfileBoundary<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DynamicScalarReport, DynamicSgsError> {
         let n = self.scalar.len();
         // Momentum deliberately skips all filtered scratch for uniform flow.
         // Scalar input has already been validated even on this exact-zero path.
@@ -278,7 +302,9 @@ impl PeriodicDynamicScalar {
                 ..DynamicScalarReport::default()
             });
         }
-        let domain = self.prepare_contractions(flow, density, scales, cancelled)?;
+        let domain = self.prepare_contractions_with_profile(
+            flow, density, scales, scalar_scale, profile, cancelled,
+        )?;
         if !flow.normal_ghosts || config.averaging == DynamicAveraging::Domain {
             flow.geometry
                 .average_planes(self.shape, &mut self.contraction, cancelled)?;
@@ -295,16 +321,30 @@ impl PeriodicDynamicScalar {
         scales: InputScales,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 2], DynamicSgsError> {
+        self.prepare_contractions_with_profile(flow, density, scales, 0.0, None, cancelled)
+    }
+
+    fn prepare_contractions_with_profile(
+        &mut self,
+        flow: &PeriodicDynamicSgs,
+        density: &[f64],
+        scales: InputScales,
+        scalar_scale: f64,
+        profile: Option<&reservoir::ProfileBoundary<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 2], DynamicSgsError> {
         let n = self.scalar.len();
         let samples = flow.geometry.samples();
         let ratio_squared = flow.geometry.ratio_squared();
         for cell in 0..n {
             poll(cancelled, cell)?;
+            let walls = profile.map_or(Ok(self.walls), |profile|
+                profile.scalar(cell, false, scalar_scale))?;
             let g = gradient(
                 self.shape,
                 flow.derivative_metric,
                 flow.geometry,
-                self.walls,
+                walls,
                 self.boundary_gradient,
                 false,
                 cell,
@@ -343,12 +383,14 @@ impl PeriodicDynamicScalar {
                     a[axis] += self.basis[j][axis] / samples;
                 }
             });
+            let wall_velocity = profile.map_or(Ok(flow.wall_velocity), |profile|
+                profile.velocity(cell, true, scales.velocity))?;
             let (rate, _) = if flow.normal_ghosts {
                 strain_and_gradient(
                     self.shape,
                     flow.derivative_metric,
                     flow.geometry,
-                    flow.wall_velocity,
+                    wall_velocity,
                     true,
                     cell,
                     &flow.filtered,
@@ -364,11 +406,13 @@ impl PeriodicDynamicScalar {
                     &flow.filtered,
                 )
             }?;
+            let walls = profile.map_or(Ok(self.walls), |profile|
+                profile.scalar(cell, true, scalar_scale))?;
             let g = gradient(
                 self.shape,
                 flow.derivative_metric,
                 flow.geometry,
-                self.walls,
+                walls,
                 self.boundary_gradient,
                 true,
                 cell,

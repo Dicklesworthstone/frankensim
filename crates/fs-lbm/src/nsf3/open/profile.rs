@@ -5,9 +5,10 @@
 use super::{BoundReservoirAperture, NsfError, NsfGrid3, NsfOpenState, OpenGhost};
 use crate::lattice3::Lattice3;
 
-/// Prescribed physical state at the exterior ghost centre of one aperture tile.
+/// Prescribed physical state at the exterior ghost centre of one reservoir tile.
 ///
-/// The cell identifies the adjacent fluid cell, not a new boundary owner. The
+/// The cell identifies the adjacent fluid cell of a complete face or localized
+/// aperture, not a new boundary owner. The
 /// ghost centre lies one grid spacing beyond that cell along the face normal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfReservoirTileState {

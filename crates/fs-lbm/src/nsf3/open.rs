@@ -13,6 +13,8 @@ use crate::lattice3::Lattice3;
 
 mod profile;
 pub use profile::NsfReservoirTileState;
+mod face_profile;
+pub(super) use face_profile::FaceProfile;
 
 /// Maximum independent localized reservoir owners on one resolved grid.
 /// Their cached finite-volume accounts remain bounded and stack-owned.
@@ -645,37 +647,61 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             ));
         }
         let ghost = state.map(|s| self.admit_open_state(s)).transpose()?;
+        self.rebind_reservoir_face(axis, side, ghost, None, &mut || false)
+    }
+
+    fn rebind_reservoir_face(
+        &mut self,
+        axis: usize,
+        side: usize,
+        ghost: Option<OpenGhost>,
+        profile: Option<std::sync::Arc<FaceProfile>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), NsfError> {
+        super::body_force::checkpoint(cancelled)?;
         let previous = self.reservoir_faces[axis][side];
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
         self.reservoir_faces[axis][side] = ghost;
-        let force = self.force_field(&rho, &self.theta, None);
-        let mut populations = self.f.clone();
-        for (i, f) in populations.iter_mut().enumerate() {
-            if self.solid[i] {
-                continue;
-            }
-            // Preserve the whole physical distribution, including its stress,
-            // when changing the thermal-pressure force of a reservoir face.
-            super::rebase_force::<L>(
-                f,
-                u[i],
-                std::array::from_fn(|a| self.force[i][a] - force[i][a]),
-            );
-        }
+        let previous_profile =
+            std::mem::replace(&mut self.reservoir_face_profiles[axis][side], profile);
         let history = (|| {
+            super::body_force::checkpoint(cancelled)?;
+            let force = self.force_field(&rho, &self.theta, None);
+            super::body_force::checkpoint(cancelled)?;
+            let mut populations = self.f.clone();
+            for (i, f) in populations.iter_mut().enumerate() {
+                if i % 64 == 0 {
+                    super::body_force::checkpoint(cancelled)?;
+                }
+                if self.solid[i] {
+                    continue;
+                }
+                // Preserve the whole physical distribution, including its stress,
+                // when changing the thermal-pressure force of a reservoir face.
+                super::rebase_force::<L>(
+                    f,
+                    u[i],
+                    std::array::from_fn(|a| self.force[i][a] - force[i][a]),
+                );
+            }
+            super::body_force::checkpoint(cancelled)?;
             let transport = self.sgs_field(&rho, &u, &self.theta, &self.material, None)?;
+            super::body_force::checkpoint(cancelled)?;
             let sig = self.stress_field(
                 &populations, &force, &rho, &self.theta, &self.material, &transport,
             );
+            super::body_force::checkpoint(cancelled)?;
             let (div, wall, open) =
                 self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &transport, None)?;
-            Ok((transport, div, wall, open))
+            super::body_force::checkpoint(cancelled)?;
+            Ok((populations, force, transport, div, wall, open))
         })();
-        let (transport, div, wall, open) = match history {
+        let (populations, force, transport, div, wall, open) = match history {
             Ok(value) => value,
             Err(error) => {
                 self.reservoir_faces[axis][side] = previous;
+                self.reservoir_face_profiles[axis][side] = previous_profile;
                 return Err(error);
             }
         };
@@ -741,7 +767,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     pub(super) fn reservoir_ghost(&self, i: usize, axis: usize, side: usize) -> Option<OpenGhost> {
         if let Some(ghost) = self.reservoir_faces[axis][side] {
-            return Some(ghost);
+            return Some(self.reservoir_face_profiles[axis][side].as_ref().map_or(
+                ghost,
+                |profile| profile.ghost(self.spec.dims, axis, self.at(i)),
+            ));
         }
         let owner = self.reservoir_owner(i, axis, side)?;
         Some(self.reservoir_apertures[owner].ghost_at(i))

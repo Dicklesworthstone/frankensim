@@ -6,7 +6,7 @@
 //! does not replace a reservoir by an impermeable wall or invent inflow noise.
 
 use super::*;
-use crate::sgs3::dynamic::reservoir::{ReservoirDynamicScalar, ReservoirDynamicSgs};
+use crate::sgs3::dynamic::reservoir::{ReservoirDynamicScalar, ReservoirDynamicSgs, ReservoirPrimitive};
 
 pub(super) struct ReservoirWorkspace {
     momentum: ReservoirDynamicSgs,
@@ -25,6 +25,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// on each transverse plane; LocalBox controls average their transverse
     /// nine-cell neighborhood. Normal derivatives use the actual full-spacing
     /// ghost primitive values, including throughflow and reservoir temperature.
+    /// Spatial face profiles retain their individual physical ghosts and use
+    /// the same transverse Favre weights for their test-level ghost values.
     /// This is an explicit transverse LES model, not a general 3-D open filter.
     ///
     /// Ghost changes on the admitted axis re-fit both closures within the
@@ -153,8 +155,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .lock()
             .map_err(|_| NsfError::Input("reservoir NSF workspace lock poisoned"))?;
         let ReservoirWorkspace { momentum, heat } = &mut *workspace;
-        momentum
-            .prepare_with_scalar(
+        if self.reservoir_face_profiles[normal_axis].iter().any(Option::is_some) {
+            momentum.prepare_with_profile(
+                config.momentum, config.heat, rho, velocity, theta,
+                |side, cell| {
+                    let ghost = self.reservoir_ghost(cell, normal_axis, side)
+                        .expect("both complete reservoir faces were admitted");
+                    ReservoirPrimitive { density: ghost.rho, velocity: ghost.u, scalar: ghost.theta }
+                }, heat, || false,
+            )
+        } else {
+            momentum.prepare_with_scalar(
                 config.momentum,
                 config.heat,
                 rho,
@@ -165,7 +176,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 heat,
                 || false,
             )
-            .map_err(NsfError::DynamicSgs)?;
+        }.map_err(NsfError::DynamicSgs)?;
         self.dynamic_transport_field(
             rho,
             theta,

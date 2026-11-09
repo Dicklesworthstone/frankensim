@@ -4199,8 +4199,8 @@ signal 9 under the environment memory limit; the smaller 25-test build
 compiled and ran successfully. Two native NSF integration groups specify
 current-ghost coupling, force-chart preservation, native-step replay,
 cancellation, actual reservoir-face heat-ratio refusal and boundary-update
-rollback, but remain uncompiled/unrun here. The full NSF runtime and Cargo
-workspace were not rebuilt.
+rollback. Both groups now pass within the 44-group native NSF validation
+described below. The full NSF runtime and Cargo workspace were not rebuilt.
 
 Equation and filter-convention reference: Cabot (1991), CTR Annual Research
 Briefs, section 2.1,
@@ -4209,6 +4209,39 @@ The homogeneous-direction filtering and independent momentum/scalar
 contractions follow this framework; the nine-cell box and volume-width
 ratio are explicit discretization choices, not a reproduction of its
 spectral filter or empirical validation results.
+
+## Spatial prescribed reservoir faces
+
+`NsfGrid3::set_open_face_profile` installs a complete, already-open reservoir
+plane from one admitted `NsfReservoirTileState` per adjacent fluid cell. The
+explicit tile ceiling bounds allocation; duplicates, omissions, wrong-face
+cells and inadmissible material/Mach/temperature states refuse. Accepted tiles
+have canonical transverse order (lowest remaining Cartesian axis fastest),
+constant-time lookup and immutable shared snapshots. `open_face_tile_states`
+exposes the accepted primitive targets. Installation rebases the original force
+chart and energy-flux history while preserving physical density, velocity and
+total energy; failure or cancellation retains the previous profile and complete
+accepted state. Uniform profiles use the original uniform path.
+
+Normal pressure/energy faces read the local full-spacing ghost primitive.
+Incoming diagonal lattice populations read the actual transversely shifted
+ghost donor, with periodic transverse wrapping; the receiving-cell correction
+is reused and only the requested ghost population is evaluated. Profiled
+instantaneous dynamic momentum/heat SGS uses the same original transverse filter
+for physical and test-level fields: exterior test primitives receive the matching
+nine-cell Favre filter. Existing closure fitting, material and turbulent-
+conductivity limits, collision, native mass transport and conservative energy
+owners remain authoritative. No extra full-grid SGS halo is allocated. The
+topology remains one complete nonperiodic axis with periodic transverse
+directions. Prescribed target mass flux is distinct from the compressible mass
+actually streamed.
+
+Validation: 28 actual-source shared SGS tests and 44 disjoint actual-source native
+NSF tests passed, including independent full-tensor/Favre boundary oracles,
+diagonal periodic-donor populations, uniform equivalence, cancellation/retry
+and conservative native evolution. The native source build uses real material
+and numerical dependencies and omits unused runtime-dependent observation hooks;
+it is not a full Cargo/workspace, DSR or cross-ISA gate.
 
 ## Authored mass-free dilatation in material and gas transport
 

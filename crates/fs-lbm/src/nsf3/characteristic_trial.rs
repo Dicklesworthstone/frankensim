@@ -407,6 +407,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             characteristic_patch: self.characteristic_patch,
             open_faces: self.open_faces.clone(),
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,
+            reservoir_face_profiles: self.reservoir_face_profiles.clone(),
             reservoir_apertures: self.reservoir_apertures.clone(),
             last_reservoir_mass_out_kg: self.last_reservoir_mass_out_kg,
             last_reservoir_flows: self.last_reservoir_flows.clone(),

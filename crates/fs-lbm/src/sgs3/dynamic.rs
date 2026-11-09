@@ -527,6 +527,19 @@ impl PeriodicDynamicSgs {
         density: &[f64],
         velocity: &[[f64; 3]],
         walls: [[f64; 3]; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
+        self.prepare_scaled_with_profile(config, density, velocity, walls, None, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled_with_profile(
+        &mut self,
+        config: DynamicSgsConfig,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: [[f64; 3]; 2],
+        profile: Option<&reservoir::ProfileBoundary<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -535,8 +548,9 @@ impl PeriodicDynamicSgs {
             wale.config
                 .validate_bound(config.maximum_coefficient_squared)?;
         }
-        let (scales, domain) =
-            self.prepare_contractions(density, velocity, walls, &mut cancelled)?;
+        let (scales, domain) = self.prepare_contractions_with_profile(
+            density, velocity, walls, profile, &mut cancelled,
+        )?;
         if scales.velocity == 0.0 {
             for (tile, values) in self.viscosity.chunks_mut(64).enumerate() {
                 poll(&mut cancelled, tile * 64)?;
@@ -565,6 +579,17 @@ impl PeriodicDynamicSgs {
         density: &[f64],
         velocity: &[[f64; 3]],
         walls: [[f64; 3]; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(InputScales, [f64; 2]), DynamicSgsError> {
+        self.prepare_contractions_with_profile(density, velocity, walls, None, cancelled)
+    }
+
+    fn prepare_contractions_with_profile(
+        &mut self,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: [[f64; 3]; 2],
+        profile: Option<&reservoir::ProfileBoundary<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(InputScales, [f64; 2]), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -576,7 +601,7 @@ impl PeriodicDynamicSgs {
         }
         let reference = velocity[0];
         let mut density_scale: f64 = 0.0;
-        let mut velocity_scale: f64 = 0.0;
+        let mut velocity_scale: f64 = profile.map_or(0.0, |profile| profile.velocity_extent);
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
             if !density[cell].is_finite() || density[cell] <= 0.0 {
@@ -656,11 +681,13 @@ impl PeriodicDynamicSgs {
         let ratio_squared = self.geometry.ratio_squared();
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
+            let walls = profile.map_or(Ok(self.wall_velocity), |profile|
+                profile.velocity(cell, false, velocity_scale))?;
             let (rate, s, g) = strain_and_gradient(
                 self.shape,
                 self.derivative_metric,
                 self.geometry,
-                self.wall_velocity,
+                walls,
                 self.normal_ghosts,
                 cell,
                 &self.velocity,
@@ -731,11 +758,13 @@ impl PeriodicDynamicSgs {
                     a[k] += self.basis[j][k];
                 }
             });
+            let walls = profile.map_or(Ok(self.wall_velocity), |profile|
+                profile.velocity(cell, true, velocity_scale))?;
             let (rate, s, g) = strain_and_gradient(
                 self.shape,
                 self.derivative_metric,
                 self.geometry,
-                self.wall_velocity,
+                walls,
                 self.normal_ghosts,
                 cell,
                 &self.filtered,

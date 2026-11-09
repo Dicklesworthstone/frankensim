@@ -483,16 +483,23 @@ pub fn equilibrium<L: Lattice3<27>>(rho: f64, u: [f64; 3], theta: f64) -> [f64; 
     let u2 = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
     let mut out = [0.0; Q];
     for q in 0..Q {
-        let c = L::E[q];
-        let cf = [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])];
-        let cu = cf[0] * u[0] + cf[1] * u[1] + cf[2] * u[2];
-        let c2 = cf[0] * cf[0] + cf[1] * cf[1] + cf[2] * cf[2];
-        let t2 = (cu * cu - THETA0 * u2 + dth * (c2 - 3.0 * THETA0)) / (2.0 * THETA0 * THETA0);
-        let t3 = (cu * cu * cu - 3.0 * THETA0 * cu * u2 + 3.0 * dth * cu * (c2 - 5.0 * THETA0))
-            / (6.0 * THETA0 * THETA0 * THETA0);
-        out[q] = L::W[q] * rho * (1.0 + cu / THETA0 + t2 + t3);
+        out[q] = equilibrium_population::<L>(rho, u, dth, u2, q);
     }
     out
+}
+
+#[inline]
+fn equilibrium_population<L: Lattice3<27>>(
+    rho: f64, u: [f64; 3], dth: f64, u2: f64, q: usize,
+) -> f64 {
+    let c = L::E[q];
+    let cf = [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])];
+    let cu = cf[0] * u[0] + cf[1] * u[1] + cf[2] * u[2];
+    let c2 = cf[0] * cf[0] + cf[1] * cf[1] + cf[2] * cf[2];
+    let t2 = (cu * cu - THETA0 * u2 + dth * (c2 - 3.0 * THETA0)) / (2.0 * THETA0 * THETA0);
+    let t3 = (cu * cu * cu - 3.0 * THETA0 * cu * u2 + 3.0 * dth * cu * (c2 - 5.0 * THETA0))
+        / (6.0 * THETA0 * THETA0 * THETA0);
+    L::W[q] * rho * (1.0 + cu / THETA0 + t2 + t3)
 }
 
 /// Density and first moment `sum c f`.
@@ -545,11 +552,34 @@ fn rebase_force<L: Lattice3<27>>(f: &mut [f64; Q], u: [f64; 3], difference: [f64
     }
     let uf = (0..3).map(|a| u[a] * difference[a]).sum::<f64>();
     for q in 0..Q {
-        let c = L::E[q];
-        let cf = (0..3).map(|a| f64::from(c[a]) * difference[a]).sum::<f64>();
-        let cu = (0..3).map(|a| f64::from(c[a]) * u[a]).sum::<f64>();
-        f[q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
+        f[q] += half_source_population::<L>(u, difference, uf, q);
     }
+}
+
+#[inline]
+fn half_source_population<L: Lattice3<27>>(u: [f64; 3], force: [f64; 3], uf: f64, q: usize) -> f64 {
+    let c = L::E[q];
+    let cf = (0..3).map(|a| f64::from(c[a]) * force[a]).sum::<f64>();
+    let cu = (0..3).map(|a| f64::from(c[a]) * u[a]).sum::<f64>();
+    0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0))
+}
+
+fn reservoir_local_postcollision<L: Lattice3<27>>(post: &[f64; Q], force: [f64; 3]) -> [f64; Q] {
+    let (rho, momentum) = raw_moments::<L>(post);
+    let velocity = half_force_velocity(rho, momentum, force.map(|value| -value));
+    let mut local = equilibrium::<L>(rho, velocity, THETA0);
+    rebase_force::<L>(&mut local, velocity, force);
+    local
+}
+
+fn reservoir_ghost_population<L: Lattice3<27>>(rho: f64, u: [f64; 3], force: [f64; 3], q: usize) -> f64 {
+    let u2 = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+    let mut value = equilibrium_population::<L>(rho, u, 0.0, u2, q);
+    if force != [0.0; 3] {
+        let uf = (0..3).map(|a| u[a] * force[a]).sum::<f64>();
+        value += half_source_population::<L>(u, force, uf, q);
+    }
+    value
 }
 
 /// Extrapolate physical post-collision nonequilibrium to a prescribed reservoir.
@@ -563,12 +593,9 @@ fn reservoir_postcollision<L: Lattice3<27>>(
     ghost_density: f64,
     ghost_velocity: [f64; 3],
 ) -> [f64; Q] {
-    let (rho, momentum) = raw_moments::<L>(post);
-    let velocity = half_force_velocity(rho, momentum, force.map(|value| -value));
-    let mut local = equilibrium::<L>(rho, velocity, THETA0);
+    let local = reservoir_local_postcollision::<L>(post, force);
     let mut ghost = equilibrium::<L>(ghost_density, ghost_velocity, THETA0);
     // Both are POST-collision populations, hence the positive half source.
-    rebase_force::<L>(&mut local, velocity, force);
     rebase_force::<L>(&mut ghost, ghost_velocity, force);
     core::array::from_fn(|q| ghost[q] + post[q] - local[q])
 }
@@ -722,6 +749,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     characteristic_patch: [Option<CharacteristicPatchBinding>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
+    reservoir_face_profiles: [[Option<std::sync::Arc<open::FaceProfile>>; 2]; 3],
     reservoir_apertures: Vec<open::BoundReservoirAperture>,
     last_reservoir_mass_out_kg: Option<f64>,
     last_reservoir_flows: Vec<NsfReservoirFlow>,
@@ -935,6 +963,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             characteristic_patch: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
+            reservoir_face_profiles: std::array::from_fn(|_| [None, None]),
             reservoir_apertures: Vec::new(),
             last_reservoir_mass_out_kg: None,
             last_reservoir_flows: Vec::new(),
@@ -1594,9 +1623,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let x = self.at(i);
             let mut out = [0.0; Q];
-            // All incoming links on one face share its physical ghost. Compute
-            // the two equilibria/source transforms once per encountered face.
+            // Uniform faces share a ghost and cache their two force-chart
+            // transforms. Profiles share only the receiving-cell correction;
+            // each incoming link uses its actual transverse exterior donor.
             let mut reservoir_populations = [None; 6];
+            let mut reservoir_local = None;
             for q in 0..Q {
                 let c = L::E[q];
                 let mut y = x;
@@ -1622,10 +1653,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     None if !self.solid[self.index(y)] => post[self.index(y)][q],
                     Some((a, side)) if self.reservoir_ghost(i, a, side).is_some()
                         && self.reservoir_link_is_open(x, c, -1, a, side) => {
-                        let b = self.reservoir_ghost(i, a, side).expect("guarded reservoir boundary");
-                        reservoir_populations[2 * a + side].get_or_insert_with(|| {
-                            reservoir_postcollision::<L>(&post[i], self.force[i], b.rho, b.u)
-                        })[q]
+                        if let Some(b) = self.profiled_reservoir_link_ghost(x, a, side, c) {
+                            let local = reservoir_local.get_or_insert_with(||
+                                reservoir_local_postcollision::<L>(&post[i], self.force[i]));
+                            reservoir_ghost_population::<L>(b.rho, b.u, self.force[i], q)
+                                + post[i][q] - local[q]
+                        } else {
+                            let b = self.reservoir_ghost(i, a, side).expect("guarded reservoir boundary");
+                            reservoir_populations[2 * a + side].get_or_insert_with(|| {
+                                reservoir_postcollision::<L>(&post[i], self.force[i], b.rho, b.u)
+                            })[q]
+                        }
                     }
                     _ => {
                         let mut v = post[i][L::OPP[q]];
@@ -2532,6 +2570,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 feed(control.maximum_evaluations_per_face as f64);
             }
         }
+        self.feed_face_profile_hash(&mut feed);
         h
     }
 }
