@@ -32,6 +32,7 @@ use fs_material::creep::thermal::uniaxial::recovery::{
 };
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
+use fs_material::ductile::uniaxial::UniaxialDuctileJ2State;
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
 use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
 use fs_material::plastic::thermal::tabulated::axial::{
@@ -43,10 +44,13 @@ use fs_material::plastic::reduction::{
 
 /// Bounded runtime dispatch of exact native multi-backstress axial laws.
 pub mod chaboche;
+/// Native regularized ductile axial response with an explicit physical interval.
+pub mod ductile;
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
 pub mod material;
 use chaboche::{ChabocheFiberLaw, ChabocheFiberState};
 use chaboche::thermal::{ThermalChabocheFiberLaw, ThermalChabocheFiberState};
+use ductile::DuctileFiberLaw;
 
 /// A fiber's constitutive card.
 #[derive(Debug, Clone)]
@@ -71,6 +75,9 @@ pub enum FiberLaw {
     /// Free-sided axial restriction of the shared three-dimensional J2 law.
     /// Isotropic and Prager hardening retain separate reversal histories.
     J2(UniaxialJ2),
+    /// Native axial J2 initiation and regularized damage with retained energy.
+    /// This prepared law consumes one explicitly owned physical interval.
+    DuctileJ2(DuctileFiberLaw),
     /// Native Voce isotropic saturation with retained linear Prager translation.
     Voce(UniaxialVoce),
     /// Native bounded measured-curve hardening, with retained Prager translation.
@@ -113,6 +120,8 @@ pub enum FiberState {
     ThermalRecoveringNortonJ2(UniaxialThermalRecoveringNortonJ2State),
     /// Signed axial plastic strain and accumulated equivalent plastic strain.
     J2(UniaxialJ2State),
+    /// Native plasticity, irreversible initiation/damage and separate work accounts.
+    DuctileJ2(UniaxialDuctileJ2State),
     /// The same exact axial plastic subspace, with a saturating yield radius.
     Voce(UniaxialJ2State),
     /// Signed axial plastic strain and accumulated strain on the supplied table.
@@ -171,6 +180,9 @@ impl From<UniaxialThermalRecoveringNortonJ2> for FiberLaw {
 impl From<UniaxialTabulated> for FiberLaw {
     fn from(law: UniaxialTabulated) -> Self { Self::Tabulated(law) }
 }
+impl From<DuctileFiberLaw> for FiberLaw {
+    fn from(law: DuctileFiberLaw) -> Self { Self::DuctileJ2(law) }
+}
 impl From<UniaxialTabulatedOverstress> for FiberLaw {
     fn from(law: UniaxialTabulatedOverstress) -> Self { Self::TabulatedOverstress(law) }
 }
@@ -187,6 +199,7 @@ impl FiberLaw {
                 | Self::ThermalNortonJ2(_) | Self::ThermalRecoveringNorton(_)
                 | Self::ThermalRecoveringNortonJ2(_) | Self::TabulatedOverstress(_)
                 | Self::ThermalTabulated(_) | Self::ThermalChaboche(_)
+                | Self::DuctileJ2(_)
         )
     }
 }
@@ -227,6 +240,7 @@ impl Section {
                 FiberLaw::ThermalRecoveringNorton(l) => FiberState::ThermalRecoveringNorton(l.initial_state()),
                 FiberLaw::ThermalRecoveringNortonJ2(l) => FiberState::ThermalRecoveringNortonJ2(l.initial_state()),
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
+                FiberLaw::DuctileJ2(l) => FiberState::DuctileJ2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Tabulated(l) => FiberState::Tabulated(l.initial_state()),
                 FiberLaw::TabulatedOverstress(l) => FiberState::TabulatedOverstress(l.initial_state()),
@@ -333,6 +347,11 @@ impl Section {
                             ));
                         }
                     }
+                    (response.stress_pa, response.tangent_pa)
+                }
+                (FiberLaw::DuctileJ2(l), FiberState::DuctileJ2(s)) => {
+                    let response = l.response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => (l.stress(eps, s), l.tangent(eps, s)),
@@ -462,6 +481,12 @@ impl Section {
                     *s = l.update_state(eps, s)
                 }
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::DuctileJ2(l), FiberState::DuctileJ2(s)) => {
+                    *s = l.response(eps, s)
+                        .map_err(|error| SolidError::MaterialRefused {
+                            what: error.to_string(),
+                        })?.state;
+                }
                 (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Tabulated(l), FiberState::Tabulated(s)) => {
                     *s = l.response(eps, s)

@@ -60,6 +60,9 @@ pub mod fatigue;
 /// Irreversible ductile initiation on accepted native metal-fiber histories.
 pub mod ductile;
 
+/// Progressive length-scaled ductile fibers in native frame equilibrium and motion.
+pub mod ductile_damage;
+
 /// Source-bound axial/bending tensile limits on accepted material-frame forces.
 pub mod strength;
 
@@ -374,7 +377,13 @@ impl FrameElement {
             let mut resp = Vec::with_capacity(np);
             for p in 0..np {
                 let s = self.sections[p].try_respond(d[p].0, d[p].1)?;
-                let fs = inv2(s.tangent);
+                let fs = if matches!(&self.sections[p], SectionModel::Fiber(section)
+                    if section.fibers.iter().any(|fiber| matches!(fiber.law, crate::fiber::FiberLaw::DuctileJ2(_))))
+                {
+                    ductile_damage::section_flexibility(s.tangent)?
+                } else {
+                    inv2(s.tangent)
+                };
                 let b = Self::b(self.xi[p]);
                 let wl = self.w[p] * l;
                 for a in 0..3 {
@@ -1317,6 +1326,7 @@ impl Frame2d {
         control: usize,
         targets: &[f64],
     ) -> Result<Vec<StaticStep>, SolidError> {
+        self.require_untimed_materials()?;
         self.displacement_control_observed(
             pattern, control, targets, &mut || Ok(()), &mut |_| Ok(()),
         )
@@ -1331,7 +1341,6 @@ impl Frame2d {
         accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
     ) -> Result<Vec<StaticStep>, SolidError> {
         checkpoint()?;
-        self.require_untimed_materials()?;
         let n = self.ndof();
         if pattern.len() != n || control >= n || self.fixed[control] {
             return Err(SolidError::InvalidInput {
@@ -1609,6 +1618,7 @@ impl Frame2d {
         damping: Rayleigh,
         sustained_load: &[f64],
     ) -> Result<DynamicHistory, SolidError> {
+        self.require_untimed_materials()?;
         self.newmark_with_load_observed(
             ground, dt, dir, damping, sustained_load, &mut || Ok(()), &mut |_| Ok(()),
         )
@@ -1626,7 +1636,6 @@ impl Frame2d {
         accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
     ) -> Result<DynamicHistory, SolidError> {
         checkpoint()?;
-        self.require_untimed_materials()?;
         let n = self.ndof();
         if !(dt.is_finite() && dt > 0.0) {
             return Err(SolidError::InvalidInput {

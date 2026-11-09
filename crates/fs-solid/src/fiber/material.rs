@@ -13,6 +13,7 @@
 
 use super::{Fiber, FiberLaw, Section};
 use super::chaboche::thermal::ThermalChabocheFiberLaw;
+use super::ductile::DuctileFiberLaw;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
@@ -162,6 +163,7 @@ impl FiberMaterial {
             FiberLaw::ThermalRecoveringNorton(law) => Self::thermal_recovering_norton(law, density_kg_m3),
             FiberLaw::ThermalRecoveringNortonJ2(law) => Self::thermal_recovering_norton_j2(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
+            FiberLaw::DuctileJ2(law) => Self::ductile_j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Tabulated(law) => Self::tabulated(law, density_kg_m3),
             FiberLaw::TabulatedOverstress(law) => Self::tabulated_overstress(law, density_kg_m3),
@@ -345,6 +347,55 @@ impl FiberMaterial {
             source: None,
             chaboche_branch_properties: None,
         })
+    }
+
+    /// Explicit native axial damage and reference density, without implied
+    /// calibration authority. A sourced initiation fit must instead be bound
+    /// to its original J2 material through [`Self::with_ductile_evolution`].
+    pub fn ductile_j2(law: impl Into<DuctileFiberLaw>, density_kg_m3: f64) -> Result<Self> {
+        let law = law.into();
+        require(
+            positive(density_kg_m3) && law.permits_unbound_material(),
+            "authored ductile fibers require positive density and an authored initiation law",
+        )?;
+        Ok(Self {
+            law: FiberLaw::DuctileJ2(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Add progressive axial damage to the exact original native J2 material.
+    /// A sourced initiation fit must match its immutable mechanical card,
+    /// complete fixed context and actual prepared temperature. Authored material
+    /// accepts only authored initiation; no equal-coefficient source substitution
+    /// is permitted. Reference density and original mechanical receipts survive.
+    ///
+    /// The supplied equivalent-work capacity, normalized attenuation profile and
+    /// characteristic length remain explicitly authored model inputs. This
+    /// constructor does not promote them to measured fracture energy or claim a
+    /// history-preserving temperature change of the mechanical material.
+    pub fn with_ductile_evolution(mut self, law: impl Into<DuctileFiberLaw>) -> Result<Self> {
+        let law = law.into();
+        let FiberLaw::J2(original) = &self.law else {
+            return Err(RcSectionError::Invalid(
+                "progressive axial damage requires the original native J2 fiber material",
+            ));
+        };
+        require(
+            original == law.native(),
+            "ductile backbone differs from the original native mechanical material",
+        )?;
+        require(
+            match &self.source {
+                Some(source) => law.matches_material(source),
+                None => law.permits_unbound_material(),
+            },
+            "ductile initiation differs from the original mechanical card, fixed context or actual temperature",
+        )?;
+        self.law = FiberLaw::DuctileJ2(law);
+        Ok(self)
     }
 
     /// Authored tabulated work hardening and explicit reference density. The

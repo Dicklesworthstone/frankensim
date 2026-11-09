@@ -1,5 +1,48 @@
 # fs-solid CONTRACT
 
+## Progressive ductility in native fiber-frame equilibrium
+
+`FiberLaw::DuctileJ2` and its owned history dispatch the original progressive
+axial material response. Authored and original source-resolved Johnson--Cook
+or tabulated initiation retain one physical duration and temperature.
+`FiberMaterial::with_ductile_evolution` requires the exact original native J2
+backbone and matching source card, fixed context and actual temperature;
+reference density and original mechanical receipts survive. Supplied work
+capacity, attenuation profile and receiving length remain authored inputs.
+
+`frame2d::ductile_damage::FrameDuctileDamagePath` owns complete native mechanics,
+progressive histories and a physical clock. It supports original load control,
+bordered displacement control and Newmark motion. Prepared durations equal
+each accepted physical interval; Newton and element iterations remain trials
+from the same committed history. Other timed material families refuse.
+The original untimed public entry points continue to reject timed fibers.
+
+Each progressive band's length must equal its original Lobatto tributary
+length `w*L`, with volume `area*w*L`. This establishes the local work-capacity
+normalization, not a mesh-objective crack trajectory or localization theorem.
+The explicit one-dimensional law degrades both tension and compression.
+Original stress and full possibly negative tangent enter section equilibrium.
+Progressive sections use a row-scaled actual inverse without the legacy
+determinant floor. A singular failed section refuses; no residual stiffness
+or automatic member removal is fabricated. A failed fiber can remain with
+zero response while surviving fibers carry the section.
+
+Accepted local increments retain their original material energy, so observation
+requires no second return map. Fixed-order compensated sums separate stored
+energy, plastic dissipation, damage release and numerical loss. These accounts
+cover progressive fibers only; they are not extra terms to add to the native
+dynamic work balance and do not deposit numerical loss as heat.
+Late domain, mechanism, budget or cancellation failure rolls back the entire
+proposed block, including earlier increments, inertia and physical time.
+
+The four `fiber_ductile_evolution` and five `frame_ductile_damage` regression
+cases exercise assembled stress/tangents, exact local completion, surviving
+load paths, source handoff, physical rate, work, native motion, restart and
+transactional refusals. Native execution remains subject to the real workspace
+build; these cases alone assert no experimental material or component validation.
+Finite-strain necking, crack closure/contact, separated frame topology and
+automatic transfer of a singular member remain outside this implementation.
+
 ## Ductile initiation on native frame fibers and sourced tetrahedra
 
 `frame2d::ductile::FrameDuctilePath` owns the original `Frame2d`, explicit
