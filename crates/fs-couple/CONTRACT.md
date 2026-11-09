@@ -14497,3 +14497,34 @@ mass/force, open geometry, exact added-memory and iteration limits, cancellation
 bitwise retry and zero forcing. Test execution narrows only executor context
 construction and unrelated dependency/module surfaces; no physical numerical
 owner is substituted. Full Cargo/workspace compilation remains unexecuted.
+
+## Original molecular sources in full pressure-volume evolution
+
+`cavity_modal::interior::heterogeneous::molecular::MolecularBulkInterior`
+connects original `RelaxationState` sources to the complete sparse pressure
+space. A complete disjoint partition of original tetrahedra retains every
+borrowed source and its exact positive compressibility realization. Original
+source density constructs `K_rho`; frozen `beta_inf` constructs `M_inf`, and
+the pressure histories supply the relaxed increment once. There is no
+homogeneous replacement, equilibrium-mass double count, attenuation fit,
+extra Stokes--Kirchhoff term or inferred bulk viscosity.
+
+Each region has frozen temperature/composition and the same stationary
+background pressure. The source's coherence and material domain remain
+binding. Up to 256 original regions are admitted; the FE preparation supplies
+explicit sparse and full-history resource limits. Original spatial receiver
+and source projections remain available through the retained heterogeneous
+model. Subsequent propagation queries no material and retains all histories,
+with separate physical molecular storage/heat and boundary/source work.
+This is a linear stationary molecular-pressure model; resolved shear and
+Fourier heat conduction remain on their existing thermoviscous owner.
+
+Two focused native integration tests pass using original public molecular
+law construction and actual FE assembly. They verify original source identity,
+independent frozen-volume mass and variable-density stiffness, exact partition
+and pressure compatibility, and full-field relaxation of a closed gas against
+the independent single-reservoir caloric solution. Pressure errors at 20, 40
+and 80 time steps were `2.420e-4`, `6.048e-5` and `1.512e-5` Pa, with separately
+integrated nonnegative heat closing physical energy. The tests use the bounded
+native dependency closure documented by the FE bulk owner, not a full
+workspace/Cargo or experimental validation claim.

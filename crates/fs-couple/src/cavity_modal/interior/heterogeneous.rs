@@ -13,6 +13,8 @@ pub mod regions;
 pub mod porous;
 /// Source-bound cylindrical membrane reflection in the distributed time solver.
 pub mod mechanical;
+/// Original molecular absorption and dispersion on the sparse volume timeline.
+pub mod molecular;
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
     ElementFace, HeterogeneousHelmholtzFe, HeterogeneousProbe, HeterogeneousSurfaceProbe,

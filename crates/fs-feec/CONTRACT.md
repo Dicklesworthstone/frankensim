@@ -3185,3 +3185,56 @@ stored wall energy and 0.003625 W of actual traction work and wall heat. Its
 rational oracle and derivative were independently evaluated. The public FE test
 is authored but unexecuted while the full dependency build remains unavailable;
 shared search and original rotor/wave numerical tests are separately verified.
+
+## Causal full-volume compressibility memories
+
+`acoustics::helmholtz::heterogeneous::time::bulk` propagates every original
+pressure/potential coefficient with positive pressure-driven molecular arms:
+`M_inf p_dot + sum(delta_beta M_region q_dot) + K_rho psi + C p = b`,
+`psi_dot = p`, `tau q_dot + q = region(p)`. The caller supplies a coherent
+frozen-compressibility mass. Original density stays inside the stiffness
+divergence. Each disjoint conforming material region retains one consistent
+unit-weight volume mass shared by all its arms, and each arm retains every
+original region coordinate. Internal histories may jump at material interfaces.
+
+Implicit midpoint condenses all original memories into one congruence-scaled,
+positive sparse pressure factor, reused at a fixed physical time step. There
+is no dense mass inverse, modal truncation, sampled-frequency time law or
+runtime material query. Existing uniform/spatial memoryless wall resistance,
+exact high-order pressure release, linear boundary velocities, prepared
+quadratic boundary sources and prepared volume sources retain their original
+forms and work conjugacy. Pressure release fixes pressure and potential but
+retains all volume histories, including their constrained-trace coefficients.
+
+Storage is `psi^T K_rho psi/2 + p^T M_inf p/2` plus
+`sum(delta_beta q^T M_region q/2)`. Molecular heat is independently evaluated
+as `h delta_beta (p_mid-q_mid)^T M_region (p_mid-q_mid)/tau`; it is never
+inferred from an energy defect. Each branch, the frozen acoustic field and
+the complete system must satisfy original-equation and physical-work checks
+before candidate publication. Boundary and volume-source work subtotals are
+included in total input work. State identity includes the exact prepared
+material, geometry, memories and interval. Cancellation/refusal leaves the
+accepted state untouched.
+
+Explicit limits cover complete pressure coordinates, region/arm counts,
+complete memory coordinates, retained CSR entries, COO staging and original
+sparse analysis/numeric/front/factor payloads. Geometry/caller state, symbolic
+storage, work vectors, allocator and runtime overhead remain additional to the
+factor-byte cap. Cancellation is polled through assembly and original physical
+checks; the existing factor solve is bracketed by polls.
+
+Ten focused native regressions pass: independent closed-compression and
+harmonic-dispersion solutions; manufactured non-diagonal complete fields;
+original-coordinate congruence; lossless gauge and a 256-coordinate sparse
+case; original P1 tetrahedron volume moments with independent interface
+histories; all P2 pressure-release memory coordinates; source work/ownership;
+and transactional resource/cancellation refusals. Independent temporal
+refinements recover second order. Native compilation uses the actual original
+basis, affine metrics, boundary/source forms and sparse numerical owners.
+The full Cargo graph and curved-geometry proof constructor were unavailable
+in that bounded build; curved integration follows the existing original map
+but has no new executed curved-geometry claim. Midpoint is passive and second
+order, not exact or L-stable. Geometry, h/p, quadrature, wave phase and reservoir
+times require their own convergence axes. This scope adds no mean flow,
+thermal diffusion, shear field, dynamic wall-memory composition or material
+calibration.
