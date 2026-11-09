@@ -2,6 +2,11 @@
 
 mod power;
 mod sensitivity;
+pub use power::{
+    ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient, ModalTonePowerDerivative,
+    ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
+    PreparedModalTonePowerGradient,
+};
 pub use sensitivity::{
     ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalTonePullback,
     ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,

@@ -2061,3 +2061,33 @@ must supply frequency validity and any radiation, heat or storage interpretation
 Regression cases cover nonreciprocal mutual loading, moving-support port flow,
 free-resonance regularization by a physical load, static/empty/all-support limits,
 independent work accounting, refusals and cancellation.
+
+
+### Coherent tone work and heat control gradients
+
+`PreparedModalTones::prepare_power_gradients` admits a borrowed
+`PreparedModalTonePowerGradient` under separate fixed-array scratch and
+single-mode query-work caps. No new numerical coefficients are prepared.
+`gradients_mode` and `gradients_mode_affine` return separate input-work and
+viscous-heat derivatives for initial q/v, every original source amplitude or
+both envelope endpoints, and independent common source phase. The original
+paired velocity/force QR factors are contracted before products: work
+differentiates `(R*x)^T*(T*x)` and heat differentiates `||R*x||^2` with their
+original physical scales. All coherent cross terms and the aggregate force
+imbalance chart remain. No independent-tone heat sum or endpoint-energy
+subtraction is used.
+
+The physical input transpose is applied per factor row before accumulating
+endpoint covectors. Exact duplicates map back to every original source, and
+affine endpoints are coalesced before differences, admitting representable
+cancellation even when individual deltas overflow. Both endpoint pairs use
+the interval-start carrier basis. Reverse trajectories add power and motion
+covectors, sum shared knot contributions and transpose carrier rotations.
+Mechanics k/c, source frequencies, duration and basis/mass normalization stay
+fixed on this API. Warm queries are O(n^2), allocate nothing, evaluate no
+transcendentals and poll cancellation between factor rows and source mappings.
+Refusal publishes no partial result. G1/G3 tests in `tone_power_gradients.rs`
+cover independent physical variational ODEs, duplicate/near-tone controls,
+complete energy transpose, constant-envelope reduction, the active 32nd source,
+unequal-step multimode reverse chains, units, budgets and reusable refusals.
+Finite-arithmetic gradients remain estimates, not rigorous enclosures.

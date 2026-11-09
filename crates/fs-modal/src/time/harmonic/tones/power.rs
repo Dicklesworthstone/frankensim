@@ -1,5 +1,12 @@
 //! Cross-frequency power forms, using the scalar entire flow and heat QR owner.
 
+mod gradient;
+pub use gradient::{
+    ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient, ModalTonePowerDerivative,
+    ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
+    PreparedModalTonePowerGradient,
+};
+
 use super::super::affine::{double_delta, small_delta};
 use super::super::integrals::{NODES, augmented_flow, heat_rotation};
 use super::super::{DampedTransition, double_force, invalid, small_force};
@@ -282,33 +289,9 @@ impl TonePower {
         sine: &[f64],
         deltas: Option<(&[f64], &[f64])>,
     ) -> Result<(f64, f64, f64, f64), ModalAcousticTimeError> {
-        if self.affine != deltas.is_some() {
-            return Err(invalid("tone power must use its prepared envelope law"));
-        }
-        let width = if self.affine { 4 } else { 2 };
-        let n = 2 + width * cosine.len();
-        let mut x = [0.0; MAX_COORDINATES];
-        let mut total = Sum::default();
-        x[0] = state.velocity_m_sqrt_kg_per_s;
-        for (tone, (&c, &s)) in cosine.iter().zip(sine).enumerate() {
-            let c = self.h * c;
-            let s = self.h * s;
-            total.add(c);
-            x[2 + width * tone] = c / self.scale;
-            x[3 + width * tone] = s / self.scale;
-            if let Some((dc, ds)) = deltas {
-                x[4 + width * tone] = (self.h * dc[tone]) / self.scale;
-                x[5 + width * tone] = (self.h * ds[tone]) / self.scale;
-            }
-        }
-        let restoring = (self.omega * state.displacement_m_sqrt_kg) * (self.omega * self.h);
-        x[1] = (total.value() - restoring) / self.scale;
+        let x = self.coordinates(state, cosine, sine, deltas)?;
+        let n = 2 + (if self.affine { 4 } else { 2 }) * cosine.len();
         let x = &x[..n];
-        if x.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(
-                "simultaneous-tone power coordinates must be finite",
-            ));
-        }
         let mut heat = Sum::default();
         let mut heat_scale = 0.0;
         let mut work = Sum::default();
@@ -349,6 +332,44 @@ impl TonePower {
             ));
         }
         Ok(values)
+    }
+
+    // One physical input chart for forward power and its analytic transpose.
+    // Keep the aggregate initial force imbalance, including near-DC balance.
+    fn coordinates(
+        &self,
+        state: ModalAcousticState,
+        cosine: &[f64],
+        sine: &[f64],
+        deltas: Option<(&[f64], &[f64])>,
+    ) -> Result<[f64; MAX_COORDINATES], ModalAcousticTimeError> {
+        if self.affine != deltas.is_some() {
+            return Err(invalid("tone power must use its prepared envelope law"));
+        }
+        let width = if self.affine { 4 } else { 2 };
+        let n = 2 + width * cosine.len();
+        let mut x = [0.0; MAX_COORDINATES];
+        let mut total = Sum::default();
+        x[0] = state.velocity_m_sqrt_kg_per_s;
+        for (tone, (&c, &s)) in cosine.iter().zip(sine).enumerate() {
+            let c = self.h * c;
+            let s = self.h * s;
+            total.add(c);
+            x[2 + width * tone] = c / self.scale;
+            x[3 + width * tone] = s / self.scale;
+            if let Some((dc, ds)) = deltas {
+                x[4 + width * tone] = (self.h * dc[tone]) / self.scale;
+                x[5 + width * tone] = (self.h * ds[tone]) / self.scale;
+            }
+        }
+        let restoring = (self.omega * state.displacement_m_sqrt_kg) * (self.omega * self.h);
+        x[1] = (total.value() - restoring) / self.scale;
+        if x[..n].iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "simultaneous-tone power coordinates must be finite",
+            ));
+        }
+        Ok(x)
     }
 }
 

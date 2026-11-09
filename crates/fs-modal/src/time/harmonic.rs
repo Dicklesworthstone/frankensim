@@ -25,10 +25,12 @@ pub use sensitivity::{
     HarmonicForceSensitivityFrame, PreparedHarmonicForceSensitivity,
 };
 pub use tones::{
-    MAX_HARMONIC_TONES, ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalToneBudget,
-    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
-    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedModalToneSensitivity,
-    PreparedModalTones,
+    MAX_HARMONIC_TONES, ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient,
+    ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalToneBudget,
+    ModalTonePowerDerivative, ModalTonePowerGradient, ModalTonePowerGradientBudget,
+    ModalTonePowerSourceGradient, ModalTonePullback, ModalToneSensitivityBudget,
+    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
+    PreparedModalTonePowerGradient, PreparedModalToneSensitivity, PreparedModalTones,
 };
 
 /// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where
