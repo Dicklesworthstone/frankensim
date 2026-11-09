@@ -14678,3 +14678,41 @@ caloric/cancellation failure, and temperature continuation of loaded and release
 histories. Formatting/parser and whitespace checks passed. These groups were not
 compiled or executed: required constellation siblings and DSR/RCH runners were
 absent in the working environment.
+
+## Both finite rigid walls on the original thermal liquid timeline
+
+`free_surface_wall::planar::pair::thermal::FreeSurfaceThermalPlanarWallPair`
+retains one original thermal liquid and two finite bodies. Existing pair
+mechanics share a sealed liquid view and one closure-driven pilot/replay seam;
+isothermal aliases retain their original numerical path. One common thermal
+pilot and one final replay use source-derived local viscosity/rheology and
+optional buoyancy, original native mass-route enthalpy transport and both
+original body/guide/spin/orbital/work audits. Body mass and inertia remain the
+authored finite values, and the two per-wall mechanical records own no copy
+of the thermal liquid populations.
+
+Authored cell heat and optional held initial-state molecular heat belong to
+one accepted liquid interval, never one copy per wall or per trial. Only the
+final original thermal report and jointly admitted bodies/liquid escape.
+Body elapsed time starts at binding, while a pre-advanced liquid retains its
+own physical epoch and increments its accepted clock once. Boundary work is
+not inferred caloric heat. Original fixed flooded-plane geometry, explicit
+thermal source splitting, material and prepared-boundary limits remain.
+
+Four new pair tests and four original single-wall thermal tests pass. The
+new tests cover all-axis cold compatibility, binding an already advanced
+thermal state, actual summed body linear/spin/orbital momentum and kinetic-work
+balances under heated/buoyant flow, original molecular-source equivalence and
+late second-body/source refusal with deterministic retry. Initial rest-fluid
+wall reflection may produce no intercell mass routes; continuation requires
+positive native routes and every tick retains exact original replay and
+extensive-enthalpy checks. Four original isothermal pair tests also pass.
+
+Across this extension's focused runs, 31 unique tests pass (eight new and
+23 existing). One untouched partially filled liquid fixture refuses its ordinary
+stationary mass-transport step before any changed wall entry; that result is
+not claimed green. Tests execute original numerical/material/cancellation
+sources with optional conduction/electrical feature registrations excluded.
+The normal fs-couple Cargo feature graph and full workspace gate remain
+unverified because the async runtime dependency exceeds the environment's
+8 GiB memory limit. This is not a whole-fluid total-energy certificate.

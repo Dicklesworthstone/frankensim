@@ -7,23 +7,33 @@
 //! replay advances the liquid once. Momentum communicates between the walls
 //! through the evolving original populations over subsequent physical ticks.
 
+/// Both finite walls on the original source-driven thermal liquid trajectory.
+pub mod thermal;
+
 use super::{
-    PlanarWallCandidate, PlanarWallControls, PlanarWallError, PlanarWallMotion, add, allowance,
-    array, cross_dd, dd, finite, norm, normal_axis, sum3, values,
+    PlanarWallCandidate, PlanarWallControls, PlanarWallError, PlanarWallLiquid, PlanarWallMotion,
+    add, allowance, array, cross_dd, dd, finite, norm, normal_axis, sum3, values,
 };
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::PlanarWall3;
 use fs_lbm::material::MaterialLbmError;
-use fs_lbm::material::free_surface::{MaterialFreeSurface3, MaterialPlanarRigidWallPairReport3};
+use fs_lbm::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
+use fs_lbm::material::free_surface::{
+    MaterialFreeSurface3, MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallPairReport3,
+};
 use fs_math::dd::Dd;
 use fs_mbd::{MassProperties, RigidBodyState, Vec3};
 
-/// One original source-bound liquid and both finite wall mechanisms.
+/// One mechanical owner shared by the original isothermal and thermal liquids.
+/// The source-bound liquid is stored once; each wall retains only its mechanics.
 #[derive(Clone)]
-pub struct FreeSurfacePlanarWallPair<'a> {
-    liquid: MaterialFreeSurface3<'a>,
+pub struct PlanarWallPairMotion<L> {
+    liquid: L,
     walls: [PlanarWallMotion<()>; 2],
 }
+
+/// Original source-bound isothermal liquid and both finite wall mechanisms.
+pub type FreeSurfacePlanarWallPair<'a> = PlanarWallPairMotion<MaterialFreeSurface3<'a>>;
 
 /// Refusal publishes neither wall, liquid history nor physical clock.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +47,8 @@ pub enum PlanarWallPairError {
     },
     /// Original joint liquid candidate refused before publication.
     Fluid(MaterialLbmError),
+    /// Original common thermal source, transport or endpoint material refused.
+    Thermal(FreeSurfaceEnthalpyError),
     /// Boundary exchange failed its combined physical balance.
     Balance {
         momentum_residual_kg_m_s: Vec3,
@@ -58,13 +70,20 @@ impl From<MaterialLbmError> for PlanarWallPairError {
         Self::Fluid(error)
     }
 }
+impl From<FreeSurfaceEnthalpyError> for PlanarWallPairError {
+    fn from(error: FreeSurfaceEnthalpyError) -> Self {
+        Self::Thermal(error)
+    }
+}
 
 /// Both accepted finite walls and exactly one accepted native liquid tick.
-pub struct PlanarWallPairStep<'a> {
+pub struct PlanarWallPairCandidate<L, R = ()> {
     /// Continue from this jointly accepted state.
-    pub motion: FreeSurfacePlanarWallPair<'a>,
+    pub motion: PlanarWallPairMotion<L>,
     /// The one final native liquid replay, in the caller's wall order.
     pub fluid: MaterialPlanarRigidWallPairReport3,
+    /// Original source/transport account from the final replay, never the pilot.
+    pub liquid_report: R,
     /// Complete original per-wall mechanics, raw/physical guide reactions,
     /// spin/orbital impulses and work. Their mechanical records own no liquid.
     /// Each account's two trial counts refer to the SAME pilot and replay.
@@ -90,12 +109,15 @@ pub struct PlanarWallPairStep<'a> {
     pub trial_cells: usize,
 }
 
-impl<'a> FreeSurfacePlanarWallPair<'a> {
+/// Complete original isothermal liquid/body pair candidate.
+pub type PlanarWallPairStep<'a> = PlanarWallPairCandidate<MaterialFreeSurface3<'a>>;
+
+impl<L: PlanarWallLiquid> PlanarWallPairMotion<L> {
     /// Bind distinct opposing planes of one axis to two original finite bodies.
     /// The original single-wall principal-axis, tangent-motion, speed, material
     /// and cell-domain admission applies independently to each body.
     pub fn new(
-        liquid: MaterialFreeSurface3<'a>,
+        liquid: L,
         properties: [MassProperties; 2],
         bodies: [RigidBodyState; 2],
         planes: [PlanarWall3; 2],
@@ -126,7 +148,7 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
     }
 
     /// The only accepted liquid population history.
-    pub const fn liquid(&self) -> &MaterialFreeSurface3<'a> {
+    pub const fn liquid(&self) -> &L {
         &self.liquid
     }
     /// Both original native body states, in constructor order.
@@ -160,22 +182,22 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
         Ok([twist(0)?, twist(1)?])
     }
 
-    /// Advance both finite walls under their held tangent forces and axial couples.
-    ///
-    /// The shared cell budget counts two full-grid trials. Translation/rotation
-    /// bounds and physical tolerances apply to each original wall; the wall-work
-    /// ceiling additionally bounds the sum of both absolute boundary works.
-    /// Both planes must remain flooded in the original native model. The planes
-    /// stay fixed: there is no normal displacement, tilt, changing coverage or
-    /// finite plate edge. This is an isothermal liquid step; mechanical boundary
-    /// work is not a fluid energy-conservation or heat-production claim.
-    pub fn step_candidate(
+    // Both native liquid owners measure and replay this same mechanical solve.
+    // The pilot and final candidate always begin at the unchanged original
+    // liquid; only the final source/transport report is retained.
+    fn step_candidate_with<R>(
         &self,
         external_forces_n: [Vec3; 2],
         external_torques_nm: [f64; 2],
         controls: PlanarWallControls,
         gate: &CancelGate,
-    ) -> Result<PlanarWallPairStep<'a>, PlanarWallPairError> {
+        mut trial: impl FnMut(
+            [MaterialPlanarRigidWallMotion3; 2],
+            f64,
+            &CancelGate,
+        )
+            -> Result<(L, MaterialPlanarRigidWallPairReport3, R), PlanarWallPairError>,
+    ) -> Result<PlanarWallPairCandidate<L, R>, PlanarWallPairError> {
         poll(gate)?;
         let walls = self
             .walls
@@ -190,11 +212,8 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
         let pilot = {
             let motions =
                 core::array::from_fn(|i| walls[i].prescribed(prepared[i].origin, prepared[i].q0));
-            let (candidate, report) = self.liquid.planar_rigid_wall_pair_candidate_si(
-                motions,
-                controls.maximum_relative_mass_defect,
-                gate,
-            )?;
+            let (candidate, report, _) =
+                trial(motions, controls.maximum_relative_mass_defect, gate)?;
             drop(candidate);
             report
         };
@@ -206,11 +225,8 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
         };
         let imposed = [midpoint(0)?, midpoint(1)?];
         let motions = core::array::from_fn(|i| walls[i].prescribed(prepared[i].origin, imposed[i]));
-        let (liquid, fluid) = self.liquid.planar_rigid_wall_pair_candidate_si(
-            motions,
-            controls.maximum_relative_mass_defect,
-            gate,
-        )?;
+        let (liquid, fluid, liquid_report) =
+            trial(motions, controls.maximum_relative_mass_defect, gate)?;
         if fluid.walls[0].fluid_work_j.abs() + fluid.walls[1].fluid_work_j.abs()
             > controls.maximum_absolute_wall_work_j
         {
@@ -333,7 +349,7 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
         let external_work_j = numeric(finite(external_work.to_f64()))?;
         let raw_guide_work_j = numeric(finite(guide_work.to_f64()))?;
         poll(gate)?;
-        Ok(PlanarWallPairStep {
+        Ok(PlanarWallPairCandidate {
             motion: Self {
                 liquid,
                 walls: accounts
@@ -341,6 +357,7 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
                     .map(|account| account.motion.with_liquid(())),
             },
             fluid,
+            liquid_report,
             walls: accounts,
             momentum_residual_kg_m_s: momentum_residual,
             angular_momentum_residual_kg_m2_s: angular_residual,
@@ -351,6 +368,40 @@ impl<'a> FreeSurfacePlanarWallPair<'a> {
             native_trials: 2,
             trial_cells: prepared[0].trial_cells,
         })
+    }
+}
+
+impl<'a> PlanarWallPairMotion<MaterialFreeSurface3<'a>> {
+    /// Advance both finite walls under their held tangent forces and axial couples.
+    ///
+    /// The shared cell budget counts two full-grid trials. Translation/rotation
+    /// bounds and physical tolerances apply to each original wall; the wall-work
+    /// ceiling additionally bounds the sum of both absolute boundary works.
+    /// Both planes must remain flooded in the original native model. The planes
+    /// stay fixed: there is no normal displacement, tilt, changing coverage or
+    /// finite plate edge. This is an isothermal liquid step; mechanical boundary
+    /// work is not a fluid energy-conservation or heat-production claim.
+    pub fn step_candidate(
+        &self,
+        external_forces_n: [Vec3; 2],
+        external_torques_nm: [f64; 2],
+        controls: PlanarWallControls,
+        gate: &CancelGate,
+    ) -> Result<PlanarWallPairStep<'a>, PlanarWallPairError> {
+        self.step_candidate_with(
+            external_forces_n,
+            external_torques_nm,
+            controls,
+            gate,
+            |motions, mass_tolerance, gate| {
+                let (candidate, report) = self.liquid.planar_rigid_wall_pair_candidate_si(
+                    motions,
+                    mass_tolerance,
+                    gate,
+                )?;
+                Ok((candidate, report, ()))
+            },
+        )
     }
 }
 

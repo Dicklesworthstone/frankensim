@@ -1,5 +1,8 @@
 //! Finite recoil, actual thermal trajectories, and one-time source accounting.
 
+#[path = "thermal/pair.rs"]
+mod pair;
+
 use super::*;
 use fs_couple::free_surface_wall::planar::thermal::FreeSurfaceThermalPlanarWall;
 use fs_evidence::ValidityDomain;
@@ -85,6 +88,16 @@ fn with_thermal<R>(
     buoyant: bool,
     exercise: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_thermal_domain(wall, hot_viscosity, buoyant, false, exercise)
+}
+
+fn with_thermal_domain<R>(
+    wall: PlanarWall3,
+    hot_viscosity: f64,
+    buoyant: bool,
+    fully_flooded: bool,
+    exercise: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let card = card(hot_viscosity, if buoyant { 980.0 } else { 1000.0 });
     let point = QueryPoint::new()
         .with("T", 300.0)
@@ -141,6 +154,9 @@ fn with_thermal<R>(
                 ..domain()
             },
             |x, y, z| {
+                if fully_flooded {
+                    return true;
+                }
                 let coordinate = [x, y, z][axis(wall)];
                 if upper(wall) {
                     coordinate >= 4
@@ -320,7 +336,11 @@ fn g1_finite_recoil_uses_actual_heated_buoyant_flow_and_separate_work_accounts()
                 );
                 assert_eq!(step.liquid_report.enthalpy.external_heat_j, 0.01);
                 assert_eq!(step.liquid_report.enthalpy.viscous_heat_j, 0.0);
-                assert!(step.liquid_report.enthalpy.mass_routes > 0);
+                // A first reflection accelerates the retained rest fluid;
+                // subsequent moving-fluid ticks must transport enthalpy.
+                if index > 1 {
+                    assert!(step.liquid_report.enthalpy.mass_routes > 0);
+                }
                 assert_eq!(step.motion.liquid().accepted_steps(), index);
                 let h = step
                     .motion
