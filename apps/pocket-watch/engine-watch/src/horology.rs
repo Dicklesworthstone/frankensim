@@ -53,6 +53,9 @@ pub enum MechanicalAcousticEvent {
     MagneticForkSnap {
         energy: f64,
     },
+    MechanicalShockImpulse {
+        energy: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +350,34 @@ impl HorologyState {
         }
     }
 
+    /// Deliver an external mechanical shock impulse ($G_{\text{peak}}$ in $\text{g}$-units, e.g. $500\text{ G}$ bench drop)
+    /// into the Incabloc ruby jewel suspension, balance staff, and keyless recoil click.
+    pub fn apply_mechanical_shock(
+        &mut self,
+        g_peak: f64,
+        events: &mut Vec<MechanicalAcousticEvent>,
+    ) {
+        let g = g_peak.clamp(10.0, 5000.0);
+        let shock_norm = (g / 500.0).clamp(0.05, 4.0);
+        // Incabloc lyre-spring radial/axial excursion imparts angular impulse to the balance staff
+        let dir = if self.balance_omega_rad_s >= 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        self.balance_omega_rad_s =
+            (self.balance_omega_rad_s + dir * 24.0 * shock_norm).clamp(-165.0, 165.0);
+        self.click_lever_angle_rad = (0.18 * shock_norm).min(0.28);
+        self.click_lever_omega_rad_s = -6.0 * shock_norm;
+        self.measured_beat_error_ms =
+            (self.measured_beat_error_ms + 1.8 * shock_norm).clamp(0.0, 25.0);
+        self.measured_rate_s_per_day =
+            (self.measured_rate_s_per_day - 6.5 * shock_norm).clamp(-999.0, 999.0);
+        events.push(MechanicalAcousticEvent::MechanicalShockImpulse {
+            energy: shock_norm.clamp(0.2, 2.0),
+        });
+    }
+
     pub fn step(
         &mut self,
         dt_s: f64,
@@ -615,7 +646,17 @@ impl HorologyState {
             let sin_wt = (omega_d * h).sin();
 
             let x0 = theta_rel;
-            let v0 = self.balance_omega_rad_s + (torque_esc_nm / inertia) * h;
+            // Positional gravity poise torque in the rotating 1-minute Tourbillon cage frame:
+            // Breguet invented the Tourbillon specifically so this gravity poise torque averages out over 60s!
+            let gx = mods.gravity_g_vec[0];
+            let gy = mods.gravity_g_vec[1];
+            let g_in_plane = (gx * gx + gy * gy).sqrt();
+            let psi_g = gy.atan2(gx);
+            let poise_torque_nm = -1.6e-10
+                * g_in_plane
+                * (self.balance_angle_rad + self.tourbillon_cage_angle_rad - psi_g).sin();
+            let v0 =
+                self.balance_omega_rad_s + ((torque_esc_nm + poise_torque_nm) / inertia) * h;
 
             let x1 =
                 decay * (x0 * cos_wt + ((v0 + zeta * omega_eff * x0) / omega_d) * sin_wt);
