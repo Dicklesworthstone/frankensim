@@ -1615,3 +1615,83 @@ fn g0_crystal_group_sources_keep_loss_band_and_zero_or_anomalous_slope_semantics
         }
     }
 }
+
+#[test]
+fn g1_oriented_group_transport_retains_original_sources_and_the_exact_prepared_carrier() {
+    use crate::plane_wave::uniaxial::oriented::OrientedUniaxialInterface;
+
+    let source_incident = incident(1.3, 0.8 * MU);
+    let (o, e) = axes(
+        [2.8, 1.2],
+        [3.1, 1.4],
+        [0.0; 2],
+        Some(1.7 * MU),
+        [400.0, 800.0],
+        2,
+    );
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&source_incident),
+        law,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let omega = frequency(600.0);
+    let electric = [C64::new(1.0, 0.2), C64::new(0.4, -0.3)];
+    for p in [-0.65, 0.65] {
+        let prepared = interface
+            .prepare_field_at_tangential_index(omega, p, electric)
+            .unwrap();
+        let boundary = *prepared.boundary_response();
+        let from_prepared = prepared.group_velocity_response().unwrap();
+        let from_interface = interface
+            .group_velocity_response_at_tangential_index(omega, p, electric)
+            .unwrap();
+        assert!(core::ptr::eq(from_prepared.source(), &interface));
+        assert!(core::ptr::eq(
+            from_prepared.source().crystal_response().ordinary_source(),
+            &o,
+        ));
+        assert!(core::ptr::eq(
+            from_prepared.source().crystal_response().extraordinary_source(),
+            &e,
+        ));
+        assert_eq!(from_prepared.omega_rad_s(), omega);
+        assert_eq!(*from_prepared.boundary_response(), boundary);
+        assert_eq!(*from_interface.boundary_response(), boundary);
+        assert_eq!(*prepared.boundary_response(), boundary);
+        assert_eq!(
+            from_prepared.group_velocities_m_s(),
+            from_interface.group_velocities_m_s(),
+        );
+        near(from_prepared.principal_group_indices()[0], 4.4, 3e-14);
+        near(from_prepared.principal_group_indices()[1], 4.8, 3e-14);
+        let [ordinary, extraordinary] = from_prepared.group_velocities_m_s();
+        let ordinary = ordinary.unwrap();
+        let extraordinary = extraordinary.unwrap();
+        assert!(ordinary[2] > 0.0 && extraordinary[2] > 0.0);
+        near(ordinary[1], 0.0, 2e-14 * C0);
+        assert!(extraordinary[1].abs() > 1e-3 * C0);
+        assert_eq!(boundary.transmitted[1].phase_direction.unwrap()[1], 0.0);
+    }
+    let by_angle = interface.group_velocity_response(omega, 0.8, electric).unwrap();
+    let by_tangent = interface
+        .group_velocity_response_at_tangential_index(omega, 1.3 * 0.6, electric)
+        .unwrap();
+    for m in 0..2 {
+        for j in 0..3 {
+            near(
+                by_angle.group_velocities_m_s()[m].unwrap()[j],
+                by_tangent.group_velocities_m_s()[m].unwrap()[j],
+                2e-13 * C0,
+            );
+        }
+    }
+    // Preparing monochromatic fields at an original source endpoint does
+    // not grant a two-sided derivative domain to the added group query.
+    for wavelength in [400.0, 800.0] {
+        let prepared = interface.prepare_field(frequency(wavelength), 0.8, electric).unwrap();
+        assert!(prepared.group_velocity_response().is_err());
+        assert!(interface.group_velocity_response(frequency(wavelength), 0.8, electric).is_err());
+    }
+}

@@ -1,5 +1,7 @@
 //! Fixed-size vector Maxwell boundary kernel; no source resolution or allocation.
-use super::super::kernel::{Incidence, UniaxialWaveKind, binary_scale, outgoing_root};
+use super::super::kernel::{
+    Incidence, UniaxialWaveKind, binary_scale, dispersive_group_denominator, outgoing_root,
+};
 use fs_math::{c64::C64, dd::Dd, det};
 
 const C0: f64 = 299_792_458.0;
@@ -132,14 +134,23 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
     } else {
         let [ax, ay, az] = axis.map(Dd::from_f64);
         let axis2 = ax * ax + ay * ay + az * az;
-        let f = (o2 * (ax * ax + ay * ay) + e2 * az * az) / axis2;
-        let g = (e2 - o2) * ax * az / axis2;
-        let h = (o2 * (ay * ay + az * az) + e2 * ax * ax) / axis2;
+        // Normalize direction weights BEFORE the positive constitutive sums.
+        // Dividing a rounded weighted numerator afterwards can leave a tiny
+        // signed residual at an exactly critical symmetric principal section.
+        // This matches the original principal-plane kernel without a cutoff
+        // tolerance or cancellation of a small index against a large one.
+        let xx = ax * ax / axis2;
+        let yy = ay * ay / axis2;
+        let zz = az * az / axis2;
+        let xz = ax * az / axis2;
+        let f = o2 * (xx + yy) + e2 * zz;
+        let g = (e2 - o2) * xz;
+        let h = o2 * (yy + zz) + e2 * xx;
         let gp = g * Dd::from_f64(p);
         let constant = h * p2 - o2 * e2;
         // Factor f*h-g*g before applying p². This avoids subtracting
         // nearly equal shifted-root terms and keeps one conserved p².
-        let determinant = o2 * (o2 * ay * ay + e2 * (ax * ax + az * az)) / axis2;
+        let determinant = o2 * (o2 * yy + e2 * (xx + zz));
         let discriminant = if axis[1] == 0.0 {
             o2 * e2 * (f - p2)
         } else {
@@ -406,6 +417,99 @@ fn inverse_tensor(
             + projection.scale(axis[j] * (1.0 / extraordinary_squared - 1.0 / ordinary_squared))
     })
 }
+
+/// Local bulk derivatives of the original native outgoing modes. No boundary
+/// solve, source replacement or coherent-superposition velocity is introduced.
+pub(super) fn mode_velocities(
+    boundary: &OrientedCrystalResponse,
+    omega_rad_s: f64,
+    indices: [f64; 2],
+    group_indices: [f64; 2],
+    optic_axis: [f64; 3],
+) -> Result<[Option<[f64; 3]>; 2]> {
+    let k0 = positive(positive(omega_rad_s)? / C0)?;
+    let [no, ne] = indices.map(positive);
+    let (no, ne) = (no?, ne?);
+    if group_indices.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("uniaxial group indices must be finite"));
+    }
+    let axis = unit(optic_axis)?;
+    // At exact isotropy the native kernel deliberately chooses TE/TM. When
+    // ay!=0 and the original slopes split, that basis mixes spectral branches.
+    // Preserve the carrier but refuse an unsupported per-mode interpretation.
+    if no == ne && group_indices[0] != group_indices[1] && axis[1] != 0.0 {
+        return Err(invalid(
+            "equal principal phase indices with unequal group slopes need a spectral eigenbasis for an out-of-plane optic axis",
+        ));
+    }
+    let mut velocities = [None; 2];
+    for (m, mode) in boundary.transmitted.iter().enumerate() {
+        let Some(mut direction) = mode.energy_direction else {
+            continue;
+        };
+        if mode.wave_kind == UniaxialWaveKind::Evanescent {
+            continue;
+        }
+        if mode.wave_kind == UniaxialWaveKind::Critical {
+            // The native field cross product may retain roundoff normal flux.
+            // An exactly critical branch has only tangent group transport.
+            direction[2] = 0.0;
+            direction = unit(direction)?;
+        }
+        let speed = if m == 0 {
+            if group_indices[0] == 0.0 {
+                continue;
+            }
+            C0 / group_indices[0]
+        } else {
+            let qx = boundary.tangential_wavenumber_rad_m / k0;
+            let qz = mode.normal_wavenumber_rad_m.re / k0;
+            let along = (axis[0] * qx + axis[2] * qz) / no;
+            // |q cross a| equals the perpendicular wavevector magnitude.
+            // This preserves small transverse components without subtracting
+            // two nearly equal squared norms.
+            let across = [
+                (-axis[1] * qz) / ne,
+                (axis[0] * qz - axis[2] * qx) / ne,
+                (axis[1] * qx) / ne,
+            ];
+            if ![qx, qz, along].into_iter().chain(across).all(f64::is_finite) {
+                return Err(invalid(
+                    "uniaxial group-wave coordinates are unrepresentable",
+                ));
+            }
+            let weights = [
+                Dd::from_f64(along) * Dd::from_f64(along),
+                across.into_iter().fold(Dd::ZERO, |sum, value| {
+                    let value = Dd::from_f64(value);
+                    sum + value * value
+                }),
+            ];
+            let Some(denominator) =
+                dispersive_group_denominator(weights, [no, ne], group_indices)?
+            else {
+                continue;
+            };
+            let perpendicular = det::hypot(det::hypot(across[0], across[1]), across[2]);
+            let metric_magnitude = positive(det::hypot(along / no, perpendicular / ne))?;
+            C0 * (metric_magnitude / denominator)
+        };
+        let velocity = direction.map(|value| value * speed);
+        if !speed.is_finite()
+            || speed == 0.0
+            || velocity.iter().any(|value| !value.is_finite())
+            || velocity == [0.0; 3]
+        {
+            return Err(invalid("uniaxial group velocity is unrepresentable"));
+        }
+        velocities[m] = Some(velocity);
+    }
+    Ok(velocities)
+}
+
+#[cfg(test)]
+#[path = "group_tests.rs"]
+mod group_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

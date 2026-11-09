@@ -338,6 +338,28 @@ pub(crate) fn solve(input: Input) -> Result<UniaxialInterfaceResponse, &'static 
 }
 
 
+/// Shared principal/arbitrary-axis contraction of the original spectral slopes.
+/// Weights are |q_parallel/no|² and |q_perpendicular/ne|². The ng/n ratios
+/// must be divided in double-double arithmetic before the signed sum: f64
+/// division can erase a finite difference between nearly opposite slopes.
+pub(super) fn dispersive_group_denominator(
+    weights: [Dd; 2],
+    indices: [f64; 2],
+    group_indices: [f64; 2],
+) -> Result<Option<f64>, &'static str> {
+    let ordinary = Dd::from_f64(group_indices[0]) / Dd::from_f64(indices[0]);
+    let extraordinary = Dd::from_f64(group_indices[1]) / Dd::from_f64(indices[1]);
+    let denominator = weights[0] * ordinary + weights[1] * extraordinary;
+    if denominator == Dd::ZERO {
+        return Ok(None);
+    }
+    let denominator = denominator.to_f64();
+    if !denominator.is_finite() || denominator == 0.0 {
+        return Err("uniaxial dispersive denominator is unrepresentable");
+    }
+    Ok(Some(denominator))
+}
+
 /// Differentiate the ORIGINAL ordinary/extraordinary bulk dispersion surface.
 /// The carrier remains the native outgoing interface mode; there is no second
 /// root solve or angular finite difference here.
@@ -386,19 +408,15 @@ pub(crate) fn group_velocity(
         if !q.into_iter().chain([along, across]).all(f64::is_finite) {
             return Err("uniaxial group-wave coordinates are unrepresentable");
         }
-        // Compensate the signed spectral contraction: a rounded cancellation
-        // must not invent an infinite group velocity for unequal source slopes.
-        let ordinary_slope = Dd::from_f64(group_indices[0]) / Dd::from_f64(no);
-        let extraordinary_slope = Dd::from_f64(group_indices[1]) / Dd::from_f64(ne);
-        let denominator = Dd::from_f64(along) * Dd::from_f64(along) * ordinary_slope
-            + Dd::from_f64(across) * Dd::from_f64(across) * extraordinary_slope;
-        if denominator == Dd::ZERO {
+        let weights = [
+            Dd::from_f64(along) * Dd::from_f64(along),
+            Dd::from_f64(across) * Dd::from_f64(across),
+        ];
+        let Some(denominator) =
+            dispersive_group_denominator(weights, [no, ne], group_indices)?
+        else {
             return Ok(None);
-        }
-        let denominator = denominator.to_f64();
-        if !denominator.is_finite() || denominator == 0.0 {
-            return Err("uniaxial dispersive denominator is unrepresentable");
-        }
+        };
         let metric_q = [
             axis[0] * (along / no) - axis[1] * (across / ne),
             axis[1] * (along / no) + axis[0] * (across / ne),

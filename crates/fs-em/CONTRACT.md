@@ -6733,11 +6733,43 @@ alignment limits use a deterministic nonsingular polarization basis.
 This fixed-size, allocation-free solve eliminates reflection analytically to
 leave a complex 2x2 transmission system. Power-of-two index scaling and
 factored double-double dispersion discriminants protect critical classification.
+Normalized double-double axis weights precede the positive index-squared sums;
+this retains exact symmetric critical coordinates without a tolerance window
+and preserves small principal values at large contrast. Both signed adjacent
+representable tangential inputs retain their propagating/critical/evanescent
+classification.
 Tests reconstruct both Maxwell curls from the dimensional constitutive tensor,
 verify Cartesian boundary continuity and independent normal power, and compare
 principal sections against the existing decoupled owner. This extension remains
 one lossless planar half-space; it does not claim general anisotropic film,
-beam, absorbing-medium, geometric traversal or group-speed support.
+beam, absorbing-medium, geometric traversal or broadband transient support.
+
+`OrientedUniaxialInterface::group_velocity_response` and its signed
+tangential-index counterpart pair that unchanged boundary solution with
+`OrientedCrystalGroupResponse`: original principal group indices and separate
+ordinary/extraordinary group-velocity vectors in Cartesian [x,y,z] m/s.
+`PreparedOrientedCrystalField::group_velocity_response` adds the same original
+spectral derivatives to an already solved field without another boundary/root
+solve. Both paths allocate nothing and retain their original source and axis.
+
+The full anisotropic dispersion supplies the modal derivatives, including
+nonzero y walk-off despite conserved ky=0. The two crystal paths share a
+double-double signed spectral contraction; transverse cross-product weights
+avoid subtracting nearly equal squared norms. Exactly unexcited and evanescent
+modes return no bulk group vector. Critical modes retain exact zero normal
+group velocity, including tilted modes with negative normal phase. Anomalous
+signs remain signed, and a zero or unrepresentable denominator retains the
+same explicit boundary as the principal-plane owner.
+
+At exact equal principal phase indices with unequal principal group slopes,
+an out-of-plane optic axis requires a spectral eigenbasis that the original
+deterministic TE/TM carrier does not supply. The opt-in group query refuses
+that interpretation while monochromatic fields remain usable. Principal-plane
+crossings and equal-group isotropic limits remain admitted. Separate modal
+velocities are not averaged into a velocity for a coherent superposition.
+Focused regressions compare independent dispersive Maxwell energy and flux,
+principal-section reduction, axis reversal, original-source/Prepared parity,
+near-cancelling slopes, spectral crossings and critical/evanescent mode limits.
 
 `OrientedUniaxialInterface::prepare_field` and
 `prepare_field_at_tangential_index` retain the original interface, admitted

@@ -23,6 +23,9 @@ use super::{DielectricResponse, ReflectionError, UniaxialOpticalResponse, positi
 use fs_material::field_storage::linear_magnetic_permeability;
 use fs_math::{c64::C64, det};
 
+mod group;
+pub use group::OrientedCrystalGroupResponse;
+
 mod kernel;
 use kernel::Input;
 pub use kernel::{
