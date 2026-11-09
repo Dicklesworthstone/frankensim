@@ -1,6 +1,9 @@
 //! Original molecular sources and finite-gas droplet integration.
 //! This file is included under the existing evaporation fixture module so the
 //! NASA/material owners are reused rather than replaced with a new gas model.
+#[path = "forced/tests.rs"]
+mod forced;
+
 use super::*;
 use crate::graph::thermal::medium::mass_transfer::evaporation::droplet::{
     SourceSphericalDropletFilm, SphericalDropletFilmError,
@@ -624,7 +627,17 @@ fn original_if97_water_and_nasa_gas_keep_species_energy_and_source_identity() {
     solve.maximum_temperature_increment_k = 1.0;
     solve.latent_compatibility_tolerance_j_kg = 5.0;
     for (t, fraction) in [(300.0, 0.01), (310.0, 0.05)] {
-        let original = gas(&source, t, 100_000.0, fraction);
+        // Composition coordinates follow the original catalog's canonical
+        // species order (H2O sorts before N2), never a guessed vapor index.
+        let fractions: Vec<_> = source.thermodynamics().components().iter()
+            .map(|component| if component.species() == &vapor { fraction } else { 1.0 - fraction })
+            .collect();
+        let model = source.with_composition(
+            Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
+        ).unwrap();
+        let original = ClosedGasParcel::new(
+            model, point(t, 100_000.0).with("local-lot", 9.0).unwrap(), 0.01,
+        ).unwrap();
         let saved = original.clone();
         let prepared = SourceSphericalDropletFilm::new(&pair, &vapor, &original, || false).unwrap();
         let next = prepared

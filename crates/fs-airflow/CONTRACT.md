@@ -6043,3 +6043,43 @@ Focused regressions cover independently evaluated section heat, original wall-so
 `FilmGasSurface::with_prescribed_mass_flow` binds a positive stream or recirculation mass rate and flow cross section to an existing forced heat law. Every nonlinear trial resolves velocity as `mdot/(rho_bulk A_flow)` from the same sealed original gas state's actual EOS density. It does not query unused bulk transport merely to infer density. External-film correlations retain their separate film density, viscosity, Cp and conductivity. Internal circular and rectangular flow areas must agree with the supplied passage geometry within roundoff; physical heated entrance coordinates remain unchanged. Natural and direction-dependent mixed laws refuse this unsigned forced-speed selection.
 
 The returned sample retains the prescribed inputs, actual bulk density and velocity. The default authored-speed API and shared piston/body and fixed-volume wall-feedback algorithms remain intact, with the original source checks, regime bounds and exact zero thermal-area insulation. Prescribed rate controls convection only: it supplies no open mass or enthalpy flux, fan/pump work, axial solution or new energy owner. Focused regressions cover independent film transfer, mass-flux invariance, passage geometry, original variable-volume work/energy, and fixed-volume energy/entropy conservation. This does not close the broader conjugate-channel validation bead.
+
+
+## Source-resolved dilute forced spherical evaporation
+
+`mass_transfer::sphere::ForcedSphereMassTransfer::Frossling1938` explicitly
+selects the original direct mass-transfer wind correlation. Its diameter-based
+form is `Sh = 2 + 0.552 sqrt(Re) Sc^(1/3)`, with `k_m = Sh D_AB/d`.
+This rung admits Re in [2,800] and Sc in [0.6,2.6]; it never switches models,
+clamps unsupported states or substitutes a heat-transfer analogy. The scalar
+correlation performs bounded work without allocation. Area-averaged Sherwood
+and finite kinetics form a lumped series closure; angular variation is unresolved. The original paper and
+chosen range are documented beside the implementation.
+
+`evaporation::droplet::forced::SourceForcedSphericalDropletFilm` borrows the
+same pinned binary diffusivity source as the stagnant sphere. It resolves
+molecular D and original gas density/viscosity at the arithmetic mean of actual
+surface and bulk temperature, with actual bulk pressure/composition. The mean
+is also the representative Stefan-film temperature; actual interface
+temperature, finite accommodation kinetics and both caloric owners stay
+original. True D, explicit Sh, transport groups and original material receipts
+remain separate. No parcel is heated merely to evaluate its film properties.
+
+Relative speed and a positive dilute-vapor bound are explicitly authored.
+The bound cannot exceed 0.05 and applies to bulk vapor and equilibrium surface
+pressure fraction at every phase-film evaluation. This ceiling is an
+implementation policy, not an experimental accuracy certificate. Initial and
+accepted-endpoint source/correlation support are required; a late refusal
+discards the complete original phase/heat candidate. Source claims never
+silently switch. Optional sensible heat remains independently authored.
+
+Initial geometry and transport freeze for one first-order interval; final
+samples describe the next interval. This is an isolated, uniform, quasi-steady
+sphere in dilute binary continuum gas with nearly constant film properties
+and negligible buoyancy, deformation and compressibility. It supplies no
+trajectory, drag, strong-blowing correction, breakup, nucleation or gas-volume
+work. Focused numerical/source regressions cover transport scaling and range,
+mean-film sources, both phase directions with finite kinetics, reciprocal
+heat, late refusals and original IF97/NASA calorics. The water fixture now
+constructs mole fractions by original species identity. All new regression
+execution remains unclaimed because the execution workspace is unavailable.

@@ -30,6 +30,9 @@ pub mod chamber;
 /// Original laminar plate/strip physics with explicitly authored transport.
 pub mod laminar_plate;
 
+/// Explicit dilute forced-sphere mass transfer, separate from heat convection.
+pub mod sphere;
+
 /// Source-resolved liquid evaporation on the original coupled thermal timeline.
 pub mod evaporation;
 

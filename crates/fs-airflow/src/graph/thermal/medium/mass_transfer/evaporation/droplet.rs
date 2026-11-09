@@ -20,6 +20,9 @@
 //! The isolated-sphere, uniform-liquid, binary continuum assumptions and
 //! exclusions in `fs_thermal::evaporation::droplet` remain authoritative.
 
+/// Explicit dilute forced convection with the same original molecular source.
+pub mod forced;
+
 use super::super::chamber::binary_vapor_fraction;
 use super::super::{GasFilmError, typed};
 use fs_matdb::QueryPoint;
@@ -368,6 +371,21 @@ fn evaluate(
     previous: Option<&ResolvedMaterialStatePoint>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DiffusionState, SphericalDropletFilmError> {
+    evaluate_at_temperature(
+        source, vapor, gas, previous, gas.state().state().temperature, cancelled,
+    )
+}
+
+/// Query the same admitted molecular source at an explicit transport temperature.
+/// The original gas supplies composition and total pressure without heat/storage.
+fn evaluate_at_temperature(
+    source: &BinaryDiffusionMaterial<'_>,
+    vapor: &SpeciesId,
+    gas: &ClosedGasParcel,
+    previous: Option<&ResolvedMaterialStatePoint>,
+    temperature_k: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DiffusionState, SphericalDropletFilmError> {
     poll(cancelled)?;
     let vapor_mole_fraction = binary_vapor_fraction(source, vapor, gas, cancelled)?;
     let bulk = gas.state().state();
@@ -381,7 +399,12 @@ fn evaluate(
             "spherical film requires positive finite gas temperature/pressure and a represented carrier fraction",
         ).into());
     }
-    let point = query(source, bulk.temperature, bulk.pressure)?;
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(GasFilmError::Invalid(
+            "spherical molecular source needs a positive finite transport temperature",
+        ).into());
+    }
+    let point = query(source, temperature_k, bulk.pressure)?;
     poll(cancelled)?;
     let material = if let Some(selected) = previous {
         selected.at_query_point(source.material, &point)
@@ -428,7 +451,7 @@ fn evaluate(
             diffusivity_m2_s,
             material,
         },
-        temperature_k: bulk.temperature,
+        temperature_k,
         total_pressure_pa: bulk.pressure,
         vapor_mole_fraction,
     })
