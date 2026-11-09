@@ -53,14 +53,24 @@ impl<const B: usize> BeamTotals<B> {
         let absorbed_photons = values(self.absorbed)?;
         let passive_absorbed_photons = values(self.passive)?;
         let photon_residual = photon_balance(
-            incident_photons, transmitted_photons, absorbed_photons, passive_absorbed_photons,
+            incident_photons,
+            transmitted_photons,
+            absorbed_photons,
+            passive_absorbed_photons,
         )?;
         admit_photons(
-            incident_photons, transmitted_photons, absorbed_photons,
-            passive_absorbed_photons, photon_residual, tolerance,
+            incident_photons,
+            transmitted_photons,
+            absorbed_photons,
+            passive_absorbed_photons,
+            photon_residual,
+            tolerance,
         )?;
         Ok(PumpBeamStep {
-            incident_photons, transmitted_photons, absorbed_photons, passive_absorbed_photons,
+            incident_photons,
+            transmitted_photons,
+            absorbed_photons,
+            passive_absorbed_photons,
             incident_energy_j: energies(incident_photons, quantum)?,
             transmitted_energy_j: energies(transmitted_photons, quantum)?,
             absorbed_energy_j: energies(absorbed_photons, quantum)?,
@@ -103,7 +113,10 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 )?;
                 residual.add(old)?;
                 scale.add(old)?;
-                for value in [cell.stored_energy_j[target], cell.radiative_decay_energy_j[target]] {
+                for value in [
+                    cell.stored_energy_j[target],
+                    cell.radiative_decay_energy_j[target],
+                ] {
                     residual.add(-value)?;
                     scale.add(value)?;
                 }
@@ -114,9 +127,14 @@ impl<const B: usize> SaturablePumpBeams<B> {
             }
             heat.add(cell.crossing_heat_j)?;
             heat.add(-cell.reverse_crossing_heat_absorbed_j)?;
+            heat.add(cell.annihilation_heat_j)?;
             heat.add(passive[index])?;
         }
-        admit_energy(spectral_minus_target.value()?, pump_scale.value()?, tolerance)?;
+        admit_energy(
+            spectral_minus_target.value()?,
+            pump_scale.value()?,
+            tolerance,
+        )?;
         let heat = heat.value()?;
         residual.add(-heat)?;
         scale.add(heat.abs())?;
@@ -139,21 +157,40 @@ impl<const B: usize> SaturablePumpBeams<B> {
             result.extend(k.pump_relaxation_heat_j);
             result.push(k.crossing_heat_j);
             result.push(k.reverse_crossing_heat_absorbed_j);
+            result.push(k.annihilation_heat_j);
             result.push(step.passive_heat_j[index]);
             let quantum = model.excitation_energies_j();
             result.push(positive_product(
-                k.populations[0], quantum[0], "ground convergence weight",
+                k.annihilation_events,
+                quantum[1],
+                "pair convergence weight",
+            )?);
+            result.push(positive_product(
+                k.annihilation_singlets,
+                quantum[0],
+                "pair singlet convergence weight",
+            )?);
+            result.push(positive_product(
+                k.populations[0],
+                quantum[0],
+                "ground convergence weight",
             )?);
             for target in 0..2 {
                 result.push(product3(
-                    k.stored_energy_j[target], model.radiative_rates_s()[target], duration,
+                    k.stored_energy_j[target],
+                    model.radiative_rates_s()[target],
+                    duration,
                 )?);
                 for events in [
-                    k.pump_events[target], k.radiative_events[target],
-                    k.nonradiative_events[target], k.crossing_events[target],
+                    k.pump_events[target],
+                    k.radiative_events[target],
+                    k.nonradiative_events[target],
+                    k.crossing_events[target],
                 ] {
                     result.push(positive_product(
-                        events, quantum[target], "event convergence weight",
+                        events,
+                        quantum[target],
+                        "event convergence weight",
                     )?);
                 }
             }

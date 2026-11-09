@@ -387,6 +387,7 @@ impl<const B: usize> SaturablePumpColumn<B> {
             }
             heat.add(cell.kinetics.crossing_heat_j)?;
             heat.add(-cell.kinetics.reverse_crossing_heat_absorbed_j)?;
+            heat.add(cell.kinetics.annihilation_heat_j)?;
             heat.add(cell.passive_heat_j)?;
         }
         let heat = heat.value()?;
@@ -433,7 +434,18 @@ impl<const B: usize> SaturablePumpColumn<B> {
             result.extend(k.pump_relaxation_heat_j);
             result.push(k.crossing_heat_j);
             result.push(k.reverse_crossing_heat_absorbed_j);
+            result.push(k.annihilation_heat_j);
             let energies = model.model.excitation_energies_j();
+            result.push(positive_product(
+                k.annihilation_events,
+                energies[1],
+                "pair convergence weight",
+            )?);
+            result.push(positive_product(
+                k.annihilation_singlets,
+                energies[0],
+                "pair singlet convergence weight",
+            )?);
             result.push(positive_product(
                 k.populations[0],
                 energies[0],
@@ -491,7 +503,13 @@ fn solve_cell<const B: usize>(
         passive_depth: cell.passive_optical_depth[lane],
     });
     let trial = cell::solve(
-        cell.model, populations, &channels, duration, limits, evaluations, cancelled,
+        cell.model,
+        populations,
+        &channels,
+        duration,
+        limits,
+        evaluations,
+        cancelled,
     )?;
     let incident = std::array::from_fn(|lane| trial.channels[lane].incident);
     let transmitted = std::array::from_fn(|lane| trial.channels[lane].transmitted);
@@ -569,7 +587,9 @@ impl<const B: usize> CellTotals<B> {
         photon_energies: [f64; B],
         tolerance: f64,
     ) -> Result<PumpColumnCellStep<B>, SingletTripletError> {
-        let kinetics = self.kinetics.finish(model, initial, populations, tolerance)?;
+        let kinetics = self
+            .kinetics
+            .finish(model, initial, populations, tolerance)?;
         let incident = values(self.incident)?;
         let transmitted = values(self.transmitted)?;
         let absorbed = values(self.absorbed)?;
@@ -630,6 +650,9 @@ pub(super) struct KineticTotals {
     dark_heat: [Sum; 2],
     crossing_heat: Sum,
     reverse_heat: Sum,
+    annihilation_events: Sum,
+    annihilation_singlets: Sum,
+    annihilation_heat: Sum,
 }
 
 impl KineticTotals {
@@ -645,10 +668,16 @@ impl KineticTotals {
             dark_heat: [Sum::default(); 2],
             crossing_heat: Sum::default(),
             reverse_heat: Sum::default(),
+            annihilation_events: Sum::default(),
+            annihilation_singlets: Sum::default(),
+            annihilation_heat: Sum::default(),
         }
     }
 
-    pub(super) fn add(&mut self, k: &SaturableSingletTripletStep) -> Result<(), SingletTripletError> {
+    pub(super) fn add(
+        &mut self,
+        k: &SaturableSingletTripletStep,
+    ) -> Result<(), SingletTripletError> {
         add_values(&mut self.pump_events, k.pump_events)?;
         add_values(&mut self.pump_energy, k.absorbed_pump_energy_j)?;
         add_values(&mut self.pump_heat, k.pump_relaxation_heat_j)?;
@@ -659,6 +688,9 @@ impl KineticTotals {
         add_values(&mut self.dark_heat, k.nonradiative_heat_j)?;
         self.crossing_heat.add(k.crossing_heat_j)?;
         self.reverse_heat.add(k.reverse_crossing_heat_absorbed_j)?;
+        self.annihilation_events.add(k.annihilation_events)?;
+        self.annihilation_singlets.add(k.annihilation_singlets)?;
+        self.annihilation_heat.add(k.annihilation_heat_j)?;
         Ok(())
     }
 
@@ -685,17 +717,13 @@ impl KineticTotals {
             nonradiative_heat_j: values(self.dark_heat)?,
             crossing_heat_j: self.crossing_heat.value()?,
             reverse_crossing_heat_absorbed_j: self.reverse_heat.value()?,
+            annihilation_events: self.annihilation_events.value()?,
+            annihilation_singlets: self.annihilation_singlets.value()?,
+            annihilation_heat_j: self.annihilation_heat.value()?,
             population_residual: 0.0,
             residual_j: 0.0,
         };
-        super::admit_population_balance(
-            &[initial[1], initial[2]],
-            &kinetics.pump_events,
-            &[populations[1], populations[2]],
-            &kinetics.radiative_events,
-            &kinetics.nonradiative_events,
-            tolerance,
-        )?;
+        super::saturation::annihilation::admit_excited(initial, &kinetics, tolerance)?;
         let mut population_residual = Sum::default();
         let mut population_scale = Sum::default();
         for i in 0..3 {
@@ -797,7 +825,11 @@ pub(super) fn admit_photons<const N: usize>(
     Ok(())
 }
 
-pub(super) fn admit_energy(residual_j: f64, scale: f64, tolerance: f64) -> Result<(), SingletTripletError> {
+pub(super) fn admit_energy(
+    residual_j: f64,
+    scale: f64,
+    tolerance: f64,
+) -> Result<(), SingletTripletError> {
     let allowance_j = tolerance * scale;
     if residual_j.abs() > allowance_j {
         return Err(SingletTripletError::EnergyBalance {
@@ -836,6 +868,7 @@ pub(super) fn kinetic_energy_residual(
     }
     heat.add(kinetics.crossing_heat_j)?;
     heat.add(-kinetics.reverse_crossing_heat_absorbed_j)?;
+    heat.add(kinetics.annihilation_heat_j)?;
     let heat = heat.value()?;
     residual.add(-heat)?;
     scale.add(heat.abs())?;
@@ -869,7 +902,11 @@ pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SingletTr
     }
 }
 
-pub(super) fn cap(quantity: &'static str, required: usize, maximum: usize) -> Result<(), SingletTripletError> {
+pub(super) fn cap(
+    quantity: &'static str,
+    required: usize,
+    maximum: usize,
+) -> Result<(), SingletTripletError> {
     if required > maximum {
         Err(DecayError::Budget {
             quantity,

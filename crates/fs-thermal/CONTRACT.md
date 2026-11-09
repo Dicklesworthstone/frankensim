@@ -4175,7 +4175,42 @@ paths, weak energetic beams, admission/cancellation/budgets, and two independent
 opposed-beam analytic cases. The transient case uses distinct destinations and
 photon energies; the steady recovering case spans one million radiative
 lifetimes without limiting cumulative pump events to the emitter inventory.
-These new tests are authored but have not been executed: the native executor
-became unavailable during this extension. The shared local refactor reached
-native type checking before the test compiler was externally terminated; no
-new native pass count is claimed.
+All seven shared-beam tests and all eight original column tests subsequently
+passed natively against the unchanged production math and reaction sources.
+The opposed transient used 256 accepted substeps, and the stiff steady case
+used two while retaining more than 691,000 pump events per emitter. Full
+renderer compilation remains a separate gate.
+
+## Finite-inventory triplet annihilation and delayed fluorescence
+
+`saturation::annihilation` couples the original authored `TripletAnnihilation`
+law to the conserved ground/singlet/triplet inventory. Pair events occur at
+`k N_T^2 / V`, consume two triplets, create `phi` mean singlets and return
+`2 - phi` emitters to ground. Productive events must pay their singlet energy
+individually; active volume, coefficient and yield are never inferred.
+
+`SaturableSingletTripletPlan::advance_with_annihilation` retains the original
+constant per-ground pump hazards while resolving pair density changes. Positive
+exponential-midpoint stages freeze `lambda = 2 k N_T / V` inside the same native
+three-state reaction propagator as pumping, decay and crossing. Original dark
+and reverse-crossing events are reconstructed from native integrated removals;
+temporary reaction coordinates introduce no physical bath exchange. Pair
+events, produced singlets and direct pair heat have separate fields in
+`SaturableSingletTripletStep`. Its energy residual includes this physical heat.
+
+Only corrector histories enter the compensated result. A nonlinear exposure
+guard prevents false coarse/fine agreement; bounded refinement compares event
+energy, stored energy, every integrated physical energy channel and endpoint
+radiative power expressed over the original interval. A graded true-time
+endpoint tail resolves fast original lifetimes without forcing a uniform
+lifetime-sized grid. Nonlinear encounter dynamics still require refinement.
+The reported discrepancy is an indicator, not a rigorous enclosure. No field
+is clipped, normalized or converted from a residual into heat.
+
+An absent or zero pair law uses the original linear path. Isolated dark pair
+kinetics use the original exact rational solution, including conserved ground
+return. Limits and event energetics are checked even at zero duration. The
+three independent native regressions passed: isolated branches with yields
+zero, one-half and one; a pumped nonlinear equilibrium; and nanosecond-singlet
+delayed fluorescence across a one-second dark interval. The latter used 542
+accepted nonlinear substeps rather than resolving a billion lifetimes globally.

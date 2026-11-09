@@ -20,8 +20,9 @@
 //! Stokes partition, escape and reabsorption.
 //!
 //! This incoherent rate model omits stimulated emission, excited-state pump
-//! absorption, bleaching, trap distributions and pair annihilation. An optical
-//! use requires the regime in which rapid pump relaxation justifies those
+//! absorption, irreversible bleaching and trap distributions. Authored pair
+//! annihilation is an explicit [`annihilation`] opt-in. An optical use requires
+//! the regime in which rapid pump relaxation justifies the remaining
 //! omissions; it is not a coherently driven resonant two-level atom. The
 //! ground/singlet/triplet saturation mechanism is used, for example, by Fujiwara
 //! et al., J. Cell Biol. 222, e202110160 (2023), Methods, "Triplet bottleneck
@@ -35,6 +36,10 @@ use super::{
 use fs_la::decay::DecayLimits;
 use fs_la::decay::reaction::{ReactionEdge, ReactionPlan};
 
+/// Authored triplet-pair quenching and delayed fluorescence in finite inventories.
+#[path = "saturation/annihilation.rs"]
+pub mod annihilation;
+
 /// Reusable fixed-field evolution of a conserved `[ground, singlet, triplet]`
 /// inventory. Populations are counts, not number densities.
 #[derive(Clone, Debug)]
@@ -45,6 +50,7 @@ pub struct SaturableSingletTripletPlan {
     pump_fractions: [f64; 2],
     duration_s: f64,
     relative_tolerance: f64,
+    limits: DecayLimits,
     evolution: ReactionPlan,
 }
 
@@ -76,6 +82,12 @@ pub struct SaturableSingletTripletStep {
     pub crossing_heat_j: f64,
     /// Uphill triplet-to-singlet energy withdrawn from the thermal bath.
     pub reverse_crossing_heat_absorbed_j: f64,
+    /// Triplet-pair events; each removes two triplets. Zero on the linear path.
+    pub annihilation_events: f64,
+    /// Singlets produced by those pairs, separate from intersystem crossing.
+    pub annihilation_singlets: f64,
+    /// Physical pair heat, separate from original nonradiative decay.
+    pub annihilation_heat_j: f64,
     /// Signed final-minus-initial emitter count, without correction.
     pub population_residual: f64,
     /// `old excitation + absorbed pump - new excitation - radiation - net heat`.
@@ -200,6 +212,7 @@ impl SaturableSingletTripletPlan {
             pump_fractions,
             duration_s,
             relative_tolerance: limits.relative_tolerance,
+            limits,
             evolution,
         })
     }
@@ -267,6 +280,9 @@ impl SaturableSingletTripletPlan {
             nonradiative_heat_j: [0.0; 2],
             crossing_heat_j: 0.0,
             reverse_crossing_heat_absorbed_j: 0.0,
+            annihilation_events: 0.0,
+            annihilation_singlets: 0.0,
+            annihilation_heat_j: 0.0,
             population_residual: 0.0,
             residual_j: 0.0,
         };
@@ -359,6 +375,7 @@ impl SaturableSingletTripletPlan {
         }
         heat.add(step.crossing_heat_j)?;
         heat.add(-step.reverse_crossing_heat_absorbed_j)?;
+        heat.add(step.annihilation_heat_j)?;
         // Only the NET bath exchange enters the allowance; nearly balanced
         // crossing cycles must not hide a physical energy-accounting error.
         let net_heat = total(&heat, "net finite emitter thermal exchange")?;
