@@ -8967,3 +8967,10 @@ getters/observation adapter with unrelated opaque result types substituted and
 independent uniform-bar roots; separate analytic signed-work references also
 passed. The new native integration regressions have not been compiled or run
 in this environment; these checks are not a full crate/workspace validation.
+
+
+### Interference-preserving continuous aperture traction and torque
+
+The separate finite-aperture wrench observer now shares bounded positive temporal projection before applying its original signed first-spatial-moment kernels. Continuous rectangle lever arms, real/proper source statistics, Uniform/Triangular profiles and torque translation to the requested origin remain intact. Unsupported bands or insufficient extra headroom retain the original pair route, with the same optional temporal work and workspace admission as ordinary aperture moments. The shared linear temporal projection is reused, with each original frequency reconstructed once.
+
+Combined focused verification passed 26 checks: 13 ordinary-aperture numerical tests, ten wrench numerical tests and three complete dispatch-body checks. New cases include analytic two-tone force, an optical three-tone dark fringe with signed torque and translated origin, all six traction/moment components against resolved mixed-polarization products, cancellation and tight-budget fallback. Dispatch checks use nominal reconstruction and medium adapters; no native Maxwell/material solve, complete-body force/torque closure or universal joint-null relative accuracy is claimed.

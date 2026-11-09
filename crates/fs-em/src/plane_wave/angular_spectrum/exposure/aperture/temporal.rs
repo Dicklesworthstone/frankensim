@@ -79,6 +79,37 @@ pub(super) fn integrate<K: Kernel, A: Accumulator>(
     sum: &mut A,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
+    let points = spatial.grid.width * spatial.grid.height;
+    let projected = project::<K>(window, frequencies, fields, points, modes, cancelled)?;
+    for mode in 0..modes {
+        let temporal = K::temporal_mode(mode);
+        for i in 0..points {
+            poll(cancelled)?;
+            for j in 0..points {
+                if j % 32 == 0 {
+                    poll(cancelled)?;
+                }
+                sum.add(
+                    spatial.pair(i, j).compose(temporal),
+                    &projected[mode * points + i],
+                    &projected[mode * points + j],
+                );
+            }
+        }
+    }
+    poll(cancelled)
+}
+
+/// Mode-major original spatial fields. First spatial moments share the same
+/// linear projection before signed force/torque contractions.
+pub(super) fn project<K: Kernel>(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    fields: &[Vec<FieldParts>],
+    points: usize,
+    modes: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<FieldParts>, AngularSpectrumError> {
     poll(cancelled)?;
     let mut workspace = HarmonicBandWorkspace::new();
     let mut negative = [0.0; MAX_UNIFORM_HARMONIC_BAND_TONES];
@@ -107,7 +138,6 @@ pub(super) fn integrate<K: Kernel, A: Accumulator>(
     if modes != factor.mode_count() || fields.len() != factor.source_count() {
         return Err(bad("aperture temporal factor shape is inconsistent"));
     }
-    let points = spatial.grid.width * spatial.grid.height;
     let count = points
         .checked_mul(modes)
         .ok_or_else(|| bad("aperture temporal field count overflow"))?;
@@ -167,23 +197,8 @@ pub(super) fn integrate<K: Kernel, A: Accumulator>(
             return Err(bad("aperture temporal field is unrepresentable"));
         }
     }
-    for mode in 0..modes {
-        let temporal = K::temporal_mode(mode);
-        for i in 0..points {
-            poll(cancelled)?;
-            for j in 0..points {
-                if j % 32 == 0 {
-                    poll(cancelled)?;
-                }
-                sum.add(
-                    spatial.pair(i, j).compose(temporal),
-                    &projected[mode * points + i],
-                    &projected[mode * points + j],
-                );
-            }
-        }
-    }
-    poll(cancelled)
+    poll(cancelled)?;
+    Ok(projected)
 }
 
 #[cfg(test)]

@@ -189,7 +189,7 @@ where
     }
     let grid = anchor.grid();
     let extra = moment_cache_bytes(grid, real, proper)?;
-    admit::<Wrench>(
+    let (pair_work, workspace) = admit::<Wrench>(
         grid,
         frequency_pairs,
         count(bank_workspace.checked_add(extra))?,
@@ -197,6 +197,8 @@ where
         proper,
         limits,
     )?;
+    let mut projection_headroom = limits.maximum_mode_frequency_pairs - pair_work;
+    let workspace_headroom = limits.maximum_workspace_bytes - workspace;
     let real_cache = real
         .then(|| MomentSpatial::<RealKernel>::prepare(anchor, aperture, cancelled))
         .transpose()?;
@@ -208,6 +210,14 @@ where
         if bank.frequency_count() == 0 {
             continue;
         }
+        let projected_modes = temporal::admit(
+            window,
+            &bank.frequencies,
+            anchor.modes.len(),
+            is_proper,
+            &mut projection_headroom,
+            workspace_headroom,
+        )?;
         if is_proper {
             observe_bank(
                 bank,
@@ -217,6 +227,7 @@ where
                 side,
                 distance,
                 window,
+                projected_modes,
                 &mut sum,
                 cancelled,
             )?;
@@ -229,6 +240,7 @@ where
                 side,
                 distance,
                 window,
+                projected_modes,
                 &mut sum,
                 cancelled,
             )?;
@@ -444,11 +456,11 @@ fn observe_bank<K: MomentKernel>(
     side: ExposureSide,
     distance: f64,
     window: HarmonicWindow,
+    projected_modes: Option<usize>,
     sum: &mut Wrench,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     let f = bank.frequency_count();
-    let temporal = pair_kernels(f, window, |i| -bank.frequencies[i], cancelled)?;
     let mut fields = Vec::new();
     fields
         .try_reserve_exact(f)
@@ -468,7 +480,45 @@ fn observe_bank<K: MomentKernel>(
         }
         fields.push(field);
     }
-    integrate_moments(spatial, &temporal, &fields, sum, cancelled)
+    if let Some(modes) = projected_modes {
+        let points = spatial.base.grid.width * spatial.base.grid.height;
+        let fields =
+            temporal::project::<K>(window, &bank.frequencies, &fields, points, modes, cancelled)?;
+        integrate_projected_moments(spatial, &fields, modes, sum, cancelled)
+    } else {
+        let temporal = pair_kernels(f, window, |i| -bank.frequencies[i], cancelled)?;
+        integrate_moments(spatial, &temporal, &fields, sum, cancelled)
+    }
+}
+
+fn integrate_projected_moments<K: MomentKernel>(
+    spatial: &MomentSpatial<K>,
+    fields: &[FieldParts],
+    modes: usize,
+    sum: &mut Wrench,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AngularSpectrumError> {
+    let grid = spatial.base.grid;
+    let points = grid.width * grid.height;
+    for i in 0..points {
+        poll(cancelled)?;
+        for j in 0..points {
+            let x = (i % grid.width) * grid.width + j % grid.width;
+            let y = (i / grid.width) * grid.height + j / grid.width;
+            let normal = spatial.base.x[x].compose(spatial.base.y[y]);
+            let first_x = spatial.x[x].compose_first(spatial.base.y[y]);
+            let first_y = spatial.y[y].compose_first(spatial.base.x[x]);
+            for mode in 0..modes {
+                poll(cancelled)?;
+                let time = K::temporal_mode(mode);
+                let (a, b) = (&fields[mode * points + i], &fields[mode * points + j]);
+                sum.add(normal.compose(time), a, b);
+                sum.add_first::<K>(0, first_x.compose_first(time), a, b);
+                sum.add_first::<K>(1, first_y.compose_first(time), a, b);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn integrate_moments<K: MomentKernel>(
@@ -594,3 +644,6 @@ fn finish_vector(value: [Dd; 3]) -> Result<[f64; 3], AngularSpectrumError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod temporal_tests;
