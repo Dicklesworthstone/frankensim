@@ -179,8 +179,8 @@ pub struct FmmC64<'k> {
     /// Optional per-group M2L kernel rows in `potentials` layout; see
     /// [`Self::cache_m2l_rows`].
     m2l_rows: Option<Vec<Vec<C64>>>,
-    /// Built without near-field admission; only [`Self::far_potentials`]
-    /// evaluates. See [`Self::new_far_field_within`].
+    /// Built without direct near-field work admission; only
+    /// [`Self::far_potentials`] evaluates. This applies to both FMM routes.
     far_field_only: bool,
 }
 
@@ -698,20 +698,15 @@ impl<'k> FmmC64<'k> {
         self.evaluate(charges, true)
     }
 
-    /// [`Self::potentials`] without the adjacent-leaf direct sum: every pair
+    /// [`Self::potentials`] without its direct leaf sum: every pair
     /// of points in leaves [`Self::near_field_neighbor_leaves`] relates is
     /// omitted, each point's pair with itself included. The remaining passes,
     /// their order and their bits are those of [`Self::potentials`].
     ///
     /// # Errors
-    /// `ComplexRequest` on the directional route, which owns a different
-    /// pair partition; otherwise as [`Self::potentials`].
+    /// Charge and finite-output refusals are those of [`Self::potentials`].
+    /// Both ordinary and far-only owners support this operation.
     pub fn far_potentials(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
-        if self.directional.is_some() {
-            return Err(FmmError::ComplexRequest {
-                reason: "far-field potentials apply only to the non-directional route",
-            });
-        }
         self.evaluate(charges, false)
     }
 
@@ -719,7 +714,7 @@ impl<'k> FmmC64<'k> {
     fn evaluate(&self, charges: &[C64], near: bool) -> Result<Vec<C64>, FmmError> {
         self.validate_charges(charges)?;
         if let Some(plan) = &self.directional {
-            return plan.potentials(self, charges);
+            return plan.potentials(self, charges, near);
         }
         if self.workers > 1 {
             return self.potentials_on_workers(charges, near);
@@ -1329,12 +1324,12 @@ impl<'k> FmmC64<'k> {
     /// For each leaf of [`Self::near_field_blocks`], in that order, the
     /// ascending indices (in that same order) of the leaves its points pair
     /// with in the adjacent-leaf direct sum, itself included. These are
-    /// exactly the pairs [`Self::far_potentials`] omits. The directional
-    /// route owns a different partition and returns none.
+    /// exactly the pairs [`Self::far_potentials`] omits. Directional owners
+    /// return their actual dual-tree leaf pairs, which need not be adjacent.
     #[must_use]
     pub fn near_field_neighbor_leaves(&self) -> Vec<Vec<usize>> {
-        if self.directional.is_some() {
-            return Vec::new();
+        if let Some(plan) = &self.directional {
+            return plan.near_field_neighbor_leaves(self);
         }
         let leaves: BTreeMap<CellKey, usize> = self
             .geometry

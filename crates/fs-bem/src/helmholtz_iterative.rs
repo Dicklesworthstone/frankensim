@@ -66,7 +66,9 @@ pub struct IterativeOptions {
     pub precond: Preconditioner,
     /// Maximum stored complex entries across all inverse-preconditioner
     /// blocks. Plain CBIE also charges its exact near table here, two complex
-    /// entries (S and D) per stored target-panel pair.
+    /// entries (S and D) per stored target-panel pair. The full triangle rule
+    /// also bounds static closure entry evaluations by this ceiling; a static
+    /// W5a partition can differ from the dynamic directional partition.
     pub max_near_entries: usize,
     /// Byte budget for caching the double and mixed operators' adjacent-leaf
     /// pair values (half each), which are otherwise re-evaluated every matvec.
@@ -99,7 +101,7 @@ pub struct IterativeOptions {
     /// the declared workers and refused above its declared pair count. The
     /// default [`PanelRule::Centroid`] is the centroid operator, bitwise.
     /// [`PanelRule::Triangle`] runs its far field on the Radon seven-point
-    /// cloud (W5a only; directional options are refused) and is the dense
+    /// cloud through W5a or the declared directional route, and is the dense
     /// Triangle operator to FMM accuracy. Plain CBIE ignores the rule, so one set of
     /// options can route rows of either formulation: its own near table is
     /// already the dense owner's triangle quadrature.
@@ -664,6 +666,26 @@ fn poll(gate: &CancelGate) -> Result<(), IterativeError> {
     }
 }
 
+// One original option encoding for centroid and triangle-cloud checkpoints.
+fn stamp_directional(mut stamp: u64, options: Option<&DirectionalOptions>) -> u64 {
+    if let Some(o) = options {
+        for word in [
+            1,
+            o.tolerance.to_bits(),
+            o.order as u64,
+            o.leaf_capacity as u64,
+            o.low_freq_threshold.to_bits(),
+            o.cone_resolution as u64,
+            o.max_cones_per_level as u64,
+            o.compression_tolerance.to_bits(),
+            o.max_rank as u64,
+        ] {
+            stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    stamp
+}
+
 impl<'a> IterativeRadiation<'a> {
     /// Robin extension of this same FMM/GMRES owner. The original A-block
     /// Jacobi inverse remains a right preconditioner; the recomputed residual
@@ -785,6 +807,7 @@ impl<'a> IterativeRadiation<'a> {
         ] {
             stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
         }
+        stamp = stamp_directional(stamp, options.directional.as_ref());
         Ok(Self {
             surface,
             admittance: None,
@@ -1056,21 +1079,7 @@ impl<'a> IterativeRadiation<'a> {
         ] {
             stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
         }
-        if let Some(o) = &options.directional {
-            for word in [
-                1,
-                o.tolerance.to_bits(),
-                o.order as u64,
-                o.leaf_capacity as u64,
-                o.low_freq_threshold.to_bits(),
-                o.cone_resolution as u64,
-                o.max_cones_per_level as u64,
-                o.compression_tolerance.to_bits(),
-                o.max_rank as u64,
-            ] {
-                stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
+        stamp = stamp_directional(stamp, options.directional.as_ref());
         if let (Some(rows), Some(table)) = (near, &near_table) {
             for word in [2, rows.stamp(), table.pairs() as u64] {
                 stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
@@ -1886,47 +1895,69 @@ impl BmCloudLayers {
         let triangles = surface.triangles().ok_or(IterativeError::Invalid {
             what: "PanelRule::Triangle requires retained triangles",
         })?;
-        if options.directional.is_some() {
-            return Err(IterativeError::Invalid {
-                what: "PanelRule::Triangle's far cloud is W5a only; directional rows use TriangleNear",
-            });
-        }
         let n = triangles.len();
-        let cloud_capacity =
-            options
-                .leaf_capacity
-                .checked_mul(RADON7.len())
-                .ok_or(IterativeError::Invalid {
-                    what: "leaf capacity overflow",
-                })?;
+        let cloud_capacity = options
+            .directional
+            .as_ref()
+            .map_or(options.leaf_capacity, |o| o.leaf_capacity)
+            .checked_mul(RADON7.len())
+            .ok_or(IterativeError::Invalid {
+                what: "leaf capacity overflow",
+            })?;
         let (points, normals, weights, radius) = radon_cloud(surface, triangles);
         let far = |layer: usize, k: f64| -> Result<FmmC64<'static>, IterativeError> {
             let (p, nrm) = (points.clone(), normals.clone());
             let (order, budget) = (options.fmm_order, options.budget());
-            let mut engine = match layer {
-                0 => FmmC64::new_single_far_field_within(
-                    HelmholtzSingle { k },
-                    p,
-                    order,
-                    cloud_capacity,
-                    budget,
-                )?,
-                1 => FmmC64::new_double_far_field_within(
-                    HelmholtzDouble { k },
-                    p,
-                    nrm,
-                    order,
-                    cloud_capacity,
-                    budget,
-                )?,
-                _ => FmmC64::new_hypersingular_far_field_within(
-                    HelmholtzHypersingular { k },
-                    p,
-                    nrm,
-                    order,
-                    cloud_capacity,
-                    budget,
-                )?,
+            let mut engine = if let Some(directional) = &options.directional {
+                let settings = DirectionalOptions {
+                    leaf_capacity: cloud_capacity,
+                    ..options.directional_for(directional)
+                };
+                match layer {
+                    0 => FmmC64::new_single_far_field_directional(
+                        HelmholtzSingle { k },
+                        p,
+                        settings,
+                    )?,
+                    1 => FmmC64::new_double_far_field_directional(
+                        HelmholtzDouble { k },
+                        p,
+                        nrm,
+                        settings,
+                    )?,
+                    _ => FmmC64::new_hypersingular_far_field_directional(
+                        HelmholtzHypersingular { k },
+                        p,
+                        nrm,
+                        settings,
+                    )?,
+                }
+            } else {
+                match layer {
+                    0 => FmmC64::new_single_far_field_within(
+                        HelmholtzSingle { k },
+                        p,
+                        order,
+                        cloud_capacity,
+                        budget,
+                    )?,
+                    1 => FmmC64::new_double_far_field_within(
+                        HelmholtzDouble { k },
+                        p,
+                        nrm,
+                        order,
+                        cloud_capacity,
+                        budget,
+                    )?,
+                    _ => FmmC64::new_hypersingular_far_field_within(
+                        HelmholtzHypersingular { k },
+                        p,
+                        nrm,
+                        order,
+                        cloud_capacity,
+                        budget,
+                    )?,
+                }
             };
             engine.set_workers(options.workers)?;
             Ok(engine)
@@ -1992,7 +2023,7 @@ impl BmCloudLayers {
         }
         // Stored entry = dense rule entry minus the nodes the far pass sums,
         // so the row plus that pass is the dense entry to FMM accuracy.
-        let covered = |i: usize, j: usize, k: f64| -> [C64; 3] {
+        let covered = |partition: &CloudPartition, i: usize, j: usize, k: f64| -> [C64; 3] {
             let (x, nx) = (centroids[i], surface.normals()[i]);
             let mut sums = [C64::ZERO; 3];
             for m in 0..RADON7.len() {
@@ -2011,7 +2042,7 @@ impl BmCloudLayers {
             let mut slot = 0;
             for &j in partition.panels(i).iter().filter(|&&j| j != i) {
                 let (layers, _) = triangle_rule_pair(surface, triangles, k, i, j);
-                let sums = covered(i, j, k);
+                let sums = covered(&partition, i, j, k);
                 cols[slot] = j as u32;
                 for o in 0..3 {
                     values[3 * slot + o] = layers[o] - sums[o];
@@ -2025,16 +2056,46 @@ impl BmCloudLayers {
         // node sums.
         poll(gate)?;
         let unit: Vec<C64> = weights.iter().map(|&w| C64::from_re(w)).collect();
-        let far_d0 = far(1, 0.0)?.far_potentials(&unit)?;
+        let static_double = far(1, 0.0)?;
+        // A directional dynamic pass and its zero-k W5a delegate can have
+        // different direct partitions. Close each static row using the actual
+        // omitted pairs of the STATIC pass, never the dynamic near table.
+        let static_partition = if options.directional.is_some() {
+            Some(CloudPartition::new(&static_double, n, points.len()))
+        } else {
+            None
+        };
+        let static_partition = static_partition.as_ref().unwrap_or(&partition);
+        let static_entries = (0..n)
+            .try_fold(0usize, |entries, i| {
+                static_partition
+                    .panels(i)
+                    .iter()
+                    .filter(|&&j| j != i)
+                    .count()
+                    .checked_mul(2)
+                    .and_then(|count| entries.checked_add(count))
+            })
+            .ok_or(IterativeError::Invalid {
+                what: "static closure work extent overflow",
+            })?;
+        if static_entries > options.max_near_entries {
+            return Err(IterativeError::NearFieldBudget {
+                required_entries: static_entries,
+                maximum_entries: options.max_near_entries,
+            });
+        }
+        let far_d0 = static_double.far_potentials(&unit)?;
+        drop(static_double);
         poll(gate)?;
         let far_n0 = far(2, 0.0)?.far_potentials(&unit)?;
         poll(gate)?;
         let near_statics: Vec<(f64, f64)> = {
             let row = |i: usize| {
                 let (mut d0, mut n0) = (0.0, 0.0);
-                for &j in partition.panels(i).iter().filter(|&&j| j != i) {
+                for &j in static_partition.panels(i).iter().filter(|&&j| j != i) {
                     let (_, statics) = triangle_rule_pair(surface, triangles, 0.0, i, j);
-                    let sums = covered(i, j, 0.0);
+                    let sums = covered(static_partition, i, j, 0.0);
                     d0 += statics[0] - sums[1].re;
                     n0 += statics[1] - sums[2].re;
                 }
@@ -2572,3 +2633,7 @@ mod cbie_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "helmholtz_iterative/directional_triangle_tests.rs"]
+mod directional_triangle_tests;

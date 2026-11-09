@@ -56,8 +56,8 @@ pub enum PanelRule {
     /// every far pair, with both static closures under the same rule. One-point
     /// far weights leave an O(h) remnant that `alpha = i/k` amplifies at low
     /// ka (a dipole's radiation resistance stalls); this rule removes it.
-    /// Dense route only: the iterative owner refuses it, since its far field
-    /// is one point per panel.
+    /// Both dense and iterative routes integrate this same rule. The iterative
+    /// owner uses the seven-point cloud with W5a or directional far passes.
     Triangle {
         /// Declared ceiling on corrected near pairs.
         max_pairs: usize,

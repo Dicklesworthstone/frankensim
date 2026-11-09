@@ -445,3 +445,40 @@ All new numerical, scaling and resource claims remain pending central native
 verification until the bead's run receipt exists. Traversal and cone ties are
 deterministic on a platform/profile. Passes remain synchronous without mid-pass
 cancellation; BEM continues to poll at its matvec boundaries.
+
+### Directional far passes for triangle quadrature
+
+`FmmC64::new_single_far_field_directional`,
+`new_double_far_field_directional` and
+`new_hypersingular_far_field_directional` reuse the same directional
+partition, coefficients and M2L passes while omitting direct leaf-pair work.
+Their `far_potentials` evaluates that far field; `potentials` refuses on
+these far-only owners. The existing full directional constructors also
+support `far_potentials`, retaining their own full-route admission.
+
+`near_field_neighbor_leaves` now returns the actual sorted omitted
+source-leaf indices for every directional target leaf, in the same leaf
+order as `near_field_blocks`. A panel consumer uses those exact pairs
+to supply its quadrature without omitting or double-counting point
+contributions. Adjacent spatial boxes alone do not define this directional
+near set. Metadata remains subject to the original pair-scan/storage
+envelopes. Far-only `DirectionalStats::near_pairs` is zero and no
+`max_near_pairs` work is charged because P2P is not evaluated; full
+constructors retain their original P2P limits and arithmetic.
+
+The existing root-kD threshold delegates a far-only request to the original
+W5a far-only owner, including k = 0, without changing its operation tree.
+Its omitted partition can differ from a dynamic directional pass over the
+same points; consumers must query each actual pass.
+
+Three focused native tests in `complex/directional/far_tests.rs` compile
+the complete production fs-fmm and fs-math sources. On a two-cluster fixture
+with active high-frequency interactions, orders 4/6/8 reduce independent
+partitioned-direct relative errors for all S/D/N layers from about 5.8e-3
+through 8.2e-5 to below 3.8e-7. The omitted direct field reconstructs the full
+directional field within 3e-14 relative error; one/three workers give
+bit-identical far fields. The tests also retain full-route P2P refusal and
+verify bit-identical W5a low-frequency results and partitions for all three
+layers. This adds no new performance benchmark or global relative-error
+certificate; the existing FMM approximation and resource qualifications
+continue to apply.

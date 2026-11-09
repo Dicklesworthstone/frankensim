@@ -759,14 +759,56 @@ rule to S, D and N on every other pair. D' keeps its centroid kernel.
   - Triangle: 0.69, 0.37, 0.15.
 - Dense orders under Triangle, pulsating / scattering: 2.02 / 2.01 at
   ka 1, and 2.01 / 2.02 at ka 3.
-- Iterative (`BmCloudLayers`): the far field is far-field-only W5a passes
-  over the Radon cloud that plain CBIE also uses. The near rows hold the
-  dense rule's entry minus the node sums the pass covers.
-  `impedance_sphere_triangle_far_cloud_matches_dense` holds it within
-  1.3e-6 of the dense Triangle (tolerance 1e-5) at rungs 2-4, ka 0.05 and
-  pi.
-- Directional options are refused, because there is no far-only
-  directional pass; that regime uses TriangleNear.
+- Iterative (`BmCloudLayers`): the far field uses far-only W5a or
+  directional passes over the Radon cloud that plain CBIE also uses.
+  The near rows hold the dense rule's entry minus the node sums the pass
+  covers. `impedance_sphere_triangle_far_cloud_matches_dense` holds W5a
+  within 1.3e-6 of dense Triangle (tolerance 1e-5) at rungs 2-4, ka 0.05
+  and pi.
+- Directional options also admit full Triangle. All S, D and N cloud
+  layers use the existing directional far pass; actual omitted leaf pairs
+  identify the exact triangle correction. There is no dense matrix or
+  new near-field quadrature on this route.
+
+#### Full-triangle directional Burton-Miller
+
+`IterativeOptions { panel_rule: PanelRule::Triangle { .. },
+directional: Some(..), .. }` retains Radon's seven-node far quadrature above
+W5a's root kD limit. The declared directional order and panel leaf capacity
+remain effective; the cloud capacity is seven times that panel capacity.
+The same owner supports prescribed velocity and existing passive/local Robin
+admittance, with original pressure, fluid velocity and signed surface work.
+D' keeps its original centroid closure.
+
+Dynamic and zero-k layers need not have the same partition. Every static row
+uses the omitted pairs of its own zero-k W5a pass, while every dynamic row
+uses the actual directional partition. Closing a zero-k row with the dynamic
+near table is incorrect. The existing `max_near_entries` bounds both the
+stored dynamic correction table and, separately, the two static entry
+evaluations per off-diagonal omitted panel pair. Existing FMM point,
+coefficient, translation and leaf-pair scan limits also apply. The far pass
+does not evaluate or budget direct point pairs; the BEM correction owner
+budgets its own work. No order or budget is raised automatically.
+
+Focused native tests in `helmholtz_iterative/directional_triangle_tests.rs`
+use two radius-0.01 m closed spheres centered at z = +/-1 m, k = 34/m and
+rho = 1.2 kg/m3, c = 343 m/s. Root kD is about 68 and actual high-frequency
+directional interactions are required. Orders 4/6/8 agree with the original
+dense Triangle solve to relative pressure errors 3.8573e-5, 1.2397e-7 and
+5.9122e-10. A separate closed-form pair of outgoing point sources supplies
+both pressure and normal velocity, with passive beta = 0.2 + 0.7i. On
+40/160/640 total panels the maximum pressure/velocity relative error is
+0.11716/0.029276/0.0074251; signed outgoing-work error is
+0.39033/0.091900/0.022688 against the analytic coherent full-sphere flux.
+This checks physical mesh convergence independently of dense agreement.
+
+The fixture also requires different dynamic/static partitions, bit-identical
+low-frequency fields to the original W5a Triangle route, checkpoint
+cross-wiring refusal, bounded near work and cancellation. These focused tests
+compile the actual FMM, triangle kernels, iterative owner and original GMRES
+numerical core. They do not establish full-workspace Cargo success,
+large-surface performance, an arbitrary-source relative error bound, or
+spectral mesh convergence. Existing centroid and TriangleNear APIs remain.
 
 Centroid stays the default.
 

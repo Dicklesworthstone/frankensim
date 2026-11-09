@@ -204,7 +204,8 @@ pub struct DirectionalStats {
     pub m2l_pairs: usize,
     /// Accepted pairs with a nonzero plane-wave direction.
     pub high_frequency_pairs: usize,
-    /// Exact leaf point pairs, including diagonal slots subsequently skipped.
+    /// Evaluated leaf point pairs, including diagonal slots subsequently skipped.
+    /// Zero for far-only owners; their omitted leaf partition is still retained.
     pub near_pairs: usize,
     /// Dual-tree admission tests.
     pub pair_scans: usize,
@@ -344,11 +345,63 @@ impl<'k> FmmC64<'k> {
     ) -> Result<Self, FmmError> {
         Self::build_directional(Operator::Mixed(kernel), points, Some(normals), options)
     }
+    /// Single layer on the same directional far partition, with the exact
+    /// direct leaf pairs omitted. The caller supplies their quadrature.
+    pub fn new_single_far_field_directional(
+        kernel: HelmholtzSingle,
+        points: Vec<[f64; 3]>,
+        options: DirectionalOptions,
+    ) -> Result<Self, FmmError> {
+        Self::build_directional_with(Operator::Single(kernel), points, None, options, true)
+    }
+
+    /// Source-normal layer on the directional far-only route.
+    pub fn new_double_far_field_directional(
+        kernel: HelmholtzDouble,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        options: DirectionalOptions,
+    ) -> Result<Self, FmmError> {
+        Self::build_directional_with(
+            Operator::Double(kernel),
+            points,
+            Some(normals),
+            options,
+            true,
+        )
+    }
+
+    /// Mixed normal derivative on the directional far-only route.
+    pub fn new_hypersingular_far_field_directional(
+        kernel: HelmholtzHypersingular,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        options: DirectionalOptions,
+    ) -> Result<Self, FmmError> {
+        Self::build_directional_with(
+            Operator::Mixed(kernel),
+            points,
+            Some(normals),
+            options,
+            true,
+        )
+    }
+
     fn build_directional(
         operator: Operator<'k>,
         points: Vec<[f64; 3]>,
         normals: Option<Vec<[f64; 3]>>,
         options: DirectionalOptions,
+    ) -> Result<Self, FmmError> {
+        Self::build_directional_with(operator, points, normals, options, false)
+    }
+
+    fn build_directional_with(
+        operator: Operator<'k>,
+        points: Vec<[f64; 3]>,
+        normals: Option<Vec<[f64; 3]>>,
+        options: DirectionalOptions,
+        far_field_only: bool,
     ) -> Result<Self, FmmError> {
         options.validate()?;
         // This validates coordinates/count without imposing the old all-cell-
@@ -396,13 +449,14 @@ impl<'k> FmmC64<'k> {
         // Entire low-frequency requests use the W5a code without modifying its
         // tree, pair partition, interpolation, reductions or arithmetic.
         if kd <= options.low_freq_threshold {
-            return Self::build(
+            return Self::build_with(
                 operator,
                 points,
                 normals,
                 options.order,
                 options.leaf_capacity,
                 options.w5a_budget,
+                far_field_only,
             );
         }
         // d_axis G = (x_axis-y_axis) G'(r)/r. Interpolate only the radial
@@ -469,7 +523,7 @@ impl<'k> FmmC64<'k> {
             directional: None,
             workers: 1,
             m2l_rows: None,
-            far_field_only: false,
+            far_field_only,
         };
         let plan = DirectionalPlan::build(&op, options, k)?;
         op.coefficient_slots = plan.stats.coefficient_slots;
@@ -667,12 +721,14 @@ impl DirectionalPlan {
                     .points
                     .len()
                     .saturating_mul(op.geometry.cells[&b].points.len());
-                plan.stats.near_pairs = plan.stats.near_pairs.saturating_add(pairs);
-                budget(
-                    "directional near-field point pair",
-                    plan.stats.near_pairs,
-                    plan.options.max_near_pairs,
-                )?;
+                if !op.far_field_only {
+                    plan.stats.near_pairs = plan.stats.near_pairs.saturating_add(pairs);
+                    budget(
+                        "directional near-field point pair",
+                        plan.stats.near_pairs,
+                        plan.options.max_near_pairs,
+                    )?;
+                }
                 plan.near.push((a, b));
             } else {
                 let ca = children(op, a);
@@ -1049,10 +1105,32 @@ impl DirectionalPlan {
         self.stats.coefficient_slots = retained;
         Ok(())
     }
+    /// Actual omitted source leaves, indexed in near_field_blocks order.
+    pub(super) fn near_field_neighbor_leaves(&self, op: &FmmC64<'_>) -> Vec<Vec<usize>> {
+        let leaves: BTreeMap<CellKey, usize> = op
+            .geometry
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.leaf)
+            .enumerate()
+            .map(|(i, (&key, _))| (key, i))
+            .collect();
+        let mut rows = vec![Vec::new(); leaves.len()];
+        for &(target, source) in &self.near {
+            rows[leaves[&target]].push(leaves[&source]);
+        }
+        for row in &mut rows {
+            row.sort_unstable();
+            row.dedup();
+        }
+        rows
+    }
+
     pub(super) fn potentials(
         &self,
         op: &FmmC64<'_>,
         charges: &[C64],
+        near: bool,
     ) -> Result<Vec<C64>, FmmError> {
         let (ns, nt) = op.operator.dimensions();
         let p3 = op.nodes.len().pow(3);
@@ -1148,9 +1226,9 @@ impl DirectionalPlan {
         }
         // The same exact normal-factored point kernel as W5a; no quadrature,
         // self term, charge modification or global direct fallback.
-        if op.workers > 1 {
+        if near && op.workers > 1 {
             self.near_on_workers(op, charges, &mut out);
-        } else {
+        } else if near {
             for &(a, b) in &self.near {
                 for &t in &op.geometry.cells[&a].points {
                     for &s in &op.geometry.cells[&b].points {
@@ -1661,3 +1739,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "directional/far_tests.rs"]
+mod far_tests;
