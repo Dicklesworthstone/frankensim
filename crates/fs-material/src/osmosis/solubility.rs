@@ -25,6 +25,9 @@ pub mod kinetics;
 /// Source-backed ionic solids, pH and actual dissolved osmotic species.
 pub mod electrolyte;
 
+/// Original material-card sources for neutral saturation and film kinetics.
+pub mod source;
+
 use std::sync::Arc;
 
 use fs_qty::{Amount, AmountConcentration, Temperature, Volume};

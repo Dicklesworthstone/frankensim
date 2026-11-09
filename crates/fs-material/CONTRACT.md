@@ -14071,6 +14071,32 @@ Caller-declared pair parameters retain their original numerical
 authority; the constructor does not authenticate measured solubility data.
 
 
+### Original material sources for neutral saturation and film kinetics
+
+`osmosis::solubility::source::NeutralSolubilitySource` admits an explicitly
+pinned, full-content model identity from an immutable material card. Version-one
+`neutral-solubility-vant-hoff` supplies exactly reference absolute temperature,
+saturation in mol/m³ solvent and dissolution enthalpy in J/mol. Original typed
+temperature support and singleton exact solvent/solute qualifiers are required;
+foreign pairs, unsupported conditions, missing sources, wrong units and
+extra/missing parameters refuse. Both the complete material card and original
+model remain inspectable. This binds an authored/calibrated source convention;
+it does not create measured evidence or supply phase heat capacities.
+
+Its independently sourced `NeutralSolubilityKineticsSource` admits prescribed
+fixed-film conductance with an explicit precipitation policy, or conductance at
+a declared fixed-count particle reference stock. kA retains its apparatus and
+geometry basis and is never inferred from equilibrium, density, bath volume or
+a material name. Native kinetics use the intersection of both temperature
+domains; if needed, the original constant-enthalpy saturation curve is
+numerically rebased inside that intersection without extending source support.
+Existing material, caloric and transport owners consume the same native laws.
+Callers retain the source binding alongside numeric owners to retain the
+original receipts. Focused cases cover drying, heating, finite-bath particle
+dissolution/growth, source-declared growth surfaces, exact pair/units and refusal
+of unsupported source domains.
+
+
 ### Energy-balanced finite material solutions
 
 `FiniteSolubilitySolution::add_heat` connects the current material reservoir to
