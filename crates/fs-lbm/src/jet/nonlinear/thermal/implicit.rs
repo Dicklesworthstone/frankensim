@@ -25,6 +25,9 @@ use fs_solver::{
 use super::super::implicit as momentum;
 use super::*;
 
+/// Heat-aware step doubling on the original joint implicit kernel.
+pub mod adaptive;
+
 /// Numerical method actually used by this separate coupled advance entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThermalJetImplicitMethod {
@@ -172,6 +175,7 @@ pub(super) struct Workspace {
     evaluation: Option<Evaluation>,
     input: Vec<f64>,
     output: Vec<f64>,
+    adaptive: Option<adaptive::Workspace>,
 }
 fn filled<T: Clone>(n: usize, value: T, gate: &CancelGate) -> Result<Vec<T>, NonlinearJetError> {
     let mut result = Vec::new();
@@ -197,6 +201,7 @@ impl Workspace {
             evaluation: None,
             input: zeros(n, gate)?,
             output: zeros(n, gate)?,
+            adaptive: None,
         })
     }
 }
@@ -546,6 +551,26 @@ impl NonlinearProblem for Problem<'_, '_> {
     }
 }
 
+#[derive(Default)]
+struct AdvanceTotals {
+    accepted: usize,
+    attempted: usize,
+    heat: f64,
+    upwind: f64,
+    damping: f64,
+    evaluations: usize,
+    nonlinear: usize,
+    linear: usize,
+    maximum_velocity: f64,
+    maximum_energy: f64,
+}
+
+struct TrialStep {
+    solved: StageReport,
+    upwind: f64,
+    damping: f64,
+}
+
 struct StageReport {
     evaluation: Evaluation,
     nonlinear: usize,
@@ -727,6 +752,52 @@ impl ThermalCarreauJet<'_> {
         result
     }
 
+    /// Exactly one IMEX Euler trial. No hidden subdivisions or publication.
+    /// Success leaves the transported source in candidate and endpoint in stage.
+    /// None means the explicit transport bound changed; candidate is untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn try_implicit_step(
+        &mut self,
+        dt: f64,
+        base: Evaluation,
+        cfl: f64,
+        controls: ThermalJetImplicitControls,
+        work: &mut Workspace,
+        evaluations: &mut usize,
+        gate: &CancelGate,
+    ) -> Result<Option<TrialStep>, ThermalJetImplicitError> {
+        let n = self.candidate.len();
+        for i in 0..n {
+            poll_at(gate, i)?;
+            self.flow.stage.a[i] = self.flow.candidate.a[i] + dt * self.flow.rhs.a[i];
+            self.flow.stage.q[i] = self.flow.candidate.q[i] + dt * self.flow.rhs.q[i];
+            self.stage[i] = finite(self.candidate[i] + dt * self.rhs[i])?;
+        }
+        let transport = self.evaluate_transport(true, gate)?;
+        if dt > stable_step(transport.rate_per_s, cfl) {
+            return Ok(None);
+        }
+        let upwind = finite(dt * base.upwind_power_w)?;
+        core::mem::swap(&mut self.flow.candidate, &mut self.flow.stage);
+        core::mem::swap(&mut self.candidate, &mut self.stage);
+        let solved = solve_stage(self, work, dt, controls, evaluations, gate)?;
+        let mass_factor = positive(
+            core::f64::consts::PI * self.flow.parameters.density_kg_m3 * self.flow.spacing_m,
+        )?;
+        let mut damping = Sum::default();
+        for i in 0..n {
+            poll_at(gate, i)?;
+            let mass = average(self.flow.stage.a[i], self.flow.stage.a[next(i, n)]);
+            let change = finite((self.flow.stage.q[i] - self.flow.candidate.q[i]) / mass)?;
+            damping.add(0.5 * mass_factor * mass * change * change);
+        }
+        Ok(Some(TrialStep {
+            solved,
+            upwind,
+            damping: finite(damping.total())?,
+        }))
+    }
+
     fn advance_implicit_inner(
         &mut self,
         duration_s: f64,
@@ -747,7 +818,6 @@ impl ThermalCarreauJet<'_> {
             self.candidate[i] = self.accepted[i];
         }
         self.flow.spatial.reset_viscous_heat(gate)?;
-        let before = self.flow.diagnostics;
         let b = budget.flow;
         let mut base = self.evaluate_transport(false, gate)?;
         let (mut elapsed, mut cap) = (0.0, b.maximum_step_s);
@@ -756,9 +826,6 @@ impl ThermalCarreauJet<'_> {
         let (mut evaluations, mut nonlinear, mut linear) = (0, 0, 0);
         let (mut maximum_velocity, mut maximum_energy) = (0.0_f64, 0.0_f64);
         let mut outcome = SlenderJetOutcome::Completed;
-        let mass_factor = positive(
-            core::f64::consts::PI * self.flow.parameters.density_kg_m3 * self.flow.spacing_m,
-        )?;
         while elapsed < duration_s {
             poll(gate)?;
             if attempted >= b.maximum_substeps {
@@ -777,45 +844,35 @@ impl ThermalCarreauJet<'_> {
                 return Err(NonlinearJetError::NonRepresentable.into());
             }
             attempted += 1;
-            for i in 0..n {
-                poll_at(gate, i)?;
-                self.flow.stage.a[i] = self.flow.candidate.a[i] + dt * self.flow.rhs.a[i];
-                self.flow.stage.q[i] = self.flow.candidate.q[i] + dt * self.flow.rhs.q[i];
-                self.stage[i] = finite(self.candidate[i] + dt * self.rhs[i])?;
-            }
-            let transport = match self.evaluate_transport(true, gate) {
+            let trial = match self.try_implicit_step(
+                dt,
+                base,
+                b.cfl,
+                controls,
+                work,
+                &mut evaluations,
+                gate,
+            ) {
                 Err(ThermalJetImplicitError::Thermal(ThermalJetError::Flow(
                     NonlinearJetError::InitialDomain(violation),
                 ))) => {
                     outcome = SlenderJetOutcome::DomainLimit(violation);
                     break;
                 }
-                other => other?,
+                Err(error) => return Err(error),
+                Ok(None) => {
+                    cap = positive(0.5 * dt)?;
+                    base = self.evaluate_transport(false, gate)?;
+                    continue;
+                }
+                Ok(Some(trial)) => trial,
             };
-            if dt > stable_step(transport.rate_per_s, b.cfl) {
-                cap = positive(0.5 * dt)?;
-                base = self.evaluate_transport(false, gate)?;
-                continue;
-            }
-            let numerical = finite(dt * base.upwind_power_w)?;
-            // Transported mass, q and energy are the immutable source of this
-            // nonlinear stage. Any subsequent Err rolls back the whole call.
-            core::mem::swap(&mut self.flow.candidate, &mut self.flow.stage);
-            core::mem::swap(&mut self.candidate, &mut self.stage);
-            let solved = solve_stage(self, work, dt, controls, &mut evaluations, gate)?;
-            let mut step_damping = Sum::default();
-            for i in 0..n {
-                poll_at(gate, i)?;
-                let mass = average(self.flow.stage.a[i], self.flow.stage.a[next(i, n)]);
-                let velocity_change =
-                    finite((self.flow.stage.q[i] - self.flow.candidate.q[i]) / mass)?;
-                step_damping.add(0.5 * mass_factor * mass * velocity_change * velocity_change);
-            }
+            let solved = trial.solved;
             self.flow.spatial.start_viscous_heat(dt, gate)?;
             self.flow.spatial.accept_viscous_heat_step(gate)?;
             heat = finite(heat + dt * solved.evaluation.viscous_power_w)?;
-            upwind = finite(upwind + numerical)?;
-            damping = finite(damping + step_damping.total())?;
+            upwind = finite(upwind + trial.upwind)?;
+            damping = finite(damping + trial.damping)?;
             nonlinear += solved.nonlinear;
             linear += solved.linear;
             maximum_velocity = maximum_velocity.max(solved.velocity_residual);
@@ -830,6 +887,57 @@ impl ThermalCarreauJet<'_> {
         if matches!(outcome, SlenderJetOutcome::DomainLimit(_)) {
             base = self.evaluate_transport(false, gate)?;
         }
+        self.publish_implicit_result(
+            duration_s,
+            elapsed,
+            outcome,
+            base,
+            AdvanceTotals {
+                accepted,
+                attempted,
+                heat,
+                upwind,
+                damping,
+                evaluations,
+                nonlinear,
+                linear,
+                maximum_velocity,
+                maximum_energy,
+            },
+            budget.energy_tolerance_j,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_implicit_result(
+        &mut self,
+        duration_s: f64,
+        elapsed: f64,
+        outcome: SlenderJetOutcome,
+        base: Evaluation,
+        totals: AdvanceTotals,
+        energy_tolerance_j: f64,
+        gate: &CancelGate,
+    ) -> Result<ThermalJetImplicitAdvance, ThermalJetImplicitError> {
+        let AdvanceTotals {
+            accepted,
+            attempted,
+            heat,
+            upwind,
+            damping,
+            evaluations,
+            nonlinear,
+            linear,
+            maximum_velocity,
+            maximum_energy,
+        } = totals;
+        let n = self.accepted.len();
+        let before = self.flow.diagnostics;
+        let target = self.flow.time_s + duration_s;
+        let mass_factor = positive(
+            core::f64::consts::PI * self.flow.parameters.density_kg_m3 * self.flow.spacing_m,
+        )?;
         let mut energy_change = Sum::default();
         let mut mass_change = Sum::default();
         for i in 0..n {
@@ -839,10 +947,10 @@ impl ThermalCarreauJet<'_> {
         }
         let internal = finite(energy_change.total())?;
         let residual = finite(internal - heat)?;
-        if residual.abs() > budget.energy_tolerance_j {
+        if residual.abs() > energy_tolerance_j {
             return Err(ThermalJetError::EnergyBalance {
                 residual_j: residual,
-                tolerance_j: budget.energy_tolerance_j,
+                tolerance_j: energy_tolerance_j,
             }
             .into());
         }

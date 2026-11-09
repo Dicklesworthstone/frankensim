@@ -93,6 +93,17 @@ impl Spatial {
             ))
     }
 
+    /// Current trial quadrature only; never part of published heat until accepted.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub(super) fn trial_viscous_heat_j(&self) -> Result<&[f64], NonlinearJetError> {
+        self.heat
+            .as_ref()
+            .map(|heat| heat.step.as_slice())
+            .ok_or(NonlinearJetError::InvalidState(
+                "thermal jet heat workspace absent",
+            ))
+    }
+
     pub(super) fn reset_viscous_heat(
         &mut self,
         gate: &CancelGate,

@@ -2272,6 +2272,60 @@ kinetic damping. These independent equation checks are distinct from native
 Rust execution, which remains blocked by the workspace dependencies/storage.
 All nine changed Rust sources pass pinned rustfmt parsing.
 
+### Heat-aware adaptive implicit jet evolution
+
+`ThermalCarreauJet::advance_implicit_adaptive`, under
+`implicit-enthalpy-coupling`, compares exactly one original joint IMEX-Euler
+step with two original joint half steps. The fixed and adaptive entries share
+the same single-step kernel and final publication path. Only the two-half-step
+trajectory is retained, without Richardson extrapolation or a new order claim.
+`thermal::implicit::adaptive` exposes physical tolerances and the report.
+
+Local error indicators cover area, radius, actual face velocity, original
+caloric temperature and specific energy, per-cell physical viscous heat, and
+the noncancelling sum of absolute cell-heat discrepancies. Relative scales use
+changes over the trial interval, so a large energy datum, absolute temperature
+or bulk velocity cannot loosen the local-change allowance. Heat scales use
+only that interval's physical production.
+
+A separate accepted-prefix account enforces `D <= D_abs + r*(H+D)`, with
+`0 <= r < 1`, physical viscous heat H and numerical BE kinetic damping D.
+Direct trial costs and double-double accumulated totals prevent a small
+positive loss from disappearing beside an exhausted large history. Exactly
+zero new loss remains admissible and allows growth during a quiet tail.
+Absolute-only budgets also reserve future credit using current centered
+kinetic plus nonnegative surface energy, releasing that scheduling reserve
+when centered kinetic energy fits the remaining allowance. This heuristic
+does not replace the exact prefix guard or claim a future capillary bound.
+
+All coarse and fine trials, including discarded attempts, consume the shared
+substep, original Newton and source-preparation budgets. Coarse/rejected heat
+never enters the accepted cell or aggregate accounts. Nine reusable O(N)
+checkpoint arrays supplement the original bounded Krylov workspace; no
+trajectory archive or per-trial clone of the simulation is added. Original
+transport/capillary CFL, geometry and material support remain authoritative.
+Source, work, refinement, representation or conservation refusal and
+cancellation preserve the complete pre-call state. A native geometry stop
+publishes only earlier completed comparison intervals.
+
+These are local solution/heat indicators and an actual interval-wide numerical
+damping allowance, not a certified global physical-heat error bound. The
+accepted method remains first order. Numerical damping is never deposited
+as physical heat; explicit transport and nonlinear residual errors remain.
+
+Focused regressions exercise stiff heat recovery and budget refinement,
+accepted-only spatial heat, original source retention, late refusal/retry,
+cancellation and exhausted-budget sub-ULP costs. Independent coupled
+Carreau/WLF, nonlinear-Cv and conduction calculations over 0.02 s give
+0.196349540849355 J physical heat in the resolved continuous reference.
+Absolute damping allowances 0.002 and 0.0005 J give physical heat
+0.194350019873239 and 0.195849542010369 J, with numerical losses
+0.001999520976158 and 0.000499998839052 J. Heat, temperature and deformation
+errors improve by factors about 0.25 when the allowance is quartered.
+These independent numerical calculations and pinned rustfmt parsing do not
+replace native Rust compilation/tests, which remain unexecuted in the current
+dependency/storage-constrained workspace.
+
 ## Adaptive source-owned turbulent gas heat and species transport
 
 `FvFlow::advance_turbulent_gas_species` advances a complete physical window
