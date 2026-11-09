@@ -167,6 +167,73 @@ impl<'a, 'field> EigenstrainFamily3<'a, 'field> {
 }
 
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
+    /// Evaluate fixed thermal experiments on the existing eroded realization
+    /// with the unchanged nominal/dilated material-volume constraints.
+    /// Thermal load scales follow the SAME eroded SIMP material as stiffness;
+    /// material-density force follows its eroded physical occupancy. This does
+    /// not assert that eroded thermal work is the worst across realizations.
+    /// Success and failure both restore incoming scales, like the cold robust
+    /// owner. No continuous load ball or automatic geometry transfer is implied.
+    pub fn evaluate_eigenstrain_robust(
+        &mut self,
+        rho: &[f64],
+        cases: &[CutEigenstrainCase3<'_>],
+        policy: CutEigenstrainPolicy3,
+        robustness: super::robust::RobustOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<super::robust::RobustEvaluation3, EvaluationStop> {
+        let family = EigenstrainFamily3::admit(&self.operator, cases, policy, control)?;
+        if !robustness.valid(self.params)
+            || rho.len() != self.cells()
+            || rho
+                .iter()
+                .any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
+        {
+            return Err(failure("sdf3-eigenstrain-robust-policy"));
+        }
+        let loads = family.loads();
+        self.evaluate_robust_family(rho, &loads, Some(family), robustness, control)
+    }
+
+    /// Differentiate the existing relaxed/reference or sampled-peak stress
+    /// functional under independent fixed free-strain experiments.
+    ///
+    /// Reference stress is `C_reference:(epsilon - epsilon_free)`, with the
+    /// native B-bar projection when selected. The existing stress owner retains
+    /// its direct relaxation/peak derivative and reference-stress adjoint; the
+    /// thermal load contributes `z^T db_free/dscale` through equilibrium.
+    /// `case_compliances` retains that owner's EXTERNAL-force work convention,
+    /// excluding the equivalent free-strain load. Use [`Self::evaluate_eigenstrain`]
+    /// when complete equivalent-load work is the desired objective.
+    ///
+    /// Both success and failure restore incoming scales. Admission covers all
+    /// retained physical bulk points, including zero-weight cases, without
+    /// asserting a between-point bound for the original sampled free strain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_eigenstrain_stress(
+        &mut self,
+        rho: &[f64],
+        cases: &[CutEigenstrainCase3<'_>],
+        policy: CutEigenstrainPolicy3,
+        options: super::stress::StressOptions3,
+        measure: super::stress::StressMeasure3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<super::stress::StressEvaluation3, super::stress::StressError3> {
+        let family = EigenstrainFamily3::admit(&self.operator, cases, policy, control)?;
+        let loads = family.loads();
+        super::stress::admit(self, rho, &loads, options)?;
+        let points = cases
+            .iter()
+            .try_fold(0usize, |sum, case| {
+                sum.checked_add(case.eigenstrain.bulk_points())
+            })
+            .ok_or(super::stress::StressError3::PointBudget)?;
+        if points > options.max_points {
+            return Err(super::stress::StressError3::PointBudget);
+        }
+        self.evaluate_stress_family(rho, &loads, None, Some(family), options, measure, control)
+    }
+
     /// Solve independent thermal experiments and differentiate their complete
     /// equivalent-load work through the original density map.
     ///

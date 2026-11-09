@@ -2,10 +2,11 @@
 use super::{RobustEvaluation3, RobustOptions3};
 use super::super::{CutDensityStudy3, Sdf3Elasticity, assert_loads};
 use crate::pipeline::LoadCase;
+use super::super::eigenstrain::{CutEigenstrainCase3, CutEigenstrainPolicy3, EigenstrainFamily3};
 use crate::{EvaluationStop, SolveControl, SolveWork};
 use fs_ascent::projected_al::{ProjectedAlError, ProjectedAlOptions, ProjectedAlReport,
     ProjectedAlSample, ProjectedAlState, ProjectedAlStop, ProjectedAlWork};
-use std::{cell::RefCell, ops::ControlFlow};
+use std::{borrow::Cow, cell::RefCell, ops::ControlFlow};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RobustDesignOptions3 {
@@ -57,9 +58,10 @@ fn row(e: &RobustEvaluation3, iteration: usize, options: RobustDesignOptions3) -
         feasible: constraint_violation <= options.optimizer.tolerance }
 }
 fn sample<O: Sdf3Elasticity>(study: &mut CutDensityStudy3<O>, loads: &[LoadCase<'_>],
-    rho: &[f64], options: RobustDesignOptions3, last: &mut Option<RobustDesignPoint3>,
+    rho: &[f64], options: RobustDesignOptions3, eigenstrain: Option<EigenstrainFamily3<'_, '_>>,
+    last: &mut Option<RobustDesignPoint3>,
     control: &mut SolveControl<'_>) -> Result<Option<ProjectedAlSample>, EvaluationStop> {
-    let evaluation = study.evaluate_robust(rho, loads, options.robustness, control)?;
+    let evaluation = study.evaluate_robust_family(rho, loads, eigenstrain, options.robustness, control)?;
     let sample = ProjectedAlSample {
         objective: evaluation.eroded.objective.compliance / options.compliance_scale,
         gradient: evaluation.eroded.objective.gradient.iter().map(|g| g / options.compliance_scale).collect(),
@@ -86,7 +88,8 @@ fn sample<O: Sdf3Elasticity>(study: &mut CutDensityStudy3<O>, loads: &[LoadCase<
 /// This solves the discrete threshold model, not a continuum safety guarantee.
 pub struct RobustDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
-    loads: &'a [LoadCase<'a>],
+    loads: Cow<'a, [LoadCase<'a>]>,
+    eigenstrain: Option<EigenstrainFamily3<'a, 'a>>,
     control: &'a mut SolveControl<'callback>,
     options: RobustDesignOptions3,
     state: ProjectedAlState,
@@ -101,6 +104,29 @@ impl<'a, 'callback, O: Sdf3Elasticity> RobustDesignStudy3<'a, 'callback, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, loads: &'a [LoadCase<'a>], rho: &[f64],
         options: RobustDesignOptions3, control: &'a mut SolveControl<'callback>)
         -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        Self::new_family(study, Cow::Borrowed(loads), None, rho, options, control)
+    }
+
+    /// Optimize COMPLETE equivalent-load work for independently prepared
+    /// thermal fields, with the existing eroded objective/dilated volume map.
+    /// The same projected AL permits mixed-sign density derivatives; there is
+    /// no force-only OC sign assumption. The borrowed field/source owner and
+    /// explicit physical policy remain fixed throughout this in-memory session.
+    /// These fields are not silently inherited by cold refinement/load-ball APIs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_eigenstrain(study: &'a mut CutDensityStudy3<O>,
+        cases: &'a [CutEigenstrainCase3<'a>], policy: CutEigenstrainPolicy3, rho: &[f64],
+        options: RobustDesignOptions3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        let family = EigenstrainFamily3::admit(&study.operator, cases, policy, control)
+            .map_err(ProjectedAlError::Evaluation)?;
+        Self::new_family(study, Cow::Owned(family.loads()), Some(family), rho, options, control)
+    }
+
+    fn new_family(study: &'a mut CutDensityStudy3<O>, loads: Cow<'a, [LoadCase<'a>]>,
+        eigenstrain: Option<EigenstrainFamily3<'a, 'a>>, rho: &[f64],
+        options: RobustDesignOptions3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<EvaluationStop>> {
         let n = study.cells();
         options.optimizer.validate(n)?;
         if !options.robustness.valid(study.params())
@@ -110,7 +136,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> RobustDesignStudy3<'a, 'callback, O> {
             || rho.len() != n || rho.iter().any(|r| !r.is_finite() || *r < options.density_floor || *r > 1.0) {
             return Err(ProjectedAlError::Invalid("invalid robust design policy or initial density"));
         }
-        assert_loads(study, loads);
+        assert_loads(study, &loads);
         if study.prescribed_solid_fraction() > options.volume_limit * (1.0 + options.optimizer.tolerance) {
             return Err(ProjectedAlError::Invalid("prescribed solid already exceeds the dilated material cap"));
         }
@@ -118,7 +144,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> RobustDesignStudy3<'a, 'callback, O> {
         let state = {
             let ledger = RefCell::new(&mut *control);
             ProjectedAlState::try_new(rho, &vec![options.density_floor; n], &vec![1.0; n], options.optimizer,
-                &mut |rho| sample(study, loads, rho, options, &mut last, &mut **ledger.borrow_mut()),
+                &mut |rho| sample(study, &loads, rho, options, eigenstrain, &mut last, &mut **ledger.borrow_mut()),
                 |_| if ledger.borrow_mut().checkpoint("sdf3-robust-design-control").is_ok() {
                     ControlFlow::Continue(())
                 } else { ControlFlow::Break(()) })?
@@ -127,7 +153,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> RobustDesignStudy3<'a, 'callback, O> {
         let accepted = last.expect("initial optimizer sample contains complete robust fields");
         let first = row(&accepted.evaluation, 0, options);
         let best_feasible = first.feasible.then(|| accepted.clone());
-        Ok(Self { study, loads, control, options, state, accepted, best_feasible, history: vec![first] })
+        Ok(Self { study, loads, eigenstrain, control, options, state, accepted, best_feasible, history: vec![first] })
     }
     #[must_use] pub fn options(&self) -> RobustDesignOptions3 { self.options }
     #[must_use] pub fn accepted(&self) -> &RobustDesignPoint3 { &self.accepted }
@@ -151,10 +177,11 @@ impl<'a, 'callback, O: Sdf3Elasticity> RobustDesignStudy3<'a, 'callback, O> {
             let result = {
                 let ledger = RefCell::new(&mut *self.control);
                 let study = &mut *self.study;
-                let loads = self.loads;
+                let loads = self.loads.as_ref();
+                let eigenstrain = self.eigenstrain;
                 let options = self.options;
                 self.state.try_run(remaining.min(1),
-                    &mut |rho| sample(study, loads, rho, options, &mut last, &mut **ledger.borrow_mut()),
+                    &mut |rho| sample(study, loads, rho, options, eigenstrain, &mut last, &mut **ledger.borrow_mut()),
                     |_| if ledger.borrow_mut().checkpoint("sdf3-robust-design-control").is_ok() {
                         ControlFlow::Continue(())
                     } else { ControlFlow::Break(()) })

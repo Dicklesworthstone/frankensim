@@ -38,7 +38,7 @@ impl Default for RobustOptions3 {
     fn default() -> Self { Self { threshold_offset: 0.1 } }
 }
 impl RobustOptions3 {
-    fn valid(self, params: SimpParams) -> bool {
+    pub(super) fn valid(self, params: SimpParams) -> bool {
         self.threshold_offset.is_finite() && self.threshold_offset >= 0.0
             && params.eta - self.threshold_offset > 0.0
             && params.eta + self.threshold_offset < 1.0
@@ -79,6 +79,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate_robust(&mut self, rho: &[f64], loads: &[LoadCase<'_>],
         options: RobustOptions3, control: &mut SolveControl<'_>)
         -> Result<RobustEvaluation3, EvaluationStop> {
+        self.evaluate_robust_family(rho, loads, None, options, control)
+    }
+
+    pub(in crate::sdf3) fn evaluate_robust_family(&mut self, rho: &[f64], loads: &[LoadCase<'_>],
+        eigenstrain: Option<super::eigenstrain::EigenstrainFamily3<'_, '_>>,
+        options: RobustOptions3, control: &mut SolveControl<'_>)
+        -> Result<RobustEvaluation3, EvaluationStop> {
         options.assert_valid(self.params);
         assert_loads(self, loads);
         assert_eq!(rho.len(), self.cells(), "one raw density per active cut cell required");
@@ -100,7 +107,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let dilated_volume_gradient = self.pullback(&dilated_local, control)?;
         let previous = self.operator.scales().to_vec();
         let result = (|| {
-            let eroded = self.evaluate_design(eroded, loads, control)?;
+            let eroded = self.evaluate_design_family(eroded, loads, eigenstrain, control)?;
             control.checkpoint("sdf3-robust-publish")?;
             Ok(RobustEvaluation3 {
                 robustness: options, eroded,

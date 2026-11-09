@@ -20,10 +20,13 @@
 //! relaxed AND physical stress at every retained sample of every declared case.
 //! It is an unweighted p-norm, not a normalized integral. Its sampling-dependent
 //! conservatism and finite-sample scope are part of the selected problem.
-//! Every physical load case first passes whole-cell material-strain admission,
-//! including cases excluded from a weighted aggregate. This checks the original
-//! isotropic tensor norm or source component limits; it does not constrain
-//! adjoint amplitudes or turn sampled strength into a continuum certificate.
+//! Cold load cases pass whole-cell material-strain admission. Prescribed
+//! free-strain cases instead pass the native thermal owner's separate total
+//! and elastic limits at retained bulk points, since an arbitrary supplied
+//! field has no certified between-point envelope. Both paths admit cases
+//! excluded from a weighted aggregate and retain the original isotropic norm
+//! or source component limits. They do not constrain adjoint amplitudes or turn
+//! sampled strength into a continuum certificate.
 
 use super::*;
 use crate::SolveWork;
@@ -98,7 +101,9 @@ pub(crate) fn material_domain_reason(error: &ElasticityError3) -> Option<&'stati
     match error {
         ElasticityError3::Invalid(reason @ ("bulk strain exceeds retained material domain"
             | "projected bulk strain exceeds retained material domain"
-            | "affine bulk strain ball exceeds retained material domain")) => Some(*reason),
+            | "affine bulk strain ball exceeds retained material domain"
+            | "eigenstrain response exceeds retained elastic material domain"
+            | "total strain exceeds small-deformation budget; finite-deformation model required")) => Some(*reason),
         _ => None,
     }
 }
@@ -107,7 +112,8 @@ impl From<ElasticityError3> for StressError3 {
         if let Some(reason) = material_domain_reason(&e) { return Self::MaterialDomain(reason); }
         match e {
             ElasticityError3::Cancelled => Self::Evaluation(EvaluationStop::Cancelled),
-            ElasticityError3::Invalid("bulk stress point allowance exhausted") => Self::PointBudget,
+            ElasticityError3::Invalid("bulk stress point allowance exhausted"
+                | "eigenstrain response point allowance exhausted") => Self::PointBudget,
             e => Self::Physics(e),
         }
     }
@@ -307,7 +313,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         measure: StressMeasure3,
         control: &mut SolveControl<'_>,
     ) -> Result<StressEvaluation3, StressError3> {
-        self.evaluate_stress_family(rho, loads, None, options, measure, control)
+        self.evaluate_stress_family(rho, loads, None, None, options, measure, control)
     }
 
     /// Stress under independent external forces AND prescribed embedded motion.
@@ -325,12 +331,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         loads: &[LoadCase<'_>], motions: &StressMotions3<'_>, options: StressOptions3,
         measure: StressMeasure3, control: &mut SolveControl<'_>)
         -> Result<StressEvaluation3, StressError3> {
-        self.evaluate_stress_family(rho, loads, Some(motions), options, measure, control)
+        self.evaluate_stress_family(rho, loads, Some(motions), None, options, measure, control)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_stress_family(&mut self, rho: &[f64], loads: &[LoadCase<'_>],
-        motions: Option<&StressMotions3<'_>>, options: StressOptions3,
+    pub(in crate::sdf3) fn evaluate_stress_family(&mut self, rho: &[f64], loads: &[LoadCase<'_>],
+        motions: Option<&StressMotions3<'_>>, eigenstrain: Option<eigenstrain::EigenstrainFamily3<'_, '_>>,
+        options: StressOptions3,
         measure: StressMeasure3, control: &mut SolveControl<'_>)
         -> Result<StressEvaluation3, StressError3> {
         admit(self, rho, loads, options)?;
@@ -341,7 +348,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&design.scales)?;
         let outcome = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
-            self.stress_prepared(rho, loads, motions, options, measure, &design, &prepared, None, control)
+            self.stress_prepared_family(rho, loads, motions, eigenstrain, options, measure, &design, &prepared, None, control)
         })();
         self.operator
             .set_scales(&previous)
@@ -359,6 +366,15 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         prepared: &impl fs_sparse::precond::Precond, shared: Option<SharedStressFields3<'_>>,
         control: &mut SolveControl<'_>)
         -> Result<StressEvaluation3, StressError3> {
+        self.stress_prepared_family(rho, loads, motions, None, options, measure, design, prepared, shared, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stress_prepared_family(&self, rho: &[f64], loads: &[LoadCase<'_>],
+        motions: Option<&StressMotions3<'_>>, eigenstrain: Option<eigenstrain::EigenstrainFamily3<'_, '_>>,
+        options: StressOptions3, measure: StressMeasure3, design: &crate::sdf3::Design3,
+        prepared: &impl fs_sparse::precond::Precond, shared: Option<SharedStressFields3<'_>>,
+        control: &mut SolveControl<'_>) -> Result<StressEvaluation3, StressError3> {
             if shared.is_some_and(|fields| fields.displacements.len() != loads.len()
                 || fields.displacements.iter().any(|u| u.len() != self.operator.n())
                 || fields.volume_gradient.len() != self.cells()) {
@@ -406,6 +422,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     else { "sdf3-stress-primal" })?;
                 let external = self.external_force(load.force, body.as_deref(), control)?;
                 let mut rhs = external.clone();
+                if let Some(family) = eigenstrain {
+                    family.add_load(&self.operator, case, &mut rhs, control)?;
+                }
                 let motion = motions.and_then(|entries| entries[case]);
                 if let Some(g) = motion {
                     control.checkpoint("sdf3-stress-motion-load")?;
@@ -433,12 +452,34 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 // The native owner also checks actual and assumed B-bar strain
                 // through the original strong/hanging constraint map.
                 control.checkpoint("sdf3-stress-material-domain")?;
-                self.operator.admit_material_domain(&u, || poll(control))?;
+                if eigenstrain.is_none() {
+                    self.operator.admit_material_domain(&u, || poll(control))?;
+                }
                 // b_g^T u is not external work or an actuator-energy law.
                 let compliance = finite(external.iter().zip(&u).map(|(f,u)| f*u).sum())?;
-                let data =
+                let data = if let Some(family) = eigenstrain {
+                    // The original thermal owner admits actual/projected total
+                    // and elastic strain on every retained bulk point. Its
+                    // source sampling does not imply a between-point envelope.
+                    let allowance = family.policy.max_points_per_case.min(options.max_points - point_count);
+                    let mut stopped = None;
+                    let response = self.operator.eigenstrain_response(family.cases[case].eigenstrain, &u,
+                        family.policy.maximum_kinematic_strain, allowance, || {
+                            match control.checkpoint("sdf3-eigenstrain-stress") {
+                                Ok(()) => ControlFlow::Continue(()),
+                                Err(stop) => { stopped = Some(stop); ControlFlow::Break(()) }
+                            }
+                        });
+                    if let Some(stop) = stopped { return Err(stop.into()); }
+                    response?
+                        .into_iter().map(|point| BulkStressPoint3 {
+                            cell: point.cell, position: point.position, weight: point.weight,
+                            reference_stress: point.reference_stress, stress: point.stress,
+                        }).collect()
+                } else {
                     self.operator
-                        .bulk_stress(&u, options.max_points - point_count, || poll(control))?;
+                        .bulk_stress(&u, options.max_points - point_count, || poll(control))?
+                };
                 point_count = point_count
                     .checked_add(data.len())
                     .ok_or(StressError3::PointBudget)?;
@@ -552,6 +593,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     .scale_bilinear_forms(&z, &displacements[case], || poll(control))?;
                 for (value, contraction) in scale_gradient.iter_mut().zip(cross) {
                     *value = finite(*value-contraction)?;
+                }
+                if let Some(family) = eigenstrain {
+                    // The differentiated observable is REFERENCE stress. The
+                    // existing reference-stress pullback already supplies its
+                    // displacement derivative; no physical-stress scale term
+                    // may be added again to the relaxation/peak coefficient.
+                    family.add_scale_gradient(&self.operator, case, &z, 1.0, &mut scale_gradient, control)?;
                 }
                 if let Some(g) = motions.and_then(|entries| entries[case]) {
                     control.checkpoint("sdf3-stress-motion-pullback")?;

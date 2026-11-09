@@ -1,4 +1,9 @@
 //! Fixed thermal fields through real CutFEM equilibrium and density derivatives.
+#[path = "eigenstrain_sdf3/design.rs"]
+mod design;
+#[path = "eigenstrain_sdf3/stress.rs"]
+mod stress;
+
 use std::ops::ControlFlow;
 
 use fs_blake3::ContentHash;

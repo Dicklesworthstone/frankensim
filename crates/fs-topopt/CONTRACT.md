@@ -1164,3 +1164,22 @@ positive density derivatives, so the force-only OC sign assumption does not appl
 `tests/eigenstrain_sdf3.rs` supplies full-chain derivative, adaptive, free-expansion,
 source-binding and rollback regressions. These are discrete fixed-field mechanics,
 not a heat equation, temperature-dependent stiffness law, or elastic-storage objective.
+
+
+### Thermal stress and robust design
+
+`evaluate_eigenstrain_stress` reuses the original relaxed-reference and sampled-peak
+stress functionals, replacing cold stress with `C_reference:(epsilon-epsilon_free)`
+and retaining the reference-stress adjoint. Equilibrium contributes `z^T db_free/ds`
+without duplicating the physical scale or explicit relaxation derivative. Its
+per-case compliance observations retain external-force work semantics. All cases,
+including zero-weight cases, pass thermal material admission at retained points.
+
+`evaluate_eigenstrain_robust` and `RobustDesignStudy3::new_with_eigenstrain` connect
+the same fixed fields to the existing eroded-work/dilated-volume model and resumable
+projected augmented-Lagrangian optimizer. Mixed-sign thermal work gradients are
+admitted. Incoming scales are restored after robust/stress trials; accepted design
+fields remain paired with their evaluated design. `eigenstrain_sdf3/{stress,design}`
+adds derivative, positive-gradient optimization and cancellation regressions.
+No source-temperature derivative, field-transfer recipe or continuum stress bound
+is inferred from this fixed-field optimization path.
