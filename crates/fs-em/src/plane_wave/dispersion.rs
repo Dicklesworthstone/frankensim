@@ -25,6 +25,12 @@ use super::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+mod interface;
+pub use interface::{
+    FresnelAmplitudeDispersion, FresnelLogarithmicDispersion, IncidenceFrequencyConstraint,
+    InterfaceFrequencyDispersion,
+};
+
 type Result<T> = core::result::Result<T, ReflectionError>;
 
 /// Frequency-local propagation data with the complete original source attached.

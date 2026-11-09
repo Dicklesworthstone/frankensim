@@ -7506,6 +7506,35 @@ the native interface solve, geometric invariance of bulk Debye dispersion,
 single counting of leakage, resonant/anomalous/evanescent limits, native
 six-component beam-field propagation and source/domain refusals.
 
+### Fresnel reflection phase and interface frequency dispersion
+
+`PlanarDielectricInterface::frequency_dispersion` reuses the native passive
+carrier solution and both original analytic material jets to return the first
+and second frequency derivatives of reflected tangential E and transmitted
+tangential E / conjugate H. The caller explicitly selects fixed incidence
+angle or fixed transverse wavenumber. The latter follows an original spatial
+Fourier mode as its angle varies with frequency; these paths have different
+phase slopes even for nondispersive total internal reflection. Common frequency
+factors cancel before differentiating, retaining exactly zero derivatives for
+nondispersive fixed-angle Fresnel amplitudes. Preparation allocates no storage
+and adds only fixed-size scalar arithmetic to the original bounded material jets.
+
+Each nonzero amplitude supplies `-Im(H'/H)` group delay, its frequency
+derivative, and both log-amplitude derivatives under the original exp(+i omega t)
+convention. The fields are anchored at the interface; no propagation distance
+or finite-film residence time is inserted. These are signed local narrowband
+phase derivatives, not signal-front or energy velocities. Exact Fresnel/Brewster
+zeros retain finite complex amplitude derivatives but return no logarithmic
+phase/delay. Exact critical transmission, non-lossless incident jets and
+unsupported/nonsmooth source frequencies refuse without changing the native
+carrier-only response. No broadband pulse approximation is inferred.
+
+Focused G1/G3 cases in `tests/plane_wave_dispersion.rs` compare independent native
+frequency and phase sweeps for Debye, Lorentz, Ohmic and dispersive incident laws;
+verify closed-form TIR delay/GDD and binary-exact magnetic Brewster cancellation;
+and recover the original reflected angular-spectrum beam derivatives at fixed
+transverse carrier. Synthetic source fixtures are not measured-material validation.
+
 ### Native AC circuits on physical solid-conductor electrodes
 
 `harmonic::terminals::SpatialHarmonicTerminalFrequency` prepares the complete

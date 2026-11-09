@@ -6,6 +6,7 @@ use fs_em::plane_wave::{
     angular_spectrum::{
         AngularSpectrumGrid, AngularSpectrumLimits, AngularSpectrumSide, PlanarAngularSpectrum,
     },
+    dispersion::IncidenceFrequencyConstraint,
     layers::PlanarDielectricLayers,
 };
 use fs_evidence::ValidityDomain;
@@ -40,13 +41,17 @@ const OMEGA0: f64 = 1e9;
 const SIGMA: f64 = 0.02;
 
 fn source(damping: f64) -> ResolvedMaterialStatePoint {
+    source_with_storage(damping, 2.0 * E, M)
+}
+
+fn source_with_storage(damping: f64, epsilon: f64, mu: f64) -> ResolvedMaterialStatePoint {
     let angular = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static,
     ));
     let conductivity = ElectricalPropertyBasis::Conductivity;
     let entries = [
-        (EPS_NAME, QuantitySpec::dimensional(EPS), 2.0 * E),
-        (MU_NAME, QuantitySpec::dimensional(MU), M),
+        (EPS_NAME, QuantitySpec::dimensional(EPS), epsilon),
+        (MU_NAME, QuantitySpec::dimensional(MU), mu),
         ("delta", QuantitySpec::dimensional(EPS), 4.0 * E),
         ("tau", QuantitySpec::dimensional(Time::DIMS), 1.0 / OMEGA0),
         ("omega0", angular, OMEGA0),
@@ -318,4 +323,164 @@ fn g1_high_frequency_loss_derivatives_keep_resolved_absorption_tails() {
             near(jet.wavenumber_second_derivative_s2_m().im, second, 1e-10 * second.abs());
         }
     }
+}
+
+fn differentiate_samples(values: [C64; 5], step: f64) -> [C64; 2] {
+    [
+        (values[0] - values[1].scale(8.0) + values[3].scale(8.0) - values[4])
+            .scale(1.0 / (12.0 * step)),
+        (-values[0] + values[1].scale(16.0) - values[2].scale(30.0)
+            + values[3].scale(16.0) - values[4]).scale(1.0 / (12.0 * step * step)),
+    ]
+}
+
+#[test]
+fn g1_fresnel_frequency_jets_follow_original_dispersive_boundary_fields() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let ambient = source(0.03 * OMEGA0);
+    let relaxation = debye(ambient.clone(), 0.2, 0.01);
+    let resonance = lorentz(ambient.clone());
+    let clear_resonance = lorentz(source(0.0));
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        ambient.clone(), ElectricalPropertyBasis::Conductivity,
+    ).unwrap();
+    for incident in [DielectricResponse::Lossless(&ambient), DielectricResponse::Lorentz(&clear_resonance)] {
+        for transmitted in [
+            DielectricResponse::Debye(&relaxation), DielectricResponse::Lorentz(&resonance),
+            DielectricResponse::Ohmic(&conductor),
+            DielectricResponse::LorentzWithOhmic { dielectric: &resonance, conductor: &conductor },
+        ] {
+            let interface = PlanarDielectricInterface::try_new_with_incident_response(incident, transmitted).unwrap();
+            for omega in [0.3 * OMEGA0, 0.8 * OMEGA0] {
+                for cosine in [0.5_f64, 0.9, 1.0] {
+                    let ki = interface.response(omega, 1.0, Polarization::Te).unwrap()
+                        .incident_normal_wavenumber_rad_m;
+                    let k_parallel = ki * ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+                    for constraint in [FixedAngle, FixedTransverseWavenumber] {
+                        for polarization in [Polarization::Te, Polarization::Tm] {
+                            let jet = interface.frequency_dispersion(omega, cosine, polarization, constraint).unwrap();
+                            assert_eq!(jet.carrier(), interface.response(omega, cosine, polarization).unwrap());
+                            assert!(std::ptr::eq(jet.incident_dispersion().source().material(), incident.material()));
+                            assert!(std::ptr::eq(jet.transmitted_dispersion().source().material(), transmitted.material()));
+                            let step = 1e-4 * omega;
+                            let values: [[C64; 3]; 5] = core::array::from_fn(|index| {
+                                let frequency = omega + (index as f64 - 2.0) * step;
+                                let c = if constraint == FixedAngle { cosine } else {
+                                    let wave_number = interface.response(frequency, 1.0, polarization)
+                                        .unwrap().incident_normal_wavenumber_rad_m;
+                                    (1.0 - (k_parallel / wave_number).powi(2)).sqrt()
+                                };
+                                let carrier = interface.response(frequency, c, polarization).unwrap();
+                                [carrier.reflected_tangential_e, carrier.transmitted_tangential_e,
+                                    carrier.transmitted_conjugate_h]
+                            });
+                            for (component, amplitude) in [jet.reflected_tangential_e(),
+                                jet.transmitted_tangential_e(), jet.transmitted_conjugate_h()].into_iter().enumerate()
+                            {
+                                let [first, second] = differentiate_samples(values.map(|value| value[component]), step);
+                                complex_near(amplitude.derivative_s(), first, 2e-8 / omega);
+                                complex_near(amplitude.second_derivative_s2(), second, 3e-6 / omega / omega);
+                            }
+                            let reflected = jet.reflected_tangential_e();
+                            let phase = reflected.logarithmic_dispersion().unwrap();
+                            // Independent phase samples referenced to the carrier avoid a 2*pi wrap.
+                            let phases = values.map(|value| {
+                                let ratio = value[0] / values[2][0];
+                                C64::from_re(ratio.im.atan2(ratio.re))
+                            });
+                            let [first, second] = differentiate_samples(phases, step);
+                            near(phase.group_delay_s, -first.re, 3e-8 / omega);
+                            near(phase.group_delay_dispersion_s2, -second.re, 8e-6 / omega / omega);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_total_reflection_delay_distinguishes_angle_and_transverse_frequency_paths() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let incident = source_with_storage(0.0, 1.0, 1.0);
+    let transmitted = source_with_storage(0.0, 0.25, 1.0);
+    let interface = PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&transmitted)).unwrap();
+    let omega = OMEGA0;
+    let cosine = 0.5_f64;
+    let sine_squared = 1.0 - cosine * cosine;
+    let kappa = (sine_squared - 0.25).sqrt();
+    for polarization in [Polarization::Te, Polarization::Tm] {
+        let fixed_angle = interface.frequency_dispersion(omega, cosine, polarization, FixedAngle).unwrap();
+        assert_eq!(fixed_angle.reflected_tangential_e().scaled_derivatives(), [C64::ZERO; 2]);
+        assert_eq!(fixed_angle.reflected_tangential_e().logarithmic_dispersion().unwrap().group_delay_s, 0.0);
+    }
+    let fixed_k = interface.frequency_dispersion(omega, cosine, Polarization::Te, FixedTransverseWavenumber).unwrap();
+    let phase = fixed_k.reflected_tangential_e().logarithmic_dispersion().unwrap();
+    // Differentiate the independent TIR phase 2 atan(kappa/cosine) at fixed k_parallel.
+    let delay = 2.0 * sine_squared / (omega * cosine * kappa);
+    let gdd = delay / omega * (-1.0 - 1.0 / cosine.powi(2) + 0.25 / kappa.powi(2));
+    near(phase.group_delay_s, delay, 5e-15 * delay);
+    near(phase.group_delay_dispersion_s2, gdd, 2e-14 * gdd.abs());
+    near(phase.log_amplitude_derivative_s, 0.0, 2e-15 / omega);
+    near(phase.log_amplitude_second_derivative_s2, 0.0, 2e-14 / omega / omega);
+}
+
+#[test]
+fn g0_fresnel_zero_has_amplitude_derivatives_but_no_invented_phase() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let incident = source_with_storage(0.0, 2.0, 1.0);
+    let matched = PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&incident)).unwrap();
+    let response = matched.frequency_dispersion(OMEGA0, 0.5, Polarization::Te, FixedAngle).unwrap();
+    assert_eq!(response.reflected_tangential_e().amplitude(), C64::ZERO);
+    assert!(response.reflected_tangential_e().logarithmic_dispersion().is_none());
+    assert_eq!(response.transmitted_tangential_e().amplitude(), C64::ONE);
+    assert_eq!(response.transmitted_tangential_e().scaled_derivatives(), [C64::ZERO; 2]);
+
+    // Binary-exact Brewster point: epsilon_t/epsilon_i=2, mu_t/mu_i=7/8,
+    // cosine=1/2 gives q_t=1 and the two TM Fresnel numerators both one.
+    let transmitted = source_with_storage(0.0, 4.0, 0.875);
+    let brewster = PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&transmitted)).unwrap();
+    let jet = brewster.frequency_dispersion(OMEGA0, 0.5, Polarization::Tm, FixedTransverseWavenumber).unwrap();
+    assert_eq!(jet.reflected_tangential_e().amplitude(), C64::ZERO);
+    assert!(jet.reflected_tangential_e().logarithmic_dispersion().is_none());
+    assert!(jet.reflected_tangential_e().scaled_derivatives()[0].abs() > 0.1);
+
+    let critical_exit = source_with_storage(0.0, 1.5, 1.0);
+    let critical = PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&critical_exit)).unwrap();
+    assert!(critical.response(OMEGA0, 0.5, Polarization::Te).is_ok());
+    assert!(critical.frequency_dispersion(OMEGA0, 0.5, Polarization::Te, FixedTransverseWavenumber).is_err());
+    for frequency in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matched.frequency_dispersion(frequency, 0.5, Polarization::Te, FixedAngle).is_err());
+    }
+}
+
+#[test]
+fn g3_fixed_transverse_fresnel_jet_reaches_the_original_reflected_beam() {
+    let ambient = source(0.03 * OMEGA0);
+    let resonance = lorentz(ambient.clone());
+    let transmitted = DielectricResponse::Lorentz(&resonance);
+    let interface = PlanarDielectricInterface::try_new(&ambient, transmitted).unwrap();
+    let omega = 0.7 * OMEGA0;
+    let cosine = 0.8_f64;
+    let ki = interface.response(omega, 1.0, Polarization::Te).unwrap().incident_normal_wavenumber_rad_m;
+    let carrier = [ki * (1.0 - cosine * cosine).sqrt(), 0.0];
+    let limits = AngularSpectrumLimits {
+        maximum_grid_points: 4, maximum_workspace_bytes: 100_000, maximum_fft_work: 10_000,
+    };
+    let grid = AngularSpectrumGrid { width: 2, height: 2, spacing_m: [1.0, 1.0] };
+    let step = omega * 1e-4;
+    let fields = core::array::from_fn(|index| {
+        let frequency = omega + (index as f64 - 2.0) * step;
+        let stack = PlanarDielectricLayers::try_new(&ambient, transmitted, frequency, &[]).unwrap();
+        let beam = PlanarAngularSpectrum::prepare_with_carrier(
+            &stack, grid, carrier, &[[C64::ZERO, C64::ONE]; 4], limits, || false,
+        ).unwrap();
+        beam.field(AngularSpectrumSide::Reflected, 0.0, || false).unwrap().electric_v_per_m()[0][1]
+    });
+    let jet = interface.frequency_dispersion(omega, cosine, Polarization::Te,
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber).unwrap().reflected_tangential_e();
+    let [first, second] = differentiate_samples(fields, step);
+    complex_near(jet.amplitude(), fields[2], 2e-15);
+    complex_near(jet.derivative_s(), first, 2e-8 / omega);
+    complex_near(jet.second_derivative_s2(), second, 3e-6 / omega / omega);
 }
