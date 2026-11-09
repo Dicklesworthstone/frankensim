@@ -26,7 +26,10 @@ pub use solution_pair::{
     SolutionMoistureAdvanceAccount,
 };
 
-pub use layered::LayeredMoistureAdvanceReport;
+pub use layered::{
+    LayeredMoistureAdvanceReport, MoistureSpatialPairedSolutionAdvanceReport,
+    MoistureSpatialPairedSolutionTimeControls,
+};
 pub use paired::{AtmosphereMoistureAdvanceAccount, PairedAtmosphereMoistureAdvanceReport};
 
 pub use shared::{

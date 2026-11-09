@@ -20,6 +20,11 @@ mod atmosphere;
 mod radial;
 mod sdirk;
 mod solution;
+mod spatial_solution;
+
+pub use spatial_solution::{
+    MoistureSpatialPairedSolutionAdvanceReport, MoistureSpatialPairedSolutionTimeControls,
+};
 
 /// Whole-stack accuracy and water accounts, plus each original material layer.
 #[derive(Clone, Debug)]

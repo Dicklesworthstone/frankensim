@@ -53,8 +53,6 @@ pub struct PairedSolutionMoistureAdvanceReport<Report = MoistureStepReport, cons
     pub direct_water_balance_residual_kg: f64,
 }
 
-type PairState<F> = ([FiniteMoistureSolution; 2], F);
-
 impl<R: WaterStep<N>, const N: usize> WaterStep<N> for PairedSolutionMoistureStep<R, N> {
     fn boundary_water(&self) -> [f64; N] {
         self.transport.boundary_water()
@@ -62,7 +60,7 @@ impl<R: WaterStep<N>, const N: usize> WaterStep<N> for PairedSolutionMoistureSte
 }
 
 impl PairedSolutionMoistureTimeControls {
-    fn bath(self, port: usize) -> SolutionMoistureTimeControls {
+    pub(super) fn bath(self, port: usize) -> SolutionMoistureTimeControls {
         SolutionMoistureTimeControls {
             transport: self.transport,
             kinetic_phases: self.kinetic_phases[port],
@@ -70,19 +68,19 @@ impl PairedSolutionMoistureTimeControls {
     }
 }
 
-fn bath_error<F>(
-    old: &PairState<F>,
-    coarse: &PairState<F>,
-    fine: &PairState<F>,
+pub(super) fn bath_error(
+    old: &[FiniteMoistureSolution; 2],
+    coarse: &[FiniteMoistureSolution; 2],
+    fine: &[FiniteMoistureSolution; 2],
     controls: PairedSolutionMoistureTimeControls,
     cx: &Cx<'_>,
 ) -> Result<f64, MoistureAdvanceError<SolutionMoistureError>> {
     let mut ratio = 0.0_f64;
     for port in 0..2 {
         checkpoint(cx)?;
-        let before = &old.0[port];
-        let a = &coarse.0[port];
-        let b = &fine.0[port];
+        let before = &old[port];
+        let a = &coarse[port];
+        let b = &fine[port];
         let activity = [before, a, b].map(|bath| {
             bath.solution()
                 .water_activity()
@@ -109,7 +107,7 @@ fn bath_error<F>(
     Ok(ratio)
 }
 
-fn account(
+pub(super) fn account(
     old: &FiniteMoistureSolution,
     next: &FiniteMoistureSolution,
     received: f64,
@@ -209,7 +207,9 @@ where
             Ok(((baths, field), step))
         },
         |state| field_snapshot::<F, N>(&state.1).map_err(SolutionMoistureError::from),
-        |old, a, b| Ok(bath_error(old, a, b, controls, cx)?.max(field_error(&old.1, &a.1, &b.1)?)),
+        |old, a, b| {
+            Ok(bath_error(&old.0, &a.0, &b.0, controls, cx)?.max(field_error(&old.1, &a.1, &b.1)?))
+        },
         cx,
     )?;
     let mut received = [WaterSum::default(); 2];

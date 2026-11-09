@@ -7384,6 +7384,40 @@ histories, sealed kinetics and cumulative-work/source/cancellation refusals.
 All eight changed Rust files passed the pinned formatter/parser check; the
 integration groups remain unexecuted because dependencies block fs-couple.
 
+### Adaptive compatible swelling with finite solution baths
+
+`MoistureLayeredSolid::advance_spatial_diffusion_paired_solutions_adaptive_to`
+uses the original first-order full/two-half controller around the complete
+native geometric transport, mechanics and two-bath transaction. Every probe
+retains the same original solid binding, reference mesh, dry skeleton and
+swelling datum. Accepted final stress, compatible geometry, wet inertia and
+the prestressed modal pencil come from the actual fine endpoint.
+
+Temporal error includes each layer's moisture/activity, an L1 discrepancy
+weighted by original dry cell mass, each bath's independent solvent/activity
+and optional dissolved/crystal stocks, and every native nodal displacement.
+Displacement has an explicit metre scale; relative scales use changes from the
+last accepted state. The existing representable-half correction is applied
+once to the combined comparison. This is a local asymptotic estimate, separate
+from equilibrium/geometry tolerances, and does not certify global error.
+
+Only accepted fine transfers enter layer/interface and assigned bath ledgers.
+Whole-window original-to-final layer, independent bath, component/phase and
+direct cell/bath inventory audits retain fixed budgets regardless of step count.
+The field cap includes every nested root trial; the native-solid cap spans the
+whole duration, including the initial comparison datum and discarded or failed
+probes. Original native state snapshots share their sparse assemblies. A source,
+geometry, work or cancellation refusal returns no accepted prefix.
+
+The original isothermal vapor-equilibrium bridge, scalar current-frame
+diffusivity and small-strain separable-prism scope apply. Three authored G1/G3/G4
+groups cover displacement-only refinement against an independent moving-length
+continuous solution, accepted-fine state/shape and opposing finite-bath accounts
+with exact work replay, cumulative caps after rejected comparisons, and sealed
+heterogeneous redistribution with two original kinetic phase histories.
+All seven changed Rust files passed pinned parsing/formatting checks. These
+integration groups remain unexecuted because dependencies block fs-couple.
+
 ### Adaptive heterogeneous slab and radial diffusion
 
 `MoistureLayeredSlab::advance_sdirk2_adaptive_to` and the backward-Euler and

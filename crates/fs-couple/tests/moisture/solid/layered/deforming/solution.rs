@@ -2,6 +2,7 @@
 //! All coefficients are authored numerical fixtures, not material calibration.
 
 use super::*;
+mod adaptive;
 use crate::solution as aqueous;
 use fs_couple::moisture::solution::{
     FiniteMoistureSolution, MoistureSolutionPort, PairedSolutionMoistureSolve,

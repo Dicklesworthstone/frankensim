@@ -83,6 +83,38 @@ impl MoistureLayeredSolid {
         cx: &Cx<'_>,
     ) -> Result<(MoistureSpatialPairedSolutionCandidate, MoistureSolidState), SolutionMoistureError>
     {
+        self.advance_spatial_diffusion_paired_solutions_budgeted(
+            solutions,
+            moisture,
+            dt_s,
+            faces,
+            transport,
+            nonlinear,
+            controls,
+            &mut 0,
+            || Ok(()),
+            cx,
+        )
+    }
+
+    /// The duration owner retains both counters across failed/rejected probes.
+    /// Updating the mechanical counter before propagating a bath-root failure
+    /// prevents a shortened retry from obtaining a fresh native-work allowance.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::moisture) fn advance_spatial_diffusion_paired_solutions_budgeted(
+        &self,
+        solutions: [&FiniteMoistureSolution; 2],
+        moisture: &MoistureLayeredSlab,
+        dt_s: f64,
+        faces: [Option<MoistureSolutionPort>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: MoistureSpatialPairedSolutionControls,
+        native_solid_solves: &mut usize,
+        charge_field: impl FnMut() -> Result<(), SolutionMoistureError>,
+        cx: &Cx<'_>,
+    ) -> Result<(MoistureSpatialPairedSolutionCandidate, MoistureSolidState), SolutionMoistureError>
+    {
         poll(cx)?;
         if !positive(controls.maximum_geometry_residual_m)
             || !(1..=100_000).contains(&controls.maximum_native_solid_solves)
@@ -110,11 +142,12 @@ impl MoistureLayeredSolid {
                 admit_environment(layer.sorption().source_point())?;
             }
         }
+        let initial_work = *native_solid_solves;
         let mut work = SpatialSolveBudget {
-            used: 0,
+            used: initial_work,
             maximum: controls.maximum_native_solid_solves,
         };
-        let (baths, accepted, exchange, evaluations) = advance_baths(
+        let outcome = advance_baths(
             solutions,
             moisture.layers()[0].sorption().temperature_kelvin(),
             dt_s,
@@ -147,8 +180,10 @@ impl MoistureLayeredSolid {
                     });
                 Ok((candidate, received))
             },
-            || Ok(()),
-        )?;
+            charge_field,
+        );
+        *native_solid_solves = work.used;
+        let (baths, accepted, exchange, evaluations) = outcome?;
         let change = water_change(moisture, &accepted.moisture);
         let stored = |field: &MoistureLayeredSlab| {
             water_sum(field.layers().iter().flat_map(|layer| {
@@ -215,7 +250,7 @@ impl MoistureLayeredSolid {
         } = accepted;
         let report = MoistureSpatialPairedSolutionReport {
             spatial,
-            native_solid_solves: work.used,
+            native_solid_solves: work.used - initial_work,
         };
         let step = PairedSolutionMoistureStep {
             transport: report,
