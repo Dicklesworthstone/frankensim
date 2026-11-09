@@ -77,6 +77,33 @@ pub struct ThermoelasticSensitivity3 {
     pub adjoint_residual: ResidualClaim,
 }
 
+/// A thermoelastic objective with explicit dependence on cell stiffness scales.
+///
+/// The embedded objective owns partials with respect to u, physical stress and T.
+/// explicit_scale_derivative holds those three quantities fixed. In particular,
+/// do not put stress scaling, thermal equivalent loads or support lifting into
+/// this partial: the native design adjoint differentiates them exactly once.
+/// Entries follow the original active-cell order; None means exact zero.
+#[derive(Debug, Clone)]
+pub struct ThermoelasticDesignObjective3 {
+    pub objective: ThermoelasticObjective3,
+    pub explicit_scale_derivative: Option<Vec<f64>>,
+}
+
+/// One accepted equilibrium and its joint temperature, force and design gradient.
+///
+/// scale_derivative differentiates the original dimensionless stiffness scales,
+/// not material occupancy or density. The source temperature, reference geometry,
+/// density and prescribed motion are held fixed for this derivative. Independent
+/// external loads are also held fixed; design-dependent body/surface loads need
+/// their own chain rule against thermoelastic.force_derivative. A caller may
+/// compose these cell derivatives with its existing filter/projection/SIMP map.
+#[derive(Debug, Clone)]
+pub struct ThermoelasticDesignSensitivity3 {
+    pub thermoelastic: ThermoelasticSensitivity3,
+    pub scale_derivative: Vec<f64>,
+}
+
 #[derive(Clone, Copy)]
 enum Owner<'a> {
     Cartesian(&'a CutElasticity3),
@@ -130,12 +157,13 @@ fn evaluate(
     external_force: &[f64],
     motion: Option<ThermoelasticMotion3<'_>>,
     settings: ThermoelasticAdjointSettings3,
+    differentiate_scales: bool,
     objective: impl FnOnce(
         &[f64],
         &[ThermoelasticResponse3],
-    ) -> Result<ThermoelasticObjective3, ElasticityError3>,
+    ) -> Result<ThermoelasticDesignObjective3, ElasticityError3>,
     mut checkpoint: impl FnMut(usize) -> ControlFlow<()>,
-) -> Result<ThermoelasticSensitivity3, ElasticityError3> {
+) -> Result<ThermoelasticDesignSensitivity3, ElasticityError3> {
     poll(0, &mut checkpoint)?;
     let n = native!(owner, n);
     let cells = native!(owner, cells);
@@ -208,7 +236,10 @@ fn evaluate(
         || checkpoint(primal_iterations)
     )?;
     poll(primal_iterations, &mut checkpoint)?;
-    let objective = objective(solution.coefficients(), &response)?;
+    let ThermoelasticDesignObjective3 {
+        objective,
+        explicit_scale_derivative,
+    } = objective(solution.coefficients(), &response)?;
     poll(primal_iterations, &mut checkpoint)?;
     if !objective.value.is_finite()
         || objective.displacement_derivative.len() != n
@@ -218,6 +249,9 @@ fn evaluate(
             .is_some_and(|values| values.len() != response.len())
         || objective
             .explicit_temperature_derivative
+            .as_ref()
+            .is_some_and(|values| values.len() != cells)
+        || explicit_scale_derivative
             .as_ref()
             .is_some_and(|values| values.len() != cells)
     {
@@ -231,6 +265,12 @@ fn evaluate(
         .explicit_temperature_derivative
         .unwrap_or_else(|| vec![0.0; cells]);
     finite(&temperature, primal_iterations, &mut checkpoint)?;
+    let mut scale_derivative = if differentiate_scales {
+        explicit_scale_derivative.unwrap_or_else(|| vec![0.0; cells])
+    } else {
+        Vec::new()
+    };
+    finite(&scale_derivative, primal_iterations, &mut checkpoint)?;
     if let Some(mut stress_derivatives) = objective.stress_derivatives {
         // Differentiate physical scaled stress. Native reference stress's
         // transpose supplies the same material and B-bar basis on either grid.
@@ -245,6 +285,16 @@ fn evaluate(
                 .zip(point.stress_temperature_derivative)
                 .map(|(weight, slope)| weight * slope)
                 .sum::<f64>();
+            if differentiate_scales {
+                // At fixed u and T, physical stress is scale * reference stress.
+                // Use the original unscaled cotangent before the displacement
+                // transpose below, including the original thermal free strain.
+                scale_derivative[point.mechanical.cell] += derivative
+                    .iter()
+                    .zip(point.mechanical.reference_stress)
+                    .map(|(weight, stress)| weight * stress)
+                    .sum::<f64>();
+            }
             for value in derivative {
                 *value *= scales[point.mechanical.cell];
                 if !value.is_finite() {
@@ -266,6 +316,7 @@ fn evaluate(
         }
         finite(&dual_force, primal_iterations, &mut checkpoint)?;
         finite(&temperature, primal_iterations, &mut checkpoint)?;
+        finite(&scale_derivative, primal_iterations, &mut checkpoint)?;
     }
 
     let remaining = settings
@@ -312,14 +363,58 @@ fn evaluate(
         *derivative -= residual;
     }
     finite(&temperature, completed, &mut checkpoint)?;
+    if differentiate_scales {
+        // R = K(s,T)u - f - b_free(s,T) - b_g(s,T).
+        // J_s = explicit_s + J_sigma : sigma_reference
+        //       + z^T (b_free,s + b_g,s - K_s u).
+        // The same prepared thermal columns and original native bilinear forms
+        // retain B-bar, Nitsche lifting and material-weighted ghost stiffness.
+        let free_work = native!(
+            owner,
+            eigenstrain_load_scale_pullback,
+            &prepared,
+            adjoint.coefficients(),
+            || checkpoint(completed)
+        )?;
+        let stiffness_work = native!(
+            owner,
+            scale_bilinear_forms,
+            adjoint.coefficients(),
+            solution.coefficients(),
+            || checkpoint(completed)
+        )?;
+        let motion_work = match motion {
+            Some(motion) => Some(native!(
+                owner,
+                prescribed_displacement_scale_work,
+                motion.displacement,
+                adjoint.coefficients(),
+                || checkpoint(completed)
+            )?),
+            None => None,
+        };
+        for i in 0..cells {
+            if i % 64 == 0 {
+                poll(completed, &mut checkpoint)?;
+            }
+            scale_derivative[i] += free_work[i] - stiffness_work[i];
+            if let Some(work) = &motion_work {
+                scale_derivative[i] += work[i];
+            }
+        }
+        finite(&scale_derivative, completed, &mut checkpoint)?;
+    }
     poll(completed, &mut checkpoint)?;
-    Ok(ThermoelasticSensitivity3 {
-        value: objective.value,
-        temperature_derivative: temperature,
-        force_derivative: adjoint.coefficients().to_vec(),
-        adjoint_iterations: adjoint.iterations(),
-        adjoint_residual: adjoint.residual_claim(),
-        solution,
+    Ok(ThermoelasticDesignSensitivity3 {
+        thermoelastic: ThermoelasticSensitivity3 {
+            value: objective.value,
+            temperature_derivative: temperature,
+            force_derivative: adjoint.coefficients().to_vec(),
+            adjoint_iterations: adjoint.iterations(),
+            adjoint_residual: adjoint.residual_claim(),
+            solution,
+        },
+        scale_derivative,
     })
 }
 
@@ -351,9 +446,16 @@ impl CutElasticity3 {
             external_force,
             motion,
             settings,
-            objective,
+            false,
+            |u, response| {
+                Ok(ThermoelasticDesignObjective3 {
+                    objective: objective(u, response)?,
+                    explicit_scale_derivative: None,
+                })
+            },
             checkpoint,
         )
+        .map(|result| result.thermoelastic)
     }
 }
 
@@ -379,6 +481,82 @@ impl AdaptiveElasticity3 {
             external_force,
             motion,
             settings,
+            false,
+            |u, response| {
+                Ok(ThermoelasticDesignObjective3 {
+                    objective: objective(u, response)?,
+                    explicit_scale_derivative: None,
+                })
+            },
+            checkpoint,
+        )
+        .map(|result| result.thermoelastic)
+    }
+}
+
+impl CutElasticity3 {
+    /// Differentiate an objective jointly with respect to temperature and design.
+    ///
+    /// This adds cell-stiffness sensitivities to the same accepted primal and
+    /// adjoint used by solve_thermoelastic_adjoint, without another linear solve,
+    /// constitutive preparation or derivative matrix. The original thermal
+    /// load, direct physical-stress scaling, Nitsche support motion and ghost
+    /// weights all participate. The objective callback executes exactly once.
+    ///
+    /// Geometry, source assignments, reference density and external force are
+    /// fixed under scale differentiation. Motion may depend on temperature via
+    /// ThermoelasticMotion3, but not on the stiffness scales. The caller owns
+    /// density-dependent load and filter/projection/SIMP chain rules.
+    ///
+    /// The same point admission, physical domains, aggregate iteration budget
+    /// and transactional cancellation behavior apply. No continuum stress bound,
+    /// optimum, heat-equation gradient or uniqueness certificate is inferred.
+    pub fn solve_thermoelastic_design_adjoint(
+        &self,
+        external_force: &[f64],
+        motion: Option<ThermoelasticMotion3<'_>>,
+        settings: ThermoelasticAdjointSettings3,
+        objective: impl FnOnce(
+            &[f64],
+            &[ThermoelasticResponse3],
+        ) -> Result<ThermoelasticDesignObjective3, ElasticityError3>,
+        checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ThermoelasticDesignSensitivity3, ElasticityError3> {
+        evaluate(
+            Owner::Cartesian(self),
+            external_force,
+            motion,
+            settings,
+            true,
+            objective,
+            checkpoint,
+        )
+    }
+}
+
+impl AdaptiveElasticity3 {
+    /// Joint thermoelastic design adjoint on original independent coordinates.
+    ///
+    /// All three scale pullbacks use the original hanging-node reconstruction
+    /// and transpose. See CutElasticity3::solve_thermoelastic_design_adjoint for
+    /// objective, fixed-input and budget semantics.
+    pub fn solve_thermoelastic_design_adjoint(
+        &self,
+        external_force: &[f64],
+        motion: Option<ThermoelasticMotion3<'_>>,
+        settings: ThermoelasticAdjointSettings3,
+        objective: impl FnOnce(
+            &[f64],
+            &[ThermoelasticResponse3],
+        ) -> Result<ThermoelasticDesignObjective3, ElasticityError3>,
+        checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ThermoelasticDesignSensitivity3, ElasticityError3> {
+        evaluate(
+            Owner::Adaptive(self),
+            external_force,
+            motion,
+            settings,
+            true,
             objective,
             checkpoint,
         )

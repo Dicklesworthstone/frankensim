@@ -1027,3 +1027,33 @@ algebraic; no physical amplitude ceiling applies. Mid-action cancellation or
 arithmetic overflow can leave partial output that the caller must discard.
 This block supports coupled linearization and implicit adjoints; it does not
 itself solve equilibrium, advance heat, or establish whole-system passivity.
+
+## Joint thermoelastic stiffness-design adjoints
+
+Cartesian and adaptive `solve_thermoelastic_design_adjoint` extend the native
+temperature/force adjoint with derivatives with respect to the original cell
+stiffness scales. One primal and one adjoint solve serve all three derivative
+families under the same aggregate iteration allowance. The objective callback
+runs once after physical primal admission. The temperature-only entry point
+retains its original work and result semantics.
+
+For `R = K(s,T)u - f - b_free(s,T) - b_g(s,T)`, the scale derivative includes
+the explicit objective partial, the direct physical-stress scaling term and
+`z^T (b_free,s + b_g,s - K_s u)`. The existing prepared eigenstrain columns,
+prescribed-motion pullback and stiffness bilinear forms retain the original
+B-bar projection, Nitsche terms, ghost weights and adaptive hanging map.
+Thermal loads and support lifting are differentiated once; neither is treated
+as a density-independent external force. No additional linear solve,
+constitutive preparation or derivative matrix is introduced.
+
+Geometry, source assignments, reference density, source temperature and
+prescribed motion stay fixed for the scale derivative. Temperature-dependent
+motion retains its separate temperature derivative. Density-dependent loads,
+scale-dependent prescribed motion and filter/projection/SIMP maps require the
+caller's chain rules; the native force derivative supplies the load cotangent.
+Scales are stiffness multipliers, not occupied mass fractions. Numerical
+gradients do not certify continuum peak stress, an optimum or a heat-step
+sensitivity. The existing CutFEM thermal sensitivity test target adds full
+equilibrium finite differences for Cartesian displacement/B-bar and adaptive
+joint temperature, scale and external-force variations, plus admission and
+cancellation checks.

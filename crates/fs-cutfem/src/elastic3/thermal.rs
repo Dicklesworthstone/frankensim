@@ -24,7 +24,8 @@ pub use jacobian::{PreparedThermalResidualJacobian3, ThermalJacobianLimits3};
 pub(in crate::elastic3) use jacobian::ThermalCoordinateMap3;
 pub use stress::ThermoelasticStressPullback3;
 pub use adjoint::{
-    ThermoelasticAdjointSettings3, ThermoelasticMotion3, ThermoelasticObjective3,
+    ThermoelasticAdjointSettings3, ThermoelasticDesignObjective3,
+    ThermoelasticDesignSensitivity3, ThermoelasticMotion3, ThermoelasticObjective3,
     ThermoelasticSensitivity3,
 };
 

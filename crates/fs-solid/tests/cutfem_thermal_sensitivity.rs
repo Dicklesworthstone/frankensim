@@ -1342,3 +1342,283 @@ fn explicit_isotropic_temperature_actions_retain_weak_signed_modes_without_bbar(
         close(dot(&dual, &force), expected, 2e-11, 1e-14);
     }
 }
+
+fn thermal_design_objective(
+    u: &[f64],
+    points: &[fs_cutfem::elastic3::thermal::ThermoelasticResponse3],
+    scales: &[f64],
+) -> Result<fs_cutfem::elastic3::thermal::ThermoelasticDesignObjective3, ElasticityError3> {
+    let mut objective = thermal_objective(u, points, scales.len())?;
+    let mut explicit = Vec::with_capacity(scales.len());
+    for (cell, &scale) in scales.iter().enumerate() {
+        let weight = 2e-3 * (1.0 + 0.1 * cell as f64);
+        objective.value += 0.5 * weight * scale * scale;
+        explicit.push(weight * scale);
+    }
+    Ok(
+        fs_cutfem::elastic3::thermal::ThermoelasticDesignObjective3 {
+            objective,
+            explicit_scale_derivative: Some(explicit),
+        },
+    )
+}
+
+#[test]
+fn thermoelastic_design_gradient_includes_thermal_load_stress_and_support_motion() {
+    use fs_cutfem::elastic3::thermal::ThermoelasticMotion3;
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+        let mut op = cartesian(&law, formulation);
+        let scales: Vec<_> = (0..op.cells()).map(|i| 0.55 + 0.035 * i as f64).collect();
+        op.set_scales(&scales).unwrap();
+        let external: Vec<_> = op
+            .nodes()
+            .iter()
+            .flat_map(|&[x, y, z]| [0.003 * x, -0.002 * x * y, 0.001 * x * z])
+            .collect();
+        let motion = Some(ThermoelasticMotion3 {
+            displacement: &support_motion,
+            temperature_derivative: Some(&support_motion_slope),
+        });
+        let calls = std::cell::Cell::new(0);
+        let result = op
+            .solve_thermoelastic_design_adjoint(
+                &external,
+                motion,
+                adjoint_settings(),
+                |u, points| {
+                    calls.set(calls.get() + 1);
+                    thermal_design_objective(u, points, &scales)
+                },
+                |_| poll(),
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(op.scales(), scales);
+        assert_eq!(result.scale_derivative.len(), op.cells());
+        // Adding design derivatives reuses exactly the same primal and adjoint.
+        let temperature_only = op
+            .solve_thermoelastic_adjoint(
+                &external,
+                motion,
+                adjoint_settings(),
+                |u, points| Ok(thermal_design_objective(u, points, &scales)?.objective),
+                |_| poll(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.thermoelastic.solution.coefficients(),
+            temperature_only.solution.coefficients()
+        );
+        assert_eq!(
+            result.thermoelastic.temperature_derivative,
+            temperature_only.temperature_derivative
+        );
+        assert_eq!(
+            result.thermoelastic.force_derivative,
+            temperature_only.force_derivative
+        );
+        assert_eq!(
+            result.thermoelastic.solution.iterations(),
+            temperature_only.solution.iterations()
+        );
+        assert_eq!(
+            result.thermoelastic.adjoint_iterations,
+            temperature_only.adjoint_iterations
+        );
+        let prepared = op.prepare_thermoelastic(POINTS, poll).unwrap();
+        let h = 2e-5;
+        for cell in 0..op.cells() {
+            let mut values = [0.0; 2];
+            for (sample, sign) in [-1.0, 1.0].into_iter().enumerate() {
+                let mut varied = scales.clone();
+                varied[cell] += sign * h;
+                op.set_scales(&varied).unwrap();
+                let mut rhs = op.eigenstrain_load(&prepared, poll).unwrap();
+                let lift = op
+                    .prescribed_displacement_load(&support_motion, poll)
+                    .unwrap();
+                for ((rhs, force), lift) in rhs.iter_mut().zip(&external).zip(lift) {
+                    *rhs += force + lift;
+                }
+                let primal = op
+                    .solve_controlled(&rhs, 1e-11, 5000, 8, |_| poll())
+                    .unwrap();
+                let points = op
+                    .thermoelastic_response(primal.coefficients(), TOTAL_STRAIN, POINTS, poll)
+                    .unwrap();
+                values[sample] = thermal_design_objective(primal.coefficients(), &points, &varied)
+                    .unwrap()
+                    .objective
+                    .value;
+            }
+            close(
+                result.scale_derivative[cell],
+                (values[1] - values[0]) / (2.0 * h),
+                3e-5,
+                2e-9,
+            );
+        }
+        op.set_scales(&scales).unwrap();
+    }
+}
+
+#[test]
+fn adaptive_thermoelastic_design_gradient_matches_joint_material_load_and_scale_variation() {
+    use fs_cutfem::elastic3::thermal::ThermoelasticMotion3;
+    let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+    let tree = Octree3::uniform(1, 4, 4096).unwrap();
+    let tree = tree
+        .refined(&[*tree.leaves().iter().next().unwrap()], poll)
+        .unwrap();
+    let materials = |bounds| Ok(hot(&law, temperature(bounds)));
+    let mut op = control(|control| {
+        AdaptiveElasticity3::build_with_material_field_and_embedded_dirichlet(
+            domain(),
+            &tree,
+            &Top(0.73),
+            ElasticMaterialField3::ThermoelasticByCell(&materials),
+            &|p| p[0] == 0.0,
+            &|_, n| n[2] > 0.5,
+            ElasticityOptions3 {
+                ghost_gamma: 2.7,
+                ..Default::default()
+            },
+            Default::default(),
+            Default::default(),
+            control,
+        )
+        .unwrap()
+    });
+    assert!(op.physical_nodes().len() > op.nodes().len());
+    let scales: Vec<_> = (0..op.cells()).map(|i| 0.6 + 0.02 * i as f64).collect();
+    let scale_direction: Vec<_> = (0..op.cells()).map(|i| 0.15 - 0.017 * i as f64).collect();
+    let temperature_direction = |p: [f64; 3]| 0.4 + 0.5 * p[0] - 0.2 * p[1] + 0.3 * p[2];
+    let temperature_directions: Vec<_> = op
+        .cell_nodes()
+        .iter()
+        .map(|nodes| temperature_direction(op.physical_nodes()[nodes[0]]))
+        .collect();
+    let external: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|&[x, y, z]| [0.003 * x, -0.002 * x * y, 0.001 * x * z])
+        .collect();
+    let force_direction: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|&[x, y, z]| [0.002 * x, 0.001 * x * z, -0.003 * x * y])
+        .collect();
+    op.set_scales(&scales).unwrap();
+    let result = op
+        .solve_thermoelastic_design_adjoint(
+            &external,
+            Some(ThermoelasticMotion3 {
+                displacement: &support_motion,
+                temperature_derivative: None,
+            }),
+            adjoint_settings(),
+            |u, points| thermal_design_objective(u, points, &scales),
+            |_| poll(),
+        )
+        .unwrap();
+    let derivative = dot(&result.scale_derivative, &scale_direction)
+        + dot(
+            &result.thermoelastic.temperature_derivative,
+            &temperature_directions,
+        )
+        + dot(&result.thermoelastic.force_derivative, &force_direction);
+    let mut values = [0.0; 2];
+    let h = 2e-4;
+    for (sample, sign) in [-1.0, 1.0].into_iter().enumerate() {
+        let materials = |bounds: HexCell| {
+            Ok(hot(
+                &law,
+                temperature(bounds) + sign * h * temperature_direction(bounds.lo()),
+            ))
+        };
+        op.refresh_material_field(
+            ElasticMaterialField3::ThermoelasticByCell(&materials),
+            MaterialRefreshLimits3::default(),
+            poll,
+        )
+        .unwrap();
+        let varied: Vec<_> = scales
+            .iter()
+            .zip(&scale_direction)
+            .map(|(scale, direction)| scale + sign * h * direction)
+            .collect();
+        op.set_scales(&varied).unwrap();
+        let prepared = op.prepare_thermoelastic(POINTS, poll).unwrap();
+        let mut rhs = op.eigenstrain_load(&prepared, poll).unwrap();
+        let lift = op
+            .prescribed_displacement_load(&support_motion, poll)
+            .unwrap();
+        for (((rhs, force), direction), lift) in rhs
+            .iter_mut()
+            .zip(&external)
+            .zip(&force_direction)
+            .zip(lift)
+        {
+            *rhs += force + sign * h * direction + lift;
+        }
+        let primal = op
+            .solve_controlled(&rhs, 1e-11, 5000, 8, |_| poll())
+            .unwrap();
+        let points = op
+            .thermoelastic_response(primal.coefficients(), TOTAL_STRAIN, POINTS, poll)
+            .unwrap();
+        values[sample] = thermal_design_objective(primal.coefficients(), &points, &varied)
+            .unwrap()
+            .objective
+            .value;
+    }
+    close(derivative, (values[1] - values[0]) / (2.0 * h), 3e-5, 3e-9);
+}
+
+#[test]
+fn thermoelastic_design_partial_admission_and_callback_cancellation_are_atomic() {
+    use fs_cutfem::elastic3::thermal::ThermoelasticDesignObjective3;
+    let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+    let op = cartesian(&law, ElasticityFormulation3::Displacement);
+    let external = vec![0.0; op.n()];
+    let scales = op.scales().to_vec();
+    for explicit in [vec![0.0; op.cells() + 1], vec![f64::NAN; op.cells()]] {
+        assert!(matches!(
+            op.solve_thermoelastic_design_adjoint(
+                &external,
+                None,
+                adjoint_settings(),
+                |u, points| Ok(ThermoelasticDesignObjective3 {
+                    objective: thermal_objective(u, points, op.cells())?,
+                    explicit_scale_derivative: Some(explicit),
+                }),
+                |_| poll(),
+            ),
+            Err(ElasticityError3::Invalid(_))
+        ));
+        assert_eq!(op.scales(), scales);
+    }
+    let cancel = std::cell::Cell::new(false);
+    assert!(matches!(
+        op.solve_thermoelastic_design_adjoint(
+            &external,
+            None,
+            adjoint_settings(),
+            |u, points| {
+                cancel.set(true);
+                thermal_design_objective(u, points, &scales)
+            },
+            |_| if cancel.get() {
+                ControlFlow::Break(())
+            } else {
+                poll()
+            },
+        ),
+        Err(ElasticityError3::Cancelled)
+    ));
+    assert_eq!(op.scales(), scales);
+}
