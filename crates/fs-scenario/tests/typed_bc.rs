@@ -477,7 +477,7 @@ fn g0_velocity_adds_an_explicit_vector_without_reinterpreting_legacy_rows() {
     );
     assert_eq!(
         expectation(Physics::IncompressibleFlow, BcKind::PressureOutlet),
-        Expectation::Value(PRESSURE)
+        Expectation::ValueOrScalar(PRESSURE)
     );
     assert_eq!(
         expectation(Physics::IncompressibleFlow, BcKind::WallNoSlip),

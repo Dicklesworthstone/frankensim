@@ -1,7 +1,12 @@
 //! Execute typed scalar histories without erasing their physical metadata.
 
 use crate::frame::{FrameTree, WORLD};
-use crate::payload::{OrientationParity, QuantityContract, ReferenceSemantics, ScalarPayload};
+use crate::payload::{
+    OrientationParity, Payload, QuantityContract, ReferenceSemantics, ScalarPayload,
+};
+use crate::{BcKind, BcValue, BoundaryCondition, Physics};
+use fs_qty::Pressure;
+use fs_qty::semantic::{QuantityKind, ValueForm};
 use std::ops::ControlFlow;
 
 pub use crate::sample::PayloadEvaluationError as ScalarEvaluationError;
@@ -13,6 +18,71 @@ pub struct ScalarSample {
     pub contract: QuantityContract,
     /// Reflection parity remains explicit even though frames use proper rotations.
     pub orientation: OrientationParity,
+}
+
+/// Fluid pressure is not solid stress or an acoustic amplitude, even though
+/// all three have Pa dimensions. Gauge/absolute reference remains explicit
+/// at the receiving physical owner.
+pub(crate) fn pressure_contract(contract: QuantityContract) -> bool {
+    match contract {
+        QuantityContract::Dimensions(dims) => dims == Pressure::DIMS,
+        QuantityContract::Semantic(semantic) => {
+            semantic.kind() == QuantityKind::Pressure
+                && matches!(
+                    semantic.form(),
+                    ValueForm::Static | ValueForm::Instantaneous
+                )
+        }
+        QuantityContract::Heterogeneous => false,
+    }
+}
+
+impl BoundaryCondition {
+    /// Sample a typed fluid pressure outlet, retaining its original contract.
+    ///
+    /// The scalar owner supplies fixed/held/linear histories, declared table
+    /// tails, physical-time frame validation and cancellation. Only ordinary
+    /// Pa values or static/instantaneous fluid-pressure semantics are admitted.
+    /// Frames do not add hydrostatic or dynamic pressure. The receiving solver
+    /// must explicitly interpret absolute/gauge pressure and bind the patch.
+    /// No history is copied or rescanned during sampling.
+    pub fn pressure_at(
+        &self,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<ScalarSample, ScalarEvaluationError> {
+        use ScalarEvaluationError as E;
+        if checkpoint().is_break() {
+            return Err(E::Cancelled);
+        }
+        if self.physics != Physics::IncompressibleFlow || self.kind != BcKind::PressureOutlet {
+            return Err(E::Unsupported(
+                "fluid pressure requires IncompressibleFlow/PressureOutlet",
+            ));
+        }
+        if self.region.is_empty() || self.compatibility.is_some() {
+            return Err(E::Unsupported(
+                "fluid pressure requires a named patch and no mass-flow compatibility tag",
+            ));
+        }
+        let Some(BcValue::Typed(Payload::Scalar(value))) = &self.value else {
+            return Err(E::Unsupported(
+                "typed fluid pressure requires a scalar payload",
+            ));
+        };
+        if value.meta().frame().0 != self.frame {
+            return Err(E::Unsupported(
+                "pressure payload and boundary must declare the same frame",
+            ));
+        }
+        if !pressure_contract(value.meta().contract()) {
+            return Err(E::Unsupported(
+                "fluid pressure requires Pa or static/instantaneous Pressure semantics",
+            ));
+        }
+        value.scalar_at(frames, time_s, checkpoint)
+    }
 }
 
 impl ScalarPayload {

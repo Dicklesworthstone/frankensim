@@ -15,6 +15,7 @@ use fs_lbm::d3q19::{BoundaryForcingError3, BoundaryGrid3, BoundarySpec3, Face3, 
 use fs_lbm::material::{MaterialLbmError, MaterialScaling};
 use fs_material::fluid_transport::FluidTransport;
 use fs_qty::Pressure;
+use fs_scenario::scalar::ScalarEvaluationError;
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameId, FrameTree, Physics, ScenarioError};
 use std::ops::ControlFlow;
 
@@ -61,6 +62,8 @@ pub enum ScenarioPressureError {
     Invalid(&'static str),
     /// Original signal, dimensions or frame validation refused the sample.
     Scenario(ScenarioError),
+    /// Original typed scalar source, physical semantics or frame refused.
+    Sample(ScalarEvaluationError),
     /// The original SI pressure-to-density mapping refused the value.
     Scaling(MaterialLbmError),
     /// Original specialized-grid boundary admission refused publication.
@@ -84,7 +87,7 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Scenario
     }
 }
 
-/// Sample one uniform scalar or original time signal in SI pressure units.
+/// Sample a legacy scalar/signal or canonical typed scalar in SI pressure units.
 ///
 /// Signal interpolation, endpoint clamping and complete history validation
 /// remain owned by TimeSignal. Validation and Chebyshev evaluation use that
@@ -92,9 +95,11 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Scenario
 /// world_pose operation and the velocity adapter's 256-frame-row limit.
 /// A scalar does not acquire dynamic, hydrostatic or carrier-motion corrections.
 ///
-/// Spatial profiles need a geometry/parameter binding and refuse here; typed
-/// payloads retain their separate scenario contract and are not reinterpreted
-/// as legacy scalar pressure. No source history or native population is copied.
+/// Typed scalars use the original scalar evaluator, including explicit table
+/// tails and static/instantaneous Pressure semantics. Stress and acoustic
+/// amplitude contracts refuse despite sharing Pa dimensions. Spatial profiles
+/// need a geometry/parameter binding and refuse here. No source history or
+/// native population is copied.
 pub fn sample_pressure3<F: FluidTransport + ?Sized>(
     input: PressureBoundary3<'_>,
     frames: &FrameTree,
@@ -138,7 +143,12 @@ pub fn sample_pressure3<F: FluidTransport + ?Sized>(
             return Err(E::Invalid("spatial pressure profiles require an explicit geometry binding"));
         }
         Some(BcValue::Typed(_)) => {
-            return Err(E::Invalid("pressure outlet requires a scalar uniform value or time signal"));
+            let sample = boundary.pressure_at(frames, time_s, checkpoint)
+                .map_err(|error| match error {
+                    ScalarEvaluationError::Cancelled => E::Cancelled,
+                    error => E::Sample(error),
+                })?;
+            fs_qty::QtyAny::new(sample.value, Pressure::DIMS)
         }
         None => return Err(E::Invalid("pressure outlet has no declared value")),
     };

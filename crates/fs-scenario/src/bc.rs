@@ -143,6 +143,9 @@ impl fmt::Display for BoundaryDiagnosticContext<'_> {
 pub enum Expectation {
     /// A value with exactly these SI exponents.
     Value(Dims),
+    /// A legacy scalar/signal/profile or an explicitly typed scalar with these
+    /// dimensions. The pressure row also checks the exact physical semantics.
+    ValueOrScalar(Dims),
     /// A legacy scalar/signal/profile or an explicitly typed Cartesian vector
     /// with these dimensions. Legacy values retain their wire meaning and do
     /// not acquire an inferred direction. Executable vector consumers require
@@ -183,7 +186,7 @@ mod dims {
 /// The dimensional contract of every supported (physics, kind) pair.
 #[must_use]
 pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
-    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrVector};
+    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrScalar, ValueOrVector};
     match (physics, kind) {
         (Physics::IncompressibleFlow, BcKind::Dirichlet) => ValueOrVector(dims::VELOCITY),
         (Physics::IncompressibleFlow, BcKind::Neumann) => Typed {
@@ -191,9 +194,8 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
             dims: Some(dims::VELOCITY),
         },
         (Physics::IncompressibleFlow, BcKind::MassFlowInlet) => Value(dims::MASS_FLOW),
-        (Physics::IncompressibleFlow, BcKind::PressureOutlet | BcKind::Traction) => {
-            Value(dims::PRESSURE)
-        }
+        (Physics::IncompressibleFlow, BcKind::PressureOutlet) => ValueOrScalar(dims::PRESSURE),
+        (Physics::IncompressibleFlow, BcKind::Traction) => Value(dims::PRESSURE),
         (Physics::IncompressibleFlow, BcKind::WallNoSlip | BcKind::WallSlip) => NoValue,
         (Physics::Thermal, BcKind::Dirichlet) => Value(dims::TEMPERATURE),
         (Physics::Thermal, BcKind::Neumann) => Value(dims::HEAT_FLUX),
@@ -302,7 +304,9 @@ impl BoundaryCondition {
                     });
                 }
             }
-            Expectation::Value(expected) | Expectation::ValueOrVector(expected) => match &self.value {
+            Expectation::Value(expected)
+            | Expectation::ValueOrScalar(expected)
+            | Expectation::ValueOrVector(expected) => match &self.value {
                 None => out.push(Violation {
                     code: "bc-value-missing",
                     what: format!("{ctx}: no value supplied"),
@@ -311,6 +315,27 @@ impl BoundaryCondition {
                         expected.0
                     ),
                 }),
+                Some(BcValue::Typed(payload))
+                    if matches!(expectation(self.physics, self.kind), Expectation::ValueOrScalar(_)) =>
+                {
+                    self.check_typed_payload(payload, PayloadKind::Scalar, Some(expected), ctx, out);
+                    if let Payload::Scalar(value) = payload {
+                        if !crate::scalar::pressure_contract(value.meta().contract()) {
+                            out.push(Violation {
+                                code: "bc-pressure-semantics",
+                                what: format!("{ctx}: fluid pressure requires Pa or static/instantaneous Pressure semantics"),
+                                fix: "declare fluid Pressure, not stress or an acoustic amplitude".to_string(),
+                            });
+                        }
+                        if value.meta().orientation() != OrientationParity::Even {
+                            out.push(Violation {
+                                code: "bc-pressure-parity",
+                                what: format!("{ctx}: fluid pressure requires ordinary even scalar parity"),
+                                fix: "declare OrientationParity::Even".to_string(),
+                            });
+                        }
+                    }
+                }
                 Some(BcValue::Typed(payload))
                     if matches!(
                         expectation(self.physics, self.kind),

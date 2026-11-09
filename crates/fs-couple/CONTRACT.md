@@ -2617,8 +2617,12 @@ Both use `MaterialScaling::density_lattice_from_pressure_perturbation`; the
 adapter does not infer an acoustic equation of state or a pressure-work model.
 
 Uniform values and `TimeSignal` histories retain SI dimensions, the original
-interpolation/clamping rules and cancellable validation/evaluation. Scalar
-pressure is invariant under a checked frame transform. Spatial profiles require
+interpolation/clamping rules and cancellable validation/evaluation. Canonical
+typed scalar payloads use `BoundaryCondition::pressure_at` and the shared
+scalar evaluator, including explicit table tails and exact static/instantaneous
+Pressure semantics. Dimension-only Pa remains admissible; Stress, AcousticPressure
+and amplitude contracts refuse. Scalar pressure is invariant under a checked
+frame transform. Spatial profiles require
 an explicit geometry binding and refuse this uniform-time lane. Selected native
 pressure profiles also refuse, including unchanged dormant uniform targets;
 unselected controls and profiles remain active.
@@ -2630,6 +2634,12 @@ collision, force correction and reservoir transport. G0/G3 tests in
 `tests/scenario_pressure.rs` exercise both native quadratures, actual boundary
 density after steps, gauge/absolute equivalence, histories, profile precedence,
 transactional refusal and cancellation. No new dependency or solver is added.
+
+The typed scalar pressure extension adds exact native D3Q19/D3Q27 comparisons
+against equivalent legacy histories and checks late source refusal followed by
+retry without population, target or clock changes. These added tests remain
+unexecuted: the build environment became unavailable during dependency setup,
+so Cargo typechecking and runtime verification are still required.
 
 The native `scenario_open_boundary::lattice3` serial/pooled step APIs admit
 selected pressure chirps against the frozen `MaterialScaling::timestep_s()`

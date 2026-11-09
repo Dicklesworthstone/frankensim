@@ -449,3 +449,82 @@ fn original_generic_d3q19_and_d3q27_share_pressure_history_and_atomic_refusal() 
         maximum_mach: 0.2,
     });
 }
+
+
+fn typed_pressure(outside: fs_scenario::payload::OutsideDomainPolicy) -> BoundaryCondition {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_scenario::payload::{OrientationParity, Payload, PayloadId, PayloadMeta,
+        QuantityContract, ReferenceSemantics, SampleSource, ScalarPayload, TableInterpolation};
+    boundary(BcValue::Typed(Payload::Scalar(ScalarPayload::new(
+        PayloadMeta::new(
+            QuantityContract::Semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Instantaneous)),
+            PayloadId::new("basis/scalar").unwrap(), WORLD, OrientationParity::Even,
+            ReferenceSemantics::Continuous,
+        ).unwrap(),
+        SampleSource::table(
+            [0.0, 0.002, 0.004].map(|t| QtyAny::new(t, Dims([0, 0, 1, 0, 0, 0]))).to_vec(),
+            [80.0, -80.0, 40.0].map(|p| QtyAny::new(p, PRESSURE)).to_vec(),
+            TableInterpolation::Linear, outside,
+        ).unwrap(),
+    ).unwrap())))
+}
+
+fn check_typed_native<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collision) {
+    use fs_couple::scenario_open_boundary::{ScenarioBoundary3, lattice3::step_serial};
+    use fs_scenario::payload::OutsideDomainPolicy;
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    let source = typed_pressure(OutsideDomainPolicy::Refuse);
+    let legacy = boundary(BcValue::Signal(TimeSignal::Table {
+        times: vec![0.0, 0.002, 0.004], values: vec![80.0, -80.0, 40.0],
+        dims: PRESSURE, interp: Interp::Linear,
+    }));
+    with_cx(&gate, |cx| {
+        let make_native = || Grid3::<L, Q>::try_new_equilibrium(
+            [4, 4, 5], collision, [0.0; 3], [true, true, false],
+            GridBudget3 { maximum_cells: 80, maximum_mach: 0.2 },
+            |_| false, |_| (1.0, [0.0; 3]),
+        ).unwrap();
+        let mut typed = OpenBoundaryGrid3::try_new(make_native(), cx, faces()).unwrap();
+        let mut control = OpenBoundaryGrid3::try_new(make_native(), cx, faces()).unwrap();
+        for (time, pressure) in [(0.001, 0.0), (0.002, -80.0), (0.003, -20.0), (0.004, 40.0)] {
+            for (grid, row) in [(&mut typed, &source), (&mut control, &legacy)] {
+                step_serial(grid,
+                    [None, None, None, None, Some(ScenarioBoundary3::Pressure(gauge(row))), None],
+                    &frames, time, &scaling, cx, None, [0.0; 3]).unwrap();
+            }
+            assert_eq!(typed.populations(), control.populations());
+            near(typed.macroscopic(5).unwrap().0, density(pressure));
+        }
+        let before = typed.populations().to_vec();
+        let targets = typed.boundaries();
+        let steps = typed.completed_steps();
+        assert!(step_serial(&mut typed,
+            [None, None, None, None, Some(ScenarioBoundary3::Pressure(gauge(&source))), None],
+            &frames, 0.005, &scaling, cx, None, [0.0; 3]).is_err());
+        assert_eq!(typed.populations(), before);
+        assert_eq!(typed.boundaries(), targets);
+        assert_eq!(typed.completed_steps(), steps);
+        // Refusal did not consume a source sample or advance either native clock.
+        for (grid, row) in [(&mut typed, &source), (&mut control, &legacy)] {
+            step_serial(grid,
+                [None, None, None, None, Some(ScenarioBoundary3::Pressure(gauge(row))), None],
+                &frames, 0.004, &scaling, cx, None, [0.0; 3]).unwrap();
+        }
+        assert_eq!(typed.populations(), control.populations());
+    });
+}
+
+#[test]
+fn g3_typed_pressure_advances_original_d3q19_and_d3q27_with_exact_legacy_equivalence() {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let tau = scaling.flow().tau;
+    check_typed_native::<D3q19, 19>(CollisionModel3::Bgk { tau });
+    check_typed_native::<D3q27, 27>(CollisionConfig27 {
+        model: CollisionModel27::Bgk { tau, equilibrium: Equilibrium27::Factorized },
+        maximum_mach: 0.2,
+    });
+}

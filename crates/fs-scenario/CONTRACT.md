@@ -1773,3 +1773,25 @@ cancellation/refusal behavior. Source syntax was checked with pinned rustfmt
 before the execution environment disconnected. Cargo typechecking and test
 execution remain unverified; no passing runtime or scientific-validation
 claim is made for this new path.
+
+## Typed scalar pressure boundaries on native fluid paths
+
+`IncompressibleFlow/PressureOutlet` admits the existing canonical scalar payload
+alongside legacy scalar/signal values. `BoundaryCondition::pressure_at` shares
+the scalar history and physical-time frame evaluator. It requires matching
+boundary/payload frames, even parity, and either dimension-only Pa or exact
+Pressure semantics in static/instantaneous form. Stress, AcousticPressure,
+amplitude forms and unsupported source/reference policies refuse. Declared
+fixed, held, linear and outside-domain behavior is preserved without cloning
+history. Gauge/absolute interpretation remains explicit at the receiving
+physical owner; frames do not add hydrostatic or dynamic pressure.
+
+`fs-couple::scenario_pressure` consumes this sample through its original
+material-scaling and native boundary preparation, including the specialized
+D3Q19 and generic D3Q19/D3Q27 paths and mixed native boundary steps. No wire
+schema, pressure-to-density law or solver is duplicated. Focused scenario
+regressions specify canonical replay, semantic admission, time policy and
+cancellation; native-fluid regressions specify legacy-source equivalence over
+actual steps and refusal/retry preservation. These new tests have not run:
+Cargo typechecking and execution remain blocked by the unavailable build
+environment, following dependency preparation failure.

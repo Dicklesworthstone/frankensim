@@ -234,3 +234,74 @@ fn oriented_scalar_preserves_parity_without_weakening_ordinary_scalar_admission(
         Err(ScalarEvaluationError::Cancelled)
     );
 }
+
+
+fn pressure_row(contract: QuantityContract, outside: OutsideDomainPolicy) -> fs_scenario::BoundaryCondition {
+    use fs_scenario::{BcKind, BcValue, BoundaryCondition, Physics};
+    use fs_scenario::payload::Payload;
+    let dims = Dims([-1, 1, -2, 0, 0, 0]);
+    BoundaryCondition {
+        region: "reservoir".into(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::PressureOutlet,
+        frame: WORLD.0,
+        compatibility: None,
+        value: Some(BcValue::Typed(Payload::Scalar(ScalarPayload::new(
+            PayloadMeta::new(contract, PayloadId::new("basis/scalar").unwrap(), WORLD,
+                OrientationParity::Even, ReferenceSemantics::Continuous).unwrap(),
+            SampleSource::table(
+                [0.0, 1.0, 2.0].map(|t| QtyAny::new(t, TIME)).to_vec(),
+                [40.0, 80.0, 20.0].map(|p| QtyAny::new(p, dims)).to_vec(),
+                TableInterpolation::Linear, outside,
+            ).unwrap(),
+        ).unwrap()))),
+    }
+}
+
+#[test]
+fn g3_pressure_history_round_trips_and_keeps_its_native_scalar_time_policy() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_scenario::{Environment, Scenario};
+    let contract = QuantityContract::Semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Instantaneous));
+    let row = pressure_row(contract, OutsideDomainPolicy::Periodic);
+    let mut scenario = Scenario::new("typed-reservoir", 9, Environment::earth_lab());
+    scenario.base_bcs.push(row);
+    assert!(scenario.validate().is_empty());
+    let ir = fs_scenario::ir::write_ir(&scenario);
+    let parsed = fs_scenario::ir::parse_ir(&ir).unwrap();
+    let decoded = &parsed.scenario().base_bcs[0];
+    assert_eq!(decoded, &scenario.base_bcs[0]);
+    for (t, expected) in [(0.5, 60.0), (2.0, 20.0), (2.5, 60.0), (-1.5, 60.0)] {
+        let sample = decoded.pressure_at(&scenario.frames, t, &mut || ControlFlow::Continue(())).unwrap();
+        assert_eq!(sample.value, expected);
+        assert_eq!(sample.contract, contract);
+    }
+    let refused = pressure_row(contract, OutsideDomainPolicy::Refuse);
+    assert!(refused.pressure_at(&scenario.frames, 2.1, &mut || ControlFlow::Continue(())).is_err());
+}
+
+#[test]
+fn g0_pressure_admission_and_execution_do_not_confuse_stress_or_amplitudes_with_pressure() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    for (kind, form) in [
+        (QuantityKind::Stress, ValueForm::Static),
+        (QuantityKind::AcousticPressure, ValueForm::Instantaneous),
+        (QuantityKind::Pressure, ValueForm::Peak),
+        (QuantityKind::Pressure, ValueForm::Rms),
+    ] {
+        let row = pressure_row(QuantityContract::Semantic(SemanticType::new(kind, form)), OutsideDomainPolicy::Clamp);
+        let mut findings = Vec::new();
+        row.check(&mut findings);
+        assert!(findings.iter().any(|v| v.code == "bc-pressure-semantics"));
+        assert!(matches!(row.pressure_at(&FrameTree::new(), 0.5, &mut || ControlFlow::Continue(())),
+            Err(ScalarEvaluationError::Unsupported(_))));
+    }
+    let mut row = pressure_row(QuantityContract::Dimensions(Dims([-1, 1, -2, 0, 0, 0])), OutsideDomainPolicy::Clamp);
+    assert_eq!(row.pressure_at(&FrameTree::new(), 0.5, &mut || ControlFlow::Break(())), Err(ScalarEvaluationError::Cancelled));
+    row.frame = 7;
+    let mut findings = Vec::new();
+    row.check(&mut findings);
+    assert!(findings.iter().any(|v| v.code == "bc-payload-frame"));
+    assert!(matches!(row.pressure_at(&FrameTree::new(), 0.5, &mut || ControlFlow::Continue(())),
+        Err(ScalarEvaluationError::Unsupported(_))));
+}
