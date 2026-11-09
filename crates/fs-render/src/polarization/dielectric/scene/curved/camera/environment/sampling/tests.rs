@@ -21,6 +21,8 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 
+mod microsurface;
+
 #[cfg(feature = "volumes")]
 mod participating;
 

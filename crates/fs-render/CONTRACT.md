@@ -12682,3 +12682,59 @@ or dielectric microsurface multiple scattering; such geometric source chains
 remain on the original continuation path. Tilted brushed normals retain the
 existing empirical shading law, not resolved groove geometry or a new thermal
 emissivity model.
+
+### Full Smith reflection under directional environment illumination
+
+`environment::sampling::SmithEnvironmentCameraScene` borrows the admitted
+native environment camera. Rough and body-locked brushed conductors use the
+same complete polarized Smith law for source connections and continuation;
+ordinary materials retain their original optical law and exact-PDF MIS.
+Analyzed and resolved real-lens launches preserve the reciprocal Stokes seed.
+
+The complete microsurface outgoing PDF is unavailable. The new geometry-only
+queries report the analytic density q1 of escape after exactly one reflection
+at unit facet albedo. Its integral is the single-reflection probability, not
+one; it is never substituted for full-walk throughput or claimed as a marginal
+PDF. Given the original environment proposal p, the light contribution uses
+p²/(p²+q1²) and the escaped continuation uses the complementary direction-only
+weight. Both are deterministic functions of the arriving macrostate and source
+direction. Linearity therefore retains the complete BRDF integral while keeping
+narrow-lobe continuation useful; no sampled BRDF or hidden joint path density
+enters a nonlinear weight. This is not a claim of globally optimal variance.
+
+The original environment texel owns direction, angular density, calibrated
+spectrum and source polarization. Shared native visibility, contact ownership,
+radiometric/index scaling and work bounds remain in the original source owner.
+Only direct homogeneous nonabsorbing legs compete. Unsupported Smith legs
+consume no environment/connection samples. Every later surface retires the
+previous partition; smooth delta chains keep their complete endpoint term.
+Surface and LTE emission remain unweighted by this environment partition.
+The opaque source wrappers do not silently opt rough glass into a different
+BSDF; full dielectric microsurface transport has its separate explicit owner.
+
+The full polarized connection evaluator also retains isolated grazing escape
+terms through a logarithmic geometry fallback and positive log-tail summation.
+Normal contributions keep their compensated linear fast path. Subnormal
+positive terms accumulate before linear rounding; only a complete positive
+response that is still unrepresentable refuses. Intermediate underflow is not
+declared physical extinction. The density endpoint query performs no optical
+solve, random walk, allocation or material query.
+
+Ordinary-surface, environment, continuing-facet and evaluating-facet streams
+have independent counter domains and zero-based surface/facet ordinals.
+Original source/query limits and per-estimate facet limits bound all work;
+cancellation or exhaustion refuses the complete sample. Averaging only
+successful histories after a refusal would bias the result.
+
+Verification: 27 focused native numerical tests passed, using original
+fs_math/Philox, Smith geometry, complex conductor/coating Fresnel-Mueller
+responses, beam frames and anisotropy. Four new groups cover the exact
+one-reflection integral, brushed-frame deterministic density, 32,768 independent
+complete polarized path/source estimates, and grazing/subnormal accumulation.
+Three compiled integration probes additionally exercised the complete modified
+environment sampling module, new view, receiver adapter and original source/
+weight helpers with explicit scene/visibility/emission/signature fixtures:
+ordinary/Smith dispatch, endpoint partition resets, primary/LTE preservation,
+blocked and unsupported legs, cancellation, and facet/geometry refusals.
+Four native full-scene regression groups are authored but unrun. Full workspace
+Cargo and resolved-geometry runtime validation remain unavailable.

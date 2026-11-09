@@ -23,6 +23,7 @@ use crate::polarization::dielectric::transport::PolarizedBeam;
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+mod microsurface;
 mod source;
 mod visibility;
 mod weights;
@@ -33,6 +34,18 @@ pub mod participating;
 
 use visibility::{clear_to_environment, supports_segment};
 use weights::{positive_product, power_weight};
+
+pub use microsurface::SmithEnvironmentCameraScene;
+
+/// A fixed-direction physical response and deterministic comparison density.
+/// For ordinary surfaces the latter is their exact proposal. The Smith view
+/// supplies only the analytic first-reflection escape subdensity instead.
+struct EnvironmentConnection {
+    normal: fs_geom::Vec3,
+    factor_per_sr: f64,
+    medium: usize,
+    comparison_density: f64,
+}
 
 /// Original camera limits and a separate bounded first-boundary shadow walk.
 /// A distance limit is successful only when the original scene bounds also
@@ -384,6 +397,38 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
         work: &mut Work,
         samples: &mut impl FnMut(u32) -> [f64; 2],
     ) -> Result<f64, EnvironmentCameraError> {
+        self.add_surface_with_response(cx, path, initial_index, settings, work, samples, |source| {
+            let (response, medium) =
+                receiver.directional_response(self.camera, source.frame, source.stokes)?;
+            Ok(EnvironmentConnection {
+                normal: response.normal,
+                factor_per_sr: if receiver.is_rough() {
+                    response.factor
+                } else {
+                    response.factor / core::f64::consts::PI
+                },
+                medium,
+                comparison_density: response.pdf,
+            })
+        })
+    }
+
+    /// One shared calibrated proposal, native visibility query and physical
+    /// radiometric accumulation. The response owner supplies a deterministic
+    /// angular partition guide separately from its optical response.
+    #[allow(clippy::too_many_arguments)]
+    fn add_surface_with_response(
+        &self,
+        cx: &Cx<'_>,
+        path: &CurvedPathResult,
+        initial_index: f64,
+        settings: EnvironmentCameraSettings,
+        work: &mut Work,
+        samples: &mut impl FnMut(u32) -> [f64; 2],
+        response: impl FnOnce(
+            source::EnvironmentSourceSample,
+        ) -> Result<EnvironmentConnection, EnvironmentCameraError>,
+    ) -> Result<f64, EnvironmentCameraError> {
         if work.samples >= settings.max_environment_samples {
             return Err(EnvironmentCameraError::SampleLimit);
         }
@@ -398,10 +443,13 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
         else {
             return Ok(0.0);
         };
-        let (response, medium) =
-            receiver.directional_response(self.camera, source.frame, source.stokes)?;
-        if response.factor == 0.0
-            || !supports_segment(self.camera.scene, medium, path.beam().wavelength_nm())?
+        let response = response(source)?;
+        if response.factor_per_sr == 0.0
+            || !supports_segment(
+                self.camera.scene,
+                response.medium,
+                path.beam().wavelength_nm(),
+            )?
         {
             return Ok(0.0);
         }
@@ -430,7 +478,7 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
             },
             source.frame.horizontal(),
             path.beam().wavelength_nm(),
-            medium,
+            response.medium,
             settings,
             remaining,
         )?;
@@ -445,20 +493,15 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
         if !visibility.visible {
             return Ok(0.0);
         }
-        let weight = power_weight(source.pdf, response.pdf)?;
+        let weight = power_weight(source.pdf, response.comparison_density)?;
         let local_index = phase_index(path.beam().medium(), path.beam().wavelength_nm())?;
         let ratio = initial_index / local_index;
-        let factor = if receiver.is_rough() {
-            response.factor
-        } else {
-            response.factor / core::f64::consts::PI
-        };
         positive_product(
             &[
                 path.beam().power().i,
                 ratio,
                 ratio,
-                factor,
+                response.factor_per_sr,
                 source.radiance,
                 cosine,
                 weight,

@@ -13,7 +13,7 @@
 
 use super::{SmithBeamError, SmithWalkSettings};
 use crate::conductor::microsurface::connection::SmithConnection;
-use crate::conductor::microsurface::{SmithEvent, SmithGgx, unit};
+use crate::conductor::microsurface::{SmithError, SmithEvent, SmithGgx, unit};
 use crate::conductor::{ConductorOptics, ConductorSurface};
 use crate::instances::RigidTransform;
 use crate::polarization::Stokes;
@@ -24,12 +24,16 @@ use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, P
 use crate::surface_detail::SurfaceDetail;
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
+use fs_math::det;
+
+mod density;
 
 /// A stochastic radiance BRDF contraction, intentionally without a PDF.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmithConnectionResponse {
     factor_per_sr: f64,
     facet_events: u32,
+    first_reflection_density: f64,
 }
 impl SmithConnectionResponse {
     /// Multiply by camera-prefix intensity, physical source irradiance on the
@@ -42,10 +46,19 @@ impl SmithConnectionResponse {
     pub const fn facet_events(self) -> u32 {
         self.facet_events
     }
+    /// Deterministic solid-angle density of escape after exactly one facet,
+    /// with unit facet reflectance. This subdensity excludes every higher
+    /// order and is NEVER the complete walk's outgoing marginal PDF. It may
+    /// guide a direction-only complementary estimator partition, independently
+    /// of the stochastic optical response returned above.
+    pub const fn first_reflection_density(self) -> f64 {
+        self.first_reflection_density
+    }
     const fn zero() -> Self {
         Self {
             factor_per_sr: 0.0,
             facet_events: 0,
+            first_reflection_density: 0.0,
         }
     }
 }
@@ -174,9 +187,11 @@ impl PolarizedBeam {
     ) -> Result<SmithConnectionResponse, SmithBeamError> {
         let outgoing = local(basis, source_frame.direction().scale(-1.0));
         let mut sum = Sum::default();
+        let mut first_reflection_density = 0.0;
         if let Some(connection) =
             model.single_scattering_connection(local(basis, self.frame().direction()), outgoing)?
         {
+            first_reflection_density = checked_product(connection.factor_per_sr, outgoing.z)?;
             sum.add(contribution(
                 self,
                 optics,
@@ -198,6 +213,7 @@ impl PolarizedBeam {
                     return Ok(SmithConnectionResponse {
                         factor_per_sr: sum.value()?,
                         facet_events: event,
+                        first_reflection_density,
                     });
                 }
                 SmithEvent::Reflection {
@@ -213,17 +229,39 @@ impl PolarizedBeam {
                     // First-order height is already integrated analytically.
                     // Never count its random connection a second time.
                     if event != 0 {
-                        if let Some(connection) =
-                            model.connection_at_depth(incoming, next_depth, outgoing)?
-                        {
-                            sum.add(contribution(
+                        match model.connection_at_depth(incoming, next_depth, outgoing) {
+                            Ok(Some(connection)) => sum.add(contribution(
                                 beam,
                                 optics,
                                 basis,
                                 connection,
                                 source_frame,
                                 normalized_source,
-                            )?)?;
+                            )?)?,
+                            Ok(None) => {}
+                            Err(SmithError::NumericalRange) => {
+                                // A very small grazing escape term may be
+                                // representable only after summing the complete
+                                // response. Recover its logarithm before optics;
+                                // a geometry failure is still a typed refusal.
+                                if let Some(connection) =
+                                    model.log_connection_at_depth(incoming, next_depth, outgoing)?
+                                {
+                                    let reflected = beam
+                                        .reflect_conductor(world(basis, connection.facet), optics)?
+                                        .beam;
+                                    let optical = reciprocal_contraction(
+                                        reflected,
+                                        source_frame,
+                                        normalized_source,
+                                    )?;
+                                    sum.add(PositiveTerm::from_log_factor(
+                                        connection.log_factor_per_sr,
+                                        optical,
+                                    )?)?;
+                                }
+                            }
+                            Err(error) => return Err(error.into()),
                         }
                     }
                     beam = beam.reflect_conductor(world(basis, facet), optics)?.beam;
@@ -234,6 +272,7 @@ impl PolarizedBeam {
                         return Ok(SmithConnectionResponse {
                             factor_per_sr: sum.value()?,
                             facet_events: event + 1,
+                            first_reflection_density,
                         });
                     }
                 }
@@ -252,12 +291,12 @@ fn contribution(
     connection: SmithConnection,
     source_frame: PolarizationFrame,
     source: Stokes,
-) -> Result<f64, SmithBeamError> {
+) -> Result<PositiveTerm, SmithBeamError> {
     let reflected = beam
         .reflect_conductor(world(basis, connection.facet), optics)?
         .beam;
     let optical = reciprocal_contraction(reflected, source_frame, source)?;
-    Ok(checked_product(connection.factor_per_sr, optical)?)
+    PositiveTerm::product(connection.factor_per_sr, optical)
 }
 
 fn local(basis: [Vec3; 3], direction: Vec3) -> Vec3 {
@@ -274,13 +313,64 @@ fn world(basis: [Vec3; 3], direction: Vec3) -> Vec3 {
         basis[0].z * direction.x + basis[1].z * direction.y + basis[2].z * direction.z,
     )
 }
+enum PositiveTerm {
+    Zero,
+    Linear(f64),
+    Log(f64),
+}
+impl PositiveTerm {
+    fn product(geometric: f64, optical: f64) -> Result<Self, SmithBeamError> {
+        if optical == 0.0 || geometric == 0.0 {
+            return Ok(Self::Zero);
+        }
+        let value = geometric * optical;
+        if value.is_finite() && value >= f64::MIN_POSITIVE {
+            Ok(Self::Linear(value))
+        } else {
+            Self::from_log_factor(det::ln(geometric), optical)
+        }
+    }
+    fn from_log_factor(geometric: f64, optical: f64) -> Result<Self, SmithBeamError> {
+        if optical == 0.0 {
+            return Ok(Self::Zero);
+        }
+        let value = geometric + det::ln(optical);
+        if value.is_finite() {
+            Ok(Self::Log(value))
+        } else {
+            Err(BeamError::NumericalRange.into())
+        }
+    }
+}
+
 #[derive(Default)]
 struct Sum {
     total: f64,
     correction: f64,
+    tiny_log: Option<f64>,
 }
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), SmithBeamError> {
+    fn add(&mut self, term: PositiveTerm) -> Result<(), SmithBeamError> {
+        let value = match term {
+            PositiveTerm::Zero => return Ok(()),
+            PositiveTerm::Linear(value) => value,
+            PositiveTerm::Log(log) => {
+                let value = det::exp(log);
+                if value < f64::MIN_POSITIVE {
+                    // Sum subnormal terms BEFORE rounding them to the linear
+                    // grid. The ordinary compensated fast path is unchanged.
+                    self.tiny_log = Some(match self.tiny_log {
+                        None => log,
+                        Some(previous) => {
+                            let larger = previous.max(log);
+                            larger + det::ln(1.0 + det::exp(previous.min(log) - larger))
+                        }
+                    });
+                    return Ok(());
+                }
+                value
+            }
+        };
         let next = self.total + value;
         self.correction += if self.total >= value {
             (self.total - next) + value
@@ -288,11 +378,20 @@ impl Sum {
             (value - next) + self.total
         };
         self.total = next;
-        self.value().map(|_| ())
+        if self.total.is_finite() && self.correction.is_finite() {
+            Ok(())
+        } else {
+            Err(BeamError::NumericalRange.into())
+        }
     }
     fn value(&self) -> Result<f64, SmithBeamError> {
-        let value = self.total + self.correction;
-        if value.is_finite() && value >= 0.0 {
+        let ordinary = self.total + self.correction;
+        let tiny = self.tiny_log.map_or(0.0, det::exp);
+        let value = ordinary + tiny;
+        if value.is_finite() && value >= 0.0 && !(value == 0.0 && self.tiny_log.is_some()) {
+            // An underflowing tail below half the smallest subnormal cannot
+            // change a positive representable sum. An entirely unrepresentable
+            // positive result still refuses rather than claiming exact zero.
             Ok(value)
         } else {
             Err(BeamError::NumericalRange.into())

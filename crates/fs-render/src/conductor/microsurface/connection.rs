@@ -24,7 +24,59 @@ pub struct SmithConnection {
     pub factor_per_sr: f64,
 }
 
+/// Positive connection retained in logarithmic form when a single hidden
+/// contribution is outside the linear range. The complete sum may still be
+/// representable. This is a BRDF integrand, never a directional proposal PDF.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmithLogConnection {
+    pub facet: Vec3,
+    pub log_factor_per_sr: f64,
+}
+
 impl SmithGgx {
+    /// Logarithmic companion to the linear connection query. It preserves a
+    /// grazing positive escape contribution until optical multiplication and
+    /// summation, rather than turning its isolated underflow into extinction.
+    pub fn log_connection_at_depth(
+        self,
+        incoming: Vec3,
+        depth: f64,
+        outgoing: Vec3,
+    ) -> Result<Option<SmithLogConnection>, SmithError> {
+        if !depth.is_finite() || depth < 0.0 {
+            return Err(SmithError::InvalidDepth);
+        }
+        let incoming = unit(incoming)?;
+        let outgoing = unit(outgoing)?;
+        if outgoing.z <= 0.0 {
+            return Ok(None);
+        }
+        let Some(facet) = connection_facet(incoming, outgoing)? else {
+            return Ok(None);
+        };
+        let area = self.projected_area(incoming.scale(-1.0));
+        if area <= 0.0 || !area.is_finite() {
+            return Err(SmithError::NumericalRange);
+        }
+        let escape_area = self.projected_area(outgoing.scale(-1.0));
+        let optical_depth = if escape_area == 0.0 || depth == 0.0 {
+            0.0
+        } else {
+            depth * (escape_area / outgoing.z)
+        };
+        let log_factor = det::ln(self.ndf(facet))
+            - det::ln(4.0)
+            - det::ln(area)
+            - det::ln(outgoing.z)
+            - optical_depth;
+        if !log_factor.is_finite() {
+            return Err(SmithError::NumericalRange);
+        }
+        Ok(Some(SmithLogConnection {
+            facet,
+            log_factor_per_sr: log_factor,
+        }))
+    }
     /// Integrate the first collision's height exactly. Input is propagation
     /// direction into the surface; output points out toward the light.
     /// No visible connection (including a macro horizon) returns `None`.
