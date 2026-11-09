@@ -20,6 +20,8 @@ use fs_thermal::enthalpy::DepositionSimulation;
 
 #[path = "heat/circuit.rs"]
 mod circuit;
+#[path = "heat/motion.rs"]
+mod motion;
 
 const RHO: [f64; 2] = [1.0, 3.0];
 const BETA: [f64; 2] = [0.03, 0.04];

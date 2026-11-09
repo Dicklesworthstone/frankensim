@@ -495,6 +495,8 @@ fn refused_surface_trials_and_cancellation_keep_field_and_enthalpy_unchanged() {
 
 #[path = "heat/circuit.rs"]
 mod circuit;
+#[path = "heat/response_motion.rs"]
+mod response_motion;
 
 #[test]
 fn current_controlled_motion_retains_complete_thermal_contact_and_radiation_assembly() {

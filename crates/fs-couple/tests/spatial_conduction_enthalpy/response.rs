@@ -1,6 +1,8 @@
 //! Independent nonlinear 3D current, caloric balance and continuation oracles.
 #[path = "response/circuit.rs"]
 mod circuit;
+#[path = "response/motion.rs"]
+mod motion;
 #[path = "response/power.rs"]
 mod power;
 #[path = "response/terminals.rs"]

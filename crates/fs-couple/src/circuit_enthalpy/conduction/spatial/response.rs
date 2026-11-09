@@ -6,7 +6,11 @@
 //! trials neither advance thermal time nor deposit numerical defects.
 
 mod heat;
-pub use heat::step_spatial_conduction_response_candidate;
+/// Nonlinear conductor-frame response under prescribed motion and magnetic field.
+pub mod motion;
+pub use heat::{
+    step_spatial_conduction_response_candidate, step_spatial_moving_conduction_response_candidate,
+};
 
 use super::*;
 use fs_em::spatial::conduction::response::{
@@ -21,25 +25,69 @@ fn response_error(error: SpatialConductionResponseError) -> Error {
     }
 }
 
+fn response_solve_error<E: From<ConductionThermalError>>(
+    error: SpatialConductionResponseError,
+    bounded: SpatialConductionResponseControls,
+    requested: SpatialConductionResponseControls,
+) -> CircuitEnthalpyError<E> {
+    match error {
+        SpatialConductionResponseError::FieldSolveBudget { .. }
+            if bounded.maximum_field_solves < requested.maximum_field_solves =>
+        {
+            CircuitEnthalpyError::CircuitBudget
+        }
+        other => map_conduction_error(response_error(other)),
+    }
+}
+
 /// Actual endpoint field/source evaluations and independently supplied work.
 /// Constitutive defects remain diagnostics, never additional thermal sources.
 #[derive(Clone, Debug)]
-pub struct SpatialConductionResponseThermalStep {
+pub struct SpatialConductionResponseThermalStep<F = SpatialConductionField> {
     pub start_s: f64,
     pub end_s: f64,
-    pub field: SpatialConductionResponseReport,
+    pub field: SpatialConductionResponseReport<F>,
     pub contacts: Vec<SpatialConductionContactHeat>,
     pub heat_j: f64,
+    /// Signed electrical work supplied through the native boundary/electrodes.
     pub supplied_work_j: f64,
+    /// Signed Lorentz work delivered to prescribed motion; zero at rest.
+    pub mechanical_work_j: f64,
+    /// Electrical input minus mechanical output, available to finite heat.
+    pub net_supplied_work_j: f64,
 }
 
-struct ResponseCandidate {
-    problem: SpatialConductionResponse,
-    step: SpatialConductionResponseThermalStep,
+// Both frames use one thermal residual and one original-source refresh path.
+// The native field owner supplies local Joule heat and signed mechanical work.
+trait ResponseHeatField {
+    fn joule_power_w(&self) -> f64;
+    fn cell_joule_power_w(&self) -> &[f64];
+    fn contact_response(&self) -> &[SpatialConductionContactResponse];
+    fn mechanical_power_w(&self) -> f64;
 }
-impl ThermalDriver for ResponseCandidate {
+
+impl ResponseHeatField for SpatialConductionField {
+    fn joule_power_w(&self) -> f64 {
+        self.power_w
+    }
+    fn cell_joule_power_w(&self) -> &[f64] {
+        &self.cell_power_w
+    }
+    fn contact_response(&self) -> &[SpatialConductionContactResponse] {
+        &self.contacts
+    }
+    fn mechanical_power_w(&self) -> f64 {
+        0.0
+    }
+}
+
+struct ResponseCandidate<F> {
+    problem: SpatialConductionResponse,
+    step: SpatialConductionResponseThermalStep<F>,
+}
+impl<F> ThermalDriver for ResponseCandidate<F> {
     type Model = SpatialConductionResponse;
-    type Step = SpatialConductionResponseThermalStep;
+    type Step = SpatialConductionResponseThermalStep<F>;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
             resistors: &[],
@@ -47,7 +95,7 @@ impl ThermalDriver for ResponseCandidate {
             heat_j: self.step.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: 0.0,
-            supplied_j: self.step.supplied_work_j,
+            supplied_j: self.step.net_supplied_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -57,28 +105,32 @@ impl ThermalDriver for ResponseCandidate {
 
 /// Publish the source/field state and its original finite heat history together.
 /// A failed source query, trial, work limit or cancellation publishes neither.
-pub struct SpatialConductionResponseEnthalpyCandidate<'t, S = MaterialNetworkSample> {
+pub struct SpatialConductionResponseEnthalpyCandidate<
+    't,
+    S = MaterialNetworkSample,
+    F = SpatialConductionField,
+> {
     thermal: DepositionSimulation<'t>,
     problem: SpatialConductionResponse,
-    report: CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep>,
+    report: CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep<F>>,
 }
-impl<'t, S> SpatialConductionResponseEnthalpyCandidate<'t, S> {
+impl<'t, S, F> SpatialConductionResponseEnthalpyCandidate<'t, S, F> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn problem(&self) -> &SpatialConductionResponse {
         &self.problem
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep<F>> {
         &self.report
     }
-    /// Local E.J and contact heat already entered the returned thermal state.
+    /// Local conductor-frame Joule and contact heat entered the returned state.
     pub fn into_parts(
         self,
     ) -> (
         DepositionSimulation<'t>,
         SpatialConductionResponse,
-        CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep>,
+        CircuitEnthalpyReport<S, SpatialConductionResponseThermalStep<F>>,
     ) {
         (self.thermal, self.problem, self.report)
     }
@@ -219,26 +271,6 @@ impl SpatialConductionThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionResponseEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>> {
-        check(cancel).map_err(map_conduction_error)?;
-        if !(1..=fs_em::conduction::response::MAX_RESPONSE_ITERATIONS)
-            .contains(&response.maximum_iterations)
-            || response.maximum_field_solves == 0
-        {
-            return Err(map_conduction_error(invalid(
-                "invalid bounded 3D source response limits",
-            )));
-        }
-        let dt = self
-            .admit_mesh_step(
-                thermal,
-                target_s,
-                problem.mesh(),
-                problem.contacts().len(),
-                assembly,
-                controls,
-                initial_energy_increments_j,
-            )
-            .map_err(map_conduction_error)?;
         let drive = drive.into();
         let work_drive = match drive {
             SpatialConductionResponseDrive::Terminals(drive) => {
@@ -274,6 +306,100 @@ impl SpatialConductionThermalNetwork<'_> {
                 mixed,
             },
         };
+        self.step_response_driver_candidate(
+            thermal,
+            target_s,
+            problem,
+            contact_bindings,
+            assembly,
+            response,
+            controls,
+            initial_energy_increments_j,
+            resolve_sources,
+            sample,
+            |sources, contacts, bounded| {
+                let candidate = problem
+                    .solve_with_materials_and_contacts_candidate(
+                        sources,
+                        contacts,
+                        drive,
+                        assembly,
+                        field_controls,
+                        bounded,
+                        &mut || (*cancel.borrow_mut())(),
+                    )
+                    .map_err(|error| response_solve_error(error, bounded, response))?;
+                let (next, field) = candidate.into_parts();
+                let supplied_power_w = match &field.terminals {
+                    Some(terminals) => terminals.supplied_power_w,
+                    None => work_drive
+                        .supplied_power_w(next.mesh(), &field.field, cancel)
+                        .map_err(map_conduction_error)?,
+                };
+                Ok((next, field, supplied_power_w))
+            },
+            cancel,
+        )
+    }
+
+    // The shared endpoint owns every source/phase refresh, thermal trial,
+    // physical work gate and heat partition. Frame adapters only solve the
+    // native field and expose its independently recovered terminal work.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn step_response_driver_candidate<
+        't,
+        S,
+        E: From<ConductionThermalError>,
+        F: ResponseHeatField,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConductionResponse,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        response: SpatialConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'t>,
+        )
+            -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        solve_field: impl Fn(
+            Vec<ResolvedConductorState>,
+            Vec<SpatialConductionContact>,
+            SpatialConductionResponseControls,
+        ) -> Result<
+            (
+                SpatialConductionResponse,
+                SpatialConductionResponseReport<F>,
+                f64,
+            ),
+            CircuitEnthalpyError<E>,
+        >,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialConductionResponseEnthalpyCandidate<'t, S, F>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(map_conduction_error)?;
+        if !(1..=fs_em::conduction::response::MAX_RESPONSE_ITERATIONS)
+            .contains(&response.maximum_iterations)
+            || response.maximum_field_solves == 0
+        {
+            return Err(map_conduction_error(invalid(
+                "invalid bounded 3D source response limits",
+            )));
+        }
+        let dt = self
+            .admit_mesh_step(
+                thermal,
+                target_s,
+                problem.mesh(),
+                problem.contacts().len(),
+                assembly,
+                controls,
+                initial_energy_increments_j,
+            )
+            .map_err(map_conduction_error)?;
         let regions: Vec<_> = self
             .regions
             .iter()
@@ -383,42 +509,21 @@ impl SpatialConductionThermalNetwork<'_> {
                     maximum_field_solves: response.maximum_field_solves.min(remaining),
                     ..response
                 };
-                let candidate = problem
-                    .solve_with_materials_and_contacts_candidate(
-                        sources,
-                        contacts,
-                        drive,
-                        assembly,
-                        field_controls,
-                        bounded,
-                        &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(|error| match error {
-                        SpatialConductionResponseError::FieldSolveBudget { .. }
-                            if bounded.maximum_field_solves < response.maximum_field_solves =>
-                        {
-                            CircuitEnthalpyError::CircuitBudget
-                        }
-                        other => map_conduction_error(response_error(other)),
-                    })?;
-                let (next, field) = candidate.into_parts();
-                let heat_j = finite(dt * field.field.power_w)?;
-                let supplied_power_w = match &field.terminals {
-                    Some(terminals) => terminals.supplied_power_w,
-                    None => work_drive
-                        .supplied_power_w(next.mesh(), &field.field, cancel)
-                        .map_err(map_conduction_error)?,
-                };
+                let (next, field, supplied_power_w) = solve_field(sources, contacts, bounded)?;
+                let joule_power_w = field.field.joule_power_w();
+                let heat_j = finite(dt * joule_power_w)?;
                 let supplied_work_j = finite(dt * supplied_power_w)?;
-                if (field.field.power_w > 0.0 && heat_j == 0.0)
-                    || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
+                let mechanical_work_j = finite(dt * field.field.mechanical_power_w())?;
+                let net_supplied_work_j = finite(supplied_work_j - mechanical_work_j)?;
+                if (joule_power_w > 0.0 && heat_j == 0.0)
+                    || (heat_j - net_supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
                     return Err(map_conduction_error(invalid(
-                        "nonlinear 3D Joule heat and independently supplied terminal work do not close",
+                        "nonlinear 3D Joule heat and terminal work minus Lorentz work do not close",
                     )));
                 }
                 let contact_heat = contact_owner
-                    .heat(&field.field.contacts)
+                    .heat(field.field.contact_response())
                     .map_err(map_conduction_error)?;
                 let circuit_trials = field.field_solves;
                 Ok(DrivenCoefficients {
@@ -431,6 +536,8 @@ impl SpatialConductionThermalNetwork<'_> {
                             contacts: contact_heat,
                             heat_j,
                             supplied_work_j,
+                            mechanical_work_j,
+                            net_supplied_work_j,
                         },
                     },
                     sources_w: coefficients.sources_w,
@@ -442,7 +549,7 @@ impl SpatialConductionThermalNetwork<'_> {
             |candidate, _dt, checkpoint| {
                 let mut powers = route_owner
                     .deposit_power(
-                        &candidate.step.field.field.cell_power_w,
+                        candidate.step.field.field.cell_joule_power_w(),
                         &routes,
                         checkpoint,
                     )

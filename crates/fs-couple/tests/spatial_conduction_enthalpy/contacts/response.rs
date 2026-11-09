@@ -239,6 +239,99 @@ fn current_dependent_contact_heats_both_bodies_and_complete_sourced_heat_feedbac
         )
         .unwrap();
     let theta = assert_response(&first, &initial, [0.0; 2], 1.0);
+    // The moving thermal adapter must preserve the same original nonlinear
+    // stationary contact source and deposit each native surface loss once.
+    let rest = [[0.0; 3]; 12];
+    let magnetic = [[0.0, 0.0, 1.0]; 12];
+    let moving = layout
+        .step_moving_response_contact_candidate(
+            &initial,
+            0.5,
+            &original,
+            &drive,
+            fs_em::spatial::conduction::motion::SpatialConductionMotion {
+                velocity_m_s: &rest,
+                flux_density_t: &magnetic,
+            },
+            &surface,
+            limits(),
+            field_controls(),
+            controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    for (i, cell) in [CellId(30), CellId(10)].into_iter().enumerate() {
+        near(
+            moving.thermal().temperature_k(cell).unwrap(),
+            300.0 + theta[i],
+        );
+    }
+    let moving_step = &moving.report().electrical;
+    near(moving_step.heat_j, first.report().electrical.heat_j);
+    near(moving_step.supplied_work_j, moving_step.heat_j);
+    near(moving_step.mechanical_work_j, 0.0);
+    near(moving_step.net_supplied_work_j, moving_step.heat_j);
+    assert_eq!(moving_step.contacts.len(), 2);
+    assert_eq!(moving_step.field.evaluated_contacts.len(), 2);
+    for (actual, expected) in moving_step
+        .contacts
+        .iter()
+        .zip(&first.report().electrical.contacts)
+    {
+        near(actual.response.power_w, expected.response.power_w);
+        assert_eq!(actual.cells, expected.cells);
+        near(
+            actual.heat_fraction_to_first,
+            expected.heat_fraction_to_first,
+        );
+    }
+    for source in moving_step
+        .field
+        .evaluated_contacts
+        .iter()
+        .flat_map(|sample| &sample.evaluated)
+    {
+        near(
+            source.resolved().state_coordinate("Ta").unwrap(),
+            300.0 + theta[0],
+        );
+        near(
+            source.resolved().state_coordinate("Tb").unwrap(),
+            300.0 + theta[1],
+        );
+        near(
+            source.resolved().state_coordinate("contact_J").unwrap(),
+            2.0,
+        );
+    }
+    // The thermal wrapper must not bypass the native stationary surface-work
+    // guard or reinterpret a sliding interface as a conductor heat source.
+    let mut forbidden = rest;
+    forbidden[original.contact_cells()[0][0]] = [0.0, 1.0, 0.0];
+    assert!(
+        layout
+            .step_moving_response_contact_candidate(
+                &initial,
+                0.5,
+                &original,
+                &drive,
+                fs_em::spatial::conduction::motion::SpatialConductionMotion {
+                    velocity_m_s: &forbidden,
+                    flux_density_t: &magnetic,
+                },
+                &surface,
+                limits(),
+                field_controls(),
+                controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .is_err()
+    );
+    assert_eq!(initial.time_s(), 0.0);
     let electrodes = [0.0, 2.0].map(|x| {
         original
             .exterior_faces()

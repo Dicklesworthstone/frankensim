@@ -14055,3 +14055,61 @@ spatial gas field, alternate caloric law, global time-error guarantee or
 experimental qualification. Four G1/G3/G4 regression groups are authored.
 The changed sources passed the pinned parser and an independent continuous
 cooling oracle was checked; native compilation and execution remain pending.
+
+
+### Nonlinear moving conduction and complete finite heat
+
+Planar conduction::response::motion and tetrahedral
+conduction::spatial::response::motion now close the original scalar electrical
+sources at T, phase, conductor-frame E' = E + u cross B and actual J inside the
+existing finite-enthalpy endpoint. Every thermal proposal refreshes the same
+complete pinned bulk and stationary-contact sources; the native response owner
+closes their electrical coordinates. Original caloric charts, volume routes,
+source applicability, contact heat partitions, native constitutive/contact
+refinement and total field-trial budgets remain binding. Rejected stencils do
+not advance either history or turn numerical residuals into physical heat.
+
+The accepted moving reports retain native laboratory and conductor-frame
+fields, current, Lorentz force, original source-closure diagnostics and separate
+work accounts. Only native local conductor-frame Joule loss and integrated
+stationary-contact loss are deposited into their original finite receivers,
+once. Terminal input and mechanical output remain signed and independently
+recovered: net_supplied_work_j is electrical input minus Lorentz output. It
+closes Joule heat during motoring, generation and braking, including negative
+terminal input or zero terminal supply. Positive mechanical work leaves the
+electrical/thermal system. The original thermal driver receives this net work,
+not laboratory E.J as an additional heat source.
+
+step_moving_conduction_response_candidate and
+step_spatial_moving_conduction_response_candidate accept any complete
+HeatAssembly and retain its typed source sample and errors. Thermal contacts,
+conduction layers, radiation, reservoirs and finite links evaluate the same
+endpoint. Both bulk and nonlinear-contact operating axes participate in
+field-independent thermal-source admission. Enclosure radiation and reciprocal
+finite links remain internal exchange, and their existing closed-balance gate
+is retained. Other graph electrical bindings refuse without an owner for their
+work. MaterialNetwork conveniences use the same respective endpoint paths.
+
+Planar motion uses held boundary voltage/distributed-current traces; 3D also
+supports the native direct grouped voltage/current/floating/mixed electrodes.
+Original electrical-contact adjacent cells must remain stationary, even with
+zero motional EMF. Motion elsewhere remains a prescribed fixed-domain snapshot:
+occupancy and geometry must stay represented by the original cells. These
+entry points supply no mesh advection, induction, magnetic storage, momentum
+evolution or sliding-interface work law. Continuation accepts the native source
+owner and finite thermal history together; source failure, exhausted budgets,
+failed energy gates and cancellation accept neither.
+
+Focused regressions cover nonlinear E'/J laws, native force and per-body energy
+across two intervals, source/speed sensitivity, generation and braking,
+stationary contact heat/velocity guards, complete radiation/contact provider
+samples and typed failures, shared budgets, cancellation and reusable input
+owners. Pinned rustfmt parsed/formatted the changed Rust files, and focused
+cross-module source/API reviews found no blocker. Extracted independent
+manufactured-reference functions were compiled and executed for six planar
+complete-assembly endpoints, ten 3D moving-source endpoints and six 3D complete
+heat endpoints. Those arithmetic references passed their stated gates; the
+worst planar two-body balance defect was below 1.4e-13 J. Full crate compilation
+and the newly authored integration regressions have not been executed in this
+environment. These checks do not establish mesh/time accuracy, uniqueness,
+global convergence or empirical material validation.

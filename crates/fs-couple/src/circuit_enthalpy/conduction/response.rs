@@ -4,6 +4,7 @@
 //! FEEC field, and heat from its actual local E.J integrals. There is no second
 //! thermal timeline, effective uniform resistance, or iterative-error heating.
 
+pub mod motion;
 pub(super) mod terminals;
 
 use super::*;
