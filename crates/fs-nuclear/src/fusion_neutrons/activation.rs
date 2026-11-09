@@ -14,6 +14,10 @@
 //! Q, product yield, charged-particle stopping or gamma deposition is inferred.
 //! Unbound neutron reactions remain explicitly fixed background interactions;
 //! their energy declaration creates no tracked activation or target depletion.
+//! When finite radioactive emitters are bound, their emitted neutron energy is
+//! an internal transfer debited only from original decay radiation. Capture
+//! radiation cannot fund it. Total kinetic injection remains diagnostic;
+//! external injection and internal births are reported separately.
 //!
 //! The original spatial owner's interval-mean neutron flux and target population
 //! approximation remains in force. Reaction-count convergence does not resolve
@@ -32,6 +36,9 @@ use crate::diffusion::burnup::{
 };
 use crate::diffusion::{DiffusionModel, DiffusionState};
 use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, sum};
+
+mod decay;
+use decay::DecayPartitions;
 
 /// Original coupled particle/nuclide budgets and one combined energy allowance.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +59,7 @@ pub struct FusionNeutronActivationState {
     kinetic: NeutronKineticState,
     bound_reactions: Arc<[bool]>,
     maximum_reaction_energy_j: Arc<[f64]>,
+    decay_partitions: Option<Arc<DecayPartitions>>,
     nuclear_released: Vec<[Accumulator; 3]>,
     released: Vec<[Accumulator; 3]>,
 }
@@ -68,6 +76,17 @@ pub struct FusionNeutronActivationStep {
     /// Sum of the original per-cell burnup energy channels [J]. Excludes both
     /// incident kinetic energy and prompt Q already owned by `kinetic`.
     pub nuclear_released: EnergyChannels,
+    /// Actual internal births from the original finite radioactive stock.
+    pub decay_neutrons: f64,
+    /// Original decay radiation transferred into neutron kinetic storage [J].
+    /// Already removed from combined exports; do not add it as material heat.
+    pub transferred_decay_neutron_energy_j: f64,
+    /// Accepted external injection, excluding internally emitted neutrons.
+    pub external_injected_neutrons: f64,
+    /// Kinetic energy supplied from outside this nuclear system [J].
+    pub external_injected_kinetic_energy_j: f64,
+    /// Noncancelling external/internal injection reconciliation [neutrons].
+    pub injection_number_roundoff: f64,
     /// Net signed nuclear conversion: original inventory event releases plus
     /// `kinetic.nuclear_reaction_energy_j` [J]. Endothermic reactions may make
     /// this negative. Future product-decay energy is not included.
@@ -79,7 +98,7 @@ pub struct FusionNeutronActivationStep {
     /// Conservative energy weighting of native neutron/material count defects:
     /// each cell's defect times its largest absolute event-energy coefficient.
     pub reaction_energy_defect_j: f64,
-    /// Final neutron energy - initial + all exports - injected kinetic energy
+    /// Final neutron energy - initial + all exports - external kinetic energy
     /// - generated nuclear-event energy [J].
     pub energy_balance_residual_j: f64,
     /// Noncancelling energy-account and coupling defect total [J].
@@ -115,6 +134,7 @@ impl FusionNeutronActivationState {
             &bound_reactions,
         )?;
         model.admit_active_reactions(spatial.neutrons().model())?;
+        let decay_partitions = DecayPartitions::new(&model, &spatial)?;
         let cells = spatial.inventories().len();
         let mut maximum_reaction_energy_j = spatial
             .inventories()
@@ -124,7 +144,10 @@ impl FusionNeutronActivationState {
                     .model()
                     .reactions()
                     .iter()
-                    .filter(|reaction| !matches!(reaction.rate, BurnupRate::Decay { .. }))
+                    .filter(|reaction| {
+                        decay_partitions.is_some()
+                            || !matches!(reaction.rate, BurnupRate::Decay { .. })
+                    })
                     .map(|reaction| reaction.energy_per_event.total_j())
                     .fold(0.0_f64, f64::max)
             })
@@ -149,6 +172,16 @@ impl FusionNeutronActivationState {
             maximum_reaction_energy_j[neutron.cell] =
                 maximum_reaction_energy_j[neutron.cell].max(checked(q.abs() + inventory_q)?);
         }
+        if decay_partitions.is_some() {
+            let maximum_neutron_energy = model
+                .group_energies_j()
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max);
+            for energy in &mut maximum_reaction_energy_j {
+                *energy = checked(*energy + maximum_neutron_energy)?;
+            }
+        }
         let kinetic = NeutronKineticState {
             model,
             neutrons: spatial.neutrons().clone(),
@@ -161,6 +194,7 @@ impl FusionNeutronActivationState {
             kinetic,
             bound_reactions: bound_reactions.into(),
             maximum_reaction_energy_j: maximum_reaction_energy_j.into(),
+            decay_partitions,
             nuclear_released: vec![[Accumulator::new(0.0); 3]; cells],
             released: vec![[Accumulator::new(0.0); 3]; cells],
         })
@@ -275,7 +309,43 @@ impl FusionNeutronActivationState {
             budget.energy_tolerance_j,
             &mut checkpoint,
         )?;
+        let transfer = self
+            .decay_partitions
+            .as_ref()
+            .map(|partitions| {
+                partitions.account(
+                    self.model(),
+                    self.inventories(),
+                    &spatial_step,
+                    duration_s,
+                    neutron_rates_s,
+                    &mut checkpoint,
+                )
+            })
+            .transpose()?;
+        let injection_number_roundoff =
+            transfer.as_ref().map_or(0.0, |value| value.number_roundoff);
+        if checked(spatial_step.neutrons.population_roundoff + injection_number_roundoff)?
+            > budget.spatial.diffusion.population_tolerance
+        {
+            return Err(FusionNeutronActivationError::Balance(
+                "external/internal neutron injection exceeds allowance",
+            ));
+        }
+        let external_injected_neutrons = transfer
+            .as_ref()
+            .map_or(spatial_step.neutrons.injected_neutrons, |value| {
+                value.external_neutrons
+            });
+        let external_injected_kinetic_energy_j = transfer
+            .as_ref()
+            .map_or(kinetic_step.injected_kinetic_energy_j, |value| {
+                value.external_energy_j
+            });
         let mut defect = Accumulator::new(kinetic_step.energy_roundoff_j);
+        if let Some(transfer) = &transfer {
+            defect.add(transfer.energy_roundoff_j)?;
+        }
         let mut generated = Accumulator::new(kinetic_step.nuclear_reaction_energy_j);
         let mut reaction_defect = Accumulator::new(0.0);
         let mut nuclear_totals = [Accumulator::new(0.0); 3];
@@ -293,10 +363,18 @@ impl FusionNeutronActivationState {
             reaction_defect.add(coupling)?;
             defect.add(count_defect.mul_add(event_energy, -coupling).abs())?;
             let nuclear_channels = channels(nuclear.released);
+            let mut exported_nuclear_channels = nuclear_channels;
+            if let Some(transfer) = &transfer {
+                exported_nuclear_channels[1] = transfer.remaining_radiation_j[cell];
+            }
             let kinetic_channels = channels(kinetic_step.cell_released[cell]);
             let mut combined = [Accumulator::new(0.0); 3];
             for channel in 0..3 {
-                defect.add(combined[channel].add(nuclear_channels[channel])?.abs())?;
+                defect.add(
+                    combined[channel]
+                        .add(exported_nuclear_channels[channel])?
+                        .abs(),
+                )?;
                 defect.add(combined[channel].add(kinetic_channels[channel])?.abs())?;
                 defect.add(
                     nuclear_released[cell][channel]
@@ -327,7 +405,7 @@ impl FusionNeutronActivationState {
             exports.deposited_j,
             exports.radiation_j,
             exports.escaped_j,
-            -kinetic_step.injected_kinetic_energy_j,
+            -external_injected_kinetic_energy_j,
             -generated.value(),
         ]))?;
         defect.add(energy_balance_residual_j.abs())?;
@@ -340,6 +418,13 @@ impl FusionNeutronActivationState {
             spatial: spatial_step,
             kinetic: kinetic_step,
             nuclear_released: crate::channel_values(nuclear_totals),
+            decay_neutrons: transfer.as_ref().map_or(0.0, |value| value.decay_neutrons),
+            transferred_decay_neutron_energy_j: transfer
+                .as_ref()
+                .map_or(0.0, |value| value.transferred_energy_j),
+            external_injected_neutrons,
+            external_injected_kinetic_energy_j,
+            injection_number_roundoff,
             nuclear_generated_energy_j: generated.value(),
             cell_released,
             released: exports,
@@ -354,6 +439,7 @@ impl FusionNeutronActivationState {
                 kinetic,
                 bound_reactions: Arc::clone(&self.bound_reactions),
                 maximum_reaction_energy_j: Arc::clone(&self.maximum_reaction_energy_j),
+                decay_partitions: self.decay_partitions.clone(),
                 nuclear_released,
                 released,
             },
@@ -394,16 +480,17 @@ impl FusionNeutronActivationState {
         let rates: Vec<_> = rates.into_iter().map(Accumulator::value).collect();
         let (next, mut report) =
             self.trial_with_rates(duration_s, temperatures_k, &rates, budget, &mut checkpoint)?;
-        let number_residual =
-            checked(report.spatial.neutrons.injected_neutrons - source_count.value())?;
+        let number_residual = checked(report.external_injected_neutrons - source_count.value())?;
         let energy_residual =
-            checked(report.kinetic.injected_kinetic_energy_j - source_energy.value())?;
+            checked(report.external_injected_kinetic_energy_j - source_energy.value())?;
         report.kinetic.fusion_number_residual = number_residual;
         report.kinetic.fusion_energy_residual_j = energy_residual;
         report.kinetic.energy_roundoff_j =
             checked(report.kinetic.energy_roundoff_j + energy_residual.abs())?;
         report.energy_roundoff_j = checked(report.energy_roundoff_j + energy_residual.abs())?;
-        if number_residual.abs() + report.spatial.neutrons.population_roundoff
+        if number_residual.abs()
+            + report.spatial.neutrons.population_roundoff
+            + report.injection_number_roundoff
             > budget.spatial.diffusion.population_tolerance
             || report.energy_roundoff_j > budget.energy_tolerance_j
         {

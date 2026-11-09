@@ -5,6 +5,9 @@
 //! heats material; the native kinetic, nuclear, radiation and leakage accounts
 //! remain separately accessible. Material temperatures feed the original
 //! microscopic capture tables, frozen over that interval.
+//! Bound radioactive emitters share that finite inventory and continue without
+//! external forcing. Their neutron kinetic energy is an internal transfer;
+//! source audits compare only the external injection to the supplied history.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -19,7 +22,7 @@ use crate::fusion_neutrons::activation::{
     FusionNeutronActivationBudget, FusionNeutronActivationError, FusionNeutronActivationState,
     FusionNeutronActivationStep,
 };
-use crate::fusion_neutrons::history::FusionNeutronHistory;
+use crate::fusion_neutrons::history::{FusionNeutronHistory, FusionNeutronHistoryLimits};
 use crate::{EnergyChannels, FissionError};
 use fs_qty::Time;
 use fs_thermal::enthalpy::{CellId, MaterialId};
@@ -81,6 +84,22 @@ impl FusionNeutronActivationCellStep {
 }
 
 impl FusionNeutronActivationCellSource {
+    /// Continue resident neutrons and finite radioactive emitters without any
+    /// imposed neutron source. An explicit empty history reuses the same
+    /// forcing, shared-cohort and native material transaction as supplied pulses.
+    pub fn bind_without_external_source(
+        state: Arc<FusionNeutronActivationState>,
+        accepted_time: Time,
+        cells: Vec<(CellId, MaterialId)>,
+    ) -> Result<Vec<Self>, FissionThermalError> {
+        let history = Arc::new(FusionNeutronHistory::project(
+            Arc::clone(state.model()),
+            Vec::new(),
+            FusionNeutronHistoryLimits::default(),
+        )?);
+        Self::bind_with_history(state, accepted_time, cells, history)
+    }
+
     /// Bind the supplied accepted material/neutron checkpoint to a finite pulse.
     /// Earlier irradiation and heat are never replayed. Every original neutron
     /// cell must map to one distinct active thermal cell of the original volume.
@@ -347,16 +366,16 @@ impl NuclearHeatSource for FusionNeutronActivationCellSource {
         )?;
         let (expected_number, expected_energy) =
             first.forcing.interval_moments(time_s, duration_s)?;
-        let source_number_residual =
-            finite(report.spatial.neutrons.injected_neutrons - expected_number)?;
+        let source_number_residual = finite(report.external_injected_neutrons - expected_number)?;
         let source_energy_residual_j =
-            finite(report.kinetic.injected_kinetic_energy_j - expected_energy)?;
+            finite(report.external_injected_kinetic_energy_j - expected_energy)?;
         let mut energy_defect = Sum::default();
         energy_defect.add(report.energy_roundoff_j)?;
         energy_defect.add(source_energy_residual_j.abs())?;
         let energy_roundoff_j = energy_defect.nonnegative_upper_bound()?;
         let mut neutron_defect = Sum::default();
         neutron_defect.add(report.spatial.neutrons.population_roundoff)?;
+        neutron_defect.add(report.injection_number_roundoff)?;
         neutron_defect.add(source_number_residual.abs())?;
         if energy_roundoff_j > budget.energy_tolerance_j
             || neutron_defect.nonnegative_upper_bound()?

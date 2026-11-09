@@ -3311,3 +3311,48 @@ fluence, original inventories and cell-resolved heat/radiation/escape.
 These checks retain the source, transport and spectral limits stated above;
 they do not establish temperature-dependent nuclear feedback or a full
 constellation/thermal-extension gate.
+
+## Finite radioactive emitters under neutron irradiation
+
+`diffusion::burnup::decay::BurnupDecayNeutronEmission` binds explicit parent-wide
+neutron yields to the exact original `BurnupModel`. Enabling these emissions on
+`DiffusionBurnupState` makes radioactive decay, capture, activation products and
+neutron emission consume the same finite stock. Each existing Picard iteration
+freezes the admitted microscopic-rate contraction and macroscopic neutron
+coefficients, then advances one positive neutron/nuclide block. Continuous
+neutron, precursor and nuclide feed, daughter birth and residence all retain
+their ages within that block. Neutron-source edges use only spontaneous-channel
+fractions; capture cannot create a fictitious radioactive neutron.
+
+Acceptance checks both original neutron-versus-nuclear event agreement and
+actual mean target population times actual integrated fluence. The latter
+prevents a newly born target and neutron field from falsely converging at zero.
+This closes the frozen-mean equations, not their unresolved nonlinear time
+correlation; physical interval refinement remains necessary. Existing explicit
+work, node, edge, iteration and cancellation limits apply to the entire joint
+system. Independent stationary cell inventories are admitted; material movement
+is explicitly refused by this binding. The combined node ceiling remains 64.
+
+The existing `FusionNeutronActivationState` accounts that same accepted neutron
+trajectory. Emitted kinetic energy is an internal transfer funded exclusively
+by original, rate-weighted decay radiation, never capture energy. Raw nuclear
+release remains diagnostic; combined heat, remaining radiation, escape and
+neutron storage are disjoint. External injection is reconstructed from authored
+external rates, with per-cell/group reconciliation rather than subtraction of
+large totals. Parent-count defects are converted by actual neutron yield before
+being charged to a neutron allowance.
+
+`FusionNeutronActivationCellSource::bind_without_external_source` uses the
+existing shared thermal cohort and an explicit empty forcing history. Resident
+neutrons and radioactive stock continue heating original materials after
+external forcing ends. Material temperature feeds existing microscopic data;
+original volumes, calorics, physical mass, clock and atomic publication remain
+owned by the thermal transaction.
+
+Thirteen new manufactured regressions exercise analytic birth ages, continuous
+parent/daughter feed, capture of the emitting stock against an independent
+nonlinear ODE with physical refinement, zero-target startup, rare emission,
+energy/source separation, native material heating, restart and refusal. The
+affected native test selection passed 114 tests, including the separately
+bound evaluated-spectrum extension; whole-workspace and full thermal-extension
+gates remain unclaimed.

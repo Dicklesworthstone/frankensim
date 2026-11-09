@@ -70,6 +70,7 @@ impl DiffusionBurnupState {
                 limits,
             },
             bindings: bindings.into(),
+            decay_neutrons: None,
         };
         state.validate_bindings()?;
         Ok(state)

@@ -19,6 +19,9 @@ use fs_thermochem::decay::DecayLawV1;
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL;
 use fs_thermochem::fusion::neutrons::FusionNeutronEmissionV1;
 
+#[path = "decay_tests.rs"]
+mod decay_tests;
+
 const NEUTRON_ENERGY: f64 = 4.0;
 const CAPTURE_Q: EnergyChannels = EnergyChannels {
     deposited_j: 4.0,

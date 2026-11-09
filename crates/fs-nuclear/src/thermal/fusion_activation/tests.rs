@@ -28,6 +28,9 @@ use fs_thermochem::fusion::neutrons::{FusionNeutronEmissionV1, FusionNeutronInte
 #[path = "adaptive_tests.rs"]
 mod adaptive_tests;
 
+#[path = "decay_tests.rs"]
+mod decay_tests;
+
 fn activation_budget() -> FusionNeutronActivationBudget {
     FusionNeutronActivationBudget {
         spatial: DiffusionBurnupBudget {

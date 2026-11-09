@@ -26,6 +26,9 @@ mod transport;
 pub use transport::DiffusionBurnupTransportStep;
 use transport::InventoryOwner;
 
+/// Radioactive emission from the same finite, neutron-reacting inventories.
+pub mod decay;
+
 #[cfg(test)]
 use super::DiffusionModel;
 
@@ -168,6 +171,7 @@ pub struct DiffusionBurnupState {
     neutrons: DiffusionState,
     inventories: InventoryOwner,
     bindings: Arc<[ReactionBinding]>,
+    decay_neutrons: Option<Arc<[Arc<decay::BurnupDecayNeutronEmission>]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +188,10 @@ pub struct DiffusionBurnupStep {
     /// Joint finite-material movement, when explicitly bound to this state.
     /// Nuclear-event reports and external supply remain in the original fields.
     pub transport: Option<DiffusionBurnupTransportStep>,
+    /// Internally emitted decay neutrons, cell-major then group. These births
+    /// are included in the neutron owner's total injected counts, separately
+    /// from externally prescribed sources. None means no emission binding.
+    pub decay_neutron_counts: Option<Vec<Vec<f64>>>,
     pub iterations: usize,
     pub reaction_defect: f64,
     pub reaction_defect_by_cell: Vec<f64>,
@@ -202,6 +210,7 @@ impl DiffusionBurnupState {
             neutrons,
             inventories: InventoryOwner::Independent(inventories),
             bindings: bindings.into(),
+            decay_neutrons: None,
         };
         state.validate_bindings()?;
         Ok(state)
@@ -366,18 +375,24 @@ impl DiffusionBurnupState {
         // Admit current original budgets and all table domains even at zero flux.
         // Processed microscopic coefficients are evaluated once per trial, not
         // again during each nonlinear population iterate.
+        let mut spontaneous_rates = Vec::new();
+        let mut flux_guesses = Vec::new();
         for (cell, inventory) in inventories.iter().enumerate() {
             checkpoint()?;
             let zero_flux = crate::irradiation::GroupFlux::new(
                 Arc::clone(inventory.model().groups()),
                 vec![0.0; inventory.model().groups().len()],
             )?;
-            inventory.model().rate_constants(
+            let rates = inventory.model().rate_constants(
                 &zero_flux,
                 temperatures_k[cell],
                 budget.burnup.limits,
                 &mut checkpoint,
             )?;
+            if self.decay_neutrons.is_some() {
+                spontaneous_rates.push(rates);
+                flux_guesses.push(zero_flux);
+            }
         }
         let mut microscopic = Vec::with_capacity(self.bindings.len());
         for binding in self.bindings.iter() {
@@ -444,27 +459,42 @@ impl DiffusionBurnupState {
                 )?)
             };
             let initial = self.neutrons.rebind_model(model)?;
-            let (neutrons, neutron_step) = if let Some(sources) = sources {
-                initial.trial_with_sources(
-                    duration_s,
-                    &sources.neutron_rates_s,
-                    &sources.precursor_rates_s,
-                    budget.diffusion,
-                    &mut checkpoint,
-                )?
-            } else {
-                initial.trial(duration_s, budget.diffusion, &mut checkpoint)?
-            };
-            // The joint owner moves and reacts every nuclide on this same
-            // interval; each Picard iterate restarts the original full history.
-            let trial = self.inventories.trial(
-                duration_s,
-                &neutron_step.mean_fluxes,
-                temperatures_k,
-                sources.map(|sources| sources.nuclide_rates_s.as_slice()),
-                budget.burnup,
-                &mut checkpoint,
-            )?;
+            let (neutrons, neutron_step, trial, decay_neutron_counts) =
+                if self.decay_neutrons.is_some() {
+                    let (neutrons, report, trial, births) = self.trial_decay_neutrons(
+                        &initial,
+                        duration_s,
+                        &flux_guesses,
+                        &spontaneous_rates,
+                        &microscopic,
+                        sources,
+                        budget,
+                        &mut checkpoint,
+                    )?;
+                    (neutrons, report, trial, Some(births))
+                } else {
+                    let (neutrons, neutron_step) = if let Some(sources) = sources {
+                        initial.trial_with_sources(
+                            duration_s,
+                            &sources.neutron_rates_s,
+                            &sources.precursor_rates_s,
+                            budget.diffusion,
+                            &mut checkpoint,
+                        )?
+                    } else {
+                        initial.trial(duration_s, budget.diffusion, &mut checkpoint)?
+                    };
+                    // Every iterate restarts the original complete history.
+                    let trial = self.inventories.trial(
+                        duration_s,
+                        &neutron_step.mean_fluxes,
+                        temperatures_k,
+                        sources.map(|sources| sources.nuclide_rates_s.as_slice()),
+                        budget.burnup,
+                        &mut checkpoint,
+                    )?;
+                    (neutrons, neutron_step, trial, None)
+                };
             let mut by_reaction: Vec<Vec<Accumulator>> = inventories
                 .iter()
                 .map(|inventory| vec![Accumulator::new(0.0); inventory.model().reactions().len()])
@@ -477,8 +507,23 @@ impl DiffusionBurnupState {
             }
             let mut total = Accumulator::new(0.0);
             let mut defects = Vec::with_capacity(inventories.len());
+            // Both trial rates may initially vanish for a newly born target
+            // irradiated by a newly born neutron. Compare with their ACTUAL
+            // interval means as well, so zero/zero event agreement cannot
+            // falsely accept that inactive initial guess.
+            let mean_defects = if self.decay_neutrons.is_some() {
+                decay::mean_reaction_defects(
+                    self,
+                    &neutron_step,
+                    &trial.means,
+                    &microscopic,
+                    &mut checkpoint,
+                )?
+            } else {
+                vec![0.0; inventories.len()]
+            };
             for (cell, inventory) in inventories.iter().enumerate() {
-                let mut defect = Accumulator::new(0.0);
+                let mut defect = Accumulator::new(mean_defects[cell]);
                 for (index, reaction) in inventory.model().reactions().iter().enumerate() {
                     checkpoint()?;
                     if !matches!(reaction.rate, BurnupRate::Decay { .. }) {
@@ -500,6 +545,7 @@ impl DiffusionBurnupState {
                         neutrons,
                         inventories: trial.owner,
                         bindings: Arc::clone(&self.bindings),
+                        decay_neutrons: self.decay_neutrons.clone(),
                     },
                     DiffusionBurnupStep {
                         neutrons: neutron_step,
@@ -507,11 +553,27 @@ impl DiffusionBurnupState {
                         produced_nuclei: trial.produced,
                         produced_nuclei_by_cell: trial.produced_by_cell,
                         transport: trial.transport,
+                        decay_neutron_counts,
                         iterations: iteration,
                         reaction_defect: last_defect,
                         reaction_defect_by_cell: defects,
                     },
                 ));
+            }
+            if self.decay_neutrons.is_some() {
+                for (old, new) in flux_guesses.iter_mut().zip(&neutron_step.mean_fluxes) {
+                    let mut values = Vec::with_capacity(new.values_m2_s().len());
+                    for (&old, &new) in old.values_m2_s().iter().zip(new.values_m2_s()) {
+                        checkpoint()?;
+                        let value = if old <= new {
+                            (new - old).mul_add(budget.relaxation, old)
+                        } else {
+                            (old - new).mul_add(1.0 - budget.relaxation, new)
+                        };
+                        values.push(value);
+                    }
+                    *old = crate::irradiation::GroupFlux::new(Arc::clone(old.groups()), values)?;
+                }
             }
             for (old, new) in means.iter_mut().zip(trial.means) {
                 checkpoint()?;

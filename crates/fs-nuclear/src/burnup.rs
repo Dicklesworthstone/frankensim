@@ -158,7 +158,7 @@ pub struct BurnupBudget {
 }
 
 impl BurnupBudget {
-    fn validate(self) -> Result<(), BurnupError> {
+    pub(crate) fn validate(self) -> Result<(), BurnupError> {
         if !nonnegative(self.nuclei_tolerance) || !nonnegative(self.energy_tolerance_j) {
             return Err(BurnupError::Invalid(
                 "finite nonnegative burnup account tolerances required",
@@ -176,10 +176,10 @@ pub struct BurnupModel {
 }
 
 // Both homogeneous and production maps retain the same physical channel split.
-struct ReactionChannels {
-    removal_rates: Vec<f64>,
-    fractions: Vec<f64>,
-    edges: Vec<ReactionEdge>,
+pub(crate) struct ReactionChannels {
+    pub(crate) removal_rates: Vec<f64>,
+    pub(crate) fractions: Vec<f64>,
+    pub(crate) edges: Vec<ReactionEdge>,
 }
 
 // Joint compartment propagation supplies physical reaction counts from each
@@ -473,7 +473,7 @@ impl BurnupModel {
 
     // One channel compiler serves both numerical map families. Rates have
     // already been admitted and collapsed at the actual flux and temperature.
-    fn prepare_channels(
+    pub(crate) fn prepare_channels(
         &self,
         rates: &[f64],
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
@@ -771,7 +771,7 @@ impl BurnupInventory {
 
     // Both map families share the physical channel/product/energy ledger. A
     // supplied nucleus enters this account once, separately from reaction yields.
-    fn account_evolution(
+    pub(crate) fn account_evolution(
         &self,
         evolved: ReactionAdvance,
         duration_s: f64,
