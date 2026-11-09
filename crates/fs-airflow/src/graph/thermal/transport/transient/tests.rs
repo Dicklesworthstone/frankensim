@@ -1,6 +1,7 @@
 //! Native hydraulic -> original thermal inventory -> independently checked heat.
 mod scheduled;
 mod adaptive;
+mod affine;
 
 use super::*;
 use crate::graph::{GraphSolution, LossGraph};

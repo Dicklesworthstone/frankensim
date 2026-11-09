@@ -541,6 +541,33 @@ impl DistributedGraphInventory {
         Ok(transport)
     }
 
+    /// Integrate both signs of the original affine branch histories on every
+    /// authored pipe segment. The original finite cells and limited face
+    /// reconstruction remain the sole enthalpy owners. A reversed segment
+    /// adds one native transfer, with ID `interior_connection_count + index`;
+    /// both construction and call connection budgets include these transfers.
+    /// External inlet and outlet rates each retain their actual swept mass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_affine(
+        &self,
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        initial_m3_s: &[f64],
+        mean_m3_s: &[f64],
+        final_m3_s: &[f64],
+        thermal: &DepositionSimulation<'_>,
+        boundaries: Vec<MassBoundary>,
+        maximum_connections: usize,
+    ) -> Result<GraphEnthalpyTransport, TransientTransportError> {
+        let rates = super::affine::admit_rates(cx, graph, initial_m3_s, mean_m3_s, final_m3_s)?;
+        let streams = super::affine::node_mass_streams(cx, graph, self.reference_density,
+            initial_m3_s, mean_m3_s, final_m3_s)?;
+        super::affine::admit_boundaries(cx, &self.node_cells, &streams, &boundaries)?;
+        let base = self.bind(cx, graph, mean_m3_s, thermal, boundaries, maximum_connections)?;
+        let expanded: Vec<_> = self.connections.iter().map(|&(_, _, branch)| rates[branch]).collect();
+        base.with_affine_rates(cx, thermal, self.reference_density, &expanded)
+    }
+
     fn admit_rates(&self, rates: &[f64]) -> Result<(), TransientTransportError> {
         if rates.len() != self.branch_cells.len() || rates.iter().any(|v| !v.is_finite()) {
             Err(TransientTransportError::Invalid(

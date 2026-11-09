@@ -6791,3 +6791,45 @@ Per-branch reports retain hydraulic, shaft and electrical work, both losses, sep
 This composition retains fixed original density/masses and original caloric identity; it supplies neither expansion nor shaft dynamics. Time staging remains original endpoint thermal feedback with native midpoint momentum/source quadrature.
 
 Verification: the pinned formatter parsed and checked all eight integration files. Four focused native regression definitions cover zero-flow heating with distinct/shared recipients and independent callback heat, nonlinear equipment/annular/caloric feedback against an independent scalar/matrix oracle, time-varying electrical input resolved while cooling holds all states fixed, and missing/foreign/late destination refusal with retry. These integration tests were statically reviewed but not compiled or executed after the previous numerical-source projection was lost. The separately compiled original native power leaf's small-heat/large-throughput regression passed; no full Cargo/native runtime or current regional numerical test pass is claimed.
+
+
+## Direction-resolved affine convection transport
+
+`GraphEnthalpyTransport::from_affine_volume_flows`,
+`DistributedGraphInventory::bind_affine`, and
+`inertial::advance_inertial_graph_affine` integrate the positive and negative
+swept volumes of the original native affine flow trajectory separately. Each
+reversing connection contributes two original conservative upwind transfers
+carrying their respective donor enthalpies. Zero signed mean flow therefore
+does not suppress finite heat exchange. Ordinary signed-mean APIs remain
+unchanged, and accepted inertial reports identify the selected quadrature.
+The new joint entry is opt-in for one interval; existing adaptive entries
+continue to select SignedMean explicitly.
+
+External streams remain explicit. The node helper first sums the complete
+incident affine histories, then integrates that node's directional external
+flow. Each inlet and outlet must match its own swept mass to arithmetic
+accuracy, and each entering stream retains its authored original caloric
+state. Directional admission scales only with that actual/required stream and
+preserves zero versus nonzero directions: a much larger through-flow cannot
+hide missing entering heat or authorize a fictitious reservoir. Added reverse
+transfers consume native connection bounds, outgoing-mass/CFL accounting,
+source admission, and local/global energy acceptance. Failed queries, work
+admission or cancellation return no replacement physical state.
+
+The scaled analytic lobe calculation avoids squared physical rates and
+overflowing opposite endpoint magnitudes; unsupported means or unrepresentable
+nonzero lobes refuse. Thermal donor traces remain at the native endpoint, so
+this is first-order coupled transport, not exact time-ordered mixing or a new
+boundary-layer model. Spatial/temporal refinement and each correlation's full
+flow-envelope admission remain required.
+
+Four exact production-rate test groups compiled and passed with the pinned
+compiler. Eight native graph integration groups specify closed/open reversals,
+distinct entering enthalpies, finite inventory, native momentum coupling,
+reconstruction/CFL, parity, and transactional refusal/retry, including a small
+reversal alongside a 1e16 circulation. They passed parsing but remain
+uncompiled/unexecuted with the unavailable workspace constellation. Two bounded
+probes against original thermal modules separately executed the gross transfer
+and reconstructed-Euler oracle checks; they do not establish fs-airflow
+integration execution. New-file formatting and focused diff checks passed.

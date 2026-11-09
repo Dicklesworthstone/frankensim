@@ -1,4 +1,5 @@
 //! Independent finite-network roots exercise the actual momentum and heat owners.
+mod affine;
 use super::*;
 use crate::graph::inertial::InertialBranch;
 use crate::graph::porous::{LinearLossElement, LinearLossResistance, PassiveBranch};

@@ -58,6 +58,16 @@ pub struct InertialGraphHeat<T> {
     pub heat: BoundaryStepCoefficients<T>,
 }
 
+/// Temporal mass-flux quadrature used by the original native thermal residual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InertialAdvectionRule {
+    /// Original midpoint-rate upwinding. Refine to locate interval reversals.
+    SignedMean,
+    /// Integrate forward/reverse swept volume of the native affine trajectory
+    /// separately, with each original donor enthalpy held at the endpoint.
+    AffineSwept,
+}
+
 /// Bounded joint nonlinear work and independent physical acceptance thresholds.
 #[derive(Clone, Copy, Debug)]
 pub struct InertialThermalControls {
@@ -84,6 +94,7 @@ pub struct InertialThermalControls {
 /// same proposal. Mechanical work is not silently deposited as sensible heat.
 #[derive(Debug)]
 pub struct InertialThermalReport<P, T> {
+    pub advection_rule: InertialAdvectionRule,
     pub hydraulics: InertialGraphReport,
     pub sources: P,
     pub heat: T,
@@ -188,6 +199,7 @@ pub fn advance_inertial_graph<'m, P, T, E>(
         cx,
         problem,
         None,
+        InertialAdvectionRule::SignedMean,
         thermal,
         target_s,
         controls,
@@ -239,6 +251,7 @@ pub fn advance_inertial_graph_distributed<'m, P, T, E>(
         cx,
         problem,
         Some(inventory),
+        InertialAdvectionRule::SignedMean,
         thermal,
         target_s,
         controls,
@@ -249,11 +262,57 @@ pub fn advance_inertial_graph_distributed<'m, P, T, E>(
     )
 }
 
+/// Advance retained momentum with both swept directions at a flow reversal.
+///
+/// This calls the SAME joint native momentum/enthalpy residual and acceptance
+/// gates as [`advance_inertial_graph`]. `inventory` optionally binds the same
+/// original pipe cells as [`advance_inertial_graph_distributed`]. Every native
+/// affine trajectory contributes its exact positive and negative swept volume
+/// to separate native upwind transfers. A zero signed mean can therefore still
+/// exchange heat between different original donor states.
+///
+/// `exchange` must supply both directional external mass streams. Use
+/// [`super::affine::node_mass_streams`] on the report's initial/average/final
+/// rates to obtain their required rates, and author each inlet's own original
+/// enthalpy. Supplying only net rates across an external reversal refuses.
+/// Existing source/correlation checks still inspect the complete flow envelope;
+/// this quadrature does not authorize a law through unsupported stagnation.
+///
+/// This integrates a held-endpoint thermal flux, not the time ordering of
+/// mixing or of boundary-layer evolution. The coupled method remains first
+/// order. Additional reverse transfers consume the existing connection bound.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_inertial_graph_affine<'m, P, T, E>(
+    cx: &Cx<'_>,
+    problem: &InertialThermalProblem<'_>,
+    inventory: Option<&DistributedGraphInventory>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: InertialThermalControls,
+    energy_guess_j: &[f64],
+    average_flow_guess_m3_s: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &[f64]) -> Result<ResolvedInertialGraph<P>, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &P,
+        &InertialGraphReport,
+    ) -> Result<InertialGraphHeat<T>, E>,
+) -> Result<
+    (InertialGraph, DepositionSimulation<'m>, InertialThermalReport<P, T>),
+    InertialThermalError<E>,
+> {
+    advance_inertial_graph_with_inventory(cx, problem, inventory,
+        InertialAdvectionRule::AffineSwept, thermal, target_s, controls,
+        energy_guess_j, average_flow_guess_m3_s, resolve, exchange)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn advance_inertial_graph_with_inventory<'m, P, T, E>(
     cx: &Cx<'_>,
     problem: &InertialThermalProblem<'_>,
     inventory: Option<&DistributedGraphInventory>,
+    advection_rule: InertialAdvectionRule,
     thermal: &DepositionSimulation<'m>,
     target_s: f64,
     controls: InertialThermalControls,
@@ -403,8 +462,23 @@ fn advance_inertial_graph_with_inventory<'m, P, T, E>(
                 let coefficients = exchange(cx, candidate, &response.payload, momentum.report())
                     .map_err(InertialThermalError::Exchange)?;
                 thermal_checkpoint(cx)?;
-                let binding = match inventory {
-                    Some(inventory) => inventory.bind(
+                let binding = match (inventory, advection_rule) {
+                    (Some(inventory), InertialAdvectionRule::AffineSwept) => inventory.bind_affine(
+                        cx, &response.graph,
+                        &momentum.report().initial_flows_m3_s,
+                        &momentum.report().average_volume_flows_m3_s,
+                        &momentum.report().final_flows_m3_s,
+                        candidate, coefficients.mass_boundaries, problem.maximum_connections,
+                    )?,
+                    (None, InertialAdvectionRule::AffineSwept) => GraphEnthalpyTransport::from_affine_volume_flows(
+                        cx, &response.graph,
+                        &momentum.report().initial_flows_m3_s,
+                        &momentum.report().average_volume_flows_m3_s,
+                        &momentum.report().final_flows_m3_s,
+                        problem.momentum.reference_density(), problem.node_cells,
+                        candidate, coefficients.mass_boundaries, problem.maximum_connections,
+                    )?,
+                    (Some(inventory), InertialAdvectionRule::SignedMean) => inventory.bind(
                         cx,
                         &response.graph,
                         &momentum.report().average_volume_flows_m3_s,
@@ -412,7 +486,7 @@ fn advance_inertial_graph_with_inventory<'m, P, T, E>(
                         coefficients.mass_boundaries,
                         problem.maximum_connections,
                     )?,
-                    None => GraphEnthalpyTransport::from_volume_flows(
+                    (None, InertialAdvectionRule::SignedMean) => GraphEnthalpyTransport::from_volume_flows(
                         cx,
                         &response.graph,
                         &momentum.report().average_volume_flows_m3_s,
@@ -539,6 +613,7 @@ fn advance_inertial_graph_with_inventory<'m, P, T, E>(
         next_momentum,
         next_thermal,
         InertialThermalReport {
+            advection_rule,
             hydraulics,
             sources: prepared.sources,
             heat: prepared.heat,
