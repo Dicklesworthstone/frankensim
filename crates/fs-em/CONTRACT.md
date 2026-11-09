@@ -1572,13 +1572,41 @@ geometry scaling, actual local heat and bounded/cancelled rejection cases.
 
 Fields and anisotropic axes are local radial/axial components with a decoupled
 azimuthal direction. A partial angular span is a symmetry sector. This owner
-does not add azimuthal current, induction, Hall response, contact transfer,
+does not add azimuthal current, induction, Hall response,
 motion or thermal evolution. Its private core exposes no planar motion API.
 The G1/G3/G4 tests in `tests/conduction/axisymmetric.rs` use analytical axial
 cylinders, layered logarithmic coaxial resistance, exact disk-current moments,
 rotated meridional tensors, metric/axis refusals and cancellation/retry. These
 are implementation checks, not measured-material qualification or continuum
 error enclosures; executing them remains a separate validation obligation.
+
+## Axisymmetric electrical material contacts
+
+`AxisymmetricConduction::new_with_contacts` and
+`new_with_phase_contacts` retain the original ordered interface sources and
+bulk material bindings on matching surfaces of revolution. Finite R'' in
+ohm m2 produces a resolved voltage jump, local normal current and separate
+interface Joule heat. Perfect contact uses shared vertices. The zero-area
+symmetry axis cannot supply a physical contact surface.
+
+The shared native surface operator caches its exact radial P1 moments with
+the conductivity stiffness. For g=A/R'' and q_i=r_i/(r_0+r_1), its entries are
+g/6 times [[1+2q_0,1],[1,1+2q_1]]. Assembly, current and the positive-square
+heat integral use these same moments. Radius normalization avoids overflowing
+the radius sum. Planar weights retain the previous planar arithmetic.
+Resistance and multi-terminal recovery include the contact topology and heat
+without a fictitious thin volume or an extra field solve at each drive.
+
+`cell_power_w()` reports bulk loss; `contact_response()` reports each
+interface loss; `power_w()` includes both. Thermal coupling must refresh the
+original interface state and explicitly partition surface heat between its
+receivers. No partition, thermal contact conductance, electrical surface
+storage or moving-interface law is inferred.
+
+The focused axisymmetric contact tests cover exact axial disk/annular
+resistance, nonuniform radial current and heat, coaxial refinement, source
+pressure, orientation, large common bias, matrix recovery, geometry/budget
+refusal and cancellation/retry. They use manufactured source laws.
 
 ## Three-dimensional Ohmic transport and local Joule heat
 

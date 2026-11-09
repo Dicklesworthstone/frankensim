@@ -17,6 +17,8 @@
 //! Material changes require a newly prepared source-bound operator. The private
 //! scalar core cannot escape through the planar motion or contact APIs.
 
+mod contact;
+
 use super::{
     ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField,
     ConductionPowerSource, PlanarConduction, PlanarResistance, poll, scalar_potential,
@@ -286,10 +288,12 @@ impl<C: PlanarOhmicResponse> AxisymmetricConductionField<'_, C> {
 
     /// Integral(E.J dV) on each original swept cell [W]. This is the same
     /// irreversible loss as the native resistor, not a second thermal credit.
+    /// Interface heat is reported separately by `contact_response()`.
     pub fn cell_power_w(&self) -> &[f64] {
         self.field.cell_power_w()
     }
 
+    /// Total irreversible heat in original bulk cells and material contacts [W].
     pub fn power_w(&self) -> f64 {
         self.field.power_w()
     }

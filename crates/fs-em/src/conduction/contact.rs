@@ -34,6 +34,52 @@ pub struct ConductionContactResponse {
     pub power_w: f64,
 }
 
+// Cache the exact two-node surface moments once with the native stiffness.
+// The endpoint weights are 1,1 for a planar edge and 2*r_i/(r_0+r_1)
+// for a surface of revolution. With g=A/R'', the mass entries are
+// g/6 * [[1+w_0, 1], [1, 1+w_1]]. Row sums integrate current;
+// the positive-square quadratic form integrates irreversible heat.
+#[derive(Clone)]
+pub(super) struct ContactConductance {
+    total_s: f64,
+    endpoint_weights: [f64; 2],
+}
+
+impl ContactConductance {
+    fn matrix_entry(&self, i: usize, j: usize) -> f64 {
+        (self.total_s / 6.0)
+            * if i == j {
+                1.0 + self.endpoint_weights[i]
+            } else {
+                1.0
+            }
+    }
+
+    fn current_a(&self, jump: [f64; 2]) -> f64 {
+        self.total_s
+            * (((2.0 + self.endpoint_weights[0]) / 6.0) * jump[0]
+                + ((2.0 + self.endpoint_weights[1]) / 6.0) * jump[1])
+    }
+
+    fn power_w(&self, jump: [f64; 2]) -> f64 {
+        let [d0, d1] = jump;
+        let sum = d0 + d1;
+        (self.total_s / 6.0)
+            * (self.endpoint_weights[0] * d0 * d0
+                + self.endpoint_weights[1] * d1 * d1
+                + sum * sum)
+    }
+}
+
+// The trace has positive swept area and nonnegative radii. Scaling before
+// summing keeps physical moments usable when r_0+r_1 would overflow.
+fn radial_contact_weights(radii: [f64; 2]) -> [f64; 2] {
+    let scale = radii[0].max(radii[1]);
+    let scaled = radii.map(|r| r / scale);
+    let sum = scaled[0] + scaled[1];
+    scaled.map(|r| 2.0 * (r / sum))
+}
+
 fn edge_key(mut vertices: [usize; 2]) -> [usize; 2] {
     vertices.sort_unstable();
     vertices
@@ -185,6 +231,41 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         ) -> Result<f64, ConductionError>,
     ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(ConductionError::Invalid(
+                "this conductor owner requires a planar metric",
+            ));
+        }
+        Self::assemble_metric_with_admitted_contacts(
+            mesh,
+            conductors,
+            contacts,
+            liquid_mass_fraction_axes,
+            limits,
+            cancelled,
+            admit,
+            admit_contact,
+        )
+    }
+
+    // Metric-specific facades admit their geometry before entering this shared
+    // source, topology, surface-moment and field-recovery owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_metric_with_admitted_contacts(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+        admit_contact: impl Fn(
+            usize,
+            &ResolvedElectricalInterface,
+            &[Option<String>; 2],
+        ) -> Result<f64, ConductionError>,
+    ) -> Result<Self, ConductionError> {
+        poll(cancelled)?;
         if liquid_mass_fraction_axes.len() != contacts.len() {
             return Err(ConductionError::Invalid(
                 "one phase-coordinate row per electrical contact required",
@@ -201,7 +282,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 "bulk and contact assembly exceed the declared triplet capacity",
             ));
         }
-        let mut problem = Self::assemble(mesh, conductors, limits, cancelled, admit)?;
+        let mut problem = Self::assemble_metric(mesh, conductors, limits, cancelled, admit)?;
         if contacts.is_empty() {
             return Ok(problem);
         }
@@ -317,9 +398,17 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                     "contact conductance is not representable",
                 ));
             }
+            let endpoint_weights = match problem.mesh.metric() {
+                Metric2::Planar { .. } => [1.0; 2],
+                Metric2::Axisymmetric { .. } => radial_contact_weights([a[0], b[0]]),
+            };
+            let moments = ContactConductance {
+                total_s: conductance,
+                endpoint_weights,
+            };
             for i in 0..2 {
                 for j in 0..2 {
-                    let value = sixth * if i == j { 2.0 } else { 1.0 };
+                    let value = finite(moments.matrix_entry(i, j))?;
                     let ai = contact.first_vertices[i];
                     let aj = contact.first_vertices[j];
                     let bi = contact.second_vertices[i];
@@ -330,7 +419,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                     matrix.push(bi, aj, -value);
                 }
             }
-            problem.contact_conductance_s.push(conductance);
+            problem.contact_conductance_s.push(moments);
         }
         poll(cancelled)?;
         problem.stiffness = matrix.assemble();
@@ -445,15 +534,14 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<ConductionContactResponse>, ConductionError> {
         let mut response = Vec::with_capacity(self.contacts.len());
-        for (contact, &conductance) in self.contacts.iter().zip(&self.contact_conductance_s) {
+        for (contact, moments) in self.contacts.iter().zip(&self.contact_conductance_s) {
             poll(cancelled)?;
             let [a0, a1] = contact.first_vertices;
             let [b0, b1] = contact.second_vertices;
             let d0 = finite(voltage[a0] - voltage[b0])?;
             let d1 = finite(voltage[a1] - voltage[b1])?;
             let resistance = contact.source.resistance_ohm_m2();
-            let sum = finite(d0 + d1)?;
-            let power = finite((conductance / 6.0) * (d0 * d0 + d1 * d1 + sum * sum))?;
+            let power = finite(moments.power_w([d0, d1]))?;
             if power < 0.0 || ((d0 != 0.0 || d1 != 0.0) && power == 0.0) {
                 return Err(ConductionError::Invalid(
                     "contact Joule heat is not representably positive",
@@ -462,7 +550,7 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             response.push(ConductionContactResponse {
                 voltage_jump_v: [d0, d1],
                 current_density_a_m2: [finite(d0 / resistance)?, finite(d1 / resistance)?],
-                current_a: finite(conductance * (0.5 * d0 + 0.5 * d1))?,
+                current_a: finite(moments.current_a([d0, d1]))?,
                 power_w: power,
             });
         }

@@ -184,7 +184,7 @@ pub struct PlanarConduction<C = ResolvedConductorState> {
     stiffness: Csr,
     contacts: Vec<ConductionContact>,
     contact_liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
-    contact_conductance_s: Vec<f64>,
+    contact_conductance_s: Vec<contact::ContactConductance>,
     contact_edges: BTreeSet<[usize; 2]>,
 }
 
