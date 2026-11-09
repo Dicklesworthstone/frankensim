@@ -1765,6 +1765,63 @@ certificate. Native transport order and nonlinear split error require refinement
 
 
 
+## Moving rigid damper networks on the finite thermal timeline
+
+`rigid_damping_heat::advance_candidate` composes the native full-spatial
+`step_viscous_network_with_loads` with `DepositionSimulation::advance_observed`.
+The caller supplies the original body states, complete inertias, material arms,
+passive six-coordinate connector laws and held external forces/couples/gravity.
+Their accepted time must match the original thermal clock. Every actual thermal
+interval, after CFL restriction and exact event/source-transition clipping,
+receives exactly one native mechanical step of that same duration.
+
+One authored `BTreeMap<CellId, fraction>` belongs to each original connector.
+Fractions are finite, nonnegative and total at most one; compensated admission
+retains sub-ulp overspend. Different edges may share finite receivers. Their
+independently integrated source heat accumulates once per receiving cell and
+becomes average watts over the actual accepted interval. The remainder stays
+explicitly unallocated. Neither a physical partition nor a connector-to-material
+correspondence is inferred. Existing nonlinear H, fixed-volume U and declared
+sensible-storage laws retain their original masses, coordinate bases and caloric
+inversions. No instantaneous heat-capacity temperature update or new store is used.
+
+The original observer's source, conductance, ambient, reservoir, pair-transfer,
+interval-source, transition, event and timestep hooks remain active. Every mapped
+receiver is checked on the actual interval, after all same-time births. Native
+authored boundaries and links are restored by their original owner. Each pending
+mechanical receipt becomes accepted only in the matching thermal `step` callback.
+The native whole-call candidate discards bodies, heat and observer history together
+after any mechanical, caloric, observer, conservation, resource or cancellation
+refusal. Observer Clone must deeply isolate mutable physical history; external
+callback side effects retain the original observer contract.
+
+The raw thermal audit includes generated heat once as subsystem input. The combined
+report separates actual edge heat, represented deposited heat, unrouted outflow,
+outside thermal supply, original mechanical work, gravity potential storage and
+native numerical defects. Per-cell rate conversion and merging with an existing
+interval source retain their absolute handoff error. Small physical heat cannot
+silently disappear beside a large outside source. Complete mechanical/thermal
+energy residuals, accumulated absolute interval mechanical defects and absolute
+handoff defects each obey the explicit whole-call joule allowance; numerical
+defects never become heat.
+
+Mechanical laws, inertias and held loads remain frozen over this call. The caller
+owns their validity interval and any subsequent material refresh. This is finite
+self-heating, not a temperature-feedback damping law, thermomechanical expansion,
+phase-dependent mechanics or moving thermal geometry. The existing native thermal
+order, geometry splitting and explicit source subdivision still require refinement.
+
+Additional routing work is O(bindings * log(receivers)) per native interval, with
+bounded edge arrays and receiver maps. Initial bodies and caller observer remain
+borrowed until native candidate work begins; observer physical history is cloned
+once, and accepted body banks move from the native receipt. The original thermal
+clone and native network allocations remain; no full trajectory, dense global
+damping matrix or second thermal solver is constructed. Eight native integration
+regressions cover independent exponential losses, shared nonlinear H/U receivers,
+partial routing, all observer hooks, event-clipped intervals, native zero-law
+motion, same-time births, empty thermal inventory, precision/refusal boundaries
+and late-failure/cancellation retry.
+
 ## Explicit rigid-impact loss heating in original finite caloric cells
 
 `friction_heat::directional::impact::heat::apply_source_rigid_elliptic_impacts_with_heat`

@@ -1,0 +1,650 @@
+//! Moving spatial damper networks on the original finite thermal timeline.
+//!
+//! The native mechanical owner supplies each connector's integrated physical
+//! loss. Explicit cell fractions route that loss as interval-average watts on
+//! the SAME interval selected by the native thermal transport/event owner.
+//! Original caloric laws convert energy to temperature; numerical mechanical
+//! defects never heat a receiver. Unrouted loss remains an explicit outflow.
+//!
+//! Inertias, damping forms, material arms and external loads are held for this
+//! advance. The caller owns their spatial correspondence and temperature domain.
+//! This is finite self-heating, not temperature-dependent damping, reversible
+//! thermoelastic work or an inferred heat partition. Thermal geometry remains
+//! caller-owned. Native transport order and moving-geometry splitting require
+//! temporal and spatial refinement independently of conservation tolerances.
+
+use fs_math::{dd::Dd, eft::two_sum};
+use fs_mbd::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
+use fs_mbd::spatial_loads::internal_motion::{
+    HeldExternalLoads,
+    viscous::network::{
+        ViscousNetworkMotionControls, ViscousNetworkMotionError, ViscousNetworkMotionStep,
+        step_viscous_network_with_loads,
+    },
+};
+use fs_mbd::{MassProperties, RigidBodyState, RigidKineticEnergyChange};
+use fs_thermal::enthalpy::{
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
+    HeatTransfer, StepConfig,
+};
+use std::{borrow::Cow, cell::RefCell, collections::BTreeMap};
+
+/// Borrowed original mechanical state, laws and explicitly authored heat routes.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidDampingThermalInput<'a> {
+    /// Accepted mechanical time; it must equal the original thermal clock.
+    pub time_s: f64,
+    pub states: &'a [RigidBodyState],
+    pub properties: &'a [MassProperties],
+    pub links: &'a [ViscousNetworkLink],
+    /// Held for the complete call, including every thermal event/substep.
+    pub loads: HeldExternalLoads<'a>,
+    /// One map per ORIGINAL connector, in its original order. Each map assigns
+    /// nonnegative fractions totaling at most one to unique physical CellIds.
+    /// Different connectors may share a receiver. The remainder is unallocated
+    /// loss, not an invented bath. Receiver IDs must be active on each actual
+    /// interval; same-time native birth events run before that check.
+    pub heat_fractions: &'a [BTreeMap<CellId, f64>],
+}
+
+/// Original integration/resource controls and one whole-call energy allowance.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidDampingThermalConfig {
+    /// Per-native-motion-step limits and independent physical admission gates.
+    pub mechanical: ViscousNetworkMotionControls,
+    /// Native CFL/event/substep controls. max_dt_s also bounds mechanical steps.
+    pub thermal: StepConfig,
+    /// Total authored connector-to-cell entries, including zero fractions.
+    pub maximum_heat_bindings: usize,
+    /// Bounds complete residuals, accumulated absolute interval mechanical
+    /// defects and absolute cellwise heat-handoff defects independently [J].
+    pub energy_tolerance_j: f64,
+}
+
+/// Physical heat, external work and numerical defects retain separate accounts.
+#[derive(Clone, Debug)]
+pub struct RigidDampingThermalReport {
+    pub time_s: f64,
+    pub thermal: EnergyAudit,
+    /// Original edge order, summed over every accepted interval [J].
+    pub connector_heat_j: Vec<f64>,
+    pub dissipated_energy_j: f64,
+    /// Represented generated source energy; included once in the raw thermal audit.
+    pub deposited_heat_j: f64,
+    pub unallocated_energy_j: f64,
+    /// Raw thermal heat less the represented damper source [J].
+    pub external_thermal_heat_j: f64,
+    /// Applied force/couple work; gravity is in mechanical potential storage.
+    pub mechanical_work_j: f64,
+    pub mechanical_energy_change_j: f64,
+    pub mechanical_residual_j: f64,
+    pub native_drift_energy_defect_j: f64,
+    pub absolute_mechanical_defect_j: f64,
+    /// Deposited + unallocated - independently integrated mechanical heat [J].
+    pub heat_handoff_residual_j: f64,
+    pub absolute_heat_handoff_defect_j: f64,
+    /// Delta mechanical + delta original thermal storage + unallocated loss
+    /// - original incoming inventory - outside mechanical/thermal supply [J].
+    pub combined_energy_residual_j: f64,
+    pub pair_relaxations: usize,
+}
+
+/// No independently publishable mechanical or thermal half-step on refusal.
+#[must_use]
+pub struct RigidDampingThermalCandidate<'m, O> {
+    states: Vec<RigidBodyState>,
+    thermal: DepositionSimulation<'m>,
+    observer: O,
+    report: RigidDampingThermalReport,
+}
+impl<'m, O> RigidDampingThermalCandidate<'m, O> {
+    pub fn states(&self) -> &[RigidBodyState] {
+        &self.states
+    }
+    pub fn thermal(&self) -> &DepositionSimulation<'m> {
+        &self.thermal
+    }
+    pub fn observer(&self) -> &O {
+        &self.observer
+    }
+    pub fn report(&self) -> &RigidDampingThermalReport {
+        &self.report
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<RigidBodyState>,
+        DepositionSimulation<'m>,
+        O,
+        RigidDampingThermalReport,
+    ) {
+        (self.states, self.thermal, self.observer, self.report)
+    }
+}
+
+#[derive(Debug)]
+pub enum RigidDampingThermalError<E> {
+    Invalid(&'static str),
+    Motion(ViscousNetworkMotionError),
+    Thermal(DepositionError),
+    Observer(E),
+    Energy { residual_j: f64, allowance_j: f64 },
+    Cancelled,
+}
+impl<E> From<DepositionError> for RigidDampingThermalError<E> {
+    fn from(error: DepositionError) -> Self {
+        match error {
+            DepositionError::Cancelled => Self::Cancelled,
+            error => Self::Thermal(error),
+        }
+    }
+}
+impl<E> From<ViscousNetworkMotionError> for RigidDampingThermalError<E> {
+    fn from(error: ViscousNetworkMotionError) -> Self {
+        match error {
+            ViscousNetworkMotionError::Cancelled => Self::Cancelled,
+            error => Self::Motion(error),
+        }
+    }
+}
+impl<E: core::fmt::Debug> core::fmt::Display for RigidDampingThermalError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "rigid damping/thermal advance refused: {self:?}")
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for RigidDampingThermalError<E> {}
+type Result<T, E> = core::result::Result<T, RigidDampingThermalError<E>>;
+
+fn number<E>(value: f64) -> Result<f64, E> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(DepositionError::Arithmetic.into())
+    }
+}
+fn value<E>(wide: Dd) -> Result<f64, E> {
+    number(wide.hi)?;
+    number(wide.lo)?;
+    number(wide.to_f64())
+}
+fn balance<E>(residual: f64, allowance: f64) -> Result<(), E> {
+    if number(residual)?.abs() > allowance {
+        Err(RigidDampingThermalError::Energy {
+            residual_j: residual,
+            allowance_j: allowance,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Advance the original body bank, thermal timeline and observer transactionally.
+///
+/// Every actual thermal interval gets exactly one native moving-network call.
+/// Its receipt stays pending until the matching thermal step accepts. Native
+/// event clipping, sources, transport, boundary hooks and observer transitions
+/// remain active. A rejected heat update, observer callback, energy check or
+/// cancellation discards the complete thermal/observer candidate and its bodies.
+/// Observer Clone must isolate mutable physical history, as for advance_observed.
+///
+/// Work is the native mechanical/thermal work plus O(bindings * log(receivers))
+/// heat routing per interval. The borrowed initial bank is not cloned; accepted
+/// endpoint banks are moved from native receipts. No trajectory is retained.
+/// Native per-step allocations remain, plus one bounded receiver map and the
+/// current pending receipt. Heat fractions do not infer physical correspondence,
+/// damper temperature, moving thermal geometry or material validity.
+pub fn advance_candidate<'m, O: DepositionObserver>(
+    input: RigidDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    target_s: f64,
+    config: RigidDampingThermalConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RigidDampingThermalCandidate<'m, O>, O::Error> {
+    let cancellation = RefCell::new(cancelled);
+    let requested = || (*cancellation.borrow_mut())();
+    let checkpoint = || {
+        if requested() {
+            Err(DepositionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    checkpoint()?;
+    if input.time_s.to_bits() != thermal.time_s().to_bits()
+        || !target_s.is_finite()
+        || target_s <= input.time_s
+        || input.states.len() != input.properties.len()
+        || input.states.len() != input.loads.wrenches.len()
+        || input.links.len() != input.heat_fractions.len()
+        || input.states.len() > config.mechanical.limits.maximum_bodies
+        || input.links.len() > config.mechanical.limits.maximum_connectors
+        || !config.energy_tolerance_j.is_finite()
+        || config.energy_tolerance_j < 0.0
+        || !config.thermal.energy_tolerance_j.is_finite()
+        || config.thermal.energy_tolerance_j < 0.0
+        || config.thermal.energy_tolerance_j > config.energy_tolerance_j
+    {
+        return Err(RigidDampingThermalError::Invalid(
+            "synchronized forward clocks, complete original banks/routes and finite energy limits required",
+        ));
+    }
+    let mut binding_count = 0_usize;
+    let mut remainders = Vec::with_capacity(input.links.len());
+    for route in input.heat_fractions {
+        checkpoint()?;
+        binding_count = binding_count
+            .checked_add(route.len())
+            .ok_or(DepositionError::Budget("rigid damper heat bindings"))?;
+        if binding_count > config.maximum_heat_bindings {
+            return Err(DepositionError::Budget("rigid damper heat bindings").into());
+        }
+        let mut remaining = Dd::ONE;
+        for &fraction in route.values() {
+            checkpoint()?;
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(RigidDampingThermalError::Invalid(
+                    "finite nonnegative heat fractions required",
+                ));
+            }
+            remaining = remaining - Dd::from_f64(fraction);
+            // Retain sub-ulp overspend: rounded sum == 1 is insufficient.
+            if remaining.hi < 0.0 || (remaining.hi == 0.0 && remaining.lo < 0.0) {
+                return Err(RigidDampingThermalError::Invalid(
+                    "connector heat fractions exceed one",
+                ));
+            }
+        }
+        remainders.push(remaining);
+    }
+    let coupled = HeatObserver {
+        input,
+        states: Cow::Borrowed(input.states),
+        time_s: input.time_s,
+        inner: Cow::Borrowed(observer),
+        remainders: &remainders,
+        config,
+        requested: &requested,
+        pending: None,
+        accounts: Accounts::default(),
+        connector_heat: vec![Dd::ZERO; input.links.len()],
+        pair_relaxations: 0,
+    };
+    let (thermal, coupled, audit) =
+        thermal.advance_observed(&coupled, target_s, config.thermal, checkpoint)?;
+    if coupled.pending.is_some() || coupled.time_s.to_bits() != target_s.to_bits() {
+        return Err(RigidDampingThermalError::Invalid(
+            "mechanical and thermal endpoints must agree",
+        ));
+    }
+    let mut kinetic = RigidKineticEnergyChange::new();
+    let mut potential = Dd::ZERO;
+    let g = input.loads.gravity.acceleration_world();
+    for ((&before, &after), &properties) in input
+        .states
+        .iter()
+        .zip(coupled.states.iter())
+        .zip(input.properties)
+    {
+        if requested() {
+            return Err(RigidDampingThermalError::Cancelled);
+        }
+        kinetic
+            .add_body(properties, before, after)
+            .map_err(ViscousNetworkMotionError::from)?;
+        let a = before.pose().position_world();
+        let b = after.pose().position_world();
+        for (initial, final_, acceleration) in [(a.x, b.x, g.x), (a.y, b.y, g.y), (a.z, b.z, g.z)] {
+            potential = potential
+                - Dd::from_f64(properties.mass())
+                    * Dd::from_f64(acceleration)
+                    * (Dd::from_f64(final_) - Dd::from_f64(initial));
+        }
+    }
+    let mechanical_change = kinetic
+        .finish_retained()
+        .map_err(ViscousNetworkMotionError::from)?
+        + potential;
+    let accounts = &coupled.accounts;
+    let mechanical = mechanical_change + accounts.heat - accounts.work;
+    let handoff = accounts.deposited + accounts.unallocated - accounts.heat;
+    let combined = mechanical + Dd::from_f64(audit.residual_j) + handoff;
+    for residual in [
+        mechanical,
+        mechanical - accounts.defect,
+        handoff,
+        combined,
+        accounts.absolute_defect,
+        accounts.absolute_handoff,
+    ] {
+        balance(value(residual)?, config.energy_tolerance_j)?;
+    }
+    let report = RigidDampingThermalReport {
+        time_s: target_s,
+        thermal: audit,
+        connector_heat_j: coupled
+            .connector_heat
+            .iter()
+            .copied()
+            .map(value)
+            .collect::<Result<Vec<_>, O::Error>>()?,
+        dissipated_energy_j: value(accounts.heat)?,
+        deposited_heat_j: value(accounts.deposited)?,
+        unallocated_energy_j: value(accounts.unallocated)?,
+        external_thermal_heat_j: value(Dd::from_f64(audit.external_heat_j) - accounts.deposited)?,
+        mechanical_work_j: value(accounts.work)?,
+        mechanical_energy_change_j: value(mechanical_change)?,
+        mechanical_residual_j: value(mechanical)?,
+        native_drift_energy_defect_j: value(accounts.drift)?,
+        absolute_mechanical_defect_j: value(accounts.absolute_defect)?,
+        heat_handoff_residual_j: value(handoff)?,
+        absolute_heat_handoff_defect_j: value(accounts.absolute_handoff)?,
+        combined_energy_residual_j: value(combined)?,
+        pair_relaxations: coupled.pair_relaxations,
+    };
+    if requested() {
+        return Err(RigidDampingThermalError::Cancelled);
+    }
+    Ok(RigidDampingThermalCandidate {
+        states: coupled.states.into_owned(),
+        thermal,
+        observer: coupled.inner.into_owned(),
+        report,
+    })
+}
+
+#[derive(Clone, Default)]
+struct Accounts {
+    heat: Dd,
+    deposited: Dd,
+    unallocated: Dd,
+    work: Dd,
+    defect: Dd,
+    drift: Dd,
+    absolute_defect: Dd,
+    absolute_handoff: Dd,
+}
+#[derive(Clone)]
+struct Pending {
+    start_s: f64,
+    dt_s: f64,
+    end_s: f64,
+    step: ViscousNetworkMotionStep,
+    deposited: Dd,
+    unallocated: Dd,
+    absolute_handoff: Dd,
+}
+#[derive(Clone)]
+struct HeatObserver<'a, 'g, O: Clone> {
+    input: RigidDampingThermalInput<'a>,
+    states: Cow<'a, [RigidBodyState]>,
+    time_s: f64,
+    inner: Cow<'g, O>,
+    remainders: &'g [Dd],
+    config: RigidDampingThermalConfig,
+    requested: &'g dyn Fn() -> bool,
+    pending: Option<Pending>,
+    accounts: Accounts,
+    connector_heat: Vec<Dd>,
+    pair_relaxations: usize,
+}
+impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
+    type Error = RigidDampingThermalError<O::Error>;
+    fn begin(&mut self) -> Result<(), O::Error> {
+        self.inner
+            .to_mut()
+            .begin()
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn requires_step_interval(&self) -> bool {
+        true
+    }
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<Option<f64>, O::Error> {
+        self.inner
+            .to_mut()
+            .next_transition_time_s(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        self.inner
+            .to_mut()
+            .sources(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, O::Error> {
+        self.inner
+            .to_mut()
+            .conductances(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        self.inner
+            .to_mut()
+            .ambient_conductances(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn reservoir_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        self.inner
+            .to_mut()
+            .reservoir_conductances(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn heat_transfers(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<Vec<HeatTransfer>, O::Error> {
+        self.inner
+            .to_mut()
+            .heat_transfers(thermal, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn limit_timestep_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<f64, O::Error> {
+        self.inner
+            .to_mut()
+            .limit_timestep_s(thermal, proposed_s, check)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        check()?;
+        if self.pending.is_some() || self.time_s.to_bits() != start_s.to_bits() {
+            return Err(RigidDampingThermalError::Invalid(
+                "damper interval already pending or stale",
+            ));
+        }
+        for route in self.input.heat_fractions {
+            for id in route.keys() {
+                check()?;
+                if !thermal.cells().contains_key(id) {
+                    return Err(RigidDampingThermalError::Invalid(
+                        "damper heat receiver is inactive on this interval",
+                    ));
+                }
+            }
+        }
+        let mut rates = self
+            .inner
+            .to_mut()
+            .step_sources(thermal, start_s, dt_s, end_s, check)
+            .map_err(RigidDampingThermalError::Observer)?;
+        let step = step_viscous_network_with_loads(
+            &self.states,
+            self.input.properties,
+            self.input.links,
+            self.input.loads,
+            dt_s,
+            self.config.mechanical,
+            self.requested,
+        )?;
+        let mut allocated = BTreeMap::<CellId, Dd>::new();
+        let mut unallocated = Dd::ZERO;
+        let mut edge_heat = Dd::ZERO;
+        for ((route, &remaining), &heat) in self
+            .input
+            .heat_fractions
+            .iter()
+            .zip(self.remainders)
+            .zip(&step.connector_dissipation_j)
+        {
+            check()?;
+            if !heat.is_finite() || heat < 0.0 {
+                return Err(RigidDampingThermalError::Invalid(
+                    "nonnegative native connector heat required",
+                ));
+            }
+            edge_heat = edge_heat + Dd::from_f64(heat);
+            let rest = Dd::from_f64(heat) * remaining;
+            if value::<O::Error>(rest)? == 0.0
+                && heat != 0.0
+                && (remaining.hi != 0.0 || remaining.lo != 0.0)
+            {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            unallocated = unallocated + rest;
+            for (&id, &fraction) in route {
+                check()?;
+                let part = Dd::from_f64(heat) * Dd::from_f64(fraction);
+                if value::<O::Error>(part)? == 0.0 && heat != 0.0 && fraction != 0.0 {
+                    return Err(DepositionError::Arithmetic.into());
+                }
+                let total = allocated.entry(id).or_insert(Dd::ZERO);
+                *total = *total + part;
+            }
+        }
+        let mut deposited = Dd::ZERO;
+        let mut ideal = Dd::ZERO;
+        let mut absolute = Dd::from_f64(
+            value::<O::Error>(edge_heat - Dd::from_f64(step.dissipated_energy_j))?.abs(),
+        );
+        for (id, heat) in allocated {
+            check()?;
+            ideal = ideal + heat;
+            let watts = number(value::<O::Error>(heat)? / dt_s)?;
+            if watts == 0.0 && (heat.hi != 0.0 || heat.lo != 0.0) {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            let rate = rates.entry(id).or_insert(0.0);
+            let old = *rate;
+            let (next, lost) = two_sum(old, watts);
+            *rate = number(next)?;
+            let received = (Dd::from_f64(next) - Dd::from_f64(old)) * Dd::from_f64(dt_s);
+            deposited = deposited + received;
+            absolute = absolute + Dd::from_f64(value::<O::Error>(received - heat)?.abs());
+            if lost != 0.0 {
+                absolute = absolute + Dd::from_f64(number((lost.abs() * dt_s).next_up())?);
+            }
+        }
+        absolute =
+            absolute + Dd::from_f64(value::<O::Error>(ideal + unallocated - edge_heat)?.abs());
+        balance(value(absolute)?, self.config.energy_tolerance_j)?;
+        self.pending = Some(Pending {
+            start_s,
+            dt_s,
+            end_s,
+            step,
+            deposited,
+            unallocated,
+            absolute_handoff: absolute,
+        });
+        Ok(rates)
+    }
+    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
+        if self.pending.is_some() || self.time_s.to_bits() != thermal.time_s().to_bits() {
+            return Err(RigidDampingThermalError::Invalid(
+                "event outside accepted shared clock",
+            ));
+        }
+        // All same-time births must finish before requiring every receiver.
+        self.inner
+            .to_mut()
+            .event(event, thermal)
+            .map_err(RigidDampingThermalError::Observer)
+    }
+    fn step(
+        &mut self,
+        start_s: f64,
+        dt_s: f64,
+        old: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(), O::Error> {
+        check()?;
+        let pending = self
+            .pending
+            .take()
+            .ok_or(RigidDampingThermalError::Invalid(
+                "thermal step lacks damper interval",
+            ))?;
+        if pending.start_s.to_bits() != start_s.to_bits()
+            || pending.dt_s.to_bits() != dt_s.to_bits()
+            || pending.end_s.to_bits() != thermal.time_s().to_bits()
+        {
+            return Err(RigidDampingThermalError::Invalid(
+                "thermal step changed the mechanical interval",
+            ));
+        }
+        self.inner
+            .to_mut()
+            .step(start_s, dt_s, old, thermal, check)
+            .map_err(RigidDampingThermalError::Observer)?;
+        let step = pending.step;
+        for (total, &heat) in self
+            .connector_heat
+            .iter_mut()
+            .zip(&step.connector_dissipation_j)
+        {
+            *total = *total + Dd::from_f64(heat);
+        }
+        let a = &mut self.accounts;
+        a.heat = a.heat + Dd::from_f64(step.dissipated_energy_j);
+        a.deposited = a.deposited + pending.deposited;
+        a.unallocated = a.unallocated + pending.unallocated;
+        a.work = a.work + Dd::from_f64(step.external_loads.applied_work_j);
+        a.defect = a.defect + Dd::from_f64(step.work_heat_residual_j);
+        a.drift = a.drift + Dd::from_f64(step.native_drift_energy_defect_j);
+        a.absolute_defect = a.absolute_defect + Dd::from_f64(step.work_heat_residual_j.abs());
+        a.absolute_handoff = a.absolute_handoff + pending.absolute_handoff;
+        balance(value(a.absolute_defect)?, self.config.energy_tolerance_j)?;
+        balance(value(a.absolute_handoff)?, self.config.energy_tolerance_j)?;
+        self.pair_relaxations = self
+            .pair_relaxations
+            .checked_add(step.pair_relaxations)
+            .ok_or(DepositionError::Budget("complete damper pair relaxations"))?;
+        self.states = Cow::Owned(step.into_states_after());
+        self.time_s = pending.end_s;
+        check()?;
+        Ok(())
+    }
+}

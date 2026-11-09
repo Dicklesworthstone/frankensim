@@ -183,6 +183,8 @@ pub mod molecular_shear;
 pub mod material_assembly;
 /// Nonlinear membrane material loss deposited in original source-bound caloric cells.
 pub mod membrane_thermal;
+/// Moving rigid damper networks and their actual heat on the finite thermal timeline.
+pub mod rigid_damping_heat;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
 /// One fluid source for native immersed motion, sourced additional inertia and gap films.
