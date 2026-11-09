@@ -1,3 +1,33 @@
+## Native full rigid-frame evolution
+
+`ForcedGrid3::try_new_with_rigid_frame_preserving_velocity` attaches the full
+instantaneous frame force without an initial half kick. Serial/pooled
+`advance_*_with_rigid_frame` and moving-wall variants evolve it in the original
+collision/stream transaction. For cell-center displacement `r = x - origin`,
+the non-Coriolis acceleration is
+`b = g - a_origin - alpha cross r - Omega cross (Omega cross r)`.
+The same admitted `RigidFrame3` position law and analytic skew inverse close
+`F_next = rho_next*(b_next - 2*Omega_next cross u_next)` with
+`rho_next*u_next = m_raw,next + F_next/2` after actual native transport and
+wall reflection. Endpoint terms run in the existing tiles, without another
+population buffer, source sweep or force iteration. The input acceleration
+vector becomes accepted force storage only after full physical admission.
+
+Caller-authored endpoint frame histories use lattice units and must supply
+consistent angular velocity/acceleration and body-acceleration components in
+frame axes. Grid and wall velocities are relative to those axes; no inertial
+initial-condition remap is inferred. A periodic axis requires both Omega and
+alpha parallel to it. Pure translation is compatible with all periodic axes;
+zero frame motion retains the existing acceleration path exactly.
+
+Original wall impulse, torque and relative wall work remain separate from
+frame sources. Coriolis endpoint power vanishes; this does not assert a global
+inertial energy balance or finite-inertia vessel dynamics. Refusal/cancellation
+publishes no population, source history or step count. Focused regressions
+exercise changing frames on D3Q19/D3Q27 collision families, actual transported
+density/velocity, relative wall balances, free fall, zero-frame replay,
+periodic-axis refusal, late Mach refusal and cancelled transaction replay.
+
 ## Native implicit Coriolis evolution
 
 `ForcedGrid3::try_new_with_coriolis_preserving_velocity` attaches the local

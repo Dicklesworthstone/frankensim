@@ -1,75 +1,12 @@
 //! Velocity-dependent rotating-flow sources on the original native stream.
 
 use super::acceleration::EndpointForcing;
-use super::{ForcedGrid3, ForcedLattice3, admit_forces};
+use super::{ForcedGrid3, ForcedLattice3, FrameEndpoint3, admit_forces};
 use crate::d3q19::Coriolis3;
 use crate::lattice3::moving_walls::{MovingWallMomentum3, WallMotion3};
 use crate::lattice3::wall_loads::WallMomentumProbe3;
 use crate::lattice3::{EquilibriumLattice3, Grid3, GridError3, macro_cell};
 use fs_exec::{CancelGate, Cx, KernelRunner};
-
-/// Coefficients are admitted once; every native tile uses the same skew solve.
-#[derive(Clone, Copy)]
-pub(in crate::lattice3) struct CoriolisEndpoint3 {
-    rotation: Coriolis3,
-    denominator: f64,
-}
-
-impl CoriolisEndpoint3 {
-    pub(super) fn new(rotation: Coriolis3) -> Result<Option<Self>, &'static str> {
-        let denominator = rotation.frame().midpoint_denominator([0.0; 3])?;
-        Ok((rotation.angular_velocity != [0.0; 3]).then_some(Self {
-            rotation,
-            denominator,
-        }))
-    }
-
-    fn acceleration(self, velocity: [f64; 3], base: [f64; 3]) -> [f64; 3] {
-        let omega = self.rotation.angular_velocity;
-        core::array::from_fn(|a| {
-            let b = (a + 1) % 3;
-            let c = (a + 2) % 3;
-            base[a] - 2.0 * omega[b].mul_add(velocity[c], -omega[c] * velocity[b])
-        })
-    }
-
-    pub(in crate::lattice3) fn force(
-        self,
-        rho: f64,
-        momentum: [f64; 3],
-        acceleration: [f64; 3],
-    ) -> Option<[f64; 3]> {
-        // rho*u = m_raw + rho*(a - 2*Omega cross u)/2. Thus
-        // (I + [Omega]x)u = m_raw/rho + a/2: exactly the existing analytic
-        // midpoint skew inverse, here applied to the streamed raw velocity.
-        let effective = self.rotation.frame().source_acceleration::<true>(
-            [0.0; 3],
-            momentum.map(|value| value / rho),
-            acceleration,
-            self.denominator,
-        );
-        let force = effective.map(|value| rho * value);
-        let velocity = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
-        let actual = self.acceleration(velocity, acceleration);
-        let omega = self.rotation.angular_velocity;
-        for a in 0..3 {
-            let b = (a + 1) % 3;
-            let c = (a + 2) % 3;
-            let scale = force[a].abs()
-                + rho
-                    * (acceleration[a].abs()
-                        + 2.0 * ((omega[b] * velocity[c]).abs() + (omega[c] * velocity[b]).abs()));
-            if !force[a].is_finite()
-                || !actual[a].is_finite()
-                || !scale.is_finite()
-                || (force[a] - rho * actual[a]).abs() > 128.0 * f64::EPSILON * scale
-            {
-                return None;
-            }
-        }
-        Some(force)
-    }
-}
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
     /// Attach `F = rho*(a - 2*Omega cross u)` while preserving the input
@@ -84,7 +21,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         mut acceleration: Vec<[f64; 3]>,
     ) -> Result<Self, GridError3<L::Error>> {
         cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
-        let Some(law) = CoriolisEndpoint3::new(rotation).map_err(GridError3::Input)? else {
+        let Some(law) = FrameEndpoint3::coriolis(rotation).map_err(GridError3::Input)? else {
             return Self::try_new_with_body_acceleration_preserving_velocity(
                 grid,
                 cx,

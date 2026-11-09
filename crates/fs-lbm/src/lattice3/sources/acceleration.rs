@@ -1,6 +1,6 @@
 //! Prescribed acceleration on the original native collision/transport owner.
 
-use super::{CoriolisEndpoint3, ForcedGrid3, ForcedLattice3, admit_forces};
+use super::{ForcedGrid3, ForcedLattice3, FrameEndpoint3, admit_forces};
 use crate::lattice3::moving_walls::{MovingWallMomentum3, WallMotion3};
 use crate::lattice3::wall_loads::WallMomentumProbe3;
 use crate::lattice3::{EquilibriumLattice3, Grid3, GridError3};
@@ -9,7 +9,7 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 pub(super) enum EndpointForcing<'a> {
     Density(&'a [[f64; 3]]),
     Acceleration(&'a mut [[f64; 3]]),
-    Coriolis(&'a mut [[f64; 3]], CoriolisEndpoint3),
+    Frame(&'a mut [[f64; 3]], FrameEndpoint3),
 }
 
 impl<'a> EndpointForcing<'a> {
@@ -17,7 +17,7 @@ impl<'a> EndpointForcing<'a> {
         match self {
             Self::Density(values) => values,
             Self::Acceleration(values) => values,
-            Self::Coriolis(values, _) => values,
+            Self::Frame(values, _) => values,
         }
     }
 
@@ -25,8 +25,19 @@ impl<'a> EndpointForcing<'a> {
         values: &'a mut [[f64; 3]],
         rotation: crate::d3q19::Coriolis3,
     ) -> Result<Self, &'static str> {
-        Ok(match CoriolisEndpoint3::new(rotation)? {
-            Some(law) => Self::Coriolis(values, law),
+        Ok(match FrameEndpoint3::coriolis(rotation)? {
+            Some(law) => Self::Frame(values, law),
+            None => Self::Acceleration(values),
+        })
+    }
+
+    pub(super) fn with_rigid_frame(
+        values: &'a mut [[f64; 3]],
+        frame: crate::d3q19::RigidFrame3,
+        periodic: [bool; 3],
+    ) -> Result<Self, &'static str> {
+        Ok(match FrameEndpoint3::rigid(frame, periodic)? {
+            Some(law) => Self::Frame(values, law),
             None => Self::Acceleration(values),
         })
     }
@@ -38,7 +49,7 @@ impl<'a> EndpointForcing<'a> {
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<(), GridError3<L::Error>> {
         admit_forces(grid, self.values(), Some(collisions), poll)?;
-        if matches!(self, Self::Coriolis(..)) {
+        if matches!(self, Self::Frame(..)) {
             for (cell, &collision) in collisions.iter().enumerate() {
                 if cell % 64 == 0 {
                     poll()?;
@@ -46,7 +57,7 @@ impl<'a> EndpointForcing<'a> {
                 if !grid.solid[cell] && !L::supports_body_force(collision) {
                     return Err(GridError3::MaterialField {
                         cell,
-                        reason: "Coriolis endpoint requires a forcing-compatible collision",
+                        reason: "frame endpoint requires a forcing-compatible collision",
                     });
                 }
             }
@@ -59,12 +70,12 @@ impl<'a> EndpointForcing<'a> {
     ) -> (
         Option<&'a [[f64; 3]]>,
         Option<&'a mut [[f64; 3]]>,
-        Option<CoriolisEndpoint3>,
+        Option<FrameEndpoint3>,
     ) {
         match self {
             Self::Density(values) => (Some(values), None, None),
             Self::Acceleration(values) => (None, Some(values), None),
-            Self::Coriolis(values, law) => (None, Some(values), Some(law)),
+            Self::Frame(values, law) => (None, Some(values), Some(law)),
         }
     }
 }
