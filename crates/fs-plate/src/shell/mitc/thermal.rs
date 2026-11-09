@@ -20,12 +20,14 @@
 //! inferred. Layer-dependent free strains use the original laminate owner's
 //! thickness integration through [`LaminateThermalField`]. Each layer may have
 //! its own affine profile; a nonlinear profile needs thickness refinement.
+//! [`NodalLaminateThermalField`] retains P1 in-plane variation of those profiles,
+//! interpolating integrated layer strain before evaluating physical storage.
 //! No heat equation, physical drilling stress, interlaminar stress or
 //! thermoelastic heating is implied. The separate [`prestress`] adapter adds
 //! a bounded planar membrane initial-stress term, not a nonlinear shell tangent.
 
 mod laminate;
-pub use laminate::LaminateThermalField;
+pub use laminate::{LaminateThermalField, NodalLaminateThermalField};
 
 /// Source-bound directional strength on the complete native layer strain field.
 pub mod strength;
@@ -243,6 +245,25 @@ impl MitcShellModel {
         )
     }
 
+    /// Bind P1 in-plane variation of each original layer's integrated expansion.
+    /// Node profiles follow each original triangle's node order in one fixed
+    /// laminate and section frame. Thermal loads, bubble motion, layer storage
+    /// and the existing membrane-prestress recovery use this same spatial field.
+    /// Stiffness stays fixed; varying material constants require a resolved
+    /// constitutive discretization. Uniform-snapshot strength criteria cannot
+    /// be substituted for this spatially varying thermal source.
+    pub fn prepare_nodal_laminate_thermal(
+        &self,
+        fields: &[NodalLaminateThermalField],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedThermalShell<'_>, PlateError> {
+        self.prepare_thermal_fields(
+            fields.len(),
+            fields.iter().cloned().map(ThermalLoading::NodalLaminate),
+            cancelled,
+        )
+    }
+
     fn prepare_thermal_fields(
         &self,
         count: usize,
@@ -264,8 +285,12 @@ impl MitcShellModel {
             if cancelled() {
                 return Err(PlateError::Cancelled);
             }
-            if let ThermalLoading::Laminate(laminate) = &loading {
-                laminate.admit_section(&self.sections[e])?;
+            match &loading {
+                ThermalLoading::Laminate(laminate) => laminate.admit_section(&self.sections[e])?,
+                ThermalLoading::NodalLaminate(laminate) => {
+                    laminate.admit_section(&self.sections[e])?
+                }
+                ThermalLoading::Strain(_) => {}
             }
             let field = element::PreparedStrainField::new(
                 &self.mesh,

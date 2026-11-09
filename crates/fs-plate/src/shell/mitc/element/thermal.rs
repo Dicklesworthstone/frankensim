@@ -1,7 +1,9 @@
 //! Thermal force and stress recovery in the original enriched element space.
 
 use super::{PreparedStrainField, stiffness_rule};
-use crate::shell::mitc::thermal::{FacetThermalStrain, LaminateThermalField, ThermalFacetResponse};
+use crate::shell::mitc::thermal::{
+    FacetThermalStrain, LaminateThermalField, NodalLaminateThermalField, ThermalFacetResponse,
+};
 use crate::shell::mitc::{PlateError, ShearShellSection};
 
 type Matrices = ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]);
@@ -9,6 +11,7 @@ type Matrices = ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]);
 pub(in crate::shell::mitc) enum ThermalLoading {
     Strain(FacetThermalStrain),
     Laminate(LaminateThermalField),
+    NodalLaminate(NodalLaminateThermalField),
 }
 
 pub(in crate::shell::mitc) struct PreparedThermalFacet {
@@ -45,7 +48,7 @@ impl PreparedThermalFacet {
     pub(in crate::shell::mitc) fn laminate(&self) -> Option<&LaminateThermalField> {
         match &self.loading {
             ThermalLoading::Laminate(source) => Some(source),
-            ThermalLoading::Strain(_) => None,
+            ThermalLoading::Strain(_) | ThermalLoading::NodalLaminate(_) => None,
         }
     }
 
@@ -195,6 +198,9 @@ impl PreparedThermalFacet {
                 ThermalLoading::Laminate(laminate) => {
                     (laminate.membrane_force_n_m(), laminate.bending_moment_n())
                 }
+                ThermalLoading::NodalLaminate(laminate) => {
+                    laminate.thermal_resultants_at(lambda)?
+                }
             };
             for (c, force) in full.iter_mut().enumerate() {
                 let (bm, bb, _) = field.kin.basis(&field.g, lambda[1], lambda[2], c);
@@ -310,8 +316,16 @@ impl PreparedThermalFacet {
                             + (0..2).map(|i| gamma[i] * shear[i]).sum::<f64>());
                     (n, m, shear, energy)
                 }
-                ThermalLoading::Laminate(laminate) => {
-                    let response = laminate.evaluate(eps, curvature, cancelled)?;
+                ThermalLoading::Laminate(_) | ThermalLoading::NodalLaminate(_) => {
+                    let response = match &self.loading {
+                        ThermalLoading::Laminate(laminate) => {
+                            laminate.evaluate(eps, curvature, cancelled)?
+                        }
+                        ThermalLoading::NodalLaminate(laminate) => {
+                            laminate.evaluate(lambda, eps, curvature, cancelled)?
+                        }
+                        ThermalLoading::Strain(_) => unreachable!("handled strain field"),
+                    };
                     let (_, _, shear) = resultants(&self.matrices, [0.0; 3], [0.0; 3], gamma);
                     let energy = response.strain_energy_j_m2
                         + 0.5 * (0..2).map(|i| gamma[i] * shear[i]).sum::<f64>();

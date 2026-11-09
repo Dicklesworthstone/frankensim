@@ -1489,7 +1489,7 @@ original layers and source section without copying them per facet. Each layer
 may have its own integrated expansion and affine thickness profile; no averaged
 CTE, replacement homogeneous material, or inferred temperature profile enters.
 
-Both thermal representations use the same native load assembly, affine bubble
+All thermal representations use the same native load assembly, affine bubble
 condensation, constrained solve and force recovery. Layered recovery evaluates
 physical elastic strain in each original layer, preserving residual stress
 energy even when net membrane force and bending moment vanish. The engineering
@@ -1504,6 +1504,22 @@ derivatives, rigid rotation, homogeneous reduction, original mass and atomic
 refusal checks. These are authored numerical checks. Thermal histories of Prony
 layers, temperature-dependent section updates, finite rotations, and coupled
 heat/entropy evolution remain outside this shell adapter.
+
+`prepare_nodal_laminate_thermal` additionally carries P1 in-plane variation of
+each layer's integrated free-strain profile. Its `NodalLaminateThermalField`
+binds the material owner's `PreparedNodalLaminateThermal` and one section angle.
+The three node preparations must share the same immutable laminate allocation;
+no independent stiffness, frame, thickness or source is interpolated. The
+original thickness quadrature evaluates interpolated free strain before
+squaring elastic strain, retaining both spatial variation and incompatible
+layer storage. Cached thermal resultants interpolate linearly. Load assembly,
+affine director condensation, recovery, fixed reference inertia and the planar
+prestress adapter remain the same native consumers. Existing strength criteria
+bound to one uniform thermal snapshot refuse the nodal field. Material tests
+cover the bilayer self-energy formula and source/point admission; shell tests
+cover one-layer P1 equivalence, virtual work, world rotation, and constrained
+spatial heating's energy and signed geometric stiffness. These are numerical
+implementation checks, not experimental qualification.
 
 `PreparedThermalShell::strain_field` exposes the original full-facet strain
 polynomial including the thermal director-bubble offset. It shares the existing

@@ -23,10 +23,12 @@ use std::sync::Arc;
 pub mod beam;
 /// Thermal loading and recovery with explicitly admitted material history.
 pub mod history;
-/// Source-bound elastic snapshots at one admitted temperature per layer.
-pub mod source;
+/// P1 in-plane variation of integrated layer profiles on one fixed section.
+pub mod nodal;
 /// Whole-stack transverse shear potential and its nonlocal thermal derivatives.
 pub mod shear;
+/// Source-bound elastic snapshots at one admitted temperature per layer.
+pub mod source;
 /// Source-pinned plane-stress potentials and exact temperature derivatives.
 pub mod thermoelastic;
 
@@ -41,6 +43,10 @@ pub enum LaminateThermalError {
     Nonfinite { quantity: &'static str },
     /// A thermal history law is required for this viscoelastic layer.
     ViscoelasticLayer { layer: usize },
+    /// Nodal profiles must share the same immutable original section.
+    IncompatibleSection,
+    /// Interpolation requires finite, nonnegative barycentric coordinates summing to one.
+    BarycentricCoordinates,
     /// The caller cancelled before the complete result was available.
     Cancelled,
 }
@@ -282,6 +288,23 @@ impl PreparedLaminateThermal {
         &self,
         membrane: [f64; 3],
         gradient_per_m: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateThermalResponse, LaminateThermalError> {
+        self.evaluate_with_free(
+            membrane,
+            gradient_per_m,
+            |layer, point| self.samples[layer].free[point],
+            cancelled,
+        )
+    }
+
+    // Both uniform and spatially interpolated profiles use the same original
+    // layer integration. Interpolation supplies free strain BEFORE squaring.
+    fn evaluate_with_free(
+        &self,
+        membrane: [f64; 3],
+        gradient_per_m: [f64; 3],
+        free_at: impl Fn(usize, usize) -> [f64; 3],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LaminateThermalResponse, LaminateThermalError> {
         finite(membrane.iter().chain(&gradient_per_m), "section strain")?;
@@ -290,13 +313,14 @@ impl PreparedLaminateThermal {
             bending_moment_n: [0.0; 3],
             strain_energy_j_m2: 0.0,
         };
-        for sample in &self.samples {
+        for (layer, sample) in self.samples.iter().enumerate() {
             if cancelled() {
                 return Err(LaminateThermalError::Cancelled);
             }
             for p in 0..2 {
+                let free = free_at(layer, p);
                 let elastic = core::array::from_fn(|j| {
-                    membrane[j] + sample.z[p] * gradient_per_m[j] - sample.free[p][j]
+                    membrane[j] + sample.z[p] * gradient_per_m[j] - free[j]
                 });
                 let stress = matvec(&sample.q, elastic);
                 for j in 0..3 {
@@ -328,6 +352,18 @@ impl PreparedLaminateThermal {
         membrane: [f64; 3],
         gradient_per_m: [f64; 3],
     ) -> Result<LayerThermalStress, LaminateThermalError> {
+        self.layer_stress_with_free(layer, membrane, gradient_per_m, |layer| {
+            self.samples[layer].face_free
+        })
+    }
+
+    fn layer_stress_with_free(
+        &self,
+        layer: usize,
+        membrane: [f64; 3],
+        gradient_per_m: [f64; 3],
+        free_at_faces: impl FnOnce(usize) -> [[f64; 3]; 2],
+    ) -> Result<LayerThermalStress, LaminateThermalError> {
         finite(membrane.iter().chain(&gradient_per_m), "section strain")?;
         let sample = self
             .samples
@@ -337,12 +373,11 @@ impl PreparedLaminateThermal {
                 count: self.samples.len(),
             })?;
         let integral = &self.section.layer_integrals()[layer];
+        let free = free_at_faces(layer);
         let at = |p: usize, z: f64| {
             matvec(
                 &sample.q,
-                core::array::from_fn(|j| {
-                    membrane[j] + z * gradient_per_m[j] - sample.face_free[p][j]
-                }),
+                core::array::from_fn(|j| membrane[j] + z * gradient_per_m[j] - free[p][j]),
             )
         };
         let bottom_pa = at(0, integral.z_bottom_m);

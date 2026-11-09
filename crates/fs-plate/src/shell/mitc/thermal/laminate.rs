@@ -2,6 +2,7 @@
 
 use super::super::ShearShellSection;
 use super::PlateError;
+use fs_material::laminate::thermal::nodal::PreparedNodalLaminateThermal;
 use fs_material::laminate::thermal::{
     LaminateThermalError, LaminateThermalResponse, LayerThermalStress, PreparedLaminateThermal,
 };
@@ -179,6 +180,112 @@ impl LaminateThermalField {
             (0..3)
                 .map(|j| self.strain_to_section[i][j] * strain[j])
                 .sum()
+        })
+    }
+}
+
+/// Nodal layer expansion in one fixed laminate and facet material frame.
+///
+/// Each original triangle node retains its own integrated layer profiles.
+/// The existing section transform acts after the material owner interpolates
+/// free strain; no section stiffness, source or layer ordering is mixed.
+#[derive(Debug, Clone)]
+pub struct NodalLaminateThermalField {
+    source: Arc<PreparedNodalLaminateThermal>,
+    frame: LaminateThermalField,
+}
+
+impl NodalLaminateThermalField {
+    pub fn try_new(
+        source: Arc<PreparedNodalLaminateThermal>,
+        section_angle_rad: f64,
+    ) -> Result<Self, PlateError> {
+        let frame = LaminateThermalField::try_new(source.nodes()[0].clone(), section_angle_rad)?;
+        Ok(Self { source, frame })
+    }
+
+    pub fn source(&self) -> &PreparedNodalLaminateThermal {
+        &self.source
+    }
+
+    pub const fn section(&self) -> &ShearShellSection {
+        self.frame.section()
+    }
+
+    pub const fn section_angle_rad(&self) -> f64 {
+        self.frame.section_angle_rad()
+    }
+
+    /// Positive equivalent membrane load and bending moment at this point.
+    pub fn thermal_resultants_at(
+        &self,
+        barycentric: [f64; 3],
+    ) -> Result<([f64; 3], [f64; 3]), PlateError> {
+        let (force, moment) = self
+            .source
+            .thermal_resultants_at(barycentric)
+            .map_err(material_error)?;
+        let force = to_facet(&self.frame.strain_to_section, force);
+        let moment = to_facet(&self.frame.strain_to_section, moment);
+        if force.iter().chain(&moment).any(|value| !value.is_finite()) {
+            return Err(PlateError::BadSection {
+                what: "oriented nodal laminate thermal load overflow",
+            });
+        }
+        Ok((force, moment))
+    }
+
+    /// Actual layer-face stress at a supplied compatible spatial point.
+    /// Returned shear is physical tau_xy, not doubled engineering shear.
+    pub fn layer_stress(
+        &self,
+        layer: usize,
+        barycentric: [f64; 3],
+        membrane: [f64; 3],
+        gradient_per_m: [f64; 3],
+    ) -> Result<LayerThermalStress, PlateError> {
+        let stress = self
+            .source
+            .layer_stress(
+                layer,
+                barycentric,
+                self.frame.to_section(membrane),
+                self.frame.to_section(gradient_per_m),
+            )
+            .map_err(material_error)?;
+        Ok(LayerThermalStress {
+            bottom_pa: to_facet(&self.frame.strain_to_section, stress.bottom_pa),
+            top_pa: to_facet(&self.frame.strain_to_section, stress.top_pa),
+        })
+    }
+
+    pub(super) fn admit_section(&self, actual: &ShearShellSection) -> Result<(), PlateError> {
+        self.frame.admit_section(actual)
+    }
+
+    pub(in crate::shell::mitc) fn evaluate(
+        &self,
+        barycentric: [f64; 3],
+        membrane: [f64; 3],
+        gradient_per_m: [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<LaminateThermalResponse, PlateError> {
+        let response = self
+            .source
+            .evaluate(
+                barycentric,
+                self.frame.to_section(membrane),
+                self.frame.to_section(gradient_per_m),
+                cancelled,
+            )
+            .map_err(material_error)?;
+        Ok(LaminateThermalResponse {
+            membrane_force_n_m: to_facet(
+                &self.frame.strain_to_section,
+                response.membrane_force_n_m,
+            ),
+            bending_moment_n: to_facet(&self.frame.strain_to_section, response.bending_moment_n),
+            strain_energy_j_m2: response.strain_energy_j_m2,
         })
     }
 }

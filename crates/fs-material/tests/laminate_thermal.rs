@@ -1,6 +1,7 @@
 //! G1/G3 layerwise thermal-force, curvature, energy and frame oracles.
 //! Synthetic numerical fixtures; no experimental material validation is claimed.
 
+use fs_material::laminate::thermal::nodal::PreparedNodalLaminateThermal;
 use fs_material::laminate::thermal::{
     LaminaThermalStrain, LaminateThermalError, PreparedLaminateThermal,
 };
@@ -383,4 +384,179 @@ fn g1_integrated_material_sources_drive_distinct_layers_without_endpoint_cte_sho
     assert!(
         integrate_isotropic_thermal_expansion(&card, &at(300.0), &at(410.0), selection).is_err()
     );
+}
+
+#[test]
+fn g1_nodal_bimetal_interpolates_free_strain_before_retaining_self_stress_energy() {
+    let (e, h) = (12.0, 0.8);
+    let section = Arc::new(
+        LaminateSection::try_new(
+            vec![layer(e, 0.5 * h, 0.0); 2],
+            ReferenceSurface::Midsurface,
+        )
+        .unwrap(),
+    );
+    let delta = [0.001, 0.004, 0.009];
+    let nodes = delta.map(|value| {
+        Arc::new(
+            PreparedLaminateThermal::try_new(
+                section.clone(),
+                &[
+                    LaminaThermalStrain::uniform([0.0; 3]).unwrap(),
+                    LaminaThermalStrain::uniform([value, value, 0.0]).unwrap(),
+                ],
+                || false,
+            )
+            .unwrap(),
+        )
+    });
+    let state = PreparedNodalLaminateThermal::try_new(nodes).unwrap();
+    let lambda = [0.2, 0.3, 0.5];
+    let d = (0..3).map(|i| lambda[i] * delta[i]).sum::<f64>();
+    let membrane = [0.5 * d, 0.5 * d, 0.0];
+    let curvature = [1.5 * d / h, 1.5 * d / h, 0.0];
+    let response = state
+        .evaluate(lambda, membrane, curvature, || false)
+        .unwrap();
+    for v in response
+        .membrane_force_n_m
+        .into_iter()
+        .chain(response.bending_moment_n)
+    {
+        near(v, 0.0, 2e-16);
+    }
+    let expected = e * h * d * d / 16.0;
+    near(response.strain_energy_j_m2, expected, 1e-19);
+    // Averaging independently relaxed node energies invents variance storage.
+    let wrong = e * h / 16.0 * (0..3).map(|i| lambda[i] * delta[i] * delta[i]).sum::<f64>();
+    assert!(wrong > 1.1 * expected);
+    let (force, moment) = state.thermal_resultants_at(lambda).unwrap();
+    near(force[0], 0.5 * e * h * d, 2e-16);
+    near(moment[0], e * h * h * d / 8.0, 2e-17);
+    let lower = state.layer_stress(0, lambda, membrane, curvature).unwrap();
+    let upper = state.layer_stress(1, lambda, membrane, curvature).unwrap();
+    near(lower.bottom_pa[0], -e * d / 4.0, 2e-16);
+    near(lower.top_pa[0], e * d / 2.0, 2e-16);
+    near(upper.bottom_pa[0], -e * d / 2.0, 2e-16);
+    near(upper.top_pa[0], e * d / 4.0, 2e-16);
+    assert!(core::ptr::eq(state.section(), section.as_ref()));
+    near(state.section().i0_kg_m2(), 2.0 * h, 0.0);
+}
+
+#[test]
+fn g3_nodal_rotated_layer_profiles_match_their_original_pointwise_constitutive_owner() {
+    let mut ply = layer(30.0, 0.07, 0.31);
+    ply.law = LayerLaw::PlaneStress {
+        stiffness_pa: [90.0, 7.0, 0.0, 7.0, 30.0, 0.0, 0.0, 0.0, 12.0],
+        transverse_shear_pa: [12.0, 15.0],
+    };
+    let section = Arc::new(
+        LaminateSection::try_new(
+            vec![ply, layer(47.0, 0.03, -0.2)],
+            ReferenceSurface::Offset(0.03),
+        )
+        .unwrap(),
+    );
+    let profiles: [[LaminaThermalStrain; 2]; 3] = core::array::from_fn(|node| {
+        core::array::from_fn(|layer| {
+            let bottom = core::array::from_fn(|c| {
+                0.0002 * (1.0 + node as f64 - 0.3 * layer as f64) * (c as f64 - 0.7)
+            });
+            let top = core::array::from_fn(|c| bottom[c] - 0.0001 * (1 + node + c) as f64);
+            LaminaThermalStrain::from_faces(bottom, top).unwrap()
+        })
+    });
+    let nodes = profiles.map(|profile| {
+        Arc::new(PreparedLaminateThermal::try_new(section.clone(), &profile, || false).unwrap())
+    });
+    let state = PreparedNodalLaminateThermal::try_new(nodes).unwrap();
+    let lambda = [0.13, 0.27, 0.6];
+    let point_profiles: [LaminaThermalStrain; 2] = core::array::from_fn(|layer| {
+        let faces: [[f64; 3]; 2] = core::array::from_fn(|face| {
+            core::array::from_fn(|c| {
+                (0..3)
+                    .map(|n| lambda[n] * profiles[n][layer].faces()[face][c])
+                    .sum()
+            })
+        });
+        LaminaThermalStrain::from_faces(faces[0], faces[1]).unwrap()
+    });
+    let point = PreparedLaminateThermal::try_new(section, &point_profiles, || false).unwrap();
+    let membrane = [0.0003, -0.0002, 0.0004];
+    let gradient = [0.003, -0.007, 0.002];
+    let actual = state
+        .evaluate(lambda, membrane, gradient, || false)
+        .unwrap();
+    let expected = point.evaluate(membrane, gradient, || false).unwrap();
+    near(
+        actual.strain_energy_j_m2,
+        expected.strain_energy_j_m2,
+        2e-21,
+    );
+    for c in 0..3 {
+        near(
+            actual.membrane_force_n_m[c],
+            expected.membrane_force_n_m[c],
+            2e-18,
+        );
+        near(
+            actual.bending_moment_n[c],
+            expected.bending_moment_n[c],
+            2e-19,
+        );
+    }
+    for layer in 0..2 {
+        let actual = state
+            .layer_stress(layer, lambda, membrane, gradient)
+            .unwrap();
+        let expected = point.layer_stress(layer, membrane, gradient).unwrap();
+        for c in 0..3 {
+            near(actual.bottom_pa[c], expected.bottom_pa[c], 3e-17);
+            near(actual.top_pa[c], expected.top_pa[c], 3e-17);
+        }
+    }
+}
+
+#[test]
+fn g0_nodal_thermal_preserves_uniform_profiles_and_refuses_foreign_sections_and_points() {
+    let section = Arc::new(
+        LaminateSection::try_new(vec![layer(20.0, 0.1, 0.2)], ReferenceSurface::Midsurface)
+            .unwrap(),
+    );
+    let profile =
+        LaminaThermalStrain::from_faces([0.001, -0.002, 0.0003], [0.002, 0.003, -0.0001]).unwrap();
+    let node =
+        Arc::new(PreparedLaminateThermal::try_new(section.clone(), &[profile], || false).unwrap());
+    let state =
+        PreparedNodalLaminateThermal::try_new([node.clone(), node.clone(), node.clone()]).unwrap();
+    let lambda = [0.2, 0.3, 0.5];
+    assert_eq!(
+        state.thermal_resultants_at(lambda).unwrap(),
+        (node.membrane_force_n_m(), node.bending_moment_n())
+    );
+    assert_eq!(
+        state
+            .evaluate(lambda, [0.0002; 3], [-0.001; 3], || false)
+            .unwrap(),
+        node.evaluate([0.0002; 3], [-0.001; 3], || false).unwrap(),
+    );
+    let foreign = Arc::new(
+        PreparedLaminateThermal::try_new(Arc::new(section.as_ref().clone()), &[profile], || false)
+            .unwrap(),
+    );
+    assert!(matches!(
+        PreparedNodalLaminateThermal::try_new([node.clone(), node.clone(), foreign]),
+        Err(LaminateThermalError::IncompatibleSection),
+    ));
+    for point in [[0.0; 3], [-0.1, 0.3, 0.8], [f64::NAN, 0.0, 1.0]] {
+        assert!(matches!(
+            state.evaluate(point, [0.0; 3], [0.0; 3], || false),
+            Err(LaminateThermalError::BarycentricCoordinates)
+        ));
+    }
+    assert!(matches!(
+        state.evaluate(lambda, [0.0; 3], [0.0; 3], || true),
+        Err(LaminateThermalError::Cancelled)
+    ));
+    assert_eq!(state.nodes()[0].profiles(), &[profile]);
 }
