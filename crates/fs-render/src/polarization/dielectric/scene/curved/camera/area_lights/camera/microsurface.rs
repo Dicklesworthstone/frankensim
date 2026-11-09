@@ -28,6 +28,10 @@ use crate::polarization::dielectric::scene::smith_draw;
 use crate::polarization::dielectric::transport::microsurface::SmithWalkSettings;
 use fs_rand::philox::philox4x32_10;
 
+/// Full two-sided dielectric and opaque Smith finite-source transport.
+pub mod dielectric;
+pub use dielectric::SmithDielectricAreaLightCameraScene;
+
 /// Borrow an admitted original area camera; each direct-light receiver must be
 /// an opaque rough/brushed conductor in the source's homogeneous medium.
 /// Existing authored image seeds remain owned by the original camera; this
@@ -237,11 +241,42 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         settings: AreaLightCameraSettings,
         workspace: &mut AreaLightCameraWorkspace,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+        area_samples: impl FnMut(u32, usize) -> [f64; 2],
+        connection_samples: impl FnMut(u32, usize, usize, u32) -> [f64; 3],
+    ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
+        self.sample_launched_with_microsurfaces(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            workspace,
+            surface_samples,
+            facet_samples,
+            area_samples,
+            connection_samples,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn sample_launched_with_microsurfaces(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: AreaLightCameraSettings,
+        workspace: &mut AreaLightCameraWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut facet_samples: impl FnMut(u32, u32) -> [f64; 3],
         mut area_samples: impl FnMut(u32, usize) -> [f64; 2],
         mut connection_samples: impl FnMut(u32, usize, usize, u32) -> [f64; 3],
+        mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
+        mut dielectric_connections: Option<&mut dyn FnMut(u32, usize, usize, u32) -> [f64; 4]>,
     ) -> Result<AreaLightCameraSample, AreaLightCameraError> {
         cx.checkpoint()?;
+        let full_dielectric = dielectric_connections.is_some();
         if settings.max_area_samples == 0 || settings.max_trace_evaluations == 0 {
             return Err(AreaLightCameraError::InvalidSettings);
         }
@@ -275,21 +310,17 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                                 }
                             };
                             emission.observe_weighted(path, weight)?;
-                            let contact = path
-                                .last_contact()
-                                .ok_or(CurvedSceneError::NumericalRange)?;
-                            let selected = self.source.bindings.iter().any(|binding| {
-                                binding.receiver_object_id == contact.object_id
-                                    && binding.initial_medium == path.medium_index()
-                            });
-                            partition.arrive(if selected {
-                                Some(DirectAnchor {
-                                    receiver: contact.object_id,
-                                    medium: path.medium_index(),
-                                })
-                            } else {
-                                None
-                            });
+                            let anchor = match self.direct_anchor(path, full_dielectric) {
+                                Ok(anchor) => anchor,
+                                Err(error) => {
+                                    source_error = Some(error);
+                                    return Err(CurvedSceneError::NumericalRange);
+                                }
+                            };
+                            partition.arrive(anchor);
+                            if anchor.is_none() {
+                                return Ok(());
+                            }
                             self.add_contact(
                                 cx,
                                 path,
@@ -300,6 +331,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                                 workspace,
                                 &mut area_samples,
                                 &mut connection_samples,
+                                &mut dielectric_connections,
                             )
                         }
                         CurvedTransportEvent::Surface(CurvedTraceEvent::Departure {
@@ -311,7 +343,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                         }
                         CurvedTransportEvent::MicrosurfaceDeparture(path) => {
                             emission.depart(path);
-                            partition.depart(true);
+                            partition.depart_in_medium(path.medium_index());
                             Ok(())
                         }
                     };
@@ -327,7 +359,9 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                 Some(SmithSurfaceSampler {
                     settings: self.microsurface,
                     samples: &mut facet_samples,
-                    dielectric_samples: None,
+                    dielectric_samples: dielectric_samples
+                        .as_mut()
+                        .map(|samples| &mut **samples as &mut dyn FnMut(u32, u32) -> [f64; 4]),
                 }),
             )
             .map(|(path, _)| path);
@@ -349,7 +383,38 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// A mixed equal-index glass law keeps its complete continuation measure:
+    /// no finite source estimate or endpoint suppression is installed for it.
+    fn direct_anchor(
+        &self,
+        path: &CurvedPathResult,
+        full_dielectric: bool,
+    ) -> Result<Option<DirectAnchor>, AreaLightCameraError> {
+        let contact = path
+            .last_contact()
+            .ok_or(AreaLightCameraError::NumericalRange)?;
+        if !self.source.bindings.iter().any(|binding| {
+            binding.receiver_object_id == contact.object_id
+                && (full_dielectric || binding.initial_medium == path.medium_index())
+        }) {
+            return Ok(None);
+        }
+        if full_dielectric {
+            let receiver = SurfaceReceiver::at_arrival(self.source.camera, path)?
+                .ok_or(AreaLightCameraError::NumericalRange)?;
+            if receiver.uses_smith_dielectric(self.source.camera)?
+                && !receiver.supports_smith_dielectric_connections(self.source.camera)?
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(DirectAnchor {
+            receiver: contact.object_id,
+            medium: path.medium_index(),
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn add_contact(
         &self,
         cx: &Cx<'_>,
@@ -361,6 +426,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         workspace: &mut AreaLightCameraWorkspace,
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         connection_samples: &mut impl FnMut(u32, usize, usize, u32) -> [f64; 3],
+        dielectric_connections: &mut Option<&mut dyn FnMut(u32, usize, usize, u32) -> [f64; 4]>,
     ) -> Result<(), AreaLightCameraError> {
         let contact = path
             .last_contact()
@@ -375,6 +441,8 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
         }
         let receiver = SurfaceReceiver::at_arrival(self.source.camera, path)?
             .ok_or(AreaLightCameraError::NumericalRange)?;
+        let dielectric = dielectric_connections.is_some()
+            && receiver.uses_smith_dielectric(self.source.camera)?;
         let event = path
             .surface_events()
             .checked_sub(1)
@@ -512,14 +580,28 @@ impl<'v, 'a, 's, 'm, 'l> SmithAreaLightCameraScene<'v, 'a, 's, 'm, 'l> {
                     if source_radiance == 0.0 {
                         continue;
                     }
-                    let (normal, factor) = receiver.smith_response(
-                        cx,
-                        self.source.camera,
-                        &channel,
-                        index,
-                        self.microsurface,
-                        |facet| connection_samples(event, index, channel_index, facet),
-                    )?;
+                    let (normal, factor) = if dielectric {
+                        let samples = dielectric_connections
+                            .as_mut()
+                            .ok_or(AreaLightCameraError::NumericalRange)?;
+                        receiver.smith_dielectric_response(
+                            cx,
+                            self.source.camera,
+                            &channel,
+                            index,
+                            self.microsurface,
+                            |facet| samples(event, index, channel_index, facet),
+                        )?
+                    } else {
+                        receiver.smith_response(
+                            cx,
+                            self.source.camera,
+                            &channel,
+                            index,
+                            self.microsurface,
+                            |facet| connection_samples(event, index, channel_index, facet),
+                        )?
+                    };
                     if factor == 0.0 {
                         continue;
                     }
@@ -616,7 +698,8 @@ struct DirectAnchor {
 
 /// A represented endpoint must be the very next native geometric encounter.
 /// Arrival retires the previous anchor; only a completed Smith departure from
-/// a selected conductor installs another one. In particular a delta boundary
+/// a selected, continuously evaluated receiver installs another one. A net
+/// dielectric transmission binds the resulting source-side medium. A delta boundary
 /// cannot accidentally preserve the prior receiver's direct-light partition.
 #[derive(Default)]
 struct DirectPartition {
@@ -631,5 +714,12 @@ impl DirectPartition {
     fn depart(&mut self, smith: bool) {
         self.anchor = if smith { self.arriving.take() } else { None };
         self.arriving = None;
+    }
+
+    fn depart_in_medium(&mut self, medium: usize) {
+        self.depart(true);
+        if let Some(anchor) = &mut self.anchor {
+            anchor.medium = medium;
+        }
     }
 }

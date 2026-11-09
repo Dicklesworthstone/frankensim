@@ -6,6 +6,7 @@ mod thermal;
 mod transient;
 mod sequential;
 mod microsurface;
+mod smith_dielectric;
 
 use super::*;
 use crate::charts::{Ray, TriMesh};

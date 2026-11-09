@@ -13082,3 +13082,46 @@ retain the existing opaque behavior. Two full native scene regression groups
 for both source media, analyzer/Beer/index composition and cancellation are
 authored but unrun. The actual new shared receiver also compiled and ran in the
 environment integration probe. Full Cargo/DSR/RCH remain unavailable.
+
+### Full Smith rough-glass finite-area illumination
+
+`SmithDielectricAreaLightCameraScene` borrows the admitted native area camera
+and reuses its original direct-source solver, face/side selection, spectral
+radiance, polarization-channel replay, Beer attenuation and work accounting.
+Bound receivers may be rough dielectrics or opaque rough/brushed conductors;
+each source's declared medium must be one of the receiver's original adjacent
+homogeneous media. The source's actual approach side remains authoritative.
+Other geometric surfaces block this straight proposal before scattering.
+
+Both connection and continuation use the complete two-sided Smith glass law.
+The glass connection owns its net local radiance index ratio and the original
+receiver accumulator applies the camera-prefix ratio exactly once. Finite
+sources use a direct light-only partition: only the immediately following
+emitter hit represented by the same receiver, source face selection, side and
+FINAL departure medium is suppressed. Arriving-medium identity is insufficient
+after net transmission. Intervening events retire that partition; primary
+surface emission and LTE emission remain in their original owner. No sampled
+BSDF or hidden joint path density enters MIS.
+
+At equal-index rough glass, including coated mixed continuous/delta laws, this
+view retains complete full-glass continuation and endpoint weight one. It draws
+neither an area source nor a connection sample there. Smooth interfaces retain
+their original delta path. This does not claim continuous NEE for mixed
+equal-index laws, GRIN direct legs, source images through other boundaries,
+or globally optimal variance.
+
+Separate zero-based logical streams own ordinary surfaces, opaque and glass
+continuations, area points, and opaque/glass source estimates; source binding,
+polarization channel and facet identity remain explicit. Seeded, passive
+analyzer, resolved-lens and corresponding caller-sample entry points share the
+same estimator. Cancellation and exhausted optical/source/query work refuse
+the entire sample.
+
+Verification: seven compiled integration probes passed (four new glass groups
+plus three existing opaque groups), executing the actual modified shared area
+estimator and new wrapper with explicit scene, geometry, emission, response and
+source fixtures. They cover both-side dispatch, final-medium endpoint ownership,
+face/side support, source channels, equal-index no-draw fallback, intervening
+delta reset, admission, cancellation/refusal, replay and analyzed entry points.
+Three native full-scene regression groups are authored but unrun. Full workspace
+Cargo, resolved geometry runtime and remote DSR/RCH checks were unavailable.
