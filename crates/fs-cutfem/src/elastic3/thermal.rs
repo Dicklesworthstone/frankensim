@@ -17,6 +17,9 @@ use super::{Cell3, CutElasticity3, ElasticityError3};
 
 mod adjoint;
 mod sensitivity;
+mod stress;
+
+pub use stress::ThermoelasticStressPullback3;
 pub use adjoint::{
     ThermoelasticAdjointSettings3, ThermoelasticMotion3, ThermoelasticObjective3,
     ThermoelasticSensitivity3,

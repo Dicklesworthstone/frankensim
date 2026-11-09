@@ -973,3 +973,24 @@ continuum maxima; the original supported problem must be well posed. G0/G1/G3
 regressions extend `fs-solid/tests/cutfem_thermal_sensitivity.rs` with nonlinear
 stress/displacement objectives, physical source refresh, original hanging maps,
 moving supports, shared iteration bounds and objective-callback cancellation.
+
+
+## Native thermoelastic stress objective partials
+
+Cartesian and adaptive `thermoelastic_stress_pullback` return independent-coordinate
+displacement and per-cell fixed-state stiffness-scale and temperature partials.
+One physical `[xx, yy, zz, xy, yz, zx]` cotangent per retained bulk point supplies
+its own integration weight and any objective shear multiplicity. The native
+potential supplies C'(T) and integrated, independently oriented expansion
+derivatives. Actual/projected total and elastic domains remain enforced;
+algebraic cotangents have no physical strain ceiling.
+
+Streaming recovery retains only point cotangents and cell partials. The existing
+reference stress and constraint transposes retain native material modes, B-bar,
+hanging nodes and homogeneous clamps. For K^T z = dJ/du, solved temperature
+gradients subtract the complete residual temperature VJP from the direct
+temperature partials. Geometry, reference density and external-load derivatives
+retain their separate owners. The focused `cutfem_thermal_stress_sensitivity`
+fixtures cover Cartesian/adaptive fixed-state and solved stress gradients,
+rotated orthotropic stiffness, separately oriented expansion and refusal
+boundaries; no continuum maximum-stress or heat-step gradient is inferred.
