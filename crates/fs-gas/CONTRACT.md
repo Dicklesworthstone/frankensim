@@ -9351,3 +9351,68 @@ Focused regressions cover independent physical chemical-gas/wall energy and
 momentum balances under heat release plus body forcing, analytic isomerizing
 free fall with explicit wall weights, zero-source parity, and cancellation after
 the candidate chemistry/geometry/wall solution has been formed.
+
+## Reacting steady adiabatic pressure changes
+
+The public `equilibrium_flow` owner closes a steady representative gas
+stream across a passive throttle, compressor or expander using the original
+element/charge-constrained ideal-gas chemistry. This extends the fixed-species
+phase machinery; it does not replace its distinct real-fluid phase model.
+The caller supplies original species/feed inventory, inlet temperature and
+pressure, final pressure, source-valid temperature brackets, Gibbs/root work
+bounds and absolute energy/entropy allowances.
+
+The inlet is the equilibrium of the declared feed elements at the supplied
+T,p. An unequilibrated feed cannot silently retain its original enthalpy through
+that preparation. For machinery, the original prepared isentrope supplies the
+reversible source-integrated Delta H at the final pressure. Identical Gibbs
+policies and the identical source-bearing inlet are required in both SP and HP
+paths. Compressor work into the fluid is Delta H_s / eta; expander signed work
+is eta Delta H_s, with finite 0 < eta <= 1. A passive throttle permits only
+nonincreasing pressure and declares exactly zero shaft work. A nonzero machine
+pressure change must resolve work with the correct strict sign. Exactly equal
+pressures return the identical inlet without an SP or HP query.
+
+Actual products come from the existing prepared pressure/enthalpy owner.
+Original NASA-9 sensible and formation energy, mixing entropy, elements,
+charge, molecular-count changes and reacting derivatives remain with that
+owner. Flow work is already in H; neither an extra pV term nor a second chemical
+heat source is introduced. Source-relative H and S increments, rather than
+subtraction of rounded absolute totals, govern acceptance. Actual Delta H minus
+declared shaft work must pass the independent extensive energy allowance.
+Actual chemical Delta S must be no less than minus the explicit entropy
+allowance and is reported without clipping. Product mass remains checked by
+the native owner against the exact original feed mass.
+
+The accepted balance distinguishes declared shaft work, actual stream
+enthalpy change and the numerical energy residual. Scaling by prescribed
+positive mass flow divided by conserved feed mass yields their respective
+power rates and chemical entropy production rate. Overflow and loss of a
+nonzero rate to underflow are refused. This is a steady, adiabatic, negligible
+kinetic/potential-energy-change model; it does not infer mass flow, geometry,
+choking, finite-rate reaction, condensed phases or transport from equilibrium.
+
+With feature `material`, `equilibrium_flow::material` consumes the existing
+`EquilibriumGasEnthalpyPath` directly. Its original bank, source identity,
+transport admission, conserved parcel mass and independent density-volume,
+material H and composition-freezing residuals remain mandatory. The common
+flow energy balance uses the actual material source-integrated Delta H.
+The entropy account and reacting response are native chemical-equilibrium
+quantities; frozen material heat capacity, sound speed and transport retain
+their original meaning and are not substituted for reacting derivatives.
+
+At most two original reference TP preparations and one SP plus one HP query
+are made; throttling needs only the HP reference and query. Every trial retains
+the original bounded Gibbs/backtracking/temperature controls. The balance
+reports successful original composition and temperature iteration totals.
+Cancellation is polled through the original source paths and immediately
+before complete publication; borrowed models and feed remain unchanged.
+
+The genuine-source regressions compare a single-species limit with analytic
+machinery temperatures/work and stream rates, and reacting A2 <=> 2A throttles
+and machinery with independent mass-action, enthalpy and entropy roots. They
+also cover large formation/entropy references with small work, exact
+equal-pressure identity, independent physical residual admission, original
+source/budget refusals, incorrect pressure/efficiency requests and cancellation
+at final publication. They are numerical conformance tests, not empirical
+validation, finite-rate predictions or interval certificates.
