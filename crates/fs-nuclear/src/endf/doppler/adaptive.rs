@@ -2,7 +2,7 @@
 //!
 //! Accepted intervals pass three interior interpolation probes. A source-knot
 //! search prevents narrow broadened features from hiding between those probes:
-//! cells whose retained thermal support meets a source knot must be at most
+//! cells whose retained thermal support meets a retained source feature must be at most
 //! the admitted width in sqrt(E/theta). Wide energy ratios are split
 //! geometrically to resolve the low-energy inverse-speed tail efficiently.
 //!
@@ -26,8 +26,9 @@ const MAX_GRID_DEPTH: u8 = 64;
 pub struct DopplerGridAccuracy {
     pub relative_tolerance: f64,
     pub absolute_tolerance_m2: f64,
-    /// Maximum sqrt(E/theta) span near any original source knot, in (0, 1].
-    /// The search includes both exterior endpoints and duplicate-energy jumps.
+    /// Maximum sqrt(E/theta) span near a retained source feature, in (0, 1].
+    /// Endpoints and duplicate-energy jumps are retained. Only interior knots
+    /// joining exactly equal constant intervals are omitted from this guard.
     pub maximum_thermal_span: f64,
 }
 
@@ -297,13 +298,15 @@ impl Grid<'_> {
         if width <= self.accuracy.maximum_thermal_span {
             return Ok(false);
         }
-        // A source knot affects the retained integral somewhere in this cell
+        // A retained feature affects the integral somewhere in this cell
         // precisely when its speed lies within L thermal widths of the cell.
+        // The prepared cache omits only exactly flat redundant interior knots;
+        // point quadrature still follows every original source interval.
         // Rationalized square-root differences retain narrow windows at high E.
         let coordinate = |energy: f64, reference: f64, root: f64| {
             ((energy - reference) / (det::sqrt(energy) + root)) / self.owner.sqrt_theta_j
         };
-        let energies = &self.owner.source.energies_j;
+        let energies = &self.owner.thermal_features_j;
         let (mut first, mut end) = (0, energies.len());
         while first < end {
             self.work.visit(checkpoint)?;

@@ -527,3 +527,44 @@ fn invalid_accuracy_and_domains_are_refused_and_zero_curves_stay_compact() {
     assert_eq!(zero.tabulation.curve.cross_sections_m2(), &[0.0, 0.0]);
     assert_eq!(zero.maximum_estimated_interpolation_error_m2, 0.0);
 }
+
+#[test]
+fn flat_source_knot_density_does_not_exhaust_adaptive_output_budget() {
+    // G3: all of these processed curves describe the same constant law. At
+    // these high energies the complete retained thermal support is internal
+    // to the source domain; redundant knots must not become false resonances.
+    let interval = [750_000.0 * EV, 1_250_000.0 * EV];
+    let theta = 1.380_649e-23 * 600.0 / 233.0;
+    for law in [EndfInterpolation::Linear, EndfInterpolation::Histogram] {
+        for intervals in [2, 16, 256] {
+            let points: Vec<_> = (0..=intervals)
+                .map(|i| (2_000_000.0 * f64::from(i) / f64::from(intervals), 2.0))
+                .collect();
+            let curve = source(&points, law);
+            let operator = prepare(&curve, 900.0, ZERO);
+            let result = operator
+                .tabulate_adaptive(
+                    "flat-law-independent-of-source-mesh".into(),
+                    interval,
+                    point_accuracy(),
+                    grid_accuracy(1e-3),
+                    DopplerLimits {
+                        max_output_points: 2,
+                        ..DopplerLimits::default()
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+            let hot = &result.tabulation.curve;
+            assert_eq!(hot.energies_j(), &interval);
+            assert_eq!(result.point_evaluations, 5);
+            for (&energy, &actual) in hot.energies_j().iter().zip(hot.cross_sections_m2()) {
+                // Maxwell mean relative speed: erf(y) is 1 and exp(-y*y)
+                // underflows here, so the constant-sigma law is 1+1/(2*y*y).
+                let exact = 2.0 * BARN * (1.0 + theta / (2.0 * energy));
+                assert!((actual - exact).abs() <= 4e-11 * exact);
+            }
+            assert_eq!(operator.source(), &curve);
+        }
+    }
+}

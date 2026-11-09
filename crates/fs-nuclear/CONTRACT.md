@@ -2568,14 +2568,22 @@ endpoints and interior values are reused when intervals split. Wide energy
 ratios split geometrically to resolve inverse-speed tails without repeatedly
 bisecting a large linear energy range.
 
-Sampling alone could miss an off-center narrow resonance. A bounded binary
-search therefore checks the original source knots, including endpoints and
-duplicate-energy jumps, against the cell's retained thermal support. Where a
-knot is present, the accepted cell must span at most the configured amount of
-`sqrt(E/theta)` (default 0.5, maximum 1). Rationalized square-root differences
-retain narrow thermal windows at high incident energy. Source knots are searched
-without copying them into the output, so dense source data need not force the
-same number of heated output knots. Identically zero curves retain two endpoints.
+Sampling alone could miss an off-center narrow resonance. During the existing
+bounded source scan, preparation caches potential feature energies. It omits
+only strictly interior knots whose two positive-width adjacent intervals have
+exactly the same constant cross section. Both admitted histogram and linear
+laws are then unchanged across that knot. Endpoints, duplicate-energy jumps,
+and every nonzero ordinate change, including a one-ULP change, remain.
+The original source data and every point-quadrature interval remain intact.
+
+A bounded binary search checks this shared immutable feature cache against the
+cell's retained thermal support. Where a feature is present, the accepted cell
+must span at most the configured amount of `sqrt(E/theta)` (default 0.5,
+maximum 1). Rationalized square-root differences retain narrow thermal windows
+at high incident energy. Cached features are not copied into output grids or
+rescanned at each probe; cache allocation is bounded by `max_source_points`.
+Redundant plateau knots no longer force thermally fine output or exhaust an
+otherwise adequate output budget. Identically zero curves retain two endpoints.
 
 The interpolation estimate is **not an interval certificate**, a bound at every
 unprobed energy, or a certification of nuclear data or arbitrary-spectrum
@@ -2593,11 +2601,15 @@ and leave the source unchanged. At unchanged temperature, the requested domain
 must match the complete original domain, whose knots, interpolation laws and
 jumps are retained exactly without kernel work.
 
-Six public-path regressions parse manufactured ENDF sources and exercise
+Public-path regressions parse manufactured ENDF sources and exercise
 off-center resonance discovery, inverse-speed tails, refinement of native
 flat/spectrum-weighted reaction rates, exact identity behavior, shared work,
-bounded output, cancellation and deterministic retry. They introduce no
-evaluated-isotope accuracy, resonance reconstruction or shielding claim.
+bounded output, cancellation and deterministic retry. Plateau-mesh regressions
+admit the same flat law with 3, 17 and 257 input knots within a two-output-knot
+budget for both histogram and linear interpolation. A separate G3 control
+retains the thermal guard for one-ULP features and duplicate-energy jumps.
+These introduce no evaluated-isotope accuracy, resonance reconstruction or
+shielding claim.
 
 ## Energy-group radiation deposition
 

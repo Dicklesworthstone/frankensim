@@ -122,6 +122,10 @@ pub struct PreparedDopplerBroadening {
     target_temperature_k: f64,
     sqrt_theta_j: f64,
     rate_bound_m2_sqrt_j: f64,
+    // Original endpoints and possible changes of law. Exactly flat redundant
+    // knots cannot create a thermally broadened feature; the point integrator
+    // still uses every original segment and ordinate.
+    thermal_features_j: Arc<[f64]>,
     tails: DopplerTails,
 }
 
@@ -153,13 +157,32 @@ impl PreparedDopplerBroadening {
             det::sqrt(theta)
         };
         let mut bound = 0.0_f64;
+        let mut thermal_features = Vec::new();
         if increment > 0.0 {
+            thermal_features
+                .try_reserve_exact(source.energies_j.len())
+                .map_err(|_| budget("Doppler thermal-feature memory"))?;
+            thermal_features.push(source.energies_j[0]);
             // On each original linear/histogram interval sigma is bounded by
             // its endpoints. The sqrt(E) factor increases with E. Inverse-speed
             // exterior laws have constant g, already included in this bound.
             for index in 1..source.energies_j.len() {
                 if index % 64 == 0 {
                     checkpoint()?;
+                }
+                // Both admitted interpolation laws are constant when their
+                // two ordinates agree. Remove an interior knot only when both
+                // adjacent intervals are strictly positive-width and have
+                // exactly that same constant value. Keep jumps, endpoints and
+                // even one-ULP changes; no tolerance erases source features.
+                let last = index + 1 == source.energies_j.len();
+                if last
+                    || source.energies_j[index - 1] == source.energies_j[index]
+                    || source.energies_j[index] == source.energies_j[index + 1]
+                    || source.cross_sections_m2[index - 1] != source.cross_sections_m2[index]
+                    || source.cross_sections_m2[index] != source.cross_sections_m2[index + 1]
+                {
+                    thermal_features.push(source.energies_j[index]);
                 }
                 let sigma =
                     source.cross_sections_m2[index - 1].max(source.cross_sections_m2[index]);
@@ -184,6 +207,7 @@ impl PreparedDopplerBroadening {
             target_temperature_k,
             sqrt_theta_j,
             rate_bound_m2_sqrt_j: bound,
+            thermal_features_j: thermal_features.into(),
             tails,
         })
     }

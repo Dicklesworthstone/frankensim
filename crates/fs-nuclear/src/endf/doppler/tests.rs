@@ -675,3 +675,46 @@ fn source_and_output_remain_immutable_on_cancelled_or_exhausted_tabulation() {
         baseline
     );
 }
+
+#[test]
+fn one_ulp_features_and_duplicate_energy_jumps_retain_adaptive_thermal_guard() {
+    use super::adaptive::DopplerGridAccuracy;
+
+    // G3: a loose interpolation tolerance is not permission to delete source
+    // features. Their thermally narrow support can lie between all probes.
+    for law in [EndfInterpolation::Linear, EndfInterpolation::Histogram] {
+        for curve in [
+            source(
+                [0.0, 999_900.0, 1_000_000.0, 1_000_100.0, 2_000_000.0]
+                    .map(|e| e * EV_J)
+                    .to_vec(),
+                vec![BARN, BARN, BARN.next_up(), BARN, BARN],
+                law,
+            ),
+            source(
+                [0.0, 1_000_000.0, 1_000_000.0, 2_000_000.0]
+                    .map(|e| e * EV_J)
+                    .to_vec(),
+                vec![BARN, BARN, BARN.next_up(), BARN.next_up()],
+                law,
+            ),
+        ] {
+            let operator = prepare(&curve, 900.0, ZERO);
+            assert!(matches!(
+                operator.tabulate_adaptive(
+                    "retain-exact-source-features".into(),
+                    [750_000.0 * EV_J, 1_250_000.0 * EV_J],
+                    tight(),
+                    DopplerGridAccuracy::default(),
+                    DopplerLimits {
+                        max_output_points: 2,
+                        ..DopplerLimits::default()
+                    },
+                    || Ok(()),
+                ),
+                Err(EndfError::Physics(FissionError::Budget(_)))
+            ));
+            assert_eq!(operator.source(), &curve);
+        }
+    }
+}
