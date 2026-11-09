@@ -1606,6 +1606,47 @@ This extension retains the existing modal interface's spatial and thermal
 limitations. It does not provide full pointwise P2 Helmholtz/LNS trace continuity,
 nonmatching mortar, mean-flow sound generation or an inferred body-force law.
 
+### Original pressure-region sources across the hybrid
+
+Complete-coordinate `InteriorMultiport` models now prepare the existing
+`VolumeVelocitySource` and `BoundaryVelocitySource` owners on their original
+`HelmholtzFe`. The same volume/surface quadrature, signed six-node motion and
+work-conjugate observations are reused. A private retained allocation identity
+admits that immutable geometry even after movement and refuses a geometrically
+identical substitute. Source identity additionally binds the exact multiport;
+reduced-basis models cannot reinterpret these full-coordinate loads.
+
+Volume amplitudes are peak m^3/s multiplying signed densities [m^-3]; quadratic
+boundary amplitudes are peak inward m/s. The unscaled pressure equation receives
+`i omega rho b`. All source columns add coherently before the retained loaded or
+unloaded LU solve. Source preparation is not repeated by warm responses. Boundary
+support must be disjoint from all port/interface and boundary-layer faces, even
+for zero shapes/amplitudes. Original source-count, quadrature, finite-value and
+cancellation admission remains in force.
+
+`PreparedHybrid::response_with_all_sources` closes both original affine outgoing
+source offsets with the existing interface factor, while keeping LNS body force,
+structural and volume/surface heat drives live. Native pressure responses retain
+separate signed boundary/volume source-power subtotals; `input_power_w` remains
+port work. The hybrid counts those source subtotals once alongside original LNS
+sources. Independent viscous, conductive, caloric, wall and bulk losses retain
+their original meanings; source work is never deposited as heat.
+
+Three focused regression definitions cover exact full-P2 curved-volume
+compression/work and surface moments, signed source fields against the original
+heterogeneous equations, and bilateral nonorthogonal hybrid closure assembled
+independently in physical pressure/flow coordinates. They include source emission,
+coherent interference, internal-reference invariance, original identity/support
+refusals, count limits, cancellation and replay. Existing array-valued pressure
+checks in the source fixtures were corrected to use their actual [real, imaginary]
+representation. These changes have not been formatted, compiled or executed in
+the disconnected environment.
+
+The existing selected-modal interface, insulated thermal cut, pressure-coordinate
+budgets and physical placement limits remain. This extension supplies prescribed
+first-order acoustic injection; it does not infer mass/heat-release production,
+mean-flow sound or complete pointwise P2 Helmholtz/LNS continuity.
+
 ## Molecular compression across both hybrid acoustic regions
 
 The original pressure multiport now offers `prepare_scattering_with_bulk_modulus(frequency_hz, K, references, cancelled)` with finite Re(K)>0 and Im(K)>=0 in exp(+i omega t). It assembles `K_FE - rho omega^2/K M_FE` on the original pressure basis and geometric mass, reusing the same spatial port loads and loaded LU. The original real-medium preparation keeps its existing arithmetic. `PreparedInteriorScattering::bulk_dissipation_w` independently evaluates `-omega Im(1/K) p* M_FE p / 2`, checks cancellation per row, and adds neither a dense matrix nor a fitted attenuation/loss clip.

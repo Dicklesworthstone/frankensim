@@ -21,16 +21,21 @@ use fs_math::{c64::C64, dd::Dd};
 /// A lossy owner includes its frozen frequency and complete mechanical walls;
 /// equal geometry alone never authorizes reuse with a different preparation.
 #[derive(Clone, Copy)]
-pub(super) enum PressureSourceOwner<'m, 'f, 'c> {
+pub(in crate::acoustics::helmholtz) enum PressureSourceOwner<'m, 'f, 'c> {
     Heterogeneous(&'m HeterogeneousHelmholtzFe<'f, 'c>),
     Equivalent(&'m PreparedEquivalentFluid<'f, 'c>),
+    Interior {
+        model: &'m super::super::multiport::InteriorMultiport,
+        geometry: &'f HelmholtzFe<'c>,
+    },
 }
 
 impl<'f, 'c> PressureSourceOwner<'_, 'f, 'c> {
-    pub(super) fn geometry(self) -> &'f HelmholtzFe<'c> {
+    pub(in crate::acoustics::helmholtz) fn geometry(self) -> &'f HelmholtzFe<'c> {
         match self {
             Self::Heterogeneous(model) => model.geometry,
             Self::Equivalent(prepared) => prepared.geometry(),
+            Self::Interior { geometry, .. } => geometry,
         }
     }
 
@@ -38,6 +43,9 @@ impl<'f, 'c> PressureSourceOwner<'_, 'f, 'c> {
         match (self, other) {
             (Self::Heterogeneous(a), PressureSourceOwner::Heterogeneous(b)) => core::ptr::eq(a, b),
             (Self::Equivalent(a), PressureSourceOwner::Equivalent(b)) => core::ptr::eq(a, b),
+            (Self::Interior { model: a, .. }, PressureSourceOwner::Interior { model: b, .. }) => {
+                core::ptr::eq(a, b)
+            }
             _ => false,
         }
     }
@@ -69,7 +77,7 @@ pub(super) fn admit_count(count: usize) -> Result<(), HeterogeneousError> {
 /// on a real heterogeneous model or one exact prepared lossy equivalent fluid;
 /// those bindings are distinct, even when they borrow the same geometry.
 pub struct VolumeVelocitySource<'m, 'f, 'c> {
-    owner: PressureSourceOwner<'m, 'f, 'c>,
+    pub(in crate::acoustics::helmholtz) owner: PressureSourceOwner<'m, 'f, 'c>,
     pub(super) load: Vec<f64>,
     integral: f64,
 }
@@ -146,7 +154,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
 }
 
 impl<'m, 'f, 'c> VolumeVelocitySource<'m, 'f, 'c> {
-    pub(super) fn prepare<E: From<HeterogeneousError>>(
+    pub(in crate::acoustics::helmholtz) fn prepare<E: From<HeterogeneousError>>(
         owner: PressureSourceOwner<'m, 'f, 'c>,
         quadrature_order: usize,
         density_per_m3: &mut impl FnMut(usize, [f64; 3]) -> Result<f64, E>,

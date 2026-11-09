@@ -26,6 +26,8 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 use fs_math::det;
 
+mod sources;
+
 /// Explicit cap on retained boundary modes. Exceeding it refuses, never truncates.
 pub const MAX_PORT_MODES: usize = 64;
 
@@ -58,6 +60,7 @@ impl BoundaryMode {
 pub struct InteriorMultiport {
     pub(super) reduced: ReducedHelmholtz,
     pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
+    source_geometry: Option<sources::SourceGeometry>,
 }
 
 /// Original source traces retained for an exactly identified hybrid interface.
@@ -134,10 +137,14 @@ pub struct InteriorPortResponse {
     /// with `new_full`, these are ALL original `HelmholtzFe` DOFs in their
     /// original order; otherwise they are the supplied reduced coordinates.
     pub amplitudes: Vec<[f64; 2]>,
+    /// Signed work of prepared quadratic boundary motion [W], excluding ports.
+    pub boundary_source_power_w: f64,
+    /// Signed work of original distributed volume injection [W], excluding ports.
+    pub volume_source_power_w: f64,
 }
 
 impl InteriorPortResponse {
-    /// Mean total acoustic input work [W], including modal interference through
+    /// Mean acoustic PORT input work [W], including modal interference through
     /// the solved pressure. There is no independent area or impedance scaling.
     #[must_use]
     pub fn input_power_w(&self) -> f64 {
@@ -262,6 +269,11 @@ impl InteriorMultiport {
             }
             out
         };
+        let source_geometry = Some(sources::SourceGeometry::new(
+            fe,
+            ports,
+            wall.as_ref().map(|(faces, _, _)| *faces),
+        ));
         let face_sets: Vec<_> = faces.iter().map(Vec::as_slice).collect();
         let boundary_layer = wall
             .map(|(wall_faces, transport, geometry)| {
@@ -283,7 +295,7 @@ impl InteriorMultiport {
             boundary_layer,
         };
         poll(cancelled)?;
-        Ok(Self { reduced, physical_modes })
+        Ok(Self { reduced, physical_modes, source_geometry })
     }
 
     /// Project supplied spatial modes onto the original rigid-wall FE problem.
@@ -384,6 +396,7 @@ impl InteriorMultiport {
         Ok(Self {
             reduced,
             physical_modes,
+            source_geometry: None,
         })
     }
 
@@ -708,6 +721,15 @@ impl PreparedInteriorMultiport<'_> {
         inward_flow_m3_s: &[C64],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<InteriorPortResponse, AcousticFeError> {
+        self.response_with_load(inward_flow_m3_s, None, cancelled)
+    }
+
+    fn response_with_load(
+        &self,
+        inward_flow_m3_s: &[C64],
+        source_load: Option<&[C64]>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<InteriorPortResponse, AcousticFeError> {
         poll(cancelled)?;
         if inward_flow_m3_s.len() != self.model.port_mode_count()
             || inward_flow_m3_s.iter().any(|&q| !finite(q))
@@ -721,6 +743,7 @@ impl PreparedInteriorMultiport<'_> {
                 *entry = *entry + scale.scale(weight);
             }
         }
+        sources::add_load(&mut rhs, source_load, self.omega_rho, cancelled)?;
         self.factor
             .solve_with_cancel(&mut rhs, cancelled)
             .map_err(|e| linear_error(e, self.frequency_hz))?;
@@ -739,6 +762,8 @@ impl PreparedInteriorMultiport<'_> {
             pressure_pa,
             inward_flow_m3_s: inward_flow_m3_s.to_vec(),
             amplitudes: rhs.into_iter().map(|z| [z.re, z.im]).collect(),
+            boundary_source_power_w: 0.0,
+            volume_source_power_w: 0.0,
         })
     }
 }
@@ -795,6 +820,15 @@ impl PreparedInteriorScattering<'_> {
         incident: &[C64],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<InteriorPortResponse, AcousticFeError> {
+        self.response_with_load(incident, None, cancelled)
+    }
+
+    fn response_with_load(
+        &self,
+        incident: &[C64],
+        source_load: Option<&[C64]>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<InteriorPortResponse, AcousticFeError> {
         poll(cancelled)?;
         if incident.len() != self.reference.len() || incident.iter().any(|&a| !finite(a)) {
             return Err(invalid("interior incident wave shape or nonfinite value"));
@@ -807,6 +841,7 @@ impl PreparedInteriorScattering<'_> {
                 *entry = *entry + scale.scale(weight);
             }
         }
+        sources::add_load(&mut rhs, source_load, self.omega_rho, cancelled)?;
         self.factor
             .solve_with_cancel(&mut rhs, cancelled)
             .map_err(|e| linear_error(e, self.frequency_hz))?;
@@ -837,6 +872,8 @@ impl PreparedInteriorScattering<'_> {
             pressure_pa,
             inward_flow_m3_s,
             amplitudes: rhs.into_iter().map(|z| [z.re, z.im]).collect(),
+            boundary_source_power_w: 0.0,
+            volume_source_power_w: 0.0,
         })
     }
 

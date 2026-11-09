@@ -198,6 +198,8 @@ pub struct HelmholtzModes {
 
 /// The interior Helmholtz finite-element space on one tet complex.
 pub struct HelmholtzFe<'c> {
+    /// Stable original-owner identity for full-coordinate source projections.
+    source_identity: std::sync::Arc<()>,
     space: SimplexSpace<'c>,
     positions: Vec<[f64; 3]>,
     medium: Medium,
@@ -357,6 +359,7 @@ impl<'c> HelmholtzFe<'c> {
             }
         }
         Ok(Self {
+            source_identity: std::sync::Arc::new(()),
             space,
             positions: positions.to_vec(),
             medium,

@@ -108,9 +108,10 @@ fn g2_original_vector_forces_and_surface_heat_close_nonorthogonal_hybrid_fields(
     same_fields(&response.thermoviscous, &expected);
     let expected_h = h.prepare(frequency, &|| false).unwrap()
         .response(&oracle[..3], &|| false).unwrap();
-    let scale = expected_h.amplitudes.iter().map(|z| z.abs()).fold(1e-30_f64, f64::max);
+    let scale = expected_h.amplitudes.iter().map(|z| C64::new(z[0], z[1]).abs())
+        .fold(1e-30_f64, f64::max);
     assert!(response.helmholtz.amplitudes.iter().zip(&expected_h.amplitudes)
-        .all(|(a, b)| (*a - *b).abs() < 2e-8 * scale));
+        .all(|(a, b)| C64::new(a[0] - b[0], a[1] - b[1]).abs() < 2e-8 * scale));
     for i in 0..3 {
         assert!(relative(response.helmholtz.inward_flow_m3_s[i], oracle[i]) < 2e-8);
         assert!(relative(response.thermoviscous.pressure_drive_pa[i], oracle[3 + i]) < 2e-8);
@@ -183,7 +184,7 @@ fn g1_sealed_body_force_response_preserves_original_work_binding_and_cancellatio
     let zero = prepared.response_with_volume_sources(
         &[], &[], &cancelled_sources, &[], &|| false,
     ).unwrap();
-    assert!(zero.helmholtz.amplitudes.iter().all(|z| *z == C64::ZERO));
+    assert!(zero.helmholtz.amplitudes.iter().all(|z| *z == [0.0; 2]));
     assert!(zero.thermoviscous.velocity_m_s.iter().flatten().all(|z| *z == C64::ZERO));
     assert_eq!(zero.power.source_input_w, 0.0);
 

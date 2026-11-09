@@ -42,7 +42,7 @@ pub(super) fn admit_count(count: usize) -> Result<(), HeterogeneousError> {
 /// Sources prepared on a lossy equivalent fluid retain that exact preparation;
 /// a source from a real heterogeneous model is not interchangeable with it.
 pub struct BoundaryVelocitySource<'m, 'f, 'c> {
-    owner: PressureSourceOwner<'m, 'f, 'c>,
+    pub(in crate::acoustics::helmholtz) owner: PressureSourceOwner<'m, 'f, 'c>,
     pub(super) load: Vec<f64>,
     pub(super) faces: Vec<[u32; 3]>,
     integral_m2: f64,
@@ -167,7 +167,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
 }
 
 impl<'m, 'f, 'c> BoundaryVelocitySource<'m, 'f, 'c> {
-    pub(super) fn prepare(
+    pub(in crate::acoustics::helmholtz) fn prepare(
         owner: PressureSourceOwner<'m, 'f, 'c>,
         traces: &[([u32; 3], [f64; 6])],
         quadrature_order: usize,
