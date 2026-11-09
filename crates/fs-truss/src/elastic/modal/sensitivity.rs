@@ -340,14 +340,17 @@ impl<'a> PreparedModalDesign<'a> {
             let z_t = transverse_extension(&adjoint.displacements_m);
             let k = young * (area / length);
             let force = self.pencil.equilibrium.member_force_n[index];
-            let radial = -k * (axial * axial / length)
-                - redistribution * k * self.pencil.equilibrium.member_strain[index]
-                - force * (c / length)
-                - lambda * density * area * (inertia_work / 3.0);
-            let angular = (2.0 * (k - force / length) * axial * transverse
-                + redistribution * k * u_t
-                - force * z_t)
-                / length;
+            let [radial, angular] = MemberTangent::coordinate_work(
+                length,
+                k,
+                force,
+                [axial, transverse],
+                redistribution,
+                self.pencil.equilibrium.member_strain[index],
+                u_t,
+                z_t,
+            );
+            let radial = radial - lambda * density * area * (inertia_work / 3.0);
             for axis in 0..2 {
                 let contribution =
                     radial * member.axial[axis + 2] + angular * member.transverse[axis + 2];

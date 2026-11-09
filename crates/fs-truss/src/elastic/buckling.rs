@@ -27,6 +27,9 @@ use fs_solid::stability::sparse::SparseBucklingLimits;
 use fs_solid::stability::{BucklingResult, buckling_loads_cancellable};
 use fs_sparse::Coo;
 
+/// Total design derivatives of separated positive critical load factors.
+pub mod sensitivity;
+
 /// Hard cap on combined triplets before native deterministic COO assembly.
 /// This bounds the existing assembler's unpolled sort and temporary storage.
 pub const HARD_MAX_BUCKLING_STAGED_ENTRIES: usize = 8_000_000;

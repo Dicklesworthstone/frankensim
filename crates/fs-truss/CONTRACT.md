@@ -678,3 +678,69 @@ covariance, full homothety chain rules, and a serial-member exact 2-by-2 pencil
 with off-diagonal mass. Existing analytic bar tests also check joint-mass length
 derivatives and the signed compressed-mode branch. These are local discrete
 gradient checks, not physical calibration or global shape-optimality claims.
+
+
+## Total critical-load design adjoints
+
+`elastic::buckling::sensitivity::PreparedBucklingDesign` binds the original
+ground, reference case, selected areas and Young's moduli to the existing
+fixed/reference buckling analysis. It reuses both native compatible equilibria,
+the original support map and the existing positive-base spectral owner.
+`controls.modes` names the derivative range; one additional root is requested
+as an upper guard under the same native factor/iteration admission. Guard roots
+cannot be requested as derivative results.
+
+`solve_mode` admits a positive returned root only when both available adjacent
+returned positive roots have relative separation greater than
+`max(1e-6, 10*(relative_residual_i+relative_residual_neighbor))`.
+The residuals are the native dimensionless original-pencil residuals. This is
+the existing native solid sensitivity owner's numerical branch policy with an
+explicit residual margin. It does not certify eigenvalue enclosures, exclude
+missed modes, or turn fewer returned roots into spectrum completeness. Repeated
+or unresolved adjacent roots refuse rather than supply an individual gradient.
+
+At the selected load lambda, use `u*=u_fixed+lambda*u_reference` and
+`N*=N_fixed+lambda*N_reference`. For original mode phi, the normalization is
+recomputed from original member work:
+`s=-sum(N_reference*(t.dot(phi_b-phi_a))²/L)>0`.
+Nonpositive or nonfinite s refuses. One original elastic adjoint solves
+`K_e,ff*z_f=[B diag(EA/L)c]_f`, with `c=(T^T phi)²/L`.
+The direct stiffness plus combined-state geometric/preload numerator is divided
+by s. No eigensolver iteration, dense derivative matrix or third physical solve
+is introduced.
+
+Outputs retain original indexing:
+
+- Member A, E and fixed stress-free engineering-strain partials are the original
+  elastic/preload contractions divided by s; removed members return None.
+- Fixed-load and reference-load covectors are respectively z/s and lambda*z/s,
+  zero on supported coordinates.
+- Fixed prescribed-displacement covectors include geometric-source work on
+  supports and are zero on free coordinates.
+- Node-coordinate derivatives include length, direction and both compatible
+  preload contributions. The private original `MemberTangent` contraction is
+  shared with modal design sensitivity. Supported reference nodes remain
+  geometry variables. Static buckling includes no mass derivative.
+
+All reported partials hold source properties, global force/motion components,
+support flags and topology fixed except for the named input. Geometry variations
+must preserve axial-equilibrium rank and compatible solvability. Geometry-
+dependent loads/motion, thermal source changes, self-weight and other parameter
+maps need their explicit caller-owned chain rules. This is the frozen-reference
+initial-stress approximation; it is not a local Euler-capacity, finite-strain,
+follower-force, postbuckling, physical-calibration or nonlinear-collapse claim.
+
+The additional sensitivity allowance bounds original-order gradients and native
+adjoint payload/history separately from the prepared analysis. Its node term is
+544 bytes, member term 192 bytes, iteration-history term 16 bytes per allowed
+iteration, plus 4096 bytes of fixed numerical overhead. Member/node loops poll
+at bounded strides. Exhausted work, isolation or adjoint refusal, nonfinite
+arithmetic and cancellation return no partial derivative.
+
+G1/G3/G4 additions to `tests/elastic_buckling.rs` cover an analytic biased
+critical factor and its distinct fixed/reference-load derivatives, all member,
+load, settlement and geometry finite differences, reference-load scaling,
+translation/rotation/homothety identities, both sides of a repeated-root packet,
+guard exclusion, absent positive roots, work and cancellation refusal. The
+existing modal tests continue to exercise the shared geometry contraction and
+its separate consistent-inertia contribution.

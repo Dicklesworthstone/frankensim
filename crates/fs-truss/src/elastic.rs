@@ -157,6 +157,32 @@ impl MemberTangent {
         }
     }
 
+    /// Radial and transverse coordinate work of an initial-stress mode.
+    /// The caller supplies the compatible combined state and its one adjoint.
+    /// Return [dJ/dL, (dJ/dtheta)/L]; modal inertia is added by its own owner.
+    #[allow(clippy::too_many_arguments)]
+    fn coordinate_work(
+        length: f64,
+        stiffness: f64,
+        force: f64,
+        mode: [f64; 2],
+        redistribution: f64,
+        total_strain: f64,
+        transverse_displacement: f64,
+        transverse_adjoint: f64,
+    ) -> [f64; 2] {
+        let [axial, transverse] = mode;
+        let c = transverse * transverse / length;
+        let radial = -stiffness * (axial * axial / length)
+            - redistribution * stiffness * total_strain
+            - force * (c / length);
+        let angular = (2.0 * (stiffness - force / length) * axial * transverse
+            + redistribution * stiffness * transverse_displacement
+            - force * transverse_adjoint)
+            / length;
+        [radial, angular]
+    }
+
     #[inline]
     fn entry(&self, axial_stiffness: f64, force_per_length: f64, i: usize, j: usize) -> f64 {
         // Direction products first preserve identical transposed contributions.
