@@ -27,8 +27,10 @@ mod memory;
 use fs_exec::CancelGate;
 use fs_material::fiber::WoolFeltState;
 use fs_math::dd::Dd;
-use fs_phs::linear_exact::{LinearSplitBudget, PreparedNonlinearZoh, QuadraticPart};
-use fs_phs::{PreparedStepError, QuadraticStorage, Storage};
+use fs_phs::linear_exact::{
+    DenseExponentialBudget, LinearSplitBudget, PreparedNonlinearZoh, QuadraticPart,
+};
+use fs_phs::{PreparedStepError, PreparedStepRecord, QuadraticStorage, ResistanceWitness, Storage};
 use std::{ops::Deref, rc::Rc};
 
 fn owner(error: fs_phs::PhsError) -> ImpactError {
@@ -229,6 +231,7 @@ pub struct ExponentialImpactSystem {
     flow: PreparedNonlinearZoh,
     candidate: Vec<f64>,
     output: Vec<f64>,
+    heat: Vec<f64>,
     histories: Vec<WoolFeltState>,
 }
 impl ExponentialImpactSystem {
@@ -385,8 +388,36 @@ impl ExponentialImpactSystem {
             flow,
             candidate: vec![0.0; states],
             output: vec![0.0; modes],
+            heat: Vec::new(),
             histories,
         })
+    }
+
+    // Attach read-only original resistance observations to the current state.
+    // All mechanical source data, histories, clock and numerical limits survive.
+    pub(super) fn with_heat_channels(
+        mut self,
+        channels: &[ResistanceWitness],
+        budget: DenseExponentialBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ImpactError> {
+        let iterations = self.flow.iteration_limit();
+        let mut flow = PreparedNonlinearZoh::new_owned_with_resistance_channels_controlled(
+            self.inner.system.share_storage(),
+            self.inner.config.dt_s,
+            LinearSplitBudget {
+                max_modes: self.inner.x.len(),
+                max_omega_dt: 0.9 * core::f64::consts::PI,
+            },
+            budget,
+            channels,
+            || gate.is_requested(),
+        )
+        .map_err(step_error)?;
+        flow.set_max_iterations(iterations).map_err(owner)?;
+        self.flow = flow;
+        self.heat = vec![0.0; channels.len()];
+        Ok(self)
     }
 
     /// Retain the owner's nonlinear solve limits without changing physical data.
@@ -400,6 +431,17 @@ impl ExponentialImpactSystem {
         &mut self,
         external: &[f64],
         gate: &CancelGate,
+    ) -> Result<ImpactFrame, ImpactError> {
+        self.step_checked(external, gate, |_, _| Ok(()))
+    }
+
+    // Stage dependent finite inventories before the original physical gates.
+    // The callback observes positive source integrals of this SAME trajectory.
+    pub(super) fn step_checked(
+        &mut self,
+        external: &[f64],
+        gate: &CancelGate,
+        check: impl FnOnce(PreparedStepRecord, &[f64]) -> Result<(), ImpactError>,
     ) -> Result<ImpactFrame, ImpactError> {
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
@@ -419,14 +461,16 @@ impl ExponentialImpactSystem {
         let before = self.inner.stored_energy_j();
         let record = self
             .flow
-            .step_into_controlled(
+            .step_observed_into_controlled(
                 &self.inner.x,
                 external,
                 &mut self.candidate,
                 &mut self.output,
+                &mut self.heat,
                 || gate.is_requested(),
             )
             .map_err(step_error)?;
+        check(record, &self.heat)?;
         self.inner.accept_step(
             &mut self.candidate,
             &mut self.histories,

@@ -42,6 +42,27 @@ pub(super) struct Memory {
 impl Memory {
     pub(crate) fn branch_count(&self) -> usize { self.rates.len() }
 
+    /// Original positive Maxwell resistance embedded in the complete owner.
+    /// Acoustic or other later coordinates remain present with zero source rows.
+    pub(super) fn branch_resistance_witness(
+        &self, branch: usize, state_dim: usize,
+    ) -> Result<fs_phs::ResistanceWitness, ImpactError> {
+        if state_dim < self.base_dim + self.rates.len() {
+            return Err(invalid("material heat needs the complete original state"));
+        }
+        let rate = *self.rates.get(branch)
+            .ok_or_else(|| invalid("material heat names an absent relaxation arm"))?;
+        let index = self.base_dim + branch;
+        let square = state_dim.checked_mul(state_dim)
+            .ok_or_else(|| invalid("material heat resistance extent overflows"))?;
+        let mut resistance = vec![0.0; square];
+        let mut row = vec![0.0; state_dim];
+        resistance[index * state_dim + index] = rate;
+        row[index] = det::sqrt(rate);
+        fs_phs::ResistanceWitness::try_from_source_rows(state_dim, resistance, row)
+            .map_err(|error| ImpactError::Owner(error.to_string()))
+    }
+
     /// Original diagonal Maxwell resistance at the time owner's FULL discrete
     /// effort. Appended acoustic coordinates are allowed; missing material
     /// coordinates and unrepresentable nonzero power are refused.

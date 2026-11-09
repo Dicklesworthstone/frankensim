@@ -13519,3 +13519,46 @@ Actual final species/total mass, inertial momentum and source-relative internal-
 The result is a frozen-rate, first-order homogeneous mean-drift endpoint. It supplies no collisionless filling front, finite flight delay, container trajectory, remaining wall-pressure force or complete-vessel passivity claim. Original source/species and inversion limits bound work; cancellation and every late source, inventory or balance refusal return no accepted endpoints.
 
 Five coupled regression groups specify independent monatomic/diatomic capture temperature and momentum, species separation with tangential drift and formation/common-boost invariance, exact reciprocal continuation, inactive/blocked vacuum preservation, and source/withdrawal/defect-budget/cancellation refusal. Two material groups specify the admitted-mass energy callback.
+
+## Exponential material-memory loss in finite caloric stores
+
+material::heating::exponential::HeatedExponentialImpactSystem routes selected
+original Maxwell-arm losses from ExponentialImpactSystem into the existing
+CaloricReservoir charts. The original branch resistance and normalized-memory
+coordinate generate a checked positive witness in the complete current state,
+including later acoustic coordinates. The native nonlinear held propagator
+integrates each source square on its accepted complete trajectory. No midpoint
+power, endpoint velocity, fitted damping ratio or energy-deficit heat estimate
+is substituted.
+
+Each branch has one explicit destination; multiple branches may heat one finite
+specimen. Canonical branch order fixes accumulation and unknown/duplicate
+routes refuse. Unselected modal loss, other material arms, radiation and felt
+conditioning stay in the mechanical account. Branch stored energy is never
+deposited as heat. Source observations are bounded by the original total
+dissipation up to declared arithmetic roundoff, with the full mechanical balance
+still owned by the existing acceptance gate.
+
+Thermal trials reuse the same compensated cumulative deposit and original
+enthalpy datum as the existing prepared-impact wrapper. Finite chart/phase
+admission, cumulative inventory and step energy checks happen before mechanical
+publication; only infallible caloric assignments follow it. A chart refusal,
+Newton failure, source/budget refusal or cancellation therefore advances no
+accepted mechanical state, history, sample or reservoir. Attachment and
+continuation preserve current history, clock and Newton limits without replaying
+prior heat. The wrapper implements the existing ImpactSource audio interface.
+
+Cold preparation admits complete byte/work/dimension allowances for every
+retained source integral. Warm host buffers and native integral factors are
+reused; constitutive callbacks retain their existing allocation limitations.
+This is fixed-coefficient one-way thermalization into finite uniform specimens.
+It does not supply spatial conduction or temperature-dependent material
+feedback. Nonlinear motion and heat still require temporal refinement; exactness
+is limited to the quadratic held-input case.
+
+Three focused original caloric-owner groups cover sensible/latent storage,
+compensated tiny deposits at a large enthalpy datum, finite-chart refusal and
+retry. Three full-host groups are authored for independent accepted-trajectory
+heat, motion parity, continued attachment, canonical routes, rollback and retry.
+The full impact-host groups remain unrun in this bounded environment; native
+pHS and caloric source checks do not substitute for that integration run.
