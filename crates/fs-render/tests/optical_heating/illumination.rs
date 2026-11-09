@@ -521,3 +521,6 @@ fn material_temperature_is_prepared_once_for_all_source_rays() {
         assert_eq!(illumination.traced_segments(), 3);
     });
 }
+
+#[path = "illumination/polarized.rs"]
+mod polarized;

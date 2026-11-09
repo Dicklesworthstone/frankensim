@@ -11,26 +11,36 @@
 //! comparisons. An unchanged optical packet reuses its immutable transport.
 //! This sampled response field can have nonlinear finite-history feedback bias;
 //! neither its source errors nor exact energy conservation certify that bias.
+//!
+//! Either native absorption estimator can serve the source set. Admitted
+//! full-Stokes sources retain their polarization through actual scattering;
+//! a fixed-polarization pulse program scales that same linear response on each
+//! accepted thermal interval. Propagation time is neglected, as in the original
+//! steady transport owner; this is not a transient photon-residence model.
 
 mod program;
 /// Bounded finite-duration spectral source profiles and their interval means.
 pub mod schedule;
-pub use program::ScheduledIlluminationSource;
 use program::{Program, ProgramState};
+pub use program::{ScheduledIlluminationSource, ScheduledPolarizedIlluminationSource};
 
 use super::feedback::OpticalFeedbackError;
 use super::scattering::{ScatteringHeating, ScatteringHeatingTolerance};
 use super::scattering_feedback::{
-    EnergySums, IncidentScatteringBeam, ScatteringFeedbackEnergyBudget,
+    EnergySums, IncidentPolarizedScatteringBeam, IncidentScatteringBeam,
+    ScatteringFeedbackEnergyBudget,
 };
 use super::temperature_field::{
     TemperatureOpticalField, TemperatureOpticalState, transport_checkpoint,
+    transport_checkpoint_with_error,
 };
 use super::{CheckedSum, OpticalHeatingError, nonnegative};
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::scattering::deposition::{
-    ScatteringDepositionConfig, ScatteringPowerDeposition,
+    AbsorptionEstimator, PolarizedDepositionConfig, ScatteringDepositionConfig,
+    ScatteringPowerDeposition,
 };
+use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
@@ -45,6 +55,20 @@ pub struct IncidentIlluminationSource<const N: usize> {
     /// Reordering sources does not alter streams or deterministic reductions.
     pub source_id: u64,
     pub beam: IncidentScatteringBeam<N>,
+}
+
+/// One full-Stokes source/node with its original physical frame and lane watts.
+/// Sources add as independently specified radiation, without coherent optical
+/// carrier interference. Stable IDs retain independent native history streams.
+#[derive(Clone, Copy, Debug)]
+pub struct IncidentPolarizedIlluminationSource<const N: usize> {
+    pub source_id: u64,
+    pub beam: IncidentPolarizedScatteringBeam<N>,
+}
+
+struct PolarizedSourceSet<const N: usize> {
+    sources: Vec<IncidentPolarizedIlluminationSource<N>>,
+    max_phase_proposals: u32,
 }
 
 /// Whole-source-set admission and whole-native-advance work ceilings.
@@ -68,6 +92,8 @@ struct Model<'g, const N: usize> {
     field: Arc<TemperatureOpticalField<'g, N>>,
     sources: Vec<IncidentIlluminationSource<N>>,
     config: ScatteringDepositionConfig,
+    absorption_estimator: AbsorptionEstimator,
+    polarized: Option<PolarizedSourceSet<N>>,
     tolerance: ScatteringHeatingTolerance,
     program: Option<Program<N>>,
 }
@@ -107,6 +133,8 @@ impl<const N: usize> core::fmt::Debug for TemperatureIlluminationHeating<'_, N> 
             .field("sources", &self.source_count())
             .field("time_s", &self.time_s)
             .field("histories_per_lane", &self.histories)
+            .field("absorption_estimator", &self.absorption_estimator())
+            .field("polarized", &self.is_polarized())
             .field("source_evaluations", &self.evaluations)
             .field("traced_segments", &self.segments)
             .field("transport_builds", &self.builds)
@@ -127,6 +155,32 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
         thermal: &DepositionSimulation<'_>,
         budget: IlluminationBudget,
         config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        Self::from_field_with_estimator(
+            field,
+            sources,
+            thermal,
+            budget,
+            config,
+            AbsorptionEstimator::Collision,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    /// Choose one immutable native absorption estimator for the entire source
+    /// set. The original constructor keeps collision capture and its streams;
+    /// continuous absorption scores Beer heat along every traversed native cell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_field_with_estimator(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        sources: &[IncidentIlluminationSource<N>],
+        thermal: &DepositionSimulation<'_>,
+        budget: IlluminationBudget,
+        config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
@@ -169,8 +223,12 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
         {
             return Err(invalid("illumination source identities must be unique"));
         }
-        let mut identity = DomainHasher::new("org.frankensim.render.temperature-illumination.v1");
+        let mut identity = DomainHasher::new("org.frankensim.render.temperature-illumination.v2");
         identity.update(field.identity().as_bytes());
+        identity.update(&[match absorption_estimator {
+            AbsorptionEstimator::Collision => 0,
+            AbsorptionEstimator::Continuous => 1,
+        }]);
         identity.update(&(retained.len() as u64).to_le_bytes());
         for source in &retained {
             checkpoint()?;
@@ -201,6 +259,8 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
                 field,
                 sources: retained,
                 config,
+                absorption_estimator,
+                polarized: None,
                 tolerance,
                 program: None,
             }),
@@ -218,6 +278,121 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
             energy,
             program_state: None,
         })
+    }
+
+    /// Admit canonical full-Stokes source envelopes without tracing photons.
+    /// Original frames, Stokes states and active cell phase laws are admitted
+    /// before any heat is sampled. All sources use the same estimator and phase
+    /// proposal ceiling; clones and trajectory trials retain that choice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_polarized_field(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        sources: &[IncidentPolarizedIlluminationSource<N>],
+        thermal: &DepositionSimulation<'_>,
+        budget: IlluminationBudget,
+        config: PolarizedDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+        tolerance: ScatteringHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        checkpoint()?;
+        if sources.len() > budget.max_sources || config.max_phase_proposals == 0 {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        let mut intensities = Vec::new();
+        intensities
+            .try_reserve_exact(sources.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        for source in sources {
+            checkpoint()?;
+            intensities.push(IncidentIlluminationSource {
+                source_id: source.source_id,
+                beam: IncidentScatteringBeam {
+                    origin: source.beam.origin,
+                    unit_direction: source.beam.frame.direction(),
+                    wavelengths_nm: source.beam.wavelengths_nm,
+                    incident_power_w: source.beam.incident_stokes_w.map(|s| s.i),
+                },
+            });
+        }
+        Self::from_field_with_estimator(
+            field,
+            &intensities,
+            thermal,
+            budget,
+            config.transport,
+            absorption_estimator,
+            tolerance,
+            &mut checkpoint,
+        )?
+        .with_polarized_sources(sources, config.max_phase_proposals, &mut checkpoint)
+    }
+
+    // Only fresh constructors reach this helper, before a model is shared or a
+    // source history is evaluated. The program and native interval owner remain
+    // unchanged when the angular state is attached to its admitted envelopes.
+    fn with_polarized_sources(
+        mut self,
+        sources: &[IncidentPolarizedIlluminationSource<N>],
+        max_phase_proposals: u32,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        checkpoint()?;
+        if max_phase_proposals == 0 || sources.len() != self.source_count() {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(sources.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        retained.extend_from_slice(sources);
+        retained.sort_unstable_by_key(|source| source.source_id);
+        for (source, intensity) in retained.iter().zip(&self.model.sources) {
+            if source.source_id != intensity.source_id {
+                return Err(VolumeTransportError::SourceIdentity.into());
+            }
+        }
+        transport_checkpoint_with_error(
+            checkpoint,
+            |check| -> Result<(), PolarizedScatteringError> {
+                let field = self.model.field.field(&self.coefficients, check)?;
+                for source in &retained {
+                    check()?;
+                    field.admit_polarized_source(
+                        check,
+                        source.beam.origin,
+                        source.beam.frame,
+                        &source.beam.incident_stokes_w,
+                        max_phase_proposals,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        let mut identity = DomainHasher::new("org.frankensim.render.polarized-illumination.v1");
+        identity.update(self.model.identity.as_bytes());
+        for source in &retained {
+            checkpoint()?;
+            identity.update(&source.source_id.to_le_bytes());
+            for axis in [source.beam.frame.horizontal(), source.beam.frame.vertical()] {
+                for value in [axis.x, axis.y, axis.z] {
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
+            }
+            for stokes in source.beam.incident_stokes_w {
+                for value in [stokes.i, stokes.q, stokes.u, stokes.v] {
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        let model = Arc::get_mut(&mut self.model).expect("new illumination model is unshared");
+        model.identity = identity.finalize();
+        model.polarized = Some(PolarizedSourceSet {
+            sources: retained,
+            max_phase_proposals,
+        });
+        checkpoint()?;
+        Ok(self)
     }
 
     pub fn optical_field(&self) -> &Arc<TemperatureOpticalField<'g, N>> {
@@ -250,6 +425,29 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
     }
     pub fn source_count(&self) -> usize {
         self.model.sources.len()
+    }
+    pub fn absorption_estimator(&self) -> AbsorptionEstimator {
+        self.model.absorption_estimator
+    }
+    pub fn is_polarized(&self) -> bool {
+        self.model.polarized.is_some()
+    }
+    /// Original source-id-ordered full-Stokes envelopes, including their frames.
+    pub fn polarized_sources(&self) -> Option<&[IncidentPolarizedIlluminationSource<N>]> {
+        self.model
+            .polarized
+            .as_ref()
+            .map(|set| set.sources.as_slice())
+    }
+    /// Current photon count and the immutable physical angular-proposal bound.
+    pub fn polarized_sampling_config(&self) -> Option<PolarizedDepositionConfig> {
+        self.model
+            .polarized
+            .as_ref()
+            .map(|set| PolarizedDepositionConfig {
+                transport: self.sampling_config(),
+                max_phase_proposals: set.max_phase_proposals,
+            })
     }
     pub fn has_scattering(&self) -> bool {
         self.model.field.has_scattering()
@@ -386,43 +584,72 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
             .max_traced_segments
             .saturating_sub(self.segments);
         // Borrow/validate the shared optical packet ONCE for all source rays.
-        let (reports, traced, retained_cells) = transport_checkpoint(checkpoint, |check| {
-            let field = self.model.field.field(&self.coefficients, check)?;
-            let mut reports = Vec::new();
-            reports
-                .try_reserve_exact(self.source_count())
-                .map_err(|_| VolumeTransportError::Budget)?;
-            let mut traced = 0_u64;
-            let mut cells = 0_usize;
-            for source in &self.model.sources {
-                check()?;
-                let config = self.source_config(
-                    source.source_id,
-                    available.saturating_sub(traced),
-                    self.budget
-                        .max_retained_deposition_cells
-                        .saturating_sub(cells),
-                );
-                let report = field.deposit_multiple_scattering_power_with_checkpoint(
-                    &mut || check(),
-                    source.beam.origin,
-                    source.beam.unit_direction,
-                    &source.beam.incident_power_w,
-                    config,
-                )?;
-                traced = traced
-                    .checked_add(report.traced_segments)
-                    .ok_or(VolumeTransportError::Budget)?;
-                cells = cells
-                    .checked_add(report.cells.len())
-                    .ok_or(VolumeTransportError::Budget)?;
-                if traced > available || cells > self.budget.max_retained_deposition_cells {
-                    return Err(VolumeTransportError::Budget);
+        let (reports, traced, retained_cells) = transport_checkpoint_with_error(
+            checkpoint,
+            |check| -> Result<_, PolarizedScatteringError> {
+                let field = self.model.field.field(&self.coefficients, check)?;
+                let mut reports = Vec::new();
+                reports
+                    .try_reserve_exact(self.source_count())
+                    .map_err(|_| VolumeTransportError::Budget)?;
+                let mut traced = 0_u64;
+                let mut cells = 0_usize;
+                for (index, source) in self.model.sources.iter().enumerate() {
+                    check()?;
+                    let config = self.source_config(
+                        source.source_id,
+                        available.saturating_sub(traced),
+                        self.budget
+                            .max_retained_deposition_cells
+                            .saturating_sub(cells),
+                    );
+                    let report = if let Some(set) = &self.model.polarized {
+                        let polarized = &set.sources[index];
+                        field.deposit_polarized_power_with_checkpoint(
+                            check,
+                            polarized.beam.origin,
+                            polarized.beam.frame,
+                            &polarized.beam.incident_stokes_w,
+                            PolarizedDepositionConfig {
+                                transport: config,
+                                max_phase_proposals: set.max_phase_proposals,
+                            },
+                            self.model.absorption_estimator,
+                        )?
+                    } else {
+                        match self.model.absorption_estimator {
+                            AbsorptionEstimator::Collision => field
+                                .deposit_multiple_scattering_power_with_checkpoint(
+                                    check,
+                                    source.beam.origin,
+                                    source.beam.unit_direction,
+                                    &source.beam.incident_power_w,
+                                    config,
+                                )?,
+                            AbsorptionEstimator::Continuous => field
+                                .deposit_continuous_absorption_power_with_checkpoint(
+                                    check,
+                                    source.beam.origin,
+                                    source.beam.unit_direction,
+                                    &source.beam.incident_power_w,
+                                    config,
+                                )?,
+                        }
+                    };
+                    traced = traced
+                        .checked_add(report.traced_segments)
+                        .ok_or(VolumeTransportError::Budget)?;
+                    cells = cells
+                        .checked_add(report.cells.len())
+                        .ok_or(VolumeTransportError::Budget)?;
+                    if traced > available || cells > self.budget.max_retained_deposition_cells {
+                        return Err(VolumeTransportError::Budget.into());
+                    }
+                    reports.push(report);
                 }
-                reports.push(report);
-            }
-            Ok((reports, traced, cells))
-        })?;
+                Ok((reports, traced, cells))
+            },
+        )?;
         let mut accepted = Vec::new();
         accepted
             .try_reserve_exact(reports.len())

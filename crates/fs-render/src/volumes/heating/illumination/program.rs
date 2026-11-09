@@ -2,10 +2,14 @@
 
 use super::schedule::SpectralPowerSchedule;
 use super::{
-    CheckedSum, EnergySums, IlluminationBudget, IncidentIlluminationSource, IncidentScatteringBeam,
-    OpticalFeedbackError, OpticalHeatingError, ScatteringDepositionConfig,
-    ScatteringHeatingTolerance, TemperatureIlluminationHeating, TemperatureOpticalField, invalid,
+    AbsorptionEstimator, CheckedSum, EnergySums, IlluminationBudget, IncidentIlluminationSource,
+    IncidentPolarizedIlluminationSource, IncidentPolarizedScatteringBeam, IncidentScatteringBeam,
+    OpticalFeedbackError, OpticalHeatingError, PolarizedDepositionConfig,
+    ScatteringDepositionConfig, ScatteringHeatingTolerance, TemperatureIlluminationHeating,
+    TemperatureOpticalField, invalid,
 };
+use crate::polarization::Stokes;
+use crate::polarization::dielectric::transport::PolarizationFrame;
 use fs_blake3::DomainHasher;
 use fs_geom::{Point3, Vec3};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
@@ -20,6 +24,20 @@ pub struct ScheduledIlluminationSource<const N: usize> {
     pub source_id: u64,
     pub origin: Point3,
     pub unit_direction: Vec3,
+    pub power: SpectralPowerSchedule<N>,
+}
+
+/// One fixed-polarization spectral pulse/ramp on the original source clock.
+/// Each lane's physical Stokes state must have unit intensity `I = 1` in
+/// `frame`; `power` supplies its actual quadrature-weighted watts. Multiple
+/// independently authored sources may program different polarization states
+/// on the same ray. Optical carrier coherence and propagation delay are absent.
+#[derive(Clone, Debug)]
+pub struct ScheduledPolarizedIlluminationSource<const N: usize> {
+    pub source_id: u64,
+    pub origin: Point3,
+    pub frame: PolarizationFrame,
+    pub polarization: [Stokes; N],
     pub power: SpectralPowerSchedule<N>,
 }
 
@@ -73,6 +91,34 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
         thermal: &DepositionSimulation<'_>,
         budget: IlluminationBudget,
         config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+        max_total_power_segments: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        Self::from_scheduled_field_with_estimator(
+            field,
+            sources,
+            thermal,
+            budget,
+            config,
+            AbsorptionEstimator::Collision,
+            tolerance,
+            max_total_power_segments,
+            checkpoint,
+        )
+    }
+
+    /// Reuse the same exact pulse/ramp interval means with an explicit native
+    /// absorption estimator. Power envelopes, error gates and transitions have
+    /// their original owners; this choice is retained by all future trials.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_scheduled_field_with_estimator(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        sources: &[ScheduledIlluminationSource<N>],
+        thermal: &DepositionSimulation<'_>,
+        budget: IlluminationBudget,
+        config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
         max_total_power_segments: usize,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -136,12 +182,13 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
         }
         transitions_s.sort_unstable_by(f64::total_cmp);
         transitions_s.dedup();
-        let mut result = Self::from_field(
+        let mut result = Self::from_field_with_estimator(
             field,
             &envelopes,
             thermal,
             budget,
             config,
+            absorption_estimator,
             tolerance,
             &mut checkpoint,
         )?;
@@ -162,6 +209,115 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
             accepted_sources_w: None,
             pending: None,
         });
+        checkpoint()?;
+        Ok(result)
+    }
+
+    /// Exact spectral pulse fluence acting through admitted full-Stokes paths.
+    ///
+    /// A lane's polarization is fixed while its watt profile varies. Transport
+    /// is linear at each prepared temperature, so scaling its admitted peak
+    /// response gives the actual interval heat without retracing power changes.
+    /// Temperature changes still rebuild the original optical response. The
+    /// existing simultaneous envelope conservatively admits all source/lane
+    /// sampling errors and unresolved power before interval scaling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_scheduled_polarized_field(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        sources: &[ScheduledPolarizedIlluminationSource<N>],
+        thermal: &DepositionSimulation<'_>,
+        budget: IlluminationBudget,
+        config: PolarizedDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+        tolerance: ScatteringHeatingTolerance,
+        max_total_power_segments: usize,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        checkpoint()?;
+        if sources.len() > budget.max_sources || config.max_phase_proposals == 0 {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(sources.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        ordered.extend(sources.iter());
+        ordered.sort_unstable_by_key(|source| source.source_id);
+        let mut intensities = Vec::new();
+        let mut envelopes = Vec::new();
+        intensities
+            .try_reserve_exact(sources.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        envelopes
+            .try_reserve_exact(sources.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        for source in &ordered {
+            checkpoint()?;
+            let peak = source.power.peak_power_w();
+            let mut stokes = [Stokes::unpolarized(0.0); N];
+            for lane in 0..N {
+                let state = source.polarization[lane];
+                if state.i != 1.0 || Stokes::try_new(state.i, state.q, state.u, state.v).is_none() {
+                    return Err(invalid(
+                        "scheduled polarization requires physical unit-intensity Stokes states",
+                    ));
+                }
+                stokes[lane] = Stokes {
+                    i: peak[lane],
+                    q: state.q * peak[lane],
+                    u: state.u * peak[lane],
+                    v: state.v * peak[lane],
+                };
+            }
+            intensities.push(ScheduledIlluminationSource {
+                source_id: source.source_id,
+                origin: source.origin,
+                unit_direction: source.frame.direction(),
+                power: source.power.clone(),
+            });
+            envelopes.push(IncidentPolarizedIlluminationSource {
+                source_id: source.source_id,
+                beam: IncidentPolarizedScatteringBeam {
+                    origin: source.origin,
+                    frame: source.frame,
+                    wavelengths_nm: *field.wavelengths_nm(),
+                    incident_stokes_w: stokes,
+                },
+            });
+        }
+        let mut result = Self::from_scheduled_field_with_estimator(
+            field,
+            &intensities,
+            thermal,
+            budget,
+            config.transport,
+            absorption_estimator,
+            tolerance,
+            max_total_power_segments,
+            &mut checkpoint,
+        )?
+        .with_polarized_sources(
+            &envelopes,
+            config.max_phase_proposals,
+            &mut checkpoint,
+        )?;
+        // Preserve authored polarization even in a permanently dark lane,
+        // whose zero-watt envelope cannot otherwise retain its Stokes shape.
+        let mut identity =
+            DomainHasher::new("org.frankensim.render.scheduled-polarized-illumination.v1");
+        identity.update(result.model.identity.as_bytes());
+        for source in ordered {
+            checkpoint()?;
+            identity.update(&source.source_id.to_le_bytes());
+            for state in source.polarization {
+                for value in [state.i, state.q, state.u, state.v] {
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        Arc::get_mut(&mut result.model)
+            .expect("new illumination model is unshared")
+            .identity = identity.finalize();
         checkpoint()?;
         Ok(result)
     }

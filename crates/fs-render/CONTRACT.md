@@ -7813,6 +7813,24 @@ limits. Interval source heat enters once, after that final cut. Native events at
 the same instant precede preparation of the following interval; no synthetic
 event consumes the authored event budget.
 
+The same illumination owner now selects `AbsorptionEstimator` explicitly through
+`from_field_with_estimator` and `from_scheduled_field_with_estimator`; original
+constructors retain collision capture and the original source counter streams.
+`from_polarized_field` admits full-Stokes source sets, while
+`from_scheduled_polarized_field` accepts `ScheduledPolarizedIlluminationSource`
+with physical unit-intensity Stokes states and the original spectral watt
+profiles. Each lane's polarization remains fixed while pulse power scales its
+admitted native response. Actual scattering uses the original Mueller paths;
+isotropic absorption retains the same conservative heat owner. Canonical model
+identity includes estimator, source IDs, physical frames and Stokes data,
+including authored polarization in permanently dark lanes. Source ordering
+does not alter histories or reductions. Power transitions reuse the response;
+changed temperature-dependent coefficients rebuild it. Original phase/proposal
+admission, envelope error allowances, native interval timing, joint thermal
+composition and transactional cancellation remain authoritative. This adds no
+coherent optical interference, propagation delay or inferred scalar-phase
+polarization response.
+
 Each wavelength/source is admitted at its complete-schedule power envelope.
 Absolute uncertainty and unresolved-power allowances therefore apply at a
 conservative simultaneous peak. The same immutable transport reports are scaled
