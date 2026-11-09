@@ -42,6 +42,13 @@ use core::f64::consts::PI;
 use fs_material::MaterialError;
 use fs_material::cavitation::{SaturatedWaterCavitation, vapor::SaturatedWaterVapor};
 
+/// One radial, phase and resolved-liquid thermal trajectory.
+#[path = "vapor/conducting.rs"]
+pub mod conducting;
+/// Conservative spherical liquid heat transport on the moving interface grid.
+#[path = "vapor/liquid.rs"]
+pub mod liquid;
+
 /// Geometric radius and LIQUID velocity, which differs from Rdot under phase change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VaporBubbleState {
@@ -155,6 +162,40 @@ pub struct VaporBubbleNumerics {
     pub mass_absolute_tolerance_kg: f64,
     pub energy_balance_tolerance_j: f64,
     pub mass_balance_tolerance_kg: f64,
+}
+
+fn validate_numerics(numerics: &VaporBubbleNumerics) -> Result<(), VaporBubbleError> {
+    if ![
+        numerics.temperature_absolute_tolerance_k,
+        numerics.energy_absolute_tolerance_j,
+        numerics.mass_absolute_tolerance_kg,
+        numerics.energy_balance_tolerance_j,
+        numerics.mass_balance_tolerance_kg,
+    ]
+    .into_iter()
+    .all(positive)
+    {
+        return Err(VaporBubbleError::InvalidInput(
+            "positive thermal, mass and energy error budgets",
+        ));
+    }
+    Ok(())
+}
+
+// Both the explicit heat-port and resolved-liquid owners integrate these
+// SAME physical coordinates. A constant enthalpy anchor may be selected by a
+// reciprocal thermal field without changing either phase's original datum.
+fn stage_derivatives(observation: &VaporBubbleObservation, anchor: f64) -> [f64; 8] {
+    [
+        observation.wall_velocity_m_s,
+        observation.liquid_acceleration_m_s2,
+        observation.temperature_rate_k_s,
+        observation.heat_power_w,
+        (observation.vapor.liquid_enthalpy_j_kg() - anchor) * observation.vapor_mass_rate_kg_s,
+        observation.vapor.pressure_pa() * observation.volume_rate_m3_s,
+        observation.vapor_mass_rate_kg_s,
+        observation.neglected_specific_enthalpy_j_kg * observation.vapor_mass_rate_kg_s.abs(),
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -625,20 +666,7 @@ impl SaturatedVaporBubble {
         if cancelled() {
             return Err(VaporBubbleError::Cancelled);
         }
-        if ![
-            numerics.temperature_absolute_tolerance_k,
-            numerics.energy_absolute_tolerance_j,
-            numerics.mass_absolute_tolerance_kg,
-            numerics.energy_balance_tolerance_j,
-            numerics.mass_balance_tolerance_kg,
-        ]
-        .into_iter()
-        .all(positive)
-        {
-            return Err(VaporBubbleError::InvalidInput(
-                "positive thermal, mass and energy error budgets",
-            ));
-        }
+        validate_numerics(numerics)?;
         let (initial, _) = self.thermal_state(self.state)?;
         let anchor = initial.vapor.liquid_enthalpy_j_kg();
         let start = self.state;
@@ -672,21 +700,7 @@ impl SaturatedVaporBubble {
                 let power = heat(time, &thermal)?;
                 let observation =
                     self.observe_thermal(thermal, variation, pressure(time), power)?;
-                let work = observation.vapor.pressure_pa() * observation.volume_rate_m3_s;
-                let enthalpy = (observation.vapor.liquid_enthalpy_j_kg() - anchor)
-                    * observation.vapor_mass_rate_kg_s;
-                let neglected = observation.neglected_specific_enthalpy_j_kg
-                    * observation.vapor_mass_rate_kg_s.abs();
-                Ok([
-                    observation.wall_velocity_m_s,
-                    observation.liquid_acceleration_m_s2,
-                    observation.temperature_rate_k_s,
-                    power,
-                    enthalpy,
-                    work,
-                    observation.vapor_mass_rate_kg_s,
-                    neglected,
-                ])
+                Ok(stage_derivatives(&observation, anchor))
             },
             cancelled,
             &|error: &VaporBubbleError| {
@@ -713,6 +727,31 @@ impl SaturatedVaporBubble {
         let (thermal, variation) = self.thermal_state(next)?;
         let power = heat(next.time_s, &thermal)?;
         let observation = self.observe_thermal(thermal, variation, pressure(next.time_s), power)?;
+        let step = self.finish_step(initial, anchor, &result, observation, numerics)?;
+        if cancelled() {
+            return Err(VaporBubbleError::Cancelled);
+        }
+        Ok(VaporBubbleProposal { target: self, step })
+    }
+
+    // One independent original-source phase balance for both integrator
+    // compositions. This creates a complete candidate, never publishes state.
+    fn finish_step(
+        &self,
+        initial: VaporBubbleThermalState,
+        anchor: f64,
+        result: &stepper::ArrayStep<8>,
+        observation: VaporBubbleObservation,
+        numerics: &VaporBubbleNumerics,
+    ) -> Result<VaporBubbleStep, VaporBubbleError> {
+        let start = self.state;
+        let next = observation.state;
+        let thermal = VaporBubbleThermalState {
+            state: next,
+            vapor: observation.vapor,
+            volume_m3: observation.volume_m3,
+            vapor_mass_kg: observation.vapor_mass_kg,
+        };
         // Factored volume and product differences preserve small physical
         // changes without subtracting two large phase-energy inventories.
         let delta_volume = (4.0 * PI / 3.0)
@@ -761,9 +800,6 @@ impl SaturatedVaporBubble {
                 "integrated omitted interface-energy scale",
             ));
         }
-        if cancelled() {
-            return Err(VaporBubbleError::Cancelled);
-        }
         let step = VaporBubbleStep {
             observation,
             accepted_steps: result.accepted_steps,
@@ -784,7 +820,7 @@ impl SaturatedVaporBubble {
             original_datum_energy_residual_j: absolute_residual,
             neglected_interface_energy_scale_j: result.values[7],
         };
-        Ok(VaporBubbleProposal { target: self, step })
+        Ok(step)
     }
 }
 

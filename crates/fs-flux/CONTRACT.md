@@ -10950,3 +10950,62 @@ stubs; full Cargo/runtime integration was not run. This is passive transport
 with fixed storage properties, without variable-Cp enthalpy, phase change,
 buoyancy/thermal feedback, scalar positivity enforcement or three-dimensional
 LES qualification.
+
+## Resolved moving liquid heat around a phase-changing vapor bubble
+
+`cavitation::vapor::liquid::SphericalLiquidField` retains up to 64 spherical
+liquid shells in fixed-volume coordinates `r_i^3-R^3`. Arbitrary positive
+face grading can resolve the interface diffusion layer. The original source
+liquid enthalpy supplies every shell's finite storage and all signed ALE
+mass transport. The native vapor mass transfer gives the same relative
+outward mass flux, `-dm_v/dt`, through every face. Original source
+conductivity and the existing spherical resistance geometry supply
+interfacial, interior and outer conduction.
+
+`cavitation::vapor::conducting::ConductingVaporBubble` advances this
+retained field, native phase mass/temperature and radial motion on the
+existing fixed-stack adaptive DP5 clock. Every stage computes interface
+Fourier heat from that stage's liquid profile, then evaluates the original
+phase balance and reciprocal liquid transport. Liquid temperature increments
+are the adaptive coordinates within each physical window; an absolute Kelvin
+datum cannot dilute their relative error scale. Shared phase derivatives and
+final accounting also remain the owners for the prescribed-heat entry.
+
+The same fixed enthalpy reference in both phases makes their interfacial
+mass enthalpy cancel. Independent original-source endpoint changes and
+quadratures admit the liquid first law and the combined thermal account
+`Delta(U_v-h_ref*m_v)+Delta H_liquid+W_v+Q_outer+H_outer-Q_visc=0`.
+Outer conductive heat and advected enthalpy are positive out of the finite
+grid. Native radial viscous dissipation is deposited through its exact
+spherical integral in each represented shell; the exterior share is
+reported separately. Phase pressure work remains in its mechanical owner,
+so this thermal account is not a claim to integrate all liquid kinetic and
+surface energies.
+
+The original matched saturation-path liquid calorics remain an explicitly
+bounded incompressible approximation. Actual source density, heat capacity,
+conductivity, viscosity and sound-speed drift, saturation-path capacity
+correction, Bernoulli pressure-density departure and estimated omitted
+reversible pressure heating are checked. Interior advection is donor upwind.
+Exact boundary enthalpy traces require the authored outflow half-cell Peclet
+bound; unsupported coarse outflow is refused. Finite outer temperature and
+enthalpy traces connect to an explicit bath, not a sealed liquid vessel.
+Local phase equilibrium, uniform pure vapor, fixed bulk-liquid density and
+the original radial/Mach limitations remain. There is no finite-rate
+nucleation, noncondensable gas, shock or wall-jet model in this owner.
+
+A complete proposal retains all liquid cells with the phase/radial history.
+Cancellation, physical admission, work limits, independent balance refusal
+or a dropped proposal leave every accepted state unchanged. Spatial
+resolution, exterior-domain extent and temporal refinement still need
+physical consideration; small balance defects alone are insufficient.
+
+Focused builds of the actual material, spatial, phase and stepper sources
+passed all 99 native cavitation tests (87 existing, six liquid-operator
+groups and six joint thermal groups). The new checks include spherical
+Laplace heat transport, both signs of conservative phase exchange, exact
+resolved/exterior viscous heating, independent cumulative original-source
+mass/energy balances, complete rollback and source/approximation refusal.
+The joint phase/temperature/heat response also converges under 16/32/64-cell
+and 80/40/20 ns refinement. This is focused numerical verification; the
+complete workspace and experimental validation were not run.
