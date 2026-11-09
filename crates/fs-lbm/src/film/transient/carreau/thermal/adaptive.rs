@@ -105,6 +105,12 @@ pub struct ThermalFilmAdaptiveReport<T, D = ()> {
     pub other_cell_heat_j: BTreeMap<CellId, f64>,
     pub deposited_viscous_heat_j: f64,
     pub viscous_heat_j: f64,
+    /// Accepted total interface loss and its two separately resolved receivers.
+    pub wall_slip_heat_j: f64,
+    pub wall_slip_heat_routing: ThermalFilmSlipHeat,
+    pub deposited_fluid_slip_heat_j: f64,
+    pub deposited_receiver_slip_heat_j: f64,
+    pub outward_wall_slip_heat_j: f64,
     pub body_work_j: f64,
     pub wall_work_j: f64,
     pub surface_work_j: f64,
@@ -113,6 +119,7 @@ pub struct ThermalFilmAdaptiveReport<T, D = ()> {
     pub kinetic_energy_change_j: f64,
     pub thermal_energy_residual_j: f64,
     pub heat_partition_residual_j: f64,
+    pub wall_slip_partition_residual_j: f64,
     pub combined_energy_residual_j: f64,
 }
 
@@ -177,6 +184,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             thermal: self.thermal.clone(),
             cells: self.cells.clone(),
             area: self.area,
+            wall_slip_heat: self.wall_slip_heat,
             face_temperatures: filled(self.cells.len() + 1)?,
             cell_heat: filled(self.cells.len())?,
         };
@@ -200,7 +208,11 @@ impl<'m> ThermalCarreauFilm<'m> {
             original.flow.flow.material.kinematic_viscosity_m2_s;
         self.flow.flow.shear_conductance = original.flow.flow.shear_conductance;
         self.flow.flow.diffusion_time = original.flow.flow.diffusion_time;
+        self.flow.flow.wall_slip_length = original.flow.flow.wall_slip_length;
         self.flow.flow.factored_duration = None;
+        self.trial.flow.wall_slip_length = original.flow.flow.wall_slip_length;
+        self.trial.flow.factored_duration = None;
+        self.wall_slip_heat = original.wall_slip_heat;
         self.flow
             .flow
             .velocity
@@ -471,6 +483,11 @@ impl<'m> ThermalCarreauFilm<'m> {
             other_cell_heat_j: self.thermal.cells().keys().map(|id| (*id, 0.0)).collect(),
             deposited_viscous_heat_j: 0.0,
             viscous_heat_j: 0.0,
+            wall_slip_heat_j: 0.0,
+            wall_slip_heat_routing: self.wall_slip_heat,
+            deposited_fluid_slip_heat_j: 0.0,
+            deposited_receiver_slip_heat_j: 0.0,
+            outward_wall_slip_heat_j: 0.0,
             body_work_j: 0.0,
             wall_work_j: 0.0,
             surface_work_j: 0.0,
@@ -479,9 +496,10 @@ impl<'m> ThermalCarreauFilm<'m> {
             kinetic_energy_change_j: 0.0,
             thermal_energy_residual_j: 0.0,
             heat_partition_residual_j: 0.0,
+            wall_slip_partition_residual_j: 0.0,
             combined_energy_residual_j: 0.0,
         };
-        let mut integrals = [Dd::from_f64(0.0); 7];
+        let mut integrals = [Dd::from_f64(0.0); 11];
         let mut deposited = vec![Dd::from_f64(0.0); self.cells.len()];
         let mut other: BTreeMap<_, _> = self
             .thermal
@@ -632,6 +650,10 @@ impl<'m> ThermalCarreauFilm<'m> {
         report.viscous_heat_j = values[4];
         report.transported_volume_per_width_m2 = values[5];
         report.deposited_viscous_heat_j = values[6];
+        report.wall_slip_heat_j = values[7];
+        report.deposited_fluid_slip_heat_j = values[8];
+        report.deposited_receiver_slip_heat_j = values[9];
+        report.outward_wall_slip_heat_j = values[10];
         report.deposited_cell_heat_j = deposited
             .into_iter()
             .map(|v| finite(v.to_f64()))
@@ -665,15 +687,19 @@ impl<'m> ThermalCarreauFilm<'m> {
         report.stored_energy_change_j = finite(storage.to_f64())?;
         report.kinetic_energy_change_j = finite(kinetic.to_f64())?;
         report.thermal_energy_residual_j =
-            finite((storage - integrals[3] - integrals[6]).to_f64())?;
+            finite((storage - integrals[3] - integrals[6] - integrals[8] - integrals[9]).to_f64())?;
         report.heat_partition_residual_j = finite((integrals[6] - integrals[4]).to_f64())?;
+        report.wall_slip_partition_residual_j =
+            finite((integrals[8] + integrals[9] + integrals[10] - integrals[7]).to_f64())?;
         report.combined_energy_residual_j = finite(
-            (storage + kinetic - integrals[3] - integrals[0] - integrals[1] - integrals[2])
+            (storage + kinetic - integrals[3] - integrals[0] - integrals[1] - integrals[2]
+                + integrals[10])
                 .to_f64(),
         )?;
         for residual in [
             report.thermal_energy_residual_j,
             report.heat_partition_residual_j,
+            report.wall_slip_partition_residual_j,
             report.combined_energy_residual_j,
         ] {
             if residual.abs() > adaptive.window_energy_tolerance_j {
@@ -695,7 +721,7 @@ impl<'m> ThermalCarreauFilm<'m> {
     }
 }
 
-fn channels<T, D>(report: &ThermalFilmReport<T, D>, area: f64) -> [f64; 7] {
+fn channels<T, D>(report: &ThermalFilmReport<T, D>, area: f64) -> [f64; 11] {
     let flow = report.flow.flow;
     [
         area * flow.body_work_j_m2,
@@ -705,6 +731,10 @@ fn channels<T, D>(report: &ThermalFilmReport<T, D>, area: f64) -> [f64; 7] {
         area * flow.viscous_heat_j_m2,
         flow.duration_s * flow.midpoint_flow_per_width_m2_s,
         report.deposited_viscous_heat_j,
+        report.wall_slip_heat_j,
+        report.deposited_fluid_slip_heat_j,
+        report.deposited_receiver_slip_heat_j,
+        report.outward_wall_slip_heat_j,
     ]
 }
 

@@ -4849,3 +4849,45 @@ and new tests; these new Rust tests have not been compiled or executed in this
 session. No full-crate/runtime validation is claimed. At this native checkpoint,
 the existing thermal-film constructor explicitly refuses nonzero slip until
 an explicit fluid/surroundings heat partition is supplied by its integration.
+
+
+### Explicit caloric receivers for finite film slip
+
+`ThermalCarreauFilm::new_with_wall_slip_heat` now binds the same native film
+and caloric owners with an explicit `ThermalFilmSlipHeat` routing declaration.
+Its fluid fraction heats the first original wall-normal fluid cell. The
+complement either heats an explicitly named active original `CellId`, such
+as a finite wall with its own caloric material and mass, or leaves the modeled
+inventory through the explicit `Surroundings` receiver. A named recipient must
+exist even when its fraction or instantaneous loss is zero. The original
+`new` remains the no-slip entry and refuses nonzero slip without routing.
+
+Every original thermal endpoint, derivative probe and final evaluation uses
+the retained slip length and the same accepted momentum history. Bulk shear
+heat and interface loss are independently measured. Both selected deposits
+add to the original callback's source map exactly once, including when the
+two routes name the same cell. Original external heat is measured before
+these additions. Reports retain bulk heat, total interface loss, first-fluid
+deposit, named-recipient deposit and outward heat separately. Named recipients
+use the original caloric solver's domain and storage checks; viscosity supplies
+no wall heat capacity or conductivity.
+
+The independent combined gate is
+`delta(thermal + kinetic) - other heat - mechanical work + outward slip heat`.
+Separate bulk and interface partition gates remain physical tolerances;
+interfacial loss is not numerically reconstructed as an energy residual.
+Adaptive cloning/restoration preserves the exact slip length and routing,
+including rejected comparisons and zero-duration continuations. Its existing
+controller compares the interface total and each receiving/outward channel
+independently alongside original momentum, storage, bulk heat, actuator work
+and transport; only accepted fine states contribute to window accounts.
+
+Five additional focused Rust regression groups cover independently reconstructed
+nonlinear bulk/interface heat, all-fluid and all-outward limits, same-cell route
+addition, finite-wall caloric storage with an independent existing heat source,
+explicit recipient admission, no-slip parity, a manufactured state-exact thermal
+ramp with an independent constitutive quadrature, and late cancellation/source
+refusal with deterministic retry. Pinned nightly rustfmt parsed the modified
+production and new tests, and focused whitespace checks passed. These new Rust
+tests have not been compiled or executed in this session; no full-crate or
+runtime validation is claimed.

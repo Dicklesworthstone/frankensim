@@ -3,7 +3,11 @@
 //! The native backward-Euler residual owns storage, heat transfer and energy
 //! acceptance. Each thermal endpoint trial advances the SAME accepted velocity
 //! history with the original Carreau source at that trial's face temperatures.
-//! Actual local viscous loss enters the native caloric residual once.
+//! Actual local bulk viscous loss enters the native caloric residual once.
+//! A finite wall slip length requires an explicit heat partition: the declared
+//! fraction heats the original wall-adjacent fluid cell, and the complement
+//! heats an explicitly named existing cell or leaves to surroundings.
+//! Interface heat is distinct from actuator work.
 //! Endpoint thermal coefficients are held through midpoint momentum: this
 //! coupled composition is first order when temperature evolves.
 
@@ -28,6 +32,25 @@ use super::{
 };
 
 pub mod adaptive;
+
+/// Explicit receiver of the wall-interface loss not assigned to the fluid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThermalFilmSlipHeatReceiver {
+    /// Leaves the represented thermal inventory; reported as outward heat.
+    Surroundings,
+    /// Deposited into this active original caloric cell, e.g. a finite wall.
+    Cell(CellId),
+}
+
+/// Authored heat partition; no interfacial caloric law is inferred from b.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalFilmSlipHeat {
+    /// Fraction in [0,1] deposited into film_cells()[0].
+    pub fluid_fraction: f64,
+    /// Receiver of the complementary fraction. A named cell must exist even
+    /// when its current fraction or instantaneous interface loss is zero.
+    pub remainder: ThermalFilmSlipHeatReceiver,
+}
 
 /// Original thermal work/accuracy bounds, separate from momentum controls.
 #[derive(Clone, Copy, Debug)]
@@ -86,8 +109,8 @@ pub struct ThermalFilmExchange<T> {
     /// temperature is not automatically its fluid-side interface temperature.
     pub boundary_temperatures_k: [f64; 2],
     /// Additional sources and endpoint link/boundary conductances.
-    /// Do not include film viscous heat or actuator work: this adapter installs
-    /// the actual local viscous losses exactly once.
+    /// Do not include film bulk/interface heat or actuator work: this adapter
+    /// installs the actual local bulk loss and declared interface fraction once.
     pub heat: BoundaryStepCoefficients<T>,
 }
 
@@ -160,6 +183,7 @@ pub struct ThermalCarreauFilm<'m> {
     thermal: DepositionSimulation<'m>,
     cells: Vec<CellId>,
     area: f64,
+    wall_slip_heat: ThermalFilmSlipHeat,
     trial: TransientCarreauFilm,
     face_temperatures: Vec<f64>,
     cell_heat: Vec<f64>,
@@ -177,22 +201,36 @@ pub struct ThermalFilmReport<T, D = ()> {
     pub drive_evaluations: usize,
     pub momentum_material_evaluations: u64,
     pub maximum_cell_residual_j: f64,
+    /// Actual original bulk fluid dissipation inserted into the caloric owner.
     pub deposited_viscous_heat_j: f64,
-    /// Actual heat inserted in each original film cell, in film_cells() order.
+    /// Total physical wall-interface loss, distinct from bulk fluid heating.
+    pub wall_slip_heat_j: f64,
+    pub wall_slip_heat_routing: ThermalFilmSlipHeat,
+    /// Declared interface fraction deposited into film_cells()[0].
+    pub deposited_fluid_slip_heat_j: f64,
+    /// Complement deposited into the explicitly named original receiver cell.
+    pub deposited_receiver_slip_heat_j: f64,
+    /// Complement of the interface loss leaving to unmodelled surroundings.
+    /// This is an explicit outward exchange, not heat in a represented wall.
+    pub outward_wall_slip_heat_j: f64,
+    /// Actual bulk plus routed interface heat in film_cells() order.
     pub deposited_cell_heat_j: Vec<f64>,
-    /// Sum of deposited cell heat minus area times the native flow loss.
+    /// Deposited bulk heat minus area times native bulk viscous loss.
     pub heat_partition_residual_j: f64,
+    /// Deposited plus outward interface heat minus native interface loss.
+    pub wall_slip_partition_residual_j: f64,
     pub kinetic_energy_change_j: f64,
     /// Signed body + moving-wall + free-surface traction work, J.
     pub mechanical_work_j: f64,
-    /// Original external thermal supply BEFORE inserting viscous heat.
+    /// Original external thermal supply BEFORE inserting bulk/interface heat.
     pub other_heat_j: f64,
-    /// Original net cell heat BEFORE inserting viscous heat, including internal
+    /// Original net cell heat BEFORE inserting bulk/interface heat, including internal
     /// conduction. Uses the same endpoint source and conductance overrides as
     /// the accepted thermal residual. Different mechanisms within one cell may
     /// cancel: this is not a per-boundary or per-mechanism error certificate.
     pub other_cell_heat_j: BTreeMap<CellId, f64>,
-    /// Actual thermal storage + kinetic change - other heat - mechanical work.
+    /// Thermal storage + kinetic change - other heat - mechanical work
+    /// + explicitly outward interface heat.
     /// Thermal storage is measured by the native owner relative to accepted
     /// enthalpy; no absolute caloric reference datum is subtracted here.
     pub combined_energy_residual_j: f64,
@@ -203,6 +241,10 @@ struct Endpoint<T, D> {
     exchange: T,
     drive: ThermalFilmDriveSample<D>,
     deposited_heat_j: f64,
+    wall_slip_heat_j: f64,
+    deposited_fluid_slip_heat_j: f64,
+    deposited_receiver_slip_heat_j: f64,
+    outward_wall_slip_heat_j: f64,
     other_heat_j: f64,
     other_cell_heat_j: BTreeMap<CellId, f64>,
 }
@@ -323,22 +365,70 @@ fn face_temperatures(
 impl<'m> ThermalCarreauFilm<'m> {
     /// Bind actual native inventories, without synthesizing another material
     /// or thermal state. Supplied boundary traces admit the initial source field.
+    /// Nonzero slip requires [`Self::new_with_wall_slip_heat`] so its heat
+    /// receiver is always explicit.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mut flow: TransientCarreauFilm,
+        flow: TransientCarreauFilm,
         thermal: DepositionSimulation<'m>,
         film_cells: &[CellId],
         wetted_area_m2: f64,
         initial_boundary_temperatures_k: [f64; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ThermalFilmError<Infallible>> {
-        if cancelled() {
-            return Err(DepositionError::Cancelled.into());
-        }
         if flow.wall_slip_length_m() != 0.0 {
+            if cancelled() {
+                return Err(DepositionError::Cancelled.into());
+            }
             return Err(ThermalFilmError::Invalid(
                 "wall slip requires an explicit thermal loss partition",
             ));
+        }
+        Self::new_with_wall_slip_heat(
+            flow,
+            thermal,
+            film_cells,
+            wetted_area_m2,
+            initial_boundary_temperatures_k,
+            ThermalFilmSlipHeat {
+                fluid_fraction: 0.0,
+                remainder: ThermalFilmSlipHeatReceiver::Surroundings,
+            },
+            cancelled,
+        )
+    }
+
+    /// Bind the SAME native owners with an explicit wall-interface heat split.
+    /// The authored fraction heats the original wall-adjacent fluid cell; the
+    /// complement heats an explicitly named existing cell or is reported
+    /// outward to surroundings. A finite wall uses its own original caloric
+    /// material and storage. The heat callback must not deposit these losses
+    /// again. The prescribed slip length remains on `flow`; neither
+    /// the length nor the partition is inferred from rheology or caloric data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_wall_slip_heat(
+        mut flow: TransientCarreauFilm,
+        thermal: DepositionSimulation<'m>,
+        film_cells: &[CellId],
+        wetted_area_m2: f64,
+        initial_boundary_temperatures_k: [f64; 2],
+        routing: ThermalFilmSlipHeat,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ThermalFilmError<Infallible>> {
+        if cancelled() {
+            return Err(DepositionError::Cancelled.into());
+        }
+        if !routing.fluid_fraction.is_finite() || !(0.0..=1.0).contains(&routing.fluid_fraction) {
+            return Err(ThermalFilmError::Invalid(
+                "wall slip heat fraction must lie in [0,1]",
+            ));
+        }
+        if let ThermalFilmSlipHeatReceiver::Cell(id) = routing.remainder {
+            if !thermal.cells().contains_key(&id) {
+                return Err(ThermalFilmError::Invalid(
+                    "wall slip heat receiver must be an active original cell",
+                ));
+            }
         }
         let n = flow.velocities_m_s().len();
         let volume = wetted_area_m2 * flow.spacing_m();
@@ -433,6 +523,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             flow.velocities_m_s().to_vec(),
             flow.accepted_time_s(),
         )?;
+        trial.set_wall_slip_length_m(flow.wall_slip_length_m())?;
         trial.set_face_temperatures(&temperatures, || (checkpoint.borrow_mut())())?;
         check()?;
         Ok(Self {
@@ -440,6 +531,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             thermal,
             cells: film_cells.to_vec(),
             area: wetted_area_m2,
+            wall_slip_heat: routing,
             trial,
             face_temperatures: temperatures,
             cell_heat: filled(n)?,
@@ -457,6 +549,10 @@ impl<'m> ThermalCarreauFilm<'m> {
     }
     pub const fn wetted_area_m2(&self) -> f64 {
         self.area
+    }
+    /// Authored wall-interface partition and its explicit original receiver.
+    pub const fn wall_slip_heat_routing(&self) -> ThermalFilmSlipHeat {
+        self.wall_slip_heat
     }
 
     /// Release both accepted states for an explicit event/geometry handoff.
@@ -669,6 +765,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             let material_evaluations = &work.materials;
             let cells = &self.cells;
             let area = self.area;
+            let routing = self.wall_slip_heat;
             let evaluate = |x: &[f64]| -> Result<
                 BackwardEulerTrial<'m, Endpoint<T, D>>,
                 ThermalFilmError<E>,
@@ -708,6 +805,9 @@ impl<'m> ThermalCarreauFilm<'m> {
                             &check,
                         )?;
                         let mut flow = trial.borrow_mut();
+                        // Boundary identity follows the accepted owner even
+                        // after an adaptive restore or prior rejected endpoint.
+                        flow.flow.wall_slip_length = accepted.flow.wall_slip_length;
                         flow.set_face_temperatures(&temperatures, || check().is_err())?;
                         // Reset only accepted history; preceding thermal trials
                         // are never a starting state. Private geometry/source
@@ -779,6 +879,42 @@ impl<'m> ThermalCarreauFilm<'m> {
                             let source = bulk.sources_w.entry(cell).or_insert(0.0);
                             *source = finite(*source + watts)?;
                         }
+                        let slip = finite(area * mechanical.flow.wall_slip_heat_j_m2)?;
+                        let inward = finite(routing.fluid_fraction * slip)?;
+                        let remainder = finite((1.0 - routing.fluid_fraction) * slip)?;
+                        let slip_watts = finite(inward / dt)?;
+                        if slip < 0.0
+                            || (mechanical.flow.wall_slip_heat_j_m2 != 0.0 && slip == 0.0)
+                            || (slip != 0.0 && routing.fluid_fraction != 0.0 && inward == 0.0)
+                            || (slip != 0.0 && routing.fluid_fraction != 1.0 && remainder == 0.0)
+                            || (inward != 0.0 && slip_watts == 0.0)
+                        {
+                            return Err(DepositionError::Arithmetic.into());
+                        }
+                        // Preserve the original no-slip source map exactly.
+                        if slip_watts != 0.0 {
+                            let source = bulk.sources_w.entry(cells[0]).or_insert(0.0);
+                            *source = finite(*source + slip_watts)?;
+                        }
+                        let (receiver_heat, outward) = match routing.remainder {
+                            ThermalFilmSlipHeatReceiver::Surroundings => (0.0, remainder),
+                            ThermalFilmSlipHeatReceiver::Cell(id) => {
+                                if !candidate.cells().contains_key(&id) {
+                                    return Err(ThermalFilmError::Invalid(
+                                        "wall slip heat receiver left the original inventory",
+                                    ));
+                                }
+                                let watts = finite(remainder / dt)?;
+                                if remainder != 0.0 && watts == 0.0 {
+                                    return Err(DepositionError::Arithmetic.into());
+                                }
+                                if watts != 0.0 {
+                                    let source = bulk.sources_w.entry(id).or_insert(0.0);
+                                    *source = finite(*source + watts)?;
+                                }
+                                (finite(dt * watts)?, 0.0)
+                            }
+                        };
                         Ok::<_, ThermalFilmError<E>>(BoundaryStepCoefficients {
                             bulk: StepCoefficients {
                                 sources_w: bulk.sources_w,
@@ -788,6 +924,10 @@ impl<'m> ThermalCarreauFilm<'m> {
                                     exchange: bulk.payload,
                                     drive: sample,
                                     deposited_heat_j: finite(deposited.to_f64())?,
+                                    wall_slip_heat_j: slip,
+                                    deposited_fluid_slip_heat_j: finite(dt * slip_watts)?,
+                                    deposited_receiver_slip_heat_j: receiver_heat,
+                                    outward_wall_slip_heat_j: outward,
                                     other_heat_j: other,
                                     other_cell_heat_j: other_cells,
                                 },
@@ -852,19 +992,29 @@ impl<'m> ThermalCarreauFilm<'m> {
                     - Dd::from_f64(area) * Dd::from_f64(native.viscous_heat_j_m2))
                 .to_f64(),
             )?;
+            let slip_partition = finite(
+                (Dd::from_f64(endpoint.deposited_fluid_slip_heat_j)
+                    + Dd::from_f64(endpoint.deposited_receiver_slip_heat_j)
+                    + Dd::from_f64(endpoint.outward_wall_slip_heat_j)
+                    - Dd::from_f64(endpoint.wall_slip_heat_j))
+                .to_f64(),
+            )?;
             // Independent endpoint storage/work closure, not a sum of the two
             // solvers' residuals that could hide a missing heat transfer.
             let combined = finite(
                 (Dd::from_f64(audit.stored_energy_change_j) + Dd::from_f64(kinetic)
                     - Dd::from_f64(endpoint.other_heat_j)
-                    - Dd::from_f64(mechanical_work_j))
+                    - Dd::from_f64(mechanical_work_j)
+                    + Dd::from_f64(endpoint.outward_wall_slip_heat_j))
                 .to_f64(),
             )?;
-            if combined.abs() > controls.combined_energy_tolerance_j {
-                return Err(ThermalFilmError::CombinedEnergy {
-                    residual_j: combined,
-                    tolerance_j: controls.combined_energy_tolerance_j,
-                });
+            for residual in [combined, partition, slip_partition] {
+                if residual.abs() > controls.combined_energy_tolerance_j {
+                    return Err(ThermalFilmError::CombinedEnergy {
+                        residual_j: residual,
+                        tolerance_j: controls.combined_energy_tolerance_j,
+                    });
+                }
             }
             let report = ThermalFilmReport {
                 flow: endpoint.flow,
@@ -877,12 +1027,35 @@ impl<'m> ThermalCarreauFilm<'m> {
                 momentum_material_evaluations: material_evaluations.get() - opening_materials,
                 maximum_cell_residual_j,
                 deposited_viscous_heat_j: endpoint.deposited_heat_j,
+                wall_slip_heat_j: endpoint.wall_slip_heat_j,
+                wall_slip_heat_routing: routing,
+                deposited_fluid_slip_heat_j: endpoint.deposited_fluid_slip_heat_j,
+                deposited_receiver_slip_heat_j: endpoint.deposited_receiver_slip_heat_j,
+                outward_wall_slip_heat_j: endpoint.outward_wall_slip_heat_j,
                 deposited_cell_heat_j: heat
                     .borrow()
                     .iter()
-                    .map(|q| finite(dt * (area * q / dt)))
+                    .enumerate()
+                    .map(|(i, q)| {
+                        finite(
+                            dt * (area * q / dt)
+                                + if i == 0 {
+                                    endpoint.deposited_fluid_slip_heat_j
+                                } else {
+                                    0.0
+                                }
+                                + if routing.remainder
+                                    == ThermalFilmSlipHeatReceiver::Cell(cells[i])
+                                {
+                                    endpoint.deposited_receiver_slip_heat_j
+                                } else {
+                                    0.0
+                                },
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
                 heat_partition_residual_j: partition,
+                wall_slip_partition_residual_j: slip_partition,
                 kinetic_energy_change_j: kinetic,
                 mechanical_work_j,
                 other_heat_j: endpoint.other_heat_j,

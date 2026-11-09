@@ -18,6 +18,9 @@ mod adaptive;
 #[path = "tests/feedback.rs"]
 mod feedback;
 
+#[path = "tests/slip.rs"]
+mod slip;
+
 const IDS: [CellId; 2] = [CellId(20), CellId(3)];
 const SPEC: TransientCarreauFilmSpec = TransientCarreauFilmSpec {
     density_kg_m3: 1.0,
