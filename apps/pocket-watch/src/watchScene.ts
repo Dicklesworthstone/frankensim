@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
@@ -64,8 +63,8 @@ const CASE_SHELL_N_Z = 8;
 const CASE_N_THETA = CASE_SHELL_N_THETA;
 const CASE_N_Z = CASE_SHELL_N_Z;
 const CASE_SHELL_NODES = CASE_SHELL_N_THETA * CASE_SHELL_N_Z;
-const CASE_RENDER_N_THETA = 128;
-const CASE_RENDER_N_Z = 22;
+const CASE_RENDER_N_THETA = 192;
+const CASE_RENDER_N_Z = 32;
 const CASE_RENDER_NODES = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
 
 // The Rust spatial PDE grid size can change between engine builds: the scene infers N from the
@@ -176,6 +175,54 @@ vec3 thermalFalseColor(float tK) {
   return mix(c3, c4, (u - 0.75) / 0.25);
 }
 `;
+
+/**
+ * Watch-photography light studio for image-based lighting: a dark cyclorama with large HDR
+ * softboxes and strip lights. Polished metals reflect crisp highlights instead of a grey room.
+ */
+function buildStudioEnvironmentScene(): THREE.Scene {
+  const env = new THREE.Scene();
+  env.background = new THREE.Color(0x030405);
+  const room = new THREE.Mesh(
+    new THREE.SphereGeometry(60, 48, 24),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0x0b0d12), side: THREE.BackSide }),
+  );
+  env.add(room);
+  // Warm floor bounce below the watch, so downward-facing bevels don't go black.
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(40, 48),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color().setRGB(0.09, 0.075, 0.06) }),
+  );
+  floor.position.set(0, 0, -30);
+  env.add(floor);
+  const panel = (
+    w: number,
+    h: number,
+    pos: [number, number, number],
+    intensity: number,
+    tint: [number, number, number],
+  ): void => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color().setRGB(tint[0] * intensity, tint[1] * intensity, tint[2] * intensity),
+        side: THREE.DoubleSide,
+      }),
+    );
+    m.position.set(...pos);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  // Overhead key softbox behind the camera (reflects in the dial, bridges and crystal).
+  panel(34, 22, [0, -18, 40], 3.2, [1.0, 0.97, 0.92]);
+  // Tall strip lights left/right: the long specular streaks along the case band.
+  panel(6, 44, [-42, 4, 14], 5.0, [1.0, 0.95, 0.88]);
+  panel(6, 44, [42, -4, 14], 2.6, [0.86, 0.92, 1.0]);
+  // Top rim strip toward 12 o'clock and a small kicker toward 6 o'clock.
+  panel(40, 5, [0, 44, 18], 2.2, [1.0, 0.96, 0.9]);
+  panel(18, 4, [0, -44, 6], 1.4, [0.9, 0.94, 1.0]);
+  return env;
+}
 
 /** GLSL: uniform cubic B-spline weights and their derivatives. */
 const GLSL_CUBIC = /* glsl */ `
@@ -516,6 +563,41 @@ function buildToothedGearGeometry(opts: {
     curveSegments: 16,
   });
   geom.translate(0, 0, -thickness * 0.5);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+/**
+ * Steel pinion with `leaves` rounded (cycloidal-style) leaves, axis along +Z, centered at z = 0.
+ */
+function buildPinionGeometry(outerRadius: number, leaves: number, length: number): THREE.ExtrudeGeometry {
+  const shape = new THREE.Shape();
+  const rootR = outerRadius * 0.68;
+  const step = (Math.PI * 2) / leaves;
+  const seg = 10;
+  for (let i = 0; i < leaves; i++) {
+    for (let k = 0; k <= seg; k++) {
+      const u = k / seg;
+      // Leaf occupies ~45% of the pitch with a semicircular ogival tip; root arc fills the rest.
+      const a = i * step + u * step;
+      const leafU = u / 0.45;
+      const r =
+        u <= 0.45
+          ? rootR + (outerRadius - rootR) * Math.sin(Math.min(1, leafU) * Math.PI) ** 0.55
+          : rootR;
+      const x = Math.cos(a) * r;
+      const y = Math.sin(a) * r;
+      if (i === 0 && k === 0) shape.moveTo(x, y);
+      else shape.lineTo(x, y);
+    }
+  }
+  shape.closePath();
+  const geom = new THREE.ExtrudeGeometry(shape, {
+    depth: length,
+    bevelEnabled: false,
+    curveSegments: 4,
+  });
+  geom.translate(0, 0, -length * 0.5);
   geom.computeVertexNormals();
   return geom;
 }
@@ -963,7 +1045,6 @@ export class PocketWatchScene {
         (m.material as THREE.Material).dispose();
       }
     });
-    void RoomEnvironment;
 
     this.glowUniforms = {
       uBlackbody: { value: buildBlackbodyLut() },
@@ -1259,9 +1340,339 @@ export class PocketWatchScene {
     // Build Superimposed 3D Physics Vector Fields (Heat, Convection, Magnetic, Acoustic, Stress/Gravity)
     this.buildVectorFieldOverlays();
 
+    this.installContinuumShaders();
+
     this.bindPointerEvents();
     this.resize();
-    window.addEventListener("resize", () => this.resize());
+    this.applyCameraPreset("overview", false);
+  }
+
+  /** DPR ceiling per quality tier. */
+  private static dprCap(tier: QualityTier): number {
+    return tier === "high" ? 2 : tier === "medium" ? 1.5 : 1.25;
+  }
+
+  /** Current renderer pixel ratio (used by the adaptive-resolution governor). */
+  public getPixelRatio(): number {
+    return this.pixelRatio;
+  }
+
+  public getQualityTier(): QualityTier {
+    return this.tier;
+  }
+
+  /** Change the render pixel ratio within [0.75, tier cap]; returns the applied value. */
+  public setPixelRatio(dpr: number): number {
+    const cap = Math.min(window.devicePixelRatio || 1, PocketWatchScene.dprCap(this.tier));
+    const next = Math.max(0.75, Math.min(cap, dpr));
+    if (Math.abs(next - this.pixelRatio) < 0.01) return this.pixelRatio;
+    this.pixelRatio = next;
+    this.renderer.setPixelRatio(next);
+    this.composer.setPixelRatio(next);
+    this.resize();
+    return next;
+  }
+
+  /** Downgrade/upgrade quality without rebuilding the scene (MSAA sample count is fixed at boot). */
+  public setQualityTier(tier: QualityTier): void {
+    if (tier === this.tier) return;
+    this.tier = tier;
+    const res = tier === "low" ? 1024 : 2048;
+    if (this.keyLight.shadow.mapSize.x !== res) {
+      this.keyLight.shadow.mapSize.set(res, res);
+      this.keyLight.shadow.map?.dispose();
+      this.keyLight.shadow.map = null;
+    }
+    this.setPixelRatio(this.pixelRatio);
+  }
+
+  /**
+   * Tell the scene how much of the canvas is covered by floating UI so the watch is framed in the
+   * visible window (camera view offset) instead of hiding behind the inspector or bottom sheet.
+   */
+  public setViewInsets(insets: ViewInsets, reframe = false): void {
+    const changed =
+      Math.abs(insets.left - this.viewInsets.left) > 0.5 ||
+      Math.abs(insets.right - this.viewInsets.right) > 0.5 ||
+      Math.abs(insets.top - this.viewInsets.top) > 0.5 ||
+      Math.abs(insets.bottom - this.viewInsets.bottom) > 0.5;
+    this.viewInsets = { ...insets };
+    if (changed) {
+      this.resize();
+      if (reframe) this.applyCameraPreset(this.currentPreset, true);
+    }
+  }
+
+  /**
+   * Light up the ruby contact surfaces of the escapement (bit0 entry pallet, bit1 exit pallet,
+   * bit2 impulse pin) from the engine's live contact set; glow decays over ~80 ms.
+   */
+  public setEscapementContacts(mask: number): void {
+    for (let i = 0; i < 3; i++) {
+      if (mask & (1 << i)) this.contactGlow[i] = 1.0;
+    }
+  }
+
+  /** Resize the GPU grid texture when the engine's spatial grid resolution changes. */
+  private ensureGridGeometry(cells: number): boolean {
+    const n = Math.round(Math.sqrt(cells));
+    if (n < 4 || n * n !== cells) return false;
+    if (n === GRID_N) return true;
+    GRID_N = n;
+    GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
+    this.gridTexBuf = new Float32Array(n * n * 4);
+    const old = this.gridUniforms.uGrid.value;
+    const tex = new THREE.DataTexture(this.gridTexBuf, n, n, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    this.gridUniforms.uGrid.value = tex;
+    this.gridUniforms.uGridN.value = n;
+    old.dispose();
+    return true;
+  }
+
+  /** Engine-reported half span of the spatial grid (mm); defaults to 28.8. */
+  public setGridHalfSpanMm(halfSpanMm: number): void {
+    if (!(halfSpanMm > 1) || Math.abs(halfSpanMm - GRID_HALF_SPAN_MM) < 1e-6) return;
+    GRID_HALF_SPAN_MM = halfSpanMm;
+    GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
+    this.gridUniforms.uHalfSpan.value = halfSpanMm;
+  }
+
+  /**
+   * Install the GPU displacement shaders for the deformable case shell (B-spline surface over the
+   * 64 x 8 Lagrangian nodes, analytic normals from the spline derivatives) and the molten/solid gold
+   * free-surface heightfields (Mitchell-Netravali over the PDE grid, finite-difference normals).
+   */
+  private installContinuumShaders(): void {
+    const glow = this.glowUniforms;
+    const shell = this.shellUniforms;
+    const grid = this.gridUniforms;
+
+    const shellVertexPrefix = /* glsl */ `
+uniform sampler2D uShellA;
+uniform sampler2D uShellB;
+attribute vec3 aShell;
+varying float vShellTempK;
+varying float vShellMelt;
+varying float vShellSide;
+${GLSL_CUBIC}
+const int SHELL_NT = ${CASE_SHELL_N_THETA};
+const int SHELL_NZ = ${CASE_SHELL_N_Z};
+vec4 shellFetchA(int it, int iz) {
+  int t = ((it % SHELL_NT) + SHELL_NT) % SHELL_NT;
+  if (iz < 0) {
+    vec4 a0 = texelFetch(uShellA, ivec2(t, 0), 0);
+    vec4 a1 = texelFetch(uShellA, ivec2(t, 1), 0);
+    return vec4(2.0 * a0.xyz - a1.xyz, a0.w);
+  }
+  if (iz >= SHELL_NZ) {
+    vec4 a0 = texelFetch(uShellA, ivec2(t, SHELL_NZ - 1), 0);
+    vec4 a1 = texelFetch(uShellA, ivec2(t, SHELL_NZ - 2), 0);
+    return vec4(2.0 * a0.xyz - a1.xyz, a0.w);
+  }
+  return texelFetch(uShellA, ivec2(t, iz), 0);
+}
+vec2 shellFetchB(int it, int iz) {
+  int t = ((it % SHELL_NT) + SHELL_NT) % SHELL_NT;
+  return texelFetch(uShellB, ivec2(t, clamp(iz, 0, SHELL_NZ - 1)), 0).xy;
+}
+vec3 gShellP;
+vec3 gShellN;
+void evalShell() {
+  float ft = aShell.x * float(SHELL_NT);
+  float fz = aShell.y * float(SHELL_NZ - 1);
+  float it0f = floor(ft);
+  float iz0f = min(floor(fz), float(SHELL_NZ - 2));
+  vec4 wu; vec4 dwu; vec4 wv; vec4 dwv;
+  bsplineWeights(ft - it0f, wu, dwu);
+  bsplineWeights(fz - iz0f, wv, dwv);
+  int it0 = int(it0f);
+  int iz0 = int(iz0f);
+  vec4 P = vec4(0.0);
+  vec3 Pu = vec3(0.0);
+  vec3 Pv = vec3(0.0);
+  vec2 TB = vec2(0.0);
+  for (int m = 0; m < 4; m++) {
+    for (int n = 0; n < 4; n++) {
+      vec4 a = shellFetchA(it0 + n - 1, iz0 + m - 1);
+      vec2 b = shellFetchB(it0 + n - 1, iz0 + m - 1);
+      float w = wu[n] * wv[m];
+      P += w * a;
+      Pu += dwu[n] * wv[m] * a.xyz;
+      Pv += wu[n] * dwv[m] * a.xyz;
+      TB += w * b;
+    }
+  }
+  float rimPinch = sin(aShell.y * PI);
+  float lip = 0.72 + 0.28 * pow(max(rimPinch, 0.0), 0.45);
+  float h = max(0.08, P.w) * lip;
+  float rXY = max(1.0, length(P.xy));
+  vec2 nr = P.xy / rXY;
+  float side = aShell.z;
+  gShellP = P.xyz + vec3(nr * h * (side > 0.0 ? 0.45 : -0.55), 0.0);
+  vec3 n = cross(Pu, Pv);
+  float len = length(n);
+  n = len > 1e-6 ? n / len : vec3(nr, 0.0);
+  if (dot(n.xy, nr) < 0.0) n = -n;
+  gShellN = side > 0.0 ? n : -n;
+  vShellTempK = max(50.0, TB.x);
+  vShellMelt = clamp(TB.y, 0.0, 1.0);
+  vShellSide = side;
+}
+`;
+
+    this.matGoldCase.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, glow, shell);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", `#include <common>\n${shellVertexPrefix}`)
+        .replace("#include <beginnormal_vertex>", "evalShell();\nvec3 objectNormal = gShellN;")
+        .replace("#include <begin_vertex>", "vec3 transformed = gShellP;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>\n${GLSL_BLACKBODY}\nvarying float vShellTempK;\nvarying float vShellMelt;\nvarying float vShellSide;`,
+        )
+        .replace(
+          "#include <color_fragment>",
+          /* glsl */ `#include <color_fragment>
+if (uThermalOverlay > 0.5) {
+  diffuseColor.rgb = thermalFalseColor(vShellTempK);
+} else if (vShellTempK > 720.0) {
+  float hot = min(1.0, (vShellTempK - 720.0) / 680.0);
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.03, 0.97, 1.18), hot * vShellMelt);
+} else if (vShellTempK < 220.0) {
+  float cryo = min(1.0, (220.0 - vShellTempK) / 145.0);
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.84, 0.93), cryo * 0.45);
+}
+if (vShellSide < 0.0) diffuseColor.rgb *= 0.9;`,
+        )
+        .replace(
+          "#include <emissivemap_fragment>",
+          /* glsl */ `#include <emissivemap_fragment>
+totalEmissiveRadiance += blackbodyRadiance(vShellTempK) * (0.45 + 0.25 * vShellMelt);
+if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vShellTempK) * 0.3;`,
+        );
+    };
+    this.matGoldCase.customProgramCacheKey = () => "fs-case-shell-v2";
+
+    const depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    depthMat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, shell);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", `#include <common>\n${shellVertexPrefix}`)
+        .replace("#include <begin_vertex>", "evalShell();\nvec3 transformed = gShellP;");
+    };
+    depthMat.customProgramCacheKey = () => "fs-case-shell-depth-v2";
+    this.caseShellMesh.customDepthMaterial = depthMat;
+
+    const heightfieldVertexPrefix = /* glsl */ `
+uniform sampler2D uGrid;
+uniform float uGridN;
+uniform float uHalfSpan;
+varying float vHfAlpha;
+varying float vHfTempK;
+${GLSL_CUBIC}
+vec4 hfFetch(ivec2 c) {
+  int n = int(uGridN) - 1;
+  return texelFetch(uGrid, clamp(c, ivec2(0), ivec2(n)), 0);
+}
+vec4 hfSample(vec2 xy) {
+  float dx = 2.0 * uHalfSpan / uGridN;
+  vec2 g = (xy + uHalfSpan) / dx - 0.5;
+  vec2 i0 = floor(g);
+  vec2 f = g - i0;
+  vec4 wx; vec4 wy;
+  mitchellWeights(f.x, wx);
+  mitchellWeights(f.y, wy);
+  ivec2 b = ivec2(i0);
+  vec4 acc = vec4(0.0);
+  for (int m = 0; m < 4; m++) {
+    vec4 row = wx.x * hfFetch(b + ivec2(-1, m - 1)) + wx.y * hfFetch(b + ivec2(0, m - 1))
+             + wx.z * hfFetch(b + ivec2(1, m - 1)) + wx.w * hfFetch(b + ivec2(2, m - 1));
+    acc += wy[m] * row;
+  }
+  return max(acc, vec4(0.0));
+}
+float hfHeight(vec2 xy, out float alpha, out vec4 s) {
+  s = hfSample(xy);
+  float rC = length(xy);
+  float radialT = clamp((25.0 - rC) / 2.6, 0.0, 1.0);
+  float mask = radialT * radialT * (3.0 - 2.0 * radialT);
+  float rawLiq = s.r * mask;
+  float rawFrz = s.g * mask;
+  float distT = length(xy - vec2(0.0, -11.0));
+  float wb = clamp((distT - 5.2) / 2.8, 0.0, 1.0);
+  float sw = wb * wb * (3.0 - 2.0 * wb);
+  float baseZ = -0.65 * (1.0 - sw) + 0.28 * sw;
+#if HF_MODE == 0
+  float aT = clamp((rawLiq - 0.006) / 0.042, 0.0, 1.0);
+  alpha = aT * aT * (3.0 - 2.0 * aT);
+  float dome = pow(alpha, 0.65);
+  return baseZ - 0.42 * (1.0 - dome) + rawFrz * 1.25 + min(2.4, rawLiq * 1.32) * dome;
+#else
+  float aT = clamp((rawFrz - 0.006) / 0.042, 0.0, 1.0);
+  alpha = aT * aT * (3.0 - 2.0 * aT);
+  float dome = pow(alpha, 0.65);
+  return baseZ - 0.42 * (1.0 - dome) + min(2.4, rawFrz * 1.32) * dome;
+#endif
+}
+float gHfZ;
+vec2 gHfXY;
+`;
+    const heightfieldNormal = /* glsl */ `
+gHfXY = position.xy * uHalfSpan;
+float hfA; vec4 hfS; float hfDa; vec4 hfDs;
+gHfZ = hfHeight(gHfXY, hfA, hfS);
+const float hfE = 0.3;
+float hzx1 = hfHeight(gHfXY + vec2(hfE, 0.0), hfDa, hfDs);
+float hzx0 = hfHeight(gHfXY - vec2(hfE, 0.0), hfDa, hfDs);
+float hzy1 = hfHeight(gHfXY + vec2(0.0, hfE), hfDa, hfDs);
+float hzy0 = hfHeight(gHfXY - vec2(0.0, hfE), hfDa, hfDs);
+vec3 objectNormal = normalize(vec3(-(hzx1 - hzx0) / (2.0 * hfE), -(hzy1 - hzy0) / (2.0 * hfE), 1.0));
+vHfAlpha = hfA;
+vHfTempK = max(70.0, hfS.b);
+`;
+    const installHeightfield = (mat: THREE.MeshPhysicalMaterial, mode: 0 | 1): void => {
+      mat.defines = { ...(mat.defines ?? {}), HF_MODE: mode };
+      mat.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, glow, grid);
+        shader.vertexShader = shader.vertexShader
+          .replace("#include <common>", `#include <common>\n${heightfieldVertexPrefix}`)
+          .replace("#include <beginnormal_vertex>", heightfieldNormal)
+          .replace("#include <begin_vertex>", "vec3 transformed = vec3(gHfXY, gHfZ);");
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            "#include <common>",
+            `#include <common>\n${GLSL_BLACKBODY}\nvarying float vHfAlpha;\nvarying float vHfTempK;`,
+          )
+          .replace(
+            "#include <color_fragment>",
+            mode === 0
+              ? /* glsl */ `#include <color_fragment>
+float hfGlow = clamp((vHfTempK - 950.0) / 550.0, 0.0, 1.0);
+diffuseColor.rgb *= vec3(min(1.0, 0.96 + hfGlow * 0.04), min(0.92, 0.74 + hfGlow * 0.16), min(0.68, 0.3 + hfGlow * 0.32));
+if (uThermalOverlay > 0.5) diffuseColor.rgb = thermalFalseColor(vHfTempK);
+diffuseColor.a *= vHfAlpha;`
+              : /* glsl */ `#include <color_fragment>
+float hfCryo = vHfTempK < 220.0 ? min(1.0, (220.0 - vHfTempK) / 145.0) : 0.0;
+diffuseColor.rgb *= vec3(0.9 - hfCryo * 0.16, 0.72 + hfCryo * 0.12, 0.36 + hfCryo * 0.45);
+if (uThermalOverlay > 0.5) diffuseColor.rgb = thermalFalseColor(vHfTempK);
+diffuseColor.a *= vHfAlpha;`,
+          )
+          .replace(
+            "#include <emissivemap_fragment>",
+            /* glsl */ `#include <emissivemap_fragment>
+totalEmissiveRadiance += blackbodyRadiance(vHfTempK) * ${mode === 0 ? "0.75" : "0.5"};
+if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) * 0.3;`,
+          );
+      };
+      mat.customProgramCacheKey = () => `fs-gold-heightfield-v2-${mode}`;
+    };
+    installHeightfield(this.matMoltenGold, 0);
+    installHeightfield(this.matSolidifiedGold, 1);
   }
 
   /**
@@ -1273,7 +1684,10 @@ export class PocketWatchScene {
     const ringVerts = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
     const totalVerts = ringVerts * 2; // 0..ringVerts-1 = outer surface, ringVerts..2*ringVerts-1 = inner surface
     const positions = new Float32Array(totalVerts * 3);
-    const colors = new Float32Array(totalVerts * 3);
+    const normals = new Float32Array(totalVerts * 3);
+    // (u around the case, v from back bezel to front bezel, side +1 outer / -1 inner): the vertex
+    // shader evaluates the B-spline shell surface at (u, v) from the node textures every frame.
+    const shellParams = new Float32Array(totalVerts * 3);
     const indices: number[] = [];
 
     const profileZ = [-3.8, -2.8, -1.6, -0.5, 0.5, 1.6, 2.8, 3.8];
@@ -1336,13 +1750,42 @@ export class PocketWatchScene {
       indices.push(botO0, botI1, botO1, botO0, botI0, botI1);
     }
 
+    // Rest-shape positions (frustum bounds and a sane fallback); the GPU replaces them each frame.
+    for (let side = 0; side < 2; side++) {
+      for (let iz = 0; iz < CASE_RENDER_N_Z; iz++) {
+        const v = iz / (CASE_RENDER_N_Z - 1);
+        const fz = v * (CASE_SHELL_N_Z - 1);
+        const z0 = Math.min(CASE_SHELL_N_Z - 1, Math.floor(fz));
+        const z1 = Math.min(CASE_SHELL_N_Z - 1, z0 + 1);
+        const tz = fz - z0;
+        const r = profileR[z0]! * (1 - tz) + profileR[z1]! * tz;
+        const z = profileZ[z0]! * (1 - tz) + profileZ[z1]! * tz;
+        for (let it = 0; it < CASE_RENDER_N_THETA; it++) {
+          const u = it / CASE_RENDER_N_THETA;
+          const th = u * Math.PI * 2;
+          const k = side * ringVerts + iz * CASE_RENDER_N_THETA + it;
+          positions[k * 3] = r * Math.cos(th);
+          positions[k * 3 + 1] = r * Math.sin(th);
+          positions[k * 3 + 2] = z;
+          normals[k * 3] = Math.cos(th) * (side === 0 ? 1 : -1);
+          normals[k * 3 + 1] = Math.sin(th) * (side === 0 ? 1 : -1);
+          shellParams[k * 3] = u;
+          shellParams[k * 3 + 1] = v;
+          shellParams[k * 3 + 2] = side === 0 ? 1 : -1;
+        }
+      }
+    }
+
     this.caseShellGeometry = new THREE.BufferGeometry();
     this.caseShellGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    this.caseShellGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.caseShellGeometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    this.caseShellGeometry.setAttribute("aShell", new THREE.BufferAttribute(shellParams, 3));
     this.caseShellGeometry.setIndex(indices);
+    this.caseShellGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 36);
     this.updateCaseShellFromContinuum(initData);
 
     this.caseShellMesh = new THREE.Mesh(this.caseShellGeometry, this.matGoldCase);
+    this.caseShellMesh.frustumCulled = false;
     this.caseShellMesh.castShadow = true;
     this.caseShellMesh.receiveShadow = true;
     this.layerCase.add(this.caseShellMesh);
@@ -1437,12 +1880,13 @@ export class PocketWatchScene {
     tourbBezel.position.set(0, -11.0, -0.32);
     this.layerMainplate.add(tourbBezel);
 
-    // Fixed 70-tooth fourth wheel stationary ring around the Tourbillon well (for the escape pinion to orbit)
+    // Fixed 80-tooth fourth wheel ring around the Tourbillon well: the 8-leaf escape pinion orbits it,
+    // so the escape wheel turns 80 / 8 = 10x per cage revolution (one cage turn per minute).
     const fixedFourthGeom = buildToothedGearGeometry({
       outerRadius: 5.45,
       innerRimRadius: 4.85,
       hubRadius: 4.65,
-      teeth: 60,
+      teeth: 80,
       thickness: 0.32,
       spokes: 0,
     });
@@ -1582,7 +2026,7 @@ export class PocketWatchScene {
       outerRadius: 5.45,
       innerRimRadius: 1.8,
       hubRadius: 1.6,
-      teeth: 64,
+      teeth: 78,
       thickness: 0.44,
       spokes: 0,
     });
@@ -1655,7 +2099,7 @@ export class PocketWatchScene {
     this.barrelWheelGroup.add(arbor);
 
     // True 18-Turn 3D Rectangular-Ribbon High-Carbon Steel Mainspring inside the barrel
-    const samples = 18 * 24;
+    const samples = 18 * 56;
     this.mainspringRibbonGeometry = buildSpiralRibbonGeometry(samples, 1.05, 0.085);
     const defaultCoils = new Float32Array(18);
     for (let k = 0; k < 18; k++) {
@@ -1694,16 +2138,13 @@ export class PocketWatchScene {
       outerRadius: 6.1,
       innerRimRadius: 5.15,
       hubRadius: 1.35,
-      teeth: 64,
+      teeth: 80,
       thickness: 0.42,
       spokes: 5,
     });
     const centerMesh = new THREE.Mesh(centerGeom, this.matBrassWheel);
-    const centerPinion = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.15, 1.15, 2.2, 12),
-      this.matPolishedSteel,
-    );
-    centerPinion.rotation.x = Math.PI * 0.5;
+    // 10-leaf steel pinion (barrel 78 / 10 = 7.8x into the center wheel)
+    const centerPinion = new THREE.Mesh(buildPinionGeometry(1.15, 10, 2.2), this.matPolishedSteel);
     this.centerWheelGroup.add(centerMesh, centerPinion);
 
     // Third Wheel (75T, x = -5.8, y = 2.2, z = 0.35)
@@ -1712,16 +2153,13 @@ export class PocketWatchScene {
       outerRadius: 4.55,
       innerRimRadius: 3.75,
       hubRadius: 1.05,
-      teeth: 56,
+      teeth: 75,
       thickness: 0.38,
       spokes: 5,
     });
     const thirdMesh = new THREE.Mesh(thirdGeom, this.matBrassWheel);
-    const thirdPinion = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.88, 0.88, 1.8, 10),
-      this.matPolishedSteel,
-    );
-    thirdPinion.rotation.x = Math.PI * 0.5;
+    // 10-leaf third pinion (center 80 / 10 = 8x); third 75 drives the 10-leaf cage pinion (7.5x)
+    const thirdPinion = new THREE.Mesh(buildPinionGeometry(0.88, 10, 1.8), this.matPolishedSteel);
     this.thirdWheelGroup.add(thirdMesh, thirdPinion);
 
     // Symmetrical right-flank date/moonphase intermediate transmission wheel (x = +5.8, y = 2.2, z = 0.25)
@@ -1989,11 +2427,8 @@ export class PocketWatchScene {
       clubTeeth: true,
     });
     const escapeMesh = new THREE.Mesh(escapeGeom, this.matPolishedSteel);
-    const escapePinion = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.42, 0.42, 1.45, 8),
-      this.matPolishedSteel,
-    );
-    escapePinion.rotation.x = Math.PI * 0.5;
+    // 8-leaf escape pinion rolling on the fixed 80-tooth fourth wheel (80 / 8 = 10x)
+    const escapePinion = new THREE.Mesh(buildPinionGeometry(0.42, 8, 1.45), this.matPolishedSteel);
     const escapeJewel = createRubyChatonAssembly(
       0.65,
       0.35,
@@ -2044,17 +2479,16 @@ export class PocketWatchScene {
     palletYoke.position.set(-0.68, -0.55, 0);
     palletYoke.rotation.z = 0.52;
 
-    const entryRubyPallet = new THREE.Mesh(
-      new THREE.BoxGeometry(0.24, 0.72, 0.26),
-      this.matRubyJewel,
-    );
+    // Each contact ruby gets its own material instance so the live contact set can light it.
+    const matEntry = this.matRubyJewel.clone();
+    const matExit = this.matRubyJewel.clone();
+    const matPin = this.matRubyJewel.clone();
+    this.contactMats.push(matEntry, matExit, matPin);
+    const entryRubyPallet = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.72, 0.26), matEntry);
     entryRubyPallet.position.set(-0.35, -0.98, 0);
     entryRubyPallet.rotation.z = 0.32;
 
-    const exitRubyPallet = new THREE.Mesh(
-      new THREE.BoxGeometry(0.24, 0.72, 0.26),
-      this.matRubyJewel,
-    );
+    const exitRubyPallet = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.72, 0.26), matExit);
     exitRubyPallet.position.set(-1.32, -0.45, 0);
     exitRubyPallet.rotation.z = -0.42;
 
@@ -2141,10 +2575,7 @@ export class PocketWatchScene {
     largeRoller.rotation.x = Math.PI * 0.5;
     largeRoller.position.z = -0.42;
 
-    const rubyImpulsePin = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12, 0.12, 0.45, 14),
-      this.matRubyJewel,
-    );
+    const rubyImpulsePin = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.45, 20), matPin);
     rubyImpulsePin.rotation.x = Math.PI * 0.5;
     rubyImpulsePin.position.set(-0.68, 0.42, -0.55);
 
@@ -2166,7 +2597,7 @@ export class PocketWatchScene {
     this.tourbillonCageGroup.add(this.balanceWheelGroup);
 
     // True 14-Turn 3D Rectangular-Ribbon Breguet Overcoil Hairspring (with Terminal Overcoil Riser & Stud!)
-    const hsSamples = 14 * 28;
+    const hsSamples = 14 * 72;
     this.hairspringRibbonGeometry = buildSpiralRibbonGeometry(hsSamples, 0.24, 0.045);
     this.updateHairspringRibbon(0.0, 0.0);
     const hairspringMesh = new THREE.Mesh(this.hairspringRibbonGeometry, this.matHairspring);
@@ -2399,46 +2830,16 @@ export class PocketWatchScene {
    *    meniscus feathering so liquid and frozen gold pools never show Cartesian quad edges.
    */
   private buildContinuumMoltenAndSolidGoldHeightfields(): void {
-    const buildGridGeom = (): THREE.BufferGeometry => {
-      const vCount = RENDER_GRID_N * RENDER_GRID_N;
-      const pos = new Float32Array(vCount * 3);
-      const col = new Float32Array(vCount * 4);
-      const idx: number[] = [];
-      for (let gy = 0; gy < RENDER_GRID_N; gy++) {
-        for (let gx = 0; gx < RENDER_GRID_N; gx++) {
-          const i = gy * RENDER_GRID_N + gx;
-          pos[i * 3] = -GRID_HALF_SPAN_MM + (gx + 0.5) * RENDER_GRID_DX_MM;
-          pos[i * 3 + 1] = -GRID_HALF_SPAN_MM + (gy + 0.5) * RENDER_GRID_DX_MM;
-          pos[i * 3 + 2] = -10.0;
-          col[i * 4] = 0.96;
-          col[i * 4 + 1] = 0.78;
-          col[i * 4 + 2] = 0.34;
-          col[i * 4 + 3] = 0.0;
-        }
-      }
-      for (let gy = 0; gy < RENDER_GRID_N - 1; gy++) {
-        for (let gx = 0; gx < RENDER_GRID_N - 1; gx++) {
-          const i00 = gy * RENDER_GRID_N + gx;
-          const i10 = i00 + 1;
-          const i01 = i00 + RENDER_GRID_N;
-          const i11 = i01 + 1;
-          idx.push(i00, i10, i11, i00, i11, i01);
-        }
-      }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      g.setAttribute("color", new THREE.BufferAttribute(col, 4));
-      g.setIndex(idx);
-      return g;
-    };
-
-    this.moltenGoldGeometry = buildGridGeom();
+    // Unit-square grids; the vertex shader scales by the engine's half span and displaces in z.
+    this.moltenGoldGeometry = new THREE.PlaneGeometry(2, 2, HEIGHTFIELD_RES - 1, HEIGHTFIELD_RES - 1);
     this.moltenGoldMesh = new THREE.Mesh(this.moltenGoldGeometry, this.matMoltenGold);
     this.moltenGoldMesh.visible = false;
+    this.moltenGoldMesh.frustumCulled = false;
 
-    this.solidGoldGeometry = buildGridGeom();
+    this.solidGoldGeometry = new THREE.PlaneGeometry(2, 2, HEIGHTFIELD_RES - 1, HEIGHTFIELD_RES - 1);
     this.solidGoldMesh = new THREE.Mesh(this.solidGoldGeometry, this.matSolidifiedGold);
     this.solidGoldMesh.visible = false;
+    this.solidGoldMesh.frustumCulled = false;
 
     this.watchRoot.add(this.moltenGoldMesh, this.solidGoldMesh);
   }
@@ -2755,247 +3156,97 @@ export class PocketWatchScene {
    * interpolation of the `64 x 8` Lagrangian continuum nodes computed by the Rust
    * Thermo-Elasto-Viscoplastic + Surface-Tension solver (`sim.case_shell_snapshot()`).
    */
+  /**
+   * Upload the 64 x 8 Lagrangian case-shell nodes (`[x, y, z, h, T, f_L]` per node) into two float
+   * textures; the vertex shader evaluates the bicubic B-spline surface, its analytic normals, and the
+   * per-pixel blackbody glow. Unchanged data (the common case) costs one checksum pass.
+   */
   private updateCaseShellFromContinuum(caseShellData: Float32Array): void {
     if (caseShellData.length < CASE_SHELL_NODES * 6) return;
-
-    const posAttr = this.caseShellGeometry.getAttribute("position") as THREE.BufferAttribute;
-    const colAttr = this.caseShellGeometry.getAttribute("color") as THREE.BufferAttribute;
-    const pos = posAttr.array as Float32Array;
-    const col = colAttr.array as Float32Array;
-
-    const readRawNode = (izClamped: number, tWrapped: number, ch: number): number =>
-      caseShellData[(izClamped * CASE_N_THETA + tWrapped) * 6 + ch]!;
-
-    const sampleNodeField = (iz: number, it: number, ch: number): number => {
-      const tWrapped = ((it % CASE_N_THETA) + CASE_N_THETA) % CASE_N_THETA;
-      // Phantom endpoint reflection for spatial coordinates (ch <= 2) so the C^2 cubic B-spline
-      // interpolates the exact top and bottom bezel rims (z = +/-3.8 mm, R = 23.0 mm) with zero gap:
-      if (ch <= 2) {
-        if (iz < 0) {
-          return 2.0 * readRawNode(0, tWrapped, ch) - readRawNode(1, tWrapped, ch);
-        }
-        if (iz >= CASE_N_Z) {
-          return 2.0 * readRawNode(CASE_N_Z - 1, tWrapped, ch) - readRawNode(CASE_N_Z - 2, tWrapped, ch);
-        }
-      }
-      const zClamped = Math.max(0, Math.min(CASE_N_Z - 1, iz));
-      return readRawNode(zClamped, tWrapped, ch);
-    };
-
-    const sampleShellSmooth = (uTheta: number, vZ: number, ch: number): number => {
-      const ft = uTheta * CASE_N_THETA;
-      const fz = vZ * (CASE_N_Z - 1);
-      const it0 = Math.floor(ft);
-      const iz0 = Math.floor(fz);
-      const tt = ft - it0;
-      const tz = fz - iz0;
-
-      const rowVals = [0, 0, 0, 0];
-      for (let dz = -1; dz <= 2; dz++) {
-        const p0 = sampleNodeField(iz0 + dz, it0 - 1, ch);
-        const p1 = sampleNodeField(iz0 + dz, it0, ch);
-        const p2 = sampleNodeField(iz0 + dz, it0 + 1, ch);
-        const p3 = sampleNodeField(iz0 + dz, it0 + 2, ch);
-        rowVals[dz + 1] = bSplineCubic(p0, p1, p2, p3, tt);
-      }
-      return bSplineCubic(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, tz);
-    };
-
-    let maxShellTempK = 293.15;
-
-    for (let iz = 0; iz < CASE_RENDER_N_Z; iz++) {
-      const vZ = iz / (CASE_RENDER_N_Z - 1);
-      const rimPinch = Math.sin(vZ * Math.PI);
-      const bezelLip = 0.72 + 0.28 * Math.pow(rimPinch, 0.45);
-
-      for (let it = 0; it < CASE_RENDER_N_THETA; it++) {
-        const uTheta = it / CASE_RENDER_N_THETA;
-        const idx = iz * CASE_RENDER_N_THETA + it;
-
-        const x = sampleShellSmooth(uTheta, vZ, 0);
-        const y = sampleShellSmooth(uTheta, vZ, 1);
-        const z = sampleShellSmooth(uTheta, vZ, 2);
-        const h = Math.max(0.08, sampleShellSmooth(uTheta, vZ, 3)) * bezelLip;
-        const tempK = Math.max(50.0, sampleShellSmooth(uTheta, vZ, 4));
-        const meltFrac = Math.max(0.0, Math.min(1.0, sampleShellSmooth(uTheta, vZ, 5)));
-        if (tempK > maxShellTempK) maxShellTempK = tempK;
-
-        const rXY = Math.max(1.0, Math.hypot(x, y));
-        const nx = x / rXY;
-        const ny = y / rXY;
-
-        // Outer shell surface at (x + 0.45*h*nx, y + 0.45*h*ny, z)
-        const oIdx = idx * 3;
-        pos[oIdx] = x + nx * h * 0.45;
-        pos[oIdx + 1] = y + ny * h * 0.45;
-        pos[oIdx + 2] = z;
-
-        // Inner shell surface at (x - 0.55*h*nx, y - 0.55*h*ny, z)
-        const iIdx = (CASE_RENDER_NODES + idx) * 3;
-        pos[iIdx] = x - nx * h * 0.55;
-        pos[iIdx + 1] = y - ny * h * 0.55;
-        pos[iIdx + 2] = z;
-
-        // Vertex color: 18k Yellow Gold reflectance strictly in [0, 1] (preserves Schlick Fresnel energy conservation)
-        let cr = 0.93;
-        let cg = 0.75;
-        let cb = 0.32;
-        if (this.thermalOverlayMode) {
-          const u = Math.max(0, Math.min(1, (tempK - 77.36) / 1400.0));
-          cr = Math.min(1, u * 2.0);
-          cg = Math.sin(u * Math.PI) * 0.85;
-          cb = Math.max(0, 1.0 - u * 2.0);
-        } else if (tempK > 720.0) {
-          const glow = Math.min(1.0, (tempK - 720.0) / 680.0);
-          cr = Math.min(1.0, 0.93 + glow * 0.07);
-          cg = Math.min(0.95, 0.75 - glow * 0.14 * (1.0 - meltFrac) + glow * 0.16 * meltFrac);
-          cb = Math.min(0.72, 0.32 + glow * 0.34 * meltFrac);
-        } else if (tempK < 220.0) {
-          const cryo = Math.min(1.0, (220.0 - tempK) / 145.0);
-          cr = 0.93 - cryo * 0.22;
-          cg = 0.75 + cryo * 0.14;
-          cb = 0.32 + cryo * 0.52;
-        }
-
-        col[oIdx] = cr;
-        col[oIdx + 1] = cg;
-        col[oIdx + 2] = cb;
-        col[iIdx] = cr * 0.90;
-        col[iIdx + 1] = cg * 0.90;
-        col[iIdx + 2] = cb * 0.90;
-      }
+    let checksum = 0;
+    let maxT = 0;
+    for (let i = 0; i < CASE_SHELL_NODES; i++) {
+      const s = i * 6;
+      const t = caseShellData[s + 4]!;
+      checksum +=
+        caseShellData[s]! * 1.000_1 +
+        caseShellData[s + 1]! * 1.000_3 +
+        caseShellData[s + 2]! * 1.000_7 +
+        caseShellData[s + 3]! * 0.999_1 +
+        t * 0.000_37 +
+        caseShellData[s + 5]! * 0.31 * (i + 1);
+      if (t > maxT) maxT = t;
     }
-
-    // Subtle uniform blackbody self-emission when case exceeds 820 K
-    this.matGoldCase.emissiveIntensity =
-      maxShellTempK > 820.0 ? Math.min(0.28, ((maxShellTempK - 820.0) / 650.0) * 0.28) : 0.0;
-
-    posAttr.needsUpdate = true;
-    colAttr.needsUpdate = true;
-    this.caseShellGeometry.computeVertexNormals();
+    this.maxShellTempK = maxT;
+    if (checksum === this.shellChecksum) return;
+    this.shellChecksum = checksum;
+    const a = this.shellBufA;
+    const b = this.shellBufB;
+    for (let i = 0; i < CASE_SHELL_NODES; i++) {
+      const s = i * 6;
+      a[i * 4] = caseShellData[s]!;
+      a[i * 4 + 1] = caseShellData[s + 1]!;
+      a[i * 4 + 2] = caseShellData[s + 2]!;
+      a[i * 4 + 3] = caseShellData[s + 3]!;
+      b[i * 4] = caseShellData[s + 4]!;
+      b[i * 4 + 1] = caseShellData[s + 5]!;
+    }
+    this.shellUniforms.uShellA.value.needsUpdate = true;
+    this.shellUniforms.uShellB.value.needsUpdate = true;
   }
 
   /**
-   * Update the continuous 3D Molten & Solidified Gold Free-Surface Heightfields using C^2
-   * Bicubic B-Spline reconstruction (`84 x 84`) over the `48 x 48 = 2304` Spatial PDE Grid
-   * computed in Rust (`sim.spatial_grid_snapshot()`), with per-pixel RGBA iso-contour meniscus
-   * feathering so pools never show boxy Cartesian quad boundaries.
+   * Upload the spatial PDE grid (`[T, f_L, slump, H_liq, H_frozen, frost, oil]` per cell) into a
+   * float texture (liquid, frozen, temperature); the GPU reconstructs both free surfaces with
+   * Mitchell-Netravali filtering, finite-difference normals and meniscus alpha.
    */
   private updateGoldHeightfieldsFromSpatialGrid(gridData: Float32Array): void {
-    if (gridData.length < GRID_N * GRID_N * 7) return;
-
-    // Fast coarse scan to avoid 84x84 spline evaluation when no molten or frozen gold exists
-    let maxLiqCourse = 0.0;
-    let maxFrzCourse = 0.0;
-    for (let i = 0; i < GRID_N * GRID_N; i++) {
+    const cells = Math.floor(gridData.length / 7);
+    if (!this.ensureGridGeometry(cells)) return;
+    let maxLiq = 0;
+    let maxFrz = 0;
+    let maxT = 0;
+    const buf = this.gridTexBuf;
+    for (let i = 0; i < cells; i++) {
+      const t = gridData[i * 7]!;
       const liq = gridData[i * 7 + 3]!;
       const frz = gridData[i * 7 + 4]!;
-      if (liq > maxLiqCourse) maxLiqCourse = liq;
-      if (frz > maxFrzCourse) maxFrzCourse = frz;
+      buf[i * 4] = liq;
+      buf[i * 4 + 1] = frz;
+      buf[i * 4 + 2] = t;
+      if (liq > maxLiq) maxLiq = liq;
+      if (frz > maxFrz) maxFrz = frz;
+      if (t > maxT) maxT = t;
     }
-
-    if (maxLiqCourse <= 0.008 && maxFrzCourse <= 0.008) {
-      this.moltenGoldMesh.visible = false;
-      this.solidGoldMesh.visible = false;
-      return;
-    }
-
-    const mPosAttr = this.moltenGoldGeometry.getAttribute("position") as THREE.BufferAttribute;
-    const mColAttr = this.moltenGoldGeometry.getAttribute("color") as THREE.BufferAttribute;
-    const mPos = mPosAttr.array as Float32Array;
-    const mCol = mColAttr.array as Float32Array;
-
-    const sPosAttr = this.solidGoldGeometry.getAttribute("position") as THREE.BufferAttribute;
-    const sColAttr = this.solidGoldGeometry.getAttribute("color") as THREE.BufferAttribute;
-    const sPos = sPosAttr.array as Float32Array;
-    const sCol = sColAttr.array as Float32Array;
-
-    const totalVerts = RENDER_GRID_N * RENDER_GRID_N;
-    let anyMolten = false;
-    let anySolid = false;
-
-    for (let idx = 0; idx < totalVerts; idx++) {
-      const xMm = mPos[idx * 3]!;
-      const yMm = mPos[idx * 3 + 1]!;
-      const rCenter = Math.hypot(xMm, yMm);
-
-      // Smooth circular radial taper near the outer case rim (r <= 25.0 mm)
-      const radialT = Math.max(0.0, Math.min(1.0, (25.0 - rCenter) / 2.6));
-      const radialMask = radialT * radialT * (3.0 - 2.0 * radialT);
-
-      if (radialMask <= 0.001) {
-        mPos[idx * 3 + 2] = -2.2;
-        mCol[idx * 4 + 3] = 0.0;
-        sPos[idx * 3 + 2] = -2.2;
-        sCol[idx * 4 + 3] = 0.0;
-        continue;
-      }
-
-      const tempK = sampleSmoothPdeField(gridData, xMm, yMm, 0);
-      const rawLiq = sampleSmoothPdeField(gridData, xMm, yMm, 3) * radialMask;
-      const rawFrz = sampleSmoothPdeField(gridData, xMm, yMm, 4) * radialMask;
-
-      // Smooth substrate elevation transition between recessed 6h Tourbillon well (-0.65 mm) and mainplate (+0.25 mm)
-      const distTourb = Math.hypot(xMm, yMm + 11.0);
-      const wellBlend = Math.max(0.0, Math.min(1.0, (distTourb - 5.2) / 2.8));
-      const smoothWell = wellBlend * wellBlend * (3.0 - 2.0 * wellBlend);
-      const baseZ = -0.65 * (1.0 - smoothWell) + 0.28 * smoothWell;
-
-      // 1. Molten Gold Free-Surface Height & Smooth Per-Pixel Meniscus Alpha
-      const liqAlphaT = Math.max(0.0, Math.min(1.0, (rawLiq - 0.006) / 0.042));
-      const liqAlpha = liqAlphaT * liqAlphaT * (3.0 - 2.0 * liqAlphaT);
-      if (liqAlpha > 0.005) {
-        anyMolten = true;
-      }
-      const liqDome = Math.pow(liqAlpha, 0.65);
-      mPos[idx * 3 + 2] =
-        baseZ - 0.42 * (1.0 - liqDome) + rawFrz * 1.25 + Math.min(2.4, rawLiq * 1.32) * liqDome;
-
-      const glow = Math.max(0.0, Math.min(1.0, (tempK - 950.0) / 550.0));
-      mCol[idx * 4] = Math.min(1.0, 0.96 + glow * 0.04);
-      mCol[idx * 4 + 1] = Math.min(0.92, 0.74 + glow * 0.16);
-      mCol[idx * 4 + 2] = Math.min(0.68, 0.28 + glow * 0.32);
-      mCol[idx * 4 + 3] = liqAlpha;
-
-      // 2. Solidified (Quenched) Gold Free-Surface Height & Smooth Per-Pixel Meniscus Alpha
-      const frzAlphaT = Math.max(0.0, Math.min(1.0, (rawFrz - 0.006) / 0.042));
-      const frzAlpha = frzAlphaT * frzAlphaT * (3.0 - 2.0 * frzAlphaT);
-      if (frzAlpha > 0.005) {
-        anySolid = true;
-      }
-      const frzDome = Math.pow(frzAlpha, 0.65);
-      sPos[idx * 3 + 2] =
-        baseZ - 0.42 * (1.0 - frzDome) + Math.min(2.4, rawFrz * 1.32) * frzDome;
-
-      const cryo = tempK < 220.0 ? Math.min(1.0, (220.0 - tempK) / 145.0) : 0.0;
-      sCol[idx * 4] = 0.88 - cryo * 0.16;
-      sCol[idx * 4 + 1] = 0.69 + cryo * 0.12;
-      sCol[idx * 4 + 2] = 0.28 + cryo * 0.45;
-      sCol[idx * 4 + 3] = frzAlpha;
-    }
-
+    this.maxGridTempK = maxT;
+    const anyMolten = maxLiq > 0.008;
+    const anySolid = maxFrz > 0.008;
     this.moltenGoldMesh.visible = anyMolten;
-    if (anyMolten) {
-      mPosAttr.needsUpdate = true;
-      mColAttr.needsUpdate = true;
-      this.moltenGoldGeometry.computeVertexNormals();
-    }
-
     this.solidGoldMesh.visible = anySolid;
-    if (anySolid) {
-      sPosAttr.needsUpdate = true;
-      sColAttr.needsUpdate = true;
-      this.solidGoldGeometry.computeVertexNormals();
+    if (anyMolten || anySolid) {
+      this.gridUniforms.uGrid.value.needsUpdate = true;
     }
   }
 
   public renderFrame(snap: WatchSnapshot, tools: ToolRenderParams): void {
-    // 1. Update Emergent Continuum Geometries from WASM buffers
+    const nowMs = performance.now();
+    // 1. Upload emergent continuum fields (only on frames where the caller polled them)
     if (tools.caseShellData) {
+      this.lastCaseShellData = tools.caseShellData;
       this.updateCaseShellFromContinuum(tools.caseShellData);
     }
     if (tools.spatialGridData) {
+      this.lastGridData = tools.spatialGridData;
       this.updateGoldHeightfieldsFromSpatialGrid(tools.spatialGridData);
+    }
+    this.stepCameraTween(nowMs);
+
+    // Escapement contact highlights: ruby faces glow while in contact, decaying ~80 ms.
+    for (let i = 0; i < 3; i++) {
+      const g = this.contactGlow[i]!;
+      const mat = this.contactMats[i];
+      if (mat) mat.emissiveIntensity = g * 2.2;
+      this.contactGlow[i] = g * 0.82;
     }
     if (tools.mainspringCoilsMm) {
       this.updateMainspringRibbonFromCoils(tools.mainspringCoilsMm);
@@ -3037,7 +3288,8 @@ export class PocketWatchScene {
     this.moonDiscGroup.rotation.z = snap.moonphaseAngleRad;
 
     // 5. Update Frost Rime Overlay when cooled below 270 K
-    const maxFrostUm = Math.max(...snap.nodes.map((n) => n.frostThicknessUm));
+    let maxFrostUm = 0;
+    for (const n of snap.nodes) if (n.frostThicknessUm > maxFrostUm) maxFrostUm = n.frostThicknessUm;
     if (maxFrostUm > 1.5) {
       this.frostOverlayMesh.visible = true;
       this.matFrostOverlay.opacity = Math.min(0.62, maxFrostUm / 135.0);
@@ -3046,9 +3298,15 @@ export class PocketWatchScene {
     }
 
     // 6. Update Perturbation Tool Apparatus Positions, Dynamic Bloom & Intensities
-    const maxNodeTempK = Math.max(...snap.nodes.map((n) => n.temperatureK));
-    const incandescenceFactor = Math.max(0, Math.min(1, (maxNodeTempK - 820.0) / 550.0));
-    this.bloomPass.strength = 0.06 + Math.max(incandescenceFactor * 0.12, tools.torchPower * 0.08);
+    let maxNodeTempK = Math.max(this.maxShellTempK, this.maxGridTempK);
+    for (const n of snap.nodes) if (n.temperatureK > maxNodeTempK) maxNodeTempK = n.temperatureK;
+    const incandescenceFactor = Math.max(0, Math.min(1, (maxNodeTempK - 900.0) / 550.0));
+    this.bloomPass.strength = 0.1 + Math.max(incandescenceFactor * 0.22, tools.torchPower * 0.12);
+    // Bloom only runs when something actually emits (flame or >900 K metal); phones on the low
+    // tier keep it for the flame only.
+    this.bloomPass.enabled =
+      tools.torchPower > 0.01 || (incandescenceFactor > 0.0 && this.tier !== "low");
+    this.glowUniforms.uThermalOverlay.value = this.thermalOverlayMode ? 1 : 0;
 
     this.torchGroup.visible = tools.torchPower > 0.01 || this.activeTool === "torch";
     this.torchGroup.position.set(tools.torchPosMm[0], tools.torchPosMm[1], tools.torchPosMm[2]);
@@ -3140,8 +3398,8 @@ export class PocketWatchScene {
    */
   private updateVectorFieldOverlays(snap: WatchSnapshot, tools: ToolRenderParams): void {
     const tNow = performance.now() * 0.001;
-    const grid = tools.spatialGridData;
-    const shell = tools.caseShellData;
+    const grid = tools.spatialGridData ?? this.lastGridData ?? undefined;
+    const shell = tools.caseShellData ?? this.lastCaseShellData ?? undefined;
     const airPower = tools.airPower ?? 0.0;
     const airPos = tools.airPosMm ?? [0.0, -20.0, 3.0];
     const gVec = tools.gravityGVec ?? [0.0, -1.0, 0.0];
@@ -3447,18 +3705,25 @@ export class PocketWatchScene {
     this.activeTool = mode;
     this.controls.enabled = true;
     this.controls.enableZoom = true;
-    this.controls.mouseButtons =
-      mode === "inspect"
-        ? {
-            LEFT: THREE.MOUSE.ROTATE,
-            MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.PAN,
-          }
-        : {
-            LEFT: null as unknown as THREE.MOUSE,
-            MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.ROTATE,
-          };
+    if (mode === "inspect") {
+      this.controls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      };
+      this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+    } else {
+      // Aiming a tool: primary button / one finger aims; right button or two fingers still orbit.
+      this.controls.mouseButtons = {
+        LEFT: null as unknown as THREE.MOUSE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+      this.controls.touches = {
+        ONE: null as unknown as THREE.TOUCH,
+        TWO: THREE.TOUCH.DOLLY_ROTATE,
+      };
+    }
   }
 
   public setExplodedFactor(factor: number): void {
@@ -3485,23 +3750,62 @@ export class PocketWatchScene {
   }
 
   public setCameraPreset(preset: CameraPreset): void {
-    if (preset === "overview") {
-      this.camera.position.set(0, -34, 66);
-      this.controls.target.set(0, -2, 0);
-    } else if (preset === "tourbillon") {
-      this.camera.position.set(0, -22, 22);
-      this.controls.target.set(0, -11, 0.5);
-    } else if (preset === "barrel") {
-      this.camera.position.set(0, -6, 28);
-      this.controls.target.set(0, 9.5, 0.5);
-    } else if (preset === "escapement") {
-      this.camera.position.set(-6, -18, 13);
-      this.controls.target.set(-1.5, -10.8, 0.2);
-    } else if (preset === "side" || preset === "profile") {
-      this.camera.position.set(46, -24, 18);
-      this.controls.target.set(0, -2, 0);
+    this.applyCameraPreset(preset, !this.reducedMotion);
+  }
+
+  public getCameraPreset(): CameraPreset {
+    return this.currentPreset;
+  }
+
+  /**
+   * Frame a camera preset so its subject (bounding radius in mm) fits the part of the canvas that
+   * is not covered by UI chrome, from a fixed viewing direction.
+   */
+  private applyCameraPreset(preset: CameraPreset, animate: boolean): void {
+    this.currentPreset = preset;
+    const presets: Record<string, { target: [number, number, number]; dir: [number, number, number]; radius: number }> = {
+      overview: { target: [0, 1.5, 0], dir: [0, -0.46, 0.89], radius: 37 },
+      tourbillon: { target: [0, -11, 0.5], dir: [0, -0.5, 0.87], radius: 8.6 },
+      barrel: { target: [0, 9.5, 0.5], dir: [0, -0.55, 0.84], radius: 10.5 },
+      escapement: { target: [-1.6, -11.2, 0.2], dir: [-0.3, -0.62, 0.72], radius: 4.4 },
+      side: { target: [0, -2, 0], dir: [0.86, -0.42, 0.3], radius: 35 },
+      profile: { target: [0, -2, 0], dir: [0.86, -0.42, 0.3], radius: 35 },
+    };
+    const p = presets[preset] ?? presets.overview!;
+    const dir = new THREE.Vector3(...p.dir).normalize();
+    const vw = Math.max(80, this.cssWidth - this.viewInsets.left - this.viewInsets.right);
+    const vh = Math.max(80, this.cssHeight - this.viewInsets.top - this.viewInsets.bottom);
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5));
+    // Half-extent of the visible window at unit distance, in world units per unit distance.
+    const halfMin = (tanHalf * Math.min(vw, vh)) / this.cssHeight;
+    const dist = (p.radius / Math.max(1e-3, halfMin)) * 1.04;
+    const target = new THREE.Vector3(...p.target);
+    const pos = target.clone().addScaledVector(dir, dist);
+    if (!animate) {
+      this.cameraTween = null;
+      this.camera.position.copy(pos);
+      this.controls.target.copy(target);
+      this.controls.update();
+      return;
     }
-    this.controls.update();
+    this.cameraTween = {
+      fromPos: this.camera.position.clone(),
+      toPos: pos,
+      fromTarget: this.controls.target.clone(),
+      toTarget: target,
+      t0: performance.now(),
+      durationMs: 760,
+    };
+  }
+
+  private stepCameraTween(nowMs: number): void {
+    const tw = this.cameraTween;
+    if (!tw) return;
+    const u = Math.min(1, (nowMs - tw.t0) / tw.durationMs);
+    const e = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    this.camera.position.lerpVectors(tw.fromPos, tw.toPos, e);
+    this.controls.target.lerpVectors(tw.fromTarget, tw.toTarget, e);
+    if (u >= 1) this.cameraTween = null;
   }
 
   private bindPointerEvents(): void {
@@ -3519,34 +3823,70 @@ export class PocketWatchScene {
       }
       return null;
     };
+    const activePointers = new Set<number>();
 
     this.canvas.addEventListener("pointerdown", (ev) => {
+      activePointers.add(ev.pointerId);
+      if (activePointers.size > 1) {
+        // A second finger means orbit/zoom, never aim.
+        this.isDraggingTool = false;
+        this.aimPointerId = null;
+        return;
+      }
       if (this.activeTool === "inspect" || ev.button !== 0) return;
       this.isDraggingTool = true;
+      this.aimPointerId = ev.pointerId;
       const pt = pickWatchPlane(ev);
       if (pt) this.callbacks.onTargetMoved(this.activeTool, pt);
     });
 
     window.addEventListener("pointermove", (ev) => {
       if (!this.isDraggingTool || this.activeTool === "inspect") return;
+      if (this.aimPointerId !== null && ev.pointerId !== this.aimPointerId) return;
       const pt = pickWatchPlane(ev);
       if (pt) this.callbacks.onTargetMoved(this.activeTool, pt);
     });
 
-    window.addEventListener("pointerup", () => {
-      this.isDraggingTool = false;
-    });
+    const release = (ev: PointerEvent): void => {
+      activePointers.delete(ev.pointerId);
+      if (ev.pointerId === this.aimPointerId) {
+        this.isDraggingTool = false;
+        this.aimPointerId = null;
+      }
+    };
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => this.resize()).observe(this.canvas);
+    } else {
+      window.addEventListener("resize", () => this.resize());
+    }
   }
 
   public resize(): void {
-    const parent = this.canvas.parentElement;
-    if (!parent) return;
-    const w = Math.max(320, parent.clientWidth);
-    const h = Math.max(260, parent.clientHeight);
+    const w = Math.max(240, this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || 960);
+    const h = Math.max(240, this.canvas.clientHeight || this.canvas.parentElement?.clientHeight || 640);
+    this.cssWidth = w;
+    this.cssHeight = h;
     this.renderer.setSize(w, h, false);
     this.composer.setSize(w, h);
-    this.bloomPass.resolution.set(w, h);
     this.camera.aspect = w / h;
+    // Shift the projection center into the middle of the unobstructed region.
+    const ox = (this.viewInsets.right - this.viewInsets.left) * 0.5;
+    const oy = (this.viewInsets.bottom - this.viewInsets.top) * 0.5;
+    if (Math.abs(ox) > 0.5 || Math.abs(oy) > 0.5) {
+      this.camera.setViewOffset(w, h, ox, oy, w, h);
+    } else {
+      this.camera.clearViewOffset();
+    }
     this.camera.updateProjectionMatrix();
+  }
+
+  /** Render one frame without any simulation update (used while presets fast-forward). */
+  public renderOnly(): void {
+    this.stepCameraTween(performance.now());
+    this.controls.update();
+    this.composer.render();
   }
 }
