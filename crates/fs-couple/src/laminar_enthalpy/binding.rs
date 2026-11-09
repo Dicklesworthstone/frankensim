@@ -413,7 +413,9 @@ impl ThermalBinding {
     }
 }
 
-fn product<const N: usize, E>(factors: &[f64; N]) -> Result<f64, LaminarEnthalpyError<E>> {
+pub(super) fn product<const N: usize, E>(
+    factors: &[f64; N],
+) -> Result<f64, LaminarEnthalpyError<E>> {
     if factors
         .iter()
         .any(|value| !value.is_finite() || *value < 0.0)

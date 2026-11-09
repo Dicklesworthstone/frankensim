@@ -1,5 +1,7 @@
 //! G1/G3/G4: original thermal rheology, native storage and atomic paired history.
 
+mod adaptive;
+
 use super::*;
 use crate::laminar_enthalpy::windkessel::{LaminarWindkesselControls, LaminarWindkesselInput};
 use fs_flux::MaterialStokesWindkesselPort;

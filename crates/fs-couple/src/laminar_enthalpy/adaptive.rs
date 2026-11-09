@@ -16,7 +16,7 @@ use super::drive::LaminarDriveQuery;
 use super::*;
 use fs_thermal::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
 
-mod estimate;
+pub(super) mod estimate;
 use estimate::{Account, compare};
 
 /// First-order comparison spans and shared work/physical accuracy ceilings.
@@ -79,6 +79,8 @@ pub struct LaminarTimeEstimate {
     pub maximum_temperature_difference_k: f64,
     pub maximum_velocity_difference_m_s: f64,
     pub maximum_transfer_difference_j: f64,
+    /// Present only when the same controller advances native RCR/inertance.
+    pub hydraulic: Option<windkessel::adaptive::LaminarWindkesselTimeEstimate>,
 }
 impl LaminarTimeEstimate {
     pub fn maximum_error_ratio(&self) -> f64 {
@@ -86,6 +88,7 @@ impl LaminarTimeEstimate {
             .max(self.temperature_error_ratio)
             .max(self.velocity_error_ratio)
             .max(self.transfer_error_ratio)
+            .max(self.hydraulic.map_or(0.0, |h| h.maximum_error_ratio))
     }
 }
 
@@ -115,6 +118,8 @@ pub struct LaminarAdaptiveReport<T> {
     pub other_external_heat_j: f64,
     pub buoyancy_work_j: f64,
     pub thermal_balance_residual_j: f64,
+    /// Accepted-only native external-circuit work/storage, never caloric heat.
+    pub hydraulic: Option<Vec<windkessel::adaptive::LaminarWindkesselWindowBalance>>,
 }
 
 /// Final original states, published only after the WHOLE window succeeds.
@@ -122,7 +127,7 @@ pub struct LaminarAdaptiveReport<T> {
 pub struct LaminarAdaptiveCandidate<'m, G, T> {
     thermal: DepositionSimulation<'m>,
     flow: MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
-    report: LaminarAdaptiveReport<T>,
+    pub(super) report: LaminarAdaptiveReport<T>,
 }
 impl<'m, G, T> LaminarAdaptiveCandidate<'m, G, T> {
     pub fn thermal(&self) -> &DepositionSimulation<'m> {
@@ -280,6 +285,49 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             &[f64],
         ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
     ) -> Result<LaminarAdaptiveCandidate<'m, G, T>, LaminarAdaptiveError<E>> {
+        self.advance_adaptive_with_port_history(
+            cx,
+            initial,
+            target_s,
+            history,
+            event_times_s,
+            controls,
+            |old, query, history, _, step, guess| native(old, query, history, step, guess),
+            |_, _, _, _, _| Ok(None),
+        )
+    }
+
+    // The same native controller optionally carries an original external
+    // history through the accepted report and checks its additional physics.
+    // It owns no separate speculative circuit state and no second time loop.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn advance_adaptive_with_port_history<'m, G, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        initial: &DepositionSimulation<'m>,
+        target_s: f64,
+        history: LaminarEnthalpyHistory<'_>,
+        event_times_s: &[f64],
+        controls: LaminarAdaptiveControls,
+        native: impl Fn(
+            &DepositionSimulation<'m>,
+            LaminarDriveQuery,
+            LaminarEnthalpyHistory<'_>,
+            Option<&LaminarEnthalpyReport<T>>,
+            LaminarEnthalpyControls,
+            &[f64],
+        ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
+        compare_ports: impl Fn(
+            Option<&LaminarEnthalpyReport<T>>,
+            &LaminarEnthalpyCandidate<'m, G, T>,
+            &LaminarEnthalpyCandidate<'m, G, T>,
+            &LaminarEnthalpyCandidate<'m, G, T>,
+            f64,
+        ) -> Result<
+            Option<windkessel::adaptive::LaminarWindkesselTimeEstimate>,
+            LaminarEnthalpyError<E>,
+        >,
+    ) -> Result<LaminarAdaptiveCandidate<'m, G, T>, LaminarAdaptiveError<E>> {
         let mut work = LaminarAdaptiveWork::default();
         let wrap = |error| failed_native(error, 0, work);
         checkpoint(cx).map_err(wrap)?;
@@ -325,7 +373,7 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         let accepted_limit = controls
             .maximum_accepted_steps
             .min(initial.budget().max_substeps);
-        let mut steps = Vec::new();
+        let mut steps: Vec<LaminarAdaptiveStep<T>> = Vec::new();
         let mut estimates = Vec::new();
         let mut account = Account::default();
         let mut proposal = controls.initial_step_s;
@@ -373,14 +421,23 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 time_s: middle_s,
                 segment,
             };
+            let previous_report = steps.last().map(|step| &step.report);
             let coarse = native_step(
-                &native, &current, end_query, old, controls, &guess, &mut work,
+                &native,
+                &current,
+                end_query,
+                old,
+                previous_report,
+                controls,
+                &guess,
+                &mut work,
             )?;
             let first = native_step(
                 &native,
                 &current,
                 middle_query,
                 old,
+                previous_report,
                 controls,
                 &guess,
                 &mut work,
@@ -393,11 +450,12 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                     velocity_m_s: first.flow().step.solution.velocity_dofs(),
                     time_s: middle_s,
                 },
+                Some(first.report()),
                 controls,
                 &guess,
                 &mut work,
             )?;
-            let estimate = compare(
+            let mut estimate = compare(
                 cx,
                 self.system,
                 &current,
@@ -409,6 +467,8 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 controls,
             )
             .map_err(|error| failed_native(error, 0, work))?;
+            estimate.hydraulic = compare_ports(previous_report, &coarse, &first, &fine, correction)
+                .map_err(|error| failed_native(error, 0, work))?;
             let error = estimate.maximum_error_ratio();
             if error > 1.0 {
                 work.rejected_comparisons += 1;
@@ -497,6 +557,7 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 other_external_heat_j: values[4],
                 buoyancy_work_j: values[5],
                 thermal_balance_residual_j: values[6],
+                hydraulic: None,
             },
         })
     }
@@ -532,12 +593,14 @@ fn native_step<'m, G, T, E>(
         &DepositionSimulation<'m>,
         LaminarDriveQuery,
         LaminarEnthalpyHistory<'_>,
+        Option<&LaminarEnthalpyReport<T>>,
         LaminarEnthalpyControls,
         &[f64],
     ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
     thermal: &DepositionSimulation<'m>,
     query: LaminarDriveQuery,
     history: LaminarEnthalpyHistory<'_>,
+    previous_report: Option<&LaminarEnthalpyReport<T>>,
     controls: LaminarAdaptiveControls,
     guess: &[f64],
     work: &mut LaminarAdaptiveWork,
@@ -549,7 +612,7 @@ fn native_step<'m, G, T, E>(
     let mut step = controls.step;
     step.maximum_endpoint_evaluations = step.maximum_endpoint_evaluations.min(remaining);
     work.native_steps += 1;
-    let solved = native(thermal, query, history, step, guess)
+    let solved = native(thermal, query, history, previous_report, step, guess)
         .map_err(|error| failed_native(error, step.maximum_endpoint_evaluations, *work))?;
     let used = solved.report().endpoint_evaluations;
     if used > step.maximum_endpoint_evaluations {

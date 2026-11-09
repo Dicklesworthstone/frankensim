@@ -27,6 +27,7 @@ pub(super) fn compare<G, T, E>(
         maximum_temperature_difference_k: 0.0,
         maximum_velocity_difference_m_s: 0.0,
         maximum_transfer_difference_j: 0.0,
+        hydraulic: None,
     };
     if old.cells().len() != coarse.thermal().cells().len()
         || old.cells().len() != fine.thermal().cells().len()
@@ -175,7 +176,7 @@ fn physical_difference<E>(
     }
 }
 
-fn ratio<E>(
+pub(in crate::laminar_enthalpy) fn ratio<E>(
     difference: f64,
     change: f64,
     absolute: f64,

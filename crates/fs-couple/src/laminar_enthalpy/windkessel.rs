@@ -10,6 +10,9 @@ use fs_flux::{
     MaterialStokesWindkesselSolution,
 };
 
+/// Joint adaptive momentum, caloric and external hydraulic continuation.
+pub mod adaptive;
+
 /// Held fluid data and external circuit data for one physical time interval.
 ///
 /// Compliance pressures share the clock of `fluid.history` and are measured
