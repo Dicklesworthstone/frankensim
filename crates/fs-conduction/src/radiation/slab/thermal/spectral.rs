@@ -19,6 +19,16 @@ pub struct SlabThermalBand {
     pub irradiation_w_m2: [f64; 2],
 }
 
+/// A finite optical band with a prepared depth partition, without extra
+/// material interfaces. Wavelength/source obligations are those of
+/// `SlabThermalBand`; thermal cells retain independent original caloric states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlabThermalCellBand {
+    pub window: BlackbodyBand,
+    pub response: SlabCellResponse,
+    pub irradiation_w_m2: [f64; 2],
+}
+
 /// Native enthalpy heating from explicitly covered, nonoverlapping bands.
 ///
 /// Each band retains its original coefficients, index, source and temperature
@@ -52,13 +62,53 @@ impl<'a> SpectralSlabThermal<'a> {
         area_m2: f64,
         cells: &[(CellId, &'a dyn ThermalLaw)],
         thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::bind(bands, None, area_m2, cells, thermal, checkpoint)
+    }
+
+    /// Finite-band native heat with independently heated cells inside original
+    /// layers. Every band must retain the SAME complete physical depth partition.
+    /// Responses are already prepared; no angular work occurs in thermal steps.
+    pub fn new_cells(
+        bands: Vec<SlabThermalCellBand>,
+        area_m2: f64,
+        cells: &[(CellId, &'a dyn ThermalLaw)],
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        if !(1..=MAX_SLAB_SPECTRAL_BANDS).contains(&bands.len()) {
+            return Err(DepositionError::Budget("spectral slab band count"));
+        }
+        let mut inputs = Vec::with_capacity(bands.len());
+        let mut responses = Vec::with_capacity(bands.len());
+        for band in bands {
+            inputs.push(SlabThermalBand {
+                window: band.window,
+                optics: band.response.slab().clone(),
+                irradiation_w_m2: band.irradiation_w_m2,
+            });
+            responses.push(band.response);
+        }
+        Self::bind(inputs, Some(responses), area_m2, cells, thermal, checkpoint)
+    }
+
+    fn bind(
+        bands: Vec<SlabThermalBand>,
+        responses: Option<Vec<SlabCellResponse>>,
+        area_m2: f64,
+        cells: &[(CellId, &'a dyn ThermalLaw)],
+        thermal: &DepositionSimulation<'_>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
         if !(1..=MAX_SLAB_SPECTRAL_BANDS).contains(&bands.len()) {
             return Err(DepositionError::Budget("spectral slab band count"));
         }
-        let n = bands[0].optics.layer_count();
+        let physical_layers = bands[0].optics.layer_count();
+        let n = responses
+            .as_ref()
+            .map_or(physical_layers, |r| r[0].cell_count());
         let mut drivers = Vec::with_capacity(bands.len());
         let mut pair_present = [false; MAX_SLAB_LAYERS * MAX_SLAB_LAYERS];
         let mut bounds = [0.0; MAX_SLAB_LAYERS];
@@ -67,7 +117,7 @@ impl<'a> SpectralSlabThermal<'a> {
             checkpoint()?;
             if (b > 0
                 && band.window.lower_wavelength_m() < bands[b - 1].window.upper_wavelength_m())
-                || band.optics.layer_count() != n
+                || band.optics.layer_count() != physical_layers
                 || band
                     .optics
                     .layers()
@@ -79,6 +129,14 @@ impl<'a> SpectralSlabThermal<'a> {
                     "spectral slab needs ordered nonoverlapping bands on identical original layer geometry",
                 ));
             }
+            if responses
+                .as_ref()
+                .is_some_and(|r| r[b].cells() != r[0].cells())
+            {
+                return Err(DepositionError::InvalidInput(
+                    "spectral bands must share one original thermal depth partition",
+                ));
+            }
             let driver = GraySlabThermal::bind(
                 &band.optics,
                 area_m2,
@@ -86,6 +144,7 @@ impl<'a> SpectralSlabThermal<'a> {
                 cells,
                 thermal,
                 Some(band.window),
+                responses.as_ref().map(|r| &r[b]),
                 &mut checkpoint,
             )?;
             for (i, &(id, _)) in cells.iter().enumerate() {
@@ -136,6 +195,9 @@ impl<'a> SpectralSlabThermal<'a> {
     }
     pub fn area_m2(&self) -> f64 {
         self.drivers[0].area_m2
+    }
+    pub fn cell_response(&self, band: usize) -> Option<&SlabCellResponse> {
+        self.drivers.get(band)?.cell_response()
     }
 
     pub fn endpoint_transport(

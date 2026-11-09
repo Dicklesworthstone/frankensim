@@ -2,6 +2,7 @@ use super::*;
 
 mod asymmetric;
 mod beam;
+mod cells;
 mod depth;
 mod diffuse;
 mod heterogeneous;

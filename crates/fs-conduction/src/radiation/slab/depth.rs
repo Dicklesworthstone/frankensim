@@ -198,7 +198,7 @@ impl AbsorbingSlab {
                     &mut rule_correction,
                     &mut cancelled,
                     &mut report.angular_evaluations,
-                    Some((layer, interval_m)),
+                    layered::Resolution::Interval(layer, interval_m),
                 )?;
             }
             if coarse.iter().zip(&fine).all(|(&a, &b)| {

@@ -37,15 +37,20 @@ use super::spectral::planck::{GL8, GL16};
 use crate::ConductionError;
 
 mod beam;
+mod cells;
 mod depth;
 mod diffuse;
 mod layered;
 mod refraction;
 mod thermal;
 pub use beam::{SlabBeamExchange, SlabBeamResponse};
+pub use cells::{MAX_SLAB_CELLS, SlabCell, SlabCellResponse};
 pub use depth::{SlabDepthReport, SlabDepthResponse};
 pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
-pub use thermal::{GraySlabThermal, MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SpectralSlabThermal};
+pub use thermal::{
+    GraySlabThermal, MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SlabThermalCellBand,
+    SpectralSlabThermal,
+};
 
 /// Maximum physical layers in one prepared slab.
 pub const MAX_SLAB_LAYERS: usize = 64;
@@ -421,7 +426,7 @@ impl AbsorbingSlab {
                         &mut rule_correction,
                         &mut cancelled,
                         &mut report.angular_evaluations,
-                        None,
+                        layered::Resolution::Layers,
                     )?;
                 } else if refractive_index == 1.0 {
                     rule(

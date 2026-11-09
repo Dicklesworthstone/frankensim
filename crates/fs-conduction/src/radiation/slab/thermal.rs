@@ -10,14 +10,19 @@ use fs_thermal::enthalpy::{
 
 use super::super::STEFAN_BOLTZMANN_W_M2_K4 as SIGMA;
 use super::super::spectral::planck::BlackbodyBand;
-use super::{AbsorbingSlab, Arc, MAX_SLAB_LAYERS, add, exterior_difference_product};
+use super::{
+    AbsorbingSlab, Arc, MAX_SLAB_LAYERS, SlabCellResponse, add, exterior_difference_product,
+};
 
 mod spectral;
-pub use spectral::{MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SpectralSlabThermal};
+pub use spectral::{
+    MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SlabThermalCellBand, SpectralSlabThermal,
+};
 
 #[derive(Clone)]
 struct BoundLayer<'a> {
     id: CellId,
+    optical_layer: usize,
     material: MaterialId,
     segment: u64,
     body: u64,
@@ -46,6 +51,7 @@ struct BoundLayer<'a> {
 #[derive(Clone)]
 pub struct GraySlabThermal<'a> {
     slab: AbsorbingSlab,
+    cell_response: Option<SlabCellResponse>,
     layers: Arc<[BoundLayer<'a>]>,
     pairs: Arc<[(usize, usize, f64)]>,
     derivative_bounds_w_k: Arc<BTreeMap<CellId, f64>>,
@@ -84,10 +90,36 @@ impl<'a> GraySlabThermal<'a> {
             cells,
             thermal,
             None,
+            None,
             checkpoint,
         )
     }
 
+    /// Full-spectrum gray exchange on independently heated depth cells inside
+    /// the original layers. Each native volume is `area * interval thickness`;
+    /// each caloric and optical source remains original. This constructor makes
+    /// the SAME full-spectrum source declaration as `new_full_spectrum`.
+    pub fn new_cells_full_spectrum(
+        response: &SlabCellResponse,
+        area_m2: f64,
+        irradiation_w_m2: [f64; 2],
+        cells: &[(CellId, &'a dyn ThermalLaw)],
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::bind(
+            response.slab(),
+            area_m2,
+            irradiation_w_m2,
+            cells,
+            thermal,
+            None,
+            Some(response),
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn bind(
         slab: &AbsorbingSlab,
         area_m2: f64,
@@ -95,12 +127,13 @@ impl<'a> GraySlabThermal<'a> {
         cells: &[(CellId, &'a dyn ThermalLaw)],
         thermal: &DepositionSimulation<'_>,
         emission_band: Option<BlackbodyBand>,
+        cell_response: Option<&SlabCellResponse>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
         if !area_m2.is_finite()
             || area_m2 <= 0.0
-            || cells.len() != slab.layer_count()
+            || cells.len() != cell_response.map_or(slab.layer_count(), SlabCellResponse::cell_count)
             || irradiation_w_m2.iter().any(|x| !x.is_finite() || *x < 0.0)
         {
             return Err(DepositionError::InvalidInput(
@@ -108,6 +141,10 @@ impl<'a> GraySlabThermal<'a> {
             ));
         }
         let n = cells.len();
+        let face_coupling =
+            cell_response.map_or(slab.face_coupling(), SlabCellResponse::face_coupling);
+        let pair_coupling =
+            cell_response.map_or(slab.layer_coupling(), SlabCellResponse::cell_coupling);
         let exterior_index_squared = slab
             .exterior_refractive_indices()
             .map(|index| index * index);
@@ -122,7 +159,13 @@ impl<'a> GraySlabThermal<'a> {
                 .ok_or(DepositionError::InvalidInput(
                     "gray slab needs active original cells",
                 ))?;
-            let volume = product(area_m2, slab.layers()[i].thickness_m())?;
+            let optical_layer = cell_response.map_or(i, |response| response.cells()[i].layer);
+            let material = &slab.layers()[optical_layer];
+            let thickness = cell_response.map_or(material.thickness_m(), |response| {
+                let [start, end] = response.cells()[i].interval_m;
+                end - start
+            });
+            let volume = product(area_m2, thickness)?;
             if cells[..i].iter().any(|&(previous, _)| previous == id)
                 || !thermal.uses_material_law(cell.material_id, caloric)
                 || (cell.geometry.volume_m3 / volume - 1.0).abs() > 64.0 * f64::EPSILON
@@ -131,10 +174,11 @@ impl<'a> GraySlabThermal<'a> {
                     "gray slab requires distinct cells, their original calorics and matching layer volumes",
                 ));
             }
-            let face = slab.face_coupling()[i];
+            let face = face_coupling[i];
             let face_area_m2 = [product(area_m2, face[0])?, product(area_m2, face[1])?];
             layers.push(BoundLayer {
                 id,
+                optical_layer,
                 material: cell.material_id,
                 segment: cell.segment_id,
                 body: cell.body_id,
@@ -148,7 +192,7 @@ impl<'a> GraySlabThermal<'a> {
                 + product(exterior_index_squared[1], face_area_m2[1])?;
             let mut correction = 0.0;
             for j in 0..n {
-                let coefficient = product(area_m2, slab.layer_coupling()[i * n + j])?;
+                let coefficient = product(area_m2, pair_coupling[i * n + j])?;
                 add(&mut coupling, &mut correction, coefficient);
                 if j > i && coefficient > 0.0 {
                     if pairs.len() == thermal.budget().max_links {
@@ -162,7 +206,7 @@ impl<'a> GraySlabThermal<'a> {
             // derivative has the sign of x*coth(x/2)-2 >= 0. The SAME positive
             // integral's tangent at source Tmax therefore bounds the band;
             // 4*E_band/T would be incorrect at fixed wavelength endpoints.
-            let high = slab.layers()[i].temperature_support_k()[1];
+            let high = material.temperature_support_k()[1];
             let derivative = if coupling == 0.0 {
                 0.0
             } else if let Some(band) = emission_band {
@@ -183,6 +227,7 @@ impl<'a> GraySlabThermal<'a> {
         }
         let result = Self {
             slab: slab.clone(),
+            cell_response: cell_response.cloned(),
             layers: layers.into(),
             pairs: pairs.into(),
             derivative_bounds_w_k: Arc::new(derivative_bounds_w_k),
@@ -196,6 +241,9 @@ impl<'a> GraySlabThermal<'a> {
 
     pub fn slab(&self) -> &AbsorbingSlab {
         &self.slab
+    }
+    pub fn cell_response(&self) -> Option<&SlabCellResponse> {
+        self.cell_response.as_ref()
     }
     pub const fn area_m2(&self) -> f64 {
         self.area_m2
@@ -256,7 +304,7 @@ impl<'a> GraySlabThermal<'a> {
                 ));
             }
             result[i] = thermal.temperature_k(original.id)?;
-            let [lo, hi] = self.slab.layers()[i].temperature_support_k();
+            let [lo, hi] = self.slab.layers()[original.optical_layer].temperature_support_k();
             if !result[i].is_finite() || !(lo..=hi).contains(&result[i]) {
                 return Err(DepositionError::MaterialDomain);
             }

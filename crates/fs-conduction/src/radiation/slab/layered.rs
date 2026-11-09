@@ -18,6 +18,13 @@ use super::{AbsorbingLayer, ConductionError, MAX_SLAB_LAYERS, add, checkpoint};
 use fs_math::decay::{decayed_fraction, remaining_fraction};
 use fs_math::det;
 
+#[derive(Clone, Copy)]
+pub(super) enum Resolution<'a> {
+    Layers,
+    Interval(usize, [f64; 2]),
+    Cells(&'a [super::SlabCell]),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn rule(
     layers: &[AbsorbingLayer],
@@ -30,7 +37,7 @@ pub(super) fn rule(
     correction: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
     evaluations: &mut usize,
-    interval: Option<(usize, [f64; 2])>,
+    resolution: Resolution<'_>,
 ) -> Result<(), ConductionError> {
     output.fill(0.0);
     correction.fill(0.0);
@@ -84,7 +91,7 @@ pub(super) fn rule(
                         };
                     }
                 }
-                if let Some((target, [start, end])) = interval {
+                if let Resolution::Interval(target, [start, end]) = resolution {
                     if indices[target + 1] > lower {
                         let material = &layers[target];
                         let path = |distance| {
@@ -114,6 +121,21 @@ pub(super) fn rule(
                             correction,
                         );
                     }
+                } else if let Resolution::Cells(cells) = resolution {
+                    super::cells::accumulate(
+                        layers,
+                        cells,
+                        &mu[1..n + 1],
+                        &t[..n],
+                        &a[..n],
+                        &r[..=n],
+                        &e[..=n],
+                        exterior,
+                        0.5 * q,
+                        exterior_refractive_indices.map(|index| 0.5 * (q / (index * index))),
+                        output,
+                        correction,
+                    )?;
                 } else {
                     accumulate(
                         &t[..n],
@@ -152,7 +174,7 @@ pub(super) fn band_direction_cosine(index: f64, [lower, upper]: [f64; 2], cosine
 // Reflection seen through one interface followed by a layer and its suffix.
 // Keep the deficit independently of R: a weakly absorbing closed cavity may
 // have R rounded to one while its finite thermal exchange remains resolvable.
-fn joined(r: f64, e: f64, t: f64, a: f64, back: f64, deficit: f64) -> (f64, f64, f64) {
+pub(super) fn joined(r: f64, e: f64, t: f64, a: f64, back: f64, deficit: f64) -> (f64, f64, f64) {
     if e == 0.0 {
         return (1.0, 0.0, 0.0);
     }
@@ -162,16 +184,16 @@ fn joined(r: f64, e: f64, t: f64, a: f64, back: f64, deficit: f64) -> (f64, f64,
     (r + e * (t * t * back * crossing), loss * crossing, crossing)
 }
 
-struct Returns {
-    left: [f64; MAX_SLAB_LAYERS],
-    right: [f64; MAX_SLAB_LAYERS],
-    left_deficit: [f64; MAX_SLAB_LAYERS],
-    right_deficit: [f64; MAX_SLAB_LAYERS],
-    cross_left: [f64; MAX_SLAB_LAYERS],
-    cross_right: [f64; MAX_SLAB_LAYERS],
+pub(super) struct Returns {
+    pub(super) left: [f64; MAX_SLAB_LAYERS],
+    pub(super) right: [f64; MAX_SLAB_LAYERS],
+    pub(super) left_deficit: [f64; MAX_SLAB_LAYERS],
+    pub(super) right_deficit: [f64; MAX_SLAB_LAYERS],
+    pub(super) cross_left: [f64; MAX_SLAB_LAYERS],
+    pub(super) cross_right: [f64; MAX_SLAB_LAYERS],
 }
 
-fn returns(t: &[f64], a: &[f64], r: &[f64], e: &[f64]) -> Returns {
+pub(super) fn returns(t: &[f64], a: &[f64], r: &[f64], e: &[f64]) -> Returns {
     let n = a.len();
     let mut left = [0.0; MAX_SLAB_LAYERS];
     let mut right = [0.0; MAX_SLAB_LAYERS];
