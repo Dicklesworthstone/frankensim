@@ -14597,3 +14597,37 @@ period refinement on three grids. They also cover incomplete tangents,
 active loss, action limits, cancellation/reuse and equilibrium refusal.
 These checks do not certify infinite harmonic tails, primitive periods,
 global attraction, material validity or hybrid/nonsmooth source laws.
+
+
+### Nonlinear internal loss on the original pumped source
+
+`ParametricHamiltonian::with_dissipation` consumes a prepared source and
+attaches the same `NonlinearDissipation` used by original pHS time stepping
+and equilibrium linearization. Its field is `(J-R)e-D(x,e)+Gu`, with complete
+pumped effort `e=grad H0+Q(t)x`. Original pointwise work admission evaluates
+actual `e dot D`, retaining signed roundoff and negative incremental slopes;
+this is neither global nor incremental passivity certification. Every memory
+coordinate remains, and D need not lie in the external input map's range.
+The complete tangent `(J-R)(H0_xx+Q)-D_x-D_e(H0_xx+Q)` reaches existing HB,
+adaptive HB, variational shooting and signed-sideband owners without an
+effective damping, reduced state or finite-difference replacement.
+
+`ParametricPower::nonlinear_power` separately reports nonlinear loss; pump,
+port and native resistance remain independent accounts. Longer-period views
+borrow the same law and unchanged physical-time source. Preparation requires
+a complete native/authored storage tangent and n permitted loss actions,
+adds 3*n scalar scratch entries and introduces no warm adapter allocations;
+callback-internal behavior remains its author's responsibility. No-D
+arithmetic and native refusal semantics are preserved. Structured nonlinear
+law refusals survive solver callback boundaries. Parameter sensitivities
+refuse attached nonlinear loss because their current physical direction
+contract does not represent independent D_p.
+
+Four new focused G0/G1 groups and thirteen existing parametric tests pass
+natively: complete pumped state/effort chains; a saturated subharmonic branch
+with independent original-ODE grids of 256/512/1024 steps per response period;
+generated third/fifth harmonics, separate energy accounts, full-cycle
+variational/Liouville checks, signed sidebands, refusal and cancellation/reuse.
+The branch needs an actual adaptive harmonic ladder up to order 32 at the
+stated tolerances. These checks establish bounded numerical behavior, not
+infinite tails, stability, constitutive validity or measured-instrument fidelity.

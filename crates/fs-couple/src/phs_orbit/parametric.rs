@@ -19,7 +19,9 @@ use fs_orbit::{
     solve_hb_adaptive_scaled_seeded, solve_hb_scaled_seeded, solve_shooting_variational,
 };
 use fs_phs::PortHamiltonian;
+pub use fs_phs::harmonic::equilibrium::NonlinearDissipation;
 
+mod dissipation;
 mod periods;
 
 mod sensitivity;
@@ -44,6 +46,7 @@ pub enum ParametricError {
     Shooting(VariationalShootError),
     Sideband(SidebandError),
     Physical(fs_phs::PhsError),
+    Dissipation(fs_phs::harmonic::equilibrium::LinearizationError),
     Sensitivity(fs_orbit::sensitivity::ForcedSensitivityError),
 }
 impl core::fmt::Display for ParametricError {
@@ -229,6 +232,7 @@ struct Scratch {
     ports: Vec<f64>,
     direction: Vec<f64>,
     flow: Vec<f64>,
+    dissipation: Option<dissipation::Scratch>,
 }
 
 impl Scratch {
@@ -243,6 +247,7 @@ impl Scratch {
             ports: vec![0.0; m],
             direction: vec![0.0; n],
             flow: vec![0.0; n],
+            dissipation: None,
         }
     }
 }
@@ -256,6 +261,10 @@ pub struct ParametricPower {
     pub pump_power: f64,
     pub port_power: f64,
     pub resistance_power: f64,
+    /// Original nonlinear internal loss e^T D(x,e), with the COMPLETE pumped
+    /// effort e=H0_x+Q(t)x. Zero when no nonlinear resistance is attached.
+    /// Roundoff-sized signed values admitted by the original law are retained.
+    pub nonlinear_power: f64,
     /// Total dH/dt = gradient H dot xdot + partial H/partial t.
     pub energy_rate: f64,
 }
@@ -273,8 +282,10 @@ pub struct ParametricHamiltonian<'a> {
     modulation: &'a PeriodicQuadraticModulation,
     periods: usize,
     tangent: StorageTangent<'a>,
+    dissipation: Option<NonlinearDissipation<'a>>,
     scratch: RefCell<Scratch>,
     source_refused: Cell<bool>,
+    failure: RefCell<Option<ParametricError>>,
 }
 impl<'a> ParametricHamiltonian<'a> {
     pub fn new(
@@ -326,8 +337,10 @@ impl<'a> ParametricHamiltonian<'a> {
             modulation,
             periods: 1,
             tangent,
+            dissipation: None,
             scratch: RefCell::new(Scratch::new(n, m, modulation.harmonics)),
             source_refused: Cell::new(false),
+            failure: RefCell::new(None),
         })
     }
 
@@ -362,15 +375,15 @@ impl<'a> ParametricHamiltonian<'a> {
         Ok(())
     }
 
-    /// Full physical xdot=(J-R)(gradient H0+Q(t)x)+G u(t), without allocations.
+    /// Full physical xdot=(J-R)e-D(x,e)+G u(t), e=gradient H0+Q(t)x.
+    /// D is zero unless attached through `with_dissipation`.
     /// The original compensated field owner sees the combined effort and drive
     /// in ONE contraction; small motion is not lost between opposing fields.
     pub fn vector_field_into(&self, time: f64, state: &[f64], out: &mut [f64]) -> Result<()> {
         let mut scratch = self.scratch.borrow_mut();
         self.effort(time, state, &mut scratch, false)?;
-        self.system
-            .vector_field_from_effort_into(&scratch.effort, &scratch.ports, out)
-            .map_err(|_| ParametricError::SourceRefused)
+        self.evaluate_dissipation(state, &mut scratch)?;
+        self.field_from_effort(&scratch, out)
     }
 
     /// Original state-dependent storage, explicit pump work and physical port/
@@ -379,17 +392,25 @@ impl<'a> ParametricHamiltonian<'a> {
     pub fn power(&self, time: f64, state: &[f64]) -> Result<ParametricPower> {
         let mut scratch = self.scratch.borrow_mut();
         self.effort(time, state, &mut scratch, true)?;
+        let nonlinear_power = self.evaluate_dissipation(state, &mut scratch)?;
         let Scratch {
             effort,
             ports,
             flow,
             q,
             q_rate,
+            dissipation,
             ..
         } = &mut *scratch;
-        self.system
-            .vector_field_from_effort_into(effort, ports, flow)
-            .map_err(|_| ParametricError::SourceRefused)?;
+        match dissipation {
+            Some(loss) => self
+                .system
+                .vector_field_with_dissipation_from_effort_into(effort, ports, &loss.flow, flow),
+            None => self
+                .system
+                .vector_field_from_effort_into(effort, ports, flow),
+        }
+        .map_err(|_| ParametricError::SourceRefused)?;
         let energy = (Dd::from_f64(self.system.hamiltonian(state))
             + quadratic(q, state) * Dd::from_f64(0.5))
         .to_f64();
@@ -405,6 +426,7 @@ impl<'a> ParametricHamiltonian<'a> {
             pump_power,
             port_power,
             resistance_power,
+            nonlinear_power,
             energy_rate,
         ]
         .iter()
@@ -417,6 +439,7 @@ impl<'a> ParametricHamiltonian<'a> {
             pump_power,
             port_power,
             resistance_power,
+            nonlinear_power,
             energy_rate,
         })
     }
@@ -430,6 +453,9 @@ impl<'a> ParametricHamiltonian<'a> {
             return Err(ParametricError::Invalid(
                 "complete original state and square Jacobian required",
             ));
+        }
+        if self.dissipation.is_some() {
+            return self.dissipative_state_jacobian_into(time, state, out);
         }
         let mut scratch = self.scratch.borrow_mut();
         self.modulation.sample(time, &mut scratch, false)?;
@@ -467,7 +493,7 @@ impl<'a> ParametricHamiltonian<'a> {
         scales: &HbScales,
     ) -> Result<ScaledHbOrbit> {
         self.admit_order(budget.harmonics)?;
-        self.source_refused.set(false);
+        self.reset_failure();
         let result = solve_hb_scaled_seeded(
             &Adapter(self),
             HbAnchor::Forced {
@@ -477,10 +503,7 @@ impl<'a> ParametricHamiltonian<'a> {
             budget,
             scales,
         );
-        if self.source_refused.get() {
-            return Err(ParametricError::SourceRefused);
-        }
-        result.map_err(ParametricError::Orbit)
+        self.finish(result.map_err(ParametricError::Orbit))
     }
 
     /// The shared adaptive owner increases actual solved orders, checks retained
@@ -495,7 +518,7 @@ impl<'a> ParametricHamiltonian<'a> {
         scales: &HbScales,
     ) -> Result<AdaptiveHbOrbit> {
         self.admit_order(budget.harmonics)?;
-        self.source_refused.set(false);
+        self.reset_failure();
         let result = solve_hb_adaptive_scaled_seeded(
             &Adapter(self),
             HbAnchor::Forced {
@@ -506,10 +529,7 @@ impl<'a> ParametricHamiltonian<'a> {
             refinement,
             scales,
         );
-        if self.source_refused.get() {
-            return Err(ParametricError::SourceRefused);
-        }
-        result.map_err(ParametricError::Orbit)
+        self.finish(result.map_err(ParametricError::Orbit))
     }
 
     /// Independent original-ODE period solve and exact discrete RK4 monodromy.
@@ -532,7 +552,7 @@ impl<'a> ParametricHamiltonian<'a> {
                 "shooting grid must resolve every pump and drive harmonic",
             ));
         }
-        self.source_refused.set(false);
+        self.reset_failure();
         let result = solve_shooting_variational(
             &Adapter(self),
             seed,
@@ -544,10 +564,7 @@ impl<'a> ParametricHamiltonian<'a> {
         if matches!(result, Err(VariationalShootError::Cancelled)) {
             return Err(ParametricError::Shooting(VariationalShootError::Cancelled));
         }
-        if self.source_refused.get() {
-            return Err(ParametricError::SourceRefused);
-        }
-        result.map_err(ParametricError::Shooting)
+        self.finish(result.map_err(ParametricError::Shooting))
     }
 
     /// Physical-port probe around the complete periodically pumped base orbit.
@@ -613,7 +630,7 @@ impl<'a> ParametricHamiltonian<'a> {
             maximum_work: controls.maximum_work - mapping_work,
             ..controls
         };
-        self.source_refused.set(false);
+        self.reset_failure();
         let adapter = Adapter(self);
         let prepared = PreparedPeriodicLinearization::new(
             &adapter,
@@ -625,10 +642,7 @@ impl<'a> ParametricHamiltonian<'a> {
         if matches!(prepared, Err(SidebandError::Cancelled)) {
             return Err(ParametricError::Sideband(SidebandError::Cancelled));
         }
-        if self.source_refused.get() {
-            return Err(ParametricError::SourceRefused);
-        }
-        let prepared = prepared.map_err(ParametricError::Sideband)?;
+        let prepared = self.finish(prepared.map_err(ParametricError::Sideband))?;
         let factor = prepared
             .factor(carrier, &mut cancelled)
             .map_err(ParametricError::Sideband)?;
@@ -666,6 +680,22 @@ impl<'a> ParametricHamiltonian<'a> {
 }
 
 struct Adapter<'s, 'a>(&'s ParametricHamiltonian<'a>);
+impl Adapter<'_, '_> {
+    fn record(&self, result: Result<()>) -> bool {
+        if let Err(error) = result {
+            self.0.source_refused.set(true);
+            if self.0.dissipation.is_some() {
+                let mut failure = self.0.failure.borrow_mut();
+                if failure.is_none() {
+                    *failure = Some(error);
+                }
+            }
+            false
+        } else {
+            true
+        }
+    }
+}
 impl OrbitProblem for Adapter<'_, '_> {
     fn dim(&self) -> usize {
         self.0.system.state_dim()
@@ -674,8 +704,7 @@ impl OrbitProblem for Adapter<'_, '_> {
         false
     }
     fn island(&self, time: f64, state: &[f64], out: &mut [f64]) {
-        if self.0.vector_field_into(time, state, out).is_err() {
-            self.0.source_refused.set(true);
+        if !self.record(self.0.vector_field_into(time, state, out)) {
             out.fill(f64::NAN);
         }
     }
@@ -684,7 +713,13 @@ impl OrbitProblem for Adapter<'_, '_> {
             .tangent
             .available()
             .then_some(|problem, time, state, out| {
-                problem.0.state_jacobian_into(time, state, out).is_ok()
+                let result = problem.0.state_jacobian_into(time, state, out);
+                if problem.0.dissipation.is_some() {
+                    problem.record(result)
+                } else {
+                    // Keep the original no-D native tangent-refusal semantics.
+                    result.is_ok()
+                }
             })
     }
     fn time_domain_rhs(&self) -> Option<fs_orbit::TimeDomainRhs<Self>> {

@@ -81,10 +81,18 @@ impl ParametricHamiltonian<'_> {
             modulation: self.modulation,
             periods: total,
             tangent: self.tangent.borrowed(n),
+            dissipation: self.dissipation,
             // These phases belong to the ORIGINAL physical source, not a
             // remapped Fourier array. Only the numerical chart has longer period.
-            scratch: RefCell::new(Scratch::new(n, m, self.modulation.harmonics)),
+            scratch: RefCell::new({
+                let mut scratch = Scratch::new(n, m, self.modulation.harmonics);
+                if self.dissipation.is_some() {
+                    scratch.dissipation = Some(super::dissipation::Scratch::new(n));
+                }
+                scratch
+            }),
             source_refused: Cell::new(false),
+            failure: RefCell::new(None),
         })
     }
 

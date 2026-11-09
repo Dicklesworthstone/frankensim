@@ -61,6 +61,9 @@ impl<'a> ParametricHamiltonian<'a> {
     /// before numerical preparation. Already-owned source storage and callback
     /// work retain the generic sensitivity contract's exclusions; source
     /// dimensions/bandwidth remain subject to this module's hard limits.
+    /// Nonlinear internal resistance is currently refused: this parameter
+    /// direction contract does not yet supply the independent original D_p.
+    /// Omitting that chain would produce an incomplete physical derivative.
     pub fn prepare_sensitivity(
         &self,
         orbit: &HbOrbit,
@@ -70,6 +73,11 @@ impl<'a> ParametricHamiltonian<'a> {
     ) -> Result<PreparedParametricSensitivity<'_, 'a>> {
         if cancelled() {
             return Err(ForcedSensitivityError::Cancelled.into());
+        }
+        if self.dissipation.is_some() {
+            return Err(ParametricError::Invalid(
+                "nonlinear internal resistance requires a complete original dissipation parameter direction",
+            ));
         }
         let harmonics = orbit
             .coeffs

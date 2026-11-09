@@ -7,6 +7,9 @@ mod sensitivity;
 #[path = "periods/tests.rs"]
 mod periods;
 
+#[path = "dissipation/tests.rs"]
+mod dissipation;
+
 const TAU: f64 = core::f64::consts::TAU;
 
 fn complex(amplitude: f64, phase: f64) -> C64 {
