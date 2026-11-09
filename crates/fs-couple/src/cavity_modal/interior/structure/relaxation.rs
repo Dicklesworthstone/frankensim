@@ -20,9 +20,10 @@ use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 mod fields;
 use fields::StructuralInteriorRelaxationHarmonicError as Error;
 pub use fields::{
-    StructuralInteriorRelaxationFrequencyResponse, StructuralInteriorRelaxationHarmonicError,
-    StructuralInteriorRelaxationHarmonicLimits, StructuralInteriorRelaxationMemoryResponse,
-    StructuralInteriorRelaxationResponse,
+    StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationFrequencyResponse,
+    StructuralInteriorRelaxationHarmonicError, StructuralInteriorRelaxationHarmonicLimits,
+    StructuralInteriorRelaxationMemoryCurvature, StructuralInteriorRelaxationMemoryResponse,
+    StructuralInteriorRelaxationPowerCurvature, StructuralInteriorRelaxationResponse,
 };
 
 /// Source-bound complete linear image; all frequencies share native assembly.
@@ -203,6 +204,33 @@ impl PreparedStructuralInteriorRelaxationHarmonic<'_, '_> {
             .solve(structural_force, inward_flow_load, &mut || {
                 cx.checkpoint().is_err()
             })
+    }
+
+    /// Recover every original field, material spring and heat channel through
+    /// its second frequency derivative from the same complete-state factor.
+    ///
+    /// Both optional source jets are partial derivatives per rad/s at fixed
+    /// original M, C, relaxed K, geometry and branch laws. They retain coherent
+    /// source phase and amplitude variation. None supplies a zero derivative.
+    /// All memory states remain dynamic; no impedance is frozen at this
+    /// frequency. Native and original second-order equations are checked
+    /// independently, and physical source, interface and heat work are exposed
+    /// with their complete frequency curvature.
+    pub fn solve_with_frequency_curvature(
+        &self,
+        structural_force: &[C64],
+        inward_flow_load: &[C64],
+        source_derivative: Option<StructuralInteriorSources<'_>>,
+        source_second_derivative: Option<StructuralInteriorSources<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralInteriorRelaxationCurvatureResponse, Error> {
+        self.inner.solve_with_frequency_curvature(
+            structural_force,
+            inward_flow_load,
+            source_derivative.map(|d| (d.structural_force, d.inward_flow_load)),
+            source_second_derivative.map(|d| (d.structural_force, d.inward_flow_load)),
+            &mut || cx.checkpoint().is_err(),
+        )
     }
 
     /// Reuse this full factor for every original field's derivative per rad/s.

@@ -13114,3 +13114,42 @@ physical candidate; the interval controller remains private. Existing outer
 heat-bracket and gas-increment retry rules remain unchanged. Wall, material
 and source failures propagate without publishing a partial window. Temporal
 error control remains local and does not establish physical-model accuracy.
+
+### Complete material-memory field and physical-power curvature
+
+`PreparedStructuralInteriorRelaxationHarmonic::solve_with_frequency_curvature`
+reuses the full original mechanical/pHS factor for every physical field's first
+two frequency derivatives. The fixed original M/C/relaxed-K, interface and
+Maxwell laws retain every viscous-strain state. Explicit source jets supply both
+force and inward-flow first/second derivatives, including phase and amplitude
+variation. Material impedance is not frozen and no modal truncation, sampled
+loss surrogate or additional factorization is introduced.
+
+The response exposes displacement, velocity, pressure potential, pressure,
+interface force/flow and every branch stress curvature. Original kinematic,
+momentum and branch equations independently check the second solve, including
+twice the first-order state in the frequency action. Complete mean-storage
+slopes include the original spatial storage and every material spring.
+
+Each original arm retains its own spring-energy value/slope/curvature and
+independent heat, structural work and acoustic work. Positive branch resistance
+stays inside the normalized quadratic contraction of the canonical branch
+effort; the recovery does not form a potentially overflowing resistance-times-
+field product. Structural and instantaneous wall heat use the original
+symmetric damping blocks. Gyroscopic and equal/opposite interface exchange
+remain outside material heat.
+
+Original structural/acoustic source work, interface exchange, instantaneous
+heat, branch heat and both branch-work channels expose physical power value,
+slope and curvature. Separate structural, acoustic, relaxation and total
+balance methods retain signed independent accounts with no unity floor.
+The existing complete preparation bounds cover the added O(n^2+b*n) recovery;
+the native curvature owner separately admits its three solves. Cancellation
+or original-equation/arithmetic refusal publishes no partial response.
+
+Focused native tests use independently assembled original consistent P1
+matrices and the actual complete mechanical/Maxwell owner. They compare an
+analytic coupled cubic across frequency, source phase/amplitude jets and delay
+invariance, relaxing wall admittance with separate instantaneous losses, and
+manufactured mutual-memory/gyroscopic original rows. The numerical recovery
+was exercised directly; these tests do not execute the outer FE mesh assembly.

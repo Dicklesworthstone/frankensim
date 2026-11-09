@@ -41,6 +41,7 @@ pub use frequency::{
     HarmonicFrequencyCurvatureResponse, HarmonicFrequencyResponse,
     HarmonicPortFrequencyCurvatureResponse, HarmonicPortFrequencyResponse,
     harmonic_mean_power_curvature_with_cancel, harmonic_mean_power_parameter_jet_with_cancel,
+    harmonic_quadratic_power_curvature_with_cancel,
 };
 mod parameter;
 pub use parameter::{
