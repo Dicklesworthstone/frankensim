@@ -261,7 +261,7 @@ fn stored_change(
             }
             reference.density_kg_m3() * domain.volume(cell) * change
         } else {
-            step.reference_capacity_j_k[cell] * delta
+            step.native_stored_energy_change_j(cell, new)?
         };
         if !value.is_finite() {
             return Err(MaterialBuoyancyError::Invalid(
@@ -421,7 +421,8 @@ fn energy_step(
             temperature_defect_k =
                 temperature_defect_k.max((next.temperature[cell] - iterate[cell]).abs());
             let defect = stored[cell] / step.time_step_s
-                - storage_w_k[cell] * (next.temperature[cell] - step.previous_temperature_k[cell]);
+                - next.native_solid_storage_rate_w(cell).unwrap_or_else(||
+                    storage_w_k[cell] * (next.temperature[cell] - step.previous_temperature_k[cell]));
             if !defect.is_finite() {
                 return Err(MaterialBuoyancyError::Invalid(
                     "source storage defect is unrepresentable",

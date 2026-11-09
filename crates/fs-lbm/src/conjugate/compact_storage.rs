@@ -1,9 +1,11 @@
-//! One physical sensible-energy owner per collapsed compact junction.
+//! One physical sensible-energy owner per cell or collapsed compact junction.
 
 use fs_exec::CancelGate;
 use fs_material::thermal::transport::storage::{PreparedHeatStorage, TabulatedHeatStorage};
+use fs_material::thermal::transport::volumetric::TabulatedVolumetricHeatCapacity;
 
-use super::{ChtError, EnergySolution, ThermalSetup, VoxelDomain, finite, finite_positive, poll};
+use super::energy::{check_ordinary_materials, compact_owners};
+use super::{ChtError, EnergySolution, SolidMaterial, ThermalSetup, Voxel, VoxelDomain, finite, finite_positive, poll};
 
 /// Temperature-dependent total storage assigned to one compact component.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,10 +88,10 @@ impl CompactHeatStorageLaw {
     }
 }
 
-/// Endpoint convergence controls for physical compact-junction storage.
+/// Endpoint convergence controls for physical tabulated cell and junction storage.
 ///
 /// The original time level stays fixed throughout every trial. Acceptance
-/// requires each junction's exact energy balance; unrelated junction errors
+/// requires each owner's exact energy balance; unrelated cell or junction errors
 /// cannot cancel. These controls do not change the physical time step.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactStorageControls {
@@ -196,9 +198,45 @@ struct JunctionStorage<'a> {
     constant: bool,
 }
 
+struct SolidStorage<'a> {
+    cell: usize,
+    law: &'a TabulatedVolumetricHeatCapacity,
+    volume_m3: f64,
+    previous_k: f64,
+    trial_k: f64,
+    secant_j_k: f64,
+    fixed: bool,
+    constant: bool,
+}
+
+impl SolidStorage<'_> {
+    fn capacity(&self, temperature_k: f64) -> Result<f64, ChtError> {
+        let capacity = self.volume_m3 * self.law.heat_capacity_j_m3_k(temperature_k)
+            .map_err(|error| invalid_solid(error.to_string()))?;
+        finite_positive("solid.heat_capacity_j_k", capacity)?;
+        Ok(capacity)
+    }
+
+    fn energy_change(&self, temperature_k: f64) -> Result<f64, ChtError> {
+        let change = self.volume_m3 * self.law.energy_change_j_m3(self.previous_k, temperature_k)
+            .map_err(|error| invalid_solid(error.to_string()))?;
+        finite("solid.stored_energy_change_j", change)?;
+        Ok(change)
+    }
+}
+
+fn invalid_solid(reason: impl Into<String>) -> ChtError {
+    ChtError::InvalidInput {
+        field: "solid.volumetric_heat_capacity_table_j_m3_k",
+        reason: reason.into(),
+    }
+}
+
 /// Positive enthalpy secants preserve the existing conservative M-matrix.
 pub(super) struct CompactStorageIteration<'a> {
     entries: Vec<JunctionStorage<'a>>,
+    solids: Vec<SolidStorage<'a>>,
+    cells: usize,
     controls: CompactStorageControls,
     time_step_s: f64,
 }
@@ -213,15 +251,19 @@ pub(super) struct StorageResidual {
 impl<'a> CompactStorageIteration<'a> {
     pub(super) fn new(
         domain: &VoxelDomain,
+        materials: &'a [SolidMaterial],
         setup: &'a ThermalSetup,
         previous: &[f64],
         time_step_s: f64,
         gate: &CancelGate,
     ) -> Result<Option<Self>, ChtError> {
         let laws = bindings(setup, gate)?;
-        if laws.is_empty() {
+        let has_solid_tables = materials.iter()
+            .any(|material| material.volumetric_heat_capacity_table_j_m3_k.is_some());
+        if laws.is_empty() && !has_solid_tables {
             return Ok(None);
         }
+        setup.compact_storage_controls.validate()?;
         let mut entries = Vec::with_capacity(setup.compact_heat_storage.len());
         for (component, law) in laws.into_iter().enumerate() {
             let Some(law) = law else {
@@ -248,8 +290,44 @@ impl<'a> CompactStorageIteration<'a> {
                 constant: law.is_constant(gate)?,
             });
         }
+        let mut solids = Vec::new();
+        if has_solid_tables {
+            let owners = compact_owners(domain, &setup.compact_components, gate)?;
+            check_ordinary_materials(domain, materials.len(), &owners, gate)?;
+            let mut fixed: Vec<usize> = setup.fixed_temperature.iter().map(|&(cell, _)| cell).collect();
+            fixed.sort_unstable();
+            fixed.dedup();
+            // Share the admitted law per material; only each cell's volume,
+            // history and iteration state grow with the mesh.
+            let constant: Vec<bool> = materials.iter().map(|material| {
+                material.volumetric_heat_capacity_table_j_m3_k.as_ref().is_some_and(|law|
+                    law.knots().iter().all(|knot| knot[1] == law.knots()[0][1]))
+            }).collect();
+            for cell in 0..domain.cell_count() {
+                if cell.is_multiple_of(4096) { poll(gate)?; }
+                if owners.get(cell).is_some_and(|&owner| owner != usize::MAX) { continue; }
+                let Voxel::Solid(index) = domain.voxel_at(cell) else { continue; };
+                let material = &materials[usize::from(index)];
+                material.validate_heat_capacity_ownership()?;
+                let Some(law) = &material.volumetric_heat_capacity_table_j_m3_k else { continue; };
+                let previous_k = previous[cell];
+                let mut entry = SolidStorage {
+                    cell, law, volume_m3: domain.volume(cell), previous_k,
+                    trial_k: previous_k, secant_j_k: 0.0,
+                    fixed: fixed.binary_search(&cell).is_ok(),
+                    constant: constant[usize::from(index)],
+                };
+                entry.secant_j_k = entry.capacity(previous_k)?;
+                solids.push(entry);
+            }
+        }
+        if entries.is_empty() && solids.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(Self {
             entries,
+            solids,
+            cells: domain.cell_count(),
             controls: setup.compact_storage_controls,
             time_step_s,
         }))
@@ -262,7 +340,7 @@ impl<'a> CompactStorageIteration<'a> {
     pub(super) fn write_rates(
         &mut self,
         trial: &[f64],
-        junction_rates: &mut [f64],
+        rates: &mut [f64],
         gate: &CancelGate,
     ) -> Result<(), ChtError> {
         for entry in &mut self.entries {
@@ -283,7 +361,22 @@ impl<'a> CompactStorageIteration<'a> {
             )?;
             entry.trial_k = t;
             entry.secant_j_k = capacity;
-            junction_rates[entry.component] = rate;
+            rates[self.cells + entry.component] = rate;
+        }
+        for (i, entry) in self.solids.iter_mut().enumerate() {
+            if i.is_multiple_of(4096) { poll(gate)?; }
+            let t = trial[entry.cell];
+            let change = t - entry.previous_k;
+            let capacity = if change == 0.0 { entry.capacity(t)? } else {
+                entry.energy_change(t)? / change
+            };
+            let rate = capacity / self.time_step_s;
+            finite_positive("solid.heat_capacity_secant_j_k", capacity)?;
+            finite_positive("solid.storage_rate_w_k", rate)?;
+            finite("solid.storage_history_w", rate * entry.previous_k)?;
+            entry.trial_k = t;
+            entry.secant_j_k = capacity;
+            rates[entry.cell] = rate;
         }
         Ok(())
     }
@@ -301,6 +394,13 @@ impl<'a> CompactStorageIteration<'a> {
             if !(lo..=hi).contains(&t) {
                 return Ok(false);
             }
+        }
+        for (i, entry) in self.solids.iter().enumerate() {
+            if i.is_multiple_of(4096) { poll(gate)?; }
+            let [lo, hi] = entry.law.temperature_span_k();
+            let t = temperature[entry.cell];
+            finite("solid.storage_candidate_k", t)?;
+            if !(lo..=hi).contains(&t) { return Ok(false); }
         }
         Ok(true)
     }
@@ -367,6 +467,47 @@ impl<'a> CompactStorageIteration<'a> {
                 result.normalized = result.normalized.max(normalized(change, allowance));
             }
         }
+        let mut heat_rates = next.solid_storage_heat.iter();
+        for (i, entry) in self.solids.iter().enumerate() {
+            if i.is_multiple_of(4096) { poll(gate)?; }
+            let t = next.temperature[entry.cell];
+            let stored = entry.energy_change(t)?;
+            let linearized = entry.secant_j_k * (t - entry.previous_k);
+            let constitutive = stored - linearized;
+            finite("solid.storage_constitutive_defect_j", constitutive)?;
+            let heat = heat_rates.next().ok_or_else(|| invalid_solid("missing physical cell heat audit"))?;
+            if heat.cell != entry.cell {
+                return Err(invalid_solid("physical cell heat audit has inconsistent ownership"));
+            }
+            // A thermostat supplies the exact change in stored energy. Its
+            // algebraic row is a constraint, not a free-cell heat balance.
+            let (physical, flux_scale, flux_roundoff) = if entry.fixed {
+                (0.0, 0.0, 0.0)
+            } else {
+                (stored - self.time_step_s * heat.net_heat_w,
+                 heat.absolute_heat_w, heat.arithmetic_w)
+            };
+            finite("solid.storage_physical_defect_j", physical)?;
+            let scale = stored.abs().max(linearized.abs()).max(self.time_step_s * flux_scale);
+            let capacity = entry.capacity(t)?.max(entry.secant_j_k);
+            let roundoff = 64.0 * f64::EPSILON * (
+                capacity * t.abs().max(entry.previous_k.abs()) + self.time_step_s * flux_roundoff);
+            let tolerance = self.controls.energy_absolute_tolerance_j
+                + self.controls.energy_relative_tolerance * scale + roundoff;
+            finite("solid.storage_energy_scale_j", scale)?;
+            finite("solid.storage_energy_tolerance_j", tolerance)?;
+            let c = normalized(constitutive.abs(), tolerance);
+            let p = normalized(physical.abs(), tolerance);
+            result.constitutive = result.constitutive.max(c);
+            result.physical = result.physical.max(p);
+            result.normalized = result.normalized.max(c).max(p);
+            if !entry.constant {
+                let change = (t - trial[entry.cell]).abs();
+                let allowance = self.controls.temperature_tolerance_k
+                    + 8.0 * f64::EPSILON * t.abs().max(trial[entry.cell].abs());
+                result.normalized = result.normalized.max(normalized(change, allowance));
+            }
+        }
         Ok(result)
     }
 
@@ -390,6 +531,15 @@ impl<'a> CompactStorageIteration<'a> {
             fraction = fraction.min(entry.secant_j_k / current_capacity);
             if (lo..=hi).contains(&target) {
                 fraction = fraction.min(entry.secant_j_k / entry.law.heat_capacity_j_k(target)?);
+            }
+        }
+        for (i, entry) in self.solids.iter().enumerate() {
+            if i.is_multiple_of(4096) { poll(gate)?; }
+            let target = candidate[entry.cell];
+            let [lo, hi] = entry.law.temperature_span_k();
+            fraction = fraction.min(entry.secant_j_k / entry.capacity(entry.trial_k)?);
+            if (lo..=hi).contains(&target) {
+                fraction = fraction.min(entry.secant_j_k / entry.capacity(target)?);
             }
         }
         for (i, (&old, &target)) in trial.iter().zip(candidate).enumerate() {
@@ -450,6 +600,24 @@ impl<'a> CompactStorageIteration<'a> {
                     }
                 }
             }
+            exact_candidate = false;
+        }
+        for (i, entry) in self.solids.iter().enumerate() {
+            if i.is_multiple_of(4096) { poll(gate)?; }
+            let target = candidate[entry.cell];
+            let [lo, hi] = entry.law.temperature_span_k();
+            if (lo..=hi).contains(&target) { continue; }
+            let old = entry.trial_k;
+            let bound = if target > hi { hi } else { lo };
+            let local_fraction = fraction.min(0.5 * ((bound - old) / (target - old)));
+            if !local_fraction.is_finite() || local_fraction < 0.0 {
+                return Err(invalid_solid("no representable support-preserving cell trial"));
+            }
+            let temperature = local_fraction.mul_add(target - old, old);
+            if !(lo..=hi).contains(&temperature) {
+                return Err(invalid_solid("no representable trial inside the cell storage span"));
+            }
+            trial[entry.cell] = temperature;
             exact_candidate = false;
         }
         if !self.supports(trial, gate)? {

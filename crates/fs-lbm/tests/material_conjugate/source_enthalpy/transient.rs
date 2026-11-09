@@ -25,6 +25,120 @@ fn temperature_from_h(h: f64) -> f64 {
 }
 
 #[test]
+fn source_fluid_and_native_solid_tables_exchange_exact_energy_across_knots() {
+    let card = card(0.04);
+    let law = liquid(&card);
+    let chart = caloric(&card, 1e9, 340.0);
+    let bound = MaterialChtFluid::try_new(law.reference_state()).unwrap();
+    let domain = VoxelDomain::graded_from_fn([vec![0.1, 0.9], vec![1.0], vec![1.0]], |p| {
+        if p[0] < 0.1 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let solids = [SolidMaterial::new("synthetic tabulated storage", 1.0)
+        .with_heat_capacity_table(&[[280.0, 1.0], [300.0, 2.0], [306.0, 5.0], [320.0, 33.0]])
+        .unwrap()];
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.compact_storage_controls.maximum_iterations = 200;
+    thermal.compact_storage_controls.temperature_tolerance_k = 1e-10;
+    thermal.compact_storage_controls.energy_absolute_tolerance_j = 1e-10;
+    thermal.compact_storage_controls.energy_relative_tolerance = 1e-12;
+    let energy = EnergyConfig {
+        scheme: ConvectionScheme::Upwind,
+        tolerance: 1e-13,
+        ..EnergyConfig::default()
+    };
+    let unsteady = UnsteadyConfig::new(0.5, 12);
+    let mut nonlinear = transient_controls();
+    nonlinear.maximum_energy_solves = 4000;
+    let result = bound
+        .march_natural_convection_with_enthalpy(
+            &domain,
+            &solids,
+            &SimpleConfig::new([FvBoundary::wall(); 6]),
+            &thermal,
+            &energy,
+            &[312.0, 300.0],
+            controls().boussinesq,
+            &chart,
+            nonlinear,
+            &unsteady,
+            |_| 1.0,
+            |_| 1.0,
+            None,
+            &CancelGate::new(),
+            |_, t, _| {
+                law.at_temperature(Temperature::new(t))
+                    .map_err(|error| MaterialError::State {
+                        what: error.to_string(),
+                    })
+            },
+        )
+        .unwrap();
+
+    // Independent original solid integral, with its slope change at 306 K.
+    // Source-fluid h=2*theta+.02*theta^2 and density=1 give mass 0.9 kg.
+    // The unequal half cells give G=1/(.05+.45)=2 W/K. Conservation
+    // eliminates fluid temperature from each implicit solid heat equation.
+    let solid_energy = |t: f64| {
+        let theta = t - 300.0;
+        if theta <= 6.0 {
+            2.0 * theta + 0.25 * theta * theta
+        } else {
+            let upper = theta - 6.0;
+            21.0 + 5.0 * upper + upper * upper
+        }
+    };
+    let total = 0.1 * solid_energy(312.0);
+    let (mut solid_t, mut fluid_t) = (312.0, 300.0);
+    for (record, caloric_record) in result
+        .convection
+        .march
+        .energy_records
+        .iter()
+        .zip(&result.records)
+    {
+        let old_solid_energy = solid_energy(solid_t);
+        let (mut low, mut high) = (fluid_t, solid_t);
+        for _ in 0..80 {
+            let trial = 0.5 * (low + high);
+            let fluid = temperature_from_h((total - 0.1 * solid_energy(trial)) / 0.9);
+            let residual = 0.1 * (solid_energy(trial) - old_solid_energy)
+                + unsteady.time_step_s * 2.0 * (trial - fluid);
+            if residual > 0.0 {
+                high = trial;
+            } else {
+                low = trial;
+            }
+        }
+        solid_t = 0.5 * (low + high);
+        fluid_t = temperature_from_h((total - 0.1 * solid_energy(solid_t)) / 0.9);
+        assert!((record.max_solid_temperature_k - solid_t).abs() < 2e-8);
+        near(record.stored_energy_change_j, 0.0, 1e-8);
+        near(record.source_j, 0.0, 1e-12);
+        near(record.boundary_outflow_j, 0.0, 1e-12);
+        near(record.closure_j, 0.0, 1e-8);
+        assert!(caloric_record.maximum_storage_defect_w <= nonlinear.maximum_storage_defect_w);
+    }
+    assert!(
+        solid_t < 306.0,
+        "the original solid capacity knot must be crossed"
+    );
+    assert!((result.convection.march.temperature[0] - solid_t).abs() < 2e-8);
+    assert!((result.convection.march.temperature[1] - fluid_t).abs() < 2e-8);
+    let fluid_rise = result.convection.march.temperature[1] - 300.0;
+    near(
+        0.1 * solid_energy(result.convection.march.temperature[0])
+            + 0.9 * (2.0 * fluid_rise + 0.02 * fluid_rise * fluid_rise),
+        total,
+        1e-9,
+    );
+}
+
+#[test]
 fn native_caloric_storage_and_open_advection_follow_exact_enthalpy_recurrences() {
     let card = card(0.04);
     let law = liquid(&card);

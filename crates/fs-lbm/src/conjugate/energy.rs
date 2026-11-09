@@ -389,13 +389,33 @@ pub struct EnergySolution {
     /// bulk response and contact. Compact junctions retain their own links.
     /// Storage grows with boundary faces, not with all grid faces.
     pub solid_fluid_links: Vec<(usize, usize, f64)>,
+    /// Sparse per-cell heat evidence for the native tabulated storage owner.
+    /// Empty on the original constant-capacity and steady paths.
+    pub(super) solid_storage_heat: Vec<SolidStorageHeat>,
     /// One entry per `ThermalSetup::compact_components`, in order.
     pub junctions: Vec<JunctionSolution>,
     /// Solve evidence.
     pub report: EnergyReport,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SolidStorageHeat {
+    pub cell: usize,
+    pub net_heat_w: f64,
+    pub absolute_heat_w: f64,
+    pub arithmetic_w: f64,
+    pub applied_storage_w: f64,
+}
+
 impl EnergySolution {
+    /// The native table owner may refresh its secant inside a source-fluid
+    /// solve. Outer caloric audits must use that applied rate, not their
+    /// initial reference capacity. Rows stay sorted by cell index.
+    pub(crate) fn native_solid_storage_rate_w(&self, cell: usize) -> Option<f64> {
+        self.solid_storage_heat.binary_search_by_key(&cell, |heat| heat.cell).ok()
+            .map(|index| self.solid_storage_heat[index].applied_storage_w)
+    }
+
     /// Accepted conductivity for an impermeable half cell, including compact
     /// interfaces. Interior fluid mixing continues to use `conductivity`.
     #[must_use]
@@ -1081,6 +1101,7 @@ fn solve_energy_field_kernel(
     fluid.validate()?;
     if let Some(field) = enthalpy { field.validate(domain, flow, setup, config, gate)?; }
     for solid in solids {
+        solid.validate_heat_capacity_ownership()?;
         finite_positive("solid.conductivity_w_m_k", solid.conductivity_w_m_k)?;
         for k in solid.axis_conductivity() {
             finite_positive("solid.orthotropic_w_m_k", k)?;
@@ -1616,6 +1637,9 @@ fn solve_energy_field_kernel(
     let (mut source_w, mut fixed_w, mut out_w, mut adv_w, mut scale) = (0.0, 0.0, 0.0, 0.0, 0.0f64);
     let mut sink_w = 0.0f64;
     let mut solid_fluid_links = Vec::new();
+    let mut solid_storage_heat = Vec::new();
+    let audit_solid_storage = step.is_some() && solids.iter().any(|material|
+        material.volumetric_heat_capacity_table_j_m3_k.is_some());
     let mut local_heat_residual = 0.0f64;
     for c in 0..cells {
         if c.is_multiple_of(4096) { super::poll(gate)?; }
@@ -1634,7 +1658,12 @@ fn solve_energy_field_kernel(
             }
         }
         let sink = sinks[c].0.mul_add(temperature[c] - temperature_reference, -sinks[c].1);
-        if evaluate_only && fixed[c].is_none() {
+        let tabulated_storage = audit_solid_storage && match domain.voxel_at(c) {
+            Voxel::Solid(material) => solids[usize::from(material)]
+                .volumetric_heat_capacity_table_j_m3_k.is_some(),
+            Voxel::Fluid => false,
+        };
+        if (evaluate_only || tabulated_storage) && fixed[c].is_none() {
             let mut residual = sink - source(c);
             let mut throughput = sink.abs() + source(c).abs();
             let mut arithmetic = (sinks[c].0 * temperature[c]).abs()
@@ -1654,16 +1683,32 @@ fn solve_energy_field_kernel(
                 throughput += heat.abs();
                 arithmetic += g * (temperature[c].abs() + temperature[cells + j].abs());
             }
-            if let Some(step) = step {
-                let coefficient = step.coefficient_w_k[c];
-                let storage = coefficient * (temperature[c] - step.previous[c]);
-                residual += storage;
-                throughput += storage.abs();
-                arithmetic += coefficient * (temperature[c].abs() + step.previous[c].abs());
+            if tabulated_storage {
+                solid_storage_heat.push(SolidStorageHeat {
+                    cell: c, net_heat_w: -residual,
+                    absolute_heat_w: throughput, arithmetic_w: arithmetic,
+                    applied_storage_w: step.map_or(0.0, |step|
+                        step.coefficient_w_k[c] * (temperature[c] - step.previous[c])),
+                });
             }
-            local_heat_residual = local_heat_residual.max(
-                heat_residual_ratio(residual, throughput, arithmetic, compact.links_of(c).len())?,
-            );
+            if evaluate_only {
+                if let Some(step) = step {
+                    let coefficient = step.coefficient_w_k[c];
+                    let storage = coefficient * (temperature[c] - step.previous[c]);
+                    residual += storage;
+                    throughput += storage.abs();
+                    arithmetic += coefficient * (temperature[c].abs() + step.previous[c].abs());
+                }
+                local_heat_residual = local_heat_residual.max(
+                    heat_residual_ratio(residual, throughput, arithmetic, compact.links_of(c).len())?,
+                );
+            }
+        } else if tabulated_storage {
+            solid_storage_heat.push(SolidStorageHeat {
+                cell: c, net_heat_w: 0.0, absolute_heat_w: 0.0, arithmetic_w: 0.0,
+                applied_storage_w: step.map_or(0.0, |step|
+                    step.coefficient_w_k[c] * (temperature[c] - step.previous[c])),
+            });
         }
         sink_w += sink;
         scale += sink.abs();
@@ -1819,6 +1864,7 @@ fn solve_energy_field_kernel(
         source_contact_states: Vec::new(),
         source_contact_iterations: 0,
         solid_fluid_links,
+        solid_storage_heat,
         junctions,
         report,
     })

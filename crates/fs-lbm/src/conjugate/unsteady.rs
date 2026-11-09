@@ -716,6 +716,17 @@ impl MaterialHeatStep<'_> {
         )
     }
 
+    /// Exact ordinary native storage for source-fluid marches. Source solid
+    /// owners replace their own cells separately; compact aliases remain zero.
+    pub(crate) fn native_stored_energy_change_j(
+        &self, cell: usize, temperature_k: f64,
+    ) -> Result<f64, ChtError> {
+        super::transient::native_cell_stored_energy_change_j(
+            self.domain, self.solids, self.reference_capacity_j_k,
+            self.previous_temperature_k, cell, temperature_k,
+        )
+    }
+
     pub(crate) fn solve(
         &self,
         capacity_j_k: &[f64],
@@ -762,6 +773,7 @@ impl MaterialHeatStep<'_> {
             let (next, radiated_w, correction_w) = solved?;
             let record = storage_record(
                 self.domain,
+                self.solids,
                 self.setup,
                 capacity_j_k,
                 self.previous_temperature_k,

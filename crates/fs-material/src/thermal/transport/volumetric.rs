@@ -22,6 +22,7 @@ pub mod timeline;
 mod conduction;
 
 use super::{ThermalTransportError, admit_temperature_point, source_line, transport_values};
+use super::capacity::CapacityCurve;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::{
@@ -31,6 +32,55 @@ use fs_qty::{
 
 /// Volumetric heat capacity [J/(m3 K)], distinct from specific heat [J/(kg K)].
 pub const VOLUMETRIC_HEAT_CAPACITY_DIMS: Dims = Dims([-1, 1, -2, -1, 0, 0]);
+
+/// Authored sensible capacity per fixed reference volume, in J/(m³ K).
+///
+/// The original positive piecewise-affine C_vol(T) is integrated by the same
+/// caloric kernel as source-backed Cp, Cv and assembled storage. This declaration
+/// supplies neither density, thermodynamic Cp/Cv, latent heat nor measured source
+/// authority. The caller owns the fixed-volume inventory and work convention.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabulatedVolumetricHeatCapacity {
+    knots: Vec<[f64; 2]>,
+}
+
+impl TabulatedVolumetricHeatCapacity {
+    /// Admit 2..=4096 [temperature K, capacity J/(m³ K)] pairs. No sorting,
+    /// extrapolation or endpoint extension is performed.
+    pub fn try_new(knots: &[[f64; 2]]) -> Result<Self, ThermalTransportError> {
+        if !(2..=super::storage::MAX_TABULATED_HEAT_STORAGE_KNOTS).contains(&knots.len())
+            || knots.iter().any(|[t, c]| !super::positive(*t) || !super::positive(*c))
+            || knots.windows(2).any(|pair| pair[0][0] >= pair[1][0])
+        {
+            return Err(ThermalTransportError::Invalid(
+                "volumetric capacity requires two to 4096 positive finite temperature-capacity pairs with increasing temperatures",
+            ));
+        }
+        Ok(Self { knots: knots.to_vec() })
+    }
+
+    /// Original declared temperature and volumetric-capacity pairs.
+    #[must_use]
+    pub fn knots(&self) -> &[[f64; 2]] { &self.knots }
+
+    /// Inclusive source support in absolute kelvin.
+    #[must_use]
+    pub fn temperature_span_k(&self) -> [f64; 2] {
+        [self.knots[0][0], self.knots[self.knots.len() - 1][0]]
+    }
+
+    /// Original local volumetric capacity, J/(m³ K).
+    pub fn heat_capacity_j_m3_k(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).capacity(temperature_k)
+    }
+
+    /// Signed sensible energy per reference volume, integral C_vol(T) dT.
+    /// Crossed intervals are integrated directly, without subtracting large
+    /// absolute energy datums or replacing the source by an endpoint capacity.
+    pub fn energy_change_j_m3(&self, initial_k: f64, final_k: f64) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).energy_change(initial_k, final_k)
+    }
+}
 
 /// Independent source choices at one exact, fully specified condition.
 #[derive(Clone, Copy, Debug)]

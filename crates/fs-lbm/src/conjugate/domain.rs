@@ -7,6 +7,7 @@
 
 use super::{ChtError, finite, finite_positive};
 use super::conductance::ConductivityCurve;
+use fs_material::thermal::transport::volumetric::TabulatedVolumetricHeatCapacity;
 
 /// Occupancy of one voxel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -427,6 +428,12 @@ pub struct SolidMaterial {
     /// Volumetric heat capacity `rho c`, J/(m^3 K). Required only by
     /// transient marches; steady solves never read it.
     pub volumetric_heat_capacity_j_m3_k: Option<f64>,
+    /// Original sensible capacity C_vol(T), J/(m³ K), per fixed voxel volume.
+    /// Mutually exclusive with the constant capacity. Transients integrate
+    /// every crossed interval; no latent heat or density law is inferred and
+    /// temperatures outside the declared table refuse. Collapsed compact
+    /// aliases retain their component's independent junction storage instead.
+    pub volumetric_heat_capacity_table_j_m3_k: Option<TabulatedVolumetricHeatCapacity>,
     /// Temperature dependence `[(T K, k W/(m K)), ...]` (empty: constant):
     /// piecewise linear in T, constant beyond the ends, scaling every axis
     /// conductivity by `k(T) / conductivity_w_m_k`. Continuous same-material
@@ -454,6 +461,7 @@ impl SolidMaterial {
             conductivity_w_m_k,
             orthotropic_w_m_k: None,
             volumetric_heat_capacity_j_m3_k: None,
+            volumetric_heat_capacity_table_j_m3_k: None,
             conductivity_table: Vec::new(),
             axis_conductivity_tables: None,
         }
@@ -585,5 +593,37 @@ impl SolidMaterial {
     pub fn with_heat_capacity(mut self, volumetric_heat_capacity_j_m3_k: f64) -> Self {
         self.volumetric_heat_capacity_j_m3_k = Some(volumetric_heat_capacity_j_m3_k);
         self
+    }
+
+    /// Declare positive, ordered [temperature K, volumetric capacity J/(m³ K)]
+    /// pairs. A second capacity owner is refused, never silently replaced.
+    pub fn with_heat_capacity_table(mut self, points: &[[f64; 2]]) -> Result<Self, ChtError> {
+        if self.volumetric_heat_capacity_j_m3_k.is_some()
+            || self.volumetric_heat_capacity_table_j_m3_k.is_some()
+        {
+            return Err(ChtError::InvalidInput {
+                field: "solid.volumetric_heat_capacity_table_j_m3_k",
+                reason: "constant capacity and a capacity table are competing storage owners".into(),
+            });
+        }
+        self.volumetric_heat_capacity_table_j_m3_k = Some(
+            TabulatedVolumetricHeatCapacity::try_new(points).map_err(|error| ChtError::InvalidInput {
+                field: "solid.volumetric_heat_capacity_table_j_m3_k",
+                reason: error.to_string(),
+            })?,
+        );
+        Ok(self)
+    }
+
+    pub(crate) fn validate_heat_capacity_ownership(&self) -> Result<(), ChtError> {
+        if self.volumetric_heat_capacity_j_m3_k.is_some()
+            && self.volumetric_heat_capacity_table_j_m3_k.is_some()
+        {
+            return Err(ChtError::InvalidInput {
+                field: "solid.volumetric_heat_capacity_table_j_m3_k",
+                reason: format!("solid `{}` has competing constant and tabulated storage owners", self.label),
+            });
+        }
+        Ok(())
     }
 }

@@ -465,6 +465,12 @@ impl EnergyConfig {
                 storage.push(0.0);
                 continue;
             }
+            if let super::Voxel::Solid(material) = domain.voxel_at(cell)
+                && solids.get(usize::from(material)).is_some_and(|solid|
+                    solid.volumetric_heat_capacity_table_j_m3_k.is_some())
+            {
+                return Err(invalid("explicit per-cell capacity and a native solid heat-capacity table are competing storage owners"));
+            }
             let rate = value / time_step_s;
             if !value.is_finite() || value <= 0.0 || !rate.is_finite() || rate <= 0.0
                 || !(rate * temperature).is_finite()
@@ -493,9 +499,9 @@ impl EnergyConfig {
                 });
             }
             if let Some(mut compact) = CompactStorageIteration::new(
-                domain, setup, previous_k, time_step_s, gate,
+                domain, solids, setup, previous_k, time_step_s, gate,
             )? {
-                compact.write_rates(temperature_k, &mut storage[cells..], gate)?;
+                compact.write_rates(temperature_k, &mut storage, gate)?;
             }
             let step = PseudoStep {
                 coefficient_w_k: &storage[..cells],
@@ -520,7 +526,7 @@ impl EnergyConfig {
         }
         let solids_present = (0..cells).any(|cell| !domain.is_fluid(cell));
         let record = storage_record(
-            domain, setup, &capacity, previous_k, &solution,
+            domain, solids, setup, &capacity, previous_k, &solution,
             (time_step_s, time_step_s, solids_present), (0.0, 0.0), gate,
         )?;
         super::super::poll(gate)?;

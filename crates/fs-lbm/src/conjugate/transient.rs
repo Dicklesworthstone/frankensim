@@ -207,6 +207,13 @@ pub(crate) fn heat_capacity(
             Voxel::Fluid => fluid.volumetric_heat_capacity(),
             Voxel::Solid(m) => {
                 let solid = &solids[usize::from(m)];
+                solid.validate_heat_capacity_ownership()?;
+                if let Some(law) = &solid.volumetric_heat_capacity_table_j_m3_k {
+                    law.heat_capacity_j_m3_k(initial[c]).map_err(|error| ChtError::InvalidInput {
+                        field: "solid.volumetric_heat_capacity_table_j_m3_k",
+                        reason: error.to_string(),
+                    })?
+                } else {
                 let value = solid.volumetric_heat_capacity_j_m3_k.ok_or_else(|| {
                     ChtError::InvalidInput {
                         field: "solid.volumetric_heat_capacity_j_m3_k",
@@ -215,6 +222,7 @@ pub(crate) fn heat_capacity(
                 })?;
                 finite_positive("solid.volumetric_heat_capacity_j_m3_k", value)?;
                 value
+                }
             }
         };
         let value = rho_c * domain.volume(c);
@@ -311,7 +319,7 @@ fn energy_step(
         domain, fluid, solids, flow, setup, energy, storage, previous, dt, radiation,
         molecular_w_m_k, gate,
     )?;
-    let record = storage_record(domain, setup, capacity, previous, &next,
+    let record = storage_record(domain, solids, setup, capacity, previous, &next,
         (time_s, dt, solids_present), (radiated_w, radiation_outflow_correction_w), gate)?;
     Ok((next, record))
 }
@@ -353,11 +361,39 @@ pub(super) fn junction_stored_energy_change_j(
     Ok(stored)
 }
 
-/// Ordinary constant-capacity storage plus each junction's actual sensible
+/// Exact native cell sensible-energy change. Compact aliases have zero cell
+/// capacity and never query their material's unrelated bulk storage law.
+pub(super) fn native_cell_stored_energy_change_j(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    capacity: &[f64],
+    previous: &[f64],
+    cell: usize,
+    temperature_k: f64,
+) -> Result<f64, ChtError> {
+    let change = if capacity[cell] == 0.0 {
+        0.0
+    } else if let Voxel::Solid(material) = domain.voxel_at(cell)
+        && let Some(law) = &solids[usize::from(material)].volumetric_heat_capacity_table_j_m3_k
+    {
+        domain.volume(cell) * law.energy_change_j_m3(previous[cell], temperature_k)
+            .map_err(|error| ChtError::InvalidInput {
+                field: "solid.volumetric_heat_capacity_table_j_m3_k",
+                reason: error.to_string(),
+            })?
+    } else {
+        capacity[cell] * (temperature_k - previous[cell])
+    };
+    finite("thermal.storage.cell_energy_j", change)?;
+    Ok(change)
+}
+
+/// Ordinary native sensible storage plus each junction's actual sensible
 /// energy change, composed with the shared physical boundary ledger.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn storage_record(
     domain: &VoxelDomain,
+    solids: &[SolidMaterial],
     setup: &ThermalSetup,
     capacity: &[f64],
     previous: &[f64],
@@ -370,9 +406,23 @@ pub(super) fn storage_record(
     let junction_storage = junction_stored_energy_change_j(
         domain, setup, capacity, previous, &next.temperature, gate,
     )?;
-    let mut record = record_energy_step(domain, setup, next,
-        |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
-        (time_s, dt, solids_present), radiated_w, outflow_correction_w)?;
+    let mut record = if solids.iter().any(|material|
+        material.volumetric_heat_capacity_table_j_m3_k.is_some())
+    {
+        let mut stored = Vec::with_capacity(domain.cell_count());
+        for (cell, &temperature) in next.temperature.iter().enumerate() {
+            if cell.is_multiple_of(4096) { poll(gate)?; }
+            stored.push(native_cell_stored_energy_change_j(
+                domain, solids, capacity, previous, cell, temperature,
+            )?);
+        }
+        record_energy_step(domain, setup, next, |cell| stored[cell],
+            (time_s, dt, solids_present), radiated_w, outflow_correction_w)?
+    } else {
+        record_energy_step(domain, setup, next,
+            |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
+            (time_s, dt, solids_present), radiated_w, outflow_correction_w)?
+    };
     record.stored_energy_change_j += junction_storage;
     record.closure_j = record.stored_energy_change_j - (record.source_j - record.boundary_outflow_j);
     finite("thermal.storage.energy_j", record.stored_energy_change_j)?;
@@ -489,7 +539,7 @@ fn solve_step(
         previous, time_step_s, radiation, molecular_w_m_k, None, None, gate)
 }
 
-/// Shared endpoint iteration for compact sensible storage and radiation, with
+/// Shared endpoint iteration for native sensible storage and radiation, with
 /// optional source h(T) faces and a whole-march count of actual energy solves.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn solve_step_with_fields(
@@ -516,7 +566,7 @@ pub(super) fn solve_step_with_fields(
         });
     }
     finite_positive("thermal.time_step_s", time_step_s)?;
-    let mut compact = CompactStorageIteration::new(domain, setup, previous, time_step_s, gate)?;
+    let mut compact = CompactStorageIteration::new(domain, solids, setup, previous, time_step_s, gate)?;
     let mut solve = |setup: &ThermalSetup, rates: &[f64], config: &EnergyConfig| {
         poll(gate)?;
         if let Some(remaining) = remaining_solves.as_deref_mut() {
@@ -561,8 +611,8 @@ pub(super) fn solve_step_with_fields(
     }
     let maximum_iterations = compact.as_ref().map_or(usize::MAX, |c| c.maximum_iterations())
         .min(radiation.map_or(usize::MAX, |(_, controls)| controls.max_iterations));
-    // Ordinary source-caloric coefficients stay frozen in this inner owner.
-    // Only the junction tail is refreshed from its actual enthalpy secants.
+    // Source-caloric coefficients stay with their outer owner. Native cell
+    // tables and the junction tail refresh their own exact enthalpy secants.
     let mut rates = compact.as_ref().map(|_| storage.to_vec());
     let mut iterate = previous.to_vec();
     let mut endpoint = match radiation {
@@ -586,7 +636,7 @@ pub(super) fn solve_step_with_fields(
     for _ in 0..maximum_iterations {
         poll(gate)?;
         if let (Some(compact), Some(rates)) = (&mut compact, &mut rates) {
-            compact.write_rates(&iterate, &mut rates[cells..], gate)?;
+            compact.write_rates(&iterate, rates, gate)?;
         }
         if let (Some(step), Some(endpoint)) = (&mut step, &endpoint) {
             step.cell_sinks.truncate(base_sinks);
