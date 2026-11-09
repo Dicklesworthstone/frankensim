@@ -17,7 +17,8 @@ use crate::endf::decay::{EndfDecayReadLimits, EndfDecaySelection};
 use crate::endf::fission_yields::spontaneous::SpontaneousFissionYieldEvaluation;
 use crate::endf::fission_yields::{EndfFissionYieldReadLimits, EndfFissionYieldSelection};
 use crate::endf::spontaneous_neutrons::{
-    EndfSpontaneousNeutronSelection, SpontaneousNeutronReadLimits, tests::prompt_fixture,
+    EndfSpontaneousNeutronSelection, SpontaneousFissionSpectrumLaw, SpontaneousNeutronReadLimits,
+    tests::{prompt_fixture, prompt_general_evaporation_fixture},
 };
 use crate::fusion_neutrons::activation::{
     FusionNeutronActivationBudget, FusionNeutronActivationState,
@@ -361,6 +362,36 @@ fn selection() -> EndfSpontaneousNeutronSelection {
     }
 }
 
+fn general_evaporation(
+    temperature_ev: f64,
+    restriction_ev: f64,
+    shape: &[(f64, f64)],
+    law: i32,
+) -> SpontaneousFissionPromptNeutronBinding {
+    let text = prompt_general_evaporation_fixture(
+        selection(),
+        2.0,
+        1.0,
+        temperature_ev,
+        restriction_ev,
+        shape,
+        law,
+    );
+    let mut source = prompt(selection(), 1.0, 1.0);
+    source.spectrum = Arc::new(
+        SpontaneousFissionNeutronSpectrum::parse(
+            "manufactured-scaled-evaporation-spectrum".into(),
+            selection(),
+            FissionNeutronKind::Prompt,
+            &text,
+            SpontaneousNeutronReadLimits::default(),
+            || Ok(()),
+        )
+        .unwrap(),
+    );
+    source
+}
+
 fn source_budget() -> EvaluatedBurnupNeutronBudget {
     EvaluatedBurnupNeutronBudget {
         limits: DecayEmissionLimits::default(),
@@ -417,13 +448,33 @@ fn activation(
 pub(crate) fn material_fixture(
     parent_count: f64,
 ) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState) {
+    material_fixture_with_source(parent_count, prompt(selection(), 1.0, 1.0))
+}
+
+pub(crate) fn material_fixture_general_evaporation(
+    parent_count: f64,
+) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState) {
+    material_fixture_with_source(
+        parent_count,
+        general_evaporation(2.0, -3.0, &[(0.5, 0.0), (1.0, 2.0), (1.5, 0.0)], 2),
+    )
+}
+
+fn material_fixture_with_source(
+    parent_count: f64,
+    binding: SpontaneousFissionPromptNeutronBinding,
+) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState) {
+    let assembly = assembly(&[(6.0, 0.25), (4.0, 0.75)], Some((6.0, 0.0)), true, 0.5);
     let source = Arc::new(
-        prepare_source(assembly(
-            &[(6.0, 0.25), (4.0, 0.75)],
-            Some((6.0, 0.0)),
-            true,
-            0.5,
-        ))
+        EvaluatedBurnupNeutrons::new(
+            "manufactured-material-neutron-spectrum".into(),
+            Arc::clone(&assembly),
+            kinetic(Arc::clone(assembly.model().groups())),
+            vec![binding],
+            &[],
+            source_budget(),
+            || Ok(()),
+        )
         .unwrap(),
     );
     let state = activation(&source, parent_count);
@@ -618,10 +669,84 @@ fn g0_source_normalization_is_explicit_and_admitted_discrepancies_are_not_repair
         1.001 * EV_J,
         1e-33,
     );
+    let SpontaneousFissionSpectrumLaw::Tabulated { points, .. } =
+        &admitted.spontaneous_sources()[0].spectrum.components()[0].law
+    else {
+        panic!("original tabulated law changed");
+    };
+    assert_eq!(points[1].density_per_j, 1.001 / EV_J);
+}
+
+#[test]
+fn g1_lf5_shape_scaling_matches_original_tabulated_finite_history() {
+    let (tabulated, initial) = material_fixture(100.0);
+    let (evaporation, scaled) = material_fixture_general_evaporation(100.0);
+    assert_eq!(evaporation.projection(), tabulated.projection());
+    assert_eq!(evaporation.neutron_yields(), tabulated.neutron_yields());
+    let (expected, original) = initial
+        .trial_with_rates(2.0, &[300.0], &[0.0; 2], budget(), || Ok(()))
+        .unwrap();
+    let (actual, transformed) = scaled
+        .trial_with_rates(2.0, &[300.0], &[0.0; 2], budget(), || Ok(()))
+        .unwrap();
     assert_eq!(
-        admitted.spontaneous_sources()[0].spectrum.components()[0].points[1].density_per_j,
-        1.001 / EV_J
+        actual.neutrons().neutron_counts(),
+        expected.neutrons().neutron_counts()
     );
+    assert_eq!(
+        actual.inventories()[0].populations(),
+        expected.inventories()[0].populations()
+    );
+    assert_eq!(transformed.released, original.released);
+    assert_eq!(transformed.decay_neutrons, original.decay_neutrons);
+    assert_eq!(
+        transformed.transferred_decay_neutron_energy_j,
+        original.transferred_decay_neutron_energy_j
+    );
+    let component = &evaporation.spontaneous_sources()[0].spectrum.components()[0];
+    assert_eq!(component.restriction_energy_j, Some(-3.0 * EV_J));
+    let SpontaneousFissionSpectrumLaw::GeneralEvaporation {
+        temperature_j,
+        shape,
+        ..
+    } = &component.law
+    else {
+        panic!("original LF5 law changed");
+    };
+    assert_eq!(*temperature_j, 2.0 * EV_J);
+    assert_eq!(shape[1].density, 2.0);
+    assert_eq!(shape[1].coordinate, 1.0);
+}
+
+#[test]
+fn g0_lf5_retains_positive_endpoints_normalization_and_finite_cutoff() {
+    let original = assembly(&[(6.0, 0.25), (4.0, 0.75)], None, true, 0.5);
+    let build = |temperature_ev: f64, cutoff_ev: f64, shape: &[(f64, f64)]| {
+        EvaluatedBurnupNeutrons::new(
+            "original-evaporation-normalization".into(),
+            Arc::clone(&original),
+            kinetic(Arc::clone(original.model().groups())),
+            vec![general_evaporation(temperature_ev, -cutoff_ev, shape, 1)],
+            &[],
+            source_budget(),
+            || Ok(()),
+        )
+    };
+    // LF5 histogram endpoints need not vanish. The Jacobian preserves count
+    // and first moment under a different theta/shape coordinate pair.
+    let a = build(2.0, 3.0, &[(0.5, 1.0), (1.5, 1.0)]).unwrap();
+    let b = build(4.0, 3.0, &[(0.25, 2.0), (0.75, 2.0)]).unwrap();
+    assert_eq!(a.projection(), b.projection());
+    close(a.projection()[0].particles_per_decay, 0.5, 1e-15);
+    close(a.projection()[0].kinetic_energy_j_per_decay, EV_J, 1e-33);
+    assert!(matches!(
+        build(2.0, 3.0, &[(0.5, 0.9), (1.5, 0.9)]),
+        Err(EvaluatedBurnupNeutronError::Normalization { .. })
+    ));
+    assert!(matches!(
+        build(2.0, 2.5, &[(0.5, 1.0), (1.5, 1.0)]),
+        Err(EvaluatedBurnupNeutronError::Source(_))
+    ));
 }
 
 #[test]

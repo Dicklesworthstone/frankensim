@@ -25,7 +25,7 @@ use crate::endf::decay::model::emissions::neutrons::{
     DecayNeutronBindingError, DecayNeutronProjection, project_group_moments,
 };
 use crate::endf::decay::model::emissions::{
-    DecayEmissionCoverage, DecayEmissionLimits, integrate_continuum, integrate_spectrum, visit,
+    DecayEmissionCoverage, DecayEmissionLimits, integrate_spectrum, visit,
 };
 use crate::endf::decay::spectra::{DecayRadiation, DecaySpectrum};
 use crate::endf::neutron_yield::FissionNeutronKind;
@@ -36,6 +36,8 @@ use crate::endf::spontaneous_neutrons::{
 use crate::fusion_neutrons::NeutronKineticModel;
 use crate::irradiation::NuclideId;
 use crate::{Accumulator, FissionError, nonnegative, sum};
+
+mod spectra;
 
 /// Matched original prompt multiplicity and outgoing spectrum for one SF parent.
 #[derive(Clone, Debug)]
@@ -539,11 +541,8 @@ fn integrate_sf(
         probability_sum.add(component.probability)?;
         let mut component_counts = vec![PositiveIntegral::new(); counts.len()];
         let mut component_energies = component_counts.clone();
-        integrate_continuum(
-            DecayRadiation::Neutron,
-            &component.points,
-            &component.interpolation,
-            1.0,
+        spectra::integrate_component(
+            component,
             edges,
             &mut component_counts,
             &mut component_energies,
@@ -625,4 +624,4 @@ fn invalid(message: &'static str) -> EvaluatedBurnupNeutronError {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::material_fixture;
+pub(crate) use tests::{material_fixture, material_fixture_general_evaporation};

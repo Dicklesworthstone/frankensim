@@ -2,7 +2,9 @@
 //! The shared manufactured records test source semantics, not isotope calibration.
 
 use super::*;
-use crate::endf::decay::model::burnup::neutrons::material_fixture;
+use crate::endf::decay::model::burnup::neutrons::{
+    EvaluatedBurnupNeutrons, material_fixture, material_fixture_general_evaporation,
+};
 
 const EV_J: f64 = 1.602_176_634e-19;
 
@@ -17,8 +19,19 @@ fn macroscopic_budget() -> FusionNeutronActivationBudget {
 
 #[test]
 fn g1_g3_g4_evaluated_sf_and_product_neutrons_heat_original_material_once() {
+    verify_material_history(material_fixture);
+}
+
+#[test]
+fn g1_g3_g4_lf5_spectrum_heats_original_material_with_the_same_decay_history() {
+    verify_material_history(material_fixture_general_evaporation);
+}
+
+fn verify_material_history(
+    fixture: fn(f64) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState),
+) {
     let initial_nuclei = 1e18;
-    let (_evaluated, state) = material_fixture(initial_nuclei);
+    let (_evaluated, state) = fixture(initial_nuclei);
     let state = Arc::new(state);
     let initial = thermal(
         vec![cell(20, 1, 2.0, 1200.0, 0.0)],

@@ -3532,8 +3532,9 @@ MF5/MT18 prompt and MF5/MT455 delayed spectra admit energy-independent LF=1
 tabulations with the ENDF-102 §5.4.2 INT=1,2,3 laws and zero-density endpoints.
 Original component probabilities, source order, incident grids, interpolation
 and outgoing points remain available after SI conversion. Every supplied
-incident row must describe the same distribution. Analytic LF laws and actual
-incident dependence refuse explicitly. Neither probabilities nor spectra are
+LF1 incident row must describe the same distribution. The LF5 extension below
+retains an explicitly supplied reference and finite outgoing cutoff. Other LF
+laws and actual incident dependence refuse explicitly. Neither probabilities nor spectra are
 renormalized; their physical normalization belongs to a separately bounded
 consumer. These quantities are per fission, so a mixed-mode parent's SF branch
 must be applied exactly once when constructing its transformation source.
@@ -3612,3 +3613,34 @@ heavy-energy limits, normalization discrepancies, nearly closed branching,
 changed decay data and preparation bounds. This is original-source numerical
 and integration validation, not empirical isotope calibration or a full
 Cargo/constellation gate.
+
+## General-evaporation spectra on the original decay trajectory
+
+MF5 LF5 general evaporation retains the original dimensionless shape g(x),
+positive temperature theta, restriction energy U, reference energy E and
+interpolation metadata. Exactly one supplied temperature row establishes the
+finite outgoing bound R=E-U; a constant temperature at different incident
+energies does not establish a constant truncated spectrum. The parser admits
+INT=1 through 5 with their actual logarithmic domain requirements. Singleton
+metadata has no interpolation interval and may retain a zero reference energy.
+
+The consumer streams E_out=theta*x and density g(x)/theta through the original
+MF8/LF1 continuum moment integrator, without allocating a transformed spectrum.
+Positive LF5 endpoints are valid. Positive support beyond R or the supplied
+energy grid refuses, and source normalization is checked without clipping or
+repair. The retained first energy moment enters the same conservative neutron
+projection, finite radioactive inventory, capture and material heat transaction.
+
+Seven additional regressions cover source retention and refusal, exact LF1/LF5
+finite-history parity, probability conservation under shape/temperature
+rescaling, original material heating and cancellation, and the six delayed LF5
+families from the primary ENDF/B-VIII.0 Cf-252 evaluation. The unchanged MF1/MF5
+fixture preserves its small normalization discrepancies; independently computed
+50-digit decimal integrals check each original count and energy moment. This
+checks evaluated spectral input, not aggregate delayed-family evolution or
+empirical calibration of the manufactured inventory/material examples.
+
+The focused original-source suite passed 200 native tests, zero failures, with
+`thermal` enabled and no nuclear compiler diagnostics. All nine changed source
+and fixture files matched the compiled snapshot. This extends the preceding
+193-test seam; it is not a full Cargo/constellation or DSR gate.

@@ -21,7 +21,10 @@ use crate::irradiation::NuclideId;
 use crate::{FissionError, nonnegative, positive};
 
 mod spectrum;
-pub use spectrum::{SpontaneousFissionNeutronSpectrum, SpontaneousFissionSpectrumComponent};
+pub use spectrum::{
+    SpontaneousFissionNeutronSpectrum, SpontaneousFissionShapePoint,
+    SpontaneousFissionSpectrumComponent, SpontaneousFissionSpectrumLaw,
+};
 
 /// Both the MAT and full parent isotope/isomer identity must agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

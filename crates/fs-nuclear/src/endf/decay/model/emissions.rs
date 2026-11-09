@@ -575,6 +575,38 @@ pub(in crate::endf) fn integrate_continuum(
     limits: DecayEmissionLimits,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
 ) -> Result<(), EndfError> {
+    integrate_continuum_segments(
+        radiation,
+        points.windows(2).map(|pair| Ok([pair[0], pair[1]])),
+        interpolation,
+        normalization,
+        edges[edges.len() - 1],
+        edges,
+        counts,
+        energies,
+        work,
+        limits,
+        checkpoint,
+    )
+}
+
+/// The same one-pass moment owner also admits source-coordinate transforms.
+/// A caller may stream transformed endpoints without allocating a second
+/// spectrum. `maximum_energy_j` is an additional physical support boundary;
+/// positive source intervals outside it refuse rather than being clipped.
+pub(in crate::endf) fn integrate_continuum_segments(
+    radiation: DecayRadiation,
+    segments: impl Iterator<Item = Result<[DecaySpectrumPoint; 2], EndfError>>,
+    interpolation: &[DecayInterpolation],
+    normalization: f64,
+    maximum_energy_j: f64,
+    edges: &[f64],
+    counts: &mut [PositiveIntegral],
+    energies: &mut [PositiveIntegral],
+    work: &mut usize,
+    limits: DecayEmissionLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<(), EndfError> {
     if !nonnegative(normalization) {
         return Err(invalid(
             "finite nonnegative spectral normalization required",
@@ -586,9 +618,9 @@ pub(in crate::endf) fn integrate_continuum(
     let fc = normalization;
     let mut region = 0;
     let mut group = 0;
-    for (index, points) in points.windows(2).enumerate() {
+    for (index, points) in segments.enumerate() {
         visit(work, limits, checkpoint)?;
-        let [a, b] = [points[0], points[1]];
+        let [a, b] = points?;
         if a.energy_j == b.energy_j {
             continue;
         }
@@ -621,6 +653,11 @@ pub(in crate::endf) fn integrate_continuum(
         ) {
             return Err(EndfError::Unsupported(
                 "unresolved fragment or unidentified radiation spectrum",
+            ));
+        }
+        if b.energy_j > maximum_energy_j {
+            return Err(invalid(
+                "positive continuum support exceeds its declared outgoing-energy cutoff",
             ));
         }
         check_domain(edges, a.energy_j, b.energy_j)?;

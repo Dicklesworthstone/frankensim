@@ -1,14 +1,36 @@
-//! Energy-independent MF5 LF=1 partial distributions. The common continuum
-//! point/interpolation records carry SI quantities without fabricating an MF8
-//! decay spectrum or a normalization uncertainty that the source did not give.
+//! Explicit MF5 partial distributions. LF1 tabulations and LF5 general
+//! evaporation retain their original curves without fabricating an MF8 decay
+//! spectrum or a normalization uncertainty that the source did not give.
 
 use super::*;
 use crate::endf::decay::spectra::{DecayInterpolation, DecaySpectrumPoint};
 use crate::endf::{EV_J, convert_si};
 
+/// One point of the LF5 shape g(x), with both x and g dimensionless. The
+/// physical probability density is g(E_out / theta) / theta.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpontaneousFissionShapePoint {
+    pub coordinate: f64,
+    pub density: f64,
+}
+
+/// Original outgoing distribution. Source values are never renormalized.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpontaneousFissionSpectrumLaw {
+    Tabulated {
+        points: Arc<[DecaySpectrumPoint]>,
+        interpolation: Arc<[DecayInterpolation]>,
+    },
+    GeneralEvaporation {
+        temperature_j: f64,
+        shape: Arc<[SpontaneousFissionShapePoint]>,
+        interpolation: Arc<[DecayInterpolation]>,
+    },
+}
+
 /// One original partial distribution (or delayed family), in source order.
-/// Original incident-grid fields are retained as metadata: every supplied row
-/// must declare the same outgoing law and constant component probability.
+/// LF1 may repeat an identical outgoing row. LF5 requires one supplied
+/// temperature row: its incident energy and U define the outgoing bound E-U.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpontaneousFissionSpectrumComponent {
     pub probability: f64,
@@ -16,8 +38,8 @@ pub struct SpontaneousFissionSpectrumComponent {
     pub probability_interpolation: Arc<[DecayInterpolation]>,
     pub incident_energies_j: Arc<[f64]>,
     pub incident_interpolation: Arc<[DecayInterpolation]>,
-    pub points: Arc<[DecaySpectrumPoint]>,
-    pub interpolation: Arc<[DecayInterpolation]>,
+    pub restriction_energy_j: Option<f64>,
+    pub law: SpontaneousFissionSpectrumLaw,
 }
 
 /// Explicit prompt MT18 or delayed MT455 source. Neither this source type nor
@@ -110,6 +132,12 @@ struct SourceCounts {
     regions: usize,
 }
 
+struct IncidentSpectrum {
+    energies: Vec<f64>,
+    interpolation: Vec<DecayInterpolation>,
+    law: SpontaneousFissionSpectrumLaw,
+}
+
 fn consume(
     count: &mut usize,
     added: usize,
@@ -131,15 +159,21 @@ fn component(
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
 ) -> Result<SpontaneousFissionSpectrumComponent, EndfError> {
     let probability = reader.section(section.mat, 5, section.mt, checkpoint)?;
-    if probability.number(0)? != 0.0 || probability.number(1)? != 0.0 {
-        return Err(probability.error("nonzero reserved LF1 probability field"));
+    if probability.number(1)? != 0.0 {
+        return Err(probability.error("nonzero reserved MF5 probability field"));
     }
     probability.zero_integer(2)?;
-    if probability.integer(3)? != 1 {
-        return Err(EndfError::Unsupported(
-            "spontaneous-neutron spectra currently require tabulated MF5 LF=1",
-        ));
-    }
+    let lf = probability.integer(3)?;
+    let restriction_energy_j = match lf {
+        1 if probability.number(0)? == 0.0 => None,
+        1 => return Err(probability.error("nonzero reserved LF1 probability field")),
+        5 => Some(convert_si(probability.number(0)?, EV_J)?),
+        _ => {
+            return Err(EndfError::Unsupported(
+                "spontaneous-neutron spectra require MF5 LF=1 or LF=5",
+            ));
+        }
+    };
     let probability_points = probability.count(5)?;
     if probability_points == 0 || probability_points > limits.records.max_points {
         return Err(budget("spontaneous-neutron probability points"));
@@ -154,6 +188,7 @@ fn component(
         reader,
         probability,
         probability_points,
+        if lf == 1 { 3 } else { 5 },
         limits,
         counts,
         checkpoint,
@@ -199,7 +234,41 @@ fn component(
         &probability_interpolation,
         checkpoint,
     )?;
+    let constant = constant.ok_or_else(|| probability.error("missing component probability"))?;
+    if probability_points > 1 && constant == 0.0 {
+        for law in &probability_interpolation {
+            checkpoint()?;
+            if law.law >= 4 {
+                return Err(probability.error(
+                    "log-probability interpolation requires positive component probability",
+                ));
+            }
+        }
+    }
+    let outgoing = match restriction_energy_j {
+        None => tabulated(reader, section, limits, counts, checkpoint)?,
+        Some(restriction) => {
+            general_evaporation(reader, section, restriction, limits, counts, checkpoint)?
+        }
+    };
+    Ok(SpontaneousFissionSpectrumComponent {
+        probability: constant,
+        probability_energies_j: probability_energies.into(),
+        probability_interpolation: probability_interpolation.into(),
+        incident_energies_j: outgoing.energies.into(),
+        incident_interpolation: outgoing.interpolation.into(),
+        restriction_energy_j,
+        law: outgoing.law,
+    })
+}
 
+fn tabulated(
+    reader: &mut Reader<'_>,
+    section: Record<'_>,
+    limits: SpontaneousNeutronReadLimits,
+    counts: &mut SourceCounts,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<IncidentSpectrum, EndfError> {
     let tab2 = reader.section(section.mat, 5, section.mt, checkpoint)?;
     zero_prefix(tab2)?;
     let rows = tab2.count(5)?;
@@ -212,7 +281,7 @@ fn component(
         limits.max_incident_points,
         "spontaneous-neutron incident points",
     )?;
-    let incident_interpolation = interpolation(reader, tab2, rows, limits, counts, checkpoint)?;
+    let incident_interpolation = interpolation(reader, tab2, rows, 3, limits, counts, checkpoint)?;
     require_records(reader, rows.saturating_mul(2))?;
     let mut incident_energies = reserved(rows, "spontaneous-neutron incident memory")?;
     let mut common: Option<(Vec<DecaySpectrumPoint>, Vec<DecayInterpolation>)> = None;
@@ -244,7 +313,7 @@ fn component(
             limits.max_spectrum_points,
             "spontaneous-neutron spectrum points",
         )?;
-        let laws = interpolation(reader, tab, points, limits, counts, checkpoint)?;
+        let laws = interpolation(reader, tab, points, 3, limits, counts, checkpoint)?;
         require_records(reader, points.div_ceil(3))?;
         let mut outgoing: Vec<DecaySpectrumPoint> =
             reserved(points, "spontaneous-neutron spectrum memory")?;
@@ -317,14 +386,142 @@ fn component(
     }
     log_domain(&incident_energies, &incident_interpolation, checkpoint)?;
     let (points, interpolation) = common.ok_or_else(|| tab2.error("missing outgoing spectrum"))?;
-    Ok(SpontaneousFissionSpectrumComponent {
-        probability: constant.ok_or_else(|| probability.error("missing component probability"))?,
-        probability_energies_j: probability_energies.into(),
-        probability_interpolation: probability_interpolation.into(),
-        incident_energies_j: incident_energies.into(),
-        incident_interpolation: incident_interpolation.into(),
-        points: points.into(),
-        interpolation: interpolation.into(),
+    Ok(IncidentSpectrum {
+        energies: incident_energies,
+        interpolation: incident_interpolation,
+        law: SpontaneousFissionSpectrumLaw::Tabulated {
+            points: points.into(),
+            interpolation: interpolation.into(),
+        },
+    })
+}
+
+fn general_evaporation(
+    reader: &mut Reader<'_>,
+    section: Record<'_>,
+    restriction_energy_j: f64,
+    limits: SpontaneousNeutronReadLimits,
+    counts: &mut SourceCounts,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<IncidentSpectrum, EndfError> {
+    let temperature = reader.section(section.mat, 5, section.mt, checkpoint)?;
+    zero_prefix(temperature)?;
+    let rows = temperature.count(5)?;
+    if rows > limits.records.max_points {
+        return Err(budget("spontaneous-neutron temperature points"));
+    }
+    if rows != 1 {
+        return Err(EndfError::Unsupported(
+            "LF5 spontaneous-neutron temperature requires exactly one incident row",
+        ));
+    }
+    consume(
+        &mut counts.incident,
+        rows,
+        limits.max_incident_points,
+        "spontaneous-neutron incident points",
+    )?;
+    let incident_interpolation =
+        interpolation(reader, temperature, rows, 5, limits, counts, checkpoint)?;
+    let row = reader.section(section.mat, 5, section.mt, checkpoint)?;
+    let incident = row.number(0)?;
+    let temperature = row.number(1)?;
+    if !nonnegative(incident) || !positive(temperature) {
+        return Err(
+            row.error("finite nonnegative incident energy and positive temperature required")
+        );
+    }
+    for field in 2..6 {
+        if row.number(field)? != 0.0 {
+            return Err(row.error("nonzero MF5 temperature padding"));
+        }
+    }
+    let incident_j = convert_si(incident, EV_J)?;
+    let temperature_j = convert_si(temperature, EV_J)?;
+    if !positive(incident_j - restriction_energy_j) {
+        return Err(row.error("LF5 requires finite positive outgoing bound E-U"));
+    }
+    let mut incident_energies = reserved(1, "spontaneous-neutron incident memory")?;
+    incident_energies.push(incident_j);
+
+    let tab = reader.section(section.mat, 5, section.mt, checkpoint)?;
+    zero_prefix(tab)?;
+    let points = tab.count(5)?;
+    if points < 2 {
+        return Err(tab.error("at least two outgoing shape points required"));
+    }
+    if points > limits.records.max_points {
+        return Err(budget("spontaneous-neutron spectrum points"));
+    }
+    consume(
+        &mut counts.outgoing,
+        points,
+        limits.max_spectrum_points,
+        "spontaneous-neutron spectrum points",
+    )?;
+    let laws = interpolation(reader, tab, points, 5, limits, counts, checkpoint)?;
+    require_records(reader, points.div_ceil(3))?;
+    let mut shape: Vec<SpontaneousFissionShapePoint> =
+        reserved(points, "spontaneous-neutron shape memory")?;
+    while shape.len() < points {
+        let row = reader.section(section.mat, 5, section.mt, checkpoint)?;
+        for slot in 0..3 {
+            let coordinate = row.number(2 * slot)?;
+            let density = row.number(2 * slot + 1)?;
+            if shape.len() == points {
+                if coordinate != 0.0 || density != 0.0 {
+                    return Err(row.error("nonzero MF5 shape padding"));
+                }
+                continue;
+            }
+            if !nonnegative(coordinate) || !nonnegative(density) {
+                return Err(row.error("finite nonnegative shape coordinate and density required"));
+            }
+            let n = shape.len();
+            if (n > 0 && coordinate < shape[n - 1].coordinate)
+                || (n > 1
+                    && coordinate == shape[n - 1].coordinate
+                    && coordinate == shape[n - 2].coordinate)
+            {
+                return Err(
+                    row.error("shape coordinates must ascend with at most paired discontinuities")
+                );
+            }
+            shape.push(SpontaneousFissionShapePoint {
+                coordinate,
+                density,
+            });
+        }
+    }
+    if shape[0].coordinate >= shape[points - 1].coordinate {
+        return Err(tab.error("nonempty outgoing shape domain required"));
+    }
+    let mut region = 0;
+    for (index, pair) in shape.windows(2).enumerate() {
+        checkpoint()?;
+        while laws[region].end_point < index + 2 {
+            region += 1;
+        }
+        if pair[0].coordinate == pair[1].coordinate {
+            continue;
+        }
+        if matches!(laws[region].law, 3 | 5) && pair[0].coordinate == 0.0 {
+            return Err(
+                tab.error("log-coordinate interpolation requires positive shape coordinates")
+            );
+        }
+        if matches!(laws[region].law, 4 | 5) && (pair[0].density == 0.0 || pair[1].density == 0.0) {
+            return Err(tab.error("log-density interpolation requires positive shape densities"));
+        }
+    }
+    Ok(IncidentSpectrum {
+        energies: incident_energies,
+        interpolation: incident_interpolation,
+        law: SpontaneousFissionSpectrumLaw::GeneralEvaporation {
+            temperature_j,
+            shape: shape.into(),
+            interpolation: laws.into(),
+        },
     })
 }
 
@@ -332,6 +529,7 @@ fn interpolation(
     reader: &mut Reader<'_>,
     head: Record<'_>,
     points: usize,
+    maximum_law: i32,
     limits: SpontaneousNeutronReadLimits,
     counts: &mut SourceCounts,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
@@ -368,9 +566,10 @@ fn interpolation(
                     row.error("ascending interpolation endpoints bounded by point count required")
                 );
             }
-            if !(1..=3).contains(&law) {
+            let maximum_law = if points == 1 { 5 } else { maximum_law };
+            if !(1..=maximum_law).contains(&law) {
                 return Err(EndfError::Unsupported(
-                    "MF5 LF1 interpolation requires ENDF INT=1,2,3",
+                    "unsupported MF5 interpolation for this outgoing law",
                 ));
             }
             result.push(DecayInterpolation {
@@ -397,7 +596,7 @@ fn log_domain(
         while interpolation[region].end_point < index + 2 {
             region += 1;
         }
-        if interpolation[region].law == 3 && pair[0] == 0.0 {
+        if matches!(interpolation[region].law, 3 | 5) && pair[0] == 0.0 {
             return Err(EndfError::Unsupported(
                 "log-energy interpolation requires positive incident energies",
             ));
