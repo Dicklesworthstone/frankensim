@@ -13473,3 +13473,15 @@ It does not consume pending travel, correct a stale gap, supply moving thermal
 faces, infer finite-rotation kinematics, cross a thermal instability or invent
 slip/debonding heat. Endpoint area limits do not establish stability along an
 unobserved temperature path.
+
+## Exact-vacuum moving molecular receiver startup
+
+`molecular_exchange::filling::step_candidate` joins an original finite moving donor to a receiver represented explicitly as evacuated geometry or an ordinary moving gas. An evacuated receiver supplies no return Maxwellian, temperature, pressure, velocity or seed inventory. One original drifting-Maxwellian sample supplies the same accepted species mass, vector momentum and complete crossing energy to both endpoints. Gross withdrawal uses only the original donor inventory.
+
+The donor retains its original moving species-boundary solve. `MovingGasParcel::fill_evacuated_candidate` retains captured momentum and removes actual bulk kinetic energy through the original material owner's admitted-mass callback before its single caloric inversion. Thermal and common-boost terms are formed directly in the declared aperture frame, with original species formation references removed before arithmetic. No extra receiver-mixing heat is added.
+
+Actual final species/total mass, inertial momentum and source-relative internal-plus-bulk energy are independently checked in aperture and laboratory frames. Native caloric defects, reconstruction corrections and frame conversion consume a fixed noncancelling allowance. Both positive endpoints must satisfy original source and drift support before atomic publication. Closed geometry and active zero transmission retain exact vacuum; filled receivers delegate exactly to the original reciprocal pair.
+
+The result is a frozen-rate, first-order homogeneous mean-drift endpoint. It supplies no collisionless filling front, finite flight delay, container trajectory, remaining wall-pressure force or complete-vessel passivity claim. Original source/species and inversion limits bound work; cancellation and every late source, inventory or balance refusal return no accepted endpoints.
+
+Five coupled regression groups specify independent monatomic/diatomic capture temperature and momentum, species separation with tangential drift and formation/common-boost invariance, exact reciprocal continuation, inactive/blocked vacuum preservation, and source/withdrawal/defect-budget/cancellation refusal. Two material groups specify the admitted-mass energy callback.

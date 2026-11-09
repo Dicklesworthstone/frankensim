@@ -7,6 +7,9 @@
 //! arbitrary species. No phase rate, mixing-heat correction, pressure load,
 //! moving-volume work or force law is inferred here.
 
+/// Conserved first filling of an exactly evacuated finite moving-gas volume.
+pub mod evacuated;
+
 use super::{EvaporatingLiquidGasError, MovingGasParcel};
 use fs_material::thermochemical_gas::{
     ThermochemicalGasModel,

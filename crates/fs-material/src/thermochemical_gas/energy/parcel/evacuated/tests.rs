@@ -197,6 +197,114 @@ fn g0_zero_relative_energy_uses_the_declared_chart_without_a_seed_gas() {
 }
 
 #[test]
+fn g1_admitted_mass_energy_callback_runs_once_before_the_original_fill_solve() {
+    let model = catalog(&[("A", 0.028, 2.5, 0.0)], vec![1.0], 1e12);
+    let empty = receiver();
+    let received = masses(&[("A", 2e-5)]);
+    let reference = 400.0;
+    let target = 350.0;
+    let correction = 2e-5 * 1.5 * R / 0.028 * (target - reference);
+    let mut calls = 0;
+    let result = empty
+        .fill_candidate_with_energy(
+            &model,
+            &received,
+            reference,
+            0.0,
+            |mass| {
+                calls += 1;
+                assert_eq!(mass, 2e-5);
+                Ok(correction)
+            },
+            controls(),
+            MASS_TOLERANCE,
+            ENERGY_TOLERANCE,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(result.step().reference_relative_energy_j, 0.0);
+    assert_eq!(result.step().additional_energy_j, correction);
+    near(result.gas().state().state().temperature, target, 1e-8);
+    near(
+        result.step().stored_relative_energy_j,
+        correction,
+        ENERGY_TOLERANCE,
+    );
+    assert!(result.step().energy_residual_j.abs() <= ENERGY_TOLERANCE);
+    let original = empty
+        .fill_candidate(
+            &model,
+            &received,
+            reference,
+            correction,
+            controls(),
+            MASS_TOLERANCE,
+            ENERGY_TOLERANCE,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(result.gas(), original.gas());
+    let unchanged = empty
+        .fill_candidate_with_energy(
+            &model,
+            &received,
+            reference,
+            correction,
+            |_| Ok(0.0),
+            controls(),
+            MASS_TOLERANCE,
+            ENERGY_TOLERANCE,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(unchanged, original);
+}
+
+#[test]
+fn g4_energy_callback_refusal_and_post_callback_cancellation_publish_nothing() {
+    use std::cell::Cell;
+    let model = catalog(&[("A", 0.028, 2.5, 0.0)], vec![1.0], 0.0);
+    let empty = receiver();
+    let original = empty.clone();
+    let received = masses(&[("A", 2e-5)]);
+    let error = empty
+        .fill_candidate_with_energy(
+            &model,
+            &received,
+            400.0,
+            0.0,
+            |_| Err(GasEnergyError::Invalid("declared kinetic owner refused")),
+            controls(),
+            MASS_TOLERANCE,
+            ENERGY_TOLERANCE,
+            || false,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GasEnergyError::Invalid("declared kinetic owner refused")
+    ));
+    let cancelled = Cell::new(false);
+    let result = empty.fill_candidate_with_energy(
+        &model,
+        &received,
+        400.0,
+        0.0,
+        |_| {
+            cancelled.set(true);
+            Ok(0.0)
+        },
+        controls(),
+        MASS_TOLERANCE,
+        ENERGY_TOLERANCE,
+        || cancelled.get(),
+    );
+    assert!(matches!(result, Err(GasEnergyError::Cancelled)));
+    assert_eq!(empty, original);
+}
+
+#[test]
 fn g4_invalid_inventory_source_support_and_late_cancellation_publish_no_gas() {
     for volume in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(EvacuatedGasVolume::new(volume, QueryPoint::new()).is_err());

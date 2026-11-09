@@ -5,10 +5,12 @@
 //! species and source-relative internal energy construct ONE ordinary gas state
 //! through the original composition and caloric owners.
 //!
-//! The endpoint is a thermalized, well-mixed, zero-momentum gas. Its physical
-//! owner must justify that equilibration assumption and account for opposite
-//! source storage, wall heat/work, and any captured kinetic energy. This local
-//! initialization supplies no flow rate or collisionless startup dynamics.
+//! The endpoint stores the thermalized, well-mixed gas's internal energy. Its
+//! physical owner must justify that equilibration assumption and retain any
+//! bulk momentum separately. The admitted-mass energy callback can remove the
+//! retained bulk kinetic energy before the caloric solve. Opposite source
+//! storage and wall heat/work remain caller-owned; this initialization supplies
+//! no flow rate or collisionless startup dynamics.
 
 use super::{
     ClosedGasParcel,
@@ -40,8 +42,13 @@ pub struct EvacuatedGasFillStep {
     pub received_mass_kg: f64,
     /// Numerical energy-chart origin, not a temperature of the original vacuum.
     pub reference_temperature_k: f64,
-    /// Requested `U - sum_i m_i*u_i(T_reference)` [J].
+    /// Supplied energy minus `sum_i m_i*u_i(T_reference)`, before the separately
+    /// retained additional contribution [J]. The simple fill supplies internal
+    /// energy; a moving owner supplies complete energy and removes bulk K below.
     pub reference_relative_energy_j: f64,
+    /// Additional internal energy evaluated once at the admitted mass [J].
+    /// A moving owner uses this to remove its retained bulk kinetic energy.
+    pub additional_energy_j: f64,
     /// Actual represented species masses times original-law Delta u [J].
     pub stored_relative_energy_j: f64,
     /// Sum of represented species masses minus the received inventory [kg].
@@ -136,6 +143,39 @@ impl EvacuatedGasVolume {
         energy_tolerance_j: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EvacuatedGasFillCandidate, GasEnergyError> {
+        self.fill_candidate_with_energy(
+            catalog,
+            inventory_kg,
+            reference_temperature_k,
+            reference_relative_energy_j,
+            |_| Ok(0.0),
+            controls,
+            mass_tolerance_kg,
+            energy_tolerance_j,
+            &mut cancelled,
+        )
+    }
+
+    /// First filling with an additional energy contribution at the EXACT mass
+    /// admitted by the original inventory/composition owner. The callback runs
+    /// once, before the single caloric inversion, and cannot change that mass.
+    /// This supports conservative bulk-momentum capture without a seed parcel
+    /// or a second thermodynamic solve. Its energy is retained separately from
+    /// the supplied source-relative coordinate. Callback side effects are not
+    /// rolled back on a later source, caloric or cancellation refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_candidate_with_energy(
+        &self,
+        catalog: &ThermochemicalGasModel,
+        inventory_kg: &BTreeMap<SpeciesId, f64>,
+        reference_temperature_k: f64,
+        reference_relative_energy_j: f64,
+        mut additional_energy: impl FnMut(f64) -> Result<f64, GasEnergyError>,
+        controls: GasEnergySolve,
+        mass_tolerance_kg: f64,
+        energy_tolerance_j: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EvacuatedGasFillCandidate, GasEnergyError> {
         poll(&mut cancelled)?;
         controls.validate()?;
         if inventory_kg.is_empty()
@@ -169,18 +209,23 @@ impl EvacuatedGasVolume {
         }
         let mass = received_mass.to_f64();
         let density = mass / self.volume_m3;
-        let change = reference_relative_energy_j / mass;
-        if !positive(mass)
-            || !positive(density)
-            || !change.is_finite()
-            || (reference_relative_energy_j != 0.0 && change == 0.0)
-        {
+        if !positive(mass) || !positive(density) {
             return Err(GasEnergyError::Invalid(
                 "first fill needs positive represented mass/density and a finite energy coordinate",
             ));
         }
         let model = model_for_inventory(catalog, inventory_kg)?;
         poll(&mut cancelled)?;
+        let additional_energy_j = additional_energy(mass)?;
+        poll(&mut cancelled)?;
+        let mut requested = Dd::from_f64(reference_relative_energy_j);
+        add(&mut requested, Dd::from_f64(additional_energy_j))?;
+        let change = (requested / Dd::from_f64(mass)).to_f64();
+        if !change.is_finite() || (requested != Dd::ZERO && change == 0.0) {
+            return Err(GasEnergyError::Invalid(
+                "first-fill energy per admitted mass is unrepresentable",
+            ));
+        }
         // This is a mathematical chart for the newly received composition,
         // not a sampled vacuum state. Its pressure uses the original ideal-gas
         // constant, and final transport admission uses only the solved endpoint.
@@ -265,8 +310,7 @@ impl EvacuatedGasVolume {
             - received_mass)
             .to_f64();
         let stored_relative_energy_j = stored_energy.to_f64();
-        let energy_residual_j =
-            (stored_energy - Dd::from_f64(reference_relative_energy_j)).to_f64();
+        let energy_residual_j = (stored_energy - requested).to_f64();
         if [
             mass_residual_kg,
             density_mass_residual_kg,
@@ -286,6 +330,7 @@ impl EvacuatedGasVolume {
             received_mass_kg: mass,
             reference_temperature_k,
             reference_relative_energy_j,
+            additional_energy_j,
             stored_relative_energy_j,
             mass_residual_kg,
             density_mass_residual_kg,

@@ -21,6 +21,9 @@ pub mod trajectory;
 /// Simultaneous apertures sharing finite moving-gas inventories.
 pub mod network;
 
+/// Exact-vacuum first capture followed by the same reciprocal moving-gas owner.
+pub mod filling;
+
 use crate::liquid_gas::evaporation::momentum::{
     MovingGasParcel,
     boundary::{MovingGasBoundaryError, MovingGasBoundarySolve, MovingGasBoundaryStep},
@@ -215,28 +218,11 @@ fn moving_error(side: usize, error: MovingGasBoundaryError) -> Error {
     }
 }
 
-/// Transfer the SAME original molecular beams between two finite gas owners.
-///
-/// Frozen gas temperatures, drift distributions and aperture data make this
-/// first order in time; accepted endpoint source/drift admission is mandatory
-/// but is not a continuous trajectory enclosure. Resample on subsequent steps.
-/// Only duration and gross-withdrawal refusals explicitly request refinement;
-/// source, caloric and conservation refusals retain their physical meaning.
-///
-/// Fixed gas volumes and all original auxiliary source coordinates survive.
-/// No wall-pressure force, container trajectory, mixing-heat patch or finite
-/// flight path is inferred. The scalar and vector accounts describe this one
-/// shared molecular interface; all other loads need explicit composing owners.
-#[allow(clippy::too_many_arguments)]
-pub fn step_candidate(
-    gases: [&MovingGasParcel; 2],
-    interface: &EffusiveDriftInterface,
+fn admit(
     surface: MolecularExchangeSurface,
     duration_s: f64,
     controls: MolecularExchangeControls,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<MolecularExchangeCandidate, Error> {
-    poll(&mut cancelled)?;
+) -> Result<[f64; 3], Error> {
     if !positive(duration_s)
         || !positive(controls.maximum_duration_s)
         || !positive(controls.maximum_species_fraction)
@@ -283,6 +269,33 @@ pub fn step_candidate(
             "active aperture needs a finite velocity in the common gas frame",
         ));
     }
+    Ok(frame)
+}
+
+/// Transfer the SAME original molecular beams between two finite gas owners.
+///
+/// Frozen gas temperatures, drift distributions and aperture data make this
+/// first order in time; accepted endpoint source/drift admission is mandatory
+/// but is not a continuous trajectory enclosure. Resample on subsequent steps.
+/// Only duration and gross-withdrawal refusals explicitly request refinement;
+/// source, caloric and conservation refusals retain their physical meaning.
+///
+/// Fixed gas volumes and all original auxiliary source coordinates survive.
+/// No wall-pressure force, container trajectory, mixing-heat patch or finite
+/// flight path is inferred. The scalar and vector accounts describe this one
+/// shared molecular interface; all other loads need explicit composing owners.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate(
+    gases: [&MovingGasParcel; 2],
+    interface: &EffusiveDriftInterface,
+    surface: MolecularExchangeSurface,
+    duration_s: f64,
+    controls: MolecularExchangeControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<MolecularExchangeCandidate, Error> {
+    poll(&mut cancelled)?;
+    let frame = admit(surface, duration_s, controls)?;
+    let active = surface.area_m2 > 0.0;
     let relative = if active {
         gases.map(|gas| {
             let velocity = gas.velocity_m_s();
