@@ -290,7 +290,10 @@ impl ThermalSetup {
 pub struct EnergyConfig {
     /// Convection scheme.
     pub scheme: ConvectionScheme,
-    /// Relative residual of the Jacobi-row-scaled system. Authored k(T) and
+    /// Relative residual of the Jacobi-row-scaled temperature-increment
+    /// system; an absolute Kelvin datum does not dilute this tolerance.
+    /// Endpoint probes allow only the propagated floating-point uncertainty
+    /// of returning physical Kelvin and subtracting the reference again. Authored k(T) and
     /// native limited convection also check every free cell and compact
     /// junction's physical heat residual at
     /// the unchanged endpoint, relative to its own heat throughput, with an
@@ -345,8 +348,11 @@ pub struct EnergyReport {
     pub nonzeros: usize,
     /// BiCGStab iterations, summed over all native conductivity passes.
     pub iterations: usize,
-    /// Recomputed relative residual of the row-scaled system. With authored
-    /// k(T), this is the original nonlinear operator at the returned field.
+    /// Recomputed residual of the row-scaled temperature-increment system.
+    /// Linear solves report its relative norm. Unchanged endpoint probes
+    /// report the roundoff-adjusted residual: `max(norm - Kelvin_roundoff, 0)`
+    /// divided by the load norm (absolute when the load is zero). Authored
+    /// k(T) uses the original nonlinear operator. See [`EnergyConfig::tolerance`].
     pub relative_residual: f64,
     /// Largest interior-face cell Péclet number `|F| / D`.
     pub max_cell_peclet: f64,
@@ -457,7 +463,9 @@ impl EnergySolution {
     }
 }
 
-/// One face's contribution `J = diag T_P - off T_N - rhs`.
+/// One face's contribution in temperatures relative to a common reference.
+/// Native constant-Cp advection omits its common `rho Cp Q T_ref` here;
+/// assembly adds the actual row divergence once, without assuming it is zero.
 #[derive(Debug, Clone, Copy)]
 struct FaceTerm {
     diag: f64,
@@ -514,7 +522,13 @@ impl Context<'_> {
     }
 
     fn checked_term(&self, c: usize, f: usize) -> Result<FaceTerm, ChtError> {
-        let term = self.term(c, f);
+        self.checked_centered_term(c, f, 0.0)
+    }
+
+    fn checked_centered_term(
+        &self, c: usize, f: usize, reference: f64,
+    ) -> Result<FaceTerm, ChtError> {
+        let term = self.term(c, f, reference);
         if !term.diag.is_finite()
             || !term.rhs.is_finite()
             || term
@@ -527,6 +541,24 @@ impl Context<'_> {
             });
         }
         Ok(term)
+    }
+
+    /// Evaluate a face term centered at its actual cell temperature. This makes
+    /// conduction a product with a temperature DIFFERENCE, including baths;
+    /// uniform temperature cannot create heat by cancellation of Kelvin terms.
+    fn outward_heat(
+        &self, term: &FaceTerm, c: usize, f: usize, temperature: &[f64],
+    ) -> Result<f64, ChtError> {
+        let reference = temperature[c];
+        let heat = term.off.map_or(0.0, |(n, a)| a * (reference - temperature[n]))
+            - term.rhs;
+        let heat = if self.enthalpy.is_none() {
+            // Preserve the native zero-K enthalpy convention even for a
+            // caller-supplied field with nonzero local volume divergence.
+            (self.rho_c * self.flow.outward(self.domain, c, f)).mul_add(reference, heat)
+        } else { heat };
+        finite("thermal.face_heat_w", heat)?;
+        Ok(heat)
     }
 
     fn contact(&self, c: usize, n: usize) -> f64 {
@@ -606,14 +638,14 @@ impl Context<'_> {
         if d.is_finite() && d > 0.0 { d } else { f64::NAN }
     }
 
-    fn enthalpy_boundary(&self, c: usize, f: usize) -> FaceTerm {
+    fn enthalpy_boundary(&self, c: usize, f: usize, reference: f64) -> FaceTerm {
         let field = self.enthalpy.expect("enthalpy path");
         let mass = self.density * self.flow.outward(self.domain, c, f);
         if mass >= 0.0 {
             let enthalpy = self.centered_enthalpy(field.cells[c].expect("admitted fluid boundary"));
             FaceTerm {
                 diag: mass * enthalpy.heat_capacity_j_kg_k, off: None,
-                rhs: -mass * enthalpy.intercept(),
+                rhs: -mass * enthalpy.at_temperature(reference),
                 advective: Advective::Affine { mass_flow_kg_s: mass, enthalpy },
             }
         } else {
@@ -623,7 +655,7 @@ impl Context<'_> {
         }
     }
 
-    fn term(&self, c: usize, f: usize) -> FaceTerm {
+    fn term(&self, c: usize, f: usize, reference: f64) -> FaceTerm {
         let axis = f / 2;
         let area = self.domain.face_area(c, axis);
         let half_c = 0.5 * self.domain.widths(c)[axis];
@@ -648,7 +680,7 @@ impl Context<'_> {
                     return FaceTerm {
                         diag: d + rate.max(0.0),
                         off: Some((n, d + (-rate).max(0.0))),
-                        rhs: -mass * h.intercept(),
+                        rhs: -mass * h.at_temperature(reference),
                         advective: Advective::None,
                     };
                 }
@@ -693,7 +725,7 @@ impl Context<'_> {
                 FaceTerm {
                     diag: half,
                     off: None,
-                    rhs: half * t,
+                    rhs: half * (t - reference),
                     advective: Advective::None,
                 }
             }
@@ -716,7 +748,7 @@ impl Context<'_> {
                 FaceTerm {
                     diag: u,
                     off: None,
-                    rhs: u * ambient,
+                    rhs: u * (ambient - reference),
                     advective: Advective::None,
                 }
             }
@@ -728,9 +760,9 @@ impl Context<'_> {
             },
             ThermalFace::Inflow { temperature } => {
                 if self.enthalpy.is_some() {
-                    let mut term = self.enthalpy_boundary(c, f);
+                    let mut term = self.enthalpy_boundary(c, f, reference);
                     term.diag += half;
-                    term.rhs += half * temperature;
+                    term.rhs += half * (temperature - reference);
                     return term;
                 }
                 let (diagonal, a) = self.scheme.face_coefficients(half, flux);
@@ -742,7 +774,7 @@ impl Context<'_> {
                 FaceTerm {
                     diag: diagonal,
                     off: None,
-                    rhs: a * temperature,
+                    rhs: a * (temperature - reference),
                     advective,
                 }
             }
@@ -750,7 +782,7 @@ impl Context<'_> {
                 backflow_temperature,
             } => {
                 if self.enthalpy.is_some() {
-                    return self.enthalpy_boundary(c, f);
+                    return self.enthalpy_boundary(c, f, reference);
                 }
                 if flux >= 0.0 {
                     FaceTerm {
@@ -764,7 +796,7 @@ impl Context<'_> {
                     FaceTerm {
                         diag: 0.0,
                         off: None,
-                        rhs: -j,
+                        rhs: -flux * (backflow_temperature - reference),
                         advective: Advective::Fixed(j),
                     }
                 }
@@ -1325,6 +1357,25 @@ fn solve_energy_field_kernel(
             setup.power_w[c]
         }
     };
+    // Keep every constitutive/material evaluation in physical Kelvin. Only
+    // the linear unknown is shifted, and its reference is selected from held
+    // problem/history data so nonlinear line-search residuals share a scale.
+    let temperature_reference = setup.faces.iter().find_map(|rule| match *rule {
+        ThermalFace::Inflow { temperature } => Some(temperature),
+        ThermalFace::Temperature(t) => Some(t),
+        ThermalFace::Convective { ambient, .. } => Some(ambient),
+        _ => None,
+    })
+        .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
+        .or_else(|| setup.cell_sinks.iter().find(|sink| sink.conductance_w_k > 0.0)
+            .map(|sink| sink.temperature_k))
+        .or_else(|| step.and_then(|step| step.previous.first().copied()))
+        .or_else(|| setup.faces.iter().find_map(|rule| match *rule {
+            ThermalFace::Outflow { backflow_temperature } => Some(backflow_temperature),
+            _ => None,
+        }))
+        .unwrap_or(0.0);
+    finite("thermal.temperature_reference_k", temperature_reference)?;
     let parts = setup.compact_components.len();
     let unknowns = cells + parts;
     if let Some(step) = step
@@ -1362,7 +1413,9 @@ fn solve_energy_field_kernel(
         }
         let slot = &mut sinks[sink.cell];
         slot.0 += sink.conductance_w_k;
-        slot.1 = sink.conductance_w_k.mul_add(sink.temperature_k, slot.1);
+        slot.1 = sink.conductance_w_k.mul_add(
+            sink.temperature_k - temperature_reference, slot.1,
+        );
         anchored |= sink.conductance_w_k > 0.0;
     }
     for c in 0..cells {
@@ -1377,7 +1430,7 @@ fn solve_energy_field_kernel(
         }
         if let Some(t) = fixed[c] {
             coo.push(c, c, 1.0);
-            b[c] = t;
+            b[c] = t - temperature_reference;
             continue;
         }
         let (mut diag, mut rhs) = match step {
@@ -1388,7 +1441,9 @@ fn solve_energy_field_kernel(
                 // Physical storage fixes the absolute temperature even when
                 // every boundary is insulated or supplies only a heat flux.
                 anchored = true;
-                (coefficient, coefficient.mul_add(step.previous[c], source(c)))
+                (coefficient, coefficient.mul_add(
+                    step.previous[c] - temperature_reference, source(c),
+                ))
             }
             None => (0.0, source(c)),
         };
@@ -1404,7 +1459,7 @@ fn solve_energy_field_kernel(
             if compact.toward_component(c, f) {
                 continue;
             }
-            let term = ctx.checked_term(c, f)?;
+            let term = ctx.checked_centered_term(c, f, temperature_reference)?;
             diag += term.diag;
             rhs += term.rhs;
             anchored |= term.off.is_none() && term.diag > 0.0;
@@ -1425,6 +1480,14 @@ fn solve_energy_field_kernel(
                 }
             }
         }
+        if ctx.enthalpy.is_none() {
+            // Centering native Cp*T advection removes the same datum on all
+            // faces. Retain its divergence explicitly; only a conservative
+            // flow makes it vanish. Summing facewise Kelvin products here
+            // would erase small heat sources before their cancellation.
+            rhs = (-(ctx.rho_c * flow.net_outflow(domain, c)))
+                .mul_add(temperature_reference, rhs);
+        }
         if diag <= 0.0 {
             return Err(ChtError::InvalidInput {
                 field: "thermal.faces",
@@ -1443,7 +1506,7 @@ fn solve_energy_field_kernel(
                 let coefficient = step.junction_coefficient_w_k[j];
                 finite_positive("thermal.storage.junction_coefficient_w_k", coefficient)?;
                 let previous = step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
-                let rhs = coefficient.mul_add(previous, part.power_w);
+                let rhs = coefficient.mul_add(previous - temperature_reference, part.power_w);
                 finite("thermal.storage.junction_rhs_w", rhs)?;
                 anchored = true;
                 (coefficient, rhs)
@@ -1465,43 +1528,59 @@ fn solve_energy_field_kernel(
     }
     let a = scale_rows(&coo, &mut b);
     let nonzeros = a.nnz();
-    let guess = setup
-        .faces
-        .iter()
-        .find_map(|rule| match *rule {
-            ThermalFace::Inflow { temperature } => Some(temperature),
-            ThermalFace::Temperature(t) => Some(t),
-            ThermalFace::Convective { ambient, .. } => Some(ambient),
-            _ => None,
-        })
-        .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
-        .unwrap_or(0.0);
     let warm = nonlinear.and_then(|(_, warm)| warm);
     let mut temperature = match (warm, step) {
         (Some(previous), _) => {
-            let mut start = previous.to_vec();
+            let mut start: Vec<_> = previous.iter().map(|t| t - temperature_reference).collect();
             start.extend(
                 setup
                     .compact_components
                     .iter()
-                    .map(|part| previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]),
+                    .map(|part| previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]
+                        - temperature_reference),
             );
             start
         }
         (None, Some(step)) => {
-            let mut warm = step.previous.to_vec();
+            let mut warm: Vec<_> = step.previous.iter().map(|t| t - temperature_reference).collect();
             warm.extend(
                 setup
                     .compact_components
                     .iter()
-                    .map(|part| step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]),
+                    .map(|part| step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]
+                        - temperature_reference),
             );
             warm
         }
-        (None, None) => vec![guess; unknowns],
+        (None, None) => vec![0.0; unknowns],
     };
     let outcome = if evaluate_only {
         let (residual, scale) = residual_norms(&a, &b, &temperature);
+        finite("thermal.endpoint_residual_k", residual)?;
+        finite("thermal.endpoint_load_k", scale)?;
+        // A representable Kelvin endpoint has already rounded theta+T_ref;
+        // subtraction into this coordinate can round once more. Propagate
+        // those componentwise uncertainties through the ACTUAL scaled rows.
+        // This is an absolute arithmetic floor, not a Kelvin-sized residual
+        // denominator that can conceal a physically representable heat load.
+        let mut roundoff = 0.0_f64;
+        for row in 0..unknowns {
+            if row.is_multiple_of(4096) { super::poll(gate)?; }
+            let (columns, values) = a.row(row);
+            let bound: f64 = columns.iter().zip(values).map(|(&column, coefficient)| {
+                let kelvin = warm.map_or(temperature[column] + temperature_reference, |candidate| {
+                    if column < cells { candidate[column] } else {
+                        let part = &setup.compact_components[column - cells];
+                        candidate[domain.index(part.lo[0], part.lo[1], part.lo[2])]
+                    }
+                });
+                coefficient.abs() * (f64::EPSILON * kelvin.abs()
+                    + f64::EPSILON * temperature[column].abs())
+            }).sum();
+            roundoff = roundoff.hypot(bound);
+        }
+        finite("thermal.endpoint_roundoff_k", roundoff)?;
+        let residual = (residual - roundoff).max(0.0);
         let relative_residual = if scale > 0.0 { residual / scale } else { residual };
         if !relative_residual.is_finite()
             || (residual_probe.is_none() && relative_residual > config.tolerance)
@@ -1519,12 +1598,22 @@ fn solve_energy_field_kernel(
         )?
     };
 
+    // Publish only physical temperatures. An unchanged endpoint probe keeps
+    // the caller's exact bits rather than subtracting and readding the datum.
+    if evaluate_only && let Some(previous) = warm {
+        temperature[..cells].copy_from_slice(previous);
+        for (j, part) in setup.compact_components.iter().enumerate() {
+            temperature[cells + j] = previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
+        }
+    } else {
+        for value in &mut temperature {
+            *value += temperature_reference;
+            finite("thermal.temperature_k", *value)?;
+        }
+    }
+
     // Independent accounting from boundary and fixed-cell fluxes.
     let (mut source_w, mut fixed_w, mut out_w, mut adv_w, mut scale) = (0.0, 0.0, 0.0, 0.0, 0.0f64);
-    let flux_of = |term: &FaceTerm, c: usize| {
-        let off = term.off.map_or(0.0, |(n, a)| a * temperature[n]);
-        term.diag.mul_add(temperature[c], -off) - term.rhs
-    };
     let mut sink_w = 0.0f64;
     let mut solid_fluid_links = Vec::new();
     let mut local_heat_residual = 0.0f64;
@@ -1538,13 +1627,13 @@ fn solve_energy_field_kernel(
         if !domain.is_fluid(c) {
             for f in 0..6 {
                 if let Some(n) = domain.neighbor(c, f) && domain.is_fluid(n) {
-                    let term = ctx.checked_term(c, f)?;
+                    let term = ctx.checked_centered_term(c, f, temperature[c])?;
                     let (_, g) = term.off.expect("interior solid/fluid face");
                     solid_fluid_links.push((c, n, g));
                 }
             }
         }
-        let sink = sinks[c].0.mul_add(temperature[c], -sinks[c].1);
+        let sink = sinks[c].0.mul_add(temperature[c] - temperature_reference, -sinks[c].1);
         if evaluate_only && fixed[c].is_none() {
             let mut residual = sink - source(c);
             let mut throughput = sink.abs() + source(c).abs();
@@ -1552,8 +1641,8 @@ fn solve_energy_field_kernel(
                 + sinks[c].1.abs() + source(c).abs();
             for f in 0..6 {
                 if compact.toward_component(c, f) { continue; }
-                let term = ctx.checked_term(c, f)?;
-                let heat = flux_of(&term, c);
+                let term = ctx.checked_centered_term(c, f, temperature[c])?;
+                let heat = ctx.outward_heat(&term, c, f, &temperature)?;
                 residual += heat;
                 throughput += heat.abs();
                 arithmetic += (term.diag * temperature[c]).abs() + term.rhs.abs()
@@ -1585,8 +1674,8 @@ fn solve_energy_field_kernel(
                 if compact.toward_component(c, f) {
                     continue;
                 }
-                let term = ctx.checked_term(c, f)?;
-                fixed_w += flux_of(&term, c);
+                let term = ctx.checked_centered_term(c, f, temperature[c])?;
+                fixed_w += ctx.outward_heat(&term, c, f, &temperature)?;
             }
             for &(j, g) in compact.links_of(c) {
                 fixed_w += g * (temperature[c] - temperature[cells + j]);
@@ -1599,7 +1688,7 @@ fn solve_energy_field_kernel(
             if domain.neighbor(c, f).is_some() {
                 continue;
             }
-            let term = ctx.checked_term(c, f)?;
+            let term = ctx.checked_centered_term(c, f, temperature[c])?;
             let advective = match term.advective {
                 Advective::None => 0.0,
                 Advective::OwnCell(q) => q * temperature[c],
@@ -1607,17 +1696,7 @@ fn solve_energy_field_kernel(
                     mass_flow_kg_s * enthalpy.at_temperature(temperature[c]),
                 Advective::Fixed(j) => j,
             };
-            // Centered enthalpy/diffusion avoids cancelling large affine
-            // matrix coefficients when auditing a small physical heat flux.
-            let j = if ctx.enthalpy.is_some() && domain.is_fluid(c) {
-                match setup.faces[f] {
-                    ThermalFace::Inflow { temperature: inlet } => advective
-                        + domain.face_area(c, f / 2) * ctx.k[c][f / 2]
-                            / (0.5 * domain.widths(c)[f / 2]) * (temperature[c] - inlet),
-                    ThermalFace::Outflow { .. } => advective,
-                    _ => flux_of(&term, c),
-                }
-            } else { flux_of(&term, c) };
+            let j = ctx.outward_heat(&term, c, f, &temperature)?;
             if fixed[c].is_none() {
                 out_w += j;
             } else {

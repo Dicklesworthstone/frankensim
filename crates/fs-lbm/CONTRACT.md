@@ -16,6 +16,34 @@ the initial isotropic pressure tensor, and integrated body impulse on periodic
 grids with nonuniform density and spatial forcing. These establish the stated
 initialization and balance laws, not a new whole-solver convergence claim.
 
+## Centered temperatures in conjugate conduction
+
+The native scalar/axis-aligned finite-volume energy solve uses temperature
+increments about a reference selected from held bath, prescribed-cell, sink or
+old-time data. Boundary, sink and storage loads use temperature differences;
+material conductivity, contacts, radiation and caloric queries keep physical
+Kelvin. The original sparse operator and iteration budget remain in use.
+Native constant-Cp advection retains its zero-K enthalpy convention through the
+actual local volume-divergence term; source-owned affine enthalpy evaluates its
+original tangent at the reference without replacing its caloric datum.
+
+Physical face accounting centers the same face equation at its actual cell
+temperature. Pure conduction therefore vanishes exactly at equal temperatures.
+Nonlinear endpoint algebra checks subtract only the actual row-propagated
+uncertainty from Kelvin rounding and coordinate subtraction, then apply the
+requested increment residual tolerance. Independent physical heat checks remain
+active; an absolute Kelvin-sized residual denominator cannot hide a small load.
+These result-changing semantics are version 8 of `CHT_SEMANTICS_VERSION`.
+
+Six focused regression definitions cover small heat loads across conductivity
+contrasts and Kelvin datums, exact uniform equilibrium, finite-contact heat and
+fixed-cell reactions, closed-body transient storage, and nonzero-divergence
+open-flow accounting, including backflow-only reservoirs. Pinned Rust syntax
+checks and five native tests of the original face kernels and reference selection
+passed, including reciprocal affine-enthalpy transport. Full integration execution
+remains pending after the dependency build exhausted shared resources; the native
+kernel checks do not establish full solver, convergence or performance claims.
+
 ## Conducting walls in native open-flow heat transport
 
 `ThermalOpenField3::set_wall_conduction(axis, links, controls)` attaches the existing implicit finite-wall graph to an original lower/upper external wall pair. Multiple axis pairs can coexist, including both transverse pairs of a rectangular duct. Link indices omit the selected normal coordinate and retain the original x-fast surface order. Every endpoint must face an active fluid cell; blocked wall-array slots cannot become hidden solid storage or consume sources.

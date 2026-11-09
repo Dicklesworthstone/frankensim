@@ -237,7 +237,10 @@ pub use unsteady::{
 /// half-faces of a pressure opening and admits authored backflow velocities.
 /// Version 7 requires the steady thermal endpoint to agree with the temperature
 /// driving LBM buoyancy and uses the actual final lattice-batch duration.
-pub const CHT_SEMANTICS_VERSION: u32 = 7;
+/// Version 8 solves thermal increments about a held Kelvin reference and audits
+/// conductive heat from temperature differences, retaining native advective
+/// datum/divergence and source-owned affine enthalpy semantics.
+pub const CHT_SEMANTICS_VERSION: u32 = 8;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

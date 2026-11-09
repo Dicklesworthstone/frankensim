@@ -95,6 +95,151 @@ fn composite_slab_conduction_is_exact() {
 }
 
 #[test]
+fn centered_conduction_resolves_small_heating_in_high_conductivity_solids() {
+    // A one-cell slab has the exact conductance G = k A / (dx/2).
+    // This rise is representable at both datums, but below the previous
+    // relative residual of the absolute-Kelvin right-hand side.
+    let rise = 2_f64.powi(-34);
+    for datum in [300.0, 1200.0] {
+        for conductivity in [0.17, 401.0, 1e9] {
+            let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+            let solids = [SolidMaterial::new("conducting slab", conductivity)];
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            faces[0] = ThermalFace::Temperature(datum);
+            let mut setup = ThermalSetup::new(faces);
+            let power = 2.0 * conductivity * rise;
+            setup.power_w = vec![power];
+            let result = solve_energy(
+                &domain, &unit_fluid(), &solids, &FlowField::quiescent(&domain),
+                &setup, &EnergyConfig::default(), &CancelGate::new(),
+            ).unwrap();
+            assert_eq!(result.temperature[0], datum + rise);
+            assert!(result.report.iterations > 0, "a nonzero heat load needs a solve");
+            assert!((result.report.balance.boundary_outflow_w - power).abs()
+                <= 4.0 * f64::EPSILON * power);
+        }
+    }
+}
+
+#[test]
+fn centered_conduction_uniform_kelvin_has_exactly_zero_heat() {
+    let datum = 312.345_678_901;
+    let domain = VoxelDomain::from_fn(3, 2, 1, 0.13, |p| {
+        Voxel::Solid(u16::from(p[0] > 0.2))
+    }).unwrap();
+    let solids = [SolidMaterial::new("low k", 0.17), SolidMaterial::new("high k", 401.0)];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(datum);
+    faces[1] = ThermalFace::Convective { h: 3.7, ambient: datum };
+    let mut setup = ThermalSetup::new(faces);
+    setup.cell_sinks.push(fs_lbm::conjugate::CellSink {
+        cell: 0, conductance_w_k: 0.37, temperature_k: datum,
+    });
+    setup.fixed_temperature.push((domain.cell_count() - 1, datum));
+    let result = solve_energy(
+        &domain, &unit_fluid(), &solids, &FlowField::quiescent(&domain),
+        &setup, &EnergyConfig::default(), &CancelGate::new(),
+    ).unwrap();
+    assert!(result.temperature.iter().all(|&t| t == datum));
+    assert_eq!(result.report.iterations, 0);
+    assert_eq!(result.report.balance.fixed_cell_injection_w, 0.0);
+    assert_eq!(result.report.balance.boundary_outflow_w, 0.0);
+    assert_eq!(result.report.balance.sink_outflow_w, 0.0);
+    assert_eq!(result.report.balance.residual_w, 0.0);
+}
+
+#[test]
+fn centered_conduction_keeps_tiny_contact_heat_and_fixed_cell_reaction() {
+    let domain = VoxelDomain::from_fn(2, 1, 1, 1.0, |p| {
+        Voxel::Solid(u16::from(p[0] > 1.0))
+    }).unwrap();
+    let solids = [SolidMaterial::new("insulator", 1e-4), SolidMaterial::new("metal", 400.0)];
+    let contact = 0.37;
+    let conductance = 1.0 / (0.5 / 1e-4 + contact + 0.5 / 400.0);
+    let rise = 2_f64.powi(-30);
+    let power = conductance * rise;
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.fixed_temperature.push((0, 300.0));
+    setup.power_w = vec![0.0, power];
+    setup.contacts.push(ContactResistance { materials: (0, 1), resistance_m2_k_w: contact });
+    let result = solve_energy(
+        &domain, &unit_fluid(), &solids, &FlowField::quiescent(&domain),
+        &setup, &EnergyConfig::default(), &CancelGate::new(),
+    ).unwrap();
+    assert_eq!(result.temperature, vec![300.0, 300.0 + rise]);
+    assert!((result.report.balance.fixed_cell_injection_w + power).abs()
+        <= 4.0 * f64::EPSILON * power);
+    assert_eq!(result.report.balance.boundary_outflow_w, 0.0);
+}
+
+#[test]
+fn centered_conduction_keeps_small_neumann_storage_increments() {
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let capacity = 3.7;
+    let rise = 2_f64.powi(-34);
+    let solids = [SolidMaterial::new("closed body", 401.0).with_heat_capacity(capacity)];
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.power_w = vec![capacity * rise];
+    let result = march_energy(
+        &domain, &unit_fluid(), &solids, &FlowField::quiescent(&domain),
+        &setup, &[300.0], |_| 1.0,
+        &TransientConfig { time_step_s: 1.0, steps: 1, energy: EnergyConfig::default() },
+        None, &CancelGate::new(),
+    ).unwrap();
+    assert_eq!(result.temperature[0], 300.0 + rise);
+    let record = result.records[0];
+    assert!((record.stored_energy_change_j - capacity * rise).abs()
+        <= 4.0 * f64::EPSILON * capacity * rise);
+    assert_eq!(record.boundary_outflow_j, 0.0);
+}
+
+#[test]
+fn centered_conduction_preserves_actual_nonzero_advective_divergence() {
+    // A prescribed non-solenoidal flow still transports the original Cp*T.
+    // For this one-cell upwind equation, (2*k + F_out) T =
+    // (2*k + F_in) T_bath + P. Erasing datum*div(F) would give a different T.
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Fluid).unwrap();
+    let flow = FlowField::from_face_velocity(&domain, OPEN_X, |axis, p| {
+        if axis == 0 { 1.0 + p[0] } else { 0.0 }
+    }).unwrap();
+    assert_eq!(flow.net_outflow(&domain, 0), 1.0);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    let mut setup = ThermalSetup::new(faces);
+    setup.power_w = vec![5.0];
+    let config = EnergyConfig { scheme: ConvectionScheme::Upwind, ..EnergyConfig::default() };
+    let result = solve_energy(
+        &domain, &unit_fluid(), &[], &flow, &setup, &config, &CancelGate::new(),
+    ).unwrap();
+    assert_eq!(result.temperature[0], (3.0 * 300.0 + 5.0) / 4.0);
+    assert!((result.report.balance.boundary_outflow_w - 5.0).abs() < 1e-12);
+    assert!((result.report.balance.advective_outflow_w - 152.5).abs() < 1e-12);
+}
+
+#[test]
+fn centered_conduction_resolves_tiny_load_with_backflow_reservoirs_only() {
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Fluid).unwrap();
+    let flow = FlowField::from_face_velocity(&domain, OPEN_X, |axis, _| {
+        if axis == 0 { 1.0 } else { 0.0 }
+    }).unwrap();
+    let datum = 300.0;
+    let rise = 2_f64.powi(-34);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Outflow { backflow_temperature: datum };
+    faces[1] = ThermalFace::Outflow { backflow_temperature: datum };
+    let mut setup = ThermalSetup::new(faces);
+    setup.power_w = vec![rise]; // rho Cp Q = 1 W/K; no diffusive boundary.
+    let config = EnergyConfig { scheme: ConvectionScheme::Upwind, ..EnergyConfig::default() };
+    let result = solve_energy(
+        &domain, &unit_fluid(), &[], &flow, &setup, &config, &CancelGate::new(),
+    ).unwrap();
+    assert_eq!(result.temperature[0], datum + rise);
+    assert!(result.report.iterations > 0);
+    assert_eq!(result.report.balance.boundary_outflow_w, rise);
+}
+
+#[test]
 fn two_resistor_component_matches_its_network() {
     // A 4 x 4 x 2-cell compact component between two k = 5 slabs (2 cells
     // each) held at 300 K below and 310 K above: the junction sees two paths,
