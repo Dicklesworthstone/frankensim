@@ -189,6 +189,53 @@ incompatibility, late failure/cancellation, work-budget refusal and exact retry.
 All six plus the five original Hertz heat regressions pass in the bounded
 actual-source closure; full workspace proof remains separate.
 
+## Finite-reservoir stream exchange driving nonlinear membrane motion
+
+`GasMembraneThermalMotion::step_discrete_gradient_with_nozzle` connects the
+first moving chamber to an explicit finite, fixed-volume reservoir through the
+original source-backed converging nozzle. Ideal mixtures and homogeneous
+Peng--Robinson parcels retain their native throat, choking, acoustic/caloric
+state, species identities, source metadata and donor/receiver inversion controls.
+Different source families or unavailable cross-species interactions refuse.
+Direction follows actual accepted absolute pressures on every call.
+
+The native nozzle first transfers species and upstream total enthalpy at fixed
+volumes. The resulting chamber then drives the existing discrete Gibbs
+membrane trajectory, including its exact swept-volume pressure work, native
+derivative, endpoint physical pressure and all support rows. An opposing sealed
+gas retains its own heat, volume and work account. Prescribed heat is external
+energy only; transferred enthalpy, flow work and thermalized stream energy are
+not deposited again. No nominal gas constant or nonideal pressure correction is
+introduced.
+
+The reported whole-interval chamber storage includes stream and mechanical
+stages. Whole-pair energy combines the original reference-safe transfer residual
+with the independently gated native mechanical integration defect; species
+formation datums cancel inside their source owner before rounded extensive
+reports are formed. Endpoint mass is checked independently. The reservoir and
+both chamber states, mechanics, time and accepted history publish only after
+all source, work, energy and final cancellation checks. Private trial motion
+starts without copied old history, which moves once at final publication. A
+closed nozzle gives the unchanged native Gibbs state and history.
+
+This remains a first-order transfer-then-motion split over one physical interval.
+Donor-fraction and source pressure-crossing bounds refuse rather than clip mass.
+Physical-time refinement is required: a small conservation residual is not a
+splitting-error estimate. The nozzle opening belongs to the rigid enclosure;
+resolved pipe/jet momentum, membrane impingement and reaction-force receipts
+are outside this homogeneous chamber model. No open-system entropy/passivity,
+spatial gas equilibration or phase-transition claim is added.
+
+Five focused native regression definitions cover choked ideal-mixture inflow
+and continued history, discharge with an independently heated sealed opposing
+gas, exact PR source/nozzle/Gibbs parity, closed-nozzle identity for both source
+families, and source/native-budget/whole-pair/final-poll rollback with exact retry.
+They include independent finite-fixture energy checks and endpoint pressure
+reactions. All five changed Rust files parse with Rust 2024 rustfmt; the two new
+implementation/test modules were formatted. The complete coupled tests were
+not compiled or executed because the available native dependency closure still
+lacks the original material/solid/time stack.
+
 ## Finite-body thermal contact in nonlinear membrane pressure motion
 
 `GasMembraneThermalMotion::thermal_discrete_gradient_candidate` solves one

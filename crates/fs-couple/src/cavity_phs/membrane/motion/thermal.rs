@@ -1,5 +1,9 @@
 //! Continuing motion with source-owned simultaneous heating and volume work.
 mod contact;
+mod exchange;
+pub use exchange::{
+    GasMembraneNozzleDirection, GasMembraneNozzleFlow, GasMembraneNozzleSolve, GasMembraneNozzleStep,
+};
 mod gas;
 mod operator;
 pub use contact::{
@@ -150,9 +154,11 @@ pub type GasMembraneDiscreteGradientStep = GasMembraneHeatVolumeStep<GasDiscrete
 ///
 /// No isentropic tangent is substituted under heating. Heat is prescribed
 /// energy from/to an external owner, not a reservoir-temperature or transport
-/// law. Composition, gas mass, geometry/support binding and reference masses
-/// are retained. Gas waves, phase change, heat-transfer/source dynamics and
-/// moving supports are outside this path.
+/// law. The closed-step methods retain composition and gas mass. The nozzle
+/// entry composes original finite-reservoir stream transfer before this same
+/// motion; finite-body contact has its separate source-owned candidate. All
+/// entries retain geometry/support binding and reference structural masses.
+/// Gas waves, phase change and moving supports are outside these paths.
 #[derive(Clone)]
 pub struct GasMembraneThermalMotion<'m, 'p> {
     model: &'m GasMembrane<'p>,

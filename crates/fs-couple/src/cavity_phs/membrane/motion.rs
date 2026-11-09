@@ -9,6 +9,7 @@ mod operator;
 mod thermal;
 pub use thermal::{
     GasMembraneContactCandidate, GasMembraneContactError, GasMembraneContactStep, MembraneGasSample,
+    GasMembraneNozzleDirection, GasMembraneNozzleFlow, GasMembraneNozzleSolve, GasMembraneNozzleStep,
     GasMembraneDiscreteGradientStep, GasMembraneHeatVolumeStep, GasMembraneThermalControls,
     GasMembraneThermalEvaluation, GasMembraneThermalMotion, GasMembraneThermalStep,
 };

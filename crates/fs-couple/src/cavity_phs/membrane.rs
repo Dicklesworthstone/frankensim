@@ -13,6 +13,7 @@ mod motion;
 pub use motion::{GasMembraneMotion, GasMembraneMotionControls, GasMembraneMotionError, GasMembraneMotionStep};
 pub use motion::{
     GasMembraneContactCandidate, GasMembraneContactError, GasMembraneContactStep, MembraneGasSample,
+    GasMembraneNozzleDirection, GasMembraneNozzleFlow, GasMembraneNozzleSolve, GasMembraneNozzleStep,
     GasMembraneDiscreteGradientStep, GasMembraneHeatVolumeStep, GasMembraneThermalControls,
     GasMembraneThermalEvaluation, GasMembraneThermalMotion, GasMembraneThermalStep,
 };
