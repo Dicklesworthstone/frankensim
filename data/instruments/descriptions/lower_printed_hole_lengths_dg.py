@@ -19,8 +19,9 @@ lowering of the same printed set that `fs-duct/src/hole_lengths.rs` (`HoleLength
 
 NAMED, NOT HIDDEN:
   * G(ka) of Eq. 32 is FROZEN AT 1 (its ka -> 0 value): a DG chimney is a duct of one constant length, and the printed inner
-    length's frequency factor G = 1 + H(d) I(ka) cannot be a function of frequency there. On the live route G acts (ka <= 1);
-    the difference is t_i (G - 1), a few percent of t_i at ka = 0.3 for a clarinet-like hole.
+    length's frequency factor G = 1 + H(d) I(ka) cannot be a function of frequency there. On the live route G acts (the printed
+    quartic to ka = 1, a declared continuation above it); the difference is t_i (G - 1), a few percent of t_i at ka = 0.3 for a
+    clarinet-like hole.
   * The signed SERIES length t_a (Eq. 33 open, Eq. 34 closed), an inertance acting on the BORE at the hole, is ABSENT: a DG
     junction has no series element, and this script does not fake one. The pitch share of t_a is therefore not in this card.
   * A hole with b >= a keeps the engine's terms on the live route (the fits are printed for d <= 1); here it is REFUSED by name.
