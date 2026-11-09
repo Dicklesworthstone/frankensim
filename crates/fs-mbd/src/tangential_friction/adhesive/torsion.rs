@@ -16,7 +16,9 @@
 //! Held COM forces and body-frame torques drive the same native solve and
 //! contribute their actual work. A driven reversal requires interval refinement.
 //! [`normal`] continues a loaded spring through a prescribed normal-area change.
+//! [`events`] carries native twist through separation and fresh recontact.
 
+pub mod events;
 pub mod normal;
 
 use super::super::hertz::RigidHertzError;

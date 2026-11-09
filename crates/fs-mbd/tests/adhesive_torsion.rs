@@ -2,6 +2,9 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_torsion/events.rs"]
+mod events;
+
 #[path = "adhesive_torsion/normal.rs"]
 mod normal;
 

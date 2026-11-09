@@ -9,7 +9,10 @@ use super::super::{
     ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, magnitude, poll,
     rounded_components,
 };
-use crate::{DynamicsError, MassProperties, PointKinematics, Pose, RigidBodyState, Vec3, Wrench};
+use crate::{
+    DynamicsError, MassProperties, MomentumImpulseReceipt, PointKinematics, Pose, RigidBodyState,
+    Vec3, Wrench,
+};
 use fs_contact::normal_patch::adhesive::{rolling::*, torsion::*};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -200,6 +203,125 @@ impl<S: MomentSource> From<RigidFrictionError> for MomentError<S> {
     fn from(error: RigidFrictionError) -> Self {
         Self::Mechanics(error.into())
     }
+}
+
+/// Original native free-body phase when a bonded moment junction is absent.
+/// Both lifecycle owners retain the same actual momentum/work and turn gates.
+pub(super) struct DetachedPhase {
+    pub impulses: [MomentumImpulseReceipt; 2],
+    pub angle: f64,
+    pub kinetic: f64,
+    pub work: f64,
+    pub defect: f64,
+    pub linear_residual: Vec3,
+    pub angular_residual: Vec3,
+}
+
+/// Called only after the original pair/geometry, controls and duration admit.
+/// The selected source type carries errors; no constitutive source acts while
+/// detached, and the measured angular travel creates no spring memory.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_detached<S: MomentSource>(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    axis: Vec3,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidAdhesiveMomentControls,
+    gate: &CancelGate,
+) -> Result<DetachedPhase, MomentError<S>> {
+    let apply = |i: usize| -> Result<_, MomentError<S>> {
+        poll(gate)?;
+        wrenches[i].validate()?;
+        Ok(before[i].apply_momentum_impulse(
+            properties[i],
+            wrenches[i].force_world.scale(dt_s),
+            wrenches[i].torque_body.scale(dt_s),
+        )?)
+    };
+    // Each original native receipt independently retains actual momentum and
+    // kinetic change, commanded midpoint work and their compensated defect.
+    let impulses = [apply(0)?, apply(1)?];
+    let mut kinetic = Dd::ZERO;
+    let mut work = Dd::ZERO;
+    let mut defect = Dd::ZERO;
+    let mut linear = [Dd::ZERO; 3];
+    let mut angular = [Dd::ZERO; 3];
+    for receipt in impulses {
+        if magnitude(receipt.linear_residual_world) > controls.linear_momentum_tolerance_ns
+            || magnitude(receipt.angular_residual_body) > controls.angular_momentum_tolerance_nms
+        {
+            return Err(MomentError::Invalid(
+                "detached applied impulse exceeds native momentum tolerance",
+            ));
+        }
+        kinetic = kinetic + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        work = work + Dd::from_f64(receipt.work.impulse_work_j);
+        defect = defect + Dd::from_f64(receipt.work.work_energy_residual_j.abs());
+        add_components(&mut linear, receipt.linear_residual_world);
+        let pose = receipt.state_before.pose();
+        add_components(
+            &mut angular,
+            pose.position_world().cross(receipt.linear_residual_world),
+        );
+        add_components(
+            &mut angular,
+            pose.orientation()
+                .rotate_body_to_world(receipt.angular_residual_body),
+        );
+    }
+    let linear_residual = rounded_components(linear);
+    let angular_residual = rounded_components(angular);
+    // Keep independently recovered per-body work defects as well as the summed
+    // reported work balance; neither opposite body defects nor large totals can
+    // hide a rejected impulse. The original owner computes all kinetic work.
+    defect = defect + (kinetic - work).abs();
+    if [kinetic.to_f64(), work.to_f64(), defect.to_f64()]
+        .iter()
+        .any(|v| !v.is_finite())
+        || defect.to_f64() > controls.energy_tolerance_j
+        || !linear_residual.is_finite()
+        || !angular_residual.is_finite()
+        || magnitude(linear_residual) > controls.linear_momentum_tolerance_ns
+        || magnitude(angular_residual) > controls.angular_momentum_tolerance_nms
+    {
+        return Err(MomentError::Invalid(
+            "detached applied-load work or momentum balance exceeds tolerance",
+        ));
+    }
+    let initial = points(before, properties, arms)?;
+    let final_points = points(impulses.map(|r| r.state_after), properties, arms)?;
+    let rate_before = relative_spin(initial).dot(axis);
+    let rate_after = relative_spin(final_points).dot(axis);
+    let angle = ((Dd::from_f64(rate_before) + Dd::from_f64(rate_after)) * Dd::from_f64(0.5 * dt_s))
+        .to_f64();
+    if !angle.is_finite() || angle.abs() > controls.maximum_angle_increment_rad {
+        return Err(MomentError::StepLimit);
+    }
+    if (rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0) {
+        // Constant held acceleration can turn between equal-angle endpoints.
+        // Admit the actual quadratic turning excursion, not just net travel.
+        let scale = rate_before.abs().max(rate_after.abs());
+        let first = rate_before.abs() / scale;
+        let fraction = first / (first + rate_after.abs() / scale);
+        let excursion =
+            (Dd::from_f64(rate_before) * Dd::from_f64(0.5 * dt_s) * Dd::from_f64(fraction))
+                .to_f64();
+        if !excursion.is_finite() || excursion.abs() > controls.maximum_angle_increment_rad {
+            return Err(MomentError::StepLimit);
+        }
+    }
+    poll(gate)?;
+    Ok(DetachedPhase {
+        impulses,
+        angle,
+        kinetic: kinetic.to_f64(),
+        work: work.to_f64(),
+        defect: defect.to_f64(),
+        linear_residual,
+        angular_residual,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
