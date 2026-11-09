@@ -1,4 +1,7 @@
 //! G1/G3/G4: native arrest, original finite heat and endpoint source feedback.
+#[path = "trajectory/march.rs"]
+mod march;
+
 use super::*;
 use fs_couple::friction_heat::hertz::trajectory::propose_rigid_hertz_trajectory_heat;
 use fs_mbd::tangential_friction::hertz::trajectory::{

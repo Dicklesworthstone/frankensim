@@ -32,6 +32,8 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use fs_tribo::partial_slip::TangentFrame;
 use std::cell::Cell;
 
+/// Time-resolved thermal feedback through accepted original Hertz phases.
+pub mod march;
 /// Source-resolved simultaneous Hertz patches on one finite body/heat island.
 pub mod multiple;
 /// Original finite-body stopping trajectories and their finite-cell heat.

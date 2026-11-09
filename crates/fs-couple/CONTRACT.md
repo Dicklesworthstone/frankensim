@@ -1,3 +1,31 @@
+## Time-resolved Hertz friction and finite-cell cooling
+
+`friction_heat::hertz::march` composes the original exact or curved native,
+source and finite-cell phases over a held-geometry horizon. Full-step versus
+two-half-step comparisons admit only the fine original physical states.
+Individual body momentum, cell energy, net slip/spin and physical heat estimates
+govern refinement. Accepted phase receipts retain original source identity and
+native arrest/tail evidence. Stationary phases retain ordinary conduction
+without frictional heat.
+
+Explicit work limits include discarded thermal trials and accepted receipt
+count. Any source, event, numerical, budget or cancellation refusal leaves the
+complete input span untouched. The existing retained native kinetic-change
+owner and compensated caloric/source sums independently gate whole-span energy;
+numerical work defects are never deposited as heat.
+
+Comparisons estimate local error rather than certified or global bounds.
+Original source/event cuts, native trajectory accuracy, spatial refinement and
+fixed poses, geometry, load and radius remain explicit. This composes the
+existing temperature-dependent Hertz phases; it adds no alternative friction
+history, heat store, drive, normal evolution or moving footprint.
+
+Four G1/G3/G4 additions check continuous thermal fade/arrest against an
+independent ODE, rest-only hot/cold transport, curved motion under continuously
+changing temperature, and late whole-span refusal with exact retry. All four
+and the eleven original Hertz heat tests pass in the bounded actual-source
+material, native mechanics, Newton/FGMRES and finite-cell thermal build.
+
 ## Source-resolved Hertz trajectories with finite-cell heat
 
 `friction_heat::hertz::{trajectory,transient}` compose the original exact-direction
