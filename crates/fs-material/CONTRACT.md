@@ -23707,3 +23707,36 @@ accommodation, and original accepted vacuum/reciprocal receipt identity and
 conservation; these were authored and statically reviewed but not compiled or
 executed after the workspace became unavailable. Recovered source has no new
 native formatting or compilation claim.
+
+
+### Shared Kelvin creep for simultaneous contact solves
+
+`fiber::felt_rate::{CreepSpectrum, PreparedCreep}` exposes the same intrinsic
+series Kelvin owner used by `RateFelt`, without requiring an invented nonlinear
+spring merely to convert a Prony card. Cold conversion still retains every
+resolved observable source arm and checks the original source equations.
+The consumer supplies area/thickness and its own simultaneous mechanical
+force solve. No contact geometry, default envelope or material fit enters
+the intrinsic owner.
+
+Fixed-clock preparation caches the decay, complementary response and direct
+positive loss factor. A weak exposure uses a compensated increment; a strong
+exposure uses equilibrium plus the surviving exponential tail. Thus a
+representable free recovery at exp(-100) survives even when 1-exp(-100)
+rounds to one. Successful warm operations use bounded eight-arm arithmetic,
+fixed-size checkpoints, no allocation and no branch exponential.
+
+Held-stress trials report accepted-state work and storage change, independent
+Kelvin heat, the actual balance residual and a visible numerical estimate of
+state-rounding error. An equilibrated history can remain at the same float
+when its physical increment is below checkpoint resolution; that defect is
+reported and must fit the estimate. This is not an interval certificate or a
+time/model-error allowance. The existing full RateFelt owner retains its
+stricter material-state acceptance. Neither API mutates caller history.
+
+Six new focused native source groups pass: analytic creep/recovery and heat,
+surviving long-time tails, 25,000 held-stress steps, common-kernel parity with
+RateFelt, empty/zero-clock/invalid-state behavior, and direct Prony realization.
+All eleven existing felt/Prony source groups also pass. This source harness
+uses original numerical functions and real fs-math/fs-evidence dependencies;
+full fs-material/runtime integration remains unverified.

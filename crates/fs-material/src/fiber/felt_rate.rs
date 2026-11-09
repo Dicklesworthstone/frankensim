@@ -12,7 +12,10 @@ use super::{Uniaxial, WoolFelt, WoolFeltResponse, WoolFeltState};
 use crate::MaterialError;
 use fs_math::{dd::Dd, det};
 
+mod creep;
 mod prony;
+use creep::PreparedBranch;
+pub use creep::{CreepAdvance, CreepSpectrum, PreparedCreep};
 
 /// The original source realization retains at most eight active material arms.
 pub const MAX_FELT_RATE_BRANCHES: usize = 8;
@@ -58,13 +61,6 @@ pub struct RateFeltResponse {
     pub creep_dissipation_j_m3: f64,
     pub crush_dissipation_j_m3: f64,
     pub balance_residual_j_m3: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct PreparedBranch {
-    modulus: f64,
-    fraction: f64,
-    loss_fraction: f64,
 }
 
 /// Prepared original law and fixed nonnegative interval. Warm trials allocate
@@ -124,19 +120,7 @@ fn power_difference(high: f64, low: f64, power: f64) -> f64 {
 impl RateFelt {
     pub fn new(envelope: WoolFelt, creep: Vec<CreepBranch>) -> Result<Self, MaterialError> {
         envelope.response(0.0, &envelope.initial_state())?;
-        if creep.len() > MAX_FELT_RATE_BRANCHES
-            || creep.iter().any(|b| {
-                !b.modulus_pa.is_finite()
-                    || b.modulus_pa <= 0.0
-                    || !b.viscosity_pa_s.is_finite()
-                    || b.viscosity_pa_s <= 0.0
-            })
-        {
-            return Err(MaterialError::Parameters {
-                what: "felt creep needs at most eight positive finite modulus/viscosity pairs"
-                    .into(),
-            });
-        }
+        creep::validate_branches(&creep)?;
         Ok(Self { envelope, creep })
     }
 
@@ -160,38 +144,12 @@ impl RateFelt {
     }
 
     pub fn prepare(&self, duration_s: f64) -> Result<PreparedRateFelt, MaterialError> {
-        if !duration_s.is_finite() || duration_s < 0.0 {
-            return Err(bad("finite nonnegative duration required"));
-        }
-        let mut branches = [PreparedBranch::default(); MAX_FELT_RATE_BRANCHES];
-        let mut compliance = Dd::ZERO;
-        for (i, branch) in self.creep.iter().enumerate() {
-            let tau = branch.viscosity_pa_s / branch.modulus_pa;
-            if !tau.is_finite() || tau <= 0.0 {
-                return Err(bad("unrepresentable retardation time"));
-            }
-            let exposure = duration_s / tau;
-            if duration_s > 0.0 && exposure == 0.0 {
-                return Err(bad("unresolved positive creep exposure"));
-            }
-            let fraction = -det::expm1(-exposure);
-            let loss_fraction = -det::expm1(-2.0 * exposure);
-            let response = fraction / branch.modulus_pa;
-            if !response.is_finite() || (fraction > 0.0 && response == 0.0) {
-                return Err(bad("unrepresentable positive creep response"));
-            }
-            branches[i] = PreparedBranch {
-                modulus: branch.modulus_pa,
-                fraction,
-                loss_fraction,
-            };
-            compliance = compliance + dd(response);
-        }
+        let (branches, compliance) = creep::prepare_branches(&self.creep, duration_s)?;
         Ok(PreparedRateFelt {
             law: self.clone(),
             duration: duration_s,
             branches,
-            compliance: finite(compliance.to_f64(), "creep compliance overflow")?,
+            compliance,
         })
     }
 
@@ -346,16 +304,7 @@ impl PreparedRateFelt {
         self.free_strain(state)
     }
     fn free_strain(&self, state: &RateFeltState) -> Result<f64, MaterialError> {
-        finite(
-            self.branches[..self.law.creep.len()]
-                .iter()
-                .zip(&state.creep_strain)
-                .fold(Dd::ZERO, |sum, (b, z)| {
-                    sum + dd(*z) - dd(b.fraction) * dd(*z)
-                })
-                .to_f64(),
-            "free creep strain overflow",
-        )
+        creep::free_strain(&self.branches[..self.law.creep.len()], &state.creep_strain)
     }
 
     /// Exact held nonnegative stress for the creep arms. A zero-stress command
@@ -493,14 +442,10 @@ impl PreparedRateFelt {
         let mut storage_change = spring_change;
         let mut stored = dd(after_spring);
         for (i, b) in self.branches[..self.law.creep.len()].iter().enumerate() {
-            let before = dd(state.creep_strain[i]);
-            let target = dd(stress) / dd(b.modulus);
-            let change = dd(b.fraction) * (target - before);
-            let after = finite((before + change).to_f64(), "creep strain overflow")?;
-            if after < 0.0 {
-                return Err(bad("negative physical creep strain"));
-            }
-            let actual = dd(after) - before;
+            let step = b.advance(state.creep_strain[i], stress)?;
+            let after = step.after;
+            let change = step.change;
+            let actual = step.actual;
             let scale = after
                 .abs()
                 .max(state.creep_strain[i])
@@ -512,13 +457,9 @@ impl PreparedRateFelt {
             }
             next.creep_strain[i] = after;
             total = total + dd(after);
-            let lost = dd(0.5)
-                * dd(b.modulus)
-                * dd(b.loss_fraction)
-                * (before - target)
-                * (before - target);
-            let branch_work = dd(stress) * actual;
-            let branch_change = dd(0.5) * dd(b.modulus) * (dd(after) + before) * actual;
+            let lost = step.heat;
+            let branch_work = step.work;
+            let branch_change = step.stored_change;
             let branch_scale = branch_work
                 .to_f64()
                 .abs()
@@ -533,7 +474,7 @@ impl PreparedRateFelt {
             work = work + branch_work;
             heat = heat + lost;
             storage_change = storage_change + branch_change;
-            stored = stored + dd(0.5) * dd(b.modulus) * dd(after) * dd(after);
+            stored = stored + step.stored;
         }
         let represented = finite(total.to_f64(), "total felt strain overflow")?;
         next.strain = requested_strain.unwrap_or(represented);
