@@ -17,7 +17,10 @@
 use super::{RansChannelGrid, RansFieldState, RansSolver};
 
 mod thermal;
-pub use thermal::{RansHeatCoupling, RansHeatLoad, RansThermalTransportReport};
+pub use thermal::{
+    RansConjugateHeatLoad, RansConjugateReport, RansConjugateWall, RansConjugateWorkspace,
+    RansHeatCoupling, RansHeatLoad, RansThermalTransportReport, RansWallLayer,
+};
 mod adaptive;
 pub use adaptive::{
     RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,

@@ -1814,3 +1814,60 @@ regressions now enter through decoded tensor and declared vector boundary
 rows. This extension received source review only: the execution environment
 became unavailable during runtime-dependency compilation before these changes
 could be compiled or tested.
+
+## Finite conducting walls with transported RANS
+
+`RansSolver::advance_launder_sharma_with_conjugate_wall` advances the original
+momentum, k and modified-epsilon step together with fluid sensible heat and
+a finite stationary layered wall. `RansConjugateWall` holds admitted cell
+thickness, volumetric heat capacity, normal conductivity and cell-center
+temperature, ordered from the exterior toward the fluid. Original fluid
+wall-node half-volume storage is retained. Solid half-cell series resistances
+and the final solid half-cell supply conduction; no empirical heat-transfer
+coefficient or turbulent conductivity is introduced into the solid.
+
+The thermal subsystem is a single backward-Euler system. A tridiagonal
+Schur elimination supplies its exact positive linear impedance to the
+original fluid thermal operator. Positive prefix admittances avoid
+subtraction of nearly equal conductances. The original fluid solver then
+prepares its complete endpoint, followed by solid back-substitution and
+one joint publication. The work is O(fluid nodes + solid cells), with no
+coupling iteration, dense production matrix, full-fluid clone or per-step
+numerical allocation. `RansConjugateWorkspace` retains the original nine
+fluid arrays plus four scalars per solid cell under explicit node/layer
+ceilings.
+
+`RansConjugateHeatLoad` supplies signed exterior heat flux, optional solid
+and fluid volumetric heating, and the existing passive/dissipative choice.
+Dissipative coupling retains exactly the original molecular loss and accepted
+turbulent destruction; mean-to-k transfer and numerical losses are not
+deposited again. Temperature differences relative to the opening fluid
+interface preserve a uniform unforced thermal equilibrium exactly.
+
+The report independently integrates each represented solid and fluid thermal
+inventory and local inventory increment. Interface heat is recomputed from
+the actual endpoint temperature jump and physical conductance; the difference
+from the eliminated boundary flux remains an explicit equation defect.
+Fluid, solid and combined heat-balance defects are reported without repairing
+inventory. These are floating-point diagnostics, not certified error bounds
+or automatic balance-tolerance enforcement. Every source, arithmetic,
+nonpositive-temperature or cancellation refusal preserves both caller-owned
+physical states; scratch remains reusable for exact retry.
+
+Five new native groups compare the complete thermal endpoint with an
+independently assembled dense physical-unit solid/fluid system, including
+dissipative heating; preserve exact uniform and layered stationary
+conduction states; recover closed-system equilibrium from the actual two
+inventories and heat capacities; cancel at every observed poll and replay;
+and refuse invalid materials, shapes, budgets and excessive cooling
+atomically. All 43 RANS module tests and eight integration tests passed in
+the focused pinned native build with original card/BLAKE3 code. The existing
+thermal and adaptive routes also passed their unchanged behavior checks.
+
+This remains constant-property one-dimensional stationary-wall conduction
+coupled to the existing first-order segregated RANS screen. The new entry
+advances one authored physical interval; it does not extend adaptive window
+control to wall state, infer temperature-dependent material properties,
+supply thermal/buoyancy feedback, contact resistance, radiation, phase change
+or axial heat removal. No full-workspace, empirical conjugate turbulent heat
+transfer or three-dimensional turbulence validation is claimed.

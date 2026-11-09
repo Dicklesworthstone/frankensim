@@ -1,6 +1,7 @@
 use super::*;
 use crate::rans_card::RansCardDraft;
 
+mod conjugate;
 mod dissipative;
 
 fn solver() -> RansSolver {
