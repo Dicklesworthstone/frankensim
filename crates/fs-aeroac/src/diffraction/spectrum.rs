@@ -82,7 +82,7 @@ impl HalfPlaneFrame {
         self.axes.map(|axis| dot(axis, world).to_f64())
     }
 
-    fn local_receiver(&self, receiver: HalfPlaneReceiver) -> Result<[f64; 3], AeroacError> {
+    pub(super) fn local_receiver(&self, receiver: HalfPlaneReceiver) -> Result<[f64; 3], AeroacError> {
         match receiver {
             HalfPlaneReceiver::WorldPosition(point) => {
                 if point.iter().any(|v| !v.is_finite()) {

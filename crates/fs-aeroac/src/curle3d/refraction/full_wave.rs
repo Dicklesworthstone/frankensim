@@ -556,7 +556,7 @@ impl Kernel {
 
 // Construct real and imaginary components separately, preserving exact zeros
 // and signs without first materializing a potentially overflowing magnitude.
-fn log_weighted(unit: C64, log_scale: f64, real_weight: f64) -> C64 {
+pub(crate) fn log_weighted(unit: C64, log_scale: f64, real_weight: f64) -> C64 {
     if real_weight == 0.0 {
         return C64::ZERO;
     }
@@ -574,12 +574,12 @@ fn log_weighted(unit: C64, log_scale: f64, real_weight: f64) -> C64 {
 /// Units belong to the public source-specific limits. The shared integration
 /// engine only sees the pressure/velocity transfer norms and work budgets.
 #[derive(Clone, Copy)]
-struct QuadratureLimits {
-    absolute_pressure: f64,
-    absolute_velocity: f64,
-    relative: f64,
-    maximum_evaluations: usize,
-    maximum_depth: usize,
+pub(crate) struct QuadratureLimits {
+    pub(crate) absolute_pressure: f64,
+    pub(crate) absolute_velocity: f64,
+    pub(crate) relative: f64,
+    pub(crate) maximum_evaluations: usize,
+    pub(crate) maximum_depth: usize,
 }
 
 impl From<FullWaveMonopoleLimits> for QuadratureLimits {
@@ -595,7 +595,7 @@ impl From<FullWaveMonopoleLimits> for QuadratureLimits {
 }
 
 impl QuadratureLimits {
-    fn admit(self) -> Result<(), AeroacError> {
+    pub(crate) fn admit(self) -> Result<(), AeroacError> {
         if !positive(self.absolute_pressure)
             || !positive(self.absolute_velocity)
             || !self.relative.is_finite()
@@ -613,7 +613,7 @@ impl QuadratureLimits {
 
 /// Statically sized samples keep the original monopole's three-channel work
 /// unchanged; force derivatives share the same nodes with seven channels.
-trait Spectrum<const N: usize> {
+pub(crate) trait Spectrum<const N: usize> {
     fn regions(&self) -> usize {
         3
     }
@@ -635,14 +635,14 @@ impl Spectrum<3> for Kernel {
     }
 }
 
-struct IntegratedSpectrum<const N: usize> {
-    value: [C64; N],
-    error: [f64; N],
-    evaluations: usize,
-    maximum_depth_reached: usize,
-    retained_panels: usize,
-    cutoff: f64,
-    maximum_argument: f64,
+pub(crate) struct IntegratedSpectrum<const N: usize> {
+    pub(crate) value: [C64; N],
+    pub(crate) error: [f64; N],
+    pub(crate) evaluations: usize,
+    pub(crate) maximum_depth_reached: usize,
+    pub(crate) retained_panels: usize,
+    pub(crate) cutoff: f64,
+    pub(crate) maximum_argument: f64,
 }
 
 fn real_norm(values: &[f64]) -> f64 {
@@ -843,7 +843,7 @@ fn integrate(
     ))
 }
 
-fn integrate_spectrum<const N: usize, const PRESSURE: usize>(
+pub(crate) fn integrate_spectrum<const N: usize, const PRESSURE: usize>(
     kernel: &impl Spectrum<N>,
     tail: [f64; N],
     limits: QuadratureLimits,

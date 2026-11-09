@@ -4029,3 +4029,59 @@ refusals. These are numerical checks of prescribed compact sources in a
 stationary homogeneous lossless slab. Finite wall impedance, finite edges,
 arbitrary rooms, moving sources/walls, radiation reaction, source bandwidth
 qualification and measured-SPL validation are not supplied.
+
+## Finite-distance spherical source diffraction by the original straight edge
+
+`diffraction::PreparedHalfPlaneMonopole` binds one original volume-flow
+source, placed ideal half-plane, receiver, material and positive frequency.
+It resolves the full three-dimensional Biot--Tolstoy/Sommerfeld Green function
+for rigid or pressure-release sheets, including spherical spreading, reactive
+near fields, geometrical shadow transitions and either explicit sheet face.
+The source clock is retained: `p/Q=-i*omega*rho*G` and `u/Q=-grad(G)`
+under exp(-i*omega*t). Velocity comes from differentiating the same field;
+there is no plane-wave pressure/impedance replacement or independent ray gain.
+
+The original impulse solution is Ouis (2002), Journal of Sound and Vibration
+252(2), equations 3--6, DOI 10.1006/jsvi.2000.3553:
+<https://faculty.kfupm.edu.sa/are/djamel/Publications/hard_half_plane_useful.pdf>.
+An integration-by-parts form isolates the geometrical-boundary cancellation.
+The remaining contour rotates by pi/4 without crossing its poles or square-root
+cut. Dimensionless substitutions expose both shadow-transition widths and map
+the complete infinite contour into finite numerical regions. Pressure and all
+three analytic velocity components share each quadrature node.
+
+Preparation reuses the existing adaptive Gauss--Kronrod engine, double-double
+coherent sums and logarithmic physical scaling from spherical-wave refraction.
+It respects the original positive pressure/vector-velocity tolerances, at most
+1,048,576 evaluations, depth at most 48, fallible panel allocation and cancellation.
+Tail envelopes control phase-resolution refinement only; they do not remove
+a spectral region. Embedded error estimates exclude geometry and floating-point
+errors and are not interval certificates. Quiet coherent cancellation is tested
+against the complete physical field, including its geometrical contribution.
+Diagnostics retain the work, component errors and minimum source-edge-receiver
+path. Preparation publishes no partial transfer on refusal.
+
+The immutable prepared observation caches four complex coefficients.
+Changing the prescribed source phasor then requires four complex products,
+with no allocation, quadrature or transcendental evaluation. The original
+material, source, sheet frame, boundary and receiver selection remain queryable.
+The existing `HarmonicFieldLine<3>` and `CoherentCompactField` outputs allow
+coherent composition before intensity or time-domain observation. Occluded
+image coincidence is finite; a visible source singularity, edge evaluation,
+source on the closed sheet, or ambiguous sheet-face receiver refuses.
+
+This is a stationary homogeneous lossless-fluid ideal half-plane solution.
+It adds no finite-barrier, impedance coating, arbitrary-wedge, moving-source,
+mean-flow, absorption or reciprocal source-loading approximation. The existing
+edge-parallel-flow plane-wave API remains separate because a finite source
+contains a continuum of edge wave numbers and intrinsic frequencies.
+
+Eight focused native tests compile the exact new implementation, original
+plane-wave/frame owner, actual shared quadrature and fs-math, with the original
+numerical material snapshot and narrowed error carriers. They check independent
+static and free-space limits, analytic Euler velocity and Helmholtz residual,
+reciprocity, both exact sheet conditions, occluded image coincidence, smooth
+shadow-boundary gradients, convergence to the original plane-wave owner,
+placed-source phase/velocity covariance, physical-scale preservation after raw
+contour-decay underflow, and bounded refusals. This is focused source-slice
+validation with the pinned compiler, not a full fs-aeroac/workspace Cargo result.

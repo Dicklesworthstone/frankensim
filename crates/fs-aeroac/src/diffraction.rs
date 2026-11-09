@@ -1,4 +1,4 @@
-//! Exact Sommerfeld diffraction of a plane wave by one ideal half-plane.
+//! Exact plane and spherical source diffraction by one ideal half-plane.
 //!
 //! The sheet occupies x >= 0, y = 0, with its straight edge on the z axis.
 //! Coordinates and output velocity use that same orthonormal physical frame.
@@ -6,6 +6,8 @@
 //! lower face. No geometric visibility cutoff discards the shadow field.
 //! [`PreparedHalfPlaneSpectrum`] places this same exact edge in world space
 //! and retains coherent interference between supplied incident plane waves.
+//! [`PreparedHalfPlaneMonopole`] resolves the exact finite-distance spherical
+//! Green function and analytic velocity with bounded contour quadrature.
 //!
 //! For exp(-i omega t), arrival azimuth alpha and receiver azimuth theta,
 //! the transverse solution is
@@ -24,7 +26,7 @@
 //! Analytic derivatives retain the singular 1/sqrt(r) edge velocity and
 //! signed active/reactive flux. The edge itself therefore refuses. This
 //! stationary, zero-thickness, infinite, ideal sheet does not approximate
-//! finite barriers, impedance coatings, point sources, arbitrary wedges,
+//! finite barriers, impedance coatings, arbitrary wedges,
 //! absorption, flow across the edge, or reciprocal source loading.
 
 use crate::AeroacError;
@@ -33,7 +35,9 @@ use crate::observation::HarmonicFieldLine;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod point;
 mod spectrum;
+pub use point::{HalfPlaneMonopoleDiagnostics, HalfPlaneMonopoleLimits, PreparedHalfPlaneMonopole};
 pub use spectrum::{
     HalfPlaneFace, HalfPlaneFrame, HalfPlaneIncidentWave, HalfPlaneReceiver,
     HalfPlaneSpectrumBudget, MAX_HALF_PLANE_COMPONENTS, PreparedHalfPlaneSpectrum,
