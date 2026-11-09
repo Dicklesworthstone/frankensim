@@ -74,7 +74,7 @@ pub use dispersive::{DispersiveThinLens, ThinLensElement};
 #[cfg(feature = "tracer")]
 pub(crate) use layered::ProjectedPupilFootprint;
 pub use layered::{LayeredCameraRay, LayeredDiffraction};
-use paired::RectangularPairPupil;
+use paired::RectangularArrayPupil;
 use polygon::PolygonPupil;
 
 const PI: f64 = core::f64::consts::PI;
@@ -194,53 +194,53 @@ enum AmplitudePupil<'a> {
     },
 }
 
-/// A connected polygon or two coherently illuminated rectangular openings.
+/// A connected polygon or a finite coherent array of rectangular openings.
 /// Every camera owner uses this same transfer and complete sampling proposal.
 enum PolygonPupilTransfer<'a> {
     Single(PolygonPupil<'a>),
-    Pair(RectangularPairPupil<'a>),
+    Array(RectangularArrayPupil<'a>),
 }
 
 impl PolygonPupilTransfer<'_> {
     fn density(&self, q: [f64; 2]) -> f64 {
         match self {
             Self::Single(pupil) => pupil.density(q),
-            Self::Pair(pupil) => pupil.density(q),
+            Self::Array(pupil) => pupil.density(q),
         }
     }
 
     fn defocused_density(&self, q: [f64; 2], phase: f64) -> Option<f64> {
         match self {
             Self::Single(pupil) => pupil.defocused_density(q, phase),
-            Self::Pair(pupil) => pupil.defocused_density(q, phase),
+            Self::Array(pupil) => pupil.defocused_density(q, phase),
         }
     }
 
     fn normalized_defocused_amplitude(&self, q: [f64; 2], phase: f64) -> Option<C64> {
         match self {
             Self::Single(pupil) => pupil.normalized_defocused_amplitude(q, phase),
-            Self::Pair(pupil) => pupil.normalized_defocused_amplitude(q, phase),
+            Self::Array(pupil) => pupil.normalized_defocused_amplitude(q, phase),
         }
     }
 
     fn sample(&self, sample: [f64; 2]) -> ([f64; 2], f64) {
         match self {
             Self::Single(pupil) => pupil.sample(sample),
-            Self::Pair(pupil) => pupil.sample(sample),
+            Self::Array(pupil) => pupil.sample(sample),
         }
     }
 
     fn sample_defocused(&self, sample: [f64; 2], phase: f64) -> ([f64; 2], f64) {
         match self {
             Self::Single(pupil) => pupil.sample_defocused(sample, phase),
-            Self::Pair(pupil) => pupil.sample_defocused(sample, phase),
+            Self::Array(pupil) => pupil.sample_defocused(sample, phase),
         }
     }
 
     fn sample_phase_range(&self, sample: [f64; 2], phase: f64) -> ([f64; 2], f64) {
         match self {
             Self::Single(pupil) => pupil.sample_phase_range(sample, phase),
-            Self::Pair(pupil) => pupil.sample_phase_range(sample, phase),
+            Self::Array(pupil) => pupil.sample_phase_range(sample, phase),
         }
     }
 }
@@ -261,19 +261,21 @@ impl super::Aperture {
             } => Some(PolygonPupilTransfer::Single(PolygonPupil::rectangular(
                 *radius_m, vertices, *half_axes,
             ))),
-            ApertureKind::RectangularPair {
+            ApertureKind::RectangularArray {
                 radius_m,
                 component_radius_m,
                 vertices,
                 half_axes,
                 half_offset,
+                openings,
                 ..
-            } => Some(PolygonPupilTransfer::Pair(RectangularPairPupil::new(
+            } => Some(PolygonPupilTransfer::Array(RectangularArrayPupil::new(
                 *radius_m,
                 *component_radius_m,
                 vertices,
                 *half_axes,
                 *half_offset,
+                *openings,
             ))),
             _ => None,
         }
@@ -305,7 +307,7 @@ impl<'a> PreparedDiffractionAmplitude<'a> {
             )),
             ApertureKind::RegularPolygon { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => AmplitudePupil::Polygon {
+            | ApertureKind::RectangularArray { .. } => AmplitudePupil::Polygon {
                 pupil: camera
                     .aperture
                     .polygon_pupil()
@@ -633,7 +635,7 @@ impl PhysicalCamera {
             }
             ApertureKind::RegularPolygon { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => self
+            | ApertureKind::RectangularArray { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?
@@ -701,7 +703,7 @@ impl PhysicalCamera {
         let density = match &self.aperture.kind {
             ApertureKind::RegularPolygon { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => self
+            | ApertureKind::RectangularArray { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?
@@ -839,7 +841,7 @@ impl PhysicalCamera {
                 radius_m, blades, ..
             } => radius_m * det::cos(PI / f64::from(*blades)),
             ApertureKind::Rectangular { dimensions_m, .. }
-            | ApertureKind::RectangularPair { dimensions_m, .. } => {
+            | ApertureKind::RectangularArray { dimensions_m, .. } => {
                 0.5 * dimensions_m[0].min(dimensions_m[1])
             }
             _ => self.aperture.radius_m(),

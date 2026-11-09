@@ -203,3 +203,95 @@ fn rectangular_pair_fresnel_and_source_depth_paths_keep_translation_phase() {
         }
     }
 }
+
+/// G0/G1/G3: the public finite-grating camera uses actual open area and
+/// opening locations, then the same signed transfer as its coherent owner.
+#[test]
+fn finite_grating_camera_preserves_openings_orders_and_physical_scale() {
+    let (width, height, pitch, rotation): (f64, f64, f64, f64) = (0.0005, 0.0006, 0.0015, 0.37);
+    for openings in [3, 8, 256] {
+        let aperture =
+            Aperture::try_rectangular_array(width, height, pitch, openings, rotation).unwrap();
+        assert_eq!(
+            aperture.rectangular_array_dimensions_m(),
+            Some((openings, [width, height, pitch]))
+        );
+        assert_eq!(aperture.rectangular_pair_dimensions_m(), None);
+        assert_close(
+            aperture.transmitting_area_m2().unwrap(),
+            f64::from(openings) * width * height,
+            2e-18,
+            "grating open area",
+        );
+        let camera = axial_camera(aperture, 0.25);
+        with_cx(|_, cx| {
+            for index in 0..openings {
+                let u = (f64::from(index) + 0.5) / f64::from(openings);
+                let ray = camera
+                    .generate_ray_from_tangent_offsets(
+                        cx,
+                        0.0,
+                        0.0,
+                        LensSample::try_new(u, 0.5).unwrap(),
+                    )
+                    .unwrap();
+                let center = (f64::from(index) - 0.5 * f64::from(openings - 1)) * pitch;
+                let expected = rotate([center, 0.0], rotation);
+                assert_point_close(
+                    ray.origin,
+                    Point3::new(expected[0], expected[1], 0.0),
+                    "physical grating opening",
+                );
+            }
+        });
+        let camera = camera
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+            .unwrap();
+        for wavelength in [400.0, 550.0, 700.0] {
+            let lambda = wavelength * 1e-9;
+            let peak = (f64::from(openings) * width * height).sqrt() / lambda;
+            for order in [0.0, 1.0, 2.0] {
+                let sign = if openings % 2 == 0 && order == 1.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let offset = rotate([order * lambda / pitch, 0.0], rotation);
+                let expected = sign * peak * sinc(PI * order * width / pitch);
+                let field = camera
+                    .in_focus_diffraction_amplitude(offset, wavelength)
+                    .unwrap();
+                assert_close(field.re, expected, 2e-11 * peak, "signed grating order");
+                assert_close(field.im, 0.0, 1e-15 * peak, "centred grating phase");
+                assert_close(
+                    camera
+                        .in_focus_diffraction_density(offset, wavelength)
+                        .unwrap(),
+                    field.norm_sq(),
+                    2e-12 * peak * peak,
+                    "grating density/amplitude agreement",
+                );
+            }
+            let null = rotate([lambda / (f64::from(openings) * pitch), 0.0], rotation);
+            assert!(
+                camera
+                    .in_focus_diffraction_amplitude(null, wavelength)
+                    .unwrap()
+                    .abs()
+                    < 2e-11 * peak
+            );
+        }
+    }
+    assert_eq!(
+        Aperture::try_rectangular_array(width, height, pitch, 1, rotation).unwrap(),
+        Aperture::try_rectangular(width, height, rotation).unwrap(),
+    );
+    assert_eq!(
+        Aperture::try_rectangular_array(width, height, pitch, 2, rotation).unwrap(),
+        Aperture::try_rectangular_pair(width, height, pitch, rotation).unwrap(),
+    );
+    for count in [0, 257, u16::MAX] {
+        assert!(Aperture::try_rectangular_array(width, height, pitch, count, rotation).is_err());
+    }
+    assert!(Aperture::try_rectangular_array(width, height, 0.9 * width, 3, rotation).is_err());
+}

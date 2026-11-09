@@ -4025,6 +4025,37 @@ pair tests check physical samples, signed Young fringes, absolute Fresnel
 phase, normalization and the touching limit; all existing scalar/paraxial,
 phase and visibility restrictions continue to apply.
 
+Finite rectangular gratings extend the same pupil owner through
+`Aperture::try_rectangular_array(width_m, height_m, center_separation_m,
+openings, rotation_rad)`. Counts 1..=256 are admitted; one opening
+canonicalizes to the original rectangle and two share the original pair API.
+The centre pitch must be at least the width, and total span divided by the
+smaller opening dimension remains bounded by 1024. Geometry samples the actual
+openings uniformly. Transmitting area is `N*width*height`; gaps contribute no
+area or light.
+
+At focus the signed field is the single-opening sinc envelope times
+`sin(N*t)/sin(t)`, normalized by total open area, with `t=pi*pitch*theta/lambda`.
+A division-free binary composition evaluates the finite sum in O(log N),
+including the removable principal-order limits and destructive-interference
+zeros. Finite defocus sums each translated original Fresnel field with its
+quadratic and linear phases retained separately. Components keep their own
+circumradius; DD phase reduction and accumulation preserve cancellation.
+The bounded sum and mixture need O(N) work, with N <= 256. The full-support
+Cauchy proposals retain all orders and tails; their peak importance weight
+can grow with N, so adding openings may require more samples.
+
+The array enters the original focused, defocused, source-depth, dispersive,
+coherent/Jones and finite-detector paths through their shared pupil transfer.
+Progressive rendering binds count, pitch and opening dimensions. This is
+scalar thin-aperture diffraction within the existing phase, wavelength,
+paraxial and visibility restrictions; it does not introduce a material,
+blazed, subwavelength or high-NA grating model. Numerical tests compare
+independently enumerated phasors, physical grating order widths, direct
+opening integrals, complete spectral power and the touching-array limit.
+The diffraction-array theorem follows
+[TU Delft, Scalar Diffraction Optics, equations 403–413](https://interactivetextbooks.tudelft.nl/interactive-optics/content/Chap6_Diffraction/DiffractiveOptics_2022_01Clean.html).
+
 `PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
 cinematic spectral tracer into scalar, paraxial, incoherent pupil imaging.
 It requires a nonzero circular, annular, rectangular or regular 3–64-blade aperture,

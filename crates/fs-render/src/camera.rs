@@ -26,28 +26,26 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer,
-    PolarizedCoherentInterferometerPixelExposure,
-    PolarizedCoherentInterferometerExposureSample,
-    CoherentInterferometerPixelExposure,
-    CoherentInterferometerExposureLimits, CoherentInterferometerExposureSample,
-    CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample,
-    CoherentInterferometerPixelPower,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
-    CoherentDiffractionInterferometer, CoherentInterferometerSample,
-    CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
-    CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
-    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilLayer,
-    CoherentJonesPupilLimits, CoherentJonesPupilResponse, CoherentJonesPupilWave,
-    CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
-    JonesPupilCoherenceFactor, LayeredCameraRay, LayeredDiffraction,
-    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
+    CoherentDiffractionInterferometer, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionPixelExposure, CoherentDiffractionPixelLimits,
+    CoherentDiffractionPixelPower, CoherentDiffractionSample, CoherentDiffractionShutter,
+    CoherentDiffractionTone, CoherentInterferometerExposureLimits,
+    CoherentInterferometerExposureSample, CoherentInterferometerPixelExposure,
+    CoherentInterferometerPixelPower, CoherentInterferometerSample, CoherentJonesArm,
+    CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesInterferometerResponse,
+    CoherentJonesPupilIllumination, CoherentJonesPupilLayer, CoherentJonesPupilLimits,
+    CoherentJonesPupilResponse, CoherentJonesPupilWave, CoherentPupilIllumination,
+    CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction, JonesPupilCoherenceFactor,
+    LayeredCameraRay, LayeredDiffraction, MAX_COHERENT_DIFFRACTION_TONES,
+    MAX_COHERENT_JONES_ARM_LAYERS, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
-    PolarizedDiffractionCoherency, PreparedCoherentDiffraction,
-    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PolarizedCoherentInterferometerExposureSample, PolarizedCoherentInterferometerPixelExposure,
+    PolarizedCoherentInterferometerSample, PolarizedDiffractionCoherency,
+    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure,
+    PreparedCoherentJonesDiffractionExposure, PreparedCoherentJonesInterferometer,
     PreparedPolarizedCoherentDiffraction, PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
@@ -313,13 +311,11 @@ impl CameraError {
             | Self::DispersionRequiresSpectralRays => DISPERSIVE_LENS,
             Self::InvalidSequentialLens
             | Self::SequentialLensOutsideModel
-            | Self::SequentialLensRequiresWeightedRays => &[
-                CameraFix {
-                    rank: 1,
-                    code: "admit_sequential_lens",
-                    message: "use ordered nonoverlapping spherical, aspheric or planar surfaces, source-supported glass, a fixed sensor, and weighted wavelength-specific direct rays",
-                },
-            ],
+            | Self::SequentialLensRequiresWeightedRays => &[CameraFix {
+                rank: 1,
+                code: "admit_sequential_lens",
+                message: "use ordered nonoverlapping spherical, aspheric or planar surfaces, source-supported glass, a fixed sensor, and weighted wavelength-specific direct rays",
+            }],
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
             Self::InvalidKeyframes | Self::IncompatibleKeyframes | Self::InvalidInterpolation => {
@@ -562,11 +558,12 @@ enum ApertureKind {
         half_axes: [[f64; 2]; 2],
         vertices: Vec<[f64; 2]>,
     },
-    RectangularPair {
+    RectangularArray {
         radius_m: f64,
         component_radius_m: f64,
         dimensions_m: [f64; 2],
         center_separation_m: f64,
+        openings: u16,
         rotation_rad: f64,
         half_axes: [[f64; 2]; 2],
         half_offset: [f64; 2],
@@ -582,6 +579,10 @@ impl Aperture {
     /// Conditioning limit for rectangular/slit pupil boundary propagation.
     /// More slender openings require a separately qualified numerical chart.
     pub const MAX_RECTANGULAR_ASPECT_RATIO: f64 = 1024.0;
+
+    /// Maximum number of equally spaced finite openings in one coherent pupil.
+    /// This bounds both the Fresnel sum and its full-support sampling mixture.
+    pub const MAX_RECTANGULAR_OPENINGS: u16 = 256;
 
     /// Admit a circular aperture. A radius of exactly zero is canonical pinhole.
     pub fn try_circular(radius_m: f64) -> Result<Self, CameraError> {
@@ -749,9 +750,41 @@ impl Aperture {
         center_separation_m: f64,
         rotation_rad: f64,
     ) -> Result<Self, CameraError> {
+        Self::try_rectangular_array(width_m, height_m, center_separation_m, 2, rotation_rad)
+    }
+
+    /// A finite transmission grating of identical rectangular openings.
+    ///
+    /// The array is centred on the optical axis, with centre pitch along the
+    /// local width axis; all lengths are metres. Openings share the same pupil
+    /// phase. Counts 1..=256 are admitted, and one opening is the original
+    /// rectangle. Pitch must be at least the opening width, including the
+    /// touching limit. Neither the dark gaps nor the circumscribed bounding
+    /// rectangle contribute transmitting area. The full span divided by the
+    /// smaller opening dimension must remain at most 1024.
+    ///
+    /// The same array supplies geometric sampling, signed Fraunhofer/Fresnel
+    /// fields, layered imaging and coherent/Jones observations. This is a thin
+    /// scalar pupil, not a material grating or a subwavelength Maxwell solver.
+    pub fn try_rectangular_array(
+        width_m: f64,
+        height_m: f64,
+        center_separation_m: f64,
+        openings: u16,
+        rotation_rad: f64,
+    ) -> Result<Self, CameraError> {
         let component = Self::try_rectangular(width_m, height_m, rotation_rad)?;
-        let span = width_m + center_separation_m;
-        let area = (width_m * height_m) * 2.0;
+        if !(1..=Self::MAX_RECTANGULAR_OPENINGS).contains(&openings)
+            || !center_separation_m.is_finite()
+            || center_separation_m < width_m
+        {
+            return Err(CameraError::InvalidAperture);
+        }
+        if openings == 1 {
+            return Ok(component);
+        }
+        let span = width_m + f64::from(openings - 1) * center_separation_m;
+        let area = (width_m * height_m) * f64::from(openings);
         if !center_separation_m.is_finite()
             || center_separation_m < width_m
             || !span.is_finite()
@@ -772,11 +805,12 @@ impl Aperture {
         };
         let half_offset = half_axes[0].map(|v| v * (center_separation_m / width_m));
         Ok(Self {
-            kind: ApertureKind::RectangularPair {
+            kind: ApertureKind::RectangularArray {
                 radius_m: det::hypot(0.5 * span, 0.5 * height_m),
                 component_radius_m,
                 dimensions_m,
                 center_separation_m,
+                openings,
                 rotation_rad,
                 half_axes,
                 half_offset,
@@ -789,11 +823,30 @@ impl Aperture {
     #[must_use]
     pub const fn rectangular_pair_dimensions_m(&self) -> Option<[f64; 3]> {
         match &self.kind {
-            ApertureKind::RectangularPair {
+            ApertureKind::RectangularArray {
                 dimensions_m,
                 center_separation_m,
+                openings: 2,
                 ..
             } => Some([dimensions_m[0], dimensions_m[1], *center_separation_m]),
+            _ => None,
+        }
+    }
+
+    /// Opening count and full width, height and centre pitch [m], before rotation.
+    /// Single-opening arrays canonicalize to [`Self::rectangular_dimensions_m`].
+    #[must_use]
+    pub const fn rectangular_array_dimensions_m(&self) -> Option<(u16, [f64; 3])> {
+        match &self.kind {
+            ApertureKind::RectangularArray {
+                dimensions_m,
+                center_separation_m,
+                openings,
+                ..
+            } => Some((
+                *openings,
+                [dimensions_m[0], dimensions_m[1], *center_separation_m],
+            )),
             _ => None,
         }
     }
@@ -813,7 +866,7 @@ impl Aperture {
             | ApertureKind::Annular { radius_m, .. }
             | ApertureKind::RegularPolygon { radius_m, .. }
             | ApertureKind::Rectangular { radius_m, .. }
-            | ApertureKind::RectangularPair { radius_m, .. } => *radius_m,
+            | ApertureKind::RectangularArray { radius_m, .. } => *radius_m,
         }
     }
 
@@ -858,9 +911,11 @@ impl Aperture {
                 inner_radius_m,
             } => (PI * (radius_m - inner_radius_m)) * (radius_m + inner_radius_m),
             ApertureKind::Rectangular { dimensions_m, .. } => dimensions_m[0] * dimensions_m[1],
-            ApertureKind::RectangularPair { dimensions_m, .. } => {
-                (dimensions_m[0] * dimensions_m[1]) * 2.0
-            }
+            ApertureKind::RectangularArray {
+                dimensions_m,
+                openings,
+                ..
+            } => (dimensions_m[0] * dimensions_m[1]) * f64::from(*openings),
             ApertureKind::RegularPolygon {
                 radius_m, vertices, ..
             } => {
@@ -888,7 +943,7 @@ impl Aperture {
             | ApertureKind::Circular { .. }
             | ApertureKind::Annular { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => None,
+            | ApertureKind::RectangularArray { .. } => None,
         }
     }
 
@@ -898,7 +953,7 @@ impl Aperture {
         match &self.kind {
             ApertureKind::RegularPolygon { rotation_rad, .. }
             | ApertureKind::Rectangular { rotation_rad, .. }
-            | ApertureKind::RectangularPair { rotation_rad, .. } => Some(*rotation_rad),
+            | ApertureKind::RectangularArray { rotation_rad, .. } => Some(*rotation_rad),
             ApertureKind::Pinhole
             | ApertureKind::Circular { .. }
             | ApertureKind::Annular { .. } => None,
@@ -914,16 +969,16 @@ impl Aperture {
                     coordinates[0] * half_axes[0][axis] + coordinates[1] * half_axes[1][axis]
                 })
             }
-            ApertureKind::RectangularPair {
+            ApertureKind::RectangularArray {
                 half_axes,
                 half_offset,
+                openings,
                 ..
             } => {
-                let (sign, local_u) = if sample.u < 0.5 {
-                    (-1.0, 2.0 * sample.u)
-                } else {
-                    (1.0, 2.0 * sample.u - 1.0)
-                };
+                let coordinate = f64::from(*openings) * sample.u;
+                let index = coordinate.floor();
+                let sign = 2.0 * index - f64::from(openings - 1);
+                let local_u = coordinate - index;
                 core::array::from_fn(|axis| {
                     sign * half_offset[axis]
                         + (2.0 * local_u - 1.0) * half_axes[0][axis]
@@ -1258,7 +1313,9 @@ impl PhysicalCamera {
         #[cfg(feature = "tracer")]
         if let Some(lens) = &self.sequential_lens {
             return half_ratio(
-                self.projection.sensor_height_m().expect("admitted sequential sensor"),
+                self.projection
+                    .sensor_height_m()
+                    .expect("admitted sequential sensor"),
                 lens.surfaces()[0].vertex_z_m(),
             );
         }

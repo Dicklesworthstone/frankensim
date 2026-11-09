@@ -114,6 +114,7 @@ fn coherent_pupil_amplitude_matches_original_camera_density() {
         Aperture::try_regular_polygon(radius, 4, core::f64::consts::FRAC_PI_4).unwrap(),
         Aperture::try_rectangular(1.6 * radius, 0.6 * radius, 0.37).unwrap(),
         Aperture::try_rectangular_pair(0.4 * radius, 0.6 * radius, radius, 0.37).unwrap(),
+        Aperture::try_rectangular_array(0.1 * radius, 0.4 * radius, 0.2 * radius, 7, 0.37).unwrap(),
     ] {
         let area = aperture.transmitting_area_m2().unwrap();
         let focused = axial_camera(aperture.clone(), focus)

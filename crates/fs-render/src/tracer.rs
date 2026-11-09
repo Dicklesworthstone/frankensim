@@ -10091,6 +10091,7 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     let aperture = camera.aperture();
     let rectangular_dimensions = aperture.rectangular_dimensions_m();
     let pair_dimensions = aperture.rectangular_pair_dimensions_m();
+    let array_dimensions = aperture.rectangular_array_dimensions_m();
     let aperture_tag = if aperture.is_pinhole() {
         0
     } else if aperture.is_annular() {
@@ -10101,6 +10102,8 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         4
     } else if pair_dimensions.is_some() {
         5
+    } else if array_dimensions.is_some() {
+        6
     } else {
         1
     };
@@ -10119,6 +10122,9 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         update_continuity_f64s(hasher, dimensions);
     }
     if let Some(dimensions) = pair_dimensions {
+        update_continuity_f64s(hasher, dimensions);
+    } else if let Some((openings, dimensions)) = array_dimensions {
+        hasher.update(&openings.to_le_bytes());
         update_continuity_f64s(hasher, dimensions);
     }
     let exposure = camera.exposure_metadata();

@@ -239,7 +239,7 @@ impl PhysicalCamera {
         let (q, proposal) = match &self.aperture.kind {
             ApertureKind::RegularPolygon { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => self
+            | ApertureKind::RectangularArray { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?
@@ -365,7 +365,7 @@ impl PhysicalCamera {
             }
             ApertureKind::RegularPolygon { .. }
             | ApertureKind::Rectangular { .. }
-            | ApertureKind::RectangularPair { .. } => self
+            | ApertureKind::RectangularArray { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?
