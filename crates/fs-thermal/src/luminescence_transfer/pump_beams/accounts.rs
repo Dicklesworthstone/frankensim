@@ -27,6 +27,16 @@ impl<const B: usize> BeamTotals<B> {
         Ok(())
     }
 
+    pub(super) fn add_summary(
+        &mut self,
+        step: &PumpBeamStep<B>,
+    ) -> Result<(), SingletTripletError> {
+        super::super::pump_column::add_values(&mut self.transmitted, step.transmitted_photons)?;
+        super::super::pump_column::add_values(&mut self.absorbed, step.absorbed_photons)?;
+        super::super::pump_column::add_values(&mut self.passive, step.passive_absorbed_photons)?;
+        Ok(())
+    }
+
     pub(super) fn add_transmitted(
         &mut self,
         rates: [f64; B],

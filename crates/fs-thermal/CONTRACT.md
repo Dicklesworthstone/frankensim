@@ -4198,6 +4198,27 @@ temporary reaction coordinates introduce no physical bath exchange. Pair
 events, produced singlets and direct pair heat have separate fields in
 `SaturableSingletTripletStep`. Its energy residual includes this physical heat.
 
+`SaturablePumpColumn::advance_with_annihilation` and
+`SaturablePumpBeams::advance_with_annihilation` use the same physical midpoint
+schedule with one optional law per original unique cell. Each predictor and
+corrector solves its optical field and native kinetic history with the frozen
+pair rates together. The returned ground inventory therefore changes actual
+pump depletion during the pulse. Pair events are not applied after an otherwise
+completed optical solve, and overlapping beams never receive independent copies
+of the emitter inventory. A local copy of immutable geometry is made once per
+call; only the per-cell kinetic models change between stages.
+
+Both optical and pair convergence allowances constrain the accepted finer
+history. Aggregate cell-evaluation and coupling counters include predictors,
+correctors, rejected optical iterations and discarded grids. The temporal cap
+is the smaller of the optical and pair bounds, including the endpoint tail.
+The tail's original-rate bound includes all incident beam hazards at a cell,
+as well as excited-state rates, so fast ground recovery under strong pumping
+does not require a globally lifetime-sized grid. Pump-off cells still evolve
+nonlinear pair encounters and delayed fluorescence; only their optical source
+iteration disappears. Passive photon heat and every original per-beam ledger
+retain their meanings.
+
 Only corrector histories enter the compensated result. A nonlinear exposure
 guard prevents false coarse/fine agreement; bounded refinement compares event
 energy, stored energy, every integrated physical energy channel and endpoint
@@ -4214,3 +4235,10 @@ three independent native regressions passed: isolated branches with yields
 zero, one-half and one; a pumped nonlinear equilibrium; and nanosecond-singlet
 delayed fluorescence across a one-second dark interval. The latter used 542
 accepted nonlinear substeps rather than resolving a billion lifetimes globally.
+Three additional optical regression groups passed for independent steady
+column/opposed-beam equilibrium, enhanced absorption during an actual pulse
+and beam-splitting invariance, and dark shared/unvisited recovery with exact
+zero-law behavior and budget/cancellation/retry checks. Together with the
+fifteen unchanged column and simultaneous-beam regressions, all twenty-one
+focused native tests passed against the production math, reaction and thermal
+sources. Renderer execution remains a separate gate.

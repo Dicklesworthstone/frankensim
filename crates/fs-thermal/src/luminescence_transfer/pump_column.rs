@@ -184,30 +184,11 @@ impl<const B: usize> SaturablePumpColumn<B> {
         limits: PumpColumnLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PumpColumnStep<B>, SingletTripletError> {
-        poll(&mut cancelled)?;
-        if populations.len() != self.cells.len()
-            || !populations.iter().flatten().copied().all(nonnegative)
-            || !incident_photon_rates_s.into_iter().all(nonnegative)
-            || !nonnegative(duration_s)
-            || limits.maximum_root_iterations < 2
-            || limits.maximum_substeps == 0
-            || limits.maximum_cell_evaluations == 0
-            || !nonnegative(limits.relative_tolerance)
-            || limits.relative_tolerance >= 1.0
-            || !nonnegative(limits.absolute_energy_tolerance_j)
-            || (limits.relative_tolerance == 0.0 && limits.absolute_energy_tolerance_j == 0.0)
-        {
-            return Err(SingletTripletError::Invalid(
-                "pump column populations, illumination or refinement limits",
-            ));
-        }
-        // Admit the original kinetic limits even for an empty/transparent path.
-        SaturableSingletTripletPlan::prepare(
-            SingletTripletDecay::try_new([1.0; 2], [0.0; 2], [0.0; 2], [0.0; 2])?,
-            [0.0; 2],
-            [0.0; 2],
-            0.0,
-            limits.kinetic,
+        self.validate_advance(
+            populations,
+            incident_photon_rates_s,
+            duration_s,
+            limits,
             &mut cancelled,
         )?;
         let nonlinear = duration_s > 0.0
@@ -266,6 +247,43 @@ impl<const B: usize> SaturablePumpColumn<B> {
         }
     }
 
+    fn validate_advance(
+        &self,
+        populations: &[[f64; 3]],
+        incident_photon_rates_s: [f64; B],
+        duration_s: f64,
+        limits: PumpColumnLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), SingletTripletError> {
+        poll(&mut cancelled)?;
+        if populations.len() != self.cells.len()
+            || !populations.iter().flatten().copied().all(nonnegative)
+            || !incident_photon_rates_s.into_iter().all(nonnegative)
+            || !nonnegative(duration_s)
+            || limits.maximum_root_iterations < 2
+            || limits.maximum_substeps == 0
+            || limits.maximum_cell_evaluations == 0
+            || !nonnegative(limits.relative_tolerance)
+            || limits.relative_tolerance >= 1.0
+            || !nonnegative(limits.absolute_energy_tolerance_j)
+            || (limits.relative_tolerance == 0.0 && limits.absolute_energy_tolerance_j == 0.0)
+        {
+            return Err(SingletTripletError::Invalid(
+                "pump column populations, illumination or refinement limits",
+            ));
+        }
+        // Admit the original kinetic limits even for an empty/transparent path.
+        SaturableSingletTripletPlan::prepare(
+            SingletTripletDecay::try_new([1.0; 2], [0.0; 2], [0.0; 2], [0.0; 2])?,
+            [0.0; 2],
+            [0.0; 2],
+            0.0,
+            limits.kinetic,
+            &mut cancelled,
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn uniform(
         &self,
@@ -316,6 +334,34 @@ impl<const B: usize> SaturablePumpColumn<B> {
             }
             start = end;
         }
+        self.finish_history(
+            initial,
+            &populations,
+            totals,
+            transmitted,
+            incident_rate,
+            duration,
+            segments,
+            limits,
+            *evaluations,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_history(
+        &self,
+        initial: &[[f64; 3]],
+        populations: &[[f64; 3]],
+        totals: Vec<CellTotals<B>>,
+        transmitted: [Sum; B],
+        incident_rate: [f64; B],
+        duration: f64,
+        segments: usize,
+        limits: PumpColumnLimits,
+        evaluations: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PumpColumnStep<B>, SingletTripletError> {
         let mut cells = Vec::with_capacity(self.cells.len());
         for (index, total) in totals.into_iter().enumerate() {
             poll(cancelled)?;
@@ -412,7 +458,7 @@ impl<const B: usize> SaturablePumpColumn<B> {
             photon_residual,
             residual_j,
             substeps: segments,
-            cell_evaluations: *evaluations,
+            cell_evaluations: evaluations,
             max_energy_discrepancy_j: 0.0,
         })
     }
@@ -479,6 +525,9 @@ impl<const B: usize> SaturablePumpColumn<B> {
 
 #[path = "pump_column/cell.rs"]
 pub(super) mod cell;
+
+#[path = "pump_column/annihilation.rs"]
+mod annihilation;
 
 struct Trial<const B: usize> {
     step: PumpColumnCellStep<B>,

@@ -17,8 +17,8 @@
 //! state absorption and active recycling of emitted light are outside scope.
 
 use super::pump_column::{
-    KineticTotals, PumpColumnLimits, Sum, admit_energy, admit_photons,
-    cap, cell, energies, photon_balance, poll, product3, values,
+    KineticTotals, PumpColumnLimits, Sum, admit_energy, admit_photons, cap, cell, energies,
+    photon_balance, poll, product3, values,
 };
 use super::saturation::{SaturableSingletTripletPlan, SaturableSingletTripletStep};
 use super::{SingletTripletDecay, SingletTripletError, finite, nonnegative, positive_product};
@@ -112,29 +112,37 @@ impl<const B: usize> SaturablePumpBeams<B> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, SingletTripletError> {
         poll(&mut cancelled)?;
-        if B == 0 || B > 64 || maximum_cells == 0
-            || maximum_beams == 0 || maximum_segments == 0
-        {
-            return Err(SingletTripletError::Invalid("pump beam lanes or admission limits"));
+        if B == 0 || B > 64 || maximum_cells == 0 || maximum_beams == 0 || maximum_segments == 0 {
+            return Err(SingletTripletError::Invalid(
+                "pump beam lanes or admission limits",
+            ));
         }
         cap("pump beam cells", models.len(), maximum_cells)?;
         cap("pump beams", paths.len(), maximum_beams)?;
         let mut count = 0usize;
         for path in paths {
             poll(&mut cancelled)?;
-            count = count.checked_add(path.segments.len())
-                .ok_or(SingletTripletError::Unrepresentable("pump beam segment count"))?;
+            count = count.checked_add(path.segments.len()).ok_or(
+                SingletTripletError::Unrepresentable("pump beam segment count"),
+            )?;
             cap("pump beam segments", count, maximum_segments)?;
         }
-        count.checked_mul(B)
-            .ok_or(SingletTripletError::Unrepresentable("pump beam channel count"))?;
+        count
+            .checked_mul(B)
+            .ok_or(SingletTripletError::Unrepresentable(
+                "pump beam channel count",
+            ))?;
         let mut visits = vec![Vec::new(); models.len()];
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); models.len()];
         let mut indegree = vec![0usize; models.len()];
         let mut last_visit = vec![None; models.len()];
         for (beam, path) in paths.iter().enumerate() {
             poll(&mut cancelled)?;
-            if !path.photon_energies_j.iter().all(|&e| e.is_finite() && e > 0.0) {
+            if !path
+                .photon_energies_j
+                .iter()
+                .all(|&e| e.is_finite() && e > 0.0)
+            {
                 return Err(SingletTripletError::Invalid("pump beam photon energies"));
             }
             let mut previous: Option<usize> = None;
@@ -142,11 +150,22 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 poll(&mut cancelled)?;
                 let index = segment.cell_index;
                 if index >= models.len() || last_visit[index] == Some(beam) {
-                    return Err(SingletTripletError::Invalid("pump beam cell index or repeated cell"));
+                    return Err(SingletTripletError::Invalid(
+                        "pump beam cell index or repeated cell",
+                    ));
                 }
                 last_visit[index] = Some(beam);
-                if !segment.optical_depth_per_ground.iter().flatten().copied().all(nonnegative)
-                    || !segment.passive_optical_depth.iter().copied().all(nonnegative)
+                if !segment
+                    .optical_depth_per_ground
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .all(nonnegative)
+                    || !segment
+                        .passive_optical_depth
+                        .iter()
+                        .copied()
+                        .all(nonnegative)
                 {
                     return Err(SingletTripletError::Invalid("pump beam optical depths"));
                 }
@@ -166,7 +185,10 @@ impl<const B: usize> SaturablePumpBeams<B> {
                         }
                     }
                 }
-                visits[index].push(Visit { beam, segment: ordinal });
+                visits[index].push(Visit {
+                    beam,
+                    segment: ordinal,
+                });
                 if let Some(parent) = previous {
                     successors[parent].push(index);
                     indegree[index] += 1;
@@ -174,8 +196,11 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 previous = Some(index);
             }
         }
-        let mut order: Vec<_> = indegree.iter().enumerate()
-            .filter_map(|(i, &degree)| (degree == 0).then_some(i)).collect();
+        let mut order: Vec<_> = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &degree)| (degree == 0).then_some(i))
+            .collect();
         let mut next = 0;
         while next < order.len() {
             poll(&mut cancelled)?;
@@ -216,43 +241,50 @@ impl<const B: usize> SaturablePumpBeams<B> {
         limits: PumpBeamsLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PumpBeamsStep<B>, SingletTripletError> {
-        poll(&mut cancelled)?;
-        let column = limits.column;
-        if populations.len() != self.models.len()
-            || incident_photon_rates_s.len() != self.paths.len()
-            || !populations.iter().flatten().copied().all(nonnegative)
-            || !incident_photon_rates_s.iter().flatten().copied().all(nonnegative)
-            || !nonnegative(duration_s) || limits.maximum_coupling_iterations == 0
-            || column.maximum_root_iterations < 2 || column.maximum_substeps == 0
-            || column.maximum_cell_evaluations == 0 || !nonnegative(column.relative_tolerance)
-            || column.relative_tolerance >= 1.0 || !nonnegative(column.absolute_energy_tolerance_j)
-            || (column.relative_tolerance == 0.0 && column.absolute_energy_tolerance_j == 0.0)
-        {
-            return Err(SingletTripletError::Invalid(
-                "pump beam populations, illumination or work limits",
-            ));
-        }
-        SaturableSingletTripletPlan::prepare(
-            SingletTripletDecay::try_new([1.0; 2], [0.0; 2], [0.0; 2], [0.0; 2])?,
-            [0.0; 2], [0.0; 2], 0.0, column.kinetic, &mut cancelled,
+        self.validate_advance(
+            populations,
+            incident_photon_rates_s,
+            duration_s,
+            limits,
+            &mut cancelled,
         )?;
+        let column = limits.column;
         let nonlinear = duration_s > 0.0
-            && self.paths.iter().zip(incident_photon_rates_s).any(|(path, rates)| {
-                path.segments.iter().any(|segment| {
-                    (0..B).any(|lane| rates[lane] > 0.0
-                        && segment.optical_depth_per_ground[lane].iter().any(|&a| a > 0.0))
-                })
-            });
+            && self
+                .paths
+                .iter()
+                .zip(incident_photon_rates_s)
+                .any(|(path, rates)| {
+                    path.segments.iter().any(|segment| {
+                        (0..B).any(|lane| {
+                            rates[lane] > 0.0
+                                && segment.optical_depth_per_ground[lane]
+                                    .iter()
+                                    .any(|&a| a > 0.0)
+                        })
+                    })
+                });
         let mut evaluations = 0usize;
         let mut coupling_iterations = 0usize;
         let mut substeps = 1usize;
         let mut previous: Option<Vec<f64>> = None;
         loop {
             poll(&mut cancelled)?;
-            cap("pump beam temporal substeps", substeps, column.maximum_substeps)?;
+            cap(
+                "pump beam temporal substeps",
+                substeps,
+                column.maximum_substeps,
+            )?;
             let candidate = self.uniform(
-                populations, incident_photon_rates_s, duration_s, substeps, nonlinear,
-                limits, &mut evaluations, &mut coupling_iterations, &mut cancelled,
+                populations,
+                incident_photon_rates_s,
+                duration_s,
+                substeps,
+                nonlinear,
+                limits,
+                &mut evaluations,
+                &mut coupling_iterations,
+                &mut cancelled,
             )?;
             if let Some(mut candidate) = candidate {
                 candidate.cell_evaluations = evaluations;
@@ -267,8 +299,9 @@ impl<const B: usize> SaturablePumpBeams<B> {
                     for (&before, &after) in old.iter().zip(&components) {
                         let difference = (after - before).abs();
                         discrepancy = discrepancy.max(difference);
-                        converged &= difference <= column.absolute_energy_tolerance_j
-                            + column.relative_tolerance * before.abs().max(after.abs());
+                        converged &= difference
+                            <= column.absolute_energy_tolerance_j
+                                + column.relative_tolerance * before.abs().max(after.abs());
                     }
                     if converged {
                         candidate.max_energy_discrepancy_j = discrepancy;
@@ -282,19 +315,67 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 // cannot be the coarse side of an accuracy comparison.
                 previous = None;
             }
-            substeps = substeps.checked_mul(2)
-                .ok_or(SingletTripletError::Unrepresentable("pump beam refinement counter"))?;
+            substeps = substeps
+                .checked_mul(2)
+                .ok_or(SingletTripletError::Unrepresentable(
+                    "pump beam refinement counter",
+                ))?;
         }
+    }
+
+    fn validate_advance(
+        &self,
+        populations: &[[f64; 3]],
+        incident_photon_rates_s: &[[f64; B]],
+        duration_s: f64,
+        limits: PumpBeamsLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), SingletTripletError> {
+        poll(&mut cancelled)?;
+        let column = limits.column;
+        if populations.len() != self.models.len()
+            || incident_photon_rates_s.len() != self.paths.len()
+            || !populations.iter().flatten().copied().all(nonnegative)
+            || !incident_photon_rates_s
+                .iter()
+                .flatten()
+                .copied()
+                .all(nonnegative)
+            || !nonnegative(duration_s)
+            || limits.maximum_coupling_iterations == 0
+            || column.maximum_root_iterations < 2
+            || column.maximum_substeps == 0
+            || column.maximum_cell_evaluations == 0
+            || !nonnegative(column.relative_tolerance)
+            || column.relative_tolerance >= 1.0
+            || !nonnegative(column.absolute_energy_tolerance_j)
+            || (column.relative_tolerance == 0.0 && column.absolute_energy_tolerance_j == 0.0)
+        {
+            return Err(SingletTripletError::Invalid(
+                "pump beam populations, illumination or work limits",
+            ));
+        }
+        SaturableSingletTripletPlan::prepare(
+            SingletTripletDecay::try_new([1.0; 2], [0.0; 2], [0.0; 2], [0.0; 2])?,
+            [0.0; 2],
+            [0.0; 2],
+            0.0,
+            column.kinetic,
+            &mut cancelled,
+        )?;
+        Ok(())
     }
 }
 
-#[path = "pump_beams/evolution.rs"]
-mod evolution;
 #[path = "pump_beams/accounts.rs"]
 mod accounts;
-#[cfg(test)]
-#[path = "pump_beams/tests.rs"]
-mod tests;
+#[path = "pump_beams/annihilation.rs"]
+mod annihilation;
+#[path = "pump_beams/evolution.rs"]
+mod evolution;
 #[cfg(test)]
 #[path = "pump_beams/oracles.rs"]
 mod oracles;
+#[cfg(test)]
+#[path = "pump_beams/tests.rs"]
+mod tests;

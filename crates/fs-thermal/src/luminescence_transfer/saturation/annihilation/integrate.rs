@@ -39,7 +39,7 @@ where
     S: PairHistory,
     C: FnMut() -> bool,
     F: FnMut(&[[f64; 3]], &[f64], f64, &mut C) -> Result<Option<S>, SingletTripletError>,
-    A: FnMut(&mut S) -> Result<(), SingletTripletError>,
+    A: FnMut(&mut S, &mut C) -> Result<(), SingletTripletError>,
     E: FnMut(&S) -> Result<Vec<f64>, SingletTripletError>,
 {
     cap("finite annihilation substeps", 2, limits.maximum_substeps)?;
@@ -115,7 +115,7 @@ where
                 index += 1;
                 Ok(())
             })?;
-            finalize(&mut step)?;
+            finalize(&mut step, cancelled)?;
             let current = components(&step)?;
             if let Some((old_count, old)) = &previous
                 && actual_substeps > *old_count

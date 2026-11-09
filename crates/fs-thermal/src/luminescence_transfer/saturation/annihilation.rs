@@ -115,7 +115,7 @@ impl SaturableSingletTripletPlan {
                 )?;
                 Ok(Some(step))
             },
-            |step| audit(self.model, populations, step, self.relative_tolerance),
+            |step, _| audit(self.model, populations, step, self.relative_tolerance),
             |step| energy_components(self.model, step, self.duration_s),
             &mut cancelled,
         )?;
