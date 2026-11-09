@@ -30,6 +30,8 @@ const DISTANCE: f64 = 0.05;
 mod surface;
 #[path = "conjugate/developing.rs"]
 mod developing;
+#[path = "conjugate/native_trace.rs"]
+mod native_trace;
 fn config() -> LayerConductionConfig {
     LayerConductionConfig {
         max_iterations: 96,

@@ -1,5 +1,8 @@
 //! Explicit liquid wall-Pr correction on the existing cell and link heat owners.
 use super::*;
+
+#[path = "liquid_wall/conjugate.rs"]
+mod conjugate;
 use fs_material::liquid::{LiquidPropertyRequirements, ResolvedLiquidState};
 
 fn corrected_law() -> SourceCellConvectionLaw {

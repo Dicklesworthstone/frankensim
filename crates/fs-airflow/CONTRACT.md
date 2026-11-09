@@ -6338,3 +6338,33 @@ specify actual nozzle-fed source refresh and independent full inventories,
 empty-path parity, and atomic late pressure-reversal refusal with retry.
 New modules passed pinned rustfmt parsing/format checks; compilation and
 runtime execution remain unverified in this environment.
+
+### Source-conjugate finite-cell convection
+
+`PreparedSourceConjugateLinks` binds original zero-conductance contacts to
+source-qualified wall conductivity layers and their exact native caloric,
+contact, area and geometry identities. The existing material integral-coordinate
+solver eliminates the actual fluid-facing temperature against the existing
+source-convection callback. Bulk properties remain at the finite-fluid
+temperature; selected film properties use the surface/bulk mean, and wall
+viscosity or explicit liquid wall Pr uses the solved surface. The repeatable
+fluid callback must retain its native material and pressure/composition context.
+
+Only the combined material/film conductance enters the native reciprocal link.
+Retained diagnostics include the original conductivity line, solved surface,
+fluid sources, surface-balance residual and actual native GΔT representation.
+The original native caloric temperature remains authoritative even where layer
+enthalpy admission snaps a source endpoint; an unsnapped trace outside original
+conductivity support refuses without clamping. The existing graph fixed-film,
+surface-feedback and developing-layer paths use the same native-trace rule.
+
+`SourceConjugateHeatAssembly` supplies these links through the existing complete
+`HeatAssembly`. Original finite stores, other heat mechanisms and coupled
+drivers retain ownership. Existing prescribed-reservoir composition remains
+available; finite G is not duplicated as external power or a source-rate bound.
+Disjoint mechanical contact inputs pass through; a metric touching a conjugate
+endpoint refuses until the corresponding physical geometry is supplied.
+
+The wall remains homogeneous, source-free, pure-phase and quasi-steady. No new
+solver, correlation, surface storage, contact resistance or lateral spreading
+is inferred. Original source and correlation admission remains active.

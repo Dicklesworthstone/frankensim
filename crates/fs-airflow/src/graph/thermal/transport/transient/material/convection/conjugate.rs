@@ -419,10 +419,13 @@ impl PreparedConjugateWall {
                 "conjugate wall needs its original geometry and caloric object",
             ));
         }
-        Ok([
-            layer.temperature_at_enthalpy(cell.specific_h_j_kg)?,
-            thermal.temperature_k(self.fluid)?,
-        ])
+        // Keep the original pure-phase/enthalpy admission, but do not substitute
+        // its source-boundary temperature pin for the native caloric inverse.
+        // The latter owns both reciprocal G*dT and actual surface bracketing.
+        layer.temperature_at_enthalpy(cell.specific_h_j_kg)?;
+        let wall = thermal.temperature_k(self.cell)?;
+        layer.conductivity_curve().conductivity_w_m_k(wall)?;
+        Ok([wall, thermal.temperature_k(self.fluid)?])
     }
 }
 

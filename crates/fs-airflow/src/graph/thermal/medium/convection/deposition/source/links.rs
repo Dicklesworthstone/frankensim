@@ -4,6 +4,8 @@
 use super::super::{CellConvectionEvaluation, evaluate_convection_state};
 /// Native thermal-timeline integration of finite fluid convection.
 pub mod observer;
+/// Original wall-material paths with actual source-resolved fluid-facing surfaces.
+pub mod conjugate;
 
 use super::*;
 

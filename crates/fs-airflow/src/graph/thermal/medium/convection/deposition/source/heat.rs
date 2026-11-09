@@ -10,6 +10,8 @@ pub mod observer;
 pub mod assembly;
 /// Prescribed fluid reservoirs around a complete heat assembly.
 pub mod composition;
+/// Source-integrated wall conduction and actual finite-fluid surface temperatures.
+pub mod conjugate;
 /// Source-resolved cooling on the shared material-memory/mechanical timeline.
 pub mod relaxation;
 
