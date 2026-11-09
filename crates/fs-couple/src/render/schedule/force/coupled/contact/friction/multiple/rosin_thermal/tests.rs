@@ -379,3 +379,66 @@ fn refusals_are_named_and_leave_the_histories_unchanged() {
     hot.accept(&frame(vec![sliding(1.5, 0.0); 2])).unwrap();
     assert_eq!(hot.heat_steps(), vec![k + 1; 2]);
 }
+
+#[test]
+fn signed_sliding_work_is_not_heat_and_a_late_cell_refusal_is_atomic() {
+    let mut sys = system(2, coulomb());
+    let mut rosin = RosinThermalPorts::new(params(&sys, 8, 0.3), vec![0, 1], &mut sys).unwrap();
+    let normal = RIG_N / 2.0;
+    let slip = 0.05 * sys.sample_period_s();
+    let sliding_report = |mu: f64, direction: f64| FrictionPortFrame {
+        traction_n: direction * mu * normal,
+        dissipation_j: mu * normal * slip,
+        end_slip_speed_m_s: Some(direction * 0.05),
+        ..sliding(normal, direction * slip)
+    };
+    let warm = sliding_report(rosin.coefficients()[0], 1.0);
+    rosin.accept(&frame(vec![warm; 2])).unwrap();
+    rosin.apply(&mut sys).unwrap();
+    let forward = sliding_report(rosin.coefficients()[0], 1.0);
+    let reverse = sliding_report(rosin.coefficients()[1], -1.0);
+    let snapshot = |r: &RosinThermalPorts| (
+        r.states.clone(), r.phases().to_vec(), r.accepted_steps(),
+        r.coefficients().to_vec(), r.heat_seconds(),
+    );
+    let before = snapshot(&rosin);
+
+    // A positive endpoint slip speed can coexist with negative actual step
+    // displacement at reversal. The mechanical owner records F*d as signed
+    // declared work, with zero physical dissipation.
+    let reversal = FrictionPortFrame {
+        slip_distance_m: -slip,
+        dissipation_j: 0.0,
+        declared_slip_work_j: -forward.dissipation_j,
+        ..forward
+    };
+    for bad in [
+        reversal,
+        FrictionPortFrame { declared_slip_work_j: 0.0, ..reversal },
+        FrictionPortFrame {
+            dissipation_j: 0.0,
+            declared_slip_work_j: forward.dissipation_j,
+            ..forward
+        },
+        FrictionPortFrame { dissipation_j: -forward.dissipation_j, ..forward },
+    ] {
+        let error = rosin.accept(&frame(vec![forward, bad])).unwrap_err().to_string();
+        assert!(error.contains("needs dissipative sliding work"), "{error}");
+        assert_eq!(snapshot(&rosin), before, "the first cell's staged heat must not publish");
+    }
+    for bad in [
+        FrictionPortFrame { traction_n: f64::NAN, ..forward },
+        FrictionPortFrame { declared_slip_work_j: f64::NAN, ..forward },
+    ] {
+        assert!(rosin.accept(&frame(vec![forward, bad])).is_err());
+        assert_eq!(snapshot(&rosin), before);
+    }
+
+    // Consistent reverse sliding has positive work and heats identically to
+    // forward sliding. Retaining the signed slip still records the reversal.
+    rosin.accept(&frame(vec![forward, reverse])).unwrap();
+    assert_eq!(rosin.temperatures_k()[0].to_bits(), rosin.temperatures_k()[1].to_bits());
+    assert_eq!((rosin.accepted_steps(), rosin.heat_steps()), (2, vec![2, 2]));
+    assert_eq!(rosin.states[0].slip_m()[0], 2.0 * slip);
+    assert_eq!(rosin.states[1].slip_m()[0], 0.0);
+}

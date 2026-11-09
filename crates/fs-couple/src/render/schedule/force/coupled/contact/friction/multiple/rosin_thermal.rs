@@ -33,9 +33,13 @@
 //! Refusals, by name. A cell's second landing, an unloaded cell that still
 //! carries traction, a nonfinite or negative normal load, a temperature above
 //! the calibration's limit, the law's history capacity, a port that is not
-//! plain Coulomb, and a law step other than the sample period. A refusal
-//! commits nothing. A stuck cell takes zero slip: its numerical creep is the
-//! declared stick work of the receipt, not friction heat.
+//! plain Coulomb, and a law step other than the sample period. Loaded sliding
+//! also refuses negative actual traction-slip work or declared numerical work:
+//! a reversal's signed work cannot become heat by taking an absolute slip.
+//! A refusal leaves every thermal history unchanged. The mechanical owner has
+//! already accepted its frame and remains responsible for joint publication.
+//! A stuck cell takes zero slip: its numerical creep is the declared stick work
+//! of the receipt, not friction heat.
 use super::*;
 use fs_tribo::rosin_thermal::{SmithWoodhouse, SmithWoodhouseParams, SmithWoodhouseState};
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
@@ -160,7 +164,19 @@ impl RosinThermalPorts {
                     "rosin thermal friction: a cell lands again after its lift; the rosin's cooling off the string is unsourced").into()),
             };
             let slip = match report.regime {
-                ModalFrictionRegime::Sliding => report.slip_distance_m,
+                ModalFrictionRegime::Sliding => {
+                    let slip = finite(report.slip_distance_m)?;
+                    let work = finite(finite(report.traction_n)? * slip)?;
+                    let declared = finite(report.declared_slip_work_j)?;
+                    let dissipated = finite(report.dissipation_j)?;
+                    // The endpoint branch can slide even when its actual
+                    // displacement gives signed, non-dissipative work.
+                    // The thermal law uses |slip| and cannot represent that.
+                    if work < 0.0 || declared != 0.0 || dissipated < 0.0 {
+                        return Err(invalid("rosin thermal friction needs dissipative sliding work").into());
+                    }
+                    slip
+                },
                 ModalFrictionRegime::Sticking => 0.0,
                 _ => return Err(invalid("a step Coulomb coefficient binds only to a plain Coulomb port").into()),
             };
