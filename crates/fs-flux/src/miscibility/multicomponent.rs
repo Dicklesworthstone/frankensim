@@ -38,6 +38,9 @@ pub mod advection;
 /// Same-interval stirring and full molecular mixing, with coupled adaptation.
 pub mod transport;
 
+/// Local-temperature species and heat exchange using the original caloric law.
+pub mod nonisothermal;
+
 /// Original liquid material properties retained through accepted endpoints.
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
@@ -546,6 +549,26 @@ impl MulticomponentMiscibilityField {
         controls: MulticomponentMiscibilitySolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<f64>, f64, f64)> {
+        let (components, capacity) =
+            self.inventory_balances(next, controls.amount_balance_tolerance_mol, cancelled)?;
+        let energy = solve::free_energy_change(self, next, cancelled)?;
+        if energy > controls.free_energy_tolerance_j {
+            return Err(MulticomponentMiscibilityError::FreeEnergy {
+                change_j: energy,
+                tolerance_j: controls.free_energy_tolerance_j,
+            });
+        }
+        Ok((components, capacity, energy))
+    }
+
+    /// Shared independent-inventory account. Thermal evolution owns its H/S
+    /// audit and must not apply the reference-temperature Gibbs inequality.
+    fn inventory_balances(
+        &self,
+        next: &Self,
+        tolerance_mol: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, f64)> {
         let n = self.network.species_count();
         let mut components = vec![Sum::default(); n];
         let mut capacity = 0.0_f64;
@@ -566,25 +589,14 @@ impl MulticomponentMiscibilityField {
             .iter()
             .map(Sum::value)
             .collect::<Result<Vec<_>>>()?;
-        if capacity > controls.amount_balance_tolerance_mol
-            || components
-                .iter()
-                .any(|v| v.abs() > controls.amount_balance_tolerance_mol)
-        {
+        if capacity > tolerance_mol || components.iter().any(|v| v.abs() > tolerance_mol) {
             return Err(MulticomponentMiscibilityError::Conservation {
                 component_residual_mol: components,
                 maximum_capacity_residual_mol: capacity,
-                tolerance_mol: controls.amount_balance_tolerance_mol,
+                tolerance_mol,
             });
         }
-        let energy = solve::free_energy_change(self, next, cancelled)?;
-        if energy > controls.free_energy_tolerance_j {
-            return Err(MulticomponentMiscibilityError::FreeEnergy {
-                change_j: energy,
-                tolerance_j: controls.free_energy_tolerance_j,
-            });
-        }
-        Ok((components, capacity, energy))
+        Ok((components, capacity))
     }
 }
 

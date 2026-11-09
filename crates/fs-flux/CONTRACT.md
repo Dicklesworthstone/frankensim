@@ -10402,3 +10402,56 @@ three backtracks to 1.13075e-13. These are fixture-specific numerical results,
 not general runtime or turbulence-validation claims. The original numerical
 kernels were compiled without numerical stubs; material-adapter integration
 and full Cargo/workspace validation were not run.
+
+## Local-temperature multicomponent miscibility
+
+`miscibility::multicomponent::nonisothermal` binds independent accepted species
+inventories to the same original multicomponent caloric law, one temperature
+per cell, and explicit canonical face conductivity/heat-of-transport data.
+The full Maxwell–Stefan friction solve retains the original molar frame,
+species identities, complete pair diffusivities, and shared dense workspace.
+No collection of independent binary fluxes replaces that coupled solve.
+
+Original finite-face composition efforts exclude the source-derived thermal
+chemical-potential contribution. Without authored Soret data, uniform
+composition has zero molecular flux even with unequal temperatures, pure Cp,
+and B/T interactions. Authored heat-of-transport contrasts enter both the
+species force and reciprocal Dufour energy flux. Original divided partial
+enthalpy contrasts are formed before large common references are rounded.
+The source's sufficient whole-simplex convexity bound applies throughout the
+complete temperature bracket, not only at the graph's reference temperature.
+
+Every explicit stage evaluates all face rates at one accepted state, then
+applies equal-and-opposite species and enthalpy transfers synchronously.
+Temperature recovery uses original Cp integrals and changed inventories;
+an open cell has no independent entropy gate. Whole-window component/cell
+capacity, original total enthalpy, and total entropy checks precede publication.
+The nonnegative initial face entropy rate is a constitutive diagnostic, not
+a discrete-step dissipation proof. Positive support is never clipped or seeded.
+
+Adaptive evolution compares one full coupled step with two half steps using
+every component, its compensated low word, and each local temperature.
+Unchanged initial face rates are reused for full/first-half trials and interval
+retries. Only accepted fine-path species/energy transfers enter receipts;
+completed rejected work is counted separately. A single physical allowance
+applies to the final complete interval, including short terminal remainders.
+
+Thermodynamic sampling remains on representable component high words. A
+conservative original-caloric bound rejects compensated inventories whose
+omitted energy exceeds the cell's share of the energy budget; transported
+reference energy cannot silently become heat. This is an explicit numerical
+range refusal, not a substitute two-word thermodynamic model. Fixed equal
+partial molar volumes, fixed pressure, positive support and convex homogeneous
+liquids remain required. Multicomponent interfaces, thermal expansion, variable
+pressure/momentum feedback and dynamically selected material diffusivities
+are not supplied by this numerical owner.
+
+All 134 actual-source numerical miscibility tests passed in the focused Rust
+workspace: 117 earlier cases, eleven new independent spatial/precision cases,
+and six coupled temporal cases. Oracles include independent ternary friction,
+variable-Cp/B enthalpy, reciprocal Soret/Dufour transport, heat-only analytical
+relaxation, finite-step entropy refusal, trace support, cancellation/replay,
+work/transfer receipts and a large-reference artificial-heating regression.
+Seven original-source caloric transport cases separately passed through the
+actual public API. These are numerical verification, not experimental liquid
+validation or full workspace/DSR/material-build evidence.

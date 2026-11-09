@@ -233,7 +233,7 @@ pub(super) fn candidate_from_rates(
     })
 }
 
-fn product3(a: f64, b: f64, c: f64) -> Result<f64> {
+pub(super) fn product3(a: f64, b: f64, c: f64) -> Result<f64> {
     let mut factors = [a.abs(), b, c];
     factors.sort_by(f64::total_cmp);
     finite(
