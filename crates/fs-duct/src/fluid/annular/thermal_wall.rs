@@ -52,7 +52,7 @@ pub enum AnnularThermalWall {
 }
 
 impl AnnularThermalWall {
-    fn coefficients(self, omega: f64) -> Result<C64, DuctError> {
+    pub(crate) fn coefficients(self, omega: f64) -> Result<C64, DuctError> {
         let value = match self {
             Self::Isothermal | Self::Adiabatic => C64::ZERO,
             Self::Finite {
@@ -77,7 +77,7 @@ impl AnnularThermalWall {
         Ok(value)
     }
 
-    fn capacity(self) -> f64 {
+    pub(crate) fn capacity(self) -> f64 {
         match self {
             Self::Finite {
                 areal_heat_capacity_j_m2_k,

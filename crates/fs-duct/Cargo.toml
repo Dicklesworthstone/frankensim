@@ -25,6 +25,7 @@ fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
+fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-evidence = { path = "../fs-evidence" }

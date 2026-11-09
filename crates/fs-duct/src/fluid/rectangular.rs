@@ -24,6 +24,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 /// Molecular reservoirs and wall heat diffusion in the same energy equation.
 pub mod molecular;
+/// Resolved two-dimensional thermal fields with independently authored walls.
+pub mod thermal_wall;
 mod field;
 pub use field::{
     PreparedRectangularFields, RectangularDissipationPerLength, RectangularField,

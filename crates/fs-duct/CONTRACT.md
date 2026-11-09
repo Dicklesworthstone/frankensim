@@ -5659,3 +5659,90 @@ remain unchanged. A new physical two-tone null check joins the existing profile
 tests; the combined duct/aeroac actual-helper execution passes eight checks with
 warnings denied against the shared two-tone core. Full network integration
 remains unrun.
+
+## Independent rectangular thermal walls and resolved two-dimensional fields
+
+`fluid::rectangular::thermal_wall` adds source-bound preparation for the
+original `GasState` or `RelaxationState`, with a separately authored thermal
+condition on each physical rectangular face. The face order is short-axis
+zero/end, then long-axis zero/end, independently of constructor width/height
+order. Each face is isothermal, insulated, or has nonnegative conductance G to
+the fixed background bath and areal heat capacity C. The existing annular
+G/C declaration is reused without changing its arithmetic. These parameters
+describe a local wall that is uniform through its thickness and in perfect
+thermal contact with the gas. They carry caller authority; this API does not
+resolve a planar material layer or infer conductivity, heat capacity,
+thickness, contact resistance, thermal accommodation or an exterior bath.
+
+The actual two-dimensional gas temperature obeys
+`rho Cp(s) s T - k Laplacian(T) = s p`. Under physical peak
+`exp(-i omega t)` phasors, a finite face has
+`q_out = (G - i omega C) T_wall`. The original molecular caloric response
+enters once, including both relaxation loss and dispersion. A declared Q1
+mesh assembles the physical gas stiffness, consistent mass, independent face
+forms and strong isothermal values. Unequal face conditions retain their
+two-dimensional corner and gradient fields. The original rectangular Fourier
+owner supplies the no-slip shear field and its existing tail admission.
+
+The complex symmetric thermal equation lowers exactly to the real symmetric
+block `[Re A, -Im A; -Im A, -Re A]`; the existing bounded `fs-sparse`
+LDLT supplies ordering, symbolic analysis and numerical factorization.
+Diagonal congruence preserves symmetry. The returned field is checked in the
+original unscaled equations, and the independent positive heat forms must
+close the acoustic shunt work. Opaque layers retain a temperature complement
+to avoid subtracting the constant mode from small gradients; fully insulated
+walls retain the exact constant mode. The solver introduces no dense fallback
+or replacement molecular/transport law.
+
+Prepared observations expose local gas velocity, temperature and both
+transverse gradients; separate shear, gas conduction and molecular losses;
+each face's temperature, gas-to-wall and wall-to-bath heat fluxes; separate
+bath-exchange losses and reversible wall storage; the original wave and
+stable native `TwoPort`; and residual, payload and factor diagnostics.
+Integrated positive losses are formed directly from physical field forms,
+not an acoustic power difference. They close
+`Re(Z') |U|^2 / 2 + Re(Y') |p|^2 / 2`. These are acoustic availability
+losses; they do not by themselves assign mean caloric heating to gas or wall.
+Finite/insulated face flux uses its original Robin law. Isothermal flux is
+the explicitly reported one-sided Q1 gradient estimate, converging with mesh
+refinement; no arbitrary corner reaction is redistributed into face flux.
+
+Preparation admits at least two cells in each direction, at most 16384 gas
+nodes, an explicit cell diffusion-phase ceiling, an original residual/work
+tolerance, a conservative numerical payload ceiling, and native sparse
+symbolic/work/front limits. It polls cancellation during staging, assembly,
+factorization and postprocessing. Numerical staging, sparse analysis/factor
+storage, field arrays and retained Fourier shear have separate admitted
+allowances; allocator/runtime overhead and caller sources are excluded.
+The declared mesh is a refinement choice, not a continuum error certificate.
+After preparation, thermal point queries and integrated work queries are
+O(1); the original shear point query remains O(Fourier terms). Observations
+allocate nothing and do not reevaluate the source.
+
+The model remains linear, fully developed, uniform-pressure continuum gas
+acoustics with rigid no-slip mechanical walls and a uniform background.
+Axial heat diffusion, mean flow, moving/thermoelastic walls, rarefaction,
+entrance effects and higher pressure modes are outside this owner.
+
+Eleven G1/G3 regression groups execute in a focused native build: eight
+thermal-owner groups cover the independent double sine-series Dirichlet
+limit, unequal finite G/C walls against a dimensional Robin ODE, genuine
+four-face two-dimensional molecular work balance, exact insulated behavior,
+axis exchange and length rescaling, the large-G isothermal limit, opaque
+gradients, and scope/budget/cancellation refusals. Three public integration
+groups exercise the original gas and molecular constructors, source identity,
+local fields and wall observations, original stable `TwoPort`, separate
+physical port work, empty reservoirs, constructor-axis order, stale source
+refusal and preparation limits. On 8/16/32 cells per direction, independent
+all-isothermal mean errors are approximately 2.218%, 0.5584%, 0.1399%; unequal
+Robin mean errors are 0.1359%, 0.03395%, 0.008484%.
+
+All eleven checked-in tests passed using unchanged new production files,
+the actual original rectangular field and uniform-port arithmetic, complete
+native `fs-math`, `fs-sparse`, `fs-qty` and `fs-blake3`, and a narrow
+material slice retaining the exact original gas/coherence, transport,
+acoustic/thermoviscous, relaxation construction and caloric response owners.
+The thermochemical native slice reexports its actual species-id owner.
+This execution does not claim a full Cargo/workspace test, lint or dependency
+closure. The test G/C values and molecular fixtures are explicitly synthetic
+constitutive inputs, not measured material authority.
