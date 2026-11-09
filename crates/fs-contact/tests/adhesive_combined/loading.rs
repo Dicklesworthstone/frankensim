@@ -1,6 +1,8 @@
 //! Combined first-boundary physics, reversible work and explicit release.
 #[path = "loading/temperature.rs"]
 mod temperature;
+#[path = "loading/timed.rs"]
+mod timed;
 
 use super::{close, source};
 use core::f64::consts::PI;

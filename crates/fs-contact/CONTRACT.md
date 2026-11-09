@@ -4784,3 +4784,32 @@ new failure limits, no-op/round-trip history, detached branch loss, source and
 control refusals, and a shared evaluation-budget boundary. Formatting/parser and
 whitespace checks passed; these groups were not compiled or executed because the
 required constellation sibling checkouts and remote build runners were absent.
+
+
+## Physical-time prescribed combined adhesive loading
+
+`mixed_mode::combined::loading::timed` places the original proportional loading
+path on an explicitly prescribed affine load-factor schedule. Its sealed ramp
+retains the exact original mechanical step, accepted history and first-boundary
+stop. No additional constitutive query is needed to locate the event: the
+accepted load fraction determines its timestamp with compensated arithmetic.
+An explicit absolute seconds tolerance gates the exposed rounding discrepancy;
+an interior timestamp collapsing onto either requested endpoint refuses instead
+of relocating the event. The untraversed time and load remain visible.
+
+An outward request from an existing boundary stops at the initial time. Holding
+the same boundary load consumes its positive held interval without another
+arrival. Reversals retain the original zero-load radius extremum, while detached
+history traverses the prescription without work, release or reattachment.
+Constant-cost clock sampling preserves the original endpoint and boundary loads;
+sampling the untraversed prescription does not authorize an attached state.
+Source, history, clock, budget and cancellation refusals publish no candidate.
+
+The caller owns chronological continuation and explicit separation. This
+prescribed ramp supplies no inertia, impulse, automatic release, conduction,
+rebonding or material-derived quasistatic timescale. Five focused integration
+groups cover signed and exact-endpoint event times, reversal extrema, held and
+outward fold requests, detached tails, collapsed/rounded clocks, source budget
+and cancellation. Formatting/parser and whitespace checks passed; integration
+compilation/execution remains blocked by the missing constellation siblings and
+unavailable DSR/RCH runners in this environment.

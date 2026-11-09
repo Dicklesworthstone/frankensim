@@ -216,7 +216,7 @@ pub(super) fn observe_waves(
     Ok((waves, ScatteringPowerJet::from_values(balance)))
 }
 
-fn wave_power(
+pub(in crate::harmonic::scattering) fn wave_power(
     a: ScatteringComplexJet,
     z: f64,
     dz: f64,

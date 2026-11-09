@@ -34,6 +34,8 @@
 pub mod certificate;
 /// Compatible small-strain elastic response of an actually selected truss.
 pub mod elastic;
+/// Objective network equilibrium and native continuation through geometric folds.
+pub mod geometric;
 pub mod ground;
 pub mod lp;
 /// Source-bound material assignments shared by layout, sizing and mass.

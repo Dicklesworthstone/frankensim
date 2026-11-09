@@ -269,6 +269,28 @@ impl<'a> MaterialNetwork<'a> {
 }
 
 impl PreparedMaterialNetwork<'_, '_> {
+    // Complete heat consumers use these same source declarations and transport
+    // refresh; they do not reconstruct property pins or evaluate another law.
+    pub(crate) fn conductivity_sources<'s>(
+        &'s self, responses: &'s [CellConductionResponse<'_>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<ConductorResponse<'s>>, MaterialNetworkError> {
+        let plan = response_plan(self.network, responses, &mut cancelled)?;
+        if plan.bases != self.bases {
+            return Err(MaterialNetworkError::Invalid(
+                "conductivity response bases must retain the prepared source choices"));
+        }
+        Ok(plan.sources)
+    }
+
+    pub(crate) fn refresh_conductivity_transport(
+        &self, thermal: &DepositionSimulation<'_>, electrical: &[ConductivitySample],
+        coefficients: StepCoefficients<MaterialNetworkSample>, cancelled: impl FnMut() -> bool,
+    ) -> Result<StepCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        self.network.resolve_conductivity_transport(thermal, electrical, coefficients,
+            self.directional.as_ref(), cancelled)
+    }
+
     /// Resolve complete pinned bundles at the supplied thermal state and the
     /// original context's seed E/J coordinates, without advancing either history.
     ///

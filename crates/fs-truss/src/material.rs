@@ -728,6 +728,38 @@ impl<'a> MaterialLayout<'a> {
         )
     }
 
+    /// Prepare exact-chord network equilibrium and continuation with the same
+    /// original source-resolved Young moduli used in layout and elastic analysis.
+    /// Material states/areas remain fixed. Large rotations do not extend the
+    /// linear axial law's validity; the caller supplies its elastic-strain bound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn geometric_truss<'b>(
+        &'b self,
+        areas_m2: &[f64],
+        case: &'b LayoutCase,
+        loading: crate::geometric::GeometricLoading<'_>,
+        scales: crate::geometric::GeometricScales,
+        limits: crate::geometric::GeometricLimits,
+        cx: &Cx<'_>,
+    ) -> Result<crate::geometric::GeometricTruss<'b>, fs_solid::SolidError> {
+        let moduli = self.elastic_moduli(cx).map_err(|error| match error {
+            TrussConstructionError::Cancelled { .. } => fs_solid::SolidError::Cancelled,
+            error => fs_solid::SolidError::InvalidInput {
+                what: error.to_string(),
+            },
+        })?;
+        crate::geometric::GeometricTruss::try_new(
+            self.ground,
+            case,
+            areas_m2,
+            &moduli,
+            loading,
+            scales,
+            limits,
+            cx,
+        )
+    }
+
     fn elastic_moduli(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TrussConstructionError> {
         checkpoint(cx)?;
         let mut moduli = Vec::with_capacity(self.assignments.len());

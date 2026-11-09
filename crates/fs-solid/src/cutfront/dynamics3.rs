@@ -9,9 +9,10 @@
 //! Strong homogeneous supports are removed once from every action and load;
 //! adaptive hanging constraints remain inside the original native operators.
 //! No mass lumping, stabilization inertia, constitutive fit or new time scheme
-//! is introduced. Geometry, material, occupancy and stiffness scales are fixed
-//! during a trajectory. Free strain is also fixed when supplied. Evolving
-//! temperature or prestress, nonzero/moving supports, follower loads and
+//! is introduced. Geometry, occupancy and stiffness scales remain fixed. Each
+//! immutable model holds one source and free strain; thermal_midpoint_candidate
+//! pairs accepted and candidate source endpoints through the original midpoint
+//! owner. Evolving prestress, nonzero/moving supports, follower loads and
 //! physical damping are outside this elastic adapter.
 //!
 //! Native mass and strain callbacks poll cancellation within their kernels.
@@ -34,7 +35,9 @@ use fs_time::galpha::{
 };
 
 mod prestress;
+mod thermal;
 use prestress::HeldPrestress3;
+pub use thermal::{CutThermalMidpointSettings3, CutThermalMidpointStep3};
 
 /// The original fixed-geometry elasticity owner; this view creates no mesh.
 #[derive(Clone, Copy)]

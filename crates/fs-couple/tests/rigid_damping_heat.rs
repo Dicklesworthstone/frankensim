@@ -16,8 +16,9 @@ use fs_couple::rigid_damping_heat::temperature::{
     TemperatureDampingLaw, advance_candidate as advance_temperature,
 };
 use fs_couple::rigid_damping_heat::{
-    RigidDampingThermalConfig, RigidDampingThermalError, RigidDampingThermalInput,
-    advance_candidate,
+    ImplicitThermalScheme, RigidDampingImplicitConfig, RigidDampingThermalConfig,
+    RigidDampingThermalError, RigidDampingThermalInput, advance_candidate,
+    advance_implicit_candidate,
 };
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
@@ -33,6 +34,12 @@ use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
     Wrench,
 };
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
+    ImplicitConductionLaw, ImplicitConductionLinearControls, ImplicitConductionState,
+    ImplicitConductionWorkspace,
+};
+use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, ConductivityLaw};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId, Reservoir,
@@ -67,6 +74,49 @@ impl ThermalLaw for Caloric {
     }
     fn maximum_temperature_slope(&self) -> f64 {
         1.0 / self.a
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial: f64,
+        final_h: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let initial_t = self.temperature_k(initial)?;
+        self.temperature_k(final_h)?;
+        let delta_t = 2.0 * (final_h - initial)
+            / ((self.a * self.a + 2.0 * self.b * final_h).sqrt()
+                + (self.a * self.a + 2.0 * self.b * initial).sqrt());
+        Ok(Some(
+            self.b * delta_t + (self.a - 300.0 * self.b) * (delta_t / initial_t).ln_1p(),
+        ))
+    }
+}
+impl ConductivityLaw for Caloric {
+    fn conductivity_w_m_k(&self, e: f64) -> Result<f64, DepositionError> {
+        self.temperature_k(e)?;
+        Ok(1000.0)
+    }
+}
+impl ImplicitConductionLaw for Caloric {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self
+    }
+    fn conductivity_law(&self) -> &dyn ConductivityLaw {
+        self
+    }
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
+        [0.0, self.maximum]
+    }
+    fn state_at_specific_enthalpy(
+        &self,
+        e: f64,
+    ) -> Result<ImplicitConductionState, DepositionError> {
+        let temperature_k = self.temperature_k(e)?;
+        Ok(ImplicitConductionState {
+            temperature_k,
+            temperature_slope_kg_k_j: 1.0 / (self.a + self.b * (temperature_k - 300.0)),
+            conductivity_w_m_k: self.conductivity_w_m_k(e)?,
+            conductivity_slope_kg_w_m_k_j: 0.0,
+        })
     }
 }
 fn laws() -> [Caloric; 2] {
@@ -726,32 +776,52 @@ fn late_observer_caloric_and_final_cancellation_refusals_are_transactional_and_r
 }
 
 #[test]
-fn a_large_outside_interval_source_cannot_erase_physical_damper_heat() {
+fn opposing_large_sources_preserve_physical_damper_heat() {
     let bodies = Bodies::new([0.7, 1.1]);
     let laws = laws();
-    let initial = thermal(&laws, false, true);
+    let large_watts = 2.0_f64.powi(80);
+    let initial = DepositionSimulation::new(
+        vec![birth(0, 0.0, -large_watts), birth(1, 0.0, 0.0)],
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        budget(),
+    )
+    .unwrap()
+    .advance_to(0.0, config().thermal, || Ok(()))
+    .unwrap()
+    .0;
     let routes = [
         BTreeMap::from([(CellId(0), 1.0)]),
         BTreeMap::from([(CellId(0), 1.0)]),
     ];
     let observer = Observe {
-        interval_watts: Some(1e20),
+        interval_watts: Some(large_watts),
         ..Default::default()
     };
-    // The original cell would also refuse this large input on its caloric
-    // domain. The independent handoff gate must catch erased damper joules
-    // BEFORE thermal integration, while all caller histories remain unchanged.
-    assert!(matches!(
-        advance_candidate(
-            bodies.input(&routes),
-            &initial,
-            &observer,
-            0.5,
-            config(),
-            || false
-        ),
-        Err(RigidDampingThermalError::Energy { .. })
-    ));
+    // Authored cooling and outside heating cancel, leaving independently
+    // integrated physical damping. The interval wrapper must preserve that
+    // small contribution before the native owner reduces all source terms.
+    let candidate = advance_candidate(
+        bodies.input(&routes),
+        &initial,
+        &observer,
+        0.5,
+        config(),
+        || false,
+    )
+    .unwrap();
+    let heat: f64 = exact_heat(0.5).into_iter().sum();
+    near(candidate.report().deposited_heat_j, heat, 5e-14);
+    near(candidate.report().external_thermal_heat_j, 0.0, 5e-14);
+    near(
+        candidate.thermal().cells()[&CellId(0)].specific_h_j_kg,
+        heat / 2.0,
+        5e-14,
+    );
+    near(candidate.report().combined_energy_residual_j, 0.0, 3e-13);
+    assert_eq!(
+        candidate.thermal().cells()[&CellId(0)].boundary.source_w,
+        -large_watts
+    );
     assert_eq!(initial.time_s(), 0.0);
     assert!(observer.intervals.is_empty());
     assert!(
@@ -804,6 +874,349 @@ fn linear_calorics() -> [Caloric; 2] {
             ThermalStorageBasis::InternalEnergy
         },
     })
+}
+
+fn stiff_thermal<'m>(laws: &'m [Caloric; 2], maximum_steps: usize) -> DepositionSimulation<'m> {
+    let mut limits = budget();
+    limits.max_substeps = maximum_steps;
+    let mut schedule = vec![
+        birth(0, 0.0, 0.0),
+        birth(1, 0.0, 0.0),
+        TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: 17,
+                a: CellId(0),
+                b: CellId(1),
+                area_m2: 1.0,
+                conductance_w_k: 1000.0,
+            }),
+        },
+    ];
+    for event in &mut schedule {
+        if let Event::Birth(cell) = &mut event.event {
+            // The independent reference is an isolated two-cell system.
+            // Unlike the general fixture, it has no external reservoir owner.
+            cell.boundary.reservoir = None;
+        }
+    }
+    DepositionSimulation::new(
+        schedule,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        limits,
+    )
+    .unwrap()
+    .advance_to(0.0, config().thermal, || Ok(()))
+    .unwrap()
+    .0
+}
+
+fn stiff_graph<'m>(
+    laws: &'m [Caloric; 2],
+    initial: &DepositionSimulation<'_>,
+) -> ImplicitConductionGraph<'m> {
+    let conduction = ConductionObserver::new(
+        initial,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        &[ConductiveLink {
+            link_id: 17,
+            half_distances_m: [0.5; 2],
+            contact_resistance_m2_k_w: 0.0,
+        }],
+        &[],
+        || Ok(()),
+    )
+    .unwrap();
+    ImplicitConductionGraph::new(
+        initial,
+        &conduction,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+}
+
+fn implicit_config(scheme: ImplicitThermalScheme) -> RigidDampingImplicitConfig {
+    let original = config();
+    RigidDampingImplicitConfig {
+        mechanical: original.mechanical,
+        thermal: ImplicitConductionControls {
+            maximum_dt_s: 0.25,
+            cell_tolerance_j: 1e-10,
+            total_tolerance_j: 1e-9,
+            ..Default::default()
+        },
+        scheme,
+        maximum_heat_bindings: original.maximum_heat_bindings,
+        energy_tolerance_j: 1e-8,
+    }
+}
+
+#[test]
+fn stiff_conduction_and_rigid_damping_share_be_and_sdirk_intervals() {
+    let bodies = Bodies::new([0.7, 1.1]);
+    let laws = linear_calorics();
+    let initial = stiff_thermal(&laws, 8);
+    let graph = stiff_graph(&laws, &initial);
+    let routes = [
+        BTreeMap::from([(CellId(0), 1.0)]),
+        BTreeMap::from([(CellId(0), 1.0)]),
+    ];
+    let observer = Observe::default();
+    // G=1000 W/K gives a sub-millisecond explicit stability restriction;
+    // the same physical system fits in two admitted implicit intervals.
+    assert!(matches!(
+        advance_candidate(
+            bodies.input(&routes),
+            &initial,
+            &observer,
+            0.5,
+            config(),
+            || false
+        ),
+        Err(RigidDampingThermalError::Thermal(DepositionError::Budget(
+            _
+        )))
+    ));
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (out, native) = advance_implicit_candidate(
+            bodies.input(&routes),
+            &initial,
+            &observer,
+            0.5,
+            &graph,
+            implicit_config(scheme),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(native.energy, out.report().thermal);
+        assert_eq!(native.energy.substeps, 2);
+        assert_eq!(native.rejected_intervals, 0);
+        assert_eq!(
+            out.observer().intervals,
+            [(0.0, 0.25, 0.25), (0.25, 0.25, 0.5)]
+        );
+        assert_eq!(out.observer().hooks[0], 1);
+        assert_eq!(out.observer().hooks[8], 2);
+        assert_eq!(out.report().pair_relaxations, 12);
+        assert!(native.entropy.has_unclassified_sources);
+        assert!(native.entropy.thermal_storage_change_j_k > 0.0);
+        assert!(native.entropy.conduction_generation_j_k >= 0.0);
+
+        // Independent two-capacity discrete solution. C0=1 and C1=1.5 J/K;
+        // d=T0-T1 obeys d'=-G(1/C0+1/C1)d + mean_power/C0. Each
+        // mechanical interval supplies its exact native loss only once.
+        let mut total_energy = 0.0;
+        let mut difference = 0.0;
+        let gamma = 1.0 - 1.0 / 2.0_f64.sqrt();
+        for &(start, dt, end) in &out.observer().intervals {
+            let heat: f64 = exact_heat(end)
+                .into_iter()
+                .zip(exact_heat(start))
+                .map(|(after, before)| after - before)
+                .sum();
+            total_energy += heat;
+            let stiffness = dt * 1000.0 * (1.0 + 1.0 / 1.5);
+            difference = match scheme {
+                ImplicitThermalScheme::BackwardEuler => (difference + heat) / (1.0 + stiffness),
+                ImplicitThermalScheme::Sdirk2 => {
+                    let first = (difference + gamma * heat) / (1.0 + gamma * stiffness);
+                    (difference + heat - (1.0 - gamma) * stiffness * first)
+                        / (1.0 + gamma * stiffness)
+                }
+            };
+        }
+        let cell_zero_energy = total_energy / 2.5 + (1.5 / 2.5) * difference;
+        near(
+            out.thermal().cells()[&CellId(0)].specific_h_j_kg,
+            cell_zero_energy / 2.0,
+            2e-9,
+        );
+        near(
+            out.thermal().cells()[&CellId(1)].specific_h_j_kg,
+            (total_energy - cell_zero_energy) / 3.0,
+            2e-9,
+        );
+        near(out.report().deposited_heat_j, total_energy, 1e-13);
+        near(out.report().combined_energy_residual_j, 0.0, 1e-9);
+        for (i, expected_heat) in exact_heat(0.5).into_iter().enumerate() {
+            near(out.report().connector_heat_j[i], expected_heat, 1e-13);
+        }
+        for i in 0..4 {
+            let rate = if i < 2 { 0.7 } else { 1.1 };
+            near(
+                out.states()[i].linear_momentum_world().x,
+                bodies.states[i].linear_momentum_world().x * (-rate * 0.5_f64).exp(),
+                1e-13,
+            );
+        }
+    }
+    assert_eq!(initial.time_s(), 0.0);
+    assert!(
+        initial
+            .cells()
+            .values()
+            .all(|cell| cell.specific_h_j_kg == 0.0)
+    );
+    assert_eq!(observer, Observe::default());
+}
+
+#[test]
+fn implicit_retries_replace_mechanical_receipts_and_retain_attempted_work() {
+    let bodies = Bodies::new([0.7, 1.1]);
+    let laws = laws();
+    let initial = stiff_thermal(&laws, 128);
+    let graph = stiff_graph(&laws, &initial);
+    let routes = routes();
+    let observer = Observe::default();
+    let mut controls = implicit_config(ImplicitThermalScheme::Sdirk2);
+    controls.thermal.maximum_newton_iterations = 1;
+    controls.thermal.cell_tolerance_j = 1e-5;
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (out, native) = advance_implicit_candidate(
+        bodies.input(&routes),
+        &initial,
+        &observer,
+        0.25,
+        &graph,
+        controls,
+        &mut workspace,
+        || false,
+    )
+    .unwrap();
+    assert!(native.rejected_intervals > 0);
+    let attempts = native.energy.substeps + native.rejected_intervals;
+    assert_eq!(out.observer().hooks[0], 1);
+    assert_eq!(out.observer().hooks[8], attempts);
+    assert_eq!(out.observer().intervals.len(), native.energy.substeps);
+    assert_eq!(out.report().pair_relaxations, 6 * attempts);
+    assert!(out.report().pair_relaxations > 6 * native.energy.substeps);
+    let heat = exact_heat(0.25);
+    for (i, expected) in heat.into_iter().enumerate() {
+        near(out.report().connector_heat_j[i], expected, 2e-12);
+    }
+    near(
+        out.report().deposited_heat_j,
+        0.75 * heat[0] + 0.8 * heat[1],
+        2e-12,
+    );
+    near(out.report().combined_energy_residual_j, 0.0, 1e-8);
+    for i in 0..4 {
+        let rate = if i < 2 { 0.7 } else { 1.1 };
+        near(
+            out.states()[i].linear_momentum_world().x,
+            bodies.states[i].linear_momentum_world().x * (-rate * 0.25_f64).exp(),
+            2e-12,
+        );
+    }
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(observer, Observe::default());
+}
+
+#[test]
+fn implicit_rigid_refusal_and_late_cancellation_publish_no_partial_state() {
+    let bodies = Bodies::new([0.7, 1.1]);
+    let laws = linear_calorics();
+    let initial = stiff_thermal(&laws, 8);
+    let saved_cells = initial.cells().clone();
+    let graph = stiff_graph(&laws, &initial);
+    let routes = routes();
+    let controls = implicit_config(ImplicitThermalScheme::Sdirk2);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let refusing = Observe {
+        fail_at: Some(2),
+        ..Default::default()
+    };
+    assert!(matches!(
+        advance_implicit_candidate(
+            bodies.input(&routes),
+            &initial,
+            &refusing,
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || false
+        ),
+        Err(RigidDampingThermalError::Observer(
+            DepositionError::InvalidInput("synthetic observer refusal")
+        ))
+    ));
+    assert!(refusing.intervals.is_empty());
+    let observer = Observe::default();
+    let mut polls = 0;
+    let (expected, expected_report) = advance_implicit_candidate(
+        bodies.input(&routes),
+        &initial,
+        &observer,
+        0.5,
+        &graph,
+        controls,
+        &mut workspace,
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    let mut again = 0;
+    assert!(matches!(
+        advance_implicit_candidate(
+            bodies.input(&routes),
+            &initial,
+            &observer,
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || {
+                again += 1;
+                again == polls
+            }
+        ),
+        Err(RigidDampingThermalError::Cancelled)
+    ));
+    let mut insufficient = controls;
+    insufficient.thermal.maximum_steps = 1;
+    assert!(matches!(
+        advance_implicit_candidate(
+            bodies.input(&routes),
+            &initial,
+            &observer,
+            0.5,
+            &graph,
+            insufficient,
+            &mut workspace,
+            || false
+        ),
+        Err(RigidDampingThermalError::ImplicitThermal(
+            ImplicitConductionError::Thermal(DepositionError::Budget(_))
+        ))
+    ));
+    let (retry, retry_report) = advance_implicit_candidate(
+        bodies.input(&routes),
+        &initial,
+        &observer,
+        0.5,
+        &graph,
+        controls,
+        &mut workspace,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(retry.states(), expected.states());
+    assert_eq!(retry.thermal().cells(), expected.thermal().cells());
+    assert_eq!(retry.observer(), expected.observer());
+    assert_eq!(retry_report, expected_report);
+    assert_eq!(initial.cells(), &saved_cells);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(observer, Observe::default());
 }
 
 #[test]

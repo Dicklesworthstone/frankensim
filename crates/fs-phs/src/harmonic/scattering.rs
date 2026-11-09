@@ -17,11 +17,16 @@ use super::{
 };
 
 mod frequency;
+mod curvature;
 mod mixed;
 mod parameter;
 mod poles;
 mod resonance;
 pub use frequency::{ScatteringFrequencyResponse, ScatteringWaveDerivative};
+pub use curvature::{
+    ScatteringComplexFrequencyJet, ScatteringFrequencyCurvatureResponse,
+    ScatteringPowerFrequencyJet, ScatteringWaveFrequencyCurvature,
+};
 pub use mixed::{
     ScatteringComplexJet, ScatteringFrequencyParameterResponse, ScatteringPowerJet,
     ScatteringWaveFrequencyParameterJet,

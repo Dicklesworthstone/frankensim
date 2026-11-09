@@ -11,8 +11,8 @@ use crate::harmonic::{
 };
 use physical::{SourceJet, TangentState};
 
-mod observe;
-mod residual;
+pub(super) mod observe;
+pub(super) mod residual;
 pub use observe::{ScatteringComplexJet, ScatteringPowerJet, ScatteringWaveFrequencyParameterJet};
 
 /// Every original physical field and actual wave-boundary quantity through
@@ -172,53 +172,12 @@ impl ScatteringFactor<'_> {
             &mut cancelled,
         )?;
 
-        // A_closed*x_ww=G*effective(a_ww)+2iE*x_w.
-        let second_source = source
-            .second_frequency
-            .map_or_else(|| vec![C64::ZERO; model.m], <[C64]>::to_vec);
-        let effective_second = self.effective_input(&second_source, &mut cancelled)?;
-        for (i, value) in rhs.iter_mut().enumerate() {
-            poll(&mut cancelled)?;
-            let row = &model.g[i * model.m..(i + 1) * model.m];
-            let mut terms = crate::harmonic::input_row_sums(row, |p| effective_second[p])?;
-            if i < model.n_diff {
-                add_i_state(&mut terms, frequency.state_derivative[i], 2.0)?;
-            }
-            *value = crate::harmonic::input_value(terms, C64::ZERO)?;
-        }
-        let (state, relative) = self.factor.solve_rhs(&rhs, &mut cancelled)?;
-        let mut second = physical::recover_tangent(
-            model,
-            state,
-            HarmonicParameterDirection::default(),
-            &frequency.response.physical.state,
-            &frequency.response.physical.effort,
-            relative,
-            &mut cancelled,
-        )?;
-        let second_input = self.restore_input_tangent(
+        let (second, second_input) = self.second_frequency_state(
+            &frequency,
             source.second_frequency,
-            &second.output,
-            &frequency.physical_input_derivative,
-            None,
+            &mut rhs,
             &mut cancelled,
         )?;
-        second.relative_residual =
-            second
-                .relative_residual
-                .max(residual::original_higher_residual(
-                    self.model,
-                    frequency.response.physical.omega_rad_s,
-                    &second,
-                    &second_input,
-                    &frequency.state_derivative,
-                    &frequency.effort_derivative,
-                    &frequency.physical_input_derivative,
-                    &frequency.state_derivative,
-                    2.0,
-                    HarmonicParameterDirection::default(),
-                    &mut cancelled,
-                )?);
 
         // Differentiate the complete loaded omega equation. Its coefficient
         // action and explicit source retain G_theta, Q_theta and Z_theta.
@@ -339,7 +298,7 @@ impl ScatteringFactor<'_> {
         })
     }
 
-    fn restore_input_tangent(
+    pub(super) fn restore_input_tangent(
         &self,
         source: Option<&[C64]>,
         output: &[C64],
@@ -392,7 +351,7 @@ impl ScatteringModel {
     }
 }
 
-fn add_i_state(terms: &mut [Sum; 2], state: C64, factor: f64) -> Result<(), HarmonicError> {
+pub(super) fn add_i_state(terms: &mut [Sum; 2], state: C64, factor: f64) -> Result<(), HarmonicError> {
     terms[0]
         .product(-state.im, factor)
         .and_then(|()| terms[1].product(state.re, factor))

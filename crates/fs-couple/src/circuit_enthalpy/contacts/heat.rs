@@ -28,6 +28,7 @@ mod extension;
 mod observer;
 mod layers;
 mod metrics;
+mod conductivity;
 pub use observer::{MaterialHeatObserver, AssemblyHeatObserver, HeatSourceObserver,
     HeatAssemblyAdvanceError, observe_heat_assembly};
 pub mod solid;
@@ -241,12 +242,25 @@ impl<'a> MaterialHeatNetwork<'a> {
     ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
         check(cx)?;
         admit_additional_contact_links(contact_bindings, additional_links)?;
-        let mut initial = match additional_links {
+        let initial = match additional_links {
             Some(links) => electrical.resolve_with_link_conductances(
                 thermal, links, || cx.checkpoint().is_err(),
             ),
             None => electrical.resolve(thermal, || cx.checkpoint().is_err()),
         }?;
+        self.prepare_from_electrical(cx, thermal, electrical, initial,
+            contact_bindings, surface_bindings, additional_links)
+    }
+
+    fn prepare_from_electrical<'n>(
+        &'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        electrical: PreparedElectricalContactNetwork<'n, 'a>,
+        mut initial: ContactThermalCoefficients<MaterialNetworkSample>,
+        contact_bindings: &[MaterialContactLink<'a>], surface_bindings: &[RadiatingCell<'a>],
+        additional_links: Option<&BTreeMap<u64, f64>>,
+    ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
+        check(cx)?;
+        admit_additional_contact_links(contact_bindings, additional_links)?;
         let contacts = apply_material_contacts(thermal, contact_bindings,
             &mut initial.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let mut thermal_contacts = Vec::with_capacity(contacts.len());
@@ -349,6 +363,7 @@ impl PreparedHeatNetwork<'_, '_> {
         let field_dimension = |dims| [ConductorMagnitude::ElectricField.quantity().dims(),
             ConductorMagnitude::CurrentDensity.quantity().dims(),
             fs_material::electrical_interface::response::ElectricalInterfaceCoordinate::VoltageJump.quantity().dims(),
+            fs_qty::Current::DIMS,
             fs_material::field_storage::permanent::FLUX_DENSITY_DIMS,
             fs_material::field_storage::permanent::FIELD_STRENGTH_DIMS].contains(&dims);
         let admit = |claim: &fs_matdb::PropertyClaim, context: &fs_matdb::QueryPoint,
@@ -458,8 +473,16 @@ impl PreparedHeatNetwork<'_, '_> {
         check(cx)?;
         admit_additional_contact_links(&self.thermal_contacts, additional_links)?;
         self.admit_contact_metrics(cx, thermal, additional_links, metrics)?;
-        let mut coefficients = self.electrical.resolve_with_link_metrics(
+        let coefficients = self.electrical.resolve_with_link_metrics(
             thermal, additional_links, metrics, || cx.checkpoint().is_err())?;
+        self.complete_heat_coefficients(cx, thermal, coefficients, pressures, metrics)
+    }
+
+    fn complete_heat_coefficients(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        mut coefficients: ContactThermalCoefficients<MaterialNetworkSample>,
+        pressures: &[ThermalContactPressure<'_>], metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
         let integrated_conduction = self.resolve_integrated_conduction(cx, thermal,
             &mut coefficients.bulk.conductances_w_k, &mut coefficients.bulk.source)?;
         let thermal_contacts = apply_material_contacts_with_metrics(

@@ -33,6 +33,8 @@ pub mod hydrostatic;
 pub mod principal;
 /// Prescribed calibrated temperature clocks on the original rotor Maxwell branches.
 pub mod rotor_kinetics;
+/// Finite-capacity thermal feedback from original rotor Maxwell branch heat.
+pub mod rotor_thermal;
 
 /// Complete tensor equilibrium, Maxwell and Kelvin laws on native rigid graphs.
 pub mod spatial_relaxation;

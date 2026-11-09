@@ -16,7 +16,9 @@ use super::charge::{
 };
 use super::{CommutationParameters, invalid, number, positive};
 use crate::circuit::capacitance::CapacitorChargeCurve;
-use crate::circuit::converter::commutation::gate::{GateConductanceCurve, GateDriver};
+use crate::circuit::converter::commutation::gate::{
+    GateChannelLaw, GateChannelResponse, GateConductanceCurve, GateDriver,
+};
 use crate::{ConstitutiveDiscreteGradient, ContinuousStorageTangent, PhsError, Storage};
 use fs_math::dd::Dd;
 fn dd(x: f64) -> Dd {
@@ -24,18 +26,22 @@ fn dd(x: f64) -> Dd {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GateCommutationParameters {
+pub struct GateCommutationParameters<C = GateConductanceCurve> {
     /// Original diode/bounds cards are retained. Their Ron/Roff do not select
     /// driven-channel current: channel_conductance is the sole gate-channel law.
     pub converter: CommutationParameters,
     pub intrinsic_drain_charge_curves: [CapacitorChargeCurve; 4],
     pub gate_source_capacitance_f: [f64; 4],
     pub gate_drain_capacitance_f: [f64; 4],
-    pub channel_conductance: [GateConductanceCurve; 4],
+    /// Original channel-only responses in input-high/input-low/output-high/
+    /// output-low order. The historical field name is retained for existing
+    /// conductance-curve callers; C may also be a full signed I(Vds, Vgs) law.
+    /// Body-diode current must not be included in this response.
+    pub channel_conductance: [C; 4],
     pub gate_drivers: [GateDriver; 4],
     pub maximum_cells_per_chord: usize,
 }
-impl GateCommutationParameters {
+impl<C: GateChannelResponse + Clone + 'static> GateCommutationParameters<C> {
     pub fn validate(&self) -> Result<(), PhsError> {
         GateCommutationStorage::new(self).map(|_| ())
     }
@@ -49,9 +55,6 @@ impl GateCommutationParameters {
         node_voltage_v: [f64; 2],
         gate_source_voltage_v: [f64; 4],
     ) -> Result<[f64; 9], PhsError> {
-        for k in 0..4 {
-            self.channel_conductance[k].evaluate(gate_source_voltage_v[k])?;
-        }
         GateCommutationStorage::new(self)?.state(
             current_a,
             bus_voltage_v,
@@ -79,14 +82,30 @@ pub struct GatePowerAccount {
 
 #[derive(Clone, Debug)]
 pub struct GateCommutationStorage {
-    parameters: GateCommutationParameters,
+    parameters: GateCommutationParameters<GateChannelLaw>,
     base: ChargeCommutationStorage,
     sum_f: [Dd; 4],
     alpha: [Dd; 4],
     scales: [f64; 9],
 }
 impl GateCommutationStorage {
-    pub fn new(parameters: &GateCommutationParameters) -> Result<Self, PhsError> {
+    /// Prepare reversible storage once while retaining the same immutable
+    /// channel owner for actual-voltage support checks. Channel response changes
+    /// neither the charge transform nor the original AVF energy rule.
+    pub fn new<C: GateChannelResponse + Clone + 'static>(
+        parameters: &GateCommutationParameters<C>,
+    ) -> Result<Self, PhsError> {
+        let parameters = GateCommutationParameters {
+            converter: parameters.converter,
+            intrinsic_drain_charge_curves: parameters.intrinsic_drain_charge_curves.clone(),
+            gate_source_capacitance_f: parameters.gate_source_capacitance_f,
+            gate_drain_capacitance_f: parameters.gate_drain_capacitance_f,
+            channel_conductance: super::four(core::array::from_fn(|k| {
+                GateChannelLaw::new(parameters.channel_conductance[k].clone())
+            }))?,
+            gate_drivers: parameters.gate_drivers,
+            maximum_cells_per_chord: parameters.maximum_cells_per_chord,
+        };
         parameters.converter.validate()?;
         let mut sum_f = [Dd::ZERO; 4];
         let mut alpha = [Dd::ZERO; 4];
@@ -168,14 +187,14 @@ impl GateCommutationStorage {
             )?;
         }
         Ok(Self {
-            parameters: parameters.clone(),
+            parameters,
             base,
             sum_f,
             alpha,
             scales,
         })
     }
-    pub(super) fn parameters(&self) -> &GateCommutationParameters {
+    pub(super) fn parameters(&self) -> &GateCommutationParameters<GateChannelLaw> {
         &self.parameters
     }
     pub(super) fn maximum_cells_per_chord(&self) -> usize {
@@ -216,6 +235,9 @@ impl GateCommutationStorage {
         x[0] = number(dd(p.converter.inductance_h) * dd(current))?;
         for k in 0..2 {
             let v = [dd(bus[k]) - dd(node[k]), dd(node[k])];
+            for j in 0..2 {
+                p.channel_conductance[2 * k + j].evaluate(number(v[j])?, gate[2 * k + j])?;
+            }
             let q = [
                 curve_charge_dd(&p.intrinsic_drain_charge_curves[2 * k], v[0])?,
                 curve_charge_dd(&p.intrinsic_drain_charge_curves[2 * k + 1], v[1])?,

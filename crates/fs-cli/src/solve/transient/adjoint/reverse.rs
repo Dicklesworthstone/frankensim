@@ -273,7 +273,7 @@ pub(in crate::solve::transient) fn finish(
     let prescribed_workspace = prescribed_control_storage_bytes(
         spec, n, problem.mesh.element_count(), problem.mesh.boundary().len(),
     )?;
-    let flux_workspace = flux_controls::storage_bytes(spec, n)?;
+    let flux_workspace = flux_controls::storage_bytes(spec, n, problem.mesh.boundary().len())?;
     let contact_workspace = temperature_contacts
         .map(|_| {
             contact_storage_bytes(

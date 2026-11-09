@@ -6170,3 +6170,27 @@ retain the partition under moving axes and compare the original backward-Euler
 pulse account with scalar forcing, including a rotated held left value, source
 and frame knots, tails, cancellation and exhausted budgets. Pinned Rust syntax
 parsing and source review completed; compilation and runtime tests remain unrun.
+
+## Original scalar and vector flux controls in complete thermal adjoints
+
+`PrescribedFluxControls` binds the original P1 Neumann faces in explicit control
+order. Scalar controls are uniform normal-flux offsets; vector controls retain
+all three WORLD components and each face's own outward normal. Their tangent
+loads enter the existing `RobinResponse::apply`; their pullback consumes the
+complete masked nodal-load multiplier from steady or transient owners. The
+outward-load minus is applied once. No additional solve, state feedback,
+Dirichlet lift or timestep factor is introduced by the contraction.
+
+The retained basis is sparse in selected faces. It replaces the dense
+zero-feedback trace workaround in native CLI capacity/enthalpy adjoints and
+also supplies the CLI steady scalar flux derivative. Source amplitudes, history,
+physical face partition and accepted fields remain independently owned.
+Original scalar/vector coordinate, fixed-node, finite-arithmetic, face-budget
+and cancellation checks apply. Geometry, frame/schedule chain rules and direct
+objective dependence remain outside this fixed native-flux derivative.
+
+Focused regressions define native-load differences, scalar reduction, skew-face
+vector chain rules, and all-component physical finite differences plus transpose
+identities through nonlinear contact steady and backward-Euler solves. Pinned
+Rust syntax parsing and scoped diff checks passed; Cargo typechecking and these
+runtime regressions were not executed in this session.

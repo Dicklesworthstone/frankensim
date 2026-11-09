@@ -15,11 +15,17 @@
 //! and eleven/fifteen-state finite drives share native stepping and accounts.
 //! Gate commands drive finite resistors; they do not instantaneously overwrite
 //! gate charge or channel conductance. Actual gate supply work and driver heat
-//! are explicit. No Coss loss map, recovery charge, temperature-varying storage
+//! are explicit. The driven channel may retain a complete signed I(Vds,Vgs)
+//! source response, including saturation and its original two-voltage tangent;
+//! the existing gate-only conductance curves remain the default. Channel and
+//! body-diode current are distinct physical owners. No Coss loss map, recovery charge, temperature-varying storage
 //! or finite stored gate-rail energy is inferred. Small RC scales still require
 //! explicitly authored temporal refinement.
 
-use super::gate::{GateDriver, GateDriverBranch, GateDriverPoint};
+use super::gate::{
+    GateChannelLaw, GateChannelResponse, GateConductanceCurve, GateDriver, GateDriverBranch,
+    GateDriverPoint,
+};
 use super::{
     CommutationInterval, CommutationParameters, DeviceConductionPoint, DeviceGateState,
     HalfBridgeConduction, HalfBridgeNodePoint, SwitchDevice, invalid, number, poll, positive,
@@ -353,7 +359,9 @@ impl ConverterCore<5> {
     }
 }
 impl ConverterCore<9> {
-    fn new_gate(parameters: &gate::GateCommutationParameters) -> Result<Self, PhsError> {
+    fn new_gate<C: GateChannelResponse + Clone + 'static>(
+        parameters: &gate::GateCommutationParameters<C>,
+    ) -> Result<Self, PhsError> {
         let storage = gate::GateCommutationStorage::new(parameters)?;
         Self::with_storage(
             parameters.converter,
@@ -393,7 +401,7 @@ impl<const N: usize> ConverterCore<N> {
             system,
         })
     }
-    fn gate_parameters(&self) -> Option<&gate::GateCommutationParameters> {
+    fn gate_parameters(&self) -> Option<&gate::GateCommutationParameters<GateChannelLaw>> {
         if let ConverterStorage::Gate(storage) = &self.storage {
             Some(storage.parameters())
         } else {
@@ -551,8 +559,14 @@ impl<const N: usize> ConverterCore<N> {
         if e.len() != 9 || e.iter().any(|v| !v.is_finite()) {
             return Err(invalid("finite nine-state gate efforts required"));
         }
+        let voltage = [
+            number(Dd::from_f64(e[1]) - Dd::from_f64(e[3]))?,
+            e[3],
+            number(Dd::from_f64(e[2]) - Dd::from_f64(e[4]))?,
+            e[4],
+        ];
         let c = four(core::array::from_fn(|k| {
-            p.channel_conductance[k].evaluate(e[5 + k])
+            p.channel_conductance[k].evaluate(voltage[k], e[5 + k])
         }))?;
         let branches = gate
             .drivers
@@ -560,29 +574,14 @@ impl<const N: usize> ConverterCore<N> {
             .ok_or_else(|| invalid("gate driver branches not prepared"))?;
         let driver = four(core::array::from_fn(|k| branches[k].evaluate(e[5 + k])))?;
         let legs = [
-            HalfBridgeConduction::with_conductance(
-                p.converter.devices[0],
-                p.converter.devices[1],
-                [c[0].conductance_s, c[1].conductance_s],
-            )?
-            .evaluate_at_node(e[1], e[3])?,
-            HalfBridgeConduction::with_conductance(
-                p.converter.devices[2],
-                p.converter.devices[3],
-                [c[2].conductance_s, c[3].conductance_s],
-            )?
-            .evaluate_at_node(e[2], e[4])?,
+            gate.legs[0].evaluate_at_node_with_channels(e[1], e[3], [c[0], c[1]])?,
+            gate.legs[1].evaluate_at_node_with_channels(e[2], e[4], [c[2], c[3]])?,
         ];
-        let voltage = [e[1] - e[3], e[3], e[2] - e[4], e[4]];
-        let mut channel_slope = [0.0; 4];
-        for k in 0..4 {
-            channel_slope[k] = number(Dd::from_f64(c[k].slope_s_per_v) * Dd::from_f64(voltage[k]))?;
-        }
         Ok(NodePoint {
             legs,
             gate: Some(DrivenPoint {
                 driver,
-                channel_slope,
+                channel_slope: c.map(|point| point.gate_derivative_s),
             }),
         })
     }

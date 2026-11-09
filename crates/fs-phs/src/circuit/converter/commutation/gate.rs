@@ -1,10 +1,12 @@
-//! Original gate-voltage channel laws and finite-impedance gate drivers.
+//! Original channel-current laws and finite-impedance gate drivers.
 //!
-//! Command bits select an authored driver branch. The retained gate voltage
-//! selects channel conductance through the complete original G(Vgs) table.
-//! This is a positive voltage-controlled resistive channel on its declared
-//! support; saturation, carrier storage and a fixed-drain-bias measurement
-//! outside that measurement's applicability are not inferred.
+//! Command bits select an authored driver branch. Actual drain/source and
+//! gate/source voltages select a memoryless channel current and its two
+//! analytical partials. The original positive G(Vgs) table remains one such
+//! law; complete authored I(Vds,Vgs) responses can retain saturation and
+//! asymmetric reverse conduction without dividing current by drain voltage.
+//! Channel and body-diode currents have separate ownership. Carrier memory,
+//! avalanche and extrapolation beyond a source's applicability are not inferred.
 //!
 //! Gate drivers are Thevenin sources with finite resistance and explicit current
 //! support. Their signed source work, gate-terminal work and positive resistor
@@ -14,6 +16,140 @@ use super::{invalid, number, positive};
 use crate::PhsError;
 use fs_math::dd::Dd;
 use std::sync::Arc;
+
+/// A memoryless, immutable channel-only current response on its original domain.
+///
+/// Drain/source current is positive from drain to source. The physical channel
+/// must obey I*Vds >= 0 and I(0,Vgs) = 0 throughout its admitted support. Zero
+/// current and zero drain derivative are valid authored cutoff/saturation
+/// states. Neither a leakage floor nor a saturation threshold is invented.
+///
+/// The returned derivatives must be those of the SAME current evaluator. An
+/// original piecewise law may select one deterministic incident cell at a knee;
+/// that is a semismooth Newton branch, not a classical smoothness claim.
+/// Implementations retain and enforce every drain/gate support condition,
+/// allocate no source query history, and return the same response on repeated
+/// calls. They must exclude any body-diode current already owned by the device.
+/// Higher layers own material selection and temperature/phase applicability.
+pub trait GateChannelResponse: std::fmt::Debug + Send + Sync {
+    fn gate_voltage_range_v(&self) -> [f64; 2];
+
+    fn evaluate(
+        &self,
+        drain_source_voltage_v: f64,
+        gate_source_voltage_v: f64,
+    ) -> Result<GateChannelPoint, PhsError>;
+}
+
+/// Original channel current and analytic active-cell voltage derivatives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GateChannelPoint {
+    pub current_a: f64,
+    pub drain_derivative_s: f64,
+    pub gate_derivative_s: f64,
+}
+
+impl GateChannelPoint {
+    pub(super) fn admit(self, drain_source_voltage_v: f64) -> Result<Self, PhsError> {
+        if [
+            drain_source_voltage_v,
+            self.current_a,
+            self.drain_derivative_s,
+            self.gate_derivative_s,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "finite original channel current and voltage partials required",
+            ));
+        }
+        if drain_source_voltage_v == 0.0 && self.current_a != 0.0 {
+            return Err(invalid(
+                "a passive channel cannot supply current at zero drain voltage",
+            ));
+        }
+        let power = number(Dd::from_f64(drain_source_voltage_v) * Dd::from_f64(self.current_a))?;
+        if power < 0.0 || (self.current_a != 0.0 && power == 0.0) {
+            return Err(invalid(
+                "passive physical channel work is unrepresentable or negative",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// Cold-erased immutable source response shared by all native gate intervals.
+///
+/// Equality identifies the same retained allocation, never an inferred equality
+/// of arbitrary constitutive functions. Independently prepared material laws
+/// compare their complete original numerical data in their own thermal cache.
+#[derive(Clone, Debug)]
+pub struct GateChannelLaw {
+    response: Arc<dyn GateChannelResponse>,
+    gate_voltage_range_v: [f64; 2],
+}
+
+impl PartialEq for GateChannelLaw {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.response, &other.response)
+            && self.gate_voltage_range_v.map(f64::to_bits)
+                == other.gate_voltage_range_v.map(f64::to_bits)
+    }
+}
+
+impl GateChannelLaw {
+    pub fn new<C: GateChannelResponse + 'static>(response: C) -> Result<Self, PhsError> {
+        let range = response.gate_voltage_range_v();
+        if range.iter().any(|v| !v.is_finite())
+            || range[0] >= range[1]
+            || !positive(number(Dd::from_f64(range[1]) - Dd::from_f64(range[0]))?)
+        {
+            return Err(invalid(
+                "finite ordered original channel gate support required",
+            ));
+        }
+        Ok(Self {
+            response: Arc::new(response),
+            gate_voltage_range_v: range,
+        })
+    }
+
+    pub const fn gate_voltage_range_v(&self) -> [f64; 2] {
+        self.gate_voltage_range_v
+    }
+
+    pub fn evaluate(
+        &self,
+        drain_source_voltage_v: f64,
+        gate_source_voltage_v: f64,
+    ) -> Result<GateChannelPoint, PhsError> {
+        let gate = gate_source_voltage_v;
+        let range = self.gate_voltage_range_v;
+        if !drain_source_voltage_v.is_finite()
+            || !gate.is_finite()
+            || gate < range[0]
+            || gate > range[1]
+        {
+            return Err(invalid(
+                "actual channel voltage leaves original source support",
+            ));
+        }
+        self.response
+            .evaluate(drain_source_voltage_v, gate)?
+            .admit(drain_source_voltage_v)
+    }
+}
+
+impl GateChannelResponse for GateChannelLaw {
+    fn gate_voltage_range_v(&self) -> [f64; 2] {
+        GateChannelLaw::gate_voltage_range_v(self)
+    }
+
+    fn evaluate(&self, vds: f64, vgs: f64) -> Result<GateChannelPoint, PhsError> {
+        GateChannelLaw::evaluate(self, vds, vgs)
+    }
+}
 
 /// Bounds retained constitutive data and each binary search.
 pub const MAX_GATE_CONDUCTANCE_KNOTS: usize = 4096;
@@ -113,6 +249,31 @@ impl GateConductanceCurve {
             conductance_s: g,
             slope_s_per_v: self.data.slopes[i],
         })
+    }
+}
+
+impl GateChannelResponse for GateConductanceCurve {
+    fn gate_voltage_range_v(&self) -> [f64; 2] {
+        GateConductanceCurve::gate_voltage_range_v(self)
+    }
+
+    fn evaluate(&self, vds: f64, vgs: f64) -> Result<GateChannelPoint, PhsError> {
+        if !vds.is_finite() {
+            return Err(invalid("finite original channel drain voltage required"));
+        }
+        let point = GateConductanceCurve::evaluate(self, vgs)?;
+        let current_a = number(Dd::from_f64(vds) * Dd::from_f64(point.conductance_s))?;
+        if vds != 0.0 && current_a == 0.0 {
+            return Err(invalid(
+                "original nonzero gate-controlled channel current underflows",
+            ));
+        }
+        GateChannelPoint {
+            current_a,
+            drain_derivative_s: point.conductance_s,
+            gate_derivative_s: number(Dd::from_f64(vds) * Dd::from_f64(point.slope_s_per_v))?,
+        }
+        .admit(vds)
     }
 }
 
