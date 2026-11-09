@@ -195,35 +195,7 @@ impl FlowField {
                     let mobile = admit_mobile_phase(law, &phase)?;
                     let source = resolve(cell, &phase)?;
                     poll(gate)?;
-                    if *source.mobility() != PhaseMobility::Mobile(mobile)
-                        || *source.phase_state() != phase
-                        || source.source_density_kg_m3().to_bits()
-                            != phase.bulk_density_kg_m3().to_bits()
-                    {
-                        return Err(refuse(
-                            "resistance source must match its exact phase, law and current density",
-                        ));
-                    }
-                    let transport = source.mobile_transport().ok_or_else(|| {
-                        refuse("mobile phase resistance needs original fluid transport")
-                    })?;
-                    if transport.density_kg_m3().to_bits() != phase.bulk_density_kg_m3().to_bits() {
-                        return Err(refuse(
-                            "phase viscosity must retain the current source density",
-                        ));
-                    }
-                    let viscosity = transport.dynamic_viscosity_pa_s();
-                    finite_positive("flow.thermal_resistance_dynamic_viscosity", viscosity)?;
-                    let inverse = mobile.inverse_permeability_per_m2;
-                    beta[cell] = if inverse == 0.0 {
-                        0.0
-                    } else {
-                        viscosity * inverse
-                    };
-                    finite("flow.thermal_phase_resistance_beta", beta[cell])?;
-                    if inverse != 0.0 && beta[cell] <= 0.0 {
-                        return Err(refuse("nonzero phase resistance is not representable"));
-                    }
+                    beta[cell] = source_resistance(mobile, &source)?;
                     sources.push(Some(source));
                 }
                 Ok(ResistanceResponse {
@@ -260,7 +232,7 @@ impl FlowField {
     }
 }
 
-fn admit_mobile_phase(
+pub(in crate::conjugate::flow) fn admit_mobile_phase(
     law: &MushyPhaseLaw<'_>,
     phase: &EquilibriumPhaseState,
 ) -> Result<MushyPhaseState, ChtError> {
@@ -285,6 +257,44 @@ fn admit_mobile_phase(
             "exact solid phase needs an explicit immobile momentum owner",
         )),
     }
+}
+
+/// Retain the already admitted mobility through source resolution; molecular
+/// stress and Darcy resistance share it without a second chart evaluation.
+pub(in crate::conjugate::flow) fn source_resistance(
+    mobile: MushyPhaseState,
+    source: &ResolvedPhaseTransportState,
+) -> Result<f64, ChtError> {
+    let phase = &mobile.phase;
+    if *source.mobility() != PhaseMobility::Mobile(mobile)
+        || *source.phase_state() != *phase
+        || source.source_density_kg_m3().to_bits() != phase.bulk_density_kg_m3().to_bits()
+    {
+        return Err(refuse(
+            "resistance source must match its exact phase, law and current density",
+        ));
+    }
+    let transport = source
+        .mobile_transport()
+        .ok_or_else(|| refuse("mobile phase resistance needs original fluid transport"))?;
+    if transport.density_kg_m3().to_bits() != phase.bulk_density_kg_m3().to_bits() {
+        return Err(refuse(
+            "phase viscosity must retain the current source density",
+        ));
+    }
+    let viscosity = transport.dynamic_viscosity_pa_s();
+    finite_positive("flow.thermal_resistance_dynamic_viscosity", viscosity)?;
+    let inverse = mobile.inverse_permeability_per_m2;
+    let beta = if inverse == 0.0 {
+        0.0
+    } else {
+        viscosity * inverse
+    };
+    finite("flow.thermal_phase_resistance_beta", beta)?;
+    if inverse != 0.0 && beta <= 0.0 {
+        return Err(refuse("nonzero phase resistance is not representable"));
+    }
+    Ok(beta)
 }
 
 #[cfg(test)]

@@ -497,3 +497,346 @@ fn mobile_inflow_cannot_hide_an_immobile_accepted_caloric_intermediate() {
     assert_eq!(field, original);
     assert_eq!(phase[0].unwrap().specific_enthalpy_j_kg(), 50.0);
 }
+
+fn molecular_controls() -> crate::conjugate::MaterialViscosityControls {
+    crate::conjugate::MaterialViscosityControls {
+        max_cells: 16,
+        max_sweeps: 400,
+        relative_tolerance: 1e-12,
+        maximum_impulse_defect_kg_m_s: 1e-9,
+        maximum_angular_impulse_defect_kg_m2_s: 1e-9,
+        maximum_energy_defect_j: 1e-8,
+    }
+}
+
+/// G1/G3: both physical losses heat the SAME closed inventory, while all
+/// numerical losses stay outside h. Read kinetic energy from returned M/P.
+#[test]
+fn viscous_mushy_flow_closes_closed_kinetic_and_caloric_energy() {
+    use crate::conjugate::FvBoundary;
+    let (card, curve) = fixture([2.0; 2]);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1.0).unwrap();
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let mass = vec![2.0; 4];
+    let phases = vec![Some(curve.state_at_specific_enthalpy(50.0).unwrap()); 4];
+    let heat = vec![0.0; 4];
+    let force = vec![[0.0; 3]; 4];
+    let momentum: Vec<_> = (0..4)
+        .map(|c| {
+            let [x, y, _] = domain.coords(c);
+            [-0.08 * (y as f64 - 0.5), 0.08 * (x as f64 - 0.5), 0.0]
+        })
+        .collect();
+    let mut input = data(&mass, &phases, &heat, &momentum);
+    input.force_density_n_m3 = &force;
+    let result = field
+        .advance_viscous_phase_resistance_thermal_volume_momentum(
+            &domain,
+            None,
+            &law,
+            input,
+            [FvBoundary::wall(); 6],
+            None,
+            controls(),
+            molecular_controls(),
+            &CancelGate::new_clock_free(),
+            |_, phase| source(&card, &law, phase),
+        )
+        .unwrap();
+    let native = &result.evolution.evolution;
+    let physical_heat = result.viscosity.molecular_heat_j + native.resistance.resistance_heat_j;
+    assert!(result.viscosity.molecular_heat_j > 0.0);
+    assert!(native.resistance.resistance_heat_j > 0.0);
+    let caloric_change: f64 = native
+        .thermal
+        .volume
+        .transport
+        .mass_kg
+        .iter()
+        .zip(&native.thermal.volume.transport.specific_enthalpy_j_kg)
+        .map(|(m, h)| m * (h - 50.0))
+        .sum();
+    close(caloric_change, physical_heat);
+    close(
+        native.thermal.volume.report.requested_enthalpy_increment_j,
+        physical_heat,
+    );
+    let initial_k: f64 = momentum
+        .iter()
+        .zip(&mass)
+        .map(|(p, m)| p.iter().map(|v| v * v).sum::<f64>() / (2.0 * m))
+        .sum();
+    let final_k: f64 = native
+        .momentum
+        .momentum_kg_m_s
+        .iter()
+        .zip(&native.thermal.volume.transport.mass_kg)
+        .map(|(p, m)| p.iter().map(|v| v * v).sum::<f64>() / (2.0 * m))
+        .sum();
+    let numerical = result.viscosity.backward_euler_loss_j
+        + result.viscosity.numerical_scatter_loss_j
+        + native.reconstruction.numerical_constraint_loss_j
+        + native.resistance.backward_euler_loss_j
+        + native.feedback.numerical_scatter_loss_j
+        + native.momentum.report.numerical_transport_loss_j;
+    let representation = result.viscosity.representation_work_j
+        + native.feedback.mass_representation_work_j
+        + native.momentum.report.mass_roundoff_energy_j;
+    close(
+        final_k - initial_k + caloric_change + numerical - representation,
+        0.0,
+    );
+    close(native.thermal.volume.transport.mass_kg.iter().sum(), 8.0);
+    assert!(
+        native
+            .thermal
+            .volume
+            .volume_source_m3_s
+            .iter()
+            .all(|s| *s == 0.0)
+    );
+    assert!(result.absolute_energy_defect_j <= molecular_controls().maximum_energy_defect_j);
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(phases[0].unwrap().specific_enthalpy_j_kg(), 50.0);
+}
+
+/// G1/G3: unequal phase densities affect source inertia, volume fraction and
+/// Darcy feedback while both actual physical heats enter the native h equation.
+#[test]
+fn viscous_mushy_heat_changes_density_and_volume_on_every_axis() {
+    use crate::conjugate::FvBoundary;
+    let (card, curve) = fixture([4.0, 2.0]);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 4.0, 2.0, 1.0).unwrap();
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let phase = [Some(curve.state_at_specific_enthalpy(50.0).unwrap())];
+    let mass = [phase[0].unwrap().bulk_density_kg_m3()];
+    let heat = [mass[0] * 10.0];
+    for axis in 0..3 {
+        let mut faces = [FlowFace::Wall; 6];
+        let mut boundaries = [FvBoundary::Symmetry; 6];
+        let mut planes = [[None; 2]; 3];
+        let mut momentum = [[0.0; 3]];
+        momentum[0][axis] = 0.1 * mass[0];
+        let mut input = data(&mass, &phase, &heat, &momentum);
+        for side in 0..2 {
+            faces[2 * axis + side] = FlowFace::Free;
+            boundaries[2 * axis + side] = FvBoundary::Outlet;
+            boundaries[2 * ((axis + 1) % 3) + side] = FvBoundary::wall();
+            planes[axis][side] = Some(0.0);
+            input.volume.boundary_inflow[2 * axis + side] = phase[0];
+            input.boundary_velocity_m_s[2 * axis + side] = Some([0.0; 3]);
+        }
+        let result = field
+            .advance_viscous_phase_resistance_thermal_volume_momentum(
+                &domain,
+                Some((
+                    faces,
+                    StaggeredBoundaryPressure {
+                        x_pa: &planes[0],
+                        y_pa: &planes[1],
+                        z_pa: &planes[2],
+                    },
+                )),
+                &law,
+                input,
+                boundaries,
+                Some(&[0.0]),
+                controls(),
+                molecular_controls(),
+                &CancelGate::new_clock_free(),
+                |_, phase| source(&card, &law, phase),
+            )
+            .unwrap();
+        let native = &result.evolution.evolution;
+        let volume = &native.thermal.volume;
+        let deposited =
+            heat[0] + result.viscosity.molecular_heat_j + native.resistance.resistance_heat_j;
+        assert!(result.viscosity.molecular_heat_j > 0.0);
+        assert!(native.resistance.resistance_heat_j > 0.0);
+        close(volume.report.requested_enthalpy_increment_j, deposited);
+        // v(h) = 1/4 + h/400; both physical heats expand at that SAME slope.
+        close(volume.volume_source_m3_s[0], deposited / (400.0 * 0.5));
+        let endpoint = volume.phase_states[0].unwrap();
+        close(
+            volume.transport.mass_kg[0] / endpoint.bulk_density_kg_m3(),
+            1.0,
+        );
+        assert!(endpoint.bulk_density_kg_m3() < mass[0]);
+        let original = result.viscosity_sources[0].as_ref().unwrap();
+        assert_eq!(*original.phase_state(), phase[0].unwrap());
+        close(
+            original
+                .mobile_transport()
+                .unwrap()
+                .dynamic_viscosity_pa_s(),
+            mass[0] * 0.5,
+        );
+        let final_source = result.evolution.endpoint_sources[0].as_ref().unwrap();
+        assert_eq!(*final_source.phase_state(), endpoint);
+        close(
+            final_source.source_density_kg_m3(),
+            endpoint.bulk_density_kg_m3(),
+        );
+        close(native.resistance.energy_defect_j, 0.0);
+        close(result.viscosity.energy_defect_j, 0.0);
+        close(volume.transport.report.absolute_mass_defect_kg, 0.0);
+        assert_eq!(mass[0], phase[0].unwrap().bulk_density_kg_m3());
+    }
+}
+
+/// G0/G4: an exact-solid or failed heated endpoint cannot publish the already
+/// computed viscous kick; wrong phase laws and cancellation remain atomic.
+#[test]
+fn composed_viscous_phase_refusals_leave_inputs_retryable() {
+    use crate::conjugate::FvBoundary;
+    let (card, curve) = fixture([2.0; 2]);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1.0).unwrap();
+    let wrong_law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 2.0).unwrap();
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let phase = [Some(curve.state_at_specific_enthalpy(50.0).unwrap())];
+    let solid = [Some(curve.state_at_specific_enthalpy(0.0).unwrap())];
+    let mass = [2.0];
+    let momentum = [[0.0; 3]];
+    let good = data(&mass, &phase, &[0.0], &momentum);
+    let run = |input, gate: &CancelGate| {
+        field.advance_viscous_phase_resistance_thermal_volume_momentum(
+            &domain,
+            None,
+            &law,
+            input,
+            [FvBoundary::wall(); 6],
+            None,
+            controls(),
+            molecular_controls(),
+            gate,
+            |_, phase| source(&card, &law, phase),
+        )
+    };
+    let expected = run(good, &CancelGate::new_clock_free()).unwrap();
+    let mut frozen = good;
+    frozen.volume.net_enthalpy_increment_j = &[-101.0];
+    assert!(run(frozen, &CancelGate::new_clock_free()).is_err());
+    let mut exact_solid = good;
+    exact_solid.volume.phase_states = &solid;
+    let mut queried = false;
+    assert!(
+        field
+            .advance_viscous_phase_resistance_thermal_volume_momentum(
+                &domain,
+                None,
+                &law,
+                exact_solid,
+                [FvBoundary::wall(); 6],
+                None,
+                controls(),
+                molecular_controls(),
+                &CancelGate::new_clock_free(),
+                |_, phase| {
+                    queried = true;
+                    source(&card, &law, phase)
+                },
+            )
+            .is_err()
+    );
+    assert!(!queried);
+    assert!(
+        field
+            .advance_viscous_phase_resistance_thermal_volume_momentum(
+                &domain,
+                None,
+                &law,
+                good,
+                [FvBoundary::wall(); 6],
+                None,
+                controls(),
+                molecular_controls(),
+                &CancelGate::new_clock_free(),
+                |_, phase| source(&card, &wrong_law, phase),
+            )
+            .is_err()
+    );
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    assert!(matches!(run(good, &gate), Err(ChtError::Cancelled)));
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [2.0]);
+    assert_eq!(momentum, [[0.0; 3]]);
+    assert_eq!(run(good, &CancelGate::new_clock_free()).unwrap(), expected);
+}
+
+/// G3: fully liquid material keeps the original molecular stage and has no
+/// hidden Darcy heating, inertia change, or second caloric increment.
+#[test]
+fn fully_liquid_composition_matches_the_original_viscous_density_step() {
+    use crate::conjugate::{FvBoundary, MaterialMomentumViscosityInput};
+    use fs_material::fluid_transport::FluidTransport;
+    let (card, curve) = fixture([4.0, 2.0]);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 4.0, 2.0, 1.0).unwrap();
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let state = curve.state_at_specific_enthalpy(150.0).unwrap();
+    let phases = [Some(state); 4];
+    let mass = [2.0; 4];
+    let momentum = [
+        [0.04, -0.04, 0.0],
+        [0.04, 0.04, 0.0],
+        [-0.04, -0.04, 0.0],
+        [-0.04, 0.04, 0.0],
+    ];
+    let mut input = data(&mass, &phases, &[0.0; 4], &momentum);
+    input.force_density_n_m3 = &[[0.0; 3]; 4];
+    let resolved = source(&card, &law, &state).unwrap();
+    let sources: [Option<&dyn FluidTransport>; 4] = [Some(&resolved); 4];
+    let original = field
+        .advance_piecewise_thermal_volume_momentum_with_viscosity(
+            &domain,
+            &curve,
+            input,
+            MaterialMomentumViscosityInput {
+                sources: &sources,
+                boundaries: [FvBoundary::wall(); 6],
+            },
+            controls().thermal,
+            molecular_controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    let composed = field
+        .advance_viscous_phase_resistance_thermal_volume_momentum(
+            &domain,
+            None,
+            &law,
+            input,
+            [FvBoundary::wall(); 6],
+            None,
+            controls(),
+            molecular_controls(),
+            &CancelGate::new_clock_free(),
+            |_, phase| source(&card, &law, phase),
+        )
+        .unwrap();
+    assert_eq!(composed.viscosity, original.viscosity);
+    let native = &composed.evolution.evolution;
+    assert_eq!(native.resistance.resistance_heat_j, 0.0);
+    assert!(native.resistance_pa_s_m2.iter().all(|b| *b == 0.0));
+    assert_eq!(
+        native.thermal.volume.transport.mass_kg,
+        original.evolution.thermal.volume.transport.mass_kg
+    );
+    assert_eq!(
+        native.thermal.volume.transport.specific_enthalpy_j_kg,
+        original
+            .evolution
+            .thermal
+            .volume
+            .transport
+            .specific_enthalpy_j_kg
+    );
+    assert_eq!(
+        native.momentum.momentum_kg_m_s,
+        original.evolution.momentum.momentum_kg_m_s
+    );
+}

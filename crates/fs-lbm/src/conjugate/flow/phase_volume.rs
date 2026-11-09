@@ -29,7 +29,8 @@ pub use momentum::{
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
     ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
     ThermalResistanceCouplingReport, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
-    ThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep,
+    ThermalVolumeMomentumStep, ViscousResistiveThermalVolumeMomentumStep,
+    ViscousThermalVolumeMomentumStep,
 };
 
 use fs_material::phase::{

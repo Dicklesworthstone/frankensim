@@ -1707,3 +1707,29 @@ all three models, zero-drive/disabled controls, serial/pooled/native equivalence
 force histories, cancellation and refusal. This remains the exploratory local
 closure on fixed staircase geometry; it does not add wall functions, geometry
 remapping, a turbulent-flow qualification or an integrated energy balance.
+
+
+### Molecular stress with phase resistance and changing density
+
+`advance_viscous_phase_resistance_thermal_volume_momentum` composes the
+existing full-stress molecular owner with source-resolved mushy resistance,
+physical heating, thermal volume flow and conservative M/Mh/P transport.
+Original material receipts supply molecular viscosity; actual M/V supplies
+inertia. Darcy resistance resolves the accepted endpoint phase on the same
+material chart. Molecular and Darcy heat each enter caloric storage once;
+numerical losses, reservoir work and source-pressure work retain their separate
+accounts. Noncancelling caloric and mechanical defects share the existing
+energy budgets. Source, solve, cancellation or budget refusal publishes no
+partial inventory.
+
+This is a first-order split with frozen original molecular viscosity and
+endpoint Darcy coupling. It provides neither simultaneous nonlinear shear
+coupling nor exact solid locking, moving skeletons or free surfaces. Initial,
+incoming, heated and transported phases must remain mobile.
+
+Four new focused regressions cover closed kinetic/caloric balance with both
+heat sources, unequal phase densities and volume response on every axis, exact
+fully-liquid parity with the original viscous route, and atomic source/solid/
+cancellation refusals with retry. These and three existing phase-resistance
+tests passed in a native production-source harness; this is not a full workspace
+build or a temporal-convergence certificate.

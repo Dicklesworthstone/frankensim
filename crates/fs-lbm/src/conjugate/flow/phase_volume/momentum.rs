@@ -7,7 +7,7 @@ pub(in crate::conjugate::flow) use viscous::{
 };
 pub use viscous::{
     EndpointRheologyThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
-    ViscousThermalVolumeMomentumStep,
+    ViscousResistiveThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep,
 };
 mod resistance;
 pub use resistance::{

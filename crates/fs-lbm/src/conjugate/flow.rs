@@ -62,7 +62,7 @@ pub use phase_volume::{
     ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
     ThermalResistanceCouplingReport, ThermalVolumeBathFace, ThermalVolumeControls,
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
-    ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
+    ThermalVolumeStep, ViscousResistiveThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep,
 };
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use phase_volume::{

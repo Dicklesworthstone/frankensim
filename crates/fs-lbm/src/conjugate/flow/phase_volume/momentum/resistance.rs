@@ -2,6 +2,7 @@
 
 mod phase;
 pub use phase::ResolvedResistiveThermalVolumeMomentumStep;
+pub(in crate::conjugate::flow) use phase::{admit_mobile_phase, source_resistance};
 
 use std::borrow::Cow;
 
