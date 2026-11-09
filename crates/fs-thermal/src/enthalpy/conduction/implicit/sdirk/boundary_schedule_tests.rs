@@ -276,7 +276,7 @@ fn gray_exterior_receives_scheduled_baths_and_preserves_interval_accounts() {
     // An independent trajectory has no scheduled event. Change its bath between
     // calls and reprepare the boundary owner at the actual new physical state.
     let mut manual = thermal.clone();
-    manual.schedule.truncate(manual.cursor);
+    std::rc::Rc::make_mut(&mut manual.schedule).truncate(manual.cursor);
     let (mut first, first_report) = solver
         .advance_sdirk2_to(&manual, 0.3, controls(0.1), &mut workspace, || Ok(()))
         .unwrap();

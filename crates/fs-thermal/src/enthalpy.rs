@@ -19,6 +19,7 @@
 //! independently supplied conductances; it is not a validated print predictor.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 // Keep the std-only kernel testable as a standalone crate as well as a module.
 #[path = "deposition/observe.rs"]
@@ -397,11 +398,16 @@ pub struct EnergyAudit {
 pub struct DepositionSimulation<'a> {
     time_s: f64,
     cursor: usize,
-    schedule: Vec<TimedEvent>,
-    materials: BTreeMap<MaterialId, &'a dyn ThermalLaw>,
+    // Every nonlinear/stage candidate shares the immutable authored inputs.
+    // Only active cells, interfaces, physical time and this cursor are copied:
+    // future deposition events must not be recopied on every residual query.
+    // ThermalLaw has no Sync bound, so this timeline already stays on its
+    // calling thread. Rc avoids atomic reference-count work on every trial.
+    schedule: Rc<Vec<TimedEvent>>,
+    materials: Rc<BTreeMap<MaterialId, &'a dyn ThermalLaw>>,
     // Immutable global CFL bounds, admitted once rather than rescanning a
     // material chart for every active cell at every thermal substep.
-    material_temperature_slopes: BTreeMap<MaterialId, f64>,
+    material_temperature_slopes: Rc<BTreeMap<MaterialId, f64>>,
     cells: BTreeMap<CellId, DepositedCell>,
     links: BTreeMap<u64, ThermalLink>,
     // Overrides only; symmetric links retain their existing area semantics.
@@ -458,9 +464,9 @@ impl<'a> DepositionSimulation<'a> {
         Ok(Self {
             time_s: 0.0,
             cursor: 0,
-            schedule,
-            materials: laws,
-            material_temperature_slopes,
+            schedule: Rc::new(schedule),
+            materials: Rc::new(laws),
+            material_temperature_slopes: Rc::new(material_temperature_slopes),
             cells: BTreeMap::new(),
             links: BTreeMap::new(),
             covered_areas: BTreeMap::new(),
@@ -1050,6 +1056,83 @@ mod tests {
     }
     fn close(a: f64, b: f64, tol: f64) {
         assert!((a - b).abs() <= tol, "{a} != {b}");
+    }
+
+
+    #[test]
+    fn shared_authored_inputs_preserve_independent_enthalpy_branches_and_events() {
+        use super::backward_euler::{BackwardEulerStep, StepCoefficients};
+
+        let mut heated = cell(1, 200_000.0);
+        heated.boundary.source_w = 2.0;
+        let initial = run(&simulation(vec![
+            event(0.0, Event::Birth(heated)),
+            birth(1.0, 2, 100_000.0),
+            event(1.0, Event::Contact(link(1, 2))),
+            event(2.0, Event::Boundary(CellId(1), boundary(0.0))),
+        ]), 0.0, 0.25).0;
+        let clone = initial.clone();
+        let (middle, first_audit) = run(&initial, 1.0, 0.25);
+        let (split, second_audit) = run(&middle, 2.0, 0.25);
+        let (whole, whole_audit) = run(&initial, 2.0, 0.25);
+        for candidate in [&clone, &middle, &split, &whole] {
+            assert!(Rc::ptr_eq(&initial.schedule, &candidate.schedule));
+            assert!(Rc::ptr_eq(&initial.materials, &candidate.materials));
+            assert!(Rc::ptr_eq(&initial.material_temperature_slopes,
+                &candidate.material_temperature_slopes));
+        }
+        // The birth at the split point is activated without being aged.
+        assert_eq!(middle.cells()[&CellId(2)].specific_h_j_kg, 100_000.0);
+        assert_eq!(split.cells(), whole.cells());
+        assert_eq!(split.links(), whole.links());
+        assert_eq!(split.cursor, whole.cursor);
+        close(first_audit.external_heat_j + second_audit.external_heat_j,
+            whole_audit.external_heat_j, 1e-12);
+        assert_eq!(initial.time_s(), 0.0);
+        assert_eq!(initial.cursor, 1);
+        assert_eq!(initial.cells().len(), 1);
+        assert!(initial.links().is_empty());
+        assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 200_000.0);
+        assert_eq!(initial.cells()[&CellId(1)].boundary.source_w, 2.0);
+
+        // Refuse at the final cancellation gate, after all candidate work.
+        let mut polls = 0usize;
+        let (counted, counted_audit) = initial.advance_to(2.0, config(0.25), || {
+            polls += 1;
+            Ok(())
+        }).unwrap();
+        let mut cancelled_polls = 0usize;
+        assert!(matches!(initial.advance_to(2.0, config(0.25), || {
+            cancelled_polls += 1;
+            if cancelled_polls == polls { Err(DepositionError::Cancelled) } else { Ok(()) }
+        }), Err(DepositionError::Cancelled)));
+        let (retry, retry_audit) = run(&initial, 2.0, 0.25);
+        assert_eq!(retry.cells(), counted.cells());
+        assert_eq!(retry_audit, counted_audit);
+        assert_eq!(initial.cursor, 1);
+        assert_eq!(initial.time_s(), 0.0);
+
+        // Implicit endpoint candidates share the same inputs while accepting
+        // an independent enthalpy and clock, through the original heat owner.
+        let step = BackwardEulerStep::new(&initial, 0.25, || Ok(())).unwrap();
+        let trial = step.evaluate(&[0.5], |candidate| {
+            assert!(Rc::ptr_eq(&initial.schedule, &candidate.schedule));
+            assert!(Rc::ptr_eq(&initial.materials, &candidate.materials));
+            assert!(Rc::ptr_eq(&initial.material_temperature_slopes,
+                &candidate.material_temperature_slopes));
+            Ok::<_, DepositionError>(StepCoefficients {
+                sources_w: BTreeMap::new(),
+                conductances_w_k: BTreeMap::new(),
+                payload: (),
+            })
+        }, || Ok(())).unwrap();
+        let (accepted, (), audit) = trial.accept(0.0, 0.0, || Ok(())).unwrap();
+        assert_eq!(accepted.time_s(), 0.25);
+        assert_eq!(accepted.cells()[&CellId(1)].specific_h_j_kg, 200_500.0);
+        assert_eq!(audit.external_heat_j, 0.5);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(initial.time_s(), 0.0);
+        assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 200_000.0);
     }
 
     #[test]

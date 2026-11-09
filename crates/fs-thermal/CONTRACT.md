@@ -1,5 +1,26 @@
 # fs-thermal contract
 
+## Shared immutable inputs across thermal candidates
+
+Every clone of the original `DepositionSimulation` shares its immutable
+resolved event schedule, borrowed caloric-law table and admitted global
+temperature-slope bounds. Copying these authored inputs takes constant work
+independent of future event count or registered material count. Implicit
+residual evaluations, line-search trials, adaptive stages and phase-transfer
+candidates all retain that sharing through the existing timeline owner.
+
+Each candidate still owns its active cells, enthalpies, geometry, links,
+surface coverage, physical time and event cursor independently. Accepting one
+branch or refusing a cancelled trial cannot mutate another branch or consume
+its future births. The original borrowed law identities and lifetimes are
+unchanged; laws remain subject to the existing immutability contract. This
+single-threaded storage introduces no new thread-safety guarantee.
+
+The focused regression follows explicit split/replay trajectories through a
+birth, contact and boundary change, cancels after candidate work, retries from
+the original state and accepts an implicit enthalpy endpoint. It checks input
+allocation identity together with independent clocks, events and heat storage.
+
 ## Stationary operating points of original conduction networks
 
 `ImplicitConductionChain::solve_operating_point` and the graph counterpart
