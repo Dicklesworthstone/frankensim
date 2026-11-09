@@ -197,10 +197,10 @@ pub struct SlabQuadratureReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbsorbingSlab {
     layers: Arc<[AbsorbingLayer]>,
-    exterior_refractive_index: f64,
-    exterior_index_source: Option<Arc<str>>,
+    exterior_refractive_indices: [f64; 2],
+    exterior_index_sources: [Option<Arc<str>>; 2],
     reflectance: [f64; 2],
-    transmittance: f64,
+    transmittance: [f64; 2],
     face_coupling: Arc<[[f64; 2]]>,
     layer_coupling: Arc<[f64]>,
     quadrature: SlabQuadratureReport,
@@ -215,7 +215,7 @@ impl AbsorbingSlab {
         controls: SlabQuadrature,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
-        Self::prepare(layers, 1.0, None, controls, cancelled)
+        Self::prepare(layers, [1.0; 2], [None, None], controls, cancelled)
     }
 
     /// A plane-parallel dielectric stack in an index-one environment.
@@ -252,7 +252,7 @@ impl AbsorbingSlab {
             layer.refractive_index = refractive_index;
             layer.refractive_index_source = Some(source.clone());
         }
-        Self::prepare(layers, 1.0, None, controls, cancelled)
+        Self::prepare(layers, [1.0; 2], [None, None], controls, cancelled)
     }
 
     /// Prepare diffuse illumination and thermal emission in one lossless
@@ -284,10 +284,36 @@ impl AbsorbingSlab {
                 "need a sourced real exterior index >= 1 with representable n²",
             ));
         }
+        let source: Arc<str> = source.into();
         Self::prepare(
             layers,
-            exterior_refractive_index,
-            Some(source.into()),
+            [exterior_refractive_index; 2],
+            [Some(source.clone()), Some(source)],
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Prepare a slab between independently sourced, lossless exterior media.
+    /// Indices and sources are ordered [front, back]; layer indices are absolute.
+    ///
+    /// Each incident diffuse fraction uses its OWN exterior optical-mode measure.
+    /// Consequently transmission fractions generally differ, while reciprocity
+    /// gives n_front² T_front = n_back² T_back. At thermal equilibrium each face
+    /// receives its own n² times the common vacuum blackbody exitance. All source
+    /// laws must cover the same declared temperature and gray/band scope.
+    pub fn new_between_media(
+        layers: Vec<AbsorbingLayer>,
+        exterior_refractive_indices: [f64; 2],
+        exterior_index_sources: [impl Into<String>; 2],
+        controls: SlabQuadrature,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ConductionError> {
+        let sources = admit_exterior_sources(exterior_refractive_indices, exterior_index_sources)?;
+        Self::prepare(
+            layers,
+            exterior_refractive_indices,
+            sources,
             controls,
             cancelled,
         )
@@ -295,8 +321,8 @@ impl AbsorbingSlab {
 
     fn prepare(
         layers: Vec<AbsorbingLayer>,
-        exterior_refractive_index: f64,
-        exterior_index_source: Option<Arc<str>>,
+        exterior_refractive_indices: [f64; 2],
+        exterior_index_sources: [Option<Arc<str>>; 2],
         controls: SlabQuadrature,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
@@ -318,18 +344,18 @@ impl AbsorbingSlab {
         let uniform_index = layers
             .iter()
             .all(|layer| layer.refractive_index == refractive_index);
-        let general_index = !uniform_index || exterior_refractive_index != 1.0;
+        let general_index = !uniform_index || exterior_refractive_indices != [1.0; 2];
         if uniform_index
-            && refractive_index == exterior_refractive_index
+            && exterior_refractive_indices == [refractive_index; 2]
             && layers.iter().all(|layer| layer.optical_depth == 0.0)
         {
             checkpoint(&mut cancelled, 0)?;
             return Ok(Self {
                 layers: layers.into(),
-                exterior_refractive_index,
-                exterior_index_source,
+                exterior_refractive_indices,
+                exterior_index_sources,
                 reflectance: [0.0; 2],
-                transmittance: 1.0,
+                transmittance: [1.0; 2],
                 face_coupling: vec![[0.0; 2]; n].into(),
                 layer_coupling: vec![0.0; n * n].into(),
                 quadrature: report,
@@ -337,7 +363,8 @@ impl AbsorbingSlab {
         }
         // Only the upper triangular exchange entries are accumulated. Mirror
         // once at publication so reciprocity is bit-identical by construction.
-        let channels = 3 + 2 * n + n * n;
+        // The reverse transmission channel follows the original layer matrix.
+        let channels = 4 + 2 * n + n * n;
         let mut total = vec![0.0; channels];
         let mut correction = vec![0.0; channels];
         let mut errors = vec![0.0; channels];
@@ -347,7 +374,11 @@ impl AbsorbingSlab {
         let mut pending = Vec::new();
         let mut bands = Vec::new();
         if general_index {
-            let mut edges = vec![0.0, exterior_refractive_index];
+            let mut edges = vec![
+                0.0,
+                exterior_refractive_indices[0],
+                exterior_refractive_indices[1],
+            ];
             edges.extend(layers.iter().map(AbsorbingLayer::refractive_index));
             edges.sort_by(f64::total_cmp);
             edges.dedup();
@@ -381,7 +412,7 @@ impl AbsorbingSlab {
                 if general_index {
                     layered::rule(
                         &layers,
-                        exterior_refractive_index,
+                        exterior_refractive_indices,
                         bands[band],
                         lo,
                         hi,
@@ -445,7 +476,7 @@ impl AbsorbingSlab {
         if total.iter().any(|&x| !nonnegative(x)) {
             return Err(invalid("nonfinite angular response"));
         }
-        let transmittance = total[0];
+        let transmittance = [total[0], total[channels - 3]];
         let reflectance = [total[channels - 2], total[channels - 1]];
         let face: Vec<[f64; 2]> = (0..n)
             .map(|i| [total[1 + 2 * i], total[2 + 2 * i]])
@@ -459,7 +490,7 @@ impl AbsorbingSlab {
             }
         }
         for side in 0..2 {
-            let mut partition = reflectance[side] + transmittance;
+            let mut partition = reflectance[side] + transmittance[side];
             let mut c = 0.0;
             for a in &face {
                 add(&mut partition, &mut c, a[side]);
@@ -477,8 +508,8 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(Self {
             layers: layers.into(),
-            exterior_refractive_index,
-            exterior_index_source,
+            exterior_refractive_indices,
+            exterior_index_sources,
             reflectance,
             transmittance,
             face_coupling: face.into(),
@@ -493,13 +524,21 @@ impl AbsorbingSlab {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
     }
-    /// Absolute real index of the common exterior dielectric.
+    /// Absolute real index at the FRONT face. Use the plural accessor for both.
     pub const fn exterior_refractive_index(&self) -> f64 {
-        self.exterior_refractive_index
+        self.exterior_refractive_indices[0]
     }
-    /// Source of the exterior index; absent for the original index-one model.
+    pub const fn exterior_refractive_indices(&self) -> [f64; 2] {
+        self.exterior_refractive_indices
+    }
+    /// Original FRONT exterior source; absent for the index-one constructor.
     pub fn exterior_index_source(&self) -> Option<&str> {
-        self.exterior_index_source.as_deref()
+        self.exterior_index_sources[0].as_deref()
+    }
+    pub fn exterior_index_sources(&self) -> [Option<&str>; 2] {
+        self.exterior_index_sources
+            .each_ref()
+            .map(|source| source.as_deref())
     }
     /// Common layer index, or None when the physical layers differ.
     /// Original per-layer indices and sources remain on `layers()`.
@@ -529,11 +568,17 @@ impl AbsorbingSlab {
     pub const fn reflectances(&self) -> [f64; 2] {
         self.reflectance
     }
+    /// Fraction of diffuse irradiation transmitted FROM the front face.
+    /// For unequal exterior indices, use `transmittances()` for both directions.
     pub const fn transmittance(&self) -> f64 {
+        self.transmittance[0]
+    }
+    /// Fractions transmitted FROM [front, back], each into the opposite medium.
+    pub const fn transmittances(&self) -> [f64; 2] {
         self.transmittance
     }
     /// Layer-major [front, back] fractions of physical incident irradiance.
-    /// Multiply by the exterior index squared for reciprocal emission
+    /// Multiply each side by ITS exterior index squared for reciprocal emission
     /// coefficients relative to vacuum blackbody exitance.
     pub fn face_coupling(&self) -> &[[f64; 2]] {
         &self.face_coupling
@@ -581,7 +626,7 @@ impl AbsorbingSlab {
                 add(
                     &mut result[side],
                     &mut correction[side],
-                    finite((a[side] * self.exterior_refractive_index.powi(2)) * b)?,
+                    finite((a[side] * self.exterior_refractive_indices[side].powi(2)) * b)?,
                 );
             }
         }
@@ -589,6 +634,36 @@ impl AbsorbingSlab {
             finite(value)?;
         }
         Ok(result)
+    }
+
+    /// Total hemispherical flux leaving [front, back], including reflection,
+    /// transmission from the opposite face and original layer emission [W/m²].
+    /// This does not assert that emergent radiance is Lambertian. As with heat
+    /// queries, inputs can be finite signed deviations from one physical bath.
+    pub fn outgoing_fluxes(
+        &self,
+        irradiation: [f64; 2],
+        blackbody_exitance: &[f64],
+    ) -> Result<[f64; 2], ConductionError> {
+        if irradiation.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("outgoing slab flux needs finite incident fields"));
+        }
+        let mut outgoing = self.emission_to_faces(blackbody_exitance)?;
+        for side in 0..2 {
+            let mut correction = 0.0;
+            add(
+                &mut outgoing[side],
+                &mut correction,
+                finite(self.reflectance[side] * irradiation[side])?,
+            );
+            add(
+                &mut outgoing[side],
+                &mut correction,
+                finite(self.transmittance[1 - side] * irradiation[1 - side])?,
+            );
+            finite(outgoing[side])?;
+        }
+        Ok(outgoing)
     }
 
     /// Net heat INTO each layer per physical port area. Both external fields
@@ -614,7 +689,7 @@ impl AbsorbingSlab {
                     self.face_coupling[i][side],
                     irradiation[side],
                     blackbody_exitance[i],
-                    self.exterior_refractive_index.powi(2),
+                    self.exterior_refractive_indices[side].powi(2),
                 )?;
                 add(&mut heat[i], &mut correction[i], value);
             }
@@ -684,6 +759,8 @@ fn rule(
                 through *= t[i];
             }
             add(&mut output[0], &mut correction[0], q * through);
+            let reverse = output.len() - 3;
+            add(&mut output[reverse], &mut correction[reverse], q * through);
             through = 1.0;
             for i in (0..n).rev() {
                 let index = 2 + 2 * i;
@@ -754,6 +831,23 @@ fn difference_product(
     } else {
         coefficient * incoming - coefficient * source
     })
+}
+
+fn admit_exterior_sources(
+    indices: [f64; 2],
+    sources: [impl Into<String>; 2],
+) -> Result<[Option<Arc<str>>; 2], ConductionError> {
+    let sources = sources.map(Into::into);
+    if indices
+        .iter()
+        .any(|&index| !index.is_finite() || index < 1.0 || !(index * index).is_finite())
+        || sources.iter().any(|source| source.trim().is_empty())
+    {
+        return Err(invalid(
+            "need two sourced real exterior indices >= 1 with representable n²",
+        ));
+    }
+    Ok(sources.map(|source| Some(source.into())))
 }
 
 fn positive(x: f64) -> bool {

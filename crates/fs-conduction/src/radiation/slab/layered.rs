@@ -21,7 +21,7 @@ use fs_math::det;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn rule(
     layers: &[AbsorbingLayer],
-    exterior_refractive_index: f64,
+    exterior_refractive_indices: [f64; 2],
     band: [f64; 2],
     lo: f64,
     hi: f64,
@@ -39,7 +39,9 @@ pub(super) fn rule(
     let width = (upper - lower) * (upper + lower);
     let midpoint = 0.5 * (lo + hi);
     let half = 0.5 * (hi - lo);
-    let mut indices = [exterior_refractive_index; MAX_SLAB_LAYERS + 2];
+    let mut indices = [exterior_refractive_indices[0]; MAX_SLAB_LAYERS + 2];
+    indices[n + 1] = exterior_refractive_indices[1];
+    let exterior = exterior_refractive_indices.map(|index| lower < index);
     for (i, layer) in layers.iter().enumerate() {
         indices[i + 1] = layer.refractive_index();
     }
@@ -102,12 +104,12 @@ pub(super) fn rule(
                             &a[..n],
                             &r[..=n],
                             &e[..=n],
-                            lower < exterior_refractive_index,
+                            exterior,
                             target,
                             loss,
                             attenuation,
                             0.5 * q,
-                            0.5 * (q / exterior_refractive_index.powi(2)),
+                            exterior_refractive_indices.map(|index| 0.5 * (q / (index * index))),
                             output,
                             correction,
                         );
@@ -118,10 +120,10 @@ pub(super) fn rule(
                         &a[..n],
                         &r[..=n],
                         &e[..=n],
-                        lower < exterior_refractive_index,
+                        exterior,
                         true,
                         0.5 * q,
-                        0.5 * (q / exterior_refractive_index.powi(2)),
+                        exterior_refractive_indices.map(|index| 0.5 * (q / (index * index))),
                         output,
                         correction,
                         None,
@@ -217,10 +219,10 @@ pub(super) fn accumulate(
     a: &[f64],
     r: &[f64],
     e: &[f64],
-    exterior: bool,
+    exterior: [bool; 2],
     thermal_exchange: bool,
     q: f64,
-    exterior_q: f64,
+    exterior_q: [f64; 2],
     output: &mut [f64],
     correction: &mut [f64],
     mut beam_fields: Option<&mut [[[f64; 2]; 2]]>,
@@ -234,10 +236,10 @@ pub(super) fn accumulate(
         cross_left,
         cross_right,
     } = returns(t, a, r, e);
-    if exterior {
-        // Exterior fractions use 2 mu_ext dmu_ext; internal exchange uses
-        // the absolute optical-mode measure d(p²), retaining n² radiance.
-        let q = exterior_q;
+    if exterior[0] {
+        // Each face uses its own normalized optical-mode measure; the internal
+        // exchange retains absolute d(p²). Only propagating ports are sampled.
+        let q = exterior_q[0];
         let (front, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
         let front_channel = output.len() - 2;
         add(
@@ -260,6 +262,9 @@ pub(super) fn accumulate(
             }
         }
         add(&mut output[0], &mut correction[0], q * field * e[n]);
+    }
+    if exterior[1] {
+        let q = exterior_q[1];
         let (back, _, mut field) = joined(
             r[n],
             e[n],
@@ -287,6 +292,12 @@ pub(super) fn accumulate(
                 field *= cross_left[i];
             }
         }
+        let channel = output.len() - 3;
+        add(
+            &mut output[channel],
+            &mut correction[channel],
+            q * field * e[0],
+        );
     }
     if !thermal_exchange {
         return;
@@ -320,12 +331,12 @@ fn accumulate_depth(
     a: &[f64],
     r: &[f64],
     e: &[f64],
-    exterior: bool,
+    exterior: [bool; 2],
     target: usize,
     loss: f64,
     attenuation: [f64; 2],
     q: f64,
-    exterior_q: f64,
+    exterior_q: [f64; 2],
     output: &mut [f64],
     correction: &mut [f64],
 ) {
@@ -343,14 +354,17 @@ fn accumulate_depth(
     } = returns(t, a, r, e);
     let from_front = loss * (attenuation[0] + t[target] * right[target] * attenuation[1]);
     let from_back = loss * (attenuation[1] + t[target] * left[target] * attenuation[0]);
-    if exterior {
-        let q = exterior_q;
+    if exterior[0] {
+        let q = exterior_q[0];
         let (_, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
         for i in 0..target {
             field *= t[i];
             field *= cross_right[i];
         }
         add(&mut output[0], &mut correction[0], q * from_front * field);
+    }
+    if exterior[1] {
+        let q = exterior_q[1];
         let (_, _, mut field) = joined(
             r[n],
             e[n],

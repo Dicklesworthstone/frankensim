@@ -27,8 +27,8 @@ pub struct SlabDepthReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlabDepthResponse {
     layers: Arc<[AbsorbingLayer]>,
-    exterior_refractive_index: f64,
-    exterior_index_source: Option<Arc<str>>,
+    exterior_refractive_indices: [f64; 2],
+    exterior_index_sources: [Option<Arc<str>>; 2],
     layer: usize,
     interval_m: [f64; 2],
     face_coupling: [f64; 2],
@@ -40,11 +40,20 @@ impl SlabDepthResponse {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
     }
+    /// Index at the FRONT face; use the plural accessor for both exterior media.
     pub const fn exterior_refractive_index(&self) -> f64 {
-        self.exterior_refractive_index
+        self.exterior_refractive_indices[0]
+    }
+    pub const fn exterior_refractive_indices(&self) -> [f64; 2] {
+        self.exterior_refractive_indices
     }
     pub fn exterior_index_source(&self) -> Option<&str> {
-        self.exterior_index_source.as_deref()
+        self.exterior_index_sources[0].as_deref()
+    }
+    pub fn exterior_index_sources(&self) -> [Option<&str>; 2] {
+        self.exterior_index_sources
+            .each_ref()
+            .map(|source| source.as_deref())
     }
     pub const fn layer_index(&self) -> usize {
         self.layer
@@ -99,7 +108,7 @@ impl SlabDepthResponse {
                     self.face_coupling[side],
                     irradiation_w_m2[side],
                     local,
-                    self.exterior_refractive_index.powi(2),
+                    self.exterior_refractive_indices[side].powi(2),
                 )?,
             );
         }
@@ -152,7 +161,11 @@ impl AbsorbingSlab {
             accepted_panels: 0,
             maximum_estimated_coefficient_error: 0.0,
         };
-        let mut edges = vec![0.0, self.exterior_refractive_index];
+        let mut edges = vec![
+            0.0,
+            self.exterior_refractive_indices[0],
+            self.exterior_refractive_indices[1],
+        ];
         edges.extend(self.layers.iter().map(AbsorbingLayer::refractive_index));
         edges.sort_by(f64::total_cmp);
         edges.dedup();
@@ -176,7 +189,7 @@ impl AbsorbingSlab {
             for (nodes, output) in [(&GL8[..], &mut coarse), (&GL16[..], &mut fine)] {
                 layered::rule(
                     &self.layers,
-                    self.exterior_refractive_index,
+                    self.exterior_refractive_indices,
                     bands[band],
                     lo,
                     hi,
@@ -217,8 +230,8 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(SlabDepthResponse {
             layers: self.layers.clone(),
-            exterior_refractive_index: self.exterior_refractive_index,
-            exterior_index_source: self.exterior_index_source.clone(),
+            exterior_refractive_indices: self.exterior_refractive_indices,
+            exterior_index_sources: self.exterior_index_sources.clone(),
             layer,
             interval_m,
             face_coupling: [total[0], total[1]],

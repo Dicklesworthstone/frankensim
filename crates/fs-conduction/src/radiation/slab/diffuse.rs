@@ -31,8 +31,8 @@ pub struct SlabDiffuseDepthReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlabDiffuseDepthResponse {
     layers: Arc<[AbsorbingLayer]>,
-    exterior_refractive_index: f64,
-    exterior_index_source: Option<Arc<str>>,
+    exterior_refractive_indices: [f64; 2],
+    exterior_index_sources: [Option<Arc<str>>; 2],
     layer: usize,
     interval_m: [f64; 2],
     absorptance: [f64; 2],
@@ -44,12 +44,23 @@ impl SlabDiffuseDepthResponse {
         &self.layers
     }
 
+    /// Index at the FRONT face; use the plural accessor for both exterior media.
     pub const fn exterior_refractive_index(&self) -> f64 {
-        self.exterior_refractive_index
+        self.exterior_refractive_indices[0]
+    }
+
+    pub const fn exterior_refractive_indices(&self) -> [f64; 2] {
+        self.exterior_refractive_indices
     }
 
     pub fn exterior_index_source(&self) -> Option<&str> {
-        self.exterior_index_source.as_deref()
+        self.exterior_index_sources[0].as_deref()
+    }
+
+    pub fn exterior_index_sources(&self) -> [Option<&str>; 2] {
+        self.exterior_index_sources
+            .each_ref()
+            .map(|source| source.as_deref())
     }
 
     pub const fn layer_index(&self) -> usize {
@@ -128,12 +139,18 @@ impl AbsorbingSlab {
             // Conserved p=n*sin(theta), split at each accessible critical
             // direction. Sine-squared panel coordinates remove endpoint cusps
             // and preserve positive Snell discriminants through the beam owner.
-            let mut edges = vec![0.0, self.exterior_refractive_index];
+            let maximum_exterior =
+                self.exterior_refractive_indices[0].max(self.exterior_refractive_indices[1]);
+            let mut edges = vec![
+                0.0,
+                self.exterior_refractive_indices[0],
+                self.exterior_refractive_indices[1],
+            ];
             edges.extend(
                 self.layers
                     .iter()
                     .map(AbsorbingLayer::refractive_index)
-                    .filter(|&index| index < self.exterior_refractive_index),
+                    .filter(|&index| index < maximum_exterior),
             );
             edges.sort_by(f64::total_cmp);
             edges.dedup();
@@ -151,8 +168,13 @@ impl AbsorbingSlab {
                 )));
             }
             let [lower, upper] = bands[band];
-            let band_mass = ((upper - lower) / self.exterior_refractive_index)
-                * ((upper + lower) / self.exterior_refractive_index);
+            let band_mass = self.exterior_refractive_indices.map(|index| {
+                if index > lower {
+                    ((upper - lower) / index) * ((upper + lower) / index)
+                } else {
+                    0.0
+                }
+            });
             let mut estimates = [[0.0; 2]; 2];
             for (nodes, estimate) in [&GL8[..], &GL16[..]].into_iter().zip(&mut estimates) {
                 // The beam owner uses the same positive Fresnel elimination and
@@ -170,12 +192,12 @@ impl AbsorbingSlab {
                         let beam = self.beam_response_in_band(bands[band], cos)?;
                         let fractions = beam.layer_interval_absorptance(layer, interval_m)?;
                         let angular_weight =
-                            band_mass * core::f64::consts::PI * sin * cos * half_width * weight;
+                            core::f64::consts::PI * sin * cos * half_width * weight;
                         for side in 0..2 {
                             add(
                                 &mut estimate[side],
                                 &mut rule_correction[side],
-                                angular_weight * fractions[side],
+                                band_mass[side] * angular_weight * fractions[side],
                             );
                         }
                         report.angular_evaluations += 1;
@@ -186,7 +208,7 @@ impl AbsorbingSlab {
             let errors: [f64; 2] = core::array::from_fn(|side| (fine[side] - coarse[side]).abs());
             if (0..2).all(|side| {
                 errors[side]
-                    <= controls.absolute_coefficient_error * band_mass * (hi - lo)
+                    <= controls.absolute_coefficient_error * band_mass[side] * (hi - lo)
                         + controls.relative_coefficient_error * fine[side]
             }) {
                 for side in 0..2 {
@@ -220,8 +242,8 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(SlabDiffuseDepthResponse {
             layers: self.layers.clone(),
-            exterior_refractive_index: self.exterior_refractive_index,
-            exterior_index_source: self.exterior_index_source.clone(),
+            exterior_refractive_indices: self.exterior_refractive_indices,
+            exterior_index_sources: self.exterior_index_sources.clone(),
             layer,
             interval_m,
             absorptance: total,

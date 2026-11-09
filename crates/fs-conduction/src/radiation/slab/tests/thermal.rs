@@ -458,3 +458,48 @@ fn g2_gray_native_binding_support_budget_and_cancellation_refuse_transactionally
     assert_eq!(old.time_s(), 0.0);
     assert!(source.endpoint_transport(&old, || Ok(())).is_ok());
 }
+
+#[test]
+fn g1_gray_asymmetric_ports_keep_each_n_squared_in_heat_and_stiffness() {
+    let slab = super::asymmetric::between(&[1000.0], &[1.5], [1.0, 1.7]);
+    let law = Caloric {
+        capacity: 1000.0,
+        datum: 0.0,
+        latent: 0.0,
+    };
+    let area = 0.01;
+    let old = state(&law, &slab, &[law.energy(500.0)], area, 0.0, 0);
+    let n_squared = [1.0, 1.7 * 1.7];
+    let bath = n_squared.map(|n2| n2 * exitance(500.0));
+    let equilibrium =
+        GraySlabThermal::new_full_spectrum(&slab, area, bath, &bindings(&law, 1), &old, || Ok(()))
+            .unwrap();
+    assert!(
+        equilibrium
+            .endpoint_transport(&old, || Ok(()))
+            .unwrap()
+            .heat
+            .bulk
+            .sources_w
+            .is_empty()
+    );
+    let h = [bath[0] + 100.0, bath[1] + 300.0];
+    let mut source =
+        GraySlabThermal::new_full_spectrum(&slab, area, h, &bindings(&law, 1), &old, || Ok(()))
+            .unwrap();
+    let face = slab.face_coupling()[0];
+    let power = area * (face[0] * 100.0 + face[1] * 300.0);
+    let transport = source.endpoint_transport(&old, || Ok(())).unwrap();
+    close(transport.heat.bulk.sources_w[&CellId(0)], power, 2e-12);
+    let (_, _, audit) = old
+        .advance_observed(&source, 1e-4, config(), || Ok(()))
+        .unwrap();
+    close(audit.external_heat_j, 1e-4 * power, 2e-14);
+    let proposed = 0.25;
+    let limited = source
+        .limit_timestep_s(&old, proposed, &mut || Ok(()))
+        .unwrap();
+    let coupling = area * (face[0] * n_squared[0] + face[1] * n_squared[1]);
+    let decay = coupling * 4.0 * SIGMA * 3000.0_f64.powi(3) / 1000.0;
+    close(limited, proposed / (1.0 + proposed * decay / 0.8), 2e-15);
+}

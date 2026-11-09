@@ -84,6 +84,12 @@ pub(super) fn rule(
                     let transmission = escape * through * entered;
                     let reflection = r + escape * r * through * through * entered;
                     add(&mut output[0], &mut correction[0], q * transmission);
+                    let reverse = output.len() - 3;
+                    add(
+                        &mut output[reverse],
+                        &mut correction[reverse],
+                        q * transmission,
+                    );
                     for last in output.len() - 2..output.len() {
                         add(&mut output[last], &mut correction[last], q * reflection);
                     }

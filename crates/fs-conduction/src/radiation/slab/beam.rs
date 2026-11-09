@@ -1,7 +1,7 @@
 //! Collimated irradiation through the original incoherent Fresnel slab.
 //!
-//! Both faces share one explicitly retained exterior dielectric; the original
-//! constructor uses index one. Input powers are already projected onto physical
+//! Faces retain independently sourced exterior dielectrics; the original
+//! constructor uses index one on both sides. Input powers are already projected onto physical
 //! slab area; neither a second cosine nor a diffuse angular average is applied.
 //! Original layer sources and temperature/band support are retained.
 
@@ -20,8 +20,10 @@ use super::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlabBeamResponse {
     layers: Arc<[AbsorbingLayer]>,
-    exterior_refractive_index: f64,
-    exterior_index_source: Option<Arc<str>>,
+    exterior_refractive_indices: [f64; 2],
+    exterior_index_sources: [Option<Arc<str>>; 2],
+    exterior_direction_cosines: [f64; 2],
+    incident_side: usize,
     direction_cosine: f64,
     s_power_fraction: f64,
     reflectance: [f64; 2],
@@ -62,8 +64,9 @@ impl SlabBeamResponse {
     ) -> Result<Self, ConductionError> {
         Self::prepare(
             layers.into(),
-            1.0,
-            None,
+            [1.0; 2],
+            [None, None],
+            0,
             direction_cosine,
             s_power_fraction,
             None,
@@ -84,8 +87,8 @@ impl SlabBeamResponse {
     /// reflection. Its ray field and heat are zero. Evanescent absorption and
     /// frustrated transmission through a thin gap require a coherent complex-
     /// index wave model and are not represented by this geometric-optics owner.
-    /// Different exterior media and thermal emission in the surrounding medium
-    /// are outside this beam-only entry point.
+    /// Use `new_between_media` for distinct exterior media. Thermal emission
+    /// remains owned by the corresponding diffuse/thermal slab.
     pub fn new_in_medium(
         layers: Vec<AbsorbingLayer>,
         exterior_refractive_index: f64,
@@ -104,10 +107,12 @@ impl SlabBeamResponse {
                 "need a sourced real exterior index >= 1 with representable n²",
             ));
         }
+        let source: Arc<str> = source.into();
         Self::prepare(
             layers.into(),
-            exterior_refractive_index,
-            Some(source.into()),
+            [exterior_refractive_index; 2],
+            [Some(source.clone()), Some(source)],
+            0,
             direction_cosine,
             s_power_fraction,
             None,
@@ -115,19 +120,52 @@ impl SlabBeamResponse {
         )
     }
 
-    fn prepare(
-        layers: Arc<[AbsorbingLayer]>,
-        exterior_refractive_index: f64,
-        exterior_index_source: Option<Arc<str>>,
+    /// Prepare a conserved Snell channel between different exterior media.
+    /// `incident_side` is 0 (front) or 1 (back), and `direction_cosine` belongs
+    /// to that medium. The opposite beam, when propagating, has the conjugate
+    /// Snell cosine exposed by `exterior_direction_cosines()`; it generally
+    /// does NOT have the same angle. A closed opposite channel has cosine zero
+    /// and refuses nonzero incident flux. Evanescent transport is not inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_between_media(
+        layers: Vec<AbsorbingLayer>,
+        exterior_refractive_indices: [f64; 2],
+        exterior_index_sources: [impl Into<String>; 2],
+        incident_side: usize,
         direction_cosine: f64,
         s_power_fraction: f64,
-        layer_cosines: Option<&[f64; MAX_SLAB_LAYERS]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ConductionError> {
+        let sources =
+            super::admit_exterior_sources(exterior_refractive_indices, exterior_index_sources)?;
+        Self::prepare(
+            layers.into(),
+            exterior_refractive_indices,
+            sources,
+            incident_side,
+            direction_cosine,
+            s_power_fraction,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        layers: Arc<[AbsorbingLayer]>,
+        exterior_refractive_indices: [f64; 2],
+        exterior_index_sources: [Option<Arc<str>>; 2],
+        incident_side: usize,
+        direction_cosine: f64,
+        s_power_fraction: f64,
+        band_cosines: Option<(&[f64; MAX_SLAB_LAYERS], [f64; 2])>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
         checkpoint(&mut cancelled, 0)?;
         let n = layers.len();
         if n == 0
             || n > MAX_SLAB_LAYERS
+            || incident_side > 1
             || !direction_cosine.is_finite()
             || direction_cosine <= 0.0
             || direction_cosine > 1.0
@@ -138,8 +176,18 @@ impl SlabBeamResponse {
                 "need 1..=64 sourced layers, beam cosine in (0,1] and s power fraction in [0,1]",
             ));
         }
-        let mut indices = [exterior_refractive_index; MAX_SLAB_LAYERS + 2];
-        let mut mu = [direction_cosine; MAX_SLAB_LAYERS + 2];
+        let incident_index = exterior_refractive_indices[incident_side];
+        let exterior_direction_cosines = if let Some((_, cosines)) = band_cosines {
+            cosines
+        } else {
+            exterior_refractive_indices
+                .map(|index| refracted_cosine(index, incident_index, direction_cosine))
+        };
+        let mut indices = [exterior_refractive_indices[0]; MAX_SLAB_LAYERS + 2];
+        indices[n + 1] = exterior_refractive_indices[1];
+        let mut mu = [0.0; MAX_SLAB_LAYERS + 2];
+        mu[0] = exterior_direction_cosines[0];
+        mu[n + 1] = exterior_direction_cosines[1];
         let mut t = [0.0; MAX_SLAB_LAYERS];
         let mut a = [0.0; MAX_SLAB_LAYERS];
         for (i, layer) in layers.iter().enumerate() {
@@ -147,24 +195,10 @@ impl SlabBeamResponse {
             indices[i + 1] = index;
             // n*sin(theta) is conserved across the whole stack. A matched
             // layer retains even a cosine whose square would underflow.
-            mu[i + 1] = if let Some(cosines) = layer_cosines {
+            mu[i + 1] = if let Some((cosines, _)) = band_cosines {
                 cosines[i]
-            } else if index == exterior_refractive_index || direction_cosine == 1.0 {
-                direction_cosine
-            } else if index < exterior_refractive_index {
-                let ratio = index / exterior_refractive_index;
-                let sin_squared = (1.0 - direction_cosine) * (1.0 + direction_cosine);
-                let discriminant = ratio.mul_add(ratio, -sin_squared);
-                if discriminant > 0.0 {
-                    discriminant.sqrt() / ratio
-                } else {
-                    0.0
-                }
             } else {
-                (((index - exterior_refractive_index) / index)
-                    * ((index + exterior_refractive_index) / index)
-                    + (direction_cosine * (exterior_refractive_index / index)).powi(2))
-                .sqrt()
+                refracted_cosine(index, incident_index, direction_cosine)
             };
             if mu[i + 1] == 0.0 {
                 // Unavailable propagating channel, not an opaque absorbing
@@ -175,8 +209,8 @@ impl SlabBeamResponse {
             t[i] = remaining_fraction(depth);
             a[i] = decayed_fraction(depth);
         }
-        let channels = 3 + 2 * n;
-        let mut output = [0.0; 3 + 2 * MAX_SLAB_LAYERS];
+        let channels = 4 + 2 * n;
+        let mut output = [0.0; 4 + 2 * MAX_SLAB_LAYERS];
         let mut correction = output;
         let mut fields = [[[0.0; 2]; 2]; MAX_SLAB_LAYERS];
         for (pol, weight) in [s_power_fraction, 1.0 - s_power_fraction]
@@ -205,16 +239,18 @@ impl SlabBeamResponse {
                 &a[..n],
                 &r[..=n],
                 &e[..=n],
-                true,
+                exterior_direction_cosines.map(|cosine| cosine > 0.0),
                 false,
                 weight,
-                weight,
+                [weight; 2],
                 &mut output[..channels],
                 &mut correction[..channels],
                 Some(&mut fields[..n]),
             );
         }
         let reflectance = [output[channels - 2], output[channels - 1]];
+        // Directional power transmission is reciprocal at conjugate Snell
+        // angles. It is zero whenever either exterior channel is closed.
         let transmittance = output[0];
         let absorptance: Arc<[[f64; 2]]> = (0..n)
             .map(|i| [output[1 + 2 * i], output[2 + 2 * i]])
@@ -233,7 +269,11 @@ impl SlabBeamResponse {
             return Err(invalid("unrepresentable directional slab coefficient"));
         }
         for side in 0..2 {
-            let mut residual = -1.0;
+            let mut residual = if exterior_direction_cosines[side] > 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
             let mut correction = 0.0;
             for coefficient in [reflectance[side], transmittance]
                 .into_iter()
@@ -249,8 +289,10 @@ impl SlabBeamResponse {
         checkpoint(&mut cancelled, 3)?;
         Ok(Self {
             layers,
-            exterior_refractive_index,
-            exterior_index_source,
+            exterior_refractive_indices,
+            exterior_index_sources,
+            exterior_direction_cosines,
+            incident_side,
             direction_cosine,
             s_power_fraction,
             reflectance,
@@ -269,14 +311,29 @@ impl SlabBeamResponse {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
     }
-    /// Absolute real index of the common surrounding dielectric.
+    /// Absolute real index at the FRONT face; use the plural form for both.
     pub const fn exterior_refractive_index(&self) -> f64 {
-        self.exterior_refractive_index
+        self.exterior_refractive_indices[0]
     }
-    /// Original exterior optical source; absent only for the index-one constructor.
+    pub const fn exterior_refractive_indices(&self) -> [f64; 2] {
+        self.exterior_refractive_indices
+    }
     pub fn exterior_index_source(&self) -> Option<&str> {
-        self.exterior_index_source.as_deref()
+        self.exterior_index_sources[0].as_deref()
     }
+    pub fn exterior_index_sources(&self) -> [Option<&str>; 2] {
+        self.exterior_index_sources
+            .each_ref()
+            .map(|source| source.as_deref())
+    }
+    /// Conjugate exterior cosines in [front, back] media; zero means closed.
+    pub const fn exterior_direction_cosines(&self) -> [f64; 2] {
+        self.exterior_direction_cosines
+    }
+    pub const fn incident_side(&self) -> usize {
+        self.incident_side
+    }
+    /// Authored cosine in `incident_side()`, retained without Snell round trips.
     pub const fn direction_cosine(&self) -> f64 {
         self.direction_cosine
     }
@@ -377,6 +434,7 @@ impl SlabBeamResponse {
             .layers
             .get(layer)
             .ok_or_else(|| invalid("beam depth query needs an original layer index"))?;
+        self.admit_irradiation(irradiation)?;
         if interval
             .iter()
             .chain(&irradiation)
@@ -389,6 +447,19 @@ impl SlabBeamResponse {
             ));
         }
         Ok((material, &self.layer_fields[layer]))
+    }
+
+    fn admit_irradiation(&self, irradiation: [f64; 2]) -> Result<(), ConductionError> {
+        if (0..2).any(|side| {
+            !nonnegative(irradiation[side])
+                || (self.exterior_direction_cosines[side] == 0.0 && irradiation[side] != 0.0)
+        }) {
+            Err(invalid(
+                "beam flux requires a propagating exterior channel and nonnegative finite power",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Apply nonnegative incident fluxes [front, back] in W/m² of slab area.
@@ -405,6 +476,7 @@ impl SlabBeamResponse {
                 "need nonnegative beam fluxes and one output per original layer",
             ));
         }
+        self.admit_irradiation(irradiation_w_m2)?;
         let reflected_w_m2 =
             std::array::from_fn(|side| self.reflectance[side] * irradiation_w_m2[side]);
         let transmitted_w_m2 =
@@ -443,6 +515,27 @@ impl SlabBeamResponse {
     }
 }
 
+// Stable Snell cosine, including an exactly matched grazing channel. A zero
+// discriminant closes a propagating mode; no evanescent flux is invented.
+fn refracted_cosine(index: f64, incident_index: f64, incident_cosine: f64) -> f64 {
+    if index == incident_index || incident_cosine == 1.0 {
+        incident_cosine
+    } else if index < incident_index {
+        let ratio = index / incident_index;
+        let sin_squared = (1.0 - incident_cosine) * (1.0 + incident_cosine);
+        let discriminant = ratio.mul_add(ratio, -sin_squared);
+        if discriminant > 0.0 {
+            discriminant.sqrt() / ratio
+        } else {
+            0.0
+        }
+    } else {
+        (((index - incident_index) / index) * ((index + incident_index) / index)
+            + (incident_cosine * (incident_index / index)).powi(2))
+        .sqrt()
+    }
+}
+
 fn interval_absorptance(
     material: &AbsorbingLayer,
     field: &BeamLayerFields,
@@ -477,33 +570,52 @@ impl AbsorbingSlab {
         band: [f64; 2],
         cosine: f64,
     ) -> Result<SlabBeamResponse, ConductionError> {
-        let mu = layered::band_direction_cosine(self.exterior_refractive_index, band, cosine);
+        let exterior_cosines = self
+            .exterior_refractive_indices
+            .map(|index| layered::band_direction_cosine(index, band, cosine));
+        let side = usize::from(exterior_cosines[0] == 0.0);
         let mut cosines = [0.0; MAX_SLAB_LAYERS];
         for (i, layer) in self.layers.iter().enumerate() {
             cosines[i] = layered::band_direction_cosine(layer.refractive_index(), band, cosine);
         }
         SlabBeamResponse::prepare(
             self.layers.clone(),
-            self.exterior_refractive_index,
-            self.exterior_index_source.clone(),
-            mu,
+            self.exterior_refractive_indices,
+            self.exterior_index_sources.clone(),
+            side,
+            exterior_cosines[side],
             0.5,
-            Some(&cosines),
+            Some((&cosines, exterior_cosines)),
             || false,
         )
     }
 
-    /// Reuse the exact material stack for a prepared polarized incident beam.
+    /// Reuse the original stack with the angle specified in the FRONT exterior.
+    /// Reverse illumination uses its conjugate Snell cosine; see
+    /// `beam_response_from_side` to author an angle in the back medium.
     pub fn beam_response(
         &self,
         direction_cosine: f64,
         s_power_fraction: f64,
         cancelled: impl FnMut() -> bool,
     ) -> Result<SlabBeamResponse, ConductionError> {
+        self.beam_response_from_side(0, direction_cosine, s_power_fraction, cancelled)
+    }
+
+    /// Author the beam angle in either exterior medium, retaining the original
+    /// ordered layers, source identities and all internal Fresnel returns.
+    pub fn beam_response_from_side(
+        &self,
+        incident_side: usize,
+        direction_cosine: f64,
+        s_power_fraction: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SlabBeamResponse, ConductionError> {
         SlabBeamResponse::prepare(
             self.layers.clone(),
-            self.exterior_refractive_index,
-            self.exterior_index_source.clone(),
+            self.exterior_refractive_indices,
+            self.exterior_index_sources.clone(),
+            incident_side,
             direction_cosine,
             s_power_fraction,
             None,
@@ -526,10 +638,10 @@ impl AbsorbingSlab {
         let n = self.layer_count();
         if self.layers != beam.layers
             || out.len() != n
-            || beam.exterior_refractive_index != self.exterior_refractive_index
+            || beam.exterior_refractive_indices != self.exterior_refractive_indices
         {
             return Err(invalid(
-                "beam and thermal exchange must share the original ordered layers and exterior index",
+                "beam and thermal exchange must share the original ordered layers and both exterior indices",
             ));
         }
         let mut thermal = [0.0; MAX_SLAB_LAYERS];

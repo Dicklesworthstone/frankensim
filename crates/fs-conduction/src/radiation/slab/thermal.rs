@@ -108,8 +108,9 @@ impl<'a> GraySlabThermal<'a> {
             ));
         }
         let n = cells.len();
-        let exterior_index_squared =
-            slab.exterior_refractive_index() * slab.exterior_refractive_index();
+        let exterior_index_squared = slab
+            .exterior_refractive_indices()
+            .map(|index| index * index);
         let mut layers = Vec::with_capacity(n);
         let mut derivative_bounds_w_k = BTreeMap::new();
         let mut pairs = Vec::new();
@@ -143,7 +144,8 @@ impl<'a> GraySlabThermal<'a> {
                 face_area_m2,
                 radiative: false,
             });
-            let mut coupling = product(exterior_index_squared, face_area_m2[0] + face_area_m2[1])?;
+            let mut coupling = product(exterior_index_squared[0], face_area_m2[0])?
+                + product(exterior_index_squared[1], face_area_m2[1])?;
             let mut correction = 0.0;
             for j in 0..n {
                 let coefficient = product(area_m2, slab.layer_coupling()[i * n + j])?;
@@ -295,8 +297,10 @@ impl<'a> GraySlabThermal<'a> {
         layer: &BoundLayer<'_>,
         emission: f64,
     ) -> Result<f64, DepositionError> {
-        let exterior_index_squared =
-            self.slab.exterior_refractive_index() * self.slab.exterior_refractive_index();
+        let exterior_index_squared = self
+            .slab
+            .exterior_refractive_indices()
+            .map(|index| index * index);
         let mut power = 0.0;
         let mut correction = 0.0;
         for side in 0..2 {
@@ -307,7 +311,7 @@ impl<'a> GraySlabThermal<'a> {
                     layer.face_area_m2[side],
                     self.irradiation_w_m2[side],
                     emission,
-                    exterior_index_squared,
+                    exterior_index_squared[side],
                 )
                 .map_err(|_| DepositionError::Arithmetic)?,
             );

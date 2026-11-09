@@ -43,7 +43,7 @@ pub(super) fn admit_axis(
     let mut ports = [false; MAX_RADIATION_SURFACES];
     let mut layers = 0;
     for slab in slabs {
-        if slab.optics.exterior_refractive_index() != 1.0 {
+        if slab.optics.exterior_refractive_indices() != [1.0; 2] {
             return Err(RadiationError::Invalid(
                 "air enclosure slab ports require an index-one exterior",
             ));
@@ -392,6 +392,24 @@ fn g0_immersed_slab_refuses_index_one_air_enclosure() {
             &[SlabPair {
                 surfaces: [0, 1],
                 optics: immersed
+            }]
+        )
+        .is_err()
+    );
+    let asymmetric = AbsorbingSlab::new_between_media(
+        layers.clone(),
+        [1.0, 1.33],
+        ["air", "water"],
+        SlabQuadrature::default(),
+        || false,
+    )
+    .unwrap();
+    assert!(
+        admit_axis(
+            2,
+            &[SlabPair {
+                surfaces: [0, 1],
+                optics: asymmetric
             }]
         )
         .is_err()

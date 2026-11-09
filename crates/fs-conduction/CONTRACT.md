@@ -5896,8 +5896,18 @@ in this resource-exhausted session.
 
 `AbsorbingSlab::new_in_medium` prepares diffuse incidence and thermal emission
 with one explicit, sourced, lossless exterior dielectric shared by both faces.
-`SlabBeamResponse::new_in_medium` prepares collimated polarized irradiation;
-`AbsorbingSlab::beam_response` retains its parent's layers and exterior.
+`new_between_media` instead retains independent [front, back] exterior indices
+and sources. Diffuse `transmittances()` stores power fractions FROM each face,
+with n_front² T_front = n_back² T_back; singular index/source/transmittance
+accessors designate the front face. `outgoing_fluxes` applies both directional
+transmissions together with reflection and the original layer emission.
+
+`SlabBeamResponse::new_between_media` and `beam_response_from_side` author
+an angle in either exterior medium. The returned exterior cosines identify the
+conjugate Snell channel, where directional power transmission is reciprocal.
+A nonpropagating exterior channel has zero cosine and refuses nonzero incident
+power; it never acquires invented evanescent heat. The original `new_in_medium`
+and `beam_response` entries retain the same common-medium/front-angle behavior.
 All layer indices remain absolute. Conserved p=n*sin(theta), split at every
 critical index, carries polarized Fresnel reflection and all propagating
 internal returns without angular mixing or exponentially growing matrices.
@@ -5921,14 +5931,24 @@ This is smooth, incoherent geometric optics with bulk Beer absorption. It does
 not infer evanescent absorption, frustrated reflection, coherent films, lateral
 scattering or interfacial complex extinction. Sources must cover the original
 temperature and gray/band scope. Beam/thermal superposition requires the same
-exterior; the air-enclosure consumer explicitly admits only index-one slabs.
+pair of exterior indices; the air-enclosure consumer explicitly requires
+index one on BOTH faces. Native gray thermal cell sources and timestep bounds
+use each face's own n² emission factor. Local diffuse and net-depth queries
+retain the same exterior pair and critical-angle bands.
+
+Six additional G0/G1/G3 groups cover independently evaluated asymmetric
+Fresnel return series and diffuse transmission, each face's thermal equilibrium,
+whole-layer/local heat balance, reversal, subdivision, index scaling and closed
+channel admission. Native gray-cell integration has a separate authored
+regression; its full dependency lane is not implied by the slab source probe.
 
 Regressions cover independent Fresnel escape-cone integration, matched-medium
 Beer exchange, equilibrium, energy balance, index rescaling, reversal, local
-heating, beam superposition, cancellation and bounded work. The complete slab
-suite and original air-enclosure admission check passed in a 49-test native
-source probe with the actual fs-math implementation; this is not a full
-workspace or material-admission dependency test.
+heating, beam superposition, cancellation and bounded work. The optical slab,
+beam, local-depth and original air-enclosure admission checks passed in a
+55-test native source probe with the actual fs-math implementation. Native
+gray/spectral thermal-cell integration remains unexecuted in this environment;
+this probe is not a full workspace or material-admission dependency test.
 
 The Fresnel, radiance and incoherent-layer assumptions follow
 [PBRT 4e §9.3](https://pbr-book.org/4ed/Reflection_Models/Specular_Reflection_and_Transmission)
