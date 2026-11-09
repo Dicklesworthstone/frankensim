@@ -2,7 +2,8 @@
 
 use super::{
     AbsorbingLayer, AbsorbingSlab, Arc, ConductionError, GL8, GL16, SlabQuadrature, add,
-    checkpoint, difference_product, finite, invalid, layered, nonnegative,
+    checkpoint, difference_product, exterior_difference_product, finite, invalid, layered,
+    nonnegative,
 };
 
 /// Numerical angular diagnostics, not certified continuum error bounds.
@@ -26,6 +27,8 @@ pub struct SlabDepthReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlabDepthResponse {
     layers: Arc<[AbsorbingLayer]>,
+    exterior_refractive_index: f64,
+    exterior_index_source: Option<Arc<str>>,
     layer: usize,
     interval_m: [f64; 2],
     face_coupling: [f64; 2],
@@ -36,6 +39,12 @@ pub struct SlabDepthResponse {
 impl SlabDepthResponse {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
+    }
+    pub const fn exterior_refractive_index(&self) -> f64 {
+        self.exterior_refractive_index
+    }
+    pub fn exterior_index_source(&self) -> Option<&str> {
+        self.exterior_index_source.as_deref()
     }
     pub const fn layer_index(&self) -> usize {
         self.layer
@@ -57,6 +66,8 @@ impl SlabDepthResponse {
     /// Signed net heat INTO the interval [W/m² of slab area]. Divide by positive
     /// interval thickness for cell-average volumetric heating [W/m³].
     ///
+    /// Irradiances are physical exterior flux; layer blackbody inputs are
+    /// vacuum exitances, with exterior n² emission included automatically.
     /// Irradiances and original layer blackbody exitances use the same gray,
     /// band or wavelength scope. Finite signed deviations from ONE common
     /// background are also admitted. Each original layer retains its uniform
@@ -84,7 +95,12 @@ impl SlabDepthResponse {
             add(
                 &mut heat,
                 &mut correction,
-                difference_product(self.face_coupling[side], irradiation_w_m2[side], local)?,
+                exterior_difference_product(
+                    self.face_coupling[side],
+                    irradiation_w_m2[side],
+                    local,
+                    self.exterior_refractive_index.powi(2),
+                )?,
             );
         }
         for (&coefficient, &source) in self.layer_coupling.iter().zip(blackbody_exitance_w_m2) {
@@ -136,7 +152,7 @@ impl AbsorbingSlab {
             accepted_panels: 0,
             maximum_estimated_coefficient_error: 0.0,
         };
-        let mut edges = vec![0.0, 1.0];
+        let mut edges = vec![0.0, self.exterior_refractive_index];
         edges.extend(self.layers.iter().map(AbsorbingLayer::refractive_index));
         edges.sort_by(f64::total_cmp);
         edges.dedup();
@@ -160,6 +176,7 @@ impl AbsorbingSlab {
             for (nodes, output) in [(&GL8[..], &mut coarse), (&GL16[..], &mut fine)] {
                 layered::rule(
                     &self.layers,
+                    self.exterior_refractive_index,
                     bands[band],
                     lo,
                     hi,
@@ -200,6 +217,8 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(SlabDepthResponse {
             layers: self.layers.clone(),
+            exterior_refractive_index: self.exterior_refractive_index,
+            exterior_index_source: self.exterior_index_source.clone(),
             layer,
             interval_m,
             face_coupling: [total[0], total[1]],

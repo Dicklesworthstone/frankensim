@@ -66,6 +66,7 @@ impl SlabBeamResponse {
             None,
             direction_cosine,
             s_power_fraction,
+            None,
             cancelled,
         )
     }
@@ -109,6 +110,7 @@ impl SlabBeamResponse {
             Some(source.into()),
             direction_cosine,
             s_power_fraction,
+            None,
             cancelled,
         )
     }
@@ -119,6 +121,7 @@ impl SlabBeamResponse {
         exterior_index_source: Option<Arc<str>>,
         direction_cosine: f64,
         s_power_fraction: f64,
+        layer_cosines: Option<&[f64; MAX_SLAB_LAYERS]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
         checkpoint(&mut cancelled, 0)?;
@@ -144,7 +147,9 @@ impl SlabBeamResponse {
             indices[i + 1] = index;
             // n*sin(theta) is conserved across the whole stack. A matched
             // layer retains even a cosine whose square would underflow.
-            mu[i + 1] = if index == exterior_refractive_index || direction_cosine == 1.0 {
+            mu[i + 1] = if let Some(cosines) = layer_cosines {
+                cosines[i]
+            } else if index == exterior_refractive_index || direction_cosine == 1.0 {
                 direction_cosine
             } else if index < exterior_refractive_index {
                 let ratio = index / exterior_refractive_index;
@@ -202,6 +207,7 @@ impl SlabBeamResponse {
                 &e[..=n],
                 true,
                 false,
+                weight,
                 weight,
                 &mut output[..channels],
                 &mut correction[..channels],
@@ -464,6 +470,29 @@ pub(super) fn optical_path(absorption: f64, distance: f64, mu: f64) -> f64 {
 }
 
 impl AbsorbingSlab {
+    // Original beam fields at a quadrature direction expressed in conserved
+    // optical coordinates. The caller splits bands at every material index.
+    pub(super) fn beam_response_in_band(
+        &self,
+        band: [f64; 2],
+        cosine: f64,
+    ) -> Result<SlabBeamResponse, ConductionError> {
+        let mu = layered::band_direction_cosine(self.exterior_refractive_index, band, cosine);
+        let mut cosines = [0.0; MAX_SLAB_LAYERS];
+        for (i, layer) in self.layers.iter().enumerate() {
+            cosines[i] = layered::band_direction_cosine(layer.refractive_index(), band, cosine);
+        }
+        SlabBeamResponse::prepare(
+            self.layers.clone(),
+            self.exterior_refractive_index,
+            self.exterior_index_source.clone(),
+            mu,
+            0.5,
+            Some(&cosines),
+            || false,
+        )
+    }
+
     /// Reuse the exact material stack for a prepared polarized incident beam.
     pub fn beam_response(
         &self,
@@ -473,10 +502,11 @@ impl AbsorbingSlab {
     ) -> Result<SlabBeamResponse, ConductionError> {
         SlabBeamResponse::prepare(
             self.layers.clone(),
-            1.0,
-            None,
+            self.exterior_refractive_index,
+            self.exterior_index_source.clone(),
             direction_cosine,
             s_power_fraction,
+            None,
             cancelled,
         )
     }
@@ -494,9 +524,12 @@ impl AbsorbingSlab {
         out: &mut [f64],
     ) -> Result<SlabBeamExchange, ConductionError> {
         let n = self.layer_count();
-        if self.layers != beam.layers || out.len() != n || beam.exterior_refractive_index != 1.0 {
+        if self.layers != beam.layers
+            || out.len() != n
+            || beam.exterior_refractive_index != self.exterior_refractive_index
+        {
             return Err(invalid(
-                "beam and thermal exchange must share the original ordered layers and index-one exterior",
+                "beam and thermal exchange must share the original ordered layers and exterior index",
             ));
         }
         let mut thermal = [0.0; MAX_SLAB_LAYERS];

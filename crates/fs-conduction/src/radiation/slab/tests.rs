@@ -4,6 +4,7 @@ mod beam;
 mod depth;
 mod diffuse;
 mod heterogeneous;
+mod immersion;
 
 fn slab(depths: &[f64]) -> AbsorbingSlab {
     AbsorbingSlab::new(

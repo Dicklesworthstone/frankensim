@@ -21,6 +21,7 @@ use fs_math::det;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn rule(
     layers: &[AbsorbingLayer],
+    exterior_refractive_index: f64,
     band: [f64; 2],
     lo: f64,
     hi: f64,
@@ -38,7 +39,7 @@ pub(super) fn rule(
     let width = (upper - lower) * (upper + lower);
     let midpoint = 0.5 * (lo + hi);
     let half = 0.5 * (hi - lo);
-    let mut indices = [1.0; MAX_SLAB_LAYERS + 2];
+    let mut indices = [exterior_refractive_index; MAX_SLAB_LAYERS + 2];
     for (i, layer) in layers.iter().enumerate() {
         indices[i + 1] = layer.refractive_index();
     }
@@ -52,14 +53,7 @@ pub(super) fn rule(
             let q = width * (core::f64::consts::PI * sin * cos * half * weight);
             let mut mu = [0.0; MAX_SLAB_LAYERS + 2];
             for i in 0..n + 2 {
-                let index = indices[i];
-                if index > lower {
-                    // All active indices are >= upper. Form index²-p² as a
-                    // positive sum, retaining the grazing cosine near p=index.
-                    let gap = ((index - upper) / index) * ((index + upper) / index);
-                    let range = ((upper - lower) / index) * ((upper + lower) / index);
-                    mu[i] = (gap + range * cos * cos).sqrt();
-                }
+                mu[i] = band_direction_cosine(indices[i], band, cos);
             }
             let mut t = [0.0; MAX_SLAB_LAYERS];
             let mut a = [0.0; MAX_SLAB_LAYERS];
@@ -108,11 +102,12 @@ pub(super) fn rule(
                             &a[..n],
                             &r[..=n],
                             &e[..=n],
-                            lower == 0.0,
+                            lower < exterior_refractive_index,
                             target,
                             loss,
                             attenuation,
                             0.5 * q,
+                            0.5 * (q / exterior_refractive_index.powi(2)),
                             output,
                             correction,
                         );
@@ -123,9 +118,10 @@ pub(super) fn rule(
                         &a[..n],
                         &r[..=n],
                         &e[..=n],
-                        lower == 0.0,
+                        lower < exterior_refractive_index,
                         true,
                         0.5 * q,
+                        0.5 * (q / exterior_refractive_index.powi(2)),
                         output,
                         correction,
                         None,
@@ -136,6 +132,19 @@ pub(super) fn rule(
         }
     }
     Ok(())
+}
+
+// Within a band split at EVERY refractive index, each active index is at
+// least upper. Preserve the positive Snell discriminant near critical angles,
+// where reconstructing it from a rounded exterior cosine loses accuracy.
+pub(super) fn band_direction_cosine(index: f64, [lower, upper]: [f64; 2], cosine: f64) -> f64 {
+    if index <= lower {
+        0.0
+    } else {
+        let gap = ((index - upper) / index) * ((index + upper) / index);
+        let range = ((upper - lower) / index) * ((upper + lower) / index);
+        (gap + range * cosine * cosine).sqrt()
+    }
 }
 
 // Reflection seen through one interface followed by a layer and its suffix.
@@ -211,6 +220,7 @@ pub(super) fn accumulate(
     exterior: bool,
     thermal_exchange: bool,
     q: f64,
+    exterior_q: f64,
     output: &mut [f64],
     correction: &mut [f64],
     mut beam_fields: Option<&mut [[[f64; 2]; 2]]>,
@@ -225,6 +235,9 @@ pub(super) fn accumulate(
         cross_right,
     } = returns(t, a, r, e);
     if exterior {
+        // Exterior fractions use 2 mu_ext dmu_ext; internal exchange uses
+        // the absolute optical-mode measure d(p²), retaining n² radiance.
+        let q = exterior_q;
         let (front, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
         let front_channel = output.len() - 2;
         add(
@@ -312,6 +325,7 @@ fn accumulate_depth(
     loss: f64,
     attenuation: [f64; 2],
     q: f64,
+    exterior_q: f64,
     output: &mut [f64],
     correction: &mut [f64],
 ) {
@@ -330,6 +344,7 @@ fn accumulate_depth(
     let from_front = loss * (attenuation[0] + t[target] * right[target] * attenuation[1]);
     let from_back = loss * (attenuation[1] + t[target] * left[target] * attenuation[0]);
     if exterior {
+        let q = exterior_q;
         let (_, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
         for i in 0..target {
             field *= t[i];

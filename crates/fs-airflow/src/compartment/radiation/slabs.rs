@@ -43,6 +43,11 @@ pub(super) fn admit_axis(
     let mut ports = [false; MAX_RADIATION_SURFACES];
     let mut layers = 0;
     for slab in slabs {
+        if slab.optics.exterior_refractive_index() != 1.0 {
+            return Err(RadiationError::Invalid(
+                "air enclosure slab ports require an index-one exterior",
+            ));
+        }
         let [a, b] = slab.surfaces;
         if a >= n || b >= n || a == b || ports[a] || ports[b] {
             return Err(RadiationError::Invalid(
@@ -362,3 +367,46 @@ pub mod thermal;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn g0_immersed_slab_refuses_index_one_air_enclosure() {
+    use fs_conduction::radiation::slab::{AbsorbingLayer, SlabQuadrature};
+    let layers = vec![
+        AbsorbingLayer::new(1.0, 0.3, [100.0, 3000.0], "bulk absorption")
+            .unwrap()
+            .with_refractive_index(1.5, "glass")
+            .unwrap(),
+    ];
+    let immersed = AbsorbingSlab::new_in_medium(
+        layers.clone(),
+        1.5,
+        "liquid",
+        SlabQuadrature::default(),
+        || false,
+    )
+    .unwrap();
+    assert!(
+        admit_axis(
+            2,
+            &[SlabPair {
+                surfaces: [0, 1],
+                optics: immersed
+            }]
+        )
+        .is_err()
+    );
+    let air = AbsorbingSlab::new(layers, SlabQuadrature::default(), || false).unwrap();
+    assert_eq!(
+        admit_axis(
+            2,
+            &[SlabPair {
+                surfaces: [0, 1],
+                optics: air
+            }]
+        )
+        .unwrap()
+        .1,
+        1
+    );
+}

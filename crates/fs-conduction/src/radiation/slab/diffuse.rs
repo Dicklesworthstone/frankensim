@@ -1,8 +1,8 @@
 //! Prepared depth-resolved absorption of diffuse external irradiation.
 
 use super::{
-    AbsorbingLayer, AbsorbingSlab, Arc, ConductionError, GL8, GL16, SlabQuadrature, add, checkpoint,
-    finite, invalid, nonnegative,
+    AbsorbingLayer, AbsorbingSlab, Arc, ConductionError, GL8, GL16, SlabQuadrature, add,
+    checkpoint, finite, invalid, nonnegative,
 };
 
 /// Bounded preparation work and embedded angular discrepancies.
@@ -31,6 +31,8 @@ pub struct SlabDiffuseDepthReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlabDiffuseDepthResponse {
     layers: Arc<[AbsorbingLayer]>,
+    exterior_refractive_index: f64,
+    exterior_index_source: Option<Arc<str>>,
     layer: usize,
     interval_m: [f64; 2],
     absorptance: [f64; 2],
@@ -40,6 +42,14 @@ pub struct SlabDiffuseDepthResponse {
 impl SlabDiffuseDepthResponse {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
+    }
+
+    pub const fn exterior_refractive_index(&self) -> f64 {
+        self.exterior_refractive_index
+    }
+
+    pub fn exterior_index_source(&self) -> Option<&str> {
+        self.exterior_index_source.as_deref()
     }
 
     pub const fn layer_index(&self) -> usize {
@@ -71,8 +81,7 @@ impl SlabDiffuseDepthResponse {
             ));
         }
         finite(
-            self.absorptance[0] * irradiation_w_m2[0]
-                + self.absorptance[1] * irradiation_w_m2[1],
+            self.absorptance[0] * irradiation_w_m2[0] + self.absorptance[1] * irradiation_w_m2[1],
         )
     }
 }
@@ -114,10 +123,26 @@ impl AbsorbingSlab {
         let mut correction = [0.0; 2];
         let mut error_correction = [0.0; 2];
         let mut pending = Vec::new();
+        let mut bands = Vec::new();
         if material.absorption_m_inv() > 0.0 && interval_m[0] < interval_m[1] {
-            pending.push((0.0, 1.0, 0_usize));
+            // Conserved p=n*sin(theta), split at each accessible critical
+            // direction. Sine-squared panel coordinates remove endpoint cusps
+            // and preserve positive Snell discriminants through the beam owner.
+            let mut edges = vec![0.0, self.exterior_refractive_index];
+            edges.extend(
+                self.layers
+                    .iter()
+                    .map(AbsorbingLayer::refractive_index)
+                    .filter(|&index| index < self.exterior_refractive_index),
+            );
+            edges.sort_by(f64::total_cmp);
+            edges.dedup();
+            bands.extend(edges.windows(2).map(|edge| [edge[0], edge[1]]));
+            for band in (0..bands.len()).rev() {
+                pending.push((0.0, 1.0, 0_usize, band));
+            }
         }
-        while let Some((lo, hi, depth)) = pending.pop() {
+        while let Some((lo, hi, depth, band)) = pending.pop() {
             checkpoint(&mut cancelled, report.angular_evaluations)?;
             if report.angular_evaluations + 24 > controls.maximum_evaluations {
                 return Err(invalid(format!(
@@ -125,6 +150,9 @@ impl AbsorbingSlab {
                     report.angular_evaluations, controls.maximum_evaluations,
                 )));
             }
+            let [lower, upper] = bands[band];
+            let band_mass = ((upper - lower) / self.exterior_refractive_index)
+                * ((upper + lower) / self.exterior_refractive_index);
             let mut estimates = [[0.0; 2]; 2];
             for (nodes, estimate) in [&GL8[..], &GL16[..]].into_iter().zip(&mut estimates) {
                 // The beam owner uses the same positive Fresnel elimination and
@@ -136,14 +164,18 @@ impl AbsorbingSlab {
                 for &(node, weight) in nodes {
                     for sign in [-1.0, 1.0] {
                         checkpoint(&mut cancelled, report.angular_evaluations)?;
-                        let mu = midpoint + sign * half_width * node;
-                        let beam = self.beam_response(mu, 0.5, || false)?;
+                        let ordinate = midpoint + sign * half_width * node;
+                        let (sin, cos) =
+                            fs_math::det::sin_cos(core::f64::consts::FRAC_PI_2 * ordinate);
+                        let beam = self.beam_response_in_band(bands[band], cos)?;
                         let fractions = beam.layer_interval_absorptance(layer, interval_m)?;
+                        let angular_weight =
+                            band_mass * core::f64::consts::PI * sin * cos * half_width * weight;
                         for side in 0..2 {
                             add(
                                 &mut estimate[side],
                                 &mut rule_correction[side],
-                                2.0 * mu * half_width * weight * fractions[side],
+                                angular_weight * fractions[side],
                             );
                         }
                         report.angular_evaluations += 1;
@@ -154,7 +186,7 @@ impl AbsorbingSlab {
             let errors: [f64; 2] = core::array::from_fn(|side| (fine[side] - coarse[side]).abs());
             if (0..2).all(|side| {
                 errors[side]
-                    <= controls.absolute_coefficient_error * (hi - lo)
+                    <= controls.absolute_coefficient_error * band_mass * (hi - lo)
                         + controls.relative_coefficient_error * fine[side]
             }) {
                 for side in 0..2 {
@@ -174,17 +206,22 @@ impl AbsorbingSlab {
                 if mid <= lo || mid >= hi {
                     return Err(invalid("diffuse depth angular panel is unrepresentable"));
                 }
-                pending.push((mid, hi, depth + 1));
-                pending.push((lo, mid, depth + 1));
+                pending.push((mid, hi, depth + 1, band));
+                pending.push((lo, mid, depth + 1, band));
             }
         }
         let allowance = 256.0 * f64::EPSILON * self.layers.len() as f64;
-        if total.iter().any(|x| !nonnegative(*x) || *x > 1.0 + allowance) {
+        if total
+            .iter()
+            .any(|x| !nonnegative(*x) || *x > 1.0 + allowance)
+        {
             return Err(invalid("unrepresentable diffuse depth absorptance"));
         }
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(SlabDiffuseDepthResponse {
             layers: self.layers.clone(),
+            exterior_refractive_index: self.exterior_refractive_index,
+            exterior_index_source: self.exterior_index_source.clone(),
             layer,
             interval_m,
             absorptance: total,

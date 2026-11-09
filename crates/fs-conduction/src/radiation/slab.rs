@@ -195,6 +195,8 @@ pub struct SlabQuadratureReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbsorbingSlab {
     layers: Arc<[AbsorbingLayer]>,
+    exterior_refractive_index: f64,
+    exterior_index_source: Option<Arc<str>>,
     reflectance: [f64; 2],
     transmittance: f64,
     face_coupling: Arc<[[f64; 2]]>,
@@ -211,7 +213,7 @@ impl AbsorbingSlab {
         controls: SlabQuadrature,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
-        Self::prepare(layers, controls, cancelled)
+        Self::prepare(layers, 1.0, None, controls, cancelled)
     }
 
     /// A plane-parallel dielectric stack in an index-one environment.
@@ -248,11 +250,51 @@ impl AbsorbingSlab {
             layer.refractive_index = refractive_index;
             layer.refractive_index_source = Some(source.clone());
         }
-        Self::prepare(layers, controls, cancelled)
+        Self::prepare(layers, 1.0, None, controls, cancelled)
+    }
+
+    /// Prepare diffuse illumination and thermal emission in one lossless
+    /// dielectric shared by both exterior faces. Layer indices stay absolute.
+    ///
+    /// Irradiance is physical flux in that medium. Layer blackbody exitances
+    /// remain vacuum Planck/Stefan--Boltzmann values: escape emission includes
+    /// the exterior n² radiance factor, while interlayer exchange retains each
+    /// material's available optical modes. Equal-temperature equilibrium uses
+    /// exterior irradiance n² times that common blackbody exitance.
+    ///
+    /// The exterior source must cover the layers' temperature and gray/band
+    /// domain. Smooth incoherent interfaces, bulk Beer absorption and trapped
+    /// propagating rays are supported; evanescent coupling is not represented.
+    pub fn new_in_medium(
+        layers: Vec<AbsorbingLayer>,
+        exterior_refractive_index: f64,
+        exterior_index_source: impl Into<String>,
+        controls: SlabQuadrature,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ConductionError> {
+        let source = exterior_index_source.into();
+        if !exterior_refractive_index.is_finite()
+            || exterior_refractive_index < 1.0
+            || !(exterior_refractive_index * exterior_refractive_index).is_finite()
+            || source.trim().is_empty()
+        {
+            return Err(invalid(
+                "need a sourced real exterior index >= 1 with representable n²",
+            ));
+        }
+        Self::prepare(
+            layers,
+            exterior_refractive_index,
+            Some(source.into()),
+            controls,
+            cancelled,
+        )
     }
 
     fn prepare(
         layers: Vec<AbsorbingLayer>,
+        exterior_refractive_index: f64,
+        exterior_index_source: Option<Arc<str>>,
         controls: SlabQuadrature,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
@@ -274,13 +316,16 @@ impl AbsorbingSlab {
         let uniform_index = layers
             .iter()
             .all(|layer| layer.refractive_index == refractive_index);
+        let general_index = !uniform_index || exterior_refractive_index != 1.0;
         if uniform_index
-            && refractive_index == 1.0
+            && refractive_index == exterior_refractive_index
             && layers.iter().all(|layer| layer.optical_depth == 0.0)
         {
             checkpoint(&mut cancelled, 0)?;
             return Ok(Self {
                 layers: layers.into(),
+                exterior_refractive_index,
+                exterior_index_source,
                 reflectance: [0.0; 2],
                 transmittance: 1.0,
                 face_coupling: vec![[0.0; 2]; n].into(),
@@ -299,8 +344,8 @@ impl AbsorbingSlab {
         let mut rule_correction = vec![0.0; channels];
         let mut pending = Vec::new();
         let mut bands = Vec::new();
-        if !uniform_index {
-            let mut edges = vec![0.0, 1.0];
+        if general_index {
+            let mut edges = vec![0.0, exterior_refractive_index];
             edges.extend(layers.iter().map(AbsorbingLayer::refractive_index));
             edges.sort_by(f64::total_cmp);
             edges.dedup();
@@ -318,7 +363,7 @@ impl AbsorbingSlab {
         }
         // External incidence is integrated in external mu, avoiding a square
         // root singularity at the escape-cone edge. Trapped rays use internal mu.
-        if uniform_index {
+        if !general_index {
             pending.push((0.0, 1.0, 0_usize, false, 0));
         }
         let integration_width: f64 = pending.iter().map(|(lo, hi, _, _, _)| hi - lo).sum();
@@ -331,9 +376,10 @@ impl AbsorbingSlab {
                 )));
             }
             for (nodes, output) in [(&GL8[..], &mut coarse), (&GL16[..], &mut fine)] {
-                if !uniform_index {
+                if general_index {
                     layered::rule(
                         &layers,
+                        exterior_refractive_index,
                         bands[band],
                         lo,
                         hi,
@@ -429,6 +475,8 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(Self {
             layers: layers.into(),
+            exterior_refractive_index,
+            exterior_index_source,
             reflectance,
             transmittance,
             face_coupling: face.into(),
@@ -442,6 +490,14 @@ impl AbsorbingSlab {
     }
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
+    }
+    /// Absolute real index of the common exterior dielectric.
+    pub const fn exterior_refractive_index(&self) -> f64 {
+        self.exterior_refractive_index
+    }
+    /// Source of the exterior index; absent for the original index-one model.
+    pub fn exterior_index_source(&self) -> Option<&str> {
+        self.exterior_index_source.as_deref()
     }
     /// Common layer index, or None when the physical layers differ.
     /// Original per-layer indices and sources remain on `layers()`.
@@ -474,7 +530,9 @@ impl AbsorbingSlab {
     pub const fn transmittance(&self) -> f64 {
         self.transmittance
     }
-    /// Layer-major [front, back] incident absorption / reciprocal escape fractions.
+    /// Layer-major [front, back] fractions of physical incident irradiance.
+    /// Multiply by the exterior index squared for reciprocal emission
+    /// coefficients relative to vacuum blackbody exitance.
     pub fn face_coupling(&self) -> &[[f64; 2]] {
         &self.face_coupling
     }
@@ -504,7 +562,8 @@ impl AbsorbingSlab {
         Ok(())
     }
 
-    /// Layer emission escaping each face, in W/m² for blackbody exitance in W/m².
+    /// Layer emission escaping each face [W/m²]. Inputs are VACUUM blackbody
+    /// exitances [W/m²]; the exterior n² radiance factor is included here.
     /// Finite signed deviations from ONE common background are supported for
     /// near-equilibrium solvers. This does not add transmitted external light.
     /// The consumer owns source-temperature and spectral-window admission.
@@ -520,7 +579,7 @@ impl AbsorbingSlab {
                 add(
                     &mut result[side],
                     &mut correction[side],
-                    finite(a[side] * b)?,
+                    finite((a[side] * self.exterior_refractive_index.powi(2)) * b)?,
                 );
             }
         }
@@ -549,10 +608,11 @@ impl AbsorbingSlab {
         let mut correction = [0.0; MAX_SLAB_LAYERS];
         for i in 0..n {
             for side in 0..2 {
-                let value = difference_product(
+                let value = exterior_difference_product(
                     self.face_coupling[i][side],
                     irradiation[side],
                     blackbody_exitance[i],
+                    self.exterior_refractive_index.powi(2),
                 )?;
                 add(&mut heat[i], &mut correction[i], value);
             }
@@ -658,6 +718,24 @@ fn add(sum: &mut f64, correction: &mut f64, value: f64) {
     let next = *sum + y;
     *correction = (next - *sum) - y;
     *sum = next;
+}
+
+// Keep exact equilibrium cancellation before scaling, with a finite-product
+// fallback when the exterior blackbody flux overflows but its escape is tiny.
+fn exterior_difference_product(
+    coefficient: f64,
+    incoming: f64,
+    source: f64,
+    index_squared: f64,
+) -> Result<f64, ConductionError> {
+    let exterior_source = index_squared * source;
+    if coefficient == 0.0 {
+        Ok(0.0)
+    } else if exterior_source.is_finite() {
+        difference_product(coefficient, incoming, exterior_source)
+    } else {
+        finite(coefficient * incoming - (coefficient * index_squared) * source)
+    }
 }
 
 fn difference_product(
