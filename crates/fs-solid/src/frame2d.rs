@@ -1037,6 +1037,13 @@ impl Frame2d {
         3 * self.nodes.len()
     }
 
+    /// Number of original members, including every material/section family.
+    /// Coupled owners use this count to require a complete physical inventory.
+    #[must_use]
+    pub fn element_count(&self) -> usize {
+        self.elements.len()
+    }
+
     /// Committed displacements.
     #[must_use]
     pub fn displacements(&self) -> &[f64] {
@@ -1274,6 +1281,22 @@ impl Frame2d {
     ) -> Result<Vec<StaticStep>, SolidError> {
         self.require_untimed_materials()?;
         self.static_load_controlled(load, steps, &mut || Ok(()))
+    }
+
+    /// Native load-controlled equilibrium with cancellation inside the original
+    /// assembly, Newton and line-search work. Like [`Self::static_load`], completed
+    /// load increments remain accepted if a later increment fails or cancels.
+    /// A coupled transaction should therefore solve on its private frame trial.
+    pub fn static_load_with_cx(
+        &mut self,
+        load: &[f64],
+        steps: usize,
+        cx: &fs_exec::Cx<'_>,
+    ) -> Result<Vec<StaticStep>, SolidError> {
+        self.require_untimed_materials()?;
+        self.static_load_controlled(load, steps, &mut || {
+            cx.checkpoint().map_err(|_| SolidError::Cancelled)
+        })
     }
 
     fn static_load_controlled(

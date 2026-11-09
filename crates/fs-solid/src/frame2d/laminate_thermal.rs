@@ -95,6 +95,18 @@ impl FrameLaminateSection {
         self.thermoelastic.as_deref()
     }
 
+    /// Admitted absolute-temperature interval of one original layer potential.
+    /// This is the source-bound interval used for its elastic-capacity bound;
+    /// a thermal consumer must also admit its original caloric law throughout it.
+    #[must_use]
+    pub fn thermoelastic_temperature_range_k(&self, layer: usize) -> Option<[f64; 2]> {
+        self.binding
+            .thermoelastic
+            .as_ref()?
+            .get(layer)
+            .map(AffineLaminaThermoelastic::temperature_range_k)
+    }
+
     /// Bound on total, free and elastic in-plane strain tensor norms.
     #[must_use]
     pub fn linear_strain_limit(&self) -> f64 {
@@ -331,6 +343,45 @@ impl Frame2d {
         cx: &Cx<'_>,
     ) -> Result<Self, SolidError> {
         checkpoint(cx)?;
+        let mut candidate = self.clone();
+        candidate.refresh_laminate_member(element, temperatures_k, cx)?;
+        Ok(candidate)
+    }
+
+    /// Refresh a complete original laminate temperature field atomically.
+    /// Fields are in native `[element][station][layer]` order. Every member
+    /// must carry its own original laminate source; the same source, strength,
+    /// potential, inertia and compatibility checks as a single-member refresh
+    /// apply. The frame is cloned once, avoiding a whole-frame copy per member
+    /// inside coupled thermal trials. Failure in any member returns no update.
+    pub fn with_laminate_temperature_field(
+        &self,
+        temperatures_k: &[Vec<Vec<f64>>],
+        cx: &Cx<'_>,
+    ) -> Result<Self, SolidError> {
+        checkpoint(cx)?;
+        if temperatures_k.len() != self.elements.len() || self.elements.is_empty() {
+            return Err(invalid(
+                "one complete temperature field per original laminate member required",
+            ));
+        }
+        let mut candidate = self.clone();
+        for (element, temperatures) in temperatures_k.iter().enumerate() {
+            candidate.refresh_laminate_member(element, temperatures, cx)?;
+        }
+        checkpoint(cx)?;
+        Ok(candidate)
+    }
+
+    // Operates only on an unpublished clone owned by one of the public
+    // transactional refresh methods. No accepted member can be partly changed.
+    fn refresh_laminate_member(
+        &mut self,
+        element: usize,
+        temperatures_k: &[Vec<f64>],
+        cx: &Cx<'_>,
+    ) -> Result<(), SolidError> {
+        checkpoint(cx)?;
         let member = self
             .elements
             .get(element)
@@ -366,21 +417,21 @@ impl Frame2d {
                 ));
             }
         }
-        let mut candidate = self.clone();
-        candidate.elements[element].sections = sections;
-        let trial = candidate.element_trial(&candidate.elements[element], &candidate.u)?;
-        candidate.elements[element].commit = ElementCommit {
+        let has_potential = binding.thermoelastic.is_some();
+        self.elements[element].sections = sections;
+        let trial = self.element_trial(&self.elements[element], &self.u)?;
+        self.elements[element].commit = ElementCommit {
             q: trial.q,
             d: trial.d,
             alpha: trial.alpha,
         };
-        if binding.thermoelastic.is_some() {
+        if has_potential {
             // Admit the potential at the newly compatible native strains as
             // part of the same transaction, before returning the hot frame.
-            candidate.laminate_thermoelastic_energy(element, cx)?;
+            self.laminate_thermoelastic_energy(element, cx)?;
         }
         checkpoint(cx)?;
-        Ok(candidate)
+        Ok(())
     }
 
     /// Current source-bound laminate station, if the member carries one.

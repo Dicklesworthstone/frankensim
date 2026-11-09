@@ -16,6 +16,9 @@
 mod observer;
 mod material;
 
+/// Reciprocal finite heating and native source-bound laminate equilibrium.
+pub mod laminate;
+
 pub use material::FrameThermalSource;
 
 use fs_exec::Cx;
