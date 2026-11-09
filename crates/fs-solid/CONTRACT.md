@@ -13695,9 +13695,50 @@ acceleration, finite inelastic work accounts, kinetic clocks and transactional
 motion acceptance. These manufactured cases are numerical
 evidence, not material calibration, a universal inf-sup theorem, continuum
 convergence, or an injectivity certificate between quadrature points. This
-adapter does not yet add thermal evolution, porous/ductile
-damage, contact, or follower loads to mixed plasticity; their existing owners
-remain separate.
+adapter's evolving-temperature counterpart is described below. Porous/ductile
+damage, contact and follower loads retain their separate owners.
+
+### Evolving temperature in retained mixed inelastic solids
+
+`hyper3::mixed::plastic::thermal::MixedThermoplasticTetSolid` owns one original
+thermal material family and supplied temperature per element, with complete
+typed history at every native P2/P1 quadrature point. A virgin configuration
+starts at each family's original reference temperature. Subsequent heating,
+cooling and loading occur through actual accepted steps. Native and source-bound
+plastic, overstress, creep, combined and recovering families use the same driver.
+
+Old history and pressure are admitted at OLD temperature. The new temperature
+and physical duration freeze each element's native law once; all its quadrature
+points and every Newton trial reuse that view. Original source families and
+prepared reference geometry are shared across successors. The existing mixed
+solver supplies compatible displacement and continuous pressure without a new
+return map or a replacement bulk modulus. Exact elastic incompressibility
+constrains the thermal volume weakly, preserving the declared expansion.
+
+The native mixed thermal account supplies physical free energy, pressure-dependent
+entropy and mechanical internal energy. Plastic/creep heat, reversible exchange,
+variational flow potential, weak-pressure work and signed endpoint error remain
+separate. The error allowance gates the sum of absolute quadrature defects so
+opposing local errors cannot hide by cancellation. `element_caloric_heat_j`
+returns the integrated physical transfer for each original element; it includes
+reversible exchange and excludes numerical loss. It must be deposited once by
+an external caloric owner. Prescribed temperatures alone do not solve heat
+transport or establish the pressure-coupled caloric capacity condition.
+
+Optional `with_inertia` binds original density and nodal velocity to a cached
+signed consistent P2 mass. The same physical interval drives material kinetics
+and backward-Euler motion. Heating never changes reference mass. Reactions
+include inertia, while kinetic change and numerical damping remain independent
+of material heat. Equilibrium, native point identities, reduced potentials,
+pressure work, total work, material-defect and kinetic-loss gates all precede
+publication of temperature, displacement, pressure, history and optional velocity.
+Failure or cancellation leaves the accepted state unchanged for retry.
+
+`tests/mixed_thermoplastic.rs` specifies thermal expansion, clamped heating,
+loaded temperature-dependent yielding/creep, original-mass motion, spatial
+temperature binding and transactional refusal/retry against bounded independent
+equations. The original quadrature, material, local bulk branch, timestep and
+mesh-convergence limits remain in force.
 
 ### Integrated expansion in native elastic frames
 

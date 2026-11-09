@@ -19,6 +19,8 @@
 //! finite-history limits and local convex bulk branch remain enforced. Mesh
 //! stability, locking accuracy and injectivity require their own evidence.
 //! [`dynamics`] adds consistent reference inertia to this same mixed solve.
+//! [`thermal`] retains the original evolving-temperature families, thermal
+//! expansion and pressure-dependent entropy through that same spatial owner.
 
 use std::sync::Arc;
 
@@ -37,6 +39,9 @@ use crate::linear3::TetAssemblyBudget;
 
 /// Retained velocity and consistent P2 inertia with native inelastic history.
 pub mod dynamics;
+
+/// Evolving temperature, original pressure entropy and complete native history.
+pub mod thermal;
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
