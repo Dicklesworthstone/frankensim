@@ -46,6 +46,8 @@ pub mod bundle;
 pub mod water;
 /// Original NASA CHARMS silica refraction on the same thermal mesh.
 pub mod silica;
+/// Original tabulated phase, group and loss response on the same thermal mesh.
+pub mod spectral;
 /// Original molecular gas refraction on the same thermal or joint p/T mesh.
 #[cfg(feature = "volumes")]
 pub mod gas;

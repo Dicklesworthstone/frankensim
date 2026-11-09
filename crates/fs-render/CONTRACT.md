@@ -12555,3 +12555,45 @@ signature fixtures for the driver, bundle and evaluator. They verify isotropic
 and brushed dispatch, radiometric composition, independent sample indices,
 work counters, contact refusal and cancellation. These are integration-shape
 checks, not execution of the full native scene/geometry solver.
+
+
+### Original tabulated thermal refraction in native rays, meshes and scenes
+
+- [S] The material-state adapter now exposes
+  `MaterialSpectralRefractiveField` and a borrowed wavelength preparation.
+  The shared `SpectralDielectricTemperaturePath` owns the original selected
+  phase, wavelength and intensity-absorption claims and their exact temperature
+  interpolation. A local sample uses all three at the same accepted temperature;
+  no additive reference-index correction, source refit or resampling is applied.
+- [S] The native reference glass must equal the complete original tabulated
+  spectrum, including phase/loss/provenance and the interpolation-gap policy.
+  The same gap ceiling is checked over the full source temperature interval,
+  including interior wavelength breakpoints. Wavelength support is the exact
+  common original band, and snapshot identities must be nonzero.
+- [S] Prepared ray stages reuse the original smooth thermal cell without
+  allocation, material queries or finite differences. Analytic moving-grid
+  derivatives compose as grad(n)=n_T grad(T) and
+  Hess(n)=n_T Hess(T)+n_TT grad(T) grad(T)^T, including a nonzero Hessian when
+  the central temperature gradient vanishes. Phase optical length, available
+  group delay and Beer loss use the same original state.
+- [S] `P1ConductionMesh::propagate_spectral` and
+  `propagate_spectral_bundle` reuse the native element cursor, prepared
+  walkers, geometric budgets, transition collars and gradient-jump mapping.
+  They require the exact accepted mesh and nodal slice; equal-valued foreign
+  snapshots are refused. No additional propagation heap workspace or solver
+  is introduced.
+- [S] Four native material-field scene constructors retain gradient or full
+  Hessian capability in prepared/unprepared form. Their identity binds the
+  complete reference, original material path and accepted snapshot, and the
+  existing full reference-medium comparison remains authoritative.
+- [S] Added native regressions cover exact affine curved rays and bundles with
+  phase/group/current loss, moving-grid nonlinear Hessians, original source
+  cusps and gap/domain refusals, and four mesh orientation/gradient-jump cases
+  with exact piecewise-affine ray references. Independent scalar reference
+  arithmetic and bounded source/API review were performed. Rust compilation,
+  native regressions and rustfmt were unavailable in this session.
+- [F] Smooth preparation refuses genuine active source cusps or interior moving
+  spectral-knot crossings; callers must split the declared thermal interval.
+  The accepted geometry and state stay frozen during optical transport. This
+  adapter infers no source extrapolation, scattering, stress optics, expansion,
+  moving-medium correction or causal transient constitutive storage.

@@ -43,6 +43,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 
 mod silica;
+mod spectral;
 
 #[derive(Clone, Copy)]
 enum Field<'a> {

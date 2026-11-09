@@ -20,6 +20,8 @@ mod spectral_optics;
 pub use spectral_optics::MaterialSlabEmissionError;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
+/// Original tabulated phase/group/loss on immutable temperature reconstructions.
+pub mod spectral_refraction;
 /// NIST Ciddor atmospheric refraction on original pressure/temperature fields.
 pub mod air_refraction;
 /// NASA CHARMS Corning 7980 dispersion and thermal lensing on accepted fields.

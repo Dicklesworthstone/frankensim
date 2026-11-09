@@ -728,3 +728,167 @@ fn identity_orientation_cancellation_and_whole_path_work_budgets_are_retained() 
         );
     });
 }
+
+
+#[test]
+fn original_tabulated_phase_group_and_loss_survive_mesh_faces_and_bundle_gradient_jumps() {
+    use super::bundle::P1MeshBundleOptions;
+    use super::spectral::SpectralMeshError;
+    use crate::material_state::spectral_refraction::MaterialSpectralRefractiveField;
+    use crate::material_state::spectral_refraction::tests::source_path;
+
+    with_cx(|_, cx| {
+        let (source, glass) = source_path(false, false, [280.0, 360.0]);
+        let source_identity = source.identity();
+        let wavelength_nm = 1437.5;
+        let n_ref = 1.45625;
+        let alpha_ref = 0.775;
+        for reverse in [false, true] {
+            for gradient_jump in [false, true] {
+                let mesh = column(reverse);
+                let values: Vec<_> = mesh
+                    .positions()
+                    .iter()
+                    .map(|p| {
+                        300.0 + 8.0 * p[0] - 5.0 * p[1]
+                            + if gradient_jump {
+                                (if p[2] < 0.0 { 12.0 } else { -7.0 }) * p[2]
+                            } else {
+                                0.0
+                            }
+                    })
+                    .collect();
+                let before = values.clone();
+                let snapshot =
+                    P1ConductionTemperatureSnapshot::try_new(cx, &mesh, &values).unwrap();
+                let prepared = P1ConductionMesh::try_new(cx, snapshot).unwrap();
+                let ray = launch();
+                let element = locate(snapshot, ray.origin);
+                let snapshot_identity = ContentHash([115; 32]);
+                let binding = MaterialSpectralRefractiveField::try_new(
+                    &glass, &source, &element, snapshot_identity,
+                )
+                .unwrap();
+                let length = 1.7;
+                let result = prepared
+                    .propagate_spectral(
+                        cx,
+                        &binding,
+                        ray,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        wavelength_nm,
+                        length,
+                        options(),
+                    )
+                    .unwrap();
+                let bundle_options = P1MeshBundleOptions {
+                    mesh: options(),
+                    position_derivative_tolerance_m: 2.0e-12,
+                    direction_derivative_tolerance: 2.0e-12,
+                };
+                let bundle = prepared
+                    .propagate_spectral_bundle(
+                        cx,
+                        &binding,
+                        ray,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        wavelength_nm,
+                        length,
+                        bundle_options,
+                    )
+                    .unwrap();
+                assert!(result.internal_faces >= 5);
+                assert!(bundle.internal_faces >= 5);
+                assert_eq!(result.termination, BoundaryTermination::DistanceLimit);
+                assert_eq!(bundle.termination, BoundaryTermination::DistanceLimit);
+
+                let initial_t = 300.0 + 8.0 * ray.origin.x - 5.0 * ray.origin.y
+                    + if gradient_jump { 12.0 * ray.origin.z } else { 0.0 };
+                let n0 = n_ref + 0.005 * (initial_t - 300.0);
+                let g0 = Vec3::new(0.04, -0.025, if gradient_jump { 0.06 } else { 0.0 });
+                let (expected, phase) = if gradient_jump {
+                    // The two exact affine-index paths meet on the original
+                    // unsmoothed z=0 face; locate its physical arc independently.
+                    let (mut lo, mut hi) = (0.0, length);
+                    for _ in 0..60 {
+                        let mid = 0.5 * (lo + hi);
+                        if affine(ray, n0, g0, mid).0.origin.z < 0.0 {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let crossing = 0.5 * (lo + hi);
+                    let (mut first, phase0) = affine(ray, n0, g0, crossing);
+                    first.origin.z = 0.0;
+                    let n1 = n_ref + 0.005 * (8.0 * first.origin.x - 5.0 * first.origin.y);
+                    let (last, phase1) = affine(
+                        first,
+                        n1,
+                        Vec3::new(0.04, -0.025, -0.035),
+                        length - crossing,
+                    );
+                    (last, phase0 + phase1)
+                } else {
+                    affine(ray, n0, g0, length)
+                };
+                // At this original wavelength:
+                // n=n_ref+.005*(T-300), alpha=.775+.02*(T-300),
+                // dn/dlambda_nm=-.0001, hence ng=n+.14375.
+                let expected_depth = alpha_ref * length + 4.0 * (phase - n_ref * length);
+                let expected_group = phase + 0.14375 * length;
+                for propagation in [&result.propagation, bundle.bundle.propagation()] {
+                    point_near(propagation.ray.origin, expected.origin, 5.0e-9);
+                    vector_near(propagation.ray.dir, expected.dir, 5.0e-9);
+                    near(propagation.optical_path_length_m, phase, 6.0e-9);
+                    near(propagation.optical_depth, expected_depth, 3.0e-8);
+                    near(
+                        propagation.group_optical_path_length_m.unwrap(),
+                        expected_group,
+                        6.0e-9,
+                    );
+                    near(
+                        propagation.optical_depth,
+                        alpha_ref * length
+                            + 4.0 * (propagation.optical_path_length_m - n_ref * length),
+                        3.0e-10,
+                    );
+                    near(
+                        propagation.group_optical_path_length_m.unwrap(),
+                        propagation.optical_path_length_m + 0.14375 * length,
+                        3.0e-10,
+                    );
+                    near(propagation.power_transmittance(), (-expected_depth).exp(), 3.0e-8);
+                }
+                assert_eq!(source.identity(), source_identity);
+                assert_eq!(binding.snapshot_identity(), snapshot_identity);
+                assert!(core::ptr::eq(binding.source(), &source));
+                assert_eq!(values, before);
+
+                // Identical values in another nodal slice are a different
+                // accepted snapshot; both adapters retain native identity gates.
+                let foreign_snapshot =
+                    P1ConductionTemperatureSnapshot::try_new(cx, &mesh, &before).unwrap();
+                let foreign_element = locate(foreign_snapshot, ray.origin);
+                let foreign = MaterialSpectralRefractiveField::try_new(
+                    &glass, &source, &foreign_element, snapshot_identity,
+                )
+                .unwrap();
+                assert!(matches!(
+                    prepared.propagate_spectral(
+                        cx, &foreign, ray, Vec3::new(1.0, 0.0, 0.0),
+                        wavelength_nm, length, options(),
+                    ),
+                    Err(SpectralMeshError::Mesh(P1MeshError::ForeignSnapshot)),
+                ));
+                assert!(matches!(
+                    prepared.propagate_spectral_bundle(
+                        cx, &foreign, ray, Vec3::new(1.0, 0.0, 0.0),
+                        wavelength_nm, length, bundle_options,
+                    ),
+                    Err(SpectralMeshError::Mesh(P1MeshError::ForeignSnapshot)),
+                ));
+            }
+        }
+    });
+}
