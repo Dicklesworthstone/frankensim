@@ -11924,3 +11924,30 @@ parity, independent two-lane one-scatter integrals, actual cell-selected phase,
 lossless boundary flux, source arithmetic range, deterministic replay and
 admission/cancellation/work limits. Native execution must be reported
 separately; a formatted source or completed image does not establish those gates.
+
+## Bounded opaque GGX reflection sampling
+
+Opaque legacy GGX, spectral conductors and body-locked brushed conductors use
+the bounded spherical-cap VNDF of Eto and Tokuyoshi, equations 5, 6 and 8:
+<https://gpuopen.com/download/Bounded_VNDF_Sampling_for_Smith-GGX_Reflections.pdf>.
+The cap contains every contributing reflection; anisotropic slopes use the
+conservative smaller-slope bound. Sampling and both forward/reverse PDFs share
+the same view-conditioned cap. Polarized samples and reciprocal connections
+retain its normalization analytically as `cap_mass * G2/G1(wo)`, so the original
+BRDF, optical phase, Fresnel law and shading-normal adjoint remain unchanged.
+Residual rejected facets contribute zero without resampling. The warp uses the
+same two uniforms, bounded constant work and no allocation. Transmitting glass
+retains its original full VNDF. Replay/checkpoint semantics advance to tracer
+10, conductor 3 and brushed 4; dielectric semantics remain 20.
+
+Five G1/G3 regression groups in `tracer/ggx_sampling_tests.rs` pass using the
+original production helper sources, original `Vec3` operations and native
+`fs-math`. Independent angular quadrature checks proposal mass, directional
+moments, anisotropic furnace power and reciprocal normalization. In the
+unit-Fresnel, unit-roughness, normal-view single-scattering furnace, the mean
+remains the analytic `1 - ln(2)`. Equal-draw variance falls from approximately
+0.1332526 to 0.0195470 (6.82 times lower), and rejection falls from half of draws
+to zero. This is an estimator-variance result, not a wall-clock speed claim or
+inter-facet multiple-scattering closure. Existing native scalar/polarized scene
+regressions also exercise the changed owners; their execution remains pending
+the unavailable constellation dependency checkouts in this environment.

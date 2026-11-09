@@ -215,7 +215,7 @@ mod polarized_conductor {
     use crate::polarization::dielectric::transport::{
         BeamError, BeamSample, PolarizationFrame, PolarizedBeam,
     };
-    use super::super::{sample_ggx_vndf_reflection, smith_g1};
+    use super::super::{ggx_reflection_cap_mass, sample_ggx_vndf_reflection, smith_g1};
 
     impl PolarizedBeam {
         /// Sample a metal with the native visible-normal GGX proposal, or the
@@ -228,11 +228,11 @@ mod polarized_conductor {
         /// owner evaluates bare, transparent-coated or absorbing-coated Fresnel
         /// phase at the sampled facet, using the beam's actual phase index.
         ///
-        /// For this proposal, `BSDF * cos / pdf = G2/G1(incoming) * Fresnel`.
-        /// Retain correlated Smith visibility. Cancel the distribution and
-        /// incoming masking analytically rather
+        /// For this proposal, `BSDF * cos / pdf = cap_mass * G2/G1 * Fresnel`.
+        /// Retain correlated Smith visibility and the bounding-cap mass.
+        /// Cancel the distribution and incoming masking analytically rather
         /// than divide by a near-zero scalar reflectance or subtract absorbed
-        /// power. The returned PDF is the unchanged native solid-angle proposal;
+        /// power. The returned PDF is the native bounded solid-angle proposal;
         /// only the direction is normalized into the physical beam frame.
         ///
         /// `Ok(None)` retains a native below-surface facet rejection. Never
@@ -272,8 +272,11 @@ mod polarized_conductor {
             // Reuse the one frame-aware conductor response; do not evaluate
             // its scalar Fresnel law again or divide by its mean reflectance.
             let reflected = self.reflect_conductor(facet, optics)?.beam;
-            let mask = crate::smith_correlated_weight(
-                smith_g1(alpha, normal.dot(wo).clamp(0.0, 1.0)),
+            let cos_o = normal.dot(wo).clamp(0.0, 1.0);
+            let masking_o = smith_g1(alpha, cos_o);
+            let mask = ggx_reflection_cap_mass(alpha, alpha, cos_o, masking_o)
+                * crate::smith_correlated_weight(
+                masking_o,
                 smith_g1(alpha, normal.dot(direction).clamp(0.0, 1.0)),
             );
             if !mask.is_finite() || !(0.0..=1.0).contains(&mask) {
@@ -420,7 +423,11 @@ mod polarized_conductor {
             let source=beam(Vec3::new(0.0,0.0,1.0),Vec3::new(1.0,0.0,0.0),Stokes::unpolarized(1.0));
             let original=source; let law=bare(0.2,3.0); let surface=ConductorSurface::try_rough(1.0).unwrap();
             let n=Vec3::new(0.0,0.0,1.0);
-            assert_eq!(source.sample_rough_conductor(n,&law,surface,[0.9,0.2]).unwrap(),None);
+            // The unit-roughness bounded cap is exactly the upper hemisphere.
+            assert!(source.sample_rough_conductor(n,&law,surface,[0.9,0.2]).unwrap().is_some());
+            let grazing=beam(Vec3::new(0.99_f64.sqrt(),0.0,0.1),Vec3::new(0.0,1.0,0.0),Stokes::unpolarized(1.0));
+            assert_eq!(grazing.sample_rough_conductor(n,&law,
+                ConductorSurface::try_rough(0.1).unwrap(),[0.8,0.5]).unwrap(),None);
             for draw in [[-0.1,0.0],[1.0,0.0],[0.0,f64::NAN],[0.0,f64::INFINITY]] {
                 assert_eq!(source.sample_rough_conductor(n,&law,surface,draw),
                     Err(ConductorBeamError::Optics(ConductorError::InvalidSample)));

@@ -12,13 +12,13 @@ use crate::polarization::dielectric::transport::connection::{
 };
 use crate::surface_detail::SurfaceDetail;
 use crate::tracer::{
-    brushed_local, ggx_vndf_reflection_pdf, ggx_vndf_reflection_pdf_aniso,
+    brushed_local, ggx_reflection_cap_mass, ggx_vndf_reflection_pdf, ggx_vndf_reflection_pdf_aniso,
     smith_g1, smith_g1_aniso,
 };
 use fs_geom::{Point3, Vec3};
 
 impl PolarizedBeam {
-    /// Evaluate continuous rough metal reflection and its unchanged VNDF PDF.
+    /// Evaluate continuous rough metal reflection and its bounded VNDF PDF.
     ///
     /// Retains the original spectral complex IOR and authored coherent optical
     /// stack, including circular/elliptical polarization and the actual local
@@ -46,14 +46,18 @@ impl PolarizedBeam {
         let facet = unit(Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z))?;
         let alpha = surface.roughness_alpha();
         let pdf = ggx_vndf_reflection_pdf(alpha, normal, wo, facet);
-        let mask = crate::smith_correlated_weight(
-            smith_g1(alpha, normal.dot(wo).clamp(0.0, 1.0)),
+        let cos_o = normal.dot(wo).clamp(0.0, 1.0);
+        let masking_o = smith_g1(alpha, cos_o);
+        let mask = ggx_reflection_cap_mass(alpha, alpha, cos_o, masking_o)
+            * crate::smith_correlated_weight(
+            masking_o,
             smith_g1(alpha, normal.dot(wi).clamp(0.0, 1.0)),
         );
         let reflected = camera.reflect_conductor(facet, optics)?.beam;
         let response = reciprocal_contraction(reflected, source_frame, normalized_source)?;
-        // Native f = pdf * (G2/G1(wo)) * F / geometric_cos_i. Retain this
-        // factorization, avoiding division by a possibly tiny reflectance.
+        // Native f = bounded_pdf * cap_mass * (G2/G1(wo)) * F / cos_i.
+        // The proposal normalization cannot alter the physical connection.
+        // Retain this factorization without dividing by a tiny reflectance.
         let value = checked_product(pdf, mask)? / normal.dot(wi);
         let factor = checked_product(value, response)?;
         Ok(SurfaceConnectionResponse::checked(factor, pdf, DielectricEvent::Reflection)?)
@@ -100,8 +104,10 @@ impl PolarizedBeam {
         let pdf = ggx_vndf_reflection_pdf_aniso(
             alpha_x, alpha_y, wo_local, brushed_local(&frame, facet),
         );
-        let mask = crate::smith_correlated_weight(
-            smith_g1_aniso(alpha_x, alpha_y, wo_local),
+        let masking_o = smith_g1_aniso(alpha_x, alpha_y, wo_local);
+        let mask = ggx_reflection_cap_mass(alpha_x, alpha_y, wo_local[2], masking_o)
+            * crate::smith_correlated_weight(
+            masking_o,
             smith_g1_aniso(alpha_x, alpha_y, wi_local),
         );
         let reflected = camera.reflect_conductor(facet, optics)?.beam;

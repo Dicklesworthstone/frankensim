@@ -175,6 +175,8 @@ pub use scene_exposure::{
 #[cfg(feature = "photometry")]
 pub(crate) mod photometric;
 mod transport;
+#[cfg(test)]
+mod ggx_sampling_tests;
 
 /// Bit-affecting semantic surface version of the tracer (see
 /// golden-couplings.json): the path-integrator estimator shape, the
@@ -189,7 +191,9 @@ mod transport;
 /// preserving resolvable nearby surfaces without changing physical hit points.
 /// Version 9 correlates GGX masking and shadowing through their shared facet
 /// height, retaining the original visible-normal proposal and its density.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 9;
+/// Version 10 bounds opaque GGX visible-normal proposals to a spherical cap,
+/// with matching scalar/polarized forward and reverse sampling densities.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 10;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -217,7 +221,8 @@ pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 20;
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.
 /// Version 3 uses height-correlated Smith masking and shadowing.
-pub const BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 uses the bounded visible-normal reflection proposal.
+pub const BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 4;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -23518,27 +23523,49 @@ fn to_world_all_sphere(normal: Vec3, local: [f64; 3]) -> Vec3 {
     )
 }
 
-/// Directional density induced by isotropic GGX visible-normal sampling.
-///
-/// The sampled microfacet density is
-/// `D(m) G1(wo) (wo·m) / (n·wo)`. Reflection contributes the Jacobian
-/// `1 / (4 wo·m)`, so the two dot products cancel. Samples whose reflected
-/// direction falls below the macrosurface are rejected by the caller; the
-/// remaining directional density is therefore intentionally sub-normalized by
-/// exactly that rejection probability.
+/// Eto and Tokuyoshi's conservative spherical-cap bound (equations 5--6).
+/// With admitted slopes at most one, `k` lies in [0,1]; the stretched reflected
+/// cosine is sampled above `-k * stretched_wo.z`. The smaller anisotropic slope
+/// supplies a conservative bound containing EVERY contributing reflection.
+/// https://gpuopen.com/download/Bounded_VNDF_Sampling_for_Smith-GGX_Reflections.pdf
+fn ggx_reflection_cap_scale(alpha_x: f64, alpha_y: f64, cos_o: f64) -> f64 {
+    let alpha = alpha_x.min(alpha_y).min(1.0);
+    let a2 = alpha * alpha;
+    let c2 = cos_o.clamp(0.0, 1.0) * cos_o.clamp(0.0, 1.0);
+    let s = 1.0 + (1.0 - c2).max(0.0).sqrt();
+    let s2 = s * s;
+    (1.0 - a2) * s2 / (s2 + a2 * c2)
+}
+
+/// Fraction of the ORIGINAL visible-normal proposal inside the bounding cap.
+/// Bounded PDFs divide by this mass; analytically cancelled polarized weights
+/// multiply by it. This is not the acceptance rate: residual below-surface
+/// samples still contribute zero and are never resampled.
+fn ggx_reflection_cap_mass(alpha_x: f64, alpha_y: f64, cos_o: f64, masking_o: f64) -> f64 {
+    let k = ggx_reflection_cap_scale(alpha_x, alpha_y, cos_o);
+    1.0 - 0.5 * (1.0 - k) * masking_o
+}
+
+/// Directional density induced by the bounded isotropic GGX proposal.
+/// Equation 8 followed by the reflection Jacobian cancels `wo·m`, yielding
+/// `D(m) / (2 * (k*cos_o + length(stretched_wo)))`. The cap still contains
+/// noncontributing directions except at special limits, so its surviving
+/// density is intentionally sub-normalized by residual rejection probability.
 fn ggx_vndf_reflection_pdf(alpha: f64, n: Vec3, wo: Vec3, m: Vec3) -> f64 {
     let cos_o = n.dot(wo);
     if cos_o <= 0.0 || wo.dot(m) <= 0.0 {
         return 0.0;
     }
-    ggx_d(alpha, n.dot(m)) * smith_g1(alpha, cos_o) / (4.0 * cos_o)
+    let a2 = alpha * alpha;
+    let length = (a2 + (1.0 - a2) * cos_o * cos_o).sqrt();
+    let k = ggx_reflection_cap_scale(alpha, alpha, cos_o);
+    ggx_d(alpha, n.dot(m)) / (2.0 * (k * cos_o + length))
 }
 
-/// Sample Heitz's isotropic GGX distribution of visible normals and reflect
-/// `wo` about the selected microfacet ("Sampling the GGX Distribution of
-/// Visible Normals", JCGT 2018). This uses exactly the existing two BSDF
-/// uniform dimensions, so determinism and cancellation checkpoints are
-/// unchanged while the estimator's sample/PDF bits deliberately change.
+/// Sample the bounded reflection-only visible-normal proposal. Transmitting
+/// dielectrics retain their original full VNDF: its other hemisphere matters.
+/// The two original random coordinates and the all-sphere surface frame remain
+/// native; no extra random draws or rejection loop are introduced.
 fn sample_ggx_vndf_reflection(
     n: Vec3,
     wo: Vec3,
@@ -23547,67 +23574,9 @@ fn sample_ggx_vndf_reflection(
     u2: f64,
 ) -> Option<(Vec3, f64)> {
     let cos_o = n.dot(wo);
-    if !alpha.is_finite()
-        || alpha <= 0.0
-        || cos_o <= 0.0
-        || !u1.is_finite()
-        || !u2.is_finite()
-        || !(0.0..=1.0).contains(&u1)
-        || !(0.0..=1.0).contains(&u2)
-    {
-        return None;
-    }
-
     let (tangent, bitangent) = basis_all_sphere(n);
     let local_wo = [tangent.dot(wo), bitangent.dot(wo), cos_o];
-
-    // Stretch the view so isotropic GGX becomes a unit-roughness problem.
-    let stretched = [alpha * local_wo[0], alpha * local_wo[1], local_wo[2]];
-    let inverse_stretched_norm = 1.0
-        / (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
-            .sqrt();
-    let view = stretched.map(|component| component * inverse_stretched_norm);
-
-    // Orthonormal frame around the stretched view direction.
-    let lensq = view[0] * view[0] + view[1] * view[1];
-    let frame_1 = if lensq > 0.0 {
-        let inverse_len = 1.0 / lensq.sqrt();
-        [-view[1] * inverse_len, view[0] * inverse_len, 0.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let frame_2 = [
-        view[1] * frame_1[2] - view[2] * frame_1[1],
-        view[2] * frame_1[0] - view[0] * frame_1[2],
-        view[0] * frame_1[1] - view[1] * frame_1[0],
-    ];
-
-    // Uniform disk sample warped onto the visible projected GGX hemisphere.
-    let radius = u1.sqrt();
-    let phi = 2.0 * PI * u2;
-    let disk_1 = radius * det::cos(phi);
-    let mut disk_2 = radius * det::sin(phi);
-    let blend = 0.5 * (1.0 + view[2]);
-    disk_2 = (1.0 - blend) * (1.0 - disk_1 * disk_1).max(0.0).sqrt() + blend * disk_2;
-    let projected = (1.0 - disk_1 * disk_1 - disk_2 * disk_2).max(0.0).sqrt();
-    let stretched_normal = [
-        disk_1 * frame_1[0] + disk_2 * frame_2[0] + projected * view[0],
-        disk_1 * frame_1[1] + disk_2 * frame_2[1] + projected * view[1],
-        disk_1 * frame_1[2] + disk_2 * frame_2[2] + projected * view[2],
-    ];
-
-    // Undo the stretch and normalize back into the macrosurface frame.
-    let unstretched = [
-        alpha * stretched_normal[0],
-        alpha * stretched_normal[1],
-        stretched_normal[2].max(0.0),
-    ];
-    let inverse_normal_len = 1.0
-        / (unstretched[0] * unstretched[0]
-            + unstretched[1] * unstretched[1]
-            + unstretched[2] * unstretched[2])
-            .sqrt();
-    let local_m = unstretched.map(|component| component * inverse_normal_len);
+    let local_m = sample_ggx_bounded_normal(local_wo, alpha, alpha, u1, u2)?;
     let m = to_world_all_sphere(n, local_m);
     let wo_dot_m = wo.dot(m);
     if wo_dot_m <= 0.0 {
@@ -23625,13 +23594,46 @@ fn sample_ggx_vndf_reflection(
     (pdf > 0.0 && pdf.is_finite()).then_some((wi, pdf))
 }
 
+/// Spherical-cap VNDF warp in the authored local frame. The stretched normal
+/// need not be normalized before the inverse stretch, avoiding one square root
+/// and reciprocal. All surviving directions use the exact bounded density.
+fn sample_ggx_bounded_normal(
+    wo: [f64; 3],
+    alpha_x: f64,
+    alpha_y: f64,
+    u1: f64,
+    u2: f64,
+) -> Option<[f64; 3]> {
+    if !alpha_x.is_finite() || !alpha_y.is_finite()
+        || alpha_x <= 0.0 || alpha_y <= 0.0 || wo[2] <= 0.0
+        || !(0.0..1.0).contains(&u1) || !(0.0..1.0).contains(&u2)
+    {
+        return None;
+    }
+    let stretched = [alpha_x * wo[0], alpha_y * wo[1], wo[2]];
+    let length = (stretched[0] * stretched[0] + stretched[1] * stretched[1]
+        + stretched[2] * stretched[2]).sqrt();
+    let view = stretched.map(|v| v / length);
+    let k = ggx_reflection_cap_scale(alpha_x, alpha_y, wo[2]);
+    let cap_cosine = 1.0 - u1 * (1.0 + k * view[2]);
+    let radial = ((1.0 - cap_cosine) * (1.0 + cap_cosine)).max(0.0).sqrt();
+    let phi = 2.0 * PI * u2;
+    let unstretched = [
+        alpha_x * (view[0] + radial * det::cos(phi)),
+        alpha_y * (view[1] + radial * det::sin(phi)),
+        view[2] + cap_cosine,
+    ];
+    let length = (unstretched[0] * unstretched[0] + unstretched[1] * unstretched[1]
+        + unstretched[2] * unstretched[2]).sqrt();
+    if !length.is_finite() || length <= 0.0 { return None; }
+    Some(unstretched.map(|v| v / length))
+}
+
 // ---- anisotropic GGX kernels (bead h7xu5.4.3) -------------------------
 //
-// Heitz's anisotropic generalization in a CALLER-SUPPLIED tangent frame
-// (the brushed-metal frame from `surface_detail::shading_frame`). These are
-// deliberately add-only: the isotropic paths above are untouched, and the
-// alpha_x == alpha_y case reduces to them exactly (executed in the
-// battery), so threading the Material path through later cannot drift.
+// Anisotropic distribution and bounded reflection sampling in a supplied
+// tangent frame (the brushed-metal frame from `surface_detail::shading_frame`).
+// The original Smith BRDF is unchanged; only its importance proposal differs.
 
 /// Anisotropic GGX NDF in the local (tangent, bitangent, normal) frame.
 /// `m_local` is the microfacet normal expressed in that frame.
@@ -23662,7 +23664,7 @@ fn smith_g1_aniso(alpha_x: f64, alpha_y: f64, v_local: [f64; 3]) -> f64 {
     1.0 / (1.0 + smith_lambda_aniso(alpha_x, alpha_y, v_local))
 }
 
-/// Anisotropic visible-normal reflection PDF in the local frame.
+/// Anisotropic bounded visible-normal reflection PDF in the local frame.
 fn ggx_vndf_reflection_pdf_aniso(
     alpha_x: f64,
     alpha_y: f64,
@@ -23674,11 +23676,14 @@ fn ggx_vndf_reflection_pdf_aniso(
     if cos_o <= 0.0 || wo_dot_m <= 0.0 {
         return 0.0;
     }
-    ggx_d_aniso(alpha_x, alpha_y, m_local) * smith_g1_aniso(alpha_x, alpha_y, wo_local)
-        / (4.0 * cos_o)
+    let x = alpha_x * wo_local[0];
+    let y = alpha_y * wo_local[1];
+    let length = (x * x + y * y + cos_o * cos_o).sqrt();
+    let k = ggx_reflection_cap_scale(alpha_x, alpha_y, cos_o);
+    ggx_d_aniso(alpha_x, alpha_y, m_local) / (2.0 * (k * cos_o + length))
 }
 
-/// Sample the anisotropic GGX visible-normal distribution in the local
+/// Sample the anisotropic bounded GGX visible-normal distribution in the local
 /// frame and reflect `wo_local`. Same two uniform dimensions as the
 /// isotropic sampler; returns `(wi_local, pdf)`.
 fn sample_ggx_vndf_reflection_aniso(
@@ -23688,65 +23693,7 @@ fn sample_ggx_vndf_reflection_aniso(
     u1: f64,
     u2: f64,
 ) -> Option<([f64; 3], f64)> {
-    let cos_o = wo_local[2];
-    if !alpha_x.is_finite()
-        || !alpha_y.is_finite()
-        || alpha_x <= 0.0
-        || alpha_y <= 0.0
-        || cos_o <= 0.0
-        || !u1.is_finite()
-        || !u2.is_finite()
-        || !(0.0..=1.0).contains(&u1)
-        || !(0.0..=1.0).contains(&u2)
-    {
-        return None;
-    }
-    // Per-axis stretch: the anisotropic problem becomes unit-roughness.
-    let stretched = [alpha_x * wo_local[0], alpha_y * wo_local[1], wo_local[2]];
-    let inverse_stretched_norm = 1.0
-        / (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
-            .sqrt();
-    let view = stretched.map(|component| component * inverse_stretched_norm);
-
-    let lensq = view[0] * view[0] + view[1] * view[1];
-    let frame_1 = if lensq > 0.0 {
-        let inverse_len = 1.0 / lensq.sqrt();
-        [-view[1] * inverse_len, view[0] * inverse_len, 0.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let frame_2 = [
-        view[1] * frame_1[2] - view[2] * frame_1[1],
-        view[2] * frame_1[0] - view[0] * frame_1[2],
-        view[0] * frame_1[1] - view[1] * frame_1[0],
-    ];
-
-    let radius = u1.sqrt();
-    let phi = 2.0 * PI * u2;
-    let disk_1 = radius * phi.cos();
-    let mut disk_2 = radius * phi.sin();
-    let blend = 0.5 * (1.0 + view[2]);
-    disk_2 = (1.0 - blend) * (1.0 - disk_1 * disk_1).sqrt() + blend * disk_2;
-    let projected = (1.0 - disk_1 * disk_1 - disk_2 * disk_2).max(0.0).sqrt();
-
-    let stretched_normal = [
-        disk_1 * frame_1[0] + disk_2 * frame_2[0] + projected * view[0],
-        disk_1 * frame_1[1] + disk_2 * frame_2[1] + projected * view[1],
-        disk_1 * frame_1[2] + disk_2 * frame_2[2] + projected * view[2],
-    ];
-
-    let unstretched = [
-        alpha_x * stretched_normal[0],
-        alpha_y * stretched_normal[1],
-        stretched_normal[2].max(0.0),
-    ];
-    let inverse_normal_len = 1.0
-        / (unstretched[0] * unstretched[0]
-            + unstretched[1] * unstretched[1]
-            + unstretched[2] * unstretched[2])
-            .sqrt();
-    let m_local = unstretched.map(|component| component * inverse_normal_len);
-
+    let m_local = sample_ggx_bounded_normal(wo_local, alpha_x, alpha_y, u1, u2)?;
     let wo_dot_m = wo_local[0] * m_local[0] + wo_local[1] * m_local[1] + wo_local[2] * m_local[2];
     if wo_dot_m <= 0.0 {
         return None;

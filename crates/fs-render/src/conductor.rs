@@ -31,7 +31,8 @@ pub use multilayer::{
 pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 3;
 /// Bit semantics of the single-scattering isotropic-GGX conductor BSDF.
 /// Version 2 retains shared-height correlation in Smith masking-shadowing.
-pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 bounds the visible-normal reflection proposal and its density.
+pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 3;
 /// Fixed number of knots in a conductor optical table.
 pub const CONDUCTOR_IOR_SAMPLE_COUNT: usize = 9;
 /// Legacy visible constructor's maximum interval between adjacent optical knots.

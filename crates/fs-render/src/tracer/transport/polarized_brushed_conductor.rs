@@ -20,7 +20,8 @@ use crate::polarization::dielectric::transport::{
 };
 use crate::surface_detail::{ShadingFrame, SurfaceDetail, SurfaceDetailError, shading_frame};
 use crate::tracer::{
-    brushed_local, brushed_world, sample_ggx_vndf_reflection_aniso, smith_g1_aniso,
+    brushed_local, brushed_world, ggx_reflection_cap_mass, sample_ggx_vndf_reflection_aniso,
+    smith_g1_aniso,
 };
 
 impl PolarizedBeam {
@@ -32,7 +33,7 @@ impl PolarizedBeam {
     /// Invalid frames, alpha values and uniforms are errors, not zero samples.
     /// No rejection is resampled or removed from the proposal normalization.
     ///
-    /// Forward power uses `F_mueller * (G2/G1(wo)) * C`, where
+    /// Forward power uses `F_mueller * cap_mass * (G2/G1(wo)) * C`, where
     /// `C = (ns.wo / ng.wo) * (ng.wi / ns.wi)`. This is the adjoint of the
     /// existing effective radiance BSDF. The small `ns.wi` cancels analytically
     /// against masking before division. Never clamp C to one: a valid weighted
@@ -93,12 +94,13 @@ impl PolarizedBeam {
             wo.x + direction.x, wo.y + direction.y, wo.z + direction.z,
         ))?;
         let reflected = self.reflect_conductor(facet, optics)?.beam;
-        // Native f_radiance = D*G*F/(4 ns.wo ng.wi), and the VNDF PDF is
-        // D*G1(wo)/(4 ns.wo). Thus f_radiance*ng.wi/pdf = F*G2/G1(wo).
+        // Native f_radiance = D*G*F/(4 ns.wo ng.wi), and the bounded PDF is
+        // D*G1(wo)/(4 ns.wo cap_mass). The cancelled weight retains cap_mass.
         // Select it before forming the forward-power correction C, avoiding
         // its real geometric-horizon singularity on a finite camera sample.
         let masking_o = smith_g1_aniso(alpha_x, alpha_y, wo_local);
-        let weight = if radiance || frame.geometric_normal == frame.shading_normal {
+        let cap_mass = ggx_reflection_cap_mass(alpha_x, alpha_y, wo_local[2], masking_o);
+        let weight = cap_mass * if radiance || frame.geometric_normal == frame.shading_normal {
             crate::smith_correlated_weight(
                 masking_o, smith_g1_aniso(alpha_x, alpha_y, wi_local),
             )
