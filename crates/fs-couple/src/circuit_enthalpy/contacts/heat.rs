@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 
 mod assembly;
 pub use assembly::HeatAssembly;
+/// Pure thermal nonlinear endpoints through the same complete heat assembly.
+pub mod thermal;
 mod extension;
 mod observer;
 mod layers;

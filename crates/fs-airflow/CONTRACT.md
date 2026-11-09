@@ -6427,3 +6427,13 @@ zero-time plus late source-domain refusal. Formatting and bounded static review
 passed; compilation and runtime execution remain unverified because this
 workspace has no runnable Cargo toolchain. The original source/correlation
 limits and the material controller's local-error and positive-seed limits apply.
+
+### Implicit source-conjugate finite-cell convection
+
+`SourceConjugateHeatAssembly` enters the shared thermal-only implicit candidate
+directly. Original wall k(T), the eliminated fluid-facing surface temperature,
+source-pinned bulk/wall fluid properties and combined reciprocal G are
+re-evaluated inside every native nonlinear trial and final acceptance.
+The original finite wall/fluid caloric stores supply the energy unknowns;
+bare-film hA remains diagnostic. Correlation validity, quasi-steady layer
+assumptions and temporal/source refinement obligations remain unchanged.

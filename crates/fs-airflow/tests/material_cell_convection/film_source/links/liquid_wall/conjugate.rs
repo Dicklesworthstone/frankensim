@@ -1,5 +1,8 @@
 //! Original material wall -> actual liquid-facing surface -> reciprocal heat.
 use super::*;
+
+#[path = "conjugate/implicit.rs"]
+mod implicit;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::{
     heat::conjugate::{SourceConjugateHeatAssembly, SourceConjugateHeatError},
     links::conjugate::{

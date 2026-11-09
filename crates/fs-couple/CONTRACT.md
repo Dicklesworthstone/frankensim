@@ -11962,3 +11962,19 @@ source continuity, budget refusal and final cancellation with exact retry.
 
 These regression definitions were parsed but not compiled or executed in the
 implementation environment; full coupled validation remains outstanding.
+
+### Thermal-only nonlinear heat assembly
+
+`contacts::heat::thermal::step_heat_assembly_candidate` resolves a thermal-only
+`HeatAssembly` through the existing cell-energy backward-Euler/Newton--Krylov
+owner. All nonlinear probes and fresh final admission re-evaluate the complete
+assembly at actual trial enthalpies; reciprocal finite-link conductances and
+prescribed source powers enter once. Electrical bindings and coefficients
+refuse. Public controls bound thermal unknowns, assembly evaluations and
+numerical work without requiring circuit state or controls.
+
+Original phase, pending-event/time, cancellation, local/global thermal and
+closed-enclosure energy gates remain authoritative. Reports retain the accepted
+source sample, native thermal/nonlinear accounts and external heat with internal
+radiative net removed once. The existing first-order numerical-Jacobian method
+remains subject to independent temporal refinement.
