@@ -1,6 +1,16 @@
 //! Source surfaces and prescribed baths share the original caloric history.
 use super::*;
 use fs_conduction::ThermalBc;
+use fs_conduction::bc::history::{ThermalBoundaryHistory, ThermalRegionHistory};
+use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
+use fs_conduction::bc::history::march::enthalpy::{
+    EnthalpyHistoryBudget, EnthalpyHistoryMaterials, EnthalpyHistoryRun,
+    contact::ContactEnthalpyHistoryRun,
+};
+use fs_conduction::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyError;
+use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition, Physics};
+use fs_scenario::scenario::Environment;
+use fs_scenario::signal::{Interp, TimeSignal};
 
 fn surface_card() -> InterfaceSystemCard {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
@@ -449,5 +459,119 @@ fn g4_surface_contact_keeps_latent_prescription_and_work_refusals_atomic() {
             ))
         });
         assert_eq!(old, before);
+    });
+}
+
+#[test]
+fn g1_g3_g4_scheduled_contact_baths_preserve_event_sides_storage_and_atomic_resume() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let card = surface_card();
+        let curve = linear_chart();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let history = ThermalBoundaryHistory::new(
+            cx,
+            ThermalBoundaryBuilder::new(&mesh)
+                .region("bath", |face| {
+                    let mut vertices = face.vertices;
+                    vertices.sort_unstable();
+                    vertices == [0, 1, 3]
+                }, ThermalBc::dirichlet(315.0).unwrap()).unwrap()
+                .adiabatic_remainder(),
+            &Environment::earth_lab(),
+            vec![ThermalRegionHistory {
+                row: BoundaryCondition {
+                    region: "bath".into(), physics: Physics::Thermal,
+                    kind: BcKind::Dirichlet,
+                    value: Some(BcValue::Signal(TimeSignal::Table {
+                        times: vec![0.0, 0.2, 0.5], values: vec![315.0, 300.0, 380.0],
+                        dims: fs_conduction::TEMPERATURE_DIMS, interp: Interp::Hold,
+                    })),
+                    compatibility: None, frame: 0,
+                },
+                reference_temperature: None,
+            }],
+            0.0,
+        ).unwrap();
+        let initial_boundary = history.at(cx, 0.0).unwrap();
+        let initial_t = [300.0, 300.0, 300.0, 300.0, 360.0, 360.0, 360.0, 360.0];
+        let initial_h = initial_t.map(|t| 10.0 * (t - 280.0));
+        let materials = [
+            ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: 2.0 },
+        ];
+        let create = || {
+            let run = EnthalpyHistoryRun::new(cx, ThermalHistoryProblem {
+                boundary: &history, material: &material, element_materials: None,
+                interfaces: None, source: HeatSourceHistory::Fixed(ScalarField::Uniform(0.0)),
+            }, EnthalpyHistoryMaterials {
+                table: &materials, of_element: &[0, 1], phase_conductivity: None,
+            }, &initial_h, EnthalpyHistoryBudget {
+                spatial: EnthalpyBudget { max_vertices: 8, max_elements: 2 }, max_steps: 2,
+            }).unwrap();
+            ContactEnthalpyHistoryRun::new(cx, run,
+                TemperatureContacts::new(cx, &mesh, &initial_boundary,
+                    vec![], vec![law(&mesh, &card)], 1).unwrap(), coupling()).unwrap()
+        };
+        let mut run = create();
+        assert_eq!(run.conduction().specific_enthalpy_j_kg(), &initial_h);
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        context(&cancelled, |cancelled_cx| assert!(matches!(
+            run.advance_event_step(cancelled_cx, 0.5, 1.0, config()),
+            Err(HeterogeneousEnthalpyError::Enthalpy(EnthalpyError::Conduction(
+                fs_conduction::ConductionError::Cancelled { .. }))),
+        )));
+        assert_eq!(run.conduction().time_s(), 0.0);
+        assert_eq!(run.conduction().specific_enthalpy_j_kg(), &initial_h);
+
+        let mut old_t = initial_t;
+        let mut reservoir_j = 0.0;
+        let mut previous = 0.0;
+        for (end, temperature) in [(0.2, 315.0), (0.5, 300.0)] {
+            let accepted = run.advance_event_step(cx, 0.5, 1.0, config()).unwrap();
+            assert_eq!(accepted.end_time_s, end);
+            let dt = end - previous;
+            let (expected, reaction) = oracle(old_t, temperature, dt);
+            for (&actual, expected) in accepted.report.conduction.temperature.iter().zip(expected) {
+                close(actual, expected, 2e-7);
+            }
+            close(accepted.report.physical.dirichlet_in_w, reaction, 2e-7);
+            close(accepted.report.physical.stored_energy_change_j, reaction * dt, 1e-7);
+            close(accepted.report.physical.energy_residual_j, 0.0, config().energy_tolerance_j);
+            assert!(accepted.report.physical.residual_norm_j <= coupling().residual_tolerance_j);
+            assert!(accepted.report.iterations > 1);
+            for vertex in [0, 1, 3] {
+                assert_eq!(accepted.report.conduction.temperature[vertex], temperature);
+            }
+            reservoir_j += accepted.report.physical.dirichlet_in_w * dt;
+            old_t.copy_from_slice(&accepted.report.conduction.temperature);
+            previous = end;
+        }
+        let stored: f64 = run.conduction().specific_enthalpy_j_kg().iter()
+            .zip(initial_h).zip(run.conduction().storage().reference_nodal_masses_kg())
+            .map(|((&h, initial), &mass)| mass * (h - initial)).sum();
+        close(stored, reservoir_j, 2e-8);
+        let accepted_h = run.conduction().specific_enthalpy_j_kg().to_vec();
+        assert!(run.advance_to(cx, 0.6, config()).is_err()); // Exhausted physical-step budget.
+        run.extend_step_budget(3).unwrap();
+        assert!(matches!(run.advance_to(cx, 0.6, config()),
+            Err(HeterogeneousEnthalpyError::Enthalpy(
+                EnthalpyError::AmbiguousPrescribedTemperature { .. }))));
+        assert_eq!(run.conduction().specific_enthalpy_j_kg(), accepted_h);
+        assert_eq!(run.conduction().time_s(), 0.5);
+        assert_eq!(run.conduction().accepted_steps(), 2);
+
+        let mut replay = create();
+        replay.advance_event_step(cx, 0.5, 1.0, config()).unwrap();
+        replay.advance_event_step(cx, 0.5, 1.0, config()).unwrap();
+        assert_eq!(replay.conduction().specific_enthalpy_j_kg(), accepted_h);
+        // Explicit endpoint stepping intentionally uses the new bath at a knot.
+        let direct = create().advance_to(cx, 0.2, config()).unwrap();
+        let (expected, reaction) = oracle(initial_t, 300.0, 0.2);
+        for (&actual, expected) in direct.conduction.temperature.iter().zip(expected) {
+            close(actual, expected, 2e-7);
+        }
+        close(direct.physical.dirichlet_in_w, reaction, 2e-7);
     });
 }

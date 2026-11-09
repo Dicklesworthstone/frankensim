@@ -7,7 +7,7 @@
 
 mod enclosure;
 
-use super::{EnthalpyHistoryRun, conduction, invalid, natural_only, poll};
+use super::{EnthalpyHistoryRun, conduction, invalid, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::super::{events, radiation::{RadiationRegionHistory, admit_histories, patches_before}};
@@ -182,7 +182,9 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// Solve one explicit right-continuous endpoint through the original contact
     /// solver. Reports include both applied and re-evaluated physical contacts,
     /// their source receipts, latent state, local residual and global joule audit.
-    /// Internal contact heat is never counted as an external source.
+    /// Internal contact heat is never counted as an external source. Prescribed
+    /// temperatures use their original caloric charts; the reservoir reaction
+    /// includes the change in prescribed-node storage without resetting history.
     ///
     /// # Errors
     /// Budget/time/source/phase/contact/radiation/solver or cancellation refusal.
@@ -270,10 +272,7 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let history = self.run.problem.boundary;
         let boundary = if before { events::boundary_before(cx, history, to) }
             else { history.at(cx, to) }.map_err(conduction)?;
-        match self.coupling {
-            ContactHistoryCoupling::Legacy(_) => natural_only(&boundary)?,
-            ContactHistoryCoupling::Newton(_) => self.run.storage.admit_prescribed_boundary(cx, &boundary)?,
-        }
+        self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let source = if before { events::source_before(&self.run.problem.source, to, old.len()) }
             else { self.run.problem.source.at(to, old.len()) }.map_err(conduction)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;

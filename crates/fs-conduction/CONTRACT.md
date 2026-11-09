@@ -3743,9 +3743,13 @@ authority.
   histories charge prescribed storage jumps to the bath once. Held boundary
   knots retain the exact left limit for the interval ending at a switch; the
   new bath acts on the next finite interval. Ambiguous latent temperatures
-  and out-of-domain charts refuse without advancing state. Scanning and
-  state-dependent-contact histories retain their explicit Dirichlet refusal.
-  The natural-boundary history runner remains unsupported.
+  and out-of-domain charts refuse without advancing state. Both iterated and
+  coupled-Newton state-dependent-contact histories use that same admission and
+  reservoir accounting. Contact transfer remains internal heat even when a
+  prescribed bath heats or cools one of the bodies. The scheduled-contact
+  regression in `tests/temperature_contact_enthalpy/surface_dirichlet.rs`
+  compares event-aligned and explicit endpoints against an independent P1
+  contact root, including bath storage jumps, replay and transactional refusal.
   Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
   remapping, phase kinetics or vaporization. The basic `advance` entry point
