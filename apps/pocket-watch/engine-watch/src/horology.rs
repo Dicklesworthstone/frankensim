@@ -7,7 +7,7 @@ use core::f64::consts::{PI, TAU};
 
 use fs_dcontact::hunt_crossley_loss_from_restitution;
 use fs_eproc::BettingEProcess;
-use fs_ga::{So3, Vec3 as GaVec3};
+use fs_ga::{So3, So3Tangent, Vec3 as GaVec3};
 use fs_nlmodal::duffing_backbone_exact;
 use fs_rand::{Stream, StreamKey};
 use fs_solid::rod::{Rod, RodSection};
@@ -193,7 +193,7 @@ impl HorologyState {
             .unwrap_or(1.0);
 
         let tourbillon_so3 =
-            So3::from_axis_angle(GaVec3::new(0.0, 0.0, 1.0), fourth_rad).unwrap_or_else(|_| So3::identity());
+            So3::exp(So3Tangent::new(GaVec3::new(0.0, 0.0, fourth_rad))).unwrap_or_else(|_| So3::identity());
 
         let mut s = Self {
             lab_time_s: start_time_s,
@@ -287,7 +287,7 @@ impl HorologyState {
                 rod.positions[k][1] + rod.l0 * cum_angle.sin(),
                 0.0,
             ];
-            if let Ok(frame) = So3::from_axis_angle(GaVec3::new(0.0, 0.0, 1.0), cum_angle) {
+            if let Ok(frame) = So3::exp(So3Tangent::new(GaVec3::new(0.0, 0.0, cum_angle))) {
                 rod.frames[k + 1] = frame;
             }
         }
@@ -709,13 +709,17 @@ impl HorologyState {
             }
         }
 
-        // Counter-based Philox deterministic micro-tribological acoustic variation (fs_rand::Stream)
-        let mut philox = Stream::new(StreamKey {
-            seed: 0x1903_C05C,
-            kernel: 0x484F_524F,
-            tile: (self.total_beats & 0xFFFF) as u32,
-        });
-        let micro_jitter = 1.0 + 0.015 * (philox.next_f64() * 2.0 - 1.0);
+        // Counter-based Philox deterministic micro-tribological acoustic variation (fs_rand::Stream::at)
+        let philox_words = Stream::at(
+            StreamKey {
+                seed: 0x1903_C05C,
+                kernel: 0x484F_524F,
+                tile: (self.total_beats & 0xFFFF) as u32,
+            },
+            self.total_beats,
+        );
+        let u01 = (philox_words[0] as f64) / (u32::MAX as f64);
+        let micro_jitter = 1.0 + 0.015 * (u01 * 2.0 - 1.0);
 
         events.push(MechanicalAcousticEvent::EscapementLockDrop {
             energy: (energy_scale * micro_jitter).clamp(0.15, 1.6),

@@ -54,7 +54,7 @@ fs-mbd = { path = "../../../crates/fs-mbd" }
 fs-mbd-material = { path = "../../../crates/fs-mbd-material" }
 fs-modal = { path = "../../../crates/fs-modal" }
 fs-phs = { path = "../../../crates/fs-phs" }
-fs-couple = { path = "../../../crates/fs-couple" }
+fs-ports = { path = "../../../crates/fs-ports" }
 fs-time = { path = "../../../crates/fs-time" }
 fs-duct = { path = "../../../crates/fs-duct" }
 fs-vfit = { path = "../../../crates/fs-vfit" }

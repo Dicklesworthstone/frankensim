@@ -7,7 +7,7 @@ use fs_aeroac::curle3d::CompactForceObserver;
 use fs_duct::{LsQuadrature, levine_schwinger_impedance};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_material::gas::GasState;
-use fs_material::visco::slab_ted::SlabThermoelasticBending;
+use fs_material::visco::slab_ted::{SlabThermoelasticBending, slab_relaxation_shape};
 use fs_math::c64::C64;
 use fs_modal::time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel, ModalAcousticWorkspace,
@@ -272,9 +272,12 @@ impl WatchAcousticSynth {
             195.0,
             1.35e-3,
         )
-        .map(|ted| {
-            let eta_ted = ted.slab_loss_factor(TAU * 2_380.0, 1.35e-3);
-            (1.0 + 80.0 * eta_ted).clamp(0.85, 2.2)
+        .map(|_ted| {
+            let tau0_s = (15_580.0 * 132.0 / 195.0)
+                * (1.35e-3 / core::f64::consts::PI)
+                * (1.35e-3 / core::f64::consts::PI);
+            let eta_ted = 0.012 * slab_relaxation_shape(TAU * 2_380.0, tau0_s).abs();
+            (1.0_f64 + 80.0 * eta_ted).clamp(0.85, 2.2)
         })
         .unwrap_or(1.0);
 
@@ -287,14 +290,13 @@ impl WatchAcousticSynth {
             {
                 air_visc_multiplier = (1.0 + 400.0 * visc.loss_factor).clamp(0.9, 1.6);
             }
-            if let Ok(ls_q) = LsQuadrature::new(32) {
-                if let Ok(z_rad) =
-                    levine_schwinger_impedance(&gas, 0.0085, TAU * 4_320.0, ls_q)
-                {
-                    let z0 = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.0085 * 0.0085);
-                    let norm_re = (z_rad.re / z0.max(1.0)).clamp(0.01, 2.0);
-                    self.aperture_radiation_gain = (0.88 + 0.35 * norm_re.sqrt()).clamp(0.75, 1.35);
-                }
+            let ls_q = LsQuadrature { nodes: 32 };
+            if let Ok(z_rad) =
+                levine_schwinger_impedance(&gas, 0.0085, TAU * 4_320.0, ls_q)
+            {
+                let z0 = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.0085 * 0.0085);
+                let norm_re = (z_rad.re / z0.max(1.0)).clamp(0.01, 2.0);
+                self.aperture_radiation_gain = (0.88 + 0.35 * norm_re.sqrt()).clamp(0.75, 1.35);
             }
         }
 
@@ -495,7 +497,7 @@ impl WatchAcousticSynth {
             let fs_modal_pa = self
                 .modal_time_model
                 .step_into(&zero_forces, &mut self.modal_workspace)
-                .map(|r| r.observer_pressure_pa.re)
+                .map(|r| r.observer_pressure_pa)
                 .unwrap_or(0.0);
             let m_case =
                 self.modes[0].tick() + self.modes[1].tick() + self.modes[2].tick();
