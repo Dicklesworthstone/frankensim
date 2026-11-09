@@ -6,6 +6,9 @@
 //! Heat and mechanical work belong to the consuming balance, not to this L1
 //! closure. No reaction rate, ignition or entropy-production law is inferred.
 
+/// Repeatable reacting internal-energy calorics at fixed conserved density.
+pub mod isochoric;
+
 use super::super::expansion::path::Reference;
 use super::*;
 
@@ -168,6 +171,7 @@ impl<'a> EquilibriumEnergyVolumePathV1<'a> {
             same.composition_iterations = 0;
             same.temperature_iterations = 0;
             same.pressure_iterations = 0;
+            poll(&mut cancelled)?;
             self.current = Some(same);
             return Ok(same);
         }
@@ -188,14 +192,92 @@ impl<'a> EquilibriumEnergyVolumePathV1<'a> {
                 &mut cancelled,
                 |work, t, cancel| Ok(reference.energy_change(owner, work, t, cancel)?),
             )?;
+        self.finish_sample(
+            temperature,
+            volume,
+            Some(energy_change),
+            counts,
+            temperature_iterations,
+            volume_residual,
+            &mut cancelled,
+        )
+    }
+
+    /// Evaluate original equilibrium at a prescribed temperature and volume.
+    ///
+    /// The original TV solve supplies pressure, changing molecular count and
+    /// reacting Cv. Energy and entropy remain relative to this path's immutable
+    /// source reference; no inverse caloric solve or source receipt is needed.
+    pub fn sample_temperature(
+        &mut self,
+        temperature: Temperature,
+        volume: Volume,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EquilibriumEnergyVolumeSampleV1, EquilibriumVolumeErrorV1> {
+        let previous = self.current.take();
+        poll(&mut cancelled)?;
+        if !volume.value().is_finite()
+            || volume.value() <= 0.0
+            || !(self.controls.minimum_temperature_k..=self.controls.maximum_temperature_k)
+                .contains(&temperature.value())
+        {
+            return Err(EquilibriumVolumeErrorV1::Invalid(
+                "positive finite volume and a temperature inside the source bracket required",
+            ));
+        }
+        if let Some(mut same) =
+            previous.filter(|s| s.volume == volume && s.temperature == temperature)
+        {
+            same.target_energy_change_j = same.internal_energy_change_j;
+            same.energy_residual_j = 0.0;
+            same.composition_iterations = 0;
+            same.temperature_iterations = 0;
+            same.pressure_iterations = 0;
+            poll(&mut cancelled)?;
+            self.current = Some(same);
+            return Ok(same);
+        }
+        let mut counts = Counts::default();
+        let volume_residual = self.work.solve_tv(
+            self.owner,
+            temperature,
+            volume,
+            self.controls.volume,
+            &mut counts,
+            &mut cancelled,
+        )?;
+        self.finish_sample(
+            temperature,
+            volume,
+            None,
+            counts,
+            0,
+            volume_residual,
+            &mut cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_sample(
+        &mut self,
+        temperature: Temperature,
+        volume: Volume,
+        target: Option<Energy>,
+        counts: Counts,
+        temperature_iterations: usize,
+        volume_residual: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EquilibriumEnergyVolumeSampleV1, EquilibriumVolumeErrorV1> {
+        let owner = self.owner;
+        let reference = &self.reference;
         let response = self.work.response(
             owner,
             temperature,
             self.controls.volume.equilibrium,
-            &mut cancelled,
+            cancelled,
         )?;
-        let du = reference.energy_change(owner, &self.work, temperature, &mut cancelled)?;
-        let ds = reference.entropy_change(owner, &self.work, temperature, &mut cancelled)?;
+        let du = reference.energy_change(owner, &self.work, temperature, cancelled)?;
+        let ds = reference.entropy_change(owner, &self.work, temperature, cancelled)?;
         let mut mass = Sum::default();
         for &i in &self.work.active {
             mass.add(self.work.n[i] * owner.models[i].molar_mass().value());
@@ -209,7 +291,8 @@ impl<'a> EquilibriumEnergyVolumePathV1<'a> {
             }
             .into());
         }
-        let residual = du - energy_change.value();
+        let target_energy_change_j = target.map_or(du, |energy| energy.value());
+        let residual = du - target_energy_change_j;
         if !residual.is_finite() || residual.abs() > self.controls.energy_tolerance_j {
             return Err(EquilibriumVolumeErrorV1::InternalEnergyNoConvergence {
                 iterations: temperature_iterations,
@@ -221,7 +304,7 @@ impl<'a> EquilibriumEnergyVolumePathV1<'a> {
             pressure: self.work.pressure,
             volume,
             response,
-            target_energy_change_j: energy_change.value(),
+            target_energy_change_j,
             internal_energy_change_j: du,
             energy_residual_j: residual,
             entropy_change_j_k: ds,
@@ -231,7 +314,7 @@ impl<'a> EquilibriumEnergyVolumePathV1<'a> {
             temperature_iterations,
             pressure_iterations: counts.pressure,
         };
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         self.current = Some(sample);
         Ok(sample)
     }

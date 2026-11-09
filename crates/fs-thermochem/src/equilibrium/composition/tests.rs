@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 mod ionization;
 mod volume_entropy;
 mod energy_volume_path;
+mod energy_storage;
 mod enthalpy_path;
 mod enthalpy_pressure;
 mod enthalpy_storage;
