@@ -5,11 +5,11 @@
 //! dispersive load already present in the evaluator. It is not a pole search:
 //! displacement, velocity and pressure can peak at different frequencies.
 //!
-//! The caller supplies a continuous differentiable transfer and brackets ONE
-//! isolated extremum or level crossing in each requested interval. Opposite
-//! endpoint signs are checked; uniqueness and absence of unresolved poles are
-//! not certified. Refinement is local, without a grid, spectral completeness
-//! claim, damping floor or an assumed Lorentzian line shape. Each evaluation
+//! The caller supplies a continuous differentiable transfer and either brackets
+//! ONE isolated extremum/crossing or supplies a grid resolving multiple peaks
+//! and notches. Opposite endpoint signs are checked; uniqueness and absence of
+//! unresolved poles are not certified. Refinement is local, without a spectral
+//! completeness claim, damping floor or assumed Lorentzian line shape. Each evaluation
 //! keeps its original solve/domain/work limits, and cancellation publishes no
 //! partial result. The returned bracket is numerical sign evidence, not an
 //! interval enclosure accounting for the evaluator's forward error.
@@ -21,8 +21,9 @@ use fs_math::c64::C64;
 mod query;
 pub use query::{
     HalfPowerBandwidth, HarmonicTransferSample, ResonanceControls, ResonanceError,
-    TransferExtremum, TransferExtremumKind, refine_half_power_bandwidth_with_cancel,
-    refine_transfer_extremum_with_cancel,
+    TransferExtremum, TransferExtremumKind, TransferSurvey,
+    refine_half_power_bandwidth_with_cancel, refine_transfer_extremum_with_cancel,
+    survey_transfer_extrema_with_cancel,
 };
 
 impl HarmonicTransferSample {
@@ -278,6 +279,29 @@ pub fn refine_transfer_extremum<E>(
     refine_transfer_extremum_with_cancel(
         bracket_rad_s,
         controls,
+        || cx.checkpoint().is_err(),
+        evaluate,
+    )
+}
+
+/// Discover and refine the response peaks and notches resolved by a supplied
+/// frequency grid, retaining the actual complex transfer and its tangent.
+///
+/// This executor-context entry shares the grid cache, global evaluation and
+/// extremum budgets, and resolution limits of
+/// [`survey_transfer_extrema_with_cancel`]. The grid is not a completeness
+/// certificate; unresolved peak/notch pairs can remain between its samples.
+pub fn survey_transfer_extrema<E>(
+    frequencies_rad_s: &[f64],
+    controls: ResonanceControls,
+    maximum_extrema: usize,
+    cx: &Cx<'_>,
+    evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
+) -> Result<TransferSurvey, ResonanceError<E>> {
+    survey_transfer_extrema_with_cancel(
+        frequencies_rad_s,
+        controls,
+        maximum_extrema,
         || cx.checkpoint().is_err(),
         evaluate,
     )

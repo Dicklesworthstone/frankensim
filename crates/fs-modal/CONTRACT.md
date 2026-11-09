@@ -260,10 +260,27 @@ extremum/crossing per bracket and retains the same physical source, receiver
 and model. Opposite signs do not certify uniqueness, spectral completeness,
 the nearest crossing, source forward error or absence of an unresolved pole.
 Zero-slope endpoints and flat/unresolved interiors refuse. No damping floor,
-grid, Lorentzian fit or new eigensolver is introduced. G1/G3 tests cover
+Lorentzian fit or new eigensolver is introduced. G1/G3 tests cover
 displacement/velocity/pole-frequency differences, high-Q linewidths, exact
 two-mode antiresonance, full nonproportional damping, extreme response units,
 singular evaluator refusal, budgets and cancellation.
+
+`survey_transfer_extrema` and its callback counterpart
+`survey_transfer_extrema_with_cancel` find both maxima and minima resolved by
+an explicit nonnegative increasing frequency grid. They retain exact transfer
+zeros, stationary grid samples, signed modal interference and the source's
+complete frequency tangent. Every candidate uses the existing local refinement
+owner. All input samples are cached, so shared endpoints and stationary grid
+points do not repeat a physical solve; the grid and every refinement share one
+evaluation cap. A separate extremum cap refuses truncation before refinement.
+Cancellation or any physical/refinement refusal publishes no partial list.
+The grid must separate the features the caller needs: an unresolved peak/notch
+pair may lie between equal-sign samples, and opposite signs alone do not prove
+uniqueness. Band endpoints are excluded, a silent observation returns no extrema,
+and no linewidth or free-mode completeness is inferred. Storage is linear in
+the input grid and number of returned extrema. `tests/harmonic_resonance_survey.rs`
+checks a coupled damped two-mass response with both resonances and its exact
+antiresonance, cached samples, and atomic budget/source/cancellation refusals.
 
 ### `harmonic`: full forced response and resonance
 

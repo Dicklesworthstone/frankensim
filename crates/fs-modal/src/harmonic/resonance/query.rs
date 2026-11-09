@@ -76,6 +76,24 @@ pub struct TransferExtremum {
     pub sample: HarmonicTransferSample,
     /// Final oriented numerical sign bracket [rad/s].
     pub bracket_rad_s: (f64, f64),
+    /// Original evaluator calls. In a survey, this counts only new refinement
+    /// calls; shared grid samples belong to the survey's total.
+    pub evaluations: usize,
+}
+
+/// Observable peaks and notches resolved by a caller's frequency grid.
+/// This is a driven-response survey, not a census of free vibration modes.
+#[derive(Clone, Debug)]
+pub struct TransferSurvey {
+    /// Ascending frequency, retaining both maxima and minima of the same
+    /// complex physical observation. No linewidth is inferred across neighbours.
+    pub extrema: Vec<TransferExtremum>,
+    /// First and last supplied angular frequency [rad/s].
+    pub interval_rad_s: (f64, f64),
+    /// Number of supplied frequencies, all evaluated on a successful query.
+    pub grid_points: usize,
+    /// Total original evaluator calls, including the grid and all refinements.
+    /// Reusing a cached grid sample consumes neither a call nor this budget.
     pub evaluations: usize,
 }
 
@@ -105,6 +123,11 @@ pub enum ResonanceError<E> {
     Evaluation(E),
     EvaluationBudget {
         maximum_evaluations: usize,
+    },
+    /// The grid resolves more extrema than the caller admits. No truncated
+    /// list is published, and no refinement is started before this check.
+    ExtremumBudget {
+        maximum_extrema: usize,
     },
     Cancelled,
 }
@@ -154,6 +177,116 @@ pub fn refine_transfer_extremum_with_cancel<E>(
         angular_frequency_rad_s: point.frequency,
         sample: point.sample,
         bracket_rad_s,
+        evaluations: query.evaluations,
+    })
+}
+
+/// Discover observable resonance peaks AND antiresonance notches over a band.
+///
+/// The supplied grid has at least two finite, strictly increasing, nonnegative
+/// angular frequencies. All evaluations use the same original complex transfer
+/// and its complete frequency tangent, including source, receiver and load
+/// dispersion. Strict slope sign changes identify candidates; stationary grid
+/// samples are retained between their two oriented neighbours. In particular,
+/// an exact transfer zero can be a minimum and is never divided out.
+///
+/// Every candidate is refined by the same owner as
+/// [`refine_transfer_extremum_with_cancel`]. The entire input grid is cached,
+/// avoiding repeated physical solves for shared endpoints or stationary samples.
+/// `controls.maximum_evaluations` covers the grid and ALL refinements together;
+/// it also bounds cached storage before allocation. `maximum_extrema` must be
+/// positive. Source refusal, singularity, cancellation, a flat unresolved
+/// candidate or either exhausted budget publishes no partial result.
+///
+/// This finds features RESOLVED BY THE GRID, not every physical resonance.
+/// A peak/notch pair can lie between samples with equal slope signs, and an
+/// opposite-sign bracket need not contain just one extremum. The caller owns
+/// that resolution and isolation obligation. Band endpoints are not two-sided
+/// extrema; a silent transfer returns an empty survey. No pole is made finite
+/// with invented damping. Each returned maximum can separately be passed to
+/// [`refine_half_power_bandwidth_with_cancel`] with isolated flank brackets.
+pub fn survey_transfer_extrema_with_cancel<E>(
+    frequencies_rad_s: &[f64],
+    controls: ResonanceControls,
+    maximum_extrema: usize,
+    cancelled: impl FnMut() -> bool,
+    evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
+) -> Result<TransferSurvey, ResonanceError<E>> {
+    let mut query = Query::new(controls, cancelled, evaluate)?;
+    if frequencies_rad_s.len() < 2
+        || frequencies_rad_s.iter().any(|w| !w.is_finite() || *w < 0.0)
+        || frequencies_rad_s.windows(2).any(|w| w[0] >= w[1])
+        || maximum_extrema == 0
+    {
+        return Err(ResonanceError::Invalid(
+            "ordered nonnegative frequency grid and positive extremum capacity required",
+        ));
+    }
+    if frequencies_rad_s.len() > controls.maximum_evaluations {
+        return Err(ResonanceError::EvaluationBudget {
+            maximum_evaluations: controls.maximum_evaluations,
+        });
+    }
+    query.grid.reserve_exact(frequencies_rad_s.len());
+    for &frequency in frequencies_rad_s {
+        let sample = query.sample(frequency, HarmonicTransferSample::slope)?;
+        query.grid.push(sample);
+    }
+
+    // A zero slope alone is not evidence of an extremum. Skip it until two
+    // strictly oriented neighbours establish either a peak or a notch. This
+    // retains exact antiresonances and avoids double-counting a grid maximum.
+    let mut previous: Option<usize> = None;
+    let mut brackets = Vec::new();
+    for index in 0..query.grid.len() {
+        query.poll()?;
+        let point = query.grid[index];
+        if point.level == 0.0 {
+            continue;
+        }
+        if let Some(left) = previous
+            && query.grid[left].level.is_sign_positive() != point.level.is_sign_positive()
+        {
+            if brackets.len() == maximum_extrema {
+                return Err(ResonanceError::ExtremumBudget { maximum_extrema });
+            }
+            brackets.push((left, index));
+        }
+        previous = Some(index);
+    }
+
+    let mut extrema = Vec::with_capacity(brackets.len());
+    for (left, right) in brackets {
+        let left = query.grid[left];
+        let right = query.grid[right];
+        let kind = if left.level > 0.0 {
+            TransferExtremumKind::Maximum
+        } else {
+            TransferExtremumKind::Minimum
+        };
+        let before = query.evaluations;
+        let (point, bracket_rad_s) = query.refine(
+            left,
+            right,
+            HarmonicTransferSample::slope,
+            kind == TransferExtremumKind::Maximum,
+        )?;
+        extrema.push(TransferExtremum {
+            kind,
+            angular_frequency_rad_s: point.frequency,
+            sample: point.sample,
+            bracket_rad_s,
+            evaluations: query.evaluations - before,
+        });
+    }
+    query.poll()?;
+    Ok(TransferSurvey {
+        extrema,
+        interval_rad_s: (
+            frequencies_rad_s[0],
+            frequencies_rad_s[frequencies_rad_s.len() - 1],
+        ),
+        grid_points: frequencies_rad_s.len(),
         evaluations: query.evaluations,
     })
 }
@@ -253,6 +386,10 @@ struct Query<F, C> {
     cancelled: C,
     evaluate: F,
     evaluations: usize,
+    // Only survey input samples are cached. Ordinary local refinement stays
+    // allocation-free; survey memory is O(grid points + returned extrema),
+    // independent of the number of source evaluations during refinement.
+    grid: Vec<Point>,
 }
 
 impl<F, C, E> Query<F, C>
@@ -282,6 +419,7 @@ where
             cancelled,
             evaluate,
             evaluations: 0,
+            grid: Vec::new(),
         };
         query.poll()?;
         Ok(query)
@@ -301,6 +439,14 @@ where
         level: impl Fn(HarmonicTransferSample) -> f64,
     ) -> Result<Point, ResonanceError<E>> {
         self.poll()?;
+        if let Ok(index) = self
+            .grid
+            .binary_search_by(|p| p.frequency.total_cmp(&frequency))
+        {
+            let mut point = self.grid[index];
+            point.level = level(point.sample);
+            return Ok(point);
+        }
         if self.evaluations == self.controls.maximum_evaluations {
             return Err(ResonanceError::EvaluationBudget {
                 maximum_evaluations: self.controls.maximum_evaluations,
