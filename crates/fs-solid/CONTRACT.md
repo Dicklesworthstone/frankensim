@@ -13482,3 +13482,44 @@ diagonal DOFs, small noncommuting signed pencils, small P1/Q1/B-bar continuum
 comparisons, scale restoration, resource/cancellation refusals and exact
 versus coarse subnormal factors. This is not a 100k-continuum performance
 claim.
+
+## Retained finite J2 plasticity on mixed P2/P1 tetrahedra
+
+`hyper3::mixed::plastic::MixedPlasticTetSolid` advances isothermal,
+rate-independent finite J2 loading on the existing quadratic-displacement,
+continuous-linear-pressure tetrahedra. Uniform, per-element and per-quadrature
+`FiniteJ2Material` bindings borrow the original native or source-resolved law.
+Every quadrature point retains its original inverse plastic metric and
+accumulated plastic strain. Linear, Voce and tabulated energetic hardening use
+the same native return map and analytic logarithm derivative as displacement
+plasticity; no bulk modulus is replaced and no large bulk penalty is subtracted
+from an already rounded full stress or tangent.
+
+`OriginalMaterial` preserves the original log-squared bulk law on its locally
+convex branch. `ExactIncompressible` explicitly imposes the existing weak volume
+constraint with no bulk penalty or storage. Physical storage is the native
+deviatoric/hardening remainder plus `U(J(p))` at the pressure-reconstructed
+volume. Pointwise `U(det F)` is not added to that mixed energy. Both actual
+deformation and reconstructed volume retain the material's original bounds.
+
+One `advance` is one physical endpoint: solver `load_steps` must equal one and
+Newton/line-search trials always use the same accepted histories. Native mixed
+equilibrium, old/new yield admissibility, independently re-evaluated storage,
+reduced-potential consistency, pressure-constraint work, support/dead-load work,
+and the caller's signed endpoint-work-defect allowance must all pass before
+publishing a successor. Failure or cancellation leaves the original state
+available for retry or forking. Plastic dissipation, flow potential, bulk
+storage and numerical endpoint defects remain separate result fields.
+
+`tests/mixed_plastic.rs` checks coaxial finite loading, free unloading, reverse
+yielding, permanent deformation and pressure against independent scalar
+Hencky/J2 equations at moderate and very high bulk modulus and at exact
+incompressibility. It also checks quadrature bindings and transactional
+refusal/cancellation/replay. `tests/mixed_plastic/bending.rs` adds a bounded
+non-affine two-mesh plastic cantilever diagnostic and compares high finite bulk
+response to exact incompressibility. These manufactured cases are numerical
+evidence, not material calibration, a universal inf-sup theorem, continuum
+convergence, or an injectivity certificate between quadrature points. This
+adapter does not yet add inertia, creep, thermal evolution, porous/ductile
+damage, contact, or follower loads to mixed plasticity; their existing owners
+remain separate.

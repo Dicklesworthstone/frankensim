@@ -18,8 +18,11 @@
 //! This is a compressible displacement-only P1 formulation. Isochoric plastic
 //! flow can cause volumetric locking even when the elastic Poisson ratio is
 //! moderate. Accurate bending in strongly plastic or nearly incompressible
-//! regimes requires a mixed/stabilized successor and mesh evidence; an affine
-//! patch does not establish that accuracy. [`dynamics`] adds endpoint inertia
+//! regimes requires a mixed/stabilized formulation and mesh evidence; an affine
+//! patch does not establish that accuracy. [`super::mixed::plastic`] supplies
+//! the native P2/P1 mixed, rate-independent J2 successor with original bulk
+//! compliance or explicit exact incompressibility. The rate/thermal extensions
+//! here retain their displacement-only formulation. [`dynamics`] adds endpoint inertia
 //! on this same solve. [`thermal`] adds changing temperature and exact native
 //! thermoelastic/plastic accounts. Contact, follower loads and cyclic kinematic
 //! hardening are outside these paths.

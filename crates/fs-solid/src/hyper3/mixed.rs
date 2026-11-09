@@ -38,6 +38,9 @@ use element::{MixedPoint, PreparedMixedElement, PreparedMixedMesh};
 /// Retained finite-strain viscoelastic histories on the mixed solid.
 pub mod visco;
 
+/// Retained finite J2 plasticity with independent displacement and pressure.
+pub mod plastic;
+
 /// Objective discrete-gradient elasticity with conservative reference inertia.
 pub mod conservative;
 
