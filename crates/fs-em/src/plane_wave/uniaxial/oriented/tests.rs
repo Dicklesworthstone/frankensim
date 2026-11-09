@@ -311,3 +311,103 @@ fn signed_adjacent_critical_indices_keep_both_eigenmodes_finite() {
         }
     }
 }
+
+#[test]
+fn matched_extraordinary_cutoff_retains_authored_grazing_flux() {
+    // The incident index equals the extraordinary tangential cutoff. The
+    // original positive cosine still supplies a propagating normal root even
+    // when rounding sin(theta) or 1-cos(theta)^2 would erase it.
+    for (axis, no, ne, column, normal_index, reflection, transmission) in [
+        ([0.0, 0.0, 1.0], 1.0, 1.5, 0, 1.0, 0.2, 0.96),
+        ([1.0, 0.0, 0.0], 1.5, 1.0, 0, 1.0, 0.2, 0.96),
+        ([0.0, 1.0, 0.0], 1.0, 1.5, 1, 1.5, 0.0, 1.0),
+    ] {
+        for cosine in [1e-10, 1e-16, 1e-20, 1e-30] {
+            let mut electric = [C64::ZERO; 2];
+            electric[column] = C64::from_re(if column == 0 { cosine } else { 1.0 });
+            let data = Input {
+                ni: 1.5,
+                no,
+                ne,
+                electric,
+                ..input(axis, cosine)
+            };
+            let r = solve(data).unwrap();
+            let extraordinary = r.transmitted[1];
+            assert_eq!(extraordinary.wave_kind, UniaxialWaveKind::Propagating);
+            let expected_kz = (data.omega / C0) * normal_index * cosine;
+            near(
+                extraordinary.normal_wavenumber_rad_m.re,
+                expected_kz,
+                3e-14 * expected_kz,
+            );
+            assert_eq!(extraordinary.normal_wavenumber_rad_m.im, 0.0);
+            assert!(extraordinary.normal_power_w_m2 > 0.0);
+            assert!(extraordinary.energy_direction.unwrap()[2] > 0.0);
+            complex_near(
+                r.reflected_electric_v_m[column],
+                electric[column].scale(reflection),
+                4e-14 * electric[column].abs(),
+            );
+            near(r.transmitted_power_fraction, transmission, 4e-14);
+            maxwell(data, r);
+        }
+    }
+}
+
+#[test]
+fn out_of_plane_matched_cutoff_retains_its_original_normal_root() {
+    // xx=yy=1/2 gives f=no^2, h=(no^2+ne^2)/2=625 and det=f*h.
+    // With no=35, ne=5, ni=7 the cutoff identity f*no^2*ne^2=det*ni^2
+    // is exact, and the native extraordinary kz/k0 is 5*cos(theta).
+    for sign in [-1.0, 1.0] {
+        for cosine in [1e-10, 1e-16, 1e-20] {
+            let data = Input {
+                ni: 7.0,
+                no: 35.0,
+                ne: 5.0,
+                electric: [C64::from_re(cosine), C64::ONE],
+                ..input([sign, sign, 0.0], cosine)
+            };
+            let r = solve(data).unwrap();
+            let mode = r.transmitted[1];
+            let expected = (data.omega / C0) * 5.0 * cosine;
+            assert_eq!(mode.wave_kind, UniaxialWaveKind::Propagating);
+            near(mode.normal_wavenumber_rad_m.re, expected, 3e-14 * expected);
+            assert_eq!(mode.normal_wavenumber_rad_m.im, 0.0);
+            assert!(mode.normal_power_w_m2 > 0.0);
+            assert!(mode.energy_direction.unwrap()[2] > 0.0);
+            maxwell(data, r);
+        }
+    }
+}
+
+#[test]
+fn adjacent_extraordinary_cutoffs_keep_propagation_and_evanescence_distinct() {
+    for (ne, expected) in [
+        (1.5_f64.next_down(), UniaxialWaveKind::Evanescent),
+        (1.5_f64.next_up(), UniaxialWaveKind::Propagating),
+    ] {
+        let data = Input {
+            ni: 1.5,
+            no: 1.0,
+            ne,
+            electric: [C64::from_re(1e-20), C64::ZERO],
+            ..input([0.0, 0.0, 1.0], 1e-20)
+        };
+        let r = solve(data).unwrap();
+        let mode = r.transmitted[1];
+        assert_eq!(mode.wave_kind, expected);
+        match expected {
+            UniaxialWaveKind::Evanescent => {
+                assert!(mode.normal_wavenumber_rad_m.im < 0.0);
+                assert_eq!(mode.normal_power_w_m2, 0.0);
+                assert_eq!(mode.energy_direction, None);
+            }
+            _ => {
+                assert!(mode.normal_wavenumber_rad_m.re > 0.0);
+                assert!(mode.normal_power_w_m2 > 0.0);
+            }
+        }
+    }
+}

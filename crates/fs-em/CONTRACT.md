@@ -8208,3 +8208,9 @@ ensemble, weak channels and small covariance, physical input admission,
 deterministic replay, explicit work bounds and cancellation between TE/TM.
 
 The layer query reuses each field projection across its diagonal populations, signed flux and storage, with no positivity clamp on cross moments. Preparation reserves N*(6+3D+5L)*(F+1)*17 bounded vector work. Focused regressions resolve proper three-tone signed flux and real fifth-order storage through 1 ps, retain DD filtered storage residuals, and compare all vector moments and original Debye/Lorentz work identities against independent quadrature. Continuous spatial cell power and volume heat remain separate owners; this temporal refinement is not a null-relative or global conservation certificate.
+
+## Matched-cutoff crystal propagation at grazing incidence
+
+The arbitrary-axis transparent crystal kernel retains the caller's original positive incident normal coordinate at an exactly matched extraordinary cutoff. It evaluates the normal discriminant root from that coordinate, rather than subtracting a rounded tangential square from the cutoff. This preserves propagating fields and finite transmitted power even when the authored cosine is too small for its square to survive subtraction from one. The shared eigenbasis carries this behavior into finite crystal consumers without a cutoff tolerance or an artificial critical mode. Explicit critical and adjacent representable propagating/evanescent inputs retain their distinct meanings.
+
+Native Maxwell and power regressions cover aligned and out-of-plane axes, axis reversal, grazing cosines through 1e-30, and adjacent representable cutoff indices. At a matched principal extraordinary cutoff with incident/extraordinary index 1.5 and ordinary index 1, the transmitted power remains 0.96 rather than collapsing at grazing incidence.

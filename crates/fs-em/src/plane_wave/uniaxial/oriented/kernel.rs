@@ -156,7 +156,28 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
         } else {
             f * o2 * e2 - determinant * p2
         };
-        let (s, k) = outgoing_root(discriminant).map_err(invalid)?;
+        let id = Dd::from_f64(i);
+        let i2 = id * id;
+        let matched_cutoff = if axis[1] == 0.0 {
+            f == i2
+        } else {
+            f * o2 * e2 == determinant * i2
+        };
+        let (s, k) = if matched_cutoff {
+            // The original incident normal coordinate remains positive even
+            // when 1-cos(theta)^2 rounds to one. At an exactly matched cutoff,
+            // D=det*qi^2; retain sqrt(D)=sqrt(det)*qi without squaring the
+            // grazing coordinate or inventing a coalesced critical mode.
+            let factor = if axis[1] == 0.0 {
+                od * ed
+            } else {
+                determinant.sqrt()
+            };
+            let root = positive((factor * Dd::from_f64(qi)).to_f64())?;
+            (C64::from_re(root), UniaxialWaveKind::Propagating)
+        } else {
+            outgoing_root(discriminant).map_err(invalid)?
+        };
         let real = if k == UniaxialWaveKind::Propagating && Dd::ZERO.lt(gp) {
             (constant / (-gp - Dd::from_f64(s.re))).to_f64()
         } else {
