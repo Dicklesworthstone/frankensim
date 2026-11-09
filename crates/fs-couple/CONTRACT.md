@@ -9823,6 +9823,40 @@ source refusal and retry. They are added but unexecuted under the existing
 pinned dependency/resource build block; formatter checks do not establish a
 native compile or runtime result.
 
+## Continuous multi-tone forces on retained tensor solids
+
+PreparedTensorBody::from_mass_matrix_tones and
+PreparedTensorSolidBody::new_tones extend the existing complete tensor-memory
+owner with continuous cosine/sine force records. The physical state, exact
+source-time groups, original consistent mass, quadrature points and per-element
+Kelvin/Maxwell heat remain unchanged. Source records carry no material energy.
+All tone interference enters the same native PreparedQuadraticFlow trajectory
+and the original positive PreparedSourceLoss channels.
+
+Each interval supplies coefficients relative to its own start. The native
+quadratic integral of F(t) dot v(t) is checked independently against cosine/sine
+velocity moments from a one-way rotating observer. The solid adapter expands
+those moments through its original displacement basis and checks full nodal
+work before publishing the candidate. Fixed support forces do no work.
+advance_force_phase rotates unchanged source coefficients without advancing
+mechanical history. Source frequency order, including zero or repeated tones,
+is retained; no damping fit, mode deletion or independent-tone heat sum occurs.
+
+Each frequency must lie in every original TensorProny law's admitted band.
+The original endpoint strain admission remains; neither full-interval material
+applicability nor the transient spectrum's containment in that band is claimed.
+Force records, moment observers and all heat caches enter the existing explicit
+state, preparation byte/work and warm-work budgets. Cancellation, malformed
+sources, exceeded budgets and failed work accounts preserve accepted history.
+
+Focused regressions specify nonproportional two-coordinate tensor response
+with full consistent mass against independent original-coordinate RK4, both
+weighted velocity moments, signed source work and separate positive heat;
+zero-frequency held-force parity; source-band, capacity and atomic refusals;
+and original two-element nodal loading with full/half-clock agreement.
+Pinned rustfmt parsing completed. Native Cargo compilation and these regressions
+remain unexecuted in the current development environment.
+
 
 ## Inertial phase-changing water chamber
 

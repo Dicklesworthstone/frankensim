@@ -24,6 +24,8 @@ const CORNERS: [[f64; 3]; 4] = [
 
 #[path = "tensor_solid_prepared/affine.rs"]
 mod affine;
+#[path = "tensor_solid_prepared/tones.rs"]
+mod tones;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();

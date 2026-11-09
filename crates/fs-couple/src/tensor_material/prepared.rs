@@ -10,7 +10,8 @@
 //!
 //! The original fs-phs flow and positive source-square kernels are prepared once.
 //! Warm calls use bounded contractions and source-domain checks, independently
-//! integrate held or affine-force work and grouped physical heat, and publish atomically.
+//! integrate held, affine or continuous-tone force work and grouped physical heat,
+//! and publish atomically.
 //! Geometry, force ports and the positive clock stay fixed. An explicit material
 //! continuation preserves original branch history and accounts coefficient work.
 
@@ -24,15 +25,17 @@ use fs_phs::{PhsError, PreparedStepError};
 mod affine;
 mod prepare;
 mod rebind;
+mod tones;
 pub use affine::PreparedTensorAffineStep;
 pub use rebind::{PreparedTensorMaterialChange, PreparedTensorMaterialChangeBudget};
+pub use tones::PreparedTensorToneStep;
 
 /// Explicit whole-owner resource and physical numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedTensorControls {
     pub maximum_coordinates: usize,
     pub maximum_material_points: usize,
-    /// Complete propagation coordinates, including force records for affine loading.
+    /// Complete propagation coordinates, including affine or sinusoidal force records.
     /// Accepted physical state remains displacement, momentum and material memory.
     pub maximum_state_coordinates: usize,
     pub maximum_heat_groups: usize,
@@ -197,6 +200,7 @@ pub struct PreparedTensorBody {
     heat: Vec<PreparedSourceLoss>,
     heat_scales: Vec<f64>,
     affine: Option<affine::AffinePrepared>,
+    tones: Option<tones::TonePrepared>,
     states: usize,
     dt_s: f64,
     controls: PreparedTensorControls,
@@ -208,16 +212,19 @@ impl PreparedTensorBody {
     pub fn state_dimension(&self) -> usize {
         self.states
     }
-    /// Prepared physical plus source-record coordinates. Affine loading adds
-    /// exactly one force coordinate per physical displacement; these carry no
+    /// Prepared physical plus source-record coordinates. Affine loading adds one
+    /// force coordinate per displacement; tones add a cosine/sine pair per
+    /// frequency and displacement. These records carry no
     /// mechanical storage and never enter accepted constitutive history.
     pub fn propagation_state_dimension(&self) -> usize {
-        self.states
-            + if self.affine.is_some() {
-                self.coordinates()
-            } else {
-                0
-            }
+        self.states + self.source_blocks() * self.coordinates()
+    }
+    fn source_blocks(&self) -> usize {
+        self.tones
+            .as_ref()
+            .map_or(usize::from(self.affine.is_some()), |tones| {
+                2 * tones.frequencies.len()
+            })
     }
     /// Increasing exact positive source times; adjacent f64 values stay distinct.
     pub fn relaxation_times_s(&self) -> &[f64] {
@@ -289,7 +296,7 @@ impl PreparedTensorBody {
         }
         self.admit_displacement(displacement_m, gate)?;
         let energy = self.energy(&state, &velocity, gate)?;
-        let scratch = Scratch::new(self.states, n, self.affine.is_some())?;
+        let scratch = Scratch::new(self.states, n, self.source_blocks())?;
         poll(gate)?;
         Ok(PreparedTensorHistory {
             body: self,
@@ -400,22 +407,23 @@ struct Scratch {
     integrals: Vec<f64>,
 }
 impl Scratch {
-    fn new(physical_states: usize, ports: usize, affine: bool) -> Result<Self> {
-        let states = physical_states + if affine { ports } else { 0 };
+    fn new(physical_states: usize, ports: usize, source_blocks: usize) -> Result<Self> {
+        let sources = source_blocks != 0;
+        let states = physical_states + source_blocks * ports;
         Ok(Self {
             augmented: zeros(states + ports + 1)?,
             balanced: zeros(states)?,
             endpoint: zeros(states)?,
             heat_state: zeros(states)?,
             heat_coordinates: zeros(2 * states)?,
-            source_state: if affine { zeros(states)? } else { Vec::new() },
-            physical_candidate: if affine {
+            source_state: if sources { zeros(states)? } else { Vec::new() },
+            physical_candidate: if sources {
                 zeros(physical_states)?
             } else {
                 Vec::new()
             },
-            source_increment: if affine { zeros(ports)? } else { Vec::new() },
-            integrals: if affine { zeros(1)? } else { Vec::new() },
+            source_increment: if sources { zeros(ports)? } else { Vec::new() },
+            integrals: if sources { zeros(1)? } else { Vec::new() },
         })
     }
 }
@@ -486,6 +494,11 @@ impl PreparedTensorHistory<'_> {
     /// candidate endpoint; this is not a within-interval strain/band certificate.
     /// Any refusal leaves physical state, clock and every work/heat counter intact.
     pub fn advance(&mut self, force_n: &[f64], gate: &CancelGate) -> Result<PreparedTensorStep> {
+        if self.body.tones.is_some() {
+            return Err(invalid(
+                "continuous-tone preparation requires tone coefficients",
+            ));
+        }
         if self.body.affine.is_some() {
             return self
                 .advance_affine(force_n, force_n, gate)

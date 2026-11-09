@@ -29,6 +29,7 @@ impl PreparedTensorBody {
             heat_groups,
             dt_s,
             None,
+            None,
             controls,
             gate,
         )
@@ -56,25 +57,32 @@ impl PreparedTensorBody {
             heat_groups,
             dt_s,
             Some(force_scale_n),
+            None,
             controls,
             gate,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_sources(
+    pub(super) fn prepare_sources(
         coordinates: usize,
         mass_kg: Vec<f64>,
         points: Vec<ProjectedTensorProny>,
         heat_groups: Vec<usize>,
         dt_s: f64,
         force_scale_n: Option<f64>,
+        angular_frequencies_rad_s: Option<&[f64]>,
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
         poll(gate)?;
         let n = coordinates;
-        let source_blocks = usize::from(force_scale_n.is_some());
+        let affine = force_scale_n.is_some() && angular_frequencies_rad_s.is_none();
+        let source_blocks = angular_frequencies_rad_s
+            .map_or(Some(usize::from(affine)), |frequencies| {
+                frequencies.len().checked_mul(2)
+            })
+            .ok_or_else(|| invalid("tone source extent overflow"))?;
         if n == 0
             || n > 128
             || !dt_s.is_finite()
@@ -85,6 +93,14 @@ impl PreparedTensorBody {
             || !(0.0..1.0).contains(&controls.maximum_relative_operator_error)
             || !controls.maximum_work_error_j.is_finite()
             || controls.maximum_work_error_j < 0.0
+            || angular_frequencies_rad_s.is_some_and(|frequencies| {
+                force_scale_n.is_none()
+                    || frequencies.is_empty()
+                    || frequencies.iter().any(|omega| {
+                        !omega.is_finite() || *omega < 0.0 || !(omega * dt_s).is_finite()
+                    })
+            })
+            || source_blocks > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
             || points.is_empty()
             || heat_groups.len() != points.len()
             || mass_kg.len() != n * n
@@ -211,9 +227,9 @@ impl PreparedTensorBody {
             MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128,
         )?;
         bound(dimension as u128, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128)?;
-        if force_scale_n.is_some() {
+        if source_blocks != 0 {
             bound(
-                (states + 2 * n) as u128,
+                (states + if affine { 2 * n } else { source_blocks * n }) as u128,
                 MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128,
             )?;
         }
@@ -230,9 +246,21 @@ impl PreparedTensorBody {
             compatible_points,
             groups,
             rows,
-            force_scale_n.is_some(),
+            affine,
+            angular_frequencies_rad_s.map_or(0, |frequencies| frequencies.len()),
             controls,
         )?;
+        if let Some(frequencies) = angular_frequencies_rad_s {
+            for point in &points {
+                for &omega in frequencies {
+                    poll(gate)?;
+                    point
+                        .material()
+                        .modulus_mandel(omega)
+                        .map_err(TensorMaterialError::Material)?;
+                }
+            }
+        }
         let budget = DenseExponentialBudget {
             max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
             max_dense_bytes: controls.maximum_preparation_bytes,
@@ -335,7 +363,15 @@ impl PreparedTensorBody {
         let mut input = zeros(states * n)?;
         for i in 0..n {
             poll(gate)?;
-            if force_scale_n.is_some() {
+            if let Some(frequencies) = angular_frequencies_rad_s {
+                for (tone, &omega) in frequencies.iter().enumerate() {
+                    let cosine = physical_states + (2 * tone) * n + i;
+                    let sine = cosine + n;
+                    generator[(n + i) * states + cosine] = 1.0;
+                    generator[cosine * states + sine] = omega;
+                    generator[sine * states + cosine] = -omega;
+                }
+            } else if affine {
                 // The held input is the interval force INCREMENT [N]. The
                 // force record starts at F0 and evolves with derivative dF/h.
                 input[(physical_states + i) * n + i] = dt_s.recip();
@@ -370,17 +406,25 @@ impl PreparedTensorBody {
                 heat_scales[(2 + t) * n + i] = scale(branch_stiffness[t * n * n + i * n + i])?;
             }
             if let Some(scale) = force_scale_n {
-                heat_scales[physical_states + i] = scale.recip();
+                for source in 0..source_blocks {
+                    heat_scales[physical_states + source * n + i] = scale.recip();
+                }
             }
         }
-        let flow = if force_scale_n.is_some() {
+        let flow = if source_blocks != 0 {
             let mut work = zeros(states * states)?;
             for i in 0..n {
                 poll(gate)?;
                 for j in 0..n {
                     let value = 0.5 * inertia.inverse_entry(i, j);
-                    work[(physical_states + i) * states + n + j] = value;
-                    work[(n + j) * states + physical_states + i] = value;
+                    let count =
+                        angular_frequencies_rad_s.map_or(1, |frequencies| frequencies.len());
+                    for source in 0..count {
+                        let at =
+                            physical_states + (if affine { source } else { 2 * source }) * n + i;
+                        work[at * states + n + j] = value;
+                        work[(n + j) * states + at] = value;
+                    }
                 }
             }
             // This observes the original F(t)^T M^-1 p(t), independently of
@@ -425,7 +469,23 @@ impl PreparedTensorBody {
         if !finite(&generator) || !finite(&input) {
             return Err(invalid("conditioned original heat trajectory overflow"));
         }
+        let tones = angular_frequencies_rad_s
+            .map(|frequencies| {
+                super::tones::prepare_observer(
+                    n,
+                    &generator,
+                    &heat_scales,
+                    &inertia,
+                    frequencies,
+                    dt_s,
+                    force_scale_n.ok_or_else(|| invalid("tone force scale required"))?,
+                    budget,
+                    gate,
+                )
+            })
+            .transpose()?;
         let affine = force_scale_n
+            .filter(|_| affine)
             .map(|force_scale_n| {
                 super::affine::prepare_observer(
                     n,
@@ -507,6 +567,7 @@ impl PreparedTensorBody {
             heat,
             heat_scales,
             affine,
+            tones,
             states: physical_states,
             dt_s,
             controls,
@@ -554,6 +615,7 @@ fn admit_resources(
     g: usize,
     rows: usize,
     affine: bool,
+    tones: usize,
     controls: PreparedTensorControls,
 ) -> Result<()> {
     let (n, s, p, b, kv, compatible, g, rows) = (
@@ -593,6 +655,15 @@ fn admit_resources(
         bytes += 8 * (8 * observer * observer + 2 * d * d + 4 * n * (s + n) + 256 * (s + n));
         work += 80 * observer * observer * observer + 32 * observer * observer;
         warm += 8 * d * d + 16 * n * (s + n);
+    }
+    if tones != 0 {
+        let observations = 2 * n * tones as u128;
+        let observer = s + observations;
+        bytes += 8 * (8 * observer * observer + 2 * d * d + 4 * observations * s + 256 * (s + n));
+        work += 80 * observer * observer * observer
+            + 32 * observer * observer
+            + 2048 * (p + b) * tones as u128;
+        warm += 8 * d * d + 16 * observations * s;
     }
     bound(bytes, controls.maximum_preparation_bytes as u128)?;
     bound(work, controls.maximum_preparation_multiply_terms as u128)?;

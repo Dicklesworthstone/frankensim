@@ -13,6 +13,9 @@ use crate::tensor_material::prepared::{
 use fs_exec::CancelGate;
 use fs_solid::linear3::visco::{ProjectedViscoSolid, ViscoElementError};
 
+mod tones;
+pub use tones::PreparedTensorSolidToneStep;
+
 /// Source or physical-runtime refusal before accepted nodal motion changes.
 #[derive(Debug)]
 pub enum PreparedSolidError {
@@ -76,7 +79,7 @@ impl<'s> PreparedTensorSolidBody<'s> {
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
-        Self::prepare(projection, dt_s, None, controls, gate)
+        Self::prepare(projection, dt_s, None, None, controls, gate)
     }
 
     /// Prepare exact linear-in-time nodal force intervals on the same original
@@ -90,13 +93,14 @@ impl<'s> PreparedTensorSolidBody<'s> {
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
-        Self::prepare(projection, dt_s, Some(force_scale_n), controls, gate)
+        Self::prepare(projection, dt_s, Some(force_scale_n), None, controls, gate)
     }
 
     fn prepare(
         projection: ProjectedViscoSolid<'s>,
         dt_s: f64,
         force_scale_n: Option<f64>,
+        angular_frequencies_rad_s: Option<&[f64]>,
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
@@ -109,7 +113,19 @@ impl<'s> PreparedTensorSolidBody<'s> {
                 "original solid exceeds prepared coordinate, point or element capacity",
             ));
         }
-        let body = if let Some(force_scale_n) = force_scale_n {
+        let body = if let Some(frequencies) = angular_frequencies_rad_s {
+            PreparedTensorBody::from_mass_matrix_tones(
+                projection.coordinates(),
+                projection.mass_matrix_kg().to_vec(),
+                projection.material_points().to_vec(),
+                projection.point_elements().to_vec(),
+                dt_s,
+                frequencies,
+                force_scale_n.ok_or(PreparedSolidError::Invalid("tone force scale required"))?,
+                controls,
+                gate,
+            )?
+        } else if let Some(force_scale_n) = force_scale_n {
             PreparedTensorBody::from_mass_matrix_affine(
                 projection.coordinates(),
                 projection.mass_matrix_kg().to_vec(),

@@ -39,7 +39,7 @@ impl PreparedTensorHistory<'_> {
     /// factor rank without reconstruction, inversion or spectral truncation.
     ///
     /// Geometry, basis, reference mass and positive step duration stay fixed.
-    /// Both bodies must have zero eigenstrain. Held/affine preparation and its
+    /// Both bodies must have zero eigenstrain. Held/affine/tone preparation and its
     /// conditioning scale may change because they carry no physical history.
     /// No time, relaxation or heat occurs here. The signed storage change has
     /// a distinct compensated parameter-work account; force work, heat, initial
@@ -155,7 +155,7 @@ impl PreparedTensorHistory<'_> {
                 allowance_j: next.controls.maximum_work_error_j,
             });
         }
-        let scratch = Scratch::new(next.states, n, next.affine.is_some())?;
+        let scratch = Scratch::new(next.states, n, next.source_blocks())?;
         let mut velocity = zeros(n)?;
         velocity.copy_from_slice(&self.velocity);
         poll(gate)?;
