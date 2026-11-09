@@ -8,7 +8,9 @@
 use super::*;
 use crate::assemble::{AssembledSystem, assemble_jacobian_with_optional_interfaces};
 use crate::solve::LineSearch;
-use fs_solver::FgmresState;
+use fs_solver::{FgmresState, LinearOp};
+use crate::PointwiseAmbientRadiation;
+use super::pointwise::RadiativeDirection;
 use crate::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
 
 /// Explicit nonlinear work, stopping and globalization policy for one endpoint.
@@ -95,7 +97,7 @@ pub struct ContactNonlinearStepSolution {
 
 pub(super) struct Evaluation {
     pub(super) system: AssembledSystem,
-    residual: Vec<f64>,
+    pub(super) residual: Vec<f64>,
     pub(super) norm: f64,
 }
 
@@ -125,7 +127,7 @@ impl BackwardEuler<'_> {
         config: StepConfig, nonlinear: NonlinearStepConfig,
     ) -> Result<NonlinearStepSolution, ConductionError> {
         self.advance_nonlinear_with_boundary(cx, problem, interfaces, old, dt_s,
-            config, nonlinear, false)
+            config, nonlinear, false, None)
     }
 
     /// Advance k(T) conduction with explicitly prescribed ENDPOINT temperatures.
@@ -153,14 +155,15 @@ impl BackwardEuler<'_> {
         config: StepConfig, nonlinear: NonlinearStepConfig,
     ) -> Result<NonlinearStepSolution, ConductionError> {
         self.advance_nonlinear_with_boundary(cx, problem, interfaces, old, dt_s,
-            config, nonlinear, true)
+            config, nonlinear, true, None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_nonlinear_with_boundary(
+    pub(super) fn advance_nonlinear_with_boundary(
         &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
         interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
         config: StepConfig, nonlinear: NonlinearStepConfig, prescribed: bool,
+        pointwise: Option<&PointwiseAmbientRadiation<'_>>,
     ) -> Result<NonlinearStepSolution, ConductionError> {
         poll(cx, 0)?;
         nonlinear.validate()?;
@@ -172,6 +175,9 @@ impl BackwardEuler<'_> {
         } else {
             self.admit_step(cx, problem, old, dt_s, config)?
         };
+        if pointwise.is_some_and(|radiation| !radiation.matches(problem.mesh, problem.boundary)) {
+            return Err(invalid("pointwise radiation must retain the exact capacity mesh and physical boundary"));
+        }
         let mut temperature = old.to_vec();
         if prescribed {
             for (slot, &vertex) in dofs.fixed().iter().enumerate() {
@@ -179,7 +185,8 @@ impl BackwardEuler<'_> {
                 temperature[vertex] = dofs.prescribed()[vertex];
             }
         }
-        let mut ev = self.evaluate_endpoint(cx, problem, interfaces, old, &temperature, dt_s, &dofs)?;
+        let mut ev = self.evaluate_nonlinear_endpoint(cx, problem, interfaces, old,
+            &temperature, dt_s, &dofs, pointwise)?;
         let initial_residual_j = ev.norm;
         let threshold_j = finite(nonlinear.residual_atol_j + nonlinear.residual_rtol * initial_residual_j)?;
         let mut updates = 0;
@@ -190,8 +197,10 @@ impl BackwardEuler<'_> {
             poll(cx, updates)?;
             if ev.norm <= threshold_j {
                 let residual_j = ev.norm;
-                let step = self.finish_step(cx, problem, interfaces, old, dt_s, config,
-                    &dofs, &ev.system, temperature, worst_linear_residual, work)?;
+                let radiation = pointwise.map(|owner| owner.load_and_report(cx, &temperature)).transpose()?;
+                let step = self.finish_step_with_external_heat(cx, problem, interfaces, old, dt_s, config,
+                    &dofs, &ev.system, temperature, worst_linear_residual, work,
+                    radiation.as_ref().map(|(load, report)| (load.as_slice(), report.outward_heat_w)))?;
                 return Ok(NonlinearStepSolution { step, nonlinear_iterations: updates,
                     backtracks, initial_residual_j, residual_j, threshold_j });
             }
@@ -219,7 +228,9 @@ impl BackwardEuler<'_> {
             let remaining = LinearConfig {
                 max_iterations: config.linear.max_iterations - work, ..config.linear
             };
-            let (direction, relative, iters) = solve_direction(cx, &matrix, &picard, &rhs, remaining, updates)?;
+            let radiation = pointwise.map(|owner| owner.assemble(cx, &temperature)).transpose()?;
+            let (direction, relative, iters) = solve_direction(cx, &matrix, &picard, &rhs, remaining, updates,
+                radiation.as_ref().map(|radiation| (radiation, &dofs, dt_s)))?;
             work += iters;
             worst_linear_residual = worst_linear_residual.max(relative);
             let mut alpha = 1.0;
@@ -231,10 +242,14 @@ impl BackwardEuler<'_> {
                     if index % 512 == 0 { poll(cx, index)?; }
                     trial[vertex] = temperature[vertex] + alpha * direction[index];
                 }
-                let candidate = if trial.iter().all(|t| t.is_finite()) {
-                    match self.evaluate_endpoint(cx, problem, interfaces, old, &trial, dt_s, &dofs) {
+                let candidate = if trial.iter().all(|t| t.is_finite()
+                    && (pointwise.is_none() || *t > 0.0)) {
+                    match self.evaluate_nonlinear_endpoint(cx, problem, interfaces, old,
+                        &trial, dt_s, &dofs, pointwise) {
                         Ok(candidate) => Some(candidate),
                         Err(ConductionError::OutsideTemperatureSpan { .. }) => None,
+                        Err(ConductionError::MaterialQuery { ref property, .. })
+                            if pointwise.is_some() && property == crate::SURFACE_EMISSIVITY_PROPERTY => None,
                         Err(error) => return Err(error),
                     }
                 } else { None };
@@ -363,7 +378,7 @@ impl BackwardEuler<'_> {
                 max_iterations: config.linear.max_iterations - work, ..config.linear
             };
             let (direction, relative, iters) =
-                solve_direction(cx, &matrix, &picard, &rhs, remaining, updates)?;
+                solve_direction(cx, &matrix, &picard, &rhs, remaining, updates, None)?;
             work += iters;
             worst_linear_residual = worst_linear_residual.max(relative);
 
@@ -458,12 +473,13 @@ impl BackwardEuler<'_> {
 fn solve_direction(
     cx: &Cx<'_>, matrix: &Csr, picard: &Csr, rhs: &[f64],
     config: LinearConfig, iteration: usize,
+    radiation: Option<(&crate::PointwiseRadiationAssembly, &DofMap, f64)>,
 ) -> Result<(Vec<f64>, f64, usize), ConductionError> {
     poll(cx, iteration)?;
     let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if scale == 0.0 { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
     let normalized: Vec<_> = rhs.iter().map(|v| v / scale).collect();
-    let op = CsrOp::general(matrix.clone());
+    let op = RadiativeDirection::new(cx, CsrOp::general(matrix.clone()), radiation);
     let pre = spd_preconditioner(picard);
     let restart = config.restart.min(rhs.len()).min(64);
     let mut state = FgmresState::new(&normalized, restart);
@@ -472,11 +488,13 @@ fn solve_direction(
         let before = state.iters;
         state.restart = restart.min(config.max_iterations - before);
         state.run(&op, &pre, &normalized, config.tolerance, 1);
+        op.check()?;
         if state.iters == before { break; }
     }
     poll(cx, state.iters)?;
     let mut applied = vec![0.0; rhs.len()];
-    matrix.spmv(&state.x, &mut applied);
+    op.apply(&state.x, &mut applied);
+    op.check()?;
     let residual = normalized.iter().zip(applied).map(|(b, a)| finite(b - a))
         .collect::<Result<Vec<_>, _>>()?;
     let relative = finite(norm2(&residual) / norm2(&normalized))?;

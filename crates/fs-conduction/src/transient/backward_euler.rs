@@ -24,6 +24,8 @@ mod adjoint;
 pub use adjoint::StepLinearization;
 mod radiation;
 pub use radiation::RadiationStepSolution;
+mod pointwise;
+pub use pointwise::{PointwiseRadiationEndpointEvaluation, PointwiseRadiationStepSolution};
 mod endpoint;
 pub use endpoint::EndpointEvaluation;
 pub(crate) mod enclosure;
@@ -387,6 +389,17 @@ impl<'m> BackwardEuler<'m> {
         dofs: &DofMap, system: &AssembledSystem, temperature: Vec<f64>,
         relative_residual: f64, krylov_iterations: usize) -> Result<StepSolution, ConductionError>
     {
+        self.finish_step_with_external_heat(cx, problem, interfaces, old, dt_s, config,
+            dofs, system, temperature, relative_residual, krylov_iterations, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_step_with_external_heat(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64, config: StepConfig,
+        dofs: &DofMap, system: &AssembledSystem, temperature: Vec<f64>,
+        relative_residual: f64, krylov_iterations: usize,
+        radiation: Option<(&[f64], f64)>) -> Result<StepSolution, ConductionError>
+    {
         super::validate_material_temperature(cx, problem, self, &temperature)?;
         // Account using the rounded temperature field that the caller actually
         // receives, not an unpublished high-accuracy correction vector.
@@ -397,9 +410,15 @@ impl<'m> BackwardEuler<'m> {
         let stored_energy_change_j = sum(applied.iter().copied())?;
         let (energy, robin_fluxes) = energy_balance(self.mesh, problem.boundary, problem.source,
             system, dofs, &temperature);
-        let dirichlet_in_w = finite(energy.dirichlet_in_w
+        let mut dirichlet_in_w = finite(energy.dirichlet_in_w
             + sum(dofs.fixed().iter().map(|&v| applied[v]))? / dt_s)?;
-        let net = finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
+        if let Some((load, _)) = radiation {
+            dirichlet_in_w = finite(dirichlet_in_w
+                + sum(dofs.fixed().iter().map(|&v| load[v]))?)?;
+        }
+        let mut net = finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w
+            - energy.robin_out_w)?;
+        if let Some((_, heat)) = radiation { net = finite(net - heat)?; }
         let energy_residual_j = finite(stored_energy_change_j - dt_s * net)?;
         if energy_residual_j.abs() > config.energy_tolerance_j {
             return Err(invalid(&format!("transient energy residual {energy_residual_j} J exceeds {} J", config.energy_tolerance_j)));

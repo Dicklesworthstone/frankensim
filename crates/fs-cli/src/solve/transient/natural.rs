@@ -179,7 +179,7 @@ pub(super) fn advance(
         *predictor.get_mut(vertex)
             .ok_or_else(|| bad("natural-convection prescribed vertex lies outside the history"))? = prescribed;
     }
-    let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     if let Some(lowering) = radiation {
         lowering.config.validate().map_err(lower)?;
     }
@@ -193,7 +193,7 @@ pub(super) fn advance(
         .checked_mul(airflow.map_or(0, |_| 2))
         .ok_or_else(|| bad("mixed transient airflow audit allowance overflows"))?;
     let max_radiation_trials = max_airflow_iterations
-        .checked_mul(radiation.map_or(0, |lowering| lowering.config.max_iterations))
+        .checked_mul(radiation.map_or(0, radiation::LoweredRadiation::max_solid_solves))
         .ok_or_else(|| bad("natural-convection radiation callback allowance overflows"))?;
     let max_solid_solves = max_airflow_iterations.checked_mul(radiation_factor)
         .and_then(|count| count.checked_mul(contact_config.map_or(1, contact::Config::max_responses)))
@@ -484,11 +484,18 @@ pub(super) fn advance(
                 // Flux and heat reports describe the same unchanged field
                 // under the freshly queried contact, radiation and convection.
                 contact::publish_physical(&mut endpoint, &physical, states)?;
-                if let Some(radiation) = radiative.as_mut() {
+                if let Some(endpoint) = radiative.as_mut() {
                     radiation_evidence = radiative::refresh(
-                        cx, radiation, enclosure, &physical, target, deadline,
+                        cx, endpoint, radiation, enclosure, &physical, target, deadline,
                     )?;
                 }
+            } else if radiation.is_some_and(radiation::LoweredRadiation::is_pointwise) {
+                let radiative = radiative.as_mut()
+                    .ok_or_else(|| bad("accepted natural endpoint lost its pointwise radiation"))?;
+                radiation_evidence = radiative::refresh(
+                    cx, radiative, radiation, enclosure, &physical, target, deadline,
+                )?;
+                radiative::publish_pointwise_physical(&mut endpoint, &physical);
             }
             let contact_evidence = match (contact_config, physical_contacts.as_ref()) {
                 (Some(controls), Some(states)) => Some(contact::step_receipt(

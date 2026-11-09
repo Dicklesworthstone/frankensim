@@ -543,7 +543,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         start_s: f64, dt_s: f64, end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner.step_sources(thermal_start, start_s, dt_s, end_s, check)
+        super::collect_source_rates(thermal_start, |emit| {
+            self.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
+        })
     }
 
     fn visit_step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,

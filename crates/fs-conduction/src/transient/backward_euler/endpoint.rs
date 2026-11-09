@@ -79,7 +79,28 @@ impl BackwardEuler<'_> {
         step_config: StepConfig,
         patches: Option<&[AmbientRadiationPatch]>,
     ) -> Result<EndpointEvaluation, ConductionError> {
+        self.evaluate_prescribed_endpoint_with_pointwise(cx, problem, interfaces, old,
+            candidate, dt_s, step_config, patches, None).map(|(physical, _)| physical)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_prescribed_endpoint_with_pointwise(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old: &[f64],
+        candidate: &[f64],
+        dt_s: f64,
+        step_config: StepConfig,
+        patches: Option<&[AmbientRadiationPatch]>,
+        pointwise: Option<&crate::PointwiseAmbientRadiation<'_>>,
+    ) -> Result<(EndpointEvaluation, Option<crate::PointwiseRadiationReport>), ConductionError> {
         poll(cx, 0)?;
+        if pointwise.is_some_and(|radiation| patches.is_some()
+            || !radiation.matches(problem.mesh, problem.boundary)) {
+            return Err(invalid("pointwise endpoint requires its exact physical mesh/boundary and no second radiation model"));
+        }
         let n = self.mesh.vertex_count();
         // Boundary objects may be reused by callers; validate their nodal
         // fields before any assembly or prescribed-index access.
@@ -127,9 +148,17 @@ impl BackwardEuler<'_> {
             boundary: &combined_boundary,
             ..problem
         };
-        let physical = self.evaluate_endpoint(
+        let mut physical = self.evaluate_endpoint(
             cx, physical_problem, interfaces, old, candidate, dt_s, &dofs,
         )?;
+        let pointwise = pointwise.map(|radiation| radiation.load_and_report(cx, candidate)).transpose()?;
+        if let Some((load, _)) = &pointwise {
+            for (index, (&vertex, residual)) in dofs.free().iter().zip(&mut physical.residual).enumerate() {
+                if index % 512 == 0 { poll(cx, index)?; }
+                *residual = finite(*residual + dt_s * load[vertex])?;
+            }
+            physical.norm = finite(fs_solver::norm2(&physical.residual))?;
+        }
         // The physical system supplies the reaction. Original boundary
         // integrals supply convection, without folding radiation into it.
         let (energy, convective_robin_fluxes) = energy_balance(
@@ -153,7 +182,7 @@ impl BackwardEuler<'_> {
                 finite(value)?;
             }
         }
-        let mut radiation_out_w = 0.0;
+        let mut radiation_out_w = pointwise.as_ref().map_or(0.0, |(_, report)| report.outward_heat_w);
         if let Some(patches) = patches {
             // An explicitly zero-flux radiation trace has no original Robin
             // row. Its actual area/temperature is available on the evaluated
@@ -187,16 +216,20 @@ impl BackwardEuler<'_> {
         self.capacity.spmv(&delta, &mut storage);
         poll(cx, n)?;
         let stored_energy_change_j = sum(storage.iter().copied())?;
-        let dirichlet_in_w = finite(
+        let mut dirichlet_in_w = finite(
             finite(energy.dirichlet_in_w)?
                 + sum(dofs.fixed().iter().map(|&vertex| storage[vertex]))? / dt_s,
         )?;
+        if let Some((load, _)) = &pointwise {
+            dirichlet_in_w = finite(dirichlet_in_w
+                + sum(dofs.fixed().iter().map(|&vertex| load[vertex]))?)?;
+        }
         let net_input_w = finite(
             source_w + dirichlet_in_w - neumann_out_w - convective_out_w - radiation_out_w,
         )?;
         let energy_residual_j = finite(stored_energy_change_j - dt_s * net_input_w)?;
         poll(cx, n)?;
-        Ok(EndpointEvaluation {
+        Ok((EndpointEvaluation {
             residual_norm_j: physical.norm,
             free_dofs: dofs.n(),
             stored_energy_change_j,
@@ -208,7 +241,7 @@ impl BackwardEuler<'_> {
             energy_residual_j,
             convective_robin_fluxes,
             combined_boundary,
-        })
+        }, pointwise.map(|(_, report)| report)))
     }
 }
 

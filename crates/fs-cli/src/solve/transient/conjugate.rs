@@ -282,7 +282,7 @@ pub(super) fn advance(
     let scaled_conductance_j_k =
         finite(dt_s * conductance_w_k, "step-scaled interface conductance")?;
     let mut config = exchange::exchange_config(false);
-    let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     if let Some(lowering) = radiation {
         lowering.config.validate().map_err(lower)?;
     }
@@ -292,7 +292,7 @@ pub(super) fn advance(
     let max_endpoint_evaluations = 2usize;
     let mut endpoint_evaluations = 0usize;
     let max_radiation_trials = config.max_iterations
-        .checked_mul(radiation.map_or(0, |lowering| lowering.config.max_iterations))
+        .checked_mul(radiation.map_or(0, radiation::LoweredRadiation::max_solid_solves))
         .ok_or_else(|| bad("transient airflow radiation callback allowance overflows"))?;
     let max_solid_solves = config
         .max_iterations
@@ -679,11 +679,18 @@ pub(super) fn advance(
         // Heat and source-state rows all describe the final physical air
         // references at this same field; counted inner solve evidence remains.
         contact::publish_physical(&mut last.endpoint, &physical, states)?;
-        if let Some(radiation) = last.radiation.as_mut() {
+        if let Some(endpoint) = last.radiation.as_mut() {
             last.radiation_evidence = radiative::refresh(
-                cx, radiation, enclosure, &physical, physical_residual_tolerance_j, deadline,
+                cx, endpoint, radiation, enclosure, &physical, physical_residual_tolerance_j, deadline,
             )?;
         }
+    } else if radiation.is_some_and(radiation::LoweredRadiation::is_pointwise) {
+        let radiative = last.radiation.as_mut()
+            .ok_or_else(|| bad("accepted airflow endpoint lost its pointwise radiation"))?;
+        last.radiation_evidence = radiative::refresh(
+            cx, radiative, radiation, enclosure, &physical, physical_residual_tolerance_j, deadline,
+        )?;
+        radiative::publish_pointwise_physical(&mut last.endpoint, &physical);
     }
     let contact_evidence = match (contact_config, physical_contacts.as_ref()) {
         (Some(controls), Some(states)) => Some(contact::step_receipt(

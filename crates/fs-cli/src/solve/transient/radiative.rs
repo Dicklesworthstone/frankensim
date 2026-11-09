@@ -55,6 +55,26 @@ pub(super) struct Step {
     pub(super) physical_energy: PhysicalEnergy,
 }
 
+fn pointwise_row(
+    report: &fs_conduction::PointwiseRadiationReport,
+    lowering: &radiation::LoweredRadiation,
+    physical: &EndpointEvaluation,
+    residual_tolerance_j: f64,
+    solid_iterations: usize,
+    krylov_iterations: usize,
+) -> Result<String, SolveRefusal> {
+    let exchange = radiation::pointwise_capacity_receipt(
+        report, lowering, physical.convective_out_w,
+    )?;
+    Ok(format!(
+        "{{\"model\":\"pointwise-p1\",\"solid_solves\":1,\"solid_iterations\":{solid_iterations},\"krylov_iterations\":{krylov_iterations},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"nonlinear_radiative_out_w\":{},\"exchange\":{exchange}}}",
+        number(physical.residual_norm_j)?, number(residual_tolerance_j)?,
+        number(physical.energy_residual_j)?, number(physical.dirichlet_in_w)?,
+        number(physical.convective_out_w)?, number(physical.neumann_out_w)?,
+        number(physical.radiation_out_w)?,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
@@ -79,6 +99,62 @@ pub(super) fn advance(
     if temperature_contacts.is_some() {
         contact::admit_radiation(Some(lowering), model)?;
     }
+    if lowering.is_pointwise() {
+        if model.is_some() || lowering.is_material() || temperature_contacts.is_some() {
+            return Err(bad("capacity pointwise ambient radiation requires fixed emissivity and frozen interfaces"));
+        }
+        let owner = fs_conduction::PointwiseAmbientRadiation::new(
+            cx, problem.mesh, problem.boundary, &lowering.patches,
+        ).map_err(lower)?;
+        let solved = engine.advance_prescribed_with_pointwise_ambient_radiation(
+            cx, problem, interfaces, old, dt_s, config,
+            nonlinear.ok_or_else(|| bad("pointwise capacity radiation lost its Newton controls"))?,
+            &owner,
+        ).map_err(lower)?;
+        poll(cx, deadline)?;
+        let physical = &solved.physical;
+        let response = &solved.conduction;
+        let radiation_evidence = pointwise_row(&solved.radiation, lowering, physical,
+            response.threshold_j, response.nonlinear_iterations, response.step.krylov_iterations)?;
+        let solid_iterations = response.nonlinear_iterations;
+        let krylov_iterations = response.step.krylov_iterations;
+        Ok(Step {
+            nonlinear_evidence: nonlinear_row(response)?,
+            radiation_evidence,
+            contact_evidence: None,
+            radiation_trials: 1,
+            solid_solves: 1,
+            nonlinear_updates: response.nonlinear_iterations,
+            nonlinear_backtracks: response.backtracks,
+            krylov_iterations: response.step.krylov_iterations,
+            physical_residual_tolerance_j: response.threshold_j,
+            physical_energy: PhysicalEnergy::physical(physical),
+            conduction: solved.conduction.step,
+            radiation: RadiativeEndpoint::Pointwise {
+                convective_robin_fluxes: physical.convective_robin_fluxes.clone(),
+                convective_out_w: physical.convective_out_w,
+                report: solved.radiation,
+                solid_solves: 1,
+                solid_iterations,
+                krylov_iterations,
+            },
+        })
+    } else {
+        advance_patch_mean(cx, engine, problem, interfaces, temperature_contacts,
+            contact_config, old, dt_s, config, nonlinear, lowering, model, deadline)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_patch_mean(
+    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_config: Option<contact::Config>, old: &[f64], dt_s: f64,
+    config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
+    lowering: &radiation::LoweredRadiation, model: Option<&enclosure::Model>,
+    deadline: Option<(Instant, f64)>,
+) -> Result<Step, SolveRefusal> {
     if let Some(contacts) = temperature_contacts.filter(|_| model.is_none()) {
         let controls = contact_config
             .ok_or_else(|| bad("capacity radiation lost its live contact controls"))?;
@@ -221,6 +297,7 @@ pub(super) fn advance(
 pub(super) fn refresh(
     cx: &Cx<'_>,
     endpoint: &mut RadiativeEndpoint,
+    lowering: Option<&radiation::LoweredRadiation>,
     model: Option<&enclosure::Model>,
     physical: &EndpointEvaluation,
     physical_residual_tolerance_j: f64,
@@ -228,6 +305,22 @@ pub(super) fn refresh(
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
     match endpoint {
+        RadiativeEndpoint::Pointwise {
+            convective_robin_fluxes, convective_out_w, report,
+            solid_iterations, krylov_iterations, ..
+        } if model.is_none() => {
+            let lowering = lowering.filter(|row| row.is_pointwise())
+                .ok_or_else(|| bad("capacity pointwise refresh lost its original declaration"))?;
+            // The wall field and its original radiation declaration are
+            // unchanged; only the surrounding convection law was refreshed.
+            if report.outward_heat_w.to_bits() != physical.radiation_out_w.to_bits() {
+                return Err(bad("capacity pointwise refresh changed its accepted local emission"));
+            }
+            *convective_robin_fluxes = physical.convective_robin_fluxes.clone();
+            *convective_out_w = physical.convective_out_w;
+            pointwise_row(report, lowering, physical, physical_residual_tolerance_j,
+                *solid_iterations, *krylov_iterations)
+        }
         RadiativeEndpoint::Ambient {
             combined_boundary, convective_robin_fluxes, convective_out_w, report, ..
         } if model.is_none() => {
@@ -250,6 +343,21 @@ pub(super) fn refresh(
     }
 }
 
+/// Publish the accepted convection and reactions after an outer law refresh.
+/// The field, linear evidence and frozen-contact fluxes remain those of the
+/// counted pointwise response; the fresh audit uses that exact same field.
+pub(super) fn publish_pointwise_physical(
+    endpoint: &mut StepSolution, physical: &EndpointEvaluation,
+) {
+    endpoint.robin_fluxes = physical.convective_robin_fluxes.clone();
+    endpoint.robin_out_w = physical.convective_out_w;
+    endpoint.source_w = physical.source_w;
+    endpoint.neumann_out_w = physical.neumann_out_w;
+    endpoint.dirichlet_in_w = physical.dirichlet_in_w;
+    endpoint.stored_energy_change_j = physical.stored_energy_change_j;
+    endpoint.energy_residual_j = physical.energy_residual_j;
+}
+
 /// No primal step is taken here. Candidate and old temperature retain their
 /// identities while the actual convection and reflected exchange are audited.
 #[allow(clippy::too_many_arguments)]
@@ -263,7 +371,17 @@ pub(super) fn evaluate(
     if lowering.is_some_and(radiation::LoweredRadiation::is_enclosure) != model.is_some() {
         return Err(bad("capacity physical boundary audit lost its declared radiation model"));
     }
-    let physical = if let Some(model) = model {
+    let physical = if let Some(lowering) = lowering.filter(|row| row.is_pointwise()) {
+        if model.is_some() || lowering.is_material() {
+            return Err(bad("capacity pointwise endpoint requires its original fixed-emissivity ambient owner"));
+        }
+        let owner = fs_conduction::PointwiseAmbientRadiation::new(
+            cx, problem.mesh, problem.boundary, &lowering.patches,
+        ).map_err(lower)?;
+        engine.evaluate_prescribed_pointwise_ambient_endpoint(
+            cx, problem, interfaces, old, candidate, dt_s, config, &owner,
+        ).map_err(lower)?.physical
+    } else if let Some(model) = model {
         let lowering = lowering.ok_or_else(|| bad("enclosure endpoint lost its radiation policy"))?;
         match model {
             enclosure::Model::Closed(model) => engine.evaluate_prescribed_enclosure_endpoint(

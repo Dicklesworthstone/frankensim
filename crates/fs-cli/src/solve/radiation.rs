@@ -25,6 +25,7 @@ mod material;
 mod pointwise;
 use pointwise::PointwiseEndpoint;
 pub(super) use pointwise::receipt as pointwise_receipt;
+pub(super) use pointwise::capacity_receipt as pointwise_capacity_receipt;
 
 pub(super) struct LoweredRadiation {
     pub(super) patches: Vec<AmbientRadiationPatch>,
@@ -331,6 +332,20 @@ impl SolidSolution {
         enclosure: Option<fs_conduction::PointwiseEnclosureReport>,
     ) -> Result<Self, SolveRefusal> {
         let endpoint = PointwiseEndpoint::new(ambient, enclosure)?;
+        Self::from_local_radiation_endpoint(conduction, endpoint)
+    }
+
+    pub(super) fn from_pointwise_capacity_endpoint(
+        conduction: ConductionSolution,
+        report: fs_conduction::PointwiseRadiationReport,
+    ) -> Result<Self, SolveRefusal> {
+        Self::from_local_radiation_endpoint(conduction, PointwiseEndpoint::CapacityAmbient(report))
+    }
+
+    fn from_local_radiation_endpoint(
+        conduction: ConductionSolution,
+        endpoint: PointwiseEndpoint,
+    ) -> Result<Self, SolveRefusal> {
         // Original convection is unmodified by the pointwise owner. The common
         // energy row includes radiation, so retain its independently summed
         // convection account rather than inferring it from that combined row.

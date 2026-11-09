@@ -381,6 +381,52 @@ fn g1_native_transient_natural_radiation_and_conductivity_share_the_physical_end
 }
 
 #[test]
+fn g1_native_capacity_pointwise_radiation_shares_the_actual_natural_endpoint() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for reservoir in [270.0, 350.0] {
+        let (mut spec, bytes) = regular_project(330.0, AMBIENT_K, 5.0);
+        radiation_product::declare(&mut spec, &card, "air", reservoir);
+        let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .radiation.as_mut().unwrap();
+        declaration.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+        declaration.max_iterations = 1;
+        let solved = run(&spec, &cards, &bytes);
+        for grid in ["coarse", "fine"] {
+            let mut old = 330.0;
+            for row in solved.rows(grid) {
+                let dt = n(row, "dt_s");
+                let radiative = |t: f64| EMISSIVITY * SIGMA * area_m2()
+                    * (t.powi(4) - reservoir.powi(4));
+                let expected = bisect(300.0, 380.0, |t| {
+                    CAPACITY_J_K * (t - old) / dt
+                        + coefficient(t, AMBIENT_K, LENGTH_M).0 * area_m2() * (t - AMBIENT_K)
+                        + radiative(t) - 5.0
+                });
+                let actual = n(row, "final_region_max_k");
+                close(actual, expected, 3e-8);
+                let h = checked_natural(row, actual, AMBIENT_K, area_m2(), 1);
+                let natural = row.get("natural").unwrap();
+                let radiation = row.get("radiation").unwrap();
+                assert_eq!(radiation.str_field("model"), Some("pointwise-p1"));
+                close(n(radiation, "solid_solves"), 1.0, 0.0);
+                close(n(natural, "radiation_trials"), n(natural, "solid_solves"), 0.0);
+                close(n(radiation, "convective_out_w"),
+                    h * area_m2() * (actual - AMBIENT_K), 2e-6);
+                close(n(radiation, "nonlinear_radiative_out_w"), radiative(actual), 2e-6);
+                close(n(natural, "physical_radiative_out_w"), radiative(actual), 2e-6);
+                close(n(row, "stored_energy_change_j"), CAPACITY_J_K * (expected - old), 2e-6);
+                close(n(row, "net_input_w"),
+                    5.0 - h * area_m2() * (actual - AMBIENT_K) - radiative(actual), 2e-6);
+                old = expected;
+            }
+            if grid == "fine" {
+                for &temperature in &solved.temperature { close(temperature, old, 3e-8); }
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_native_transient_natural_refuses_equilibrium_actual_domain_escape_and_exhausted_work() {
     for failure in ["equilibrium", "actual-rayleigh-domain", "radiation-work"] {
         let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);

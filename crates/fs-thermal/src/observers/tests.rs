@@ -398,6 +398,62 @@ fn g1_interval_and_start_sources_cancel_only_in_the_native_heat_owner() {
 }
 
 #[test]
+fn g1_streamed_interval_readback_matches_native_advection_heat_and_history() {
+    use crate::enthalpy::advection::{Advected, MassFlow};
+    #[derive(Clone, Default)]
+    struct Streamed { prepared: usize, accepted: usize }
+    impl DepositionObserver for Streamed {
+        type Error = DepositionError;
+        fn requires_step_interval(&self) -> bool { true }
+        fn visit_step_sources(&mut self, thermal: &DepositionSimulation<'_>,
+            start: f64, dt: f64, end: f64,
+            emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+            check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> {
+            check()?;
+            assert_eq!(thermal.time_s(), start);
+            assert_eq!(dt, end-start);
+            assert_eq!(self.prepared, self.accepted, "physical interval evaluated twice");
+            self.prepared += 1;
+            for power in [2.0_f64.powi(80), 1.0, -2.0_f64.powi(80)] {
+                emit(CellId(1), power)?;
+            }
+            Ok(())
+        }
+        fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>, _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> {
+            assert_eq!(self.prepared, self.accepted+1);
+            self.accepted += 1;
+            Ok(())
+        }
+    }
+    let (thermal, _) = interval_initial().advance_to(0.0, config(), || Ok(())).unwrap();
+    let flow = vec![MassFlow { id: 10, a: CellId(1), b: CellId(2), kg_s: 1.0 },
+        MassFlow { id: 11, a: CellId(2), b: CellId(1), kg_s: 1.0 }];
+    let observer = Advected::new(Streamed::default(), flow.clone(), 2).unwrap();
+    let mut readback = observer.clone();
+    let watts = readback.step_sources(&thermal, 0.0, 0.01, 0.01, &mut || Ok(())).unwrap();
+    assert_eq!(watts, BTreeMap::from([(CellId(1), 1.0)]));
+    assert_eq!(readback.inner().prepared, 1);
+    let mut reconstructed = observer.clone().with_optional_reconstruction(None).unwrap();
+    assert_eq!(reconstructed.step_sources(&thermal, 0.0, 0.01, 0.01, &mut || Ok(())).unwrap(), watts);
+    assert_eq!(reconstructed.inner().prepared, 1);
+    let reference = Advected::new(IntervalProducer::new(1.0, 0.0), flow, 2).unwrap();
+    let (expected, _, expected_energy) = thermal.advance_observed(
+        &reference, 0.05, config(), || Ok(())).unwrap();
+    let (next, accepted, energy) = thermal.advance_observed(
+        &observer, 0.05, config(), || Ok(())).unwrap();
+    assert_eq!(next.cells(), expected.cells());
+    assert_eq!(energy, expected_energy);
+    assert!(next.cells()[&CellId(2)].specific_h_j_kg > 0.0);
+    assert_eq!(accepted.inner().prepared, energy.substeps);
+    assert_eq!(accepted.inner().accepted, energy.substeps);
+    assert_eq!(observer.inner().prepared, 0);
+}
+
+#[test]
 fn g1_g3_implicit_sources_share_the_compensated_start_interval_balance() {
     use crate::enthalpy::conduction::{ConductionObserver, ConductiveLink};
     use crate::enthalpy::conduction::implicit::{ImplicitConductionChain,

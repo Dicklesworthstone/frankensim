@@ -51,6 +51,156 @@ fn step_controls() -> StepConfig {
     }
 }
 
+// Independent simplex moments: integral lambda^alpha dA =
+// 2 A product(alpha!)/(sum(alpha)+2)!. Expanding the quartic with an
+// additional basis function yields A/105 * sum (alpha_i+1) T^alpha.
+fn local_radiation_load(t: [f64; 3], area: f64, ambient: f64) -> [f64; 3] {
+    let mut values = [0.0; 3];
+    for a in 0_i32..=4 {
+        for b in 0_i32..=4 - a {
+            let c = 4 - a - b;
+            let monomial = t[0].powi(a) * t[1].powi(b) * t[2].powi(c);
+            for (i, exponent) in [a, b, c].into_iter().enumerate() {
+                values[i] += f64::from(exponent + 1) * monomial / 105.0;
+            }
+        }
+    }
+    values.map(|emission| 0.8 * STEFAN_BOLTZMANN_W_M2_K4 * area
+        * (emission - ambient.powi(4) / 3.0))
+}
+
+#[test]
+fn pointwise_capacity_retains_local_quartic_nonlinear_bulk_and_prescribed_storage() {
+    with_cx(|cx| {
+        let mesh = tet();
+        let fixed = 330.0;
+        let boundary = driven_boundary(&mesh, fixed);
+        let fallback = ConductivityModel::isotropic_declared(999.0).unwrap();
+        let curve = ConductivityModel::isotropic(ConductivityTable::declared_curve(
+            vec![(250.0, 15.0), (500.0, 40.0)],
+        ).unwrap());
+        let assigned = ElementMaterials::new(
+            MaterialTable::new([(MaterialId(7), curve)]).unwrap(), vec![MaterialId(7)],
+        ).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &fallback, source: &source, element_materials: Some(&assigned) };
+        let engine = BackwardEuler::uniform(cx, &mesh,
+            VolumetricHeatCapacity::declared(15.0).unwrap()).unwrap();
+        let old = [300.0; 4];
+        let mut temperatures = Vec::new();
+        for ambient in [300.0, 450.0] {
+            let patches = [patch(0.8, ambient)];
+            let radiation = fs_conduction::PointwiseAmbientRadiation::new(
+                cx, &mesh, &boundary, &patches,
+            ).unwrap();
+            let solve = || engine.advance_prescribed_with_pointwise_ambient_radiation(
+                cx, problem, None, &old, DT, step_controls(),
+                NonlinearStepConfig::default(), &radiation,
+            ).unwrap();
+            let result = solve();
+            let t = result.conduction.step.temperature[0];
+            let residual = |t: f64| {
+                let k = 0.1 * (t + 3.0 * fixed) / 4.0 - 10.0;
+                CAPACITY_PER_NODE * (t - old[0]) + DT * (
+                    k * (t - fixed) / 2.0 + 5.0 * (t + fixed - 600.0) / 4.0
+                        + 3.0 * local_radiation_load([t, fixed, fixed], 0.5, ambient)[0])
+            };
+            let mut lo = 250.0;
+            let mut hi = 500.0;
+            assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                if residual(mid) > 0.0 { hi = mid; } else { lo = mid; }
+            }
+            assert!((t - 0.5 * (lo + hi)).abs() < 2e-8);
+            assert!(residual(t).abs() < 1e-8);
+            assert_eq!(&result.conduction.step.temperature[1..], &[fixed; 3]);
+            let heat: f64 = 3.0 * local_radiation_load([t, fixed, fixed], 0.5, ambient).iter().sum::<f64>();
+            let convection = 1.5 * 5.0 * ((t + 2.0 * fixed) / 3.0 - 300.0);
+            let storage = CAPACITY_PER_NODE * (t + 3.0 * fixed - 1200.0);
+            assert!((result.radiation.outward_heat_w - heat).abs() < 1e-8);
+            assert!((result.physical.convective_out_w - convection).abs() < 1e-8);
+            assert!((result.physical.stored_energy_change_j - storage).abs() < 1e-9);
+            assert!((result.physical.dirichlet_in_w - storage / DT - convection - heat).abs() < 1e-6);
+            assert!(result.physical.residual_norm_j <= result.conduction.threshold_j);
+            assert!(result.physical.energy_residual_j.abs() <= step_controls().energy_tolerance_j);
+            assert_eq!(result.physical.convective_robin_fluxes[0].mean_htc_w_per_m2_k, 5.0);
+            assert!(result.conduction.step.krylov_iterations <= step_controls().linear.max_iterations);
+            assert!(result.conduction.nonlinear_iterations > 1);
+            let repeated = solve();
+            assert_eq!(result.conduction.step.temperature, repeated.conduction.step.temperature);
+            assert_eq!(result.radiation, repeated.radiation);
+            let limited = NonlinearStepConfig { max_iterations: 1, ..NonlinearStepConfig::default() };
+            assert!(engine.advance_prescribed_with_pointwise_ambient_radiation(
+                cx, problem, None, &old, DT, step_controls(), limited, &radiation,
+            ).is_err());
+            temperatures.push(t);
+        }
+        assert!(temperatures[1] > temperatures[0]);
+        assert_eq!(old, [300.0; 4]);
+    });
+}
+
+#[test]
+fn pointwise_capacity_audit_keeps_local_defects_and_radiation_only_heat() {
+    with_cx(|cx| {
+        let mesh = tet();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .remainder("cooler", ThermalBc::adiabatic()).unwrap().finish().unwrap();
+        let material = ConductivityModel::isotropic_declared(6.0).unwrap();
+        let source = ScalarField::Uniform(7.0);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, source: &source, element_materials: None };
+        let engine = BackwardEuler::uniform(cx, &mesh,
+            VolumetricHeatCapacity::declared(15.0).unwrap()).unwrap();
+        let old = [300.0; 4];
+        let candidate = [300.0, 310.0, 350.0, 400.0];
+        let patches = [patch(0.8, 300.0)];
+        let radiation = fs_conduction::PointwiseAmbientRadiation::new(
+            cx, &mesh, &boundary, &patches,
+        ).unwrap();
+        let got = engine.evaluate_prescribed_pointwise_ambient_endpoint(
+            cx, problem, None, &old, &candidate, DT, step_controls(), &radiation,
+        ).unwrap();
+        let mut loads = [0.0; 4];
+        for face in mesh.boundary() {
+            let local = local_radiation_load(face.vertices.map(|v| candidate[v as usize]), face.area, 300.0);
+            for (i, &v) in face.vertices.iter().enumerate() { loads[v as usize] += local[i]; }
+        }
+        let bulk = [3.0 * candidate[0] - candidate[1..].iter().sum::<f64>(),
+            candidate[1] - candidate[0], candidate[2] - candidate[0], candidate[3] - candidate[0]];
+        let residual: [f64; 4] = std::array::from_fn(|i|
+            CAPACITY_PER_NODE * (candidate[i] - old[i]) + DT * (bulk[i] + loads[i] - 7.0 / 24.0));
+        let norm = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let heat = loads.iter().sum::<f64>();
+        let storage = CAPACITY_PER_NODE * candidate.iter().zip(old).map(|(t, old)| t - old).sum::<f64>();
+        assert!((got.physical.residual_norm_j - norm).abs() < 1e-9);
+        assert!((got.physical.radiation_out_w - heat).abs() < 1e-9);
+        assert!((got.physical.energy_residual_j - storage - DT * (heat - 7.0 / 6.0)).abs() < 1e-9);
+        assert!(got.physical.convective_robin_fluxes.is_empty());
+        assert_eq!(got.physical.convective_out_w, 0.0);
+        assert!(got.physical.residual_norm_j > 1.0);
+        let clone = boundary.clone();
+        assert!(engine.evaluate_prescribed_pointwise_ambient_endpoint(
+            cx, ConductionProblem { boundary: &clone, ..problem }, None, &old,
+            &candidate, DT, step_controls(), &radiation,
+        ).is_err());
+        let mut outside = candidate;
+        outside[0] = 501.0;
+        assert!(engine.evaluate_prescribed_pointwise_ambient_endpoint(
+            cx, problem, None, &old, &outside, DT, step_controls(), &radiation,
+        ).is_err());
+        with_cancelled_cx(|cancelled| {
+            assert!(matches!(engine.advance_prescribed_with_pointwise_ambient_radiation(
+                cancelled, problem, None, &old, DT, step_controls(),
+                NonlinearStepConfig::default(), &radiation,
+            ), Err(ConductionError::Cancelled { .. })));
+        });
+        assert_eq!(old, [300.0; 4]);
+    });
+}
+
 /// Independent one-free-node residual. This unit right tet has V=1/6,
 /// lumped C_00=rho_cp/24, K_00=k/2, and three coordinate faces of area 1/2.
 /// The Robin row is h*(t+fixed-2*reference)/4, rather than a uniform flux.

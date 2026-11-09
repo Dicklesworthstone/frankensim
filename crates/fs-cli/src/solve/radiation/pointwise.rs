@@ -6,6 +6,7 @@ mod material;
 
 pub(super) enum PointwiseEndpoint {
     Ambient(PointwiseRadiationReport),
+    CapacityAmbient(PointwiseRadiationReport),
     Enclosure(PointwiseEnclosureReport),
 }
 
@@ -33,6 +34,7 @@ impl PointwiseEndpoint {
     ) -> Result<String, SolveRefusal> {
         match self {
             Self::Ambient(report) => receipt(Some(report), None, lowering, convective_out_w),
+            Self::CapacityAmbient(report) => capacity_receipt(report, lowering, convective_out_w),
             Self::Enclosure(report) => receipt(None, Some(report), lowering, convective_out_w),
         }
     }
@@ -59,6 +61,30 @@ pub(in crate::solve) fn receipt(
     enclosure: Option<&PointwiseEnclosureReport>,
     lowering: &LoweredRadiation,
     convective_out_w: f64,
+) -> Result<String, SolveRefusal> {
+    receipt_with_storage(ambient, enclosure, lowering, convective_out_w,
+        "enthalpy-newton-fgmres", SCOPE)
+}
+
+pub(in crate::solve) fn capacity_receipt(
+    report: &PointwiseRadiationReport,
+    lowering: &LoweredRadiation,
+    convective_out_w: f64,
+) -> Result<String, SolveRefusal> {
+    if lowering.is_enclosure() || lowering.is_material() {
+        return Err(bad("pointwise capacity receipt requires fixed-emissivity ambient exchange"));
+    }
+    receipt_with_storage(Some(report), None, lowering, convective_out_w,
+        "capacity-newton-fgmres", CAPACITY_SCOPE)
+}
+
+fn receipt_with_storage(
+    ambient: Option<&PointwiseRadiationReport>,
+    enclosure: Option<&PointwiseEnclosureReport>,
+    lowering: &LoweredRadiation,
+    convective_out_w: f64,
+    solver: &str,
+    scope: &str,
 ) -> Result<String, SolveRefusal> {
     if !lowering.is_pointwise() {
         return Err(bad("pointwise radiation report has a patch-mean declaration"));
@@ -129,10 +155,12 @@ pub(in crate::solve) fn receipt(
         return Err(bad("pointwise radiation omitted a declared surface"));
     }
     Ok(format!(
-        "{{\"model\":\"{model}\",\"spatial_model\":\"pointwise\",\"surfaces\":[{}],\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{}{extra},\"solver\":\"enthalpy-newton-fgmres\",\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"model\":\"{model}\",\"spatial_model\":\"pointwise\",\"surfaces\":[{}],\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{}{extra},\"solver\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         rows.join(","), num(convective_out_w)?, num(heat)?, num(heat)?,
-        json_string(SCOPE),
+        json_string(solver), json_string(scope),
     ))
 }
+
+const CAPACITY_SCOPE: &str = "Local P1 fourth-power emission and its analytic tangent enter the same backward-Euler Newton solve as conduction and declared temperature-independent heat capacity. Positive degree-five surface quadrature retains the actual nodal temperature field. Fixed emissivity comes from the declared source query and every surface node must remain in that claim's temperature support. Ambient surfaces see their declared black reservoir with unit view factor. The fresh physical endpoint includes original convection, prescribed heat flux and boundary-node storage reactions; original convection alone heats air. Every trial retains the same old temperature history. Reported mean temperature is an observation, not the emission input. This capacity composition supplies no latent storage, pointwise enclosure, local-temperature emissivity, live-contact or trajectory-adjoint support. No continuum bound or experimental validation is inferred.";
 
 const SCOPE: &str = "Local P1 fourth-power emission and its analytic tangent enter the same total-enthalpy Newton solve as conduction, contact and latent storage. Positive degree-five surface quadrature retains the actual nodal temperature field. Fixed emissivity comes from the declared source query and every surface node must remain in that claim's temperature support. Ambient surfaces see their declared black reservoir with unit view factor; enclosures retain patch-uniform irradiation from the declared reciprocal view factors. Open-enclosure row deficits see one explicit black environment whose independently evaluated power remains outside the solid degrees of freedom and air convection. Physical surface heat enters solid storage once; enclosure_energy_closure_w includes the bath when present. Original convection alone heats air. Reported mean temperature is an observation, not the emission input. Supported trajectory adjoints separately bind the complete spatial tangent and reflected transpose; open enclosures expose independent surface emissivities and one shared black-environment temperature control through that same operator. No moving visibility, participating medium, emissivity-temperature derivative, continuum bound or experimental validation is inferred.";

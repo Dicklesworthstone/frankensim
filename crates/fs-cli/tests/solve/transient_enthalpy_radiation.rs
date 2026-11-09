@@ -1,4 +1,4 @@
-//! G1 native total-enthalpy radiation against an independent uniform P1 mode.
+//! G1 native stored-energy radiation against an independent uniform P1 mode.
 //!
 //! The regular tetrahedron makes every nodal mass and boundary trace equal.
 //! Its accepted backward-Euler state therefore obeys one scalar energy law;
@@ -90,6 +90,16 @@ fn time(spec: &mut ProjectSpec) -> &mut ConductionTransient {
         .transient
         .as_mut()
         .unwrap()
+}
+
+fn use_reference_capacity(spec: &mut ProjectSpec) {
+    let policy = time(spec);
+    policy.enthalpy = None;
+    policy.capacities = vec![fs_project::TransientRegionCapacity {
+        region: "air".into(),
+        volumetric_heat_capacity: QtyAny::new(DENSITY * CP, dims::VOLUMETRIC_HEAT_CAPACITY),
+        source: "synthetic unchanged reference capacity".into(),
+    }];
 }
 
 fn project(card: &str, reservoir: f64) -> ProjectSpec {
@@ -556,8 +566,11 @@ fn g1_native_radiating_latent_plateau_accounts_for_pulse_and_boundary_energy_onc
 #[test]
 fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_cooling_roots() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
-    for reservoir in [270.0, 400.0] {
+    for (capacity, reservoir) in [(false, 270.0), (false, 400.0), (true, 270.0), (true, 400.0)] {
         let mut spec = project(&card, reservoir);
+        if capacity {
+            use_reference_capacity(&mut spec);
+        }
         let radiation = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
             .radiation.as_mut().unwrap();
         radiation.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
@@ -569,11 +582,16 @@ fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_co
         let work = history.get("radiation").unwrap();
         assert_eq!(work.str_field("method"), Some("implicit-pointwise-p1-gray-radiation"));
         close(n(work, "total_trials"), n(history, "total_steps"), 0.0);
-        close(n(work, "max_trials_per_boundary_iteration"), 1.0, 0.0);
+        let work_key = if capacity { "max_trials_per_coupling_iteration" }
+            else { "max_trials_per_boundary_iteration" };
+        close(n(work, work_key), 1.0, 0.0);
         let final_report = solved.receipt.get("radiation").unwrap();
         assert_eq!(final_report.str_field("model"),
             Some("pointwise-p1-gray-surface-to-black-reservoir"));
         assert_eq!(final_report.str_field("spatial_model"), Some("pointwise"));
+        let expected_solver = if capacity { "capacity-newton-fgmres" }
+            else { "enthalpy-newton-fgmres" };
+        assert_eq!(final_report.str_field("solver"), Some(expected_solver));
         let surface = &final_report.get("surfaces").unwrap().as_array().unwrap()[0];
         assert_eq!(surface.str_field("card"), Some(card.as_str()));
         close(n(surface, "area_m2"), area_m2(), 2e-12);
@@ -584,12 +602,16 @@ fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_co
                 let expected = uniform_step(old, dt, reservoir, 5.0);
                 close(n(row, "final_region_max_k"), expected, 2e-8);
                 let radiation = row.get("radiation").unwrap();
+                assert_eq!(radiation.get("exchange").unwrap().str_field("solver"),
+                    Some(expected_solver));
                 close(n(radiation, "solid_solves"), 1.0, 0.0);
                 close(n(radiation, "convective_out_w"), convective_w(expected), 3e-6);
                 close(n(radiation, "nonlinear_radiative_out_w"),
                     radiative_w(expected, reservoir), 3e-6);
                 close(n(row, "stored_energy_change_j"),
                     mass_kg(DENSITY) * CP * (expected - old), 3e-6);
+                close(n(row, "net_input_w"),
+                    5.0 - convective_w(expected) - radiative_w(expected, reservoir), 3e-6);
                 assert!(n(radiation, "physical_residual_j")
                     <= n(radiation, "physical_residual_threshold_j"));
                 assert!(n(radiation, "physical_energy_residual_j").abs()
@@ -608,23 +630,20 @@ fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_co
 }
 
 #[test]
-fn g0_pointwise_radiation_refuses_unsupported_storage_and_bounds_before_publishing_a_field() {
+fn g0_pointwise_radiation_refuses_unsupported_objectives_before_publishing_a_field() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
-    for variant in ["steady", "capacity", "mean-bound"] {
+    for variant in ["steady", "capacity-adjoint", "mean-bound"] {
         let mut spec = project(&card, 270.0);
         spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
             .radiation.as_mut().unwrap().spatial_model =
                 Some(fs_project::RadiationSpatialModel::Pointwise);
         match variant {
             "steady" => spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient = None,
-            "capacity" => {
-                let time = time(&mut spec);
-                time.enthalpy = None;
-                time.capacities = vec![fs_project::TransientRegionCapacity {
-                    region: "air".into(),
-                    volumetric_heat_capacity: QtyAny::new(DENSITY * CP, dims::VOLUMETRIC_HEAT_CAPACITY),
-                    source: "synthetic unchanged reference capacity".into(),
-                }];
+            "capacity-adjoint" => {
+                use_reference_capacity(&mut spec);
+                spec.outputs.as_mut().unwrap().push(OutputRequest {
+                    name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
+                });
             }
             _ => spec.outputs.as_mut().unwrap().push(OutputRequest {
                 name: "temperature-volume-mean-bound".into(), kind: "report".into(), region: None,

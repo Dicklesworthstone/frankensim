@@ -49,7 +49,7 @@ pub(super) mod spatial;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model. Declared closed/open gray-diffuse enclosures use the shared reflected-radiosity owner with genuine declared volumetric capacity, original convection and prescribed-flux heat, and an independent fresh endpoint residual and storage-energy gate. The explicit black environment has no solid trace or capacity; only physical-surface radiation enters the solid outward sum and original convection alone heats air. Every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, latent heat or undeclared transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the selected shared area-mean gray-patch or exact pointwise P1 fixed-emissivity model. Pointwise emission and its analytic tangent enter the capacity Newton solve; its fresh endpoint audit retains original convection, prescribed-flux heat and boundary-node storage reactions. Capacity pointwise enclosures, temperature-dependent emissivity, live contacts and trajectory adjoints remain unclaimed. Declared closed/open gray-diffuse enclosures use the shared reflected-radiosity owner with genuine declared volumetric capacity, original convection and prescribed-flux heat, and an independent fresh endpoint residual and storage-energy gate. The explicit black environment has no solid trace or capacity; only physical-surface radiation enters the solid outward sum and original convection alone heats air. Every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, latent heat or undeclared transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
@@ -142,14 +142,28 @@ pub(super) fn no_claim(spec: &ProjectSpec) -> &'static str {
 pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     // Also reject a transient-adjoint output on a steady project; an ignored
     // report request must never look like a completed derivative calculation.
-    let _ = adjoint::requested(spec)?;
+    let objective = adjoint::requested(spec)?;
     if radiation::pointwise_requested(spec) {
-        if !policy(spec).is_some_and(|time| time.enthalpy.is_some()) {
+        if policy(spec).is_none() {
             return Err(conduction_error(
                 "cli-solve-conduction-pointwise-radiation",
-                "pointwise radiation requires the native total-enthalpy transient owner",
-                "declare total-enthalpy storage and finite-time integration, or select patch-mean radiation",
+                "pointwise radiation requires native finite-time thermal storage",
+                "declare regional heat capacity or total-enthalpy storage, or select patch-mean radiation for a steady solve",
             ));
+        }
+        if policy(spec).is_some_and(|time| time.enthalpy.is_none()) {
+            let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+                .ok_or_else(|| bad("pointwise capacity radiation lost its conduction declaration"))?;
+            if setup.enclosure_radiation.is_some()
+                || setup.radiation.as_ref().is_some_and(|row| row.emissivity_response.is_some())
+                || objective.is_some()
+            {
+                return Err(conduction_error(
+                    "cli-solve-conduction-pointwise-radiation",
+                    "capacity pointwise radiation currently admits fixed-emissivity ambient exchange on the forward trajectory",
+                    "use total-enthalpy storage for pointwise enclosures, local-temperature emissivity or trajectory adjoints",
+                ));
+            }
         }
         if spec.outputs.iter().flatten().any(|output|
             output.name == "temperature-volume-mean-bound")
@@ -249,6 +263,14 @@ struct NaturalEndpoint {
 /// remain distinct, so neither a frozen operator nor a prescribed reaction is
 /// silently relabeled as the full radiative model.
 enum RadiativeEndpoint {
+    Pointwise {
+        convective_robin_fluxes: Vec<fs_conduction::RobinFlux>,
+        convective_out_w: f64,
+        report: fs_conduction::PointwiseRadiationReport,
+        solid_solves: usize,
+        solid_iterations: usize,
+        krylov_iterations: usize,
+    },
     Ambient {
         combined_boundary: fs_conduction::ThermalBoundary,
         convective_robin_fluxes: Vec<fs_conduction::RobinFlux>,
@@ -267,6 +289,7 @@ enum RadiativeEndpoint {
 impl RadiativeEndpoint {
     fn convective_robin_fluxes(&self) -> &[fs_conduction::RobinFlux] {
         match self {
+            Self::Pointwise { convective_robin_fluxes, .. } => convective_robin_fluxes,
             Self::Ambient { convective_robin_fluxes, .. } => convective_robin_fluxes,
             Self::Enclosure { endpoint, .. } => &endpoint.convective_robin_fluxes,
         }
@@ -274,6 +297,7 @@ impl RadiativeEndpoint {
 
     fn convective_out_w(&self) -> f64 {
         match self {
+            Self::Pointwise { convective_out_w, .. } => *convective_out_w,
             Self::Ambient { convective_out_w, .. } => *convective_out_w,
             Self::Enclosure { endpoint, .. } => endpoint.convective_out_w,
         }
@@ -632,13 +656,15 @@ fn march(
             goal_region,
         );
         sampled_peak.record(end, qoi)?;
-        // Enclosure heat is internal exchange. Common trajectory energy must
-        // use the fresh physical bath, original Neumann/convection and closed
-        // reflected heat, while the inner StepSolution retains its applied law.
+        // Pointwise radiation stays separate from the inner convection row;
+        // enclosure heat is internal exchange. Both need the complete fresh
+        // physical audit for trajectory storage and net-input accounting.
         let energy = if temperature_contacts.is_some() {
             physical_energy.unwrap_or_else(|| PhysicalEnergy::inner(&endpoint))
-        } else if enclosure.is_some() {
-            physical_energy.ok_or_else(|| bad("enclosure endpoint lost its physical energy audit"))?
+        } else if enclosure.is_some()
+            || radiation.is_some_and(radiation::LoweredRadiation::is_pointwise)
+        {
+            physical_energy.ok_or_else(|| bad("radiative endpoint lost its physical energy audit"))?
         } else {
             PhysicalEnergy::inner(&endpoint)
         };
@@ -996,7 +1022,8 @@ pub(super) fn solve(
     // never supplies the residual scale. Reserve 99% of the energy allowance
     // for the independently checked relative-residual and rounding effects.
     // Both grids reuse these same bounded controls, retained below.
-    let nonlinear = if temperature_dependent || coupled_contact_newton {
+    let nonlinear = if temperature_dependent || coupled_contact_newton
+        || radiation.is_some_and(radiation::LoweredRadiation::is_pointwise) {
         let mut config = NonlinearStepConfig::default();
         if let Some(solver) = &spec.solver {
             config.residual_rtol = solver.tolerance_rel;
@@ -1028,7 +1055,7 @@ pub(super) fn solve(
     // corrections in one response. Check complete both-grid products first.
     let airflow_factor = airflow.map_or(1, |_| airflow::exchange_config(false).max_iterations);
     let natural_factor = if natural_requested { buoyancy::MAX_ITERATIONS } else { 1 };
-    let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     let contact_factor = if temperature_contacts.is_some() {
         contact::max_responses(coupled_contact_newton)
     } else { 1 };
@@ -1216,7 +1243,9 @@ pub(super) fn solve(
     };
     let radiation_trials = coarse.radiation_trials + fine.radiation_trials;
     let radiation_receipt = if let Some(lowering) = radiation {
-        let method = if enclosure.as_ref().is_some_and(enclosure::Model::is_open) {
+        let method = if lowering.is_pointwise() {
+            "implicit-pointwise-p1-gray-radiation"
+        } else if enclosure.as_ref().is_some_and(enclosure::Model::is_open) {
             "implicit-open-gray-diffuse-enclosure"
         } else if enclosure.is_some() {
             "implicit-closed-gray-diffuse-enclosure"
@@ -1225,7 +1254,7 @@ pub(super) fn solve(
         };
         format!(
             "{{\"method\":\"{method}\",\"max_trials_per_step\":{},\"max_trials_per_coupling_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every outer convection evaluation\"}}",
-            max_radiation_trials_per_step, lowering.config.max_iterations, linear.max_iterations,
+            max_radiation_trials_per_step, lowering.max_solid_solves(), linear.max_iterations,
             coarse.radiation_trials, fine.radiation_trials,
             number(coarse.maximum_physical_energy_residual_j
                 .max(fine.maximum_physical_energy_residual_j))?,
@@ -1413,6 +1442,9 @@ pub(super) fn solve(
         report,
     };
     let solution = match fine.radiation {
+        Some(RadiativeEndpoint::Pointwise { report, solid_solves, .. }) =>
+            radiation::SolidSolution::from_pointwise_capacity_endpoint(conduction, report)?
+                .with_radiation_thermal_responses(solid_solves),
         Some(RadiativeEndpoint::Ambient {
             combined_boundary, convective_robin_fluxes, convective_out_w, report, solid_solves,
         }) => radiation::SolidSolution::from_radiative_endpoint(

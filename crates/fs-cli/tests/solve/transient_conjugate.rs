@@ -265,9 +265,15 @@ fn g1_native_transient_airflow_matches_every_endpoint_with_immutable_history() {
 fn g1_native_transient_airflow_keeps_radiation_out_of_air_enthalpy() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
     // The warmer reservoir sends heat into the solid while the air removes it.
-    for reservoir in [270.0, 350.0] {
+    for (pointwise, reservoir) in [(false, 270.0), (false, 350.0), (true, 270.0), (true, 350.0)] {
         let (mut spec, bytes) = regular_project();
         radiation_product::declare(&mut spec, &card, "air", reservoir);
+        if pointwise {
+            let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                .radiation.as_mut().unwrap();
+            declaration.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+            declaration.max_iterations = 1;
+        }
         let solved = run(&spec, &cards, &bytes);
         for grid in ["coarse", "fine"] {
             let mut old_expected = INITIAL_K;
@@ -298,11 +304,20 @@ fn g1_native_transient_airflow_keeps_radiation_out_of_air_enthalpy() {
                     n(coupled, "air_heat_gain_w"),
                     2e-6,
                 );
-                assert!(n(coupled, "radiation_trials") > n(exchange, "iterations"));
-                assert!(n(coupled, "radiation_trials") >= n(radiation, "iterations"));
+                if pointwise {
+                    assert_eq!(radiation.str_field("model"), Some("pointwise-p1"));
+                    close(n(radiation, "solid_solves"), 1.0, 0.0);
+                    close(n(coupled, "radiation_trials"), n(coupled, "solid_solves"), 0.0);
+                    assert!(n(coupled, "radiation_trials") >= n(exchange, "iterations"));
+                } else {
+                    assert!(n(coupled, "radiation_trials") > n(exchange, "iterations"));
+                    assert!(n(coupled, "radiation_trials") >= n(radiation, "iterations"));
+                }
                 assert!(n(coupled, "solid_solves") >= n(coupled, "radiation_trials"));
                 let stored = CAPACITY_J_K * (actual - old_actual);
                 close(n(row, "stored_energy_change_j"), stored, 2e-6);
+                close(n(row, "net_input_w"),
+                    5.0 - conductance * (actual - INLET_K) - radiation_w, 2e-6);
                 let residual = stored
                     - dt * (5.0 - conductance * (actual - INLET_K) - radiation_w);
                 close(residual, 0.0, 2e-6);
