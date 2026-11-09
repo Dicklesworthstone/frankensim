@@ -6,6 +6,8 @@ use super::super::super::coherence::correlation::admit_arm_count;
 use super::gram::{GramWorkspace, clear};
 use super::*;
 
+mod temporal;
+
 /// One parallel copy of the original field in the common observed half-space.
 ///
 /// The copy samples `F(x + translation_x, y + translation_y, depth, t - delay)`.
@@ -27,6 +29,11 @@ pub struct AngularSpectrumExposureApertureArm {
 /// workspace includes retained kernels and DD fields, reusable work planes,
 /// arm ordering and one original modal reconstruction. Borrowed source owners,
 /// caller arrays and allocator overhead are excluded.
+/// Window-specific requirements additionally reserve bounded positive temporal
+/// projection where admitted, with work N*M*(F+Nx+Ny+1), M<=17, plus N*F
+/// original-clock rotations for proper factors. The larger
+/// work bound is retained per selected bank; tighter legacy limits keep the
+/// original separable pair-kernel path.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumApertureInterferenceLimits {
     /// Conservative original mode/line reconstruction work: A*N*sum(L_r).
@@ -48,6 +55,7 @@ struct Bank {
     // Frequency-major, arm-major, then original Cartesian modal order.
     fields: Vec<FieldParts>,
     temporal: Temporal,
+    positive: Option<temporal::Positive>,
 }
 
 /// Fixed aperture/shutter observation of coherently recombined original fields.
@@ -72,6 +80,7 @@ pub struct PreparedAngularSpectrumApertureInterferometer {
     spatial_real: Option<Spatial<RealKernel>>,
     spatial_proper: Option<Spatial<ProperKernel>>,
     gram: GramWorkspace,
+    projected: Vec<FieldParts>,
 }
 
 impl PreparedAngularSpectrumApertureInterferometer {
@@ -127,6 +136,18 @@ impl PreparedAngularSpectrumApertureInterferometer {
                 fields,
                 &mut cancelled,
             )?;
+            if let Some(positive) = &bank.positive {
+                positive.accumulate(
+                    &mut self.gram,
+                    self.spatial_real.as_ref(),
+                    self.spatial_proper.as_ref(),
+                    self.modes,
+                    &mut self.projected,
+                    &mut moments,
+                    &mut cancelled,
+                )?;
+                continue;
+            }
             match &bank.temporal {
                 Temporal::Real(temporal) => {
                     self.gram.real(
@@ -355,6 +376,9 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
                 "aperture interferometer exceeds its work or storage budget",
             ));
         }
+        let mut projection_work = limits.maximum_gram_products - needed.maximum_gram_products;
+        let mut projection_bytes = limits.maximum_workspace_bytes - needed.maximum_workspace_bytes;
+        let mut projected_modes = 0;
         for arm in arms {
             poll(cancelled)?;
             if !arm.distance_from_face_m.is_finite()
@@ -394,6 +418,26 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
                 Temporal::Proper(pair_kernels(f, window, |i| -frequencies[i], cancelled)?)
             } else {
                 Temporal::Real(pair_kernels(f, window, |i| -frequencies[i], cancelled)?)
+            };
+            let positive = if let Some(plan) = temporal::Plan::new(
+                self.anchor.grid(),
+                window,
+                &frequencies,
+                is_proper,
+                projected_modes,
+            )? {
+                if plan.extra_work <= projection_work && plan.extra_bytes <= projection_bytes {
+                    let positive =
+                        temporal::Positive::new(window, &frequencies, is_proper, cancelled)?;
+                    projection_work -= plan.extra_work;
+                    projection_bytes -= plan.extra_bytes;
+                    projected_modes = projected_modes.max(plan.modes);
+                    Some(positive)
+                } else {
+                    None
+                }
+            } else {
+                None
             };
             let mut fields = reserved(f * arms.len() * n)?;
             for i in 0..f * arms.len() * n {
@@ -451,6 +495,7 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
                 frequencies,
                 fields,
                 temporal,
+                positive,
             });
         }
         let spatial_real = if real {
@@ -464,6 +509,13 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
             None
         };
         let gram = GramWorkspace::new(n, max_f, max_real_f, cancelled)?;
+        let mut projected = reserved(n * projected_modes)?;
+        for i in 0..n * projected_modes {
+            if i % 128 == 0 {
+                poll(cancelled)?;
+            }
+            projected.push([[Dd::ZERO; 2]; 6]);
+        }
         poll(cancelled)?;
         Ok(PreparedAngularSpectrumApertureInterferometer {
             arm_count: arms.len(),
@@ -475,7 +527,33 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
             spatial_real,
             spatial_proper,
             gram,
+            projected,
         })
+    }
+
+    fn window_requirements(
+        &self,
+        arms: usize,
+        window: HarmonicWindow,
+    ) -> Result<AngularSpectrumApertureInterferenceLimits, AngularSpectrumError> {
+        let mut limits = self.requirements(arms)?;
+        let mut modes = 0;
+        for (bank, proper) in self.banks() {
+            if let Some(plan) =
+                temporal::Plan::new(self.anchor.grid(), window, &bank.frequencies, proper, modes)?
+            {
+                limits.maximum_gram_products = limits
+                    .maximum_gram_products
+                    .checked_add(plan.extra_work)
+                    .ok_or_else(|| bad("aperture projection work overflow"))?;
+                limits.maximum_workspace_bytes = limits
+                    .maximum_workspace_bytes
+                    .checked_add(plan.extra_bytes)
+                    .ok_or_else(|| bad("aperture projection workspace overflow"))?;
+                modes = modes.max(plan.modes);
+            }
+        }
+        Ok(limits)
     }
 }
 
@@ -531,6 +609,22 @@ impl AngularSpectrumExposure<'_, '_, '_> {
         .requirements(arms)
     }
 
+    /// Bounds for the actual shutter, reserving field-before-power projection
+    /// for every supported narrow bank. No reconstruction or allocation occurs.
+    pub fn aperture_interferometer_window_requirements(
+        &self,
+        arms: usize,
+        window: HarmonicWindow,
+    ) -> Result<AngularSpectrumApertureInterferenceLimits, AngularSpectrumError> {
+        Sources {
+            anchor: self.anchor,
+            mean: Some(self),
+            factors: &[],
+            statistics: None,
+        }
+        .window_requirements(arms, window)
+    }
+
     /// Prepare a shared-side finite detector from copies of this coherent bank.
     pub fn prepare_aperture_interferometer(
         &self,
@@ -563,6 +657,22 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
             statistics: self.statistics,
         }
         .requirements(arms)
+    }
+
+    /// Shutter-specific bounds for all independent original mean/factor banks.
+    /// Positive temporal factors never create coherence between these banks.
+    pub fn aperture_interferometer_window_requirements(
+        &self,
+        arms: usize,
+        window: HarmonicWindow,
+    ) -> Result<AngularSpectrumApertureInterferenceLimits, AngularSpectrumError> {
+        Sources {
+            anchor: self.anchor,
+            mean: self.mean,
+            factors: self.factors,
+            statistics: self.statistics,
+        }
+        .window_requirements(arms, window)
     }
 
     /// Prepare independent source banks and coherently combine arms within each.
