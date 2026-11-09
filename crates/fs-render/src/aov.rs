@@ -43,7 +43,9 @@ pub use checkpoint::{
 /// Bit-affecting channel, accumulation, invalid-value, and palette semantics.
 /// Version 3 maps every motion sample to the matching shutter phase one
 /// presentation cadence away rather than directly to neighboring PTS values.
-pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 retains the beauty hero's wavelength and pupil draw for native
+/// sequential-lens motion, with unresolved local inverses explicitly unavailable.
+pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 4;
 /// Deterministic nearest-primary categorical selection semantics.
 pub const CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION: u32 = 1;
 /// Linear-sRGB material-albedo extraction semantics.

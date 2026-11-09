@@ -5323,8 +5323,9 @@ explicitly authored. Cinematic paths
 validate the outgoing wavelength's exterior against their original initial
 medium stack before transport.
 Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
-available. Aligned motion output remains unavailable until it consumes the explicit
-wavelength- and pupil-specific inverse projection below.
+available. Aligned motion output consumes the native conditional inverse below, using
+the accepted beauty hero's actual wavelength, pupil/ghost draw and sensor
+tangent. A clipped or absent hero never borrows another wavelength's geometry.
 
 `PhysicalCamera::project_sequential_point` supplies a local inverse for an
 explicit original wavelength and `LensSample`. It replays the original steady
@@ -5375,6 +5376,29 @@ Two native correspondence fixtures cover chromatic full-ray reconstruction,
 pixel signs, cuts, behind-camera points, identity refusal and per-frame work
 limits. They were parsed and independently source/API reviewed; they were not
 executed in this editing environment.
+
+All five serial and worker cinematic AOV routes retain that private optical
+witness from the actual sequential beauty launch. Photometric packets use
+their original lane-zero wavelength. No wavelength or pupil draw is
+reconstructed, consumed again, or promoted from a different lane. The
+previous reference preserves the accepted shutter phase and the current frame
+serves as the cached unused next endpoint.
+
+The complete cinematic AOV film now exports previous-motion values for admitted
+native lens correspondences. Clipped seeds, unresolved local inverses and
+exhausted inverse budgets clear motion validity while preserving other valid
+AOVs. Missing internal witnesses or malformed options refuse; cancellation
+retains the transactional tracer cancellation category. Camera cuts,
+behind-camera points and unavailable correspondence remain categorical.
+Ordinary camera projection and beauty integration retain their original
+arithmetic. AOV semantics version 4 prevents mixing these changed motion
+outputs with prior progressive/configuration/checkpoint identities.
+
+Four original-owner fixtures cover exact beauty hero/pupil/tangent retention,
+shutter-aligned nonzero motion, public film validity/EXR guides, clipping,
+missing witnesses, local refusal, cuts, and ordinary-camera/beauty bit parity.
+Both complete changed source files and the new fixtures passed Rust parsing,
+with independent API/source review. The full renderer tests were not executed.
 
 The film convention is sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers

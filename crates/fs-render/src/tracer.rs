@@ -48,6 +48,7 @@ use crate::aov::{
 use crate::camera::{
     AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LayeredDiffraction,
     LensSample, OpticalCenterProjection, PhysicalCamera, ProjectedPupilFootprint,
+    SequentialProjectionError, SequentialProjectionOptions,
 };
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
 use crate::conductor::{
@@ -68,7 +69,7 @@ use crate::lighting::{AdmittedLighting, EnvironmentMap, LightSample, LightingErr
 use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
 use crate::motion_vectors::{
     MotionEndpoint, MotionFrame, MotionVectorComputation, MotionVectorError, PrimarySurfaceSample,
-    RasterSize, compute_motion_vectors,
+    RasterSize, compute_motion_vectors, compute_sequential_motion_vectors,
 };
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
@@ -410,9 +411,19 @@ pub struct PrimaryTraceHit {
     pub surface: Option<PrimarySurfaceSample>,
 }
 
+/// Exact optical realization of the hero lane that owns the primary AOV hit.
+/// A fixed wavelength and original pupil draw retain its direct/ghost branch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SequentialMotionWitness {
+    wavelength_nm: f64,
+    lens_sample: LensSample,
+    initial_tangent_xy: [f64; 2],
+}
+
 struct PathTraceSample {
     xyz: [f64; 3],
     primary: Option<PrimaryTraceHit>,
+    sequential_motion: Option<SequentialMotionWitness>,
     absolute_time_s: Option<f64>,
     pixel_jitter: [f64; 2],
     contribution_split: Option<PathContributionSplit>,
@@ -4816,6 +4827,7 @@ impl ParallelCinematicAovKernel<'_, '_> {
                             capture_ids,
                             absolute_time_s,
                             traced.primary.as_ref(),
+                            traced.sequential_motion,
                         ) {
                             Ok(primary) => primary,
                             Err(error) => {
@@ -5048,6 +5060,7 @@ impl ParallelFixedSampleCinematicAovKernel<'_, '_> {
                             capture_ids,
                             absolute_time_s,
                             traced.primary.as_ref(),
+                            traced.sequential_motion,
                         ) {
                             Ok(primary) => primary,
                             Err(error) => {
@@ -5387,6 +5400,7 @@ impl ParallelAdaptiveCinematicAovKernel<'_, '_> {
                             capture_ids,
                             absolute_time_s,
                             traced.primary.as_ref(),
+                            traced.sequential_motion,
                         ) {
                             Ok(primary) => primary,
                             Err(error) => {
@@ -9391,6 +9405,7 @@ pub fn render_cinematic_adaptive_with_aovs(
                         capture_ids,
                         absolute_time_s,
                         traced.primary.as_ref(),
+                        traced.sequential_motion,
                     )?;
                     aov.push(
                         pixel as usize,
@@ -9553,6 +9568,7 @@ pub fn render_cinematic_range_with_aovs(
                         capture_ids,
                         absolute_time_s,
                         traced.primary.as_ref(),
+                        traced.sequential_motion,
                     )?;
                     staged.push(
                         pixel as usize,
@@ -9699,6 +9715,7 @@ fn prepare_aligned_aov_primary(
     capture_ids: bool,
     absolute_time_s: f64,
     primary: Option<&PrimaryTraceHit>,
+    sequential_motion: Option<SequentialMotionWitness>,
 ) -> Result<Option<AlignedAovPrimary>, CinematicAovError> {
     let Some(primary) = primary else {
         return Ok(None);
@@ -9711,6 +9728,9 @@ fn prepare_aligned_aov_primary(
         .evaluate_exposure(cx, exposure, absolute_time_s)
         .map_err(TracerError::from)?;
     let depth_m = if physical.sequential_lens().is_some() {
+        if sequential_motion.is_none() {
+            return Err(CinematicAovError::SampleAlignmentMismatch);
+        }
         // Real lens distortion has no optical-centre projection, but axial
         // scene depth remains well-defined in the authored sensor frame.
         let depth = physical.forward().dot(primary.hit.point.delta_from(physical.eye()));
@@ -9760,6 +9780,7 @@ fn prepare_aligned_aov_primary(
                 settings,
                 absolute_time_s,
                 physical.clone(),
+                sequential_motion,
             )
         })
         .transpose()?
@@ -9793,11 +9814,11 @@ fn aligned_previous_motion(
     settings: &Settings,
     absolute_time_s: f64,
     current_camera: PhysicalCamera,
+    sequential_motion: Option<SequentialMotionWitness>,
 ) -> Result<Option<[f64; 2]>, CinematicAovError> {
-    if current_camera.sequential_lens().is_some() {
-        // A lens-aware inverse raster mapping is required before exporting
-        // motion; keep this channel unavailable without dropping valid AOVs.
-        return Ok(None);
+    let sequential = current_camera.sequential_lens().is_some();
+    if sequential && sequential_motion.is_none() {
+        return Err(CinematicAovError::SampleAlignmentMismatch);
     }
     let previous_sample_time_s =
         shutter_aligned_previous_reference_time(provenance, absolute_time_s);
@@ -9820,12 +9841,39 @@ fn aligned_previous_motion(
     // The aligned AOV exports only previous motion. Supplying the current
     // frame as the unused next endpoint avoids evaluating beyond a terminal
     // trajectory cut while preserving the low-level three-frame API.
-    let next = current.clone();
     let raster =
         RasterSize::try_new(settings.width, settings.height).map_err(TracerError::MotionVector)?;
-    match compute_motion_vectors(surface, &previous, &current, &next, raster)
-        .map_err(TracerError::MotionVector)?
-    {
+    let motion = if sequential {
+        let witness = sequential_motion.ok_or(CinematicAovError::SampleAlignmentMismatch)?;
+        compute_sequential_motion_vectors(
+            cx,
+            surface,
+            &previous,
+            &current,
+            &current,
+            raster,
+            witness.wavelength_nm,
+            witness.lens_sample,
+            SequentialProjectionOptions {
+                initial_tangent_xy: witness.initial_tangent_xy,
+                ..SequentialProjectionOptions::default()
+            },
+        )
+    } else {
+        compute_motion_vectors(surface, &previous, &current, &current, raster)
+    };
+    let motion = match motion {
+        Ok(motion) => motion,
+        Err(error @ MotionVectorError::SequentialProjection(
+            SequentialProjectionError::InvalidOptions,
+        )) => return Err(TracerError::from(error).into()),
+        // Clipping, an unresolved local inverse or its bounded work limit
+        // clears only motion validity. It never invents a zero displacement.
+        Err(MotionVectorError::SequentialProjection(_)) => return Ok(None),
+        // Preserve the cancellation category used by transactional AOV tiles.
+        Err(error) => return Err(TracerError::from(error).into()),
+    };
+    match motion {
         MotionVectorComputation::Available(sample) => match sample.previous {
             MotionEndpoint::Projected {
                 displacement_pixels,
@@ -14082,12 +14130,14 @@ fn trace_path_with_regions<'scene>(
                     // Continue every wavelength on its own native path, keeping
                     // the original packet's integration measure and RNG identity.
                     // Rejected pupil draws remain zero samples, never retries.
+                    let lens_sample = camera_lens_sample(key, pixel, sample)?;
                     let optical = physical.generate_sequential_spectral_rays_from_tangent_offsets(
-                        cx, x_tan, y_tan, camera_lens_sample(key, pixel, sample)?, &lambdas,
+                        cx, x_tan, y_tan, lens_sample, &lambdas,
                     )?;
                     let mut result = PathTraceSample {
                         xyz: [0.0; 3],
                         primary: None,
+                        sequential_motion: None,
                         absolute_time_s: Some(time.interval.time_at(time.normalized)),
                         pixel_jitter: [jx, jy],
                         contribution_split: capture_primary.then_some(PathContributionSplit::ZERO),
@@ -14138,6 +14188,14 @@ fn trace_path_with_regions<'scene>(
                         // genuinely clipped hero. No other colour borrows it.
                         if lane == 0 {
                             result.primary = child.primary;
+                            if capture_primary && result.primary.is_some() {
+                                result.sequential_motion = Some(SequentialMotionWitness {
+                                    // Keep the actual lane, including photometry packets.
+                                    wavelength_nm: lambdas[0],
+                                    lens_sample,
+                                    initial_tangent_xy: [x_tan, y_tan],
+                                });
+                            }
                         }
                     }
                     return Ok(result);
@@ -16211,6 +16269,8 @@ fn trace_path_with_regions<'scene>(
     Ok(PathTraceSample {
         xyz,
         primary,
+        // A resumed spectral lane never replaces the outer camera witness.
+        sequential_motion: None,
         absolute_time_s: ray_time.map(|time| time.interval.time_at(time.normalized)),
         pixel_jitter: [jx, jy],
         contribution_split,
@@ -17681,6 +17741,8 @@ mod aspheric_lens_tests;
 
 #[cfg(test)]
 mod tests {
+    mod sequential_motion;
+
     #[test]
     fn rough_diffuse_proposals_share_thermal_paths_and_reverse_densities() {
         use super::*;
