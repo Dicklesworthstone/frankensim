@@ -239,6 +239,7 @@ impl<'a> RecedingSlab<'a> {
         checkpoint()?;
         let n = solid.thermal.cells.len();
         if !(1..=MAX_RECEDING_SLAB_CELLS).contains(&n)
+            || solid.inventories.len() != n
             || !positive(geometry.area_m2)
             || !positive(geometry.density_kg_m3)
             || !positive(geometry.conductivity_w_m_k)

@@ -5,6 +5,8 @@
 //! `virgin -> y_char char + (1-y_char) volatile` by mass. Its finite-rate
 //! backward-Euler extent and temperature close one local energy equation;
 //! product formation enthalpy is carried once, never added as another heater.
+//! Explicitly declared heat-only bodies retain their original caloric laws,
+//! including latent plateaus, and exchange heat through that same operator.
 //! The base owner has fixed geometry and instantaneous removal of volatiles at
 //! their local production temperature. The `implicit` extension couples endpoint
 //! conduction and reaction without the explicit conduction timestep limit.
@@ -24,9 +26,9 @@
 
 use super::{
     Boundary, CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit, Event,
-    MaterialId, ThermalLaw, finite, nonnegative, positive,
+    MaterialId, ThermalLaw, ThermalStorageBasis, finite, nonnegative, positive,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Coupled backward-Euler heat transport and finite-rate decomposition.
 #[path = "pyrolysis/implicit.rs"]
@@ -239,7 +241,8 @@ pub struct PyrolysisAudit {
     pub temperature_evaluations: usize,
 }
 
-/// Fixed-geometry reactive solid on the original cells and transport operator.
+/// Fixed-geometry reactive solid and explicitly declared heat-only bodies on
+/// the original cells and transport operator.
 #[derive(Clone)]
 pub struct PyrolysisSimulation<'a> {
     thermal: DepositionSimulation<'a>,
@@ -274,6 +277,15 @@ impl PyrolysisMaterial<'_> {
 
     fn admit(&self) -> Result<(), DepositionError> {
         let [lo, hi] = self.temperature_range_k;
+        if self.virgin.storage_basis() != ThermalStorageBasis::Enthalpy
+            || self
+                .char_caloric
+                .is_some_and(|law| law.storage_basis() != ThermalStorageBasis::Enthalpy)
+        {
+            return Err(DepositionError::InvalidInput(
+                "reacting virgin and char calorics must store enthalpy for volatile transport",
+            ));
+        }
         if !positive(lo)
             || !positive(hi)
             || lo >= hi
@@ -342,12 +354,31 @@ impl<'a> PyrolysisSimulation<'a> {
     pub fn new(
         thermal: DepositionSimulation<'a>,
         materials: &[PyrolysisMaterial<'a>],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::new_with_thermal_materials(thermal, materials, &[], checkpoint)
+    }
+
+    /// Adopt reactive material together with explicitly declared heat-only
+    /// material IDs, such as a finite mold, wall or phase-change heat sink.
+    ///
+    /// Unlisted active materials still refuse: omitting a kinetic model must
+    /// not silently disable decomposition. Heat-only cells retain their exact
+    /// original `ThermalLaw`, mass, geometry and storage basis. Their T(e) may
+    /// contain sharp latent plateaus; they acquire no virgin/char inventory or
+    /// volatile release. Internal energy and declared sensible storage remain
+    /// valid for these closed-mass bodies, but not for reacting material.
+    pub fn new_with_thermal_materials(
+        thermal: DepositionSimulation<'a>,
+        materials: &[PyrolysisMaterial<'a>],
+        thermal_materials: &[MaterialId],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
         if thermal.cells.is_empty()
             || !thermal.pending_events().is_empty()
             || materials.len() > thermal.budget.max_cells
+            || thermal_materials.len() > thermal.budget.max_cells
         {
             return Err(DepositionError::InvalidInput(
                 "pyrolysis requires activated cells, bounded materials and no pending geometry events",
@@ -365,9 +396,24 @@ impl<'a> PyrolysisSimulation<'a> {
                 ));
             }
         }
+        let mut heat_only = BTreeSet::new();
+        for &id in thermal_materials {
+            checkpoint()?;
+            if !thermal.materials.contains_key(&id)
+                || map.contains_key(&id)
+                || !heat_only.insert(id)
+            {
+                return Err(DepositionError::InvalidInput(
+                    "unknown, duplicate or reacting heat-only material",
+                ));
+            }
+        }
         let mut inventories = BTreeMap::new();
         for (&id, cell) in &thermal.cells {
             checkpoint()?;
+            if heat_only.contains(&cell.material_id) {
+                continue;
+            }
             let model = map
                 .get(&cell.material_id)
                 .ok_or(DepositionError::InvalidInput(
@@ -407,7 +453,8 @@ impl<'a> PyrolysisSimulation<'a> {
     pub fn cells(&self) -> &BTreeMap<CellId, DepositedCell> {
         &self.thermal.cells
     }
-    /// Actual condensed inventory; no volatile material remains in these cells.
+    /// Actual reactive condensed inventory; heat-only cells have no entry and
+    /// no volatile material remains in any cell.
     pub fn inventories(&self) -> &BTreeMap<CellId, PyrolysisCell> {
         &self.inventories
     }
@@ -415,16 +462,31 @@ impl<'a> PyrolysisSimulation<'a> {
     pub fn mass_kg(&self) -> f64 {
         self.thermal.mass_kg()
     }
-    /// Sum of actual original cell `mass * mixture_h`, J.
+    /// Sum of actual original cell storage, J: reacting `mass * mixture_h`
+    /// plus each heat-only body's declared `mass * e` coordinate.
     pub fn energy_j(&self) -> f64 {
         self.thermal.energy_j()
     }
     /// Composition-dependent common temperature, K, not a virgin-only Cp proxy.
     pub fn temperature_k(&self, id: CellId) -> Result<f64, DepositionError> {
-        self.inventories
-            .get(&id)
-            .map(|c| c.temperature_k)
-            .ok_or(DepositionError::InvalidInput("inactive pyrolysis cell"))
+        match self.inventories.get(&id) {
+            Some(inventory) => Ok(inventory.temperature_k),
+            None => self.thermal.temperature_k(id),
+        }
+    }
+
+    fn calorics(&self, id: CellId, cell: &DepositedCell) -> Result<(f64, f64), DepositionError> {
+        if let Some(&inventory) = self.inventories.get(&id) {
+            Ok((
+                inventory.temperature_k,
+                self.materials[&cell.material_id].mixture_slope(inventory)?,
+            ))
+        } else {
+            Ok((
+                self.thermal.materials[&cell.material_id].temperature_k(cell.specific_h_j_kg)?,
+                self.thermal.material_temperature_slopes[&cell.material_id],
+            ))
+        }
     }
 
     /// Atomically change one authored thermal boundary using original admission.
@@ -523,11 +585,7 @@ impl<'a> PyrolysisSimulation<'a> {
             let requested = controls.maximum_dt_s.min(remaining_s);
             let rates = next.thermal.heat_rates_with_calorics(
                 requested,
-                |id, cell| {
-                    let inventory = next.inventories[&id];
-                    let model = next.materials[&cell.material_id];
-                    Ok((inventory.temperature_k, model.mixture_slope(inventory)?))
-                },
+                |id, cell| next.calorics(id, cell),
                 &mut checkpoint,
             )?;
             let dt = rates.explicit_dt_s;
@@ -541,16 +599,19 @@ impl<'a> PyrolysisSimulation<'a> {
             }
             for (&id, cell) in &mut next.thermal.cells {
                 checkpoint()?;
-                let previous = next.inventories[&id];
                 let input_j = finite(dt * rates.watts[&id].value()?)?;
-                let step = solve_cell(
-                    previous,
-                    next.materials[&cell.material_id],
-                    dt,
-                    input_j,
-                    controls,
-                    &mut checkpoint,
-                )?;
+                let step = if let Some(&previous) = next.inventories.get(&id) {
+                    solve_cell(
+                        previous,
+                        next.materials[&cell.material_id],
+                        dt,
+                        input_j,
+                        controls,
+                        &mut checkpoint,
+                    )?
+                } else {
+                    solve_thermal_cell(cell, next.thermal.materials[&cell.material_id], input_j)?
+                };
                 let old_h = cell.specific_h_j_kg;
                 let old_mass = cell.mass_kg;
                 let next_mass = step.inventory.virgin_mass_kg + step.inventory.char_mass_kg;
@@ -594,7 +655,9 @@ impl<'a> PyrolysisSimulation<'a> {
                     finite(release.consumed_virgin_mass_kg + step.release.consumed_virgin_mass_kg)?;
                 cell.mass_kg = next_mass;
                 cell.specific_h_j_kg = step.specific_h_j_kg;
-                next.inventories.insert(id, step.inventory);
+                if let Some(inventory) = next.inventories.get_mut(&id) {
+                    *inventory = step.inventory;
+                }
             }
             external.add(finite(dt * rates.external_w.value()?)?)?;
             next.thermal.time_s = endpoint;
@@ -682,6 +745,35 @@ struct CellStep {
     evaluations: usize,
     kinetic_mass_roundoff_kg: f64,
     kinetic_energy_roundoff_j: f64,
+}
+
+// A heat-only body uses its original stored-energy coordinate directly. No
+// inverse h(T), fictitious reaction or apparent Cp is needed on a latent plateau.
+// CellStep's mass/temperature slot is only numerical scratch for the common
+// heat solver; it is never installed as a reactive material inventory.
+fn solve_thermal_cell(
+    cell: &DepositedCell,
+    law: &dyn ThermalLaw,
+    input_j: f64,
+) -> Result<CellStep, DepositionError> {
+    let specific_h_j_kg = finite(cell.specific_h_j_kg + finite(input_j / cell.mass_kg)?)?;
+    let temperature_k = law.temperature_k(specific_h_j_kg)?;
+    if !positive(temperature_k) {
+        return Err(DepositionError::MaterialDomain);
+    }
+    Ok(CellStep {
+        inventory: PyrolysisCell {
+            virgin_mass_kg: cell.mass_kg,
+            char_mass_kg: 0.0,
+            temperature_k,
+        },
+        specific_h_j_kg,
+        volatile_h_j_kg: cell.specific_h_j_kg,
+        release: VolatileRelease::default(),
+        evaluations: 1,
+        kinetic_mass_roundoff_kg: 0.0,
+        kinetic_energy_roundoff_j: 0.0,
+    })
 }
 
 fn solve_cell(

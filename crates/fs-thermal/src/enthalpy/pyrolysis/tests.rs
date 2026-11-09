@@ -1,6 +1,9 @@
 use super::*;
 use crate::enthalpy::{CellGeometry, DepositionBudget, StepConfig, ThermalLink, TimedEvent};
 
+#[path = "tests/thermal_cells.rs"]
+mod thermal_cells;
+
 struct Caloric {
     cp: f64,
     offset: f64,

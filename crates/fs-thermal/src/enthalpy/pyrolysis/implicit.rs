@@ -363,7 +363,12 @@ fn initialize(
     // This only seeds Newton; the original solve_cell determines every trial.
     for (i, &id) in w.ids.iter().enumerate() {
         checkpoint()?;
-        let inventory = initial.inventories[&id];
+        let Some(&inventory) = initial.inventories.get(&id) else {
+            // An ordinary finite body starts at its accepted energy; only
+            // actual reactive cells require an isothermal reaction-heat guess.
+            w.energy[i] = 0.0;
+            continue;
+        };
         let model = initial.materials[&initial.cells()[&id].material_id];
         let h = model.enthalpies(inventory.temperature_k)?;
         let consumed = model
@@ -389,6 +394,12 @@ fn local_solve(
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<CellStep, DepositionError> {
     work.cells += 1;
+    if !initial.inventories.contains_key(&id) {
+        checkpoint()?;
+        work.temperature_evaluations += 1;
+        let cell = &initial.cells()[&id];
+        return solve_thermal_cell(cell, initial.thermal.materials[&cell.material_id], input);
+    }
     solve_cell(
         initial.inventories[&id],
         initial.materials[&initial.cells()[&id].material_id],
@@ -430,18 +441,14 @@ fn evaluate(
             .expect("admitted cell axis");
         cell.mass_kg = finite(step.inventory.virgin_mass_kg + step.inventory.char_mass_kg)?;
         cell.specific_h_j_kg = step.specific_h_j_kg;
-        candidate.inventories.insert(id, step.inventory);
+        if let Some(inventory) = candidate.inventories.get_mut(&id) {
+            *inventory = step.inventory;
+        }
         steps.push(step);
     }
     let rates = candidate.thermal.heat_rates_with_calorics(
         f64::MAX,
-        |id, cell| {
-            let inventory = candidate.inventories[&id];
-            Ok((
-                inventory.temperature_k,
-                candidate.materials[&cell.material_id].mixture_slope(inventory)?,
-            ))
-        },
+        |id, cell| candidate.calorics(id, cell),
         checkpoint,
     )?;
     work.heat += 1;
@@ -464,9 +471,14 @@ fn derivative(
     work: &mut Work,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<f64, ImplicitError> {
-    let model = initial.materials[&initial.cells()[&id].material_id];
-    let middle = 0.5 * model.temperature_range_k[0] + 0.5 * model.temperature_range_k[1];
-    let direction = if temperature > middle { -1.0 } else { 1.0 };
+    let reactive = initial.inventories.contains_key(&id);
+    let direction = if reactive {
+        let model = initial.materials[&initial.cells()[&id].material_id];
+        let middle = 0.5 * model.temperature_range_k[0] + 0.5 * model.temperature_range_k[1];
+        if temperature > middle { -1.0 } else { 1.0 }
+    } else {
+        1.0
+    };
     let mut delta = solve
         .energy_difference_j
         .max(256.0 * controls.cell_energy_tolerance_j)
@@ -482,7 +494,10 @@ fn derivative(
             match local_solve(initial, id, dt, value, controls, work, checkpoint) {
                 Ok(probe) => {
                     let slope = finite((probe.inventory.temperature_k - temperature) / actual)?;
-                    if positive(slope) {
+                    // Exact isothermal storage is admissible for an ordinary
+                    // heat-only body: dT/de = 0 retains its latent energy in
+                    // the common residual instead of inventing a large Cp.
+                    if positive(slope) || (!reactive && slope == 0.0) {
                         return Ok(slope);
                     }
                 }

@@ -1416,6 +1416,29 @@ admission checks that the charts agree. Virgin and char may have distinct
 nonlinear sensible calorics. `VolatileEnthalpy` supplies the escaping gas's
 physical enthalpy on a compatible formation reference.
 
+`new_with_thermal_materials` additionally admits explicitly named heat-only
+materials in the same activated graph. Finite molds, walls and phase-change
+heat sinks retain their original mass, geometry, `ThermalLaw::T(e)` and cached
+thermal slope bound. They receive no virgin/char inventory and release no
+volatile material. The ordinary `new` constructor still requires reactive
+models for every active material; missing kinetics never silently disables a
+reaction. Duplicate, unknown and simultaneously reactive/heat-only declarations
+refuse. Reacting virgin and char branches must declare enthalpy storage for the
+open volatile balance. Closed-mass heat-only bodies may retain internal energy
+or their original declared sensible-storage convention.
+
+Both explicit and implicit transport retain the same paired heat, boundary and
+stored-energy accounts across these materials. The implicit local query uses
+the heat-only body's original energy inverse directly, without a fictitious
+reaction or an apparent heat capacity. Zero thermal slope is retained on a
+sharp latent plateau; the nonlinear residual still decides the accepted heat.
+Focused G1 tests independently solve two-body explicit and backward-Euler
+calorimetry, including finite-capacity and isothermal latent sinks, and reconcile
+remaining reactive storage plus actual outgoing volatile enthalpy. Domain
+failures and cancellation preserve both original histories. The homogeneous
+receding-slab owner refuses graphs containing heat-only bodies before indexing
+reactive inventory; moving mixed-material geometry is not inferred.
+
 One first-order non-oxidative reaction converts virgin material into an explicit
 char mass yield and outgoing volatiles. Its accepted endpoint temperature
 determines the backward-Euler inventory, retained char and outgoing enthalpy:
