@@ -20,8 +20,9 @@ use fs_solver::op::LinearOp;
 /// Converged coefficients and nodal field from a controlled elasticity solve.
 ///
 /// Construction is private: only an explicitly recomputed Euclidean residual
-/// below the requested tolerance and the original material's full tensor-strain
-/// domain admit this value. Interrupted or exhausted solves cannot construct one.
+/// below the requested tolerance and the original material's elastic-strain
+/// domain admit this value. An attached eigenstrain also enforces its separate
+/// total-strain budget. Interrupted or exhausted solves cannot construct one.
 #[derive(Debug, Clone)]
 pub struct ControlledElasticitySolution {
     coefficients: Vec<f64>,

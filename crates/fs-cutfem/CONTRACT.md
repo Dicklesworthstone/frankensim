@@ -222,6 +222,36 @@ incompressible materials, or establish an inf-sup/coercivity theorem for every
 cut, pressure mode, penalty, contrast or refinement pattern. Conditioning and
 physical convergence remain properties of the actual resolved problem.
 
+## Prescribed eigenstrain in two-dimensional elasticity
+
+`CutElasticityOperator::with_eigenstrain` adds cellwise bilinear
+`Q1Eigenstrain` to the existing plane-stress or plane-strain operator. The
+caller supplies global tensor-shear strains at the four Q1 corners, including
+source-integrated isotropic expansion when applicable. The retained field is
+immutable; duplicate attachment is refused. Geometry, material, constraints,
+stiffness, Nitsche support and solver ordering remain with the original owner.
+
+The added load is the physical-volume `B^T C epsilon_free` integral with the
+negative eigenstress traction on embedded displacement supports. Plane stress
+uses the original reduced constitutive law, including out-of-plane relaxation;
+plane strain retains constrained out-of-plane stress and elastic storage.
+`strain_stress` distinguishes total, free and elastic strains and reports
+physical stress and recoverable elastic energy. No-eigenstrain observations
+retain their existing arithmetic and material checks.
+
+The caller supplies a separate total Frobenius-strain budget in `(0,1)`;
+the original material calibration applies to elastic strain. Both domains are
+checked at all Q1 corners, bounding the entire retained bilinear tensor field.
+This is a small-strain constitutive model, not finite-deformation or thermal
+back-reaction. The usual controlled solve enforces these two admissions before
+publishing a solution. A new temperature/free-strain field requires attaching
+it to an unattached operator, which callers may retain by cloning beforehand.
+
+`elastic_eigenstrain` regressions cover stress-free expansion, restrained
+compression, plane reductions near incompressibility, spatial compatibility,
+natural and Nitsche boundaries, hanging nodes, source retention, cancellation
+and distinct elastic/kinematic envelopes.
+
 ## Prescribed eigenstrain in three-dimensional elasticity
 
 Cartesian and adaptive `prepare_eigenstrain` retain prescribed global-frame

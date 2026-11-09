@@ -25,6 +25,8 @@ use fs_solver::op::LinearOp;
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Prescribed thermal/manufacturing strain on the original cut trial space.
+pub mod eigenstrain;
 /// Original-material strain, stress and elastic-energy observations.
 pub mod strain;
 
@@ -324,6 +326,8 @@ pub struct CutElasticityOperator {
     plane: ElasticPlane,
     material: IsotropicElastic,
     lattice_level: u32,
+    embedded_dirichlet: bool,
+    eigenstrain: Option<eigenstrain::RetainedEigenstrain>,
     matrix: Csr,
     rhs: Vec<f64>,
     node_ids: TerminalIds,
@@ -1148,6 +1152,8 @@ impl CutElasticity<'_> {
             plane,
             material: self.material.clone(),
             lattice_level: self.grid.max_level(),
+            embedded_dirichlet: !self.traction_free_interface,
+            eigenstrain: None,
             matrix: coo.assemble(),
             rhs,
             node_ids,
