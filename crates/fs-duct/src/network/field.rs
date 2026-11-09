@@ -149,7 +149,9 @@ pub struct PreparedNetworkFields {
     // Original constitutive inputs and local cylinder coordinates, bounded by
     // maximum_probes. No material query or graph reconstruction during heat use.
     cylinders: Vec<Option<absorption::CylinderSection>>,
-    loss: LossModel,
+    // None retains an external constitutive owner whose volume-loss forms
+    // cannot be reconstructed from an equilibrium LossModel.
+    loss: Option<LossModel>,
     pressure: Vec<C64>,
     flow: Vec<C64>,
 }
@@ -237,6 +239,7 @@ impl PreparedNetworkFields {
         Self::prepare_with_operators(
             net,
             request,
+            Some(request.loss),
             |_edge| (acoustic.density_kg_m3(), acoustic.sound_speed_m_s()),
             |_edge| match state {
                 MaterialSnapshot::Acoustic(_) => None,
@@ -272,7 +275,7 @@ impl PreparedNetworkFields {
                     cancelled,
                 )?)
             },
-            |_edge, radius| Ok(state.wave(radius, request.omega, request.loss)?),
+            |_edge, _block, radius| Ok(state.wave(radius, request.omega, request.loss)?),
             cancelled,
         )
     }
@@ -297,6 +300,7 @@ impl PreparedNetworkFields {
         Self::prepare_with_operators(
             net,
             request,
+            Some(request.loss),
             |edge| {
                 let gas = gas_at(edge);
                 (gas.density, gas.sound_speed)
@@ -305,9 +309,7 @@ impl PreparedNetworkFields {
             // wall is solved on the walled line, so it supplies no diffusion
             // snapshot and its heat refuses rather than mixing the two lines.
             |edge| match super::media::edge_wall_model(media, &edge.id) {
-                crate::WallModel::Rigid => {
-                    Some(crate::WallDiffusionInputs::from_gas(gas_at(edge)))
-                }
+                crate::WallModel::Rigid => Some(crate::WallDiffusionInputs::from_gas(gas_at(edge))),
                 _ => None,
             },
             |selected, _cancelled| {
@@ -334,13 +336,16 @@ impl PreparedNetworkFields {
                     super::media::edge_wall_model(media, &edge.id),
                     options,
                     crate::hole_lengths::HoleLengths::from_compact(
-                        edge.corrections == JunctionCorrections::ChainLocal),
+                        edge.corrections == JunctionCorrections::ChainLocal,
+                    ),
                     Some(boundaries),
                     cancelled,
                 )
                 .map(|(chain, _)| chain)
             },
-            |edge, radius| crate::segment_wave(gas_at(edge), radius, request.omega, request.loss),
+            |edge, _block, radius| {
+                crate::segment_wave(gas_at(edge), radius, request.omega, request.loss)
+            },
             cancelled,
         )
     }
@@ -348,9 +353,10 @@ impl PreparedNetworkFields {
     // Only constitutive and loaded-endpoint operators vary. Probe admission,
     // prefix/suffix scattering, source columns and field coordinates remain
     // one algorithm for the gas and original-material entry points.
-    fn prepare_with_operators<E: From<DuctError>>(
+    pub(super) fn prepare_with_operators<E: From<DuctError>>(
         net: &DuctNetwork,
         request: &NetworkFieldRequest<'_>,
+        loss: Option<LossModel>,
         medium: impl Fn(&NetworkEdge) -> (f64, f64),
         diffusion: impl Fn(&NetworkEdge) -> Option<crate::WallDiffusionInputs>,
         mut spatial: impl FnMut(
@@ -363,7 +369,7 @@ impl PreparedNetworkFields {
             &mut Vec<usize>,
             &mut dyn FnMut() -> bool,
         ) -> Result<PreparedChain, E>,
-        wave_at: impl Fn(&NetworkEdge, f64) -> Result<crate::SegmentWave, E>,
+        wave_at: impl Fn(&NetworkEdge, usize, f64) -> Result<crate::SegmentWave, E>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, E> {
         let budget = request.budget;
@@ -482,7 +488,7 @@ impl PreparedNetworkFields {
                         } else if offset_m == length {
                             (prefix[after], suffix[after])
                         } else {
-                            let wave = wave_at(edge, radius)?;
+                            let wave = wave_at(edge, before, radius)?;
                             let a = TwoPort::from_wave(
                                 &Segment::Cylinder {
                                     radius,
@@ -558,7 +564,7 @@ impl PreparedNetworkFields {
                                 // fields inconsistent with the loaded solve.
                                 let local = (offset_m - x0) / (x1 - x0);
                                 let radius = ra + (rb - ra) * local;
-                                let wave = wave_at(edge, f64::midpoint(ra, rb))?;
+                                let wave = wave_at(edge, before + slice, f64::midpoint(ra, rb))?;
                                 let a = TwoPort::from_wave(
                                     &Segment::Cone {
                                         inlet_radius: ra,
@@ -611,7 +617,7 @@ impl PreparedNetworkFields {
             source_clock: request.source_clock.to_owned(),
             locations,
             cylinders,
-            loss: request.loss,
+            loss,
             pressure,
             flow,
         })
@@ -807,9 +813,10 @@ fn resolve_location(
             (segment, s.axial_length(), s.outlet_radius())
         }
         NetworkFieldSection::Profile { segment, boundary } => {
-            let Some(Segment::Profile { profile, steps }) = edge.duct.segments.get(segment)
-            else {
-                return Err(bad("profile field probe requires an authored smooth profile"));
+            let Some(Segment::Profile { profile, steps }) = edge.duct.segments.get(segment) else {
+                return Err(bad(
+                    "profile field probe requires an authored smooth profile",
+                ));
             };
             steps.validate()?;
             if boundary > steps.0 {

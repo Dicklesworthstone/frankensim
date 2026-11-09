@@ -12,6 +12,8 @@ use fs_material::relaxation::{
 use fs_math::c64::C64;
 use fs_thermochem::SpeciesId;
 
+mod fields;
+
 fn gas(temperature: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 101325.0).unwrap()
 }

@@ -76,7 +76,7 @@ fn fields(omega: f64) -> PreparedNetworkFields {
         source_clock: "recorded source clock".into(),
         locations,
         cylinders: Vec::new(),
-        loss: LossModel::Lossless,
+        loss: Some(LossModel::Lossless),
         pressure,
         flow,
     }

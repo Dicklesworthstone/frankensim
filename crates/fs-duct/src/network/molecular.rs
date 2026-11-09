@@ -6,6 +6,8 @@
 //! speed, fitted attenuation or separately added thermal shunt replaces them.
 //! The returned prepared source operator feeds the existing coherent-drive,
 //! source-statistics and finite-window observation APIs without another solve.
+//! [`MolecularNetwork::prepare_fields`] also observes original branch pressure,
+//! flow and velocity using those same molecular waves and loaded equations.
 //!
 //! Geometry is frozen, with one gas state per edge, a common static pressure
 //! and an independently declared exterior. Cylinders, cones, profiles, parallel
@@ -24,6 +26,9 @@ use crate::molecular::{MolecularDuct, MolecularDuctError, MolecularWallResolutio
 use crate::{ConeSlices, DuctError, Segment};
 use fs_material::relaxation::RelaxationState;
 use std::collections::BTreeMap;
+
+mod field;
+pub use field::{MolecularNetworkFieldRequest, PreparedMolecularNetworkFields};
 
 /// Original molecular law and explicit diffusion/geometry resolution for one
 /// authored graph edge. The state's gas must equal that edge's original media
@@ -65,6 +70,8 @@ impl MolecularNetwork {
     /// Bind every edge exactly once, retaining the complete original media.
     /// `maximum_blocks` caps the SUM of all actual edge propagation blocks.
     /// It never reduces the caller's cone, profile or diffusion resolution.
+    /// Mechanical pins on `NetworkMedia` refuse: this graph binding does not
+    /// implement their coupled molecular wall response and never drops them.
     pub fn new(
         network: DuctNetwork,
         media: NetworkMedia,
@@ -99,6 +106,12 @@ impl MolecularNetwork {
         }
         // Admit identity and gas before preparing ANY expensive wall spectra.
         for edge in &network.edges {
+            if media.edge_wall(&edge.id).is_some() {
+                return Err(bad(
+                    "molecular network mechanical wall pins require their original coupled owner",
+                )
+                .into());
+            }
             let binding = bindings
                 .get(&edge.id)
                 .ok_or_else(|| bad("molecular network omits an authored edge identity"))?;

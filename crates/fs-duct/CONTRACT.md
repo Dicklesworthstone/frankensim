@@ -2248,6 +2248,49 @@ joint wall/molecular chain subdivision, half-wave loaded closure and exact
 binding/capacity refusals. Native execution is pending because the current
 checkout lacks required sibling repositories.
 
+#### Interior fields on original molecular branches
+
+`MolecularNetwork::prepare_fields` accepts a `MolecularNetworkFieldRequest`
+with physical frequency, source clock, complete source/load conditions,
+original geometry probes and the existing `NetworkFieldBudget`. It returns
+`PreparedMolecularNetworkFields`, which borrows the original molecular network
+and exposes its native `PreparedNetworkFields`. That same loaded inverse
+supplies external ports and internal pressure/directed volume-flow transfers.
+Cycle-mean particle velocity uses the actual section area. Coherent samples,
+proper-factor finite-window moments and recorded Welch cross spectra reuse
+the existing contraction and observation owners without another graph solve.
+
+The original molecular owner prepares each edge's caloric response once per
+frequency. Its joint molecular/thermal diffusion waves, authored segment cuts
+and actual cone slices are retained through field preparation. A cylinder or
+cone interior point splits its original local-wave block; it does not evaluate
+an equilibrium wave or resample material at a nearby radius. Profile probes
+use original Magnus-panel cuts. Prefix/suffix scattering avoids growing reverse
+propagators on opaque paths. Regional edge identities, reservoirs, wall spectra,
+source-bank coupling and the independent exterior remain on the borrowed
+network. Sound-speed location metadata is the equilibrium reference; the
+complex molecular wave determines actual phase, storage and attenuation.
+
+No independent `LossModel` overrides this path. In particular, the equilibrium
+`prepare_cylinder_absorption` API explicitly refuses these fields rather than
+reporting zero loss or assigning Bessel heat to the coupled molecular law.
+Signed internal power is transported work, not a caloric-deposition partition.
+The existing mechanically rigid network scope now explicitly rejects supplied
+`NetworkMedia` wall pins instead of silently discarding their response.
+The original aggregate block cap, probe/transfer bounds, frequency support,
+loaded conditioning and cancellation remain; no numerical axis is reduced.
+The dense loaded solve is bounded and polled immediately before/after.
+
+`src/network/molecular/tests/fields.rs` compares independent complex traveling
+waves at loaded half-wave poles and opaque lengths, regional branch fields
+and coherence with a full coupled source bank, original joint wall/molecular
+fields across cylinder/cone/profile segment cuts, and independent converging
+and diverging spherical-wave fields. It also checks unsupported heat and wall
+bindings, original frequency support, budgets, probe bounds, cancellation and
+deterministic replay. Rust formatting/parser checks have passed; native test
+execution remains pending because the constrained host cannot build the real
+pinned dependency graph. Source review is not a native runtime result.
+
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
 plus one independently specified homogeneous exterior. Mixture composition,
 NASA-9 query states and source-pack receipts remain in those records and in

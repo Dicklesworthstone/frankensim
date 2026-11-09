@@ -35,10 +35,10 @@
 //! complete exterior impedance matrix close the same propagation operator.
 //! Exterior radiation is explicit, never inferred from the bore gas.
 
-use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
-use crate::{ConeSlices, Duct, DuctError, Segment, SegmentWave};
 #[cfg(test)]
 use crate::LossModel;
+use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
+use crate::{ConeSlices, Duct, DuctError, Segment, SegmentWave};
 use fs_material::MaterialError;
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
@@ -50,11 +50,12 @@ pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 mod field;
 pub use field::MolecularFieldTravel;
 pub(crate) use field::{gas_key, state_key};
-pub(crate) mod local;
 mod exterior;
+pub(crate) mod local;
 pub use exterior::{MolecularExteriorResponse, MolecularPortScattering};
 mod compliant_wall;
 pub use compliant_wall::MolecularCompliantWall;
+pub(crate) mod spatial;
 
 /// Original constitutive or propagation refusal, without a fallback gas law.
 #[derive(Debug)]
@@ -111,8 +112,15 @@ struct MaterialPoint {
 }
 #[derive(Debug, Clone)]
 enum Piece {
-    Wave { geometry: Segment, point: usize },
-    Magnus { h: f64, points: [usize; 2], slants: [f64; 2] },
+    Wave {
+        geometry: Segment,
+        point: usize,
+    },
+    Magnus {
+        h: f64,
+        points: [usize; 2],
+        slants: [f64; 2],
+    },
     ToneHole(holes::ToneHole),
 }
 
@@ -123,6 +131,9 @@ pub struct MolecularDuct {
     field_binding: Option<field::FieldBinding>,
     points: Vec<MaterialPoint>,
     pieces: Vec<Piece>,
+    // Original authored segment cuts on the homogeneous construction path.
+    // A varying primitive field has its own quadrature and no such cut map.
+    segment_boundaries: Option<Vec<usize>>,
     reference_impedance: f64,
     compliant_wall: Option<MolecularCompliantWall>,
 }
@@ -191,6 +202,7 @@ impl MolecularDuct {
         }
         // Admit the entire geometry/work request before any eigensolve.
         let mut count = 0usize;
+        let mut segment_boundaries = vec![0];
         for segment in &duct.segments {
             poll(cancelled, 0)?;
             segment.validate()?;
@@ -202,7 +214,11 @@ impl MolecularDuct {
                     ..
                 } => {
                     let n = cones.count(*inlet_radius, *outlet_radius)?;
-                    if wall.is_some() || compliant_wall.is_some() { n } else { 1 }
+                    if wall.is_some() || compliant_wall.is_some() {
+                        n
+                    } else {
+                        1
+                    }
                 }
                 Segment::Profile { steps, .. } => steps.0,
                 Segment::ToneHole { state, .. } => {
@@ -216,6 +232,7 @@ impl MolecularDuct {
             if count > maximum_blocks {
                 return Err(bad("molecular duct composition block work cap exceeded").into());
             }
+            segment_boundaries.push(count);
         }
         let gas = state.gas();
         let r = first.inlet_radius();
@@ -228,6 +245,7 @@ impl MolecularDuct {
             field_binding: None,
             points: Vec::new(),
             pieces: Vec::with_capacity(count),
+            segment_boundaries: Some(segment_boundaries),
             reference_impedance: reference,
             compliant_wall,
         };
@@ -381,7 +399,13 @@ impl MolecularDuct {
 
     fn state_at_point(&self, index: usize) -> &RelaxationState {
         match self.points[index].state {
-            Some(state) => &self.field_binding.as_ref().expect("field material point").states[state],
+            Some(state) => {
+                &self
+                    .field_binding
+                    .as_ref()
+                    .expect("field material point")
+                    .states[state]
+            }
             None => &self.state,
         }
     }
@@ -396,7 +420,13 @@ impl MolecularDuct {
         let point = &self.points[index];
         let state = self.state_at_point(index);
         Ok(local::wave(
-            state, point.radius, point.x_m, point.wall.as_ref(), omega, cp, relaxing_k,
+            state,
+            point.radius,
+            point.x_m,
+            point.wall.as_ref(),
+            omega,
+            cp,
+            relaxing_k,
         )?)
     }
 
@@ -441,6 +471,21 @@ impl MolecularDuct {
             return Err(bad("molecular chimney loads must be finite and passive").into());
         }
         let (waves, min_shear) = self.waves_controlled(omega, cancelled)?;
+        self.chain_from_waves_controlled(omega, mouth_loads, options, &waves, min_shear, cancelled)
+    }
+
+    // Both port-only and spatial preparations consume these same original
+    // waves. The spatial consumer retains them rather than re-querying the
+    // material or evaluating a nearby rounded radius while splitting a block.
+    fn chain_from_waves_controlled(
+        &self,
+        omega: f64,
+        mouth_loads: &[C64],
+        options: ComposeOptions,
+        waves: &[SegmentWave],
+        min_shear: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedChain, Vec<holes::PreparedHole>), MolecularDuctError> {
         let mut wall_waves = BTreeMap::new();
         let reference = self.reference_impedance;
         let mut blocks = Vec::with_capacity(self.blocks());
@@ -456,7 +501,7 @@ impl MolecularDuct {
                         None
                     };
                     let (local, observation) = hole.prepare(
-                        &self.wall_wave(hole.point, 1.0, omega, &waves, &mut wall_waves)?,
+                        &self.wall_wave(hole.point, 1.0, omega, waves, &mut wall_waves)?,
                         self.state_at_point(hole.point).gas().density,
                         omega,
                         load,
@@ -468,7 +513,7 @@ impl MolecularDuct {
                     observations.push(observation);
                     continue;
                 }
-                _ => self.piece_wave_block(piece, &waves, omega, &mut wall_waves)?,
+                _ => self.piece_wave_block(piece, waves, omega, &mut wall_waves)?,
             };
             blocks.push(block);
         }
@@ -499,7 +544,11 @@ impl MolecularDuct {
             local.reserve(binding.states.len());
             for (index, state) in binding.states.iter().enumerate() {
                 poll(cancelled, 0)?;
-                local.push(if index == 0 { uniform } else { local::caloric(state, omega)? });
+                local.push(if index == 0 {
+                    uniform
+                } else {
+                    local::caloric(state, omega)?
+                });
             }
         }
         let mut waves = Vec::with_capacity(self.points.len());
@@ -528,8 +577,11 @@ impl MolecularDuct {
         Ok(match piece {
             Piece::Wave { geometry, point } => {
                 let slant = match geometry {
-                    Segment::Cone { inlet_radius, outlet_radius, length }
-                        if self.compliant_wall.is_some() => {
+                    Segment::Cone {
+                        inlet_radius,
+                        outlet_radius,
+                        length,
+                    } if self.compliant_wall.is_some() => {
                         let slope = (outlet_radius - inlet_radius) / length;
                         det::sqrt(1.0 + slope * slope)
                     }
@@ -548,13 +600,18 @@ impl MolecularDuct {
                     ))
                 };
                 let mut matrix = crate::profile::magnus_step(
-                    generator(points[0], slants[0])?, generator(points[1], slants[1])?, *h, det::sqrt(3.0),
+                    generator(points[0], slants[0])?,
+                    generator(points[1], slants[1])?,
+                    *h,
+                    det::sqrt(3.0),
                 )?;
                 matrix[1] = matrix[1].scale(reference);
                 matrix[2] = matrix[2].scale(1.0 / reference);
                 TwoPort::from_abcd(matrix, reference)?
             }
-            Piece::ToneHole(_) => return Err(bad("tone holes require their branch preparation").into()),
+            Piece::ToneHole(_) => {
+                return Err(bad("tone holes require their branch preparation").into());
+            }
         })
     }
 
@@ -596,4 +653,3 @@ mod tests;
 
 #[cfg(test)]
 mod holes_tests;
-

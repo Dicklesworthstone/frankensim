@@ -230,6 +230,7 @@ impl MolecularDuct {
             }),
             points: Vec::new(),
             pieces: Vec::with_capacity(count),
+            segment_boundaries: None,
             reference_impedance: reference,
             compliant_wall,
         };
