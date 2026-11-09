@@ -7,8 +7,9 @@
 //! they are not endpoint trapezoids or energy-balance remainders.
 //!
 //! This is a native mechanics owner, not a fluid/material constitutive law.
-//! Its caller supplies admitted resistances and the physical regime. Forces,
-//! ambient velocity, properties and resistances stay fixed over the interval.
+//! Its caller supplies admitted resistances and the physical regime. The force
+//! may be held or explicitly affine in time; ambient velocity, properties and
+//! resistances stay fixed over the interval.
 //! Anisotropic inertia, applied couples, rotating baths, lift, contact and
 //! changing sources require their existing more general owners.
 
@@ -17,6 +18,8 @@ use crate::{
     Wrench,
 };
 use fs_math::{dd::Dd, decay};
+
+mod affine;
 
 /// An exact-flow input or arithmetic refusal; no state has been modified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +62,7 @@ pub struct IsotropicLinearDrag {
 /// Exact-model motion and independent source/storage accounts, rounded to f64.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearDragStep {
-    /// Held interval [s].
+    /// Physical interval [s].
     pub duration_s: f64,
     /// Original authoritative state at the beginning of the interval.
     pub state_before: RigidBodyState,
@@ -85,7 +88,7 @@ pub struct LinearDragStep {
     pub dissipated_energy_j: f64,
     /// Signed work of the actuator maintaining U: `drag_impulse . U` [J].
     pub background_work_j: f64,
-    /// Held applied force paired with the integrated COM path [J].
+    /// Integral of the prescribed applied force paired with COM velocity [J].
     pub applied_work_j: f64,
     /// Gravity paired with the integrated COM path [J].
     pub gravity_work_j: f64,
@@ -158,16 +161,13 @@ impl IsotropicLinearDrag {
             return Err(DynamicsError::InvalidStepDuration.into());
         }
         let mass = dd(self.properties.mass());
-        let inertia = dd(self.properties.principal_inertia_body().x);
         let dt = dd(duration_s);
         let translation = Moments::new(
             self.translation_resistance_kg_s,
             self.properties.mass(),
             duration_s,
         )?;
-        let rotation = Moments::new(self.rotary_resistance_kg_m2_s, inertia.hi, duration_s)?;
         let before_p = components(state.linear_momentum_world()).map(dd);
-        let before_l = components(state.angular_momentum_body()).map(dd);
         let force = components(applied.force_world).map(dd);
         let weight = components(self.gravity.acceleration_world()).map(|g| mass * dd(g));
         let total_force: [Dd; 3] = core::array::from_fn(|i| force[i] + weight[i]);
@@ -217,6 +217,43 @@ impl IsotropicLinearDrag {
                     * (relative_mean * relative_mean
                         + velocity_increment * velocity_increment * dd(translation.variance));
         }
+        self.finish(
+            state,
+            duration_s,
+            TranslationPath {
+                after_p,
+                displacement,
+                drag_impulse,
+                translation_heat,
+                applied_work: dot(force, displacement),
+                total_impulse: total_force.map(|value| value * dt),
+            },
+        )
+    }
+
+    // Both prescribed force histories use the original native free-spin flow,
+    // represented-state storage and retained impulse/work accounting below.
+    fn finish(
+        self,
+        state: RigidBodyState,
+        duration_s: f64,
+        path: TranslationPath,
+    ) -> Result<LinearDragStep, LinearDragError> {
+        let TranslationPath {
+            after_p,
+            displacement,
+            drag_impulse,
+            translation_heat,
+            applied_work,
+            total_impulse,
+        } = path;
+        let mass = dd(self.properties.mass());
+        let inertia = dd(self.properties.principal_inertia_body().x);
+        let rotation = Moments::new(self.rotary_resistance_kg_m2_s, inertia.hi, duration_s)?;
+        let before_p = components(state.linear_momentum_world()).map(dd);
+        let before_l = components(state.angular_momentum_body()).map(dd);
+        let weight = components(self.gravity.acceleration_world()).map(|g| mass * dd(g));
+        let ambient = components(self.ambient_velocity_world).map(dd);
         let after_l = before_l.map(|value| attenuated(value, rotation.exposure));
         let rotation_vector_body =
             vector(before_l.map(|value| value / inertia * rotation.integral_s))?;
@@ -242,7 +279,6 @@ impl IsotropicLinearDrag {
             return Err(LinearDragError::Invalid("negative integrated drag heat"));
         }
         let background_work = dot(drag_impulse, ambient);
-        let applied_work = dot(force, displacement);
         let gravity_work = dot(weight, displacement);
         let represented_displacement = core::array::from_fn(|i| {
             dd(components(state_after.pose().position_world())[i]) - position[i]
@@ -254,7 +290,7 @@ impl IsotropicLinearDrag {
         let linear_residual = core::array::from_fn(|i| {
             dd(components(state_after.linear_momentum_world())[i])
                 - before_p[i]
-                - total_force[i] * dt
+                - total_impulse[i]
                 - drag_impulse[i]
         });
         let drag_angular_impulse_world = state
@@ -296,6 +332,15 @@ impl IsotropicLinearDrag {
     }
 }
 
+struct TranslationPath {
+    after_p: [Dd; 3],
+    displacement: [Dd; 3],
+    drag_impulse: [Dd; 3],
+    translation_heat: Dd,
+    applied_work: Dd,
+    total_impulse: [Dd; 3],
+}
+
 // phi1 = integral_0^1 exp(-x*s) ds; phi2 = (1-phi1)/x.
 // variance is that of (1-exp(-x*s))/(1-exp(-x)) on [0,1].
 // Its small-x series tends to 1/12, the variance of s, without subtracting
@@ -312,16 +357,7 @@ struct Moments {
 
 impl Moments {
     fn new(resistance: f64, inertia: f64, duration: f64) -> Result<Self, LinearDragError> {
-        let rate = resistance / inertia;
-        let exposure = rate * duration;
-        if !rate.is_finite()
-            || !exposure.is_finite()
-            || resistance > 0.0 && (rate == 0.0 || exposure == 0.0)
-        {
-            return Err(LinearDragError::Invalid(
-                "drag relaxation scale is unrepresentable",
-            ));
-        }
+        let exposure = relaxation_exposure(resistance, inertia, duration)?;
         let lost = decay::decayed_fraction(exposure);
         let (phi1, phi2, variance) = if exposure < 0.25 {
             let mut phi2 = 0.5;
@@ -356,6 +392,20 @@ impl Moments {
             variance,
         })
     }
+}
+
+fn relaxation_exposure(resistance: f64, inertia: f64, duration: f64) -> Result<f64, LinearDragError> {
+    let rate = resistance / inertia;
+    let exposure = rate * duration;
+    if !rate.is_finite()
+        || !exposure.is_finite()
+        || resistance > 0.0 && (rate == 0.0 || exposure == 0.0)
+    {
+        return Err(LinearDragError::Invalid(
+            "drag relaxation scale is unrepresentable",
+        ));
+    }
+    Ok(exposure)
 }
 
 fn dd(value: f64) -> Dd {

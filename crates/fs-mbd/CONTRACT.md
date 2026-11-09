@@ -96,6 +96,34 @@ lost coordinate or momentum increments remain visible rather than becoming heat.
 entrainment, semigroup composition, terminal settling, a tiny unresolved state
 change, zero drag, Galilean covariance and unsupported-input refusal.
 
+### Prescribed force ramps with simultaneous drag
+
+`IsotropicLinearDrag::step_affine_force` uses the same initial-wrench/final-world-
+force convention as the native integrator's affine-force entry. It integrates
+the prescribed ramp and drag together, retaining gravity, held bath velocity,
+fixed isotropic inertia and the original exact free-spin flow. A held force
+delegates to the existing held entry. No separate force kick, terminal-speed
+approximation or relaxation-number restriction replaces the actual path.
+
+Applied work uses both the velocity integral and its first time moment; even
+zero net applied impulse can transfer nonzero work. Independent slip heat uses
+the positive squared projections of the affine/exponential trajectory onto
+constant and linear time, plus its nonnegative remaining variance. The short-
+interval moments have regular series with residual variance tending to 1/720;
+the stiff branch uses the decaying-exponential basis. Zero translation drag
+uses exact polynomial motion without reading bath velocity into the solution.
+The original native pose, spin, kinetic-storage and impulse/work-residual
+owners publish the result. Represented-state rounding remains a defect.
+
+`tests/linear_drag/affine.rs` checks independent closed-form velocities and
+power quadrature, a zero-impulse work transfer, unequal-interval composition,
+small-exposure reversal heat, zero-drag ballistic work, Galilean source work,
+held-entry parity and unsupported inputs. Endpoint force samples do not define
+an arbitrary feedback law. A material consumer must admit interior speed
+extrema; the held-force endpoint-only Reynolds argument does not extend to a
+ramp. Accelerating-fluid pressure, added mass and history remain with their
+existing physical owners; this entry changes the prescribed force only.
+
 ## Relative contact velocity
 
 The shared articulated normal, tangential and bilateral velocity rows accumulate
