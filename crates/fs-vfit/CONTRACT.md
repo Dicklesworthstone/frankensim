@@ -101,6 +101,13 @@ pole refusal and transactional refusal.
   `s*e`; `eval`/`eval_iw`; real block-diagonal `state_space()` whose
   independent LU-solve `StateSpace::eval` route is the
   realization-parity oracle.
+  Scalar and multiport evaluation retain the original finite response when a
+  reciprocal pole distance would overflow or lose a subnormal component:
+  those terms use the shared scaled complex division with the residue inside
+  the quotient. Ordinary multiport evaluations keep one cached reciprocal per
+  pole. No physical decay is clipped or added; a true pole remains nonfinite.
+  `tests/exact_resonance.rs` checks finite tiny-loss peaks, signed mutual
+  participation, extreme time-unit scaling and surviving weak quadratures.
 - `vf::vector_fit(omega, h, opts)` — relaxed vector fitting
   (Gustavsen-Semlyen): homogeneous sigma system with the relaxed
   non-triviality row, pole relocation via the sigma-zero eigensolve on

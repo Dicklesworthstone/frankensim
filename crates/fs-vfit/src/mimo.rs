@@ -19,7 +19,7 @@
 //!   stability cannot change. Each `(frequency, eigenvector)` pair gives a
 //!   linear constraint. The constraints accumulate over rounds against the
 //!   original model, and every round is re-certified.
-use crate::model::{PoleTerm, RationalModel};
+use crate::model::{PoleTerm, RationalModel, normal_pole_reciprocal};
 use crate::passivity::{CertificateClass, PassivityError};
 use crate::vf::{
     FitOptions, FitReport, VfError, WeightPreset, basis_columns, conjugate_close, initial_poles,
@@ -114,15 +114,29 @@ impl MimoModel {
         for (term, r) in self.poles.iter().zip(&self.residues) {
             match *term {
                 PoleTerm::Real { pole, .. } => {
-                    let phi = (s - C64::from_re(pole)).recip();
+                    let distance = s - C64::from_re(pole);
+                    let inverse = normal_pole_reciprocal(distance);
                     for (zi, ri) in z.iter_mut().zip(r) {
-                        *zi = *zi + phi.scale(ri.re);
+                        let value = match inverse {
+                            Some(phi) => phi.scale(ri.re),
+                            None => C64::from_re(ri.re) / distance,
+                        };
+                        *zi = *zi + value;
                     }
                 }
                 PoleTerm::Pair { pole, .. } => {
-                    let (a, b) = ((s - pole).recip(), (s - pole.conj()).recip());
+                    let (a, b) = (s - pole, s - pole.conj());
+                    let (first, second) = (normal_pole_reciprocal(a), normal_pole_reciprocal(b));
                     for (zi, ri) in z.iter_mut().zip(r) {
-                        *zi = *zi + *ri * a + ri.conj() * b;
+                        let first_value = match first {
+                            Some(inverse) => *ri * inverse,
+                            None => *ri / a,
+                        };
+                        let second_value = match second {
+                            Some(inverse) => ri.conj() * inverse,
+                            None => ri.conj() / b,
+                        };
+                        *zi = *zi + first_value + second_value;
                     }
                 }
             }

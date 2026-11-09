@@ -1,10 +1,10 @@
 //! G0/G1 held-input resonance normalization, phase and physical port work.
 use fs_math::c64::C64;
-use fs_vfit::PoleTerm;
 use fs_vfit::discretize::DelayedFilter;
 use fs_vfit::mimo::delayed::{DelayedMimoLoadLimits, PreparedDelayedMimoLoad};
 use fs_vfit::mimo::load::MimoLoadLimits;
 use fs_vfit::mimo::{DelayedMimoModel, MimoModel};
+use fs_vfit::{PoleTerm, RationalModel};
 
 const DT: f64 = 1.0 / 48_000.0;
 const W: f64 = core::f64::consts::TAU * 1_000.0;
@@ -24,6 +24,170 @@ fn near(actual: C64, expected: C64, relative: f64) {
         error <= relative * expected.abs().max(1e-20),
         "actual={actual:?}, expected={expected:?}, error={error:e}"
     );
+}
+
+#[test]
+fn g1_continuous_narrow_resonance_retains_finite_scalar_and_mutual_response() {
+    let gains = [
+        C64::new(1.0, 0.5),
+        C64::new(-2.0, 1.0),
+        C64::new(0.5, -1.0),
+        C64::new(2.0, -0.5),
+    ];
+    // These physical decays are nonzero, but their reciprocals overflow.
+    // The residues scale with decay, so the resonant transfer is finite.
+    for decay in [f64::from_bits(4), 1e-310, f64::MIN_POSITIVE] {
+        let pole = C64::new(-decay, 7.0);
+        let model = MimoModel {
+            ports: 2,
+            poles: vec![PoleTerm::Pair {
+                pole,
+                residue: C64::ZERO,
+            }],
+            residues: vec![gains.iter().map(|r| r.scale(decay)).collect()],
+            d: vec![0.0; 4],
+            e: vec![0.0; 4],
+            reciprocal: false,
+        };
+        let positive = model.eval_iw(7.0);
+        let negative = model.eval_iw(-7.0);
+        for (entry, &gain) in gains.iter().enumerate() {
+            // At +omega the resonant term is exactly r/decay. The other
+            // conjugate term is O(decay/omega), below this rounding tolerance.
+            near(positive[entry], gain, 2e-13);
+            near(negative[entry], gain.conj(), 2e-13);
+            let scalar = RationalModel {
+                terms: vec![PoleTerm::Pair {
+                    pole,
+                    residue: model.residues[0][entry],
+                }],
+                d: 0.0,
+                e: 0.0,
+            };
+            near(scalar.eval_iw(7.0), gain, 2e-13);
+            let relaxation = PoleTerm::Real {
+                pole: -decay,
+                residue: decay * gain.re,
+            };
+            near(relaxation.eval(C64::ZERO), C64::from_re(gain.re), 2e-13);
+        }
+    }
+    // Removing physical loss still exposes the true pole; no numerical floor
+    // or damping regularization is introduced by the finite-response repair.
+    let pole = PoleTerm::Pair {
+        pole: C64::new(0.0, 7.0),
+        residue: C64::ONE,
+    };
+    let singular = pole.eval(C64::new(0.0, 7.0));
+    assert!(!singular.re.is_finite() || !singular.im.is_finite());
+}
+
+#[test]
+fn g1_continuous_response_is_covariant_under_extreme_time_unit_scaling() {
+    // Independent real arithmetic for r/(s-p), used only at O(1) scales.
+    let quotient = |r: C64, d: C64| {
+        let norm = d.re * d.re + d.im * d.im;
+        C64::new(
+            (r.re * d.re + r.im * d.im) / norm,
+            (r.im * d.re - r.re * d.im) / norm,
+        )
+    };
+    let p = C64::new(-0.125, 0.5);
+    let r = C64::new(0.25, 0.0625);
+    let gains = [1.0, -0.5, 0.25, 1.5];
+    // Exact binary scalings also keep the subnormal test independent of
+    // platform powi implementations that form an overflowing reciprocal.
+    for scale in [
+        f64::from_bits(1_u64 << 34), // 2^-1040
+        1.0,
+        f64::from_bits(2046_u64 << 52), // 2^1023
+    ] {
+        for omega in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let s = C64::new(0.0, omega);
+            let expected = C64::from_re(0.125)
+                + quotient(C64::from_re(0.75), s - C64::from_re(-0.5))
+                + quotient(r, s - p)
+                + quotient(r.conj(), s - p.conj());
+            let model = MimoModel {
+                ports: 2,
+                poles: vec![
+                    PoleTerm::Real {
+                        pole: -0.5 * scale,
+                        residue: 0.0,
+                    },
+                    PoleTerm::Pair {
+                        pole: p.scale(scale),
+                        residue: C64::ZERO,
+                    },
+                ],
+                residues: vec![
+                    gains
+                        .iter()
+                        .map(|&gain| C64::from_re(0.75 * gain * scale))
+                        .collect(),
+                    gains
+                        .iter()
+                        .map(|&gain| r.scale(gain).scale(scale))
+                        .collect(),
+                ],
+                d: gains.iter().map(|gain| 0.125 * gain).collect(),
+                e: vec![0.0; 4],
+                reciprocal: false,
+            };
+            let actual = model.eval_iw(omega * scale);
+            for (entry, &gain) in gains.iter().enumerate() {
+                near(actual[entry], expected.scale(gain), 4e-14);
+                let scalar = RationalModel {
+                    terms: vec![
+                        PoleTerm::Real {
+                            pole: -0.5 * scale,
+                            residue: model.residues[0][entry].re,
+                        },
+                        PoleTerm::Pair {
+                            pole: p.scale(scale),
+                            residue: model.residues[1][entry],
+                        },
+                    ],
+                    d: model.d[entry],
+                    e: 0.0,
+                };
+                near(scalar.eval_iw(omega * scale), expected.scale(gain), 4e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_continuous_weak_quadrature_survives_reciprocal_underflow() {
+    // H(i) = rate/(rate+i) = 1-i/rate+O(1/rate^2). Forming the
+    // reciprocal first loses its imaginary part before the residue restores it.
+    let rate = f64::from_bits(2046_u64 << 52);
+    let model = MimoModel {
+        ports: 2,
+        poles: vec![PoleTerm::Real {
+            pole: -rate,
+            residue: 0.0,
+        }],
+        residues: vec![vec![
+            C64::from_re(rate),
+            C64::from_re(-rate),
+            C64::from_re(rate * 0.5),
+            C64::from_re(-rate * 0.5),
+        ]],
+        d: vec![0.0; 4],
+        e: vec![0.0; 4],
+        reciprocal: false,
+    };
+    for (entry, gain) in [1.0, -1.0, 0.5, -0.5].into_iter().enumerate() {
+        let scalar = PoleTerm::Real {
+            pole: -rate,
+            residue: rate * gain,
+        };
+        for actual in [scalar.eval(C64::new(0.0, 1.0)), model.eval_iw(1.0)[entry]] {
+            assert_eq!(actual.re, gain);
+            assert!((actual.im / (-gain / rate) - 1.0).abs() < 3e-15);
+        }
+    }
 }
 
 #[test]

@@ -9,6 +9,18 @@
 
 use fs_math::c64::C64;
 
+// Reuse one reciprocal across a multiport residue matrix at ordinary scales.
+// An unrepresentable or subnormal reciprocal component must instead remain
+// inside the scaled complex quotient: a small residue can make r/(s-p) finite
+// even when 1/(s-p) overflows, and a large residue can restore a weak quadrature
+// that would underflow if the reciprocal were rounded first.
+pub(crate) fn normal_pole_reciprocal(distance: C64) -> Option<C64> {
+    let inverse = distance.recip();
+    let real_normal = inverse.re.is_normal() || (distance.re == 0.0 && inverse.re == 0.0);
+    let imaginary_normal = inverse.im.is_normal() || (distance.im == 0.0 && inverse.im == 0.0);
+    (real_normal && imaginary_normal).then_some(inverse)
+}
+
 /// One real-rational term of a pole-residue expansion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PoleTerm {
@@ -45,10 +57,18 @@ impl PoleTerm {
     pub fn eval(&self, s: C64) -> C64 {
         match *self {
             PoleTerm::Real { pole, residue } => {
-                C64::from_re(residue) * (s - C64::from_re(pole)).recip()
+                let distance = s - C64::from_re(pole);
+                match normal_pole_reciprocal(distance) {
+                    Some(inverse) => C64::from_re(residue) * inverse,
+                    None => C64::from_re(residue) / distance,
+                }
             }
             PoleTerm::Pair { pole, residue } => {
-                residue * (s - pole).recip() + residue.conj() * (s - pole.conj()).recip()
+                let quotient = |r, distance| match normal_pole_reciprocal(distance) {
+                    Some(inverse) => r * inverse,
+                    None => r / distance,
+                };
+                quotient(residue, s - pole) + quotient(residue.conj(), s - pole.conj())
             }
         }
     }
