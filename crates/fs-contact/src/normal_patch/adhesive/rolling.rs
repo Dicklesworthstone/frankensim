@@ -12,9 +12,10 @@
 //! storage. `advance_normal` explicitly follows a prescribed attached JKR path
 //! at held rolling angle, retains the original memory and returns the signed
 //! work needed to change rolling stiffness. It does not add reciprocal normal
-//! loading or solve a relaxed mixed-mode contact area. Temperature, detachment
-//! or a changing rolling axis need other history/work owners; rebuilding this
-//! owner cannot adopt its predecessor's history. No net-load cutoff is applied.
+//! loading or solve a relaxed mixed-mode contact area. The [`events`] owner
+//! carries this memory through original normal attachment and detachment with
+//! explicit outgoing release. Temperature or a changing rolling axis need
+//! other history/work owners. No net-load cutoff is applied.
 
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use fs_blake3::{ContentHash, DomainHasher};
@@ -24,6 +25,9 @@ use fs_tribo::rolling_loss::adhesive::{
     AdhesiveRollingStep,
 };
 use std::sync::Arc;
+
+/// Original normal attachment, loaded separation and stress-free recontact.
+pub mod events;
 
 /// Independent rolling calibration and small-shift approximation ceiling.
 /// Neither field is inferred from bulk elasticity or work of adhesion.

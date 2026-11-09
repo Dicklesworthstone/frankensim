@@ -533,7 +533,10 @@ mod tests {
             refresh.law().critical_moment_n_m(),
             8.0 * model.critical_moment_n_m(),
         );
-        assert_eq!(refresh.state.elastic_fraction, loaded.state.elastic_fraction);
+        assert_eq!(
+            refresh.state.elastic_fraction,
+            loaded.state.elastic_fraction
+        );
         assert_eq!(refresh.state.angle, loaded.state.angle);
         close(refresh.storage_before_j(), loaded.storage_after_j);
         close(refresh.storage_after_j(), 8.0 * loaded.storage_after_j);
@@ -571,7 +574,10 @@ mod tests {
             .state;
         let loaded = model.advance(&start, angle * 1e-20).unwrap().state;
         assert_ne!(loaded, start);
-        assert_eq!(loaded.accumulated_angle_rad(), start.accumulated_angle_rad());
+        assert_eq!(
+            loaded.accumulated_angle_rad(),
+            start.accumulated_angle_rad()
+        );
         let radius = parameters().contact_radius_m;
         let direct = model.refresh_contact_radius(&loaded, 1.8 * radius).unwrap();
         let first = model.refresh_contact_radius(&loaded, 1.3 * radius).unwrap();

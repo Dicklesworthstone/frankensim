@@ -1,6 +1,8 @@
 //! G0/G1/G3: original JKR area, tensile rolling memory and independent work.
 #[path = "source_point/common.rs"]
 mod common;
+#[path = "adhesive_rolling/events.rs"]
+mod events;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::rolling::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
@@ -213,8 +215,7 @@ fn prescribed_normal_loading_retains_rolling_memory_and_accounts_for_both_stores
     // Independent full normal potential at a prescribed radius and indentation.
     let potential = |a: f64, delta: f64| {
         let hertz = a * a / r;
-        e * a * (delta - hertz / 3.0).powi(2)
-            + (4.0 / 45.0) * e * a * hertz * hertz
+        e * a * (delta - hertz / 3.0).powi(2) + (4.0 / 45.0) * e * a * hertz * hertz
             - PI * w * a * a
     };
     let normal_change = potential(end.contact_radius_m, end.indentation_m)
@@ -262,10 +263,7 @@ fn prescribed_normal_loading_retains_rolling_memory_and_accounts_for_both_stores
 #[test]
 fn attached_tensile_area_continuation_preserves_work_under_subdivision() {
     let normal = normal("rolling-A");
-    let delta0 = normal
-        .evaluate_force_controlled(0.0)
-        .unwrap()
-        .indentation_m;
+    let delta0 = normal.evaluate_force_controlled(0.0).unwrap().indentation_m;
     let source = SourceJkrRollingContact::new(normal.clone(), delta0, controls()).unwrap();
     let state = source
         .advance(
@@ -317,8 +315,7 @@ fn attached_tensile_area_continuation_preserves_work_under_subdivision() {
 fn normal_continuation_refuses_detachment_and_inapplicable_area_atomically() {
     let normal_source = normal("rolling-A");
     let delta = 0.8 * normal_source.envelope().maximum_indentation_m;
-    let source =
-        SourceJkrRollingContact::new(normal_source.clone(), delta, controls()).unwrap();
+    let source = SourceJkrRollingContact::new(normal_source.clone(), delta, controls()).unwrap();
     let state = source
         .advance(
             &source.initial_state(),
@@ -335,8 +332,7 @@ fn normal_continuation_refuses_detachment_and_inapplicable_area_atomically() {
     ] {
         assert!(source.advance_normal(&state, target).is_err());
     }
-    let wrong =
-        SourceJkrRollingContact::new(normal("other-rolling-A"), delta, controls()).unwrap();
+    let wrong = SourceJkrRollingContact::new(normal("other-rolling-A"), delta, controls()).unwrap();
     assert!(matches!(
         wrong.advance_normal(&state, delta),
         Err(SourceJkrRollingError::StateMismatch)

@@ -4552,3 +4552,25 @@ capillary-driven body motion with reciprocal impulses.
 
 Reference: Shim et al. (2019), section 3.5, equation (3.1),
 https://pmc.ncbi.nlm.nih.gov/articles/PMC6528685/.
+
+## Adhesive rolling through attachment and separation
+
+`normal_patch::adhesive::rolling::events` retains the original JKR normal
+source, rolling calibration and sealed branch history across junction lifetimes.
+Prescribed normal travel delegates branch selection and smooth work to the
+original `advance_monotone`; attached rolling uses the original return map.
+At separation the retained spring first reaches the actual displacement
+spinodal radius. Its remaining storage leaves as a separate nonnegative release,
+while signed stiffness work and normal snap release keep their own accounts.
+Normal release, rolling release and plastic rolling loss accumulate separately
+with compensated arithmetic. Detached angular travel stores no preload, and
+reattachment starts stress-free without erasing the accumulated energy accounts.
+
+All successors are immutable proposals. The source and critical-shift/radius
+applicability screens apply at the event itself, including when the requested
+endpoint overshoots it. Repeating a detached endpoint cannot release energy
+twice. The source remains the prescribed-normal-area approximation; it adds no
+reciprocal rolling-area equilibrium, body impulse, temperature evolution or
+inferred destination for outgoing energy. G1/G3/G4 cases in
+`tests/adhesive_rolling/events.rs` specify independent spinodal release formulas,
+fresh recontact, subdivision, weak-work retention and atomic input refusal.
