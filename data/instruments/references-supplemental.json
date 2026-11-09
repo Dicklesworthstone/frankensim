@@ -153,6 +153,13 @@
       "url": "https://creativecommons.org/licenses/by-sa/4.0",
       "credit": "Ovinus Real (Commons user Ovinus), own work, Wikimedia Commons, 2020-05-08",
       "notes": "Licence read from the Commons file page (https://commons.wikimedia.org/wiki/File:Pedal_tone_demonstration2.ogg) on 2026-11-09. Attribution and share-alike apply to derived clips and spectra; no recording bytes are redistributed in Git."
+    },
+    {
+      "id": "dvtd-cc0",
+      "name": "CC0 1.0",
+      "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "credit": "Birkholz et al., the Dresden Vocal Tract Dataset (Sci. Data 7:255, 2020, doi 10.1038/s41597-020-00597-w, CC BY 4.0; archive CC0, figshare 11897187)",
+      "notes": "Licence read from the figshare record of the complete archive (api.figshare.com/v2/articles/11897187: CC0) on 2026-11-09; the article describing the data is CC BY 4.0, as its Rights and permissions section reads. Credit is given to the article as a courtesy; no recording bytes are redistributed in Git."
     }
   ],
   "chains": [
@@ -224,6 +231,19 @@
       "room": "not stated",
       "notes": "No microphone, distance, room or recording chain is stated on the file page. Original audio retained without normalization or retuning.",
       "source_sha256": "cd488df30dd8e8b3d255e5d601f39097c9222eb184a35666fc627b25e3916cfd"
+    },
+    {
+      "id": "dvtd-flow-rig-2020",
+      "source_url": "https://www.vocaltractlab.de/dvtd.zip",
+      "mic": "Microtech Gefell MK 250 1/2-inch capsule with MV 210 preamplifier",
+      "distance_m": 0.424,
+      "format": "PCM 24-bit mono 48 kHz WAV (ffprobe pcm_s24le); the article describes the samples as floating point between -1 and +1, with +1 = 12.62 Pa",
+      "room": "large climate-controlled anechoic chamber at TU Dresden (free field, 1000 m3, absorption at least 99 % from 60 Hz to 16 kHz); 22 C, 1007 hPa, 46 % relative humidity",
+      "signal_chain": [
+        "Data Translation DT9837C data acquisition device, 48 kHz, 24 bit"
+      ],
+      "notes": "The radiated sound of a 3-D printed vocal tract model blown by a stationary airflow, as the article describes it: the microphone 30 cm in front of and 30 cm sideways from the mouth (0.424 m), directed towards it. The article states the absolute scale (+1 = 12.62 Pa) and a hand-held sound level meter check within +-2 dB. Original audio retained without normalization, resampling or retuning.",
+      "source_sha256": null
     }
   ],
   "files": [
@@ -1702,6 +1722,43 @@
         "decode_check": "ffmpeg full decode to 48 kHz mono PCM succeeded"
       },
       "source_checksum": "md5:128f7cb6c837909dfa303b2305187daf"
+    },
+    {
+      "id": "dvtd-s1-11-bass-s-noise-500mW",
+      "instrument": "Voice",
+      "kind": "archive",
+      "archive_format": "zip",
+      "path": "DVTD/dvtd.zip",
+      "url": "https://www.vocaltractlab.de/dvtd.zip",
+      "sha256": null,
+      "bytes": 1129467424,
+      "source_checksum": "md5:02d159b107c9dd129744fc005e0f91d7",
+      "source_checksum_status": "The MD5 figshare publishes for the complete archive (figshare 11897187, dvtd.zip, 1129467424 bytes, the same length as the vocaltractlab.de mirror), not independently verified. The complete archive was not downloaded. The selected member has its own SHA-256 and byte-length pin.",
+      "retrieved_utc": "2026-11-08T22:37:24Z",
+      "acquisition_check": "The member was read by HTTP range request from the vocaltractlab.de mirror and its CRC-32 checked against the archive's central directory; ffmpeg decoded it in full on 2026-11-09.",
+      "source_page": "https://doi.org/10.6084/m9.figshare.c.4869732",
+      "paper": "https://doi.org/10.1038/s41597-020-00597-w",
+      "licence": "dvtd-cc0",
+      "chain": "dvtd-flow-rig-2020",
+      "articulation": "the stationary-flow noise of the 3-D printed model of subject 1's /s/ (s1-11-bass-s), blown through a 10 mm glottal hole with no vocal folds, at a fluid power of 500 mW",
+      "range": "unvoiced fricative noise: no pitch",
+      "dynamic": null,
+      "notes": "A physical model, not a voice: DVTD's flow rig blows the printed model of one speaker's /s/ from a tank through a trachea and bronchial horn, in an anechoic room. The dataset prints the subglottal pressure, the flow and the noise spectrum for this recording in s1-11-bass-s-noise-metadata.txt and s1-11-bass-s-noise-psd.txt. The metadata file's level column reads relative to 2e-4 Pa, 20.0 dB under the same signal re 20 uPa. The recording has no pitch: a grader's f0, harmonic and partial measures do not apply to it.",
+      "gradable": false,
+      "members": [
+        {
+          "archive_member": "subject-1/s1-11-bass-s/s1-11-bass-s-noise-500mW.wav",
+          "path": "DVTD/subject-1/s1-11-bass-s/s1-11-bass-s-noise-500mW.wav",
+          "sha256": "4a025a303e43283c3f2a2ee97660d858265993cbeff2e634171bc161e46cf914",
+          "bytes": 1440044,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 1,
+            "duration_s": 10.0,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        }
+      ]
     }
   ],
   "acquisition_check": {
