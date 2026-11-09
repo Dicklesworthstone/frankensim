@@ -22,6 +22,8 @@ use crate::{PhsError, PreparedStepError, PreparedStepRecord, storage_energy_chan
 
 /// Prescribed gates with continuing finite-energy capacitor source/load states.
 pub mod capacitor_fed;
+/// Nonlinear regulated demand with explicit numerical refinement per gate interval.
+pub mod power_load;
 /// Switched trajectories driven by finite voltage-source and load resistances.
 pub mod voltage_driven;
 

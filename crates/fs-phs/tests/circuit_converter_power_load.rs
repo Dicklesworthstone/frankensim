@@ -8,6 +8,9 @@ use fs_phs::{PreparedStepError, SolveBudget};
 #[path = "circuit_converter_power_load/voltage.rs"]
 mod voltage;
 
+#[path = "circuit_converter_power_load/switching.rs"]
+mod switching;
+
 fn parameters() -> BuckBoostParameters {
     BuckBoostParameters {
         inductance_h: 0.02,

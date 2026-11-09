@@ -441,6 +441,45 @@ regeneration, load-ripple heating, cache reuse, and cancellation/refusal/retry.
 This joins existing linear physical owners; semiconductor transition physics,
 dead time, diode recovery, device cards and thermal feedback remain unclaimed.
 
+### Regulated demand during prescribed PWM
+
+`switching::power_load::PreparedPowerLoadedSwitchCycle` composes the original
+three-state nonlinear converter owner on each binary `SwitchInterval`. Both
+finite-resistance ideal voltage supplies and the existing regulated-load
+current-limit/foldback laws are solved simultaneously at every numerical substep.
+Flux and both bus charges continue across all gate edges. Identical gate/duration
+pairs reuse a native workspace; `PowerSwitchCommand` still belongs to each
+original physical interval, preserving source/current and gate/load correlation.
+
+The existing physical-interval cap and an explicit 1–256 subdivisions per
+interval bound warm work. A compensated final remainder must reproduce each
+authored gate duration exactly in the represented clock, with every substep
+positive, or preparation refuses. `integration_steps()` exposes the number of
+native solves to charge to a coupled thermal trial. Newton counts sum and the
+reported residual is the maximum accepted substep residual; no single algebraic
+certificate is fabricated for the composed cycle. Preparation allocates, while
+warm cycles reuse fixed-size native scratch.
+
+`PowerLoadedSwitchCycleStep` separates original endpoint storage change, net
+converter bus work, five internal conduction heats, two source-resistor heats,
+signed ideal-source work, actual load delivery and curtailment. It reports
+numerical mean source currents and only the final discrete load points, without
+assigning a fictitious cycle-average branch mode. Independent endpoint/accumulated
+storage, converter, each source/resistor/load, and whole-cycle power balances
+gate publication. Their scales use actual cycle transfers, excluding untouched
+stored-energy data. Any substep, applicability, arithmetic, budget or cancellation
+refusal preserves both output buffers.
+
+These are explicitly refined native discrete-effort quadratures, not exact
+continuous-time integrals. Subdivision convergence measures temporal error;
+neither energy closure nor nonlinear convergence establishes stability or root
+uniqueness. The prescribed complementary gates add no dead time,
+diode/recovery/gate/transition losses, automatic control or finite source energy.
+Focused regressions check original native parity, independent switched SI ODE
+state and seven-heat refinement, resolved winding ripple heat, changing commands
+over shared caches, actual branch curtailment, numerical work limits, and
+transactional retry.
+
 ## Averaged bidirectional power conversion
 
 `circuit::converter::AveragedBuckBoost` assembles the original flux and both bus
