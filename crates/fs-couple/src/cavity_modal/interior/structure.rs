@@ -34,6 +34,8 @@ pub mod resonance;
 mod response;
 /// Original tensor-Prony shell materials coupled to the full interior field.
 pub mod shell;
+/// Complete original structural/interior waves with bounded sparse midpoint solves.
+pub mod sparse;
 /// Full original structural and pressure fields on one exact held-input timeline.
 pub mod time;
 pub use response::StructuralInteriorEnergy;
@@ -253,95 +255,7 @@ impl<'a, 'f, 'c> StructuralInterior<'a, 'f, 'c> {
         poll(cx)?;
         let ns = solid.assembly.free_dofs.len();
         admit(ns, interior.ndof(), controls)?;
-        let full = solid
-            .nodes_m
-            .len()
-            .checked_mul(3)
-            .ok_or_else(|| invalid("solid coordinate extent overflow"))?;
-        let mut free = BTreeMap::new();
-        for (reduced, &original) in solid.assembly.free_dofs.iter().enumerate() {
-            if original >= full || free.insert(original, reduced).is_some() {
-                return Err(invalid(
-                    "solid free-coordinate map must be unique and in range",
-                ));
-            }
-        }
-        let mut owners = BTreeMap::new();
-        let mut fluid_faces = BTreeSet::new();
-        for (index, face) in solid.interface.iter().enumerate() {
-            let mut key = face.solid;
-            key.sort_unstable();
-            let mut fluid = face.fluid;
-            fluid.sort_unstable();
-            if key[0] == key[1]
-                || key[1] == key[2]
-                || key[2] >= solid.nodes_m.len()
-                || owners.insert(key, (index, 0usize, 0usize)).is_some()
-                || !fluid_faces.insert(fluid)
-            {
-                return Err(invalid(
-                    "conforming interface requires distinct valid fluid and solid faces",
-                ));
-            }
-        }
-        for tet in solid.tetrahedra {
-            poll(cx)?;
-            let mut key = *tet;
-            key.sort_unstable();
-            if key[3] >= solid.nodes_m.len() || key.windows(2).any(|pair| pair[0] == pair[1]) {
-                return Err(invalid("solid tetrahedron connectivity is invalid"));
-            }
-            for opposite in 0..4 {
-                let mut face = [0; 3];
-                let mut next = 0;
-                for (local, &vertex) in tet.iter().enumerate() {
-                    if local != opposite {
-                        face[next] = vertex;
-                        next += 1;
-                    }
-                }
-                face.sort_unstable();
-                if let Some((_, count, vertex)) = owners.get_mut(&face) {
-                    *count += 1;
-                    *vertex = tet[opposite];
-                }
-            }
-        }
-        let mut traces = vec![Vec::new(); ns];
-        for (_, (index, count, opposite)) in owners {
-            poll(cx)?;
-            if count != 1 {
-                return Err(invalid(
-                    "each interface face must have exactly one solid volume owner",
-                ));
-            }
-            let face = solid.interface[index];
-            let (points, normal, _) = interior.geometry().boundary_geometry(face.fluid)?;
-            for local in 0..3 {
-                if points[local] != solid.nodes_m[face.solid[local]] {
-                    return Err(invalid(
-                        "fluid and solid interface vertices must coincide exactly",
-                    ));
-                }
-            }
-            let outside: f64 = (0..3)
-                .map(|axis| normal[axis] * (solid.nodes_m[opposite][axis] - points[0][axis]))
-                .sum();
-            if !outside.is_finite() || outside <= 0.0 {
-                return Err(invalid(
-                    "solid interface owner must lie outside the fluid volume",
-                ));
-            }
-            for axis in 0..3 {
-                for local in 0..3 {
-                    if let Some(&coordinate) = free.get(&(3 * face.solid[local] + axis)) {
-                        let mut values = [0.0; 3];
-                        values[local] = normal[axis];
-                        traces[coordinate].push((face.fluid, values));
-                    }
-                }
-            }
-        }
+        let traces = conforming_tet_traces(interior, &solid, cx)?;
         Self::new(
             interior,
             StructuralMatrices {
@@ -605,6 +519,106 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
             relative_residual: response.relative_residual,
         })
     }
+}
+
+// One original geometry lowering for both dense exact/harmonic and sparse time.
+fn conforming_tet_traces(
+    interior: &HeterogeneousHelmholtzFe<'_, '_>,
+    solid: &ConformingTetStructure<'_>,
+    cx: &Cx<'_>,
+) -> Result<Vec<Vec<NormalDisplacementTrace>>, StructuralInteriorError> {
+    poll(cx)?;
+    let ns = solid.assembly.free_dofs.len();
+    let full = solid
+        .nodes_m
+        .len()
+        .checked_mul(3)
+        .ok_or_else(|| invalid("solid coordinate extent overflow"))?;
+    let mut free = BTreeMap::new();
+    for (reduced, &original) in solid.assembly.free_dofs.iter().enumerate() {
+        if original >= full || free.insert(original, reduced).is_some() {
+            return Err(invalid(
+                "solid free-coordinate map must be unique and in range",
+            ));
+        }
+    }
+    let mut owners = BTreeMap::new();
+    let mut fluid_faces = BTreeSet::new();
+    for (index, face) in solid.interface.iter().enumerate() {
+        let mut key = face.solid;
+        key.sort_unstable();
+        let mut fluid = face.fluid;
+        fluid.sort_unstable();
+        if key[0] == key[1]
+            || key[1] == key[2]
+            || key[2] >= solid.nodes_m.len()
+            || owners.insert(key, (index, 0usize, 0usize)).is_some()
+            || !fluid_faces.insert(fluid)
+        {
+            return Err(invalid(
+                "conforming interface requires distinct valid fluid and solid faces",
+            ));
+        }
+    }
+    for tet in solid.tetrahedra {
+        poll(cx)?;
+        let mut key = *tet;
+        key.sort_unstable();
+        if key[3] >= solid.nodes_m.len() || key.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("solid tetrahedron connectivity is invalid"));
+        }
+        for opposite in 0..4 {
+            let mut face = [0; 3];
+            let mut next = 0;
+            for (local, &vertex) in tet.iter().enumerate() {
+                if local != opposite {
+                    face[next] = vertex;
+                    next += 1;
+                }
+            }
+            face.sort_unstable();
+            if let Some((_, count, vertex)) = owners.get_mut(&face) {
+                *count += 1;
+                *vertex = tet[opposite];
+            }
+        }
+    }
+    let mut traces = vec![Vec::new(); ns];
+    for (_, (index, count, opposite)) in owners {
+        poll(cx)?;
+        if count != 1 {
+            return Err(invalid(
+                "each interface face must have exactly one solid volume owner",
+            ));
+        }
+        let face = solid.interface[index];
+        let (points, normal, _) = interior.geometry().boundary_geometry(face.fluid)?;
+        for local in 0..3 {
+            if points[local] != solid.nodes_m[face.solid[local]] {
+                return Err(invalid(
+                    "fluid and solid interface vertices must coincide exactly",
+                ));
+            }
+        }
+        let outside: f64 = (0..3)
+            .map(|axis| normal[axis] * (solid.nodes_m[opposite][axis] - points[0][axis]))
+            .sum();
+        if !outside.is_finite() || outside <= 0.0 {
+            return Err(invalid(
+                "solid interface owner must lie outside the fluid volume",
+            ));
+        }
+        for axis in 0..3 {
+            for local in 0..3 {
+                if let Some(&coordinate) = free.get(&(3 * face.solid[local] + axis)) {
+                    let mut values = [0.0; 3];
+                    values[local] = normal[axis];
+                    traces[coordinate].push((face.fluid, values));
+                }
+            }
+        }
+    }
+    Ok(traces)
 }
 
 fn invalid(what: &'static str) -> StructuralInteriorError {

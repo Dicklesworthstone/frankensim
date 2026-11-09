@@ -13153,3 +13153,86 @@ analytic coupled cubic across frequency, source phase/amplitude jets and delay
 invariance, relaxing wall admittance with separate instantaneous losses, and
 manufactured mutual-memory/gyroscopic original rows. The numerical recovery
 was exercised directly; these tests do not execute the outer FE mesh assembly.
+
+## Sparse full structural/interior acoustic transients
+
+`cavity_modal::interior::structure::sparse::PreparedSparseStructuralInterior`
+advances the original heterogeneous pressure-potential/pressure finite-element
+field together with every original structural displacement/velocity coordinate.
+It accepts the original sparse consistent M/K/C forms and integrates the same
+native normal traces as `StructuralInterior`. The conforming tetrahedral entry
+shares the existing exact vertex, owning-volume normal, sidedness and actual
+free-coordinate lowering; it never constructs a dense coupled model first.
+
+Pressure remains `p = psi_dot`, particle velocity remains `-grad(psi)/rho`,
+and B has acoustic rows and structural columns. At midpoint the complete
+simultaneous unknown is [structural velocity, pressure]. The native bounded
+sparse LDLT owner factors
+
+```text
+[ M_s + h*C_s/2 + h^2*K_s/4     -h*B^T/2 ]
+[ -h*B/2                       -M_a - h*C_a/2 - h^2*K_a/4 ].
+```
+
+Only the acoustic equation's sign is changed to obtain this symmetric factor.
+Both original physical equations, kinematics, source work and port work are
+checked afterward. Neither a bare cavity stiffness nor a structural stiffness
+is inverted. Original lateral elasticity, all off-diagonal inertia, every
+pressure coordinate, cavity compression, constant potential and structural
+rigid modes survive. The feature supplies an actual sparse path beyond the
+existing dense exponential owner's 42-coordinate time limit.
+
+Each candidate retains independent structural and acoustic kinetic/elastic
+storage; original generalized-force and projected inward-flow work; intrinsic
+structural damping heat; relative-wall admittance heat; and both separately
+contracted B/B^T interface works. Signed exchange is positive from fluid to
+structure and cancels from the total account. Polarized original forms compute
+energy changes without subtracting large stored totals. Structural, acoustic,
+interface and complete-system balances all gate publication, alongside the
+uncondensed componentwise physical equations. No heat comes from an energy
+deficit, and a failed/cancelled step leaves the accepted state and clock intact.
+The returned state belongs to its exact prepared spatial/material/time owner.
+
+This lane requires exactly symmetric original forms and memoryless passive
+structural damping. Native scaled inertia admits SPD mass. PSD stiffness and
+damping admission use a 4096*epsilon diagonal shift in numerical congruence
+coordinates ONLY for the admission probe, allowing true null spaces without
+altering any retained coefficient. Resolved negative directions and coupled
+zero diagonals refuse. Actual storage and heat retain their signed contraction
+with evaluated roundoff; no negative value is clipped into a passivity claim.
+The existing exact owner remains available for gyroscopic structures and its
+explicit hereditary owners retain their original internal histories. A
+frequency-local impedance or damping sample does not authorize this transient
+law. Molecular relaxation, thermal diffusion, moving material/geometry, ideal
+pressure release and exterior radiation are not inferred by this entry.
+
+Preparation admits source/trace counts, all retained sparse entries, every
+staging extent, native symbolic/fill/frontal work and numeric factor payload.
+Native sparse fill may still be large and refuses its authored limits. Caller
+sources, geometry, O(n) candidate/observation vectors and allocator/runtime
+overhead are additional to factor bytes. A step reuses the cached factor and
+performs sparse solves/contractions without a dense mass inverse, new
+factorization, material query or modal reduction. It allocates O(n) candidate
+and audit vectors; it is not an allocation-free propagator. Cancellation polls
+during original-form work and around the synchronous native solve.
+
+Implicit midpoint is second order and passive for the admitted frozen linear
+forms; it is not an exact wave propagator. Time-step phase refinement remains
+separate from spatial h/p, material quadrature, source bandwidth and physical
+model validity.
+
+Focused native evidence uses the unchanged production sparse dynamics with
+the actual fs-sparse CSR/bounded LDLT and fs-math arithmetic. Eight tests pass:
+G1 sealed-piston/cavity analytic frequency and second-order refinement;
+G0/G1 a 112-coordinate coupled field with both domain balances and separate
+positive losses; retained rigid and constant acoustic modes; independent
+constant-force and volume-injection work; full off-diagonal blocks compared
+with independently solved original nonsymmetric endpoint equations; G3
+coordinate-unit congruence; and physical/resource/cancellation/identity/retry
+refusals. Three additional public FE/Cx integration tests define refinement
+against the existing exact owner, an actual free tetrahedral structure plus
+p4 pressure field beyond 42 coordinates, and original-source/symmetry limits.
+Those three integration tests are authored and API-reviewed but unexecuted:
+the complete Cargo dependency closure remains unavailable in this environment.
+The native slice does not establish whole-crate/workspace compilation, a
+measured performance ratio, continuum convergence or acoustic-program closure.
