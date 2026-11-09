@@ -4,6 +4,7 @@
 use fs_material::elastic::OrthotropicElastic;
 use fs_material::laminate::{LaminaLayer, LaminateSection, LayerLaw, ReferenceSurface};
 use fs_material::sheet::SheetMatrix;
+use fs_material::visco::tensor::TensorProny;
 use fs_plate::shell::mitc::{
     ConstraintFrame, MitcBudget, MitcShellModel, NodalDirectors, ShearShellSection,
     ShellConstraint, ShellMass, assemble_mitc3p, solve_static,
@@ -106,6 +107,65 @@ fn g1_equilibrated_laminate_cross_shear_reaches_actual_shell_work() {
         let expected = 0.5*0.4*(h[0]*gamma[0]*gamma[0]
             +2.0*h[1]*gamma[0]*gamma[1]+h[3]*gamma[1]*gamma[1]);
         near(model.strain_energy(&field).unwrap(),expected,2e-11);
+    }
+}
+
+#[test]
+fn g1_prony_layer_preserves_directional_shear_in_actual_shell_energy() {
+    let elastic =
+        OrthotropicElastic::new([2e8, 1e8, 8e7], [0.2, 0.15, 0.1], [4e7, 3e6, 8e7], 0.01).unwrap();
+    let prony =
+        TensorProny::new_mandel(elastic.stiffness(), Vec::new(), elastic.strain_limit).unwrap();
+    let (h, width) = (0.01, 0.4);
+    let (mesh, directors) = mesh(2, width);
+    for angle in [0.0, 0.37, core::f64::consts::FRAC_PI_2] {
+        let (s, c) = angle.sin_cos();
+        let (gxz, gyz) = (elastic.g[2], elastic.g[1]);
+        let shear = [
+            gxz * c * c + gyz * s * s,
+            (gxz - gyz) * c * s,
+            (gxz - gyz) * c * s,
+            gxz * s * s + gyz * c * c,
+        ]
+        .map(|g| (5.0 / 6.0) * h * g);
+        for law in [
+            LayerLaw::Elastic(elastic.clone()),
+            LayerLaw::Prony(prony.clone()),
+        ] {
+            let source = LaminateSection::try_new(
+                vec![LaminaLayer {
+                    thickness_m: h,
+                    orientation_rad: angle,
+                    density_kg_m3: 400.0,
+                    material: None,
+                    law,
+                }],
+                ReferenceSurface::Midsurface,
+            )
+            .unwrap();
+            let model = assemble(
+                &mesh,
+                &directors,
+                ShearShellSection::from_laminate(&source, 0.0).unwrap(),
+                &[],
+                ShellMass::Consistent,
+            );
+            for gamma in [[0.002, 0.0], [0.0, 0.003], [0.002, 0.003], [0.002, -0.003]] {
+                // Constant transverse shear in the actual MITC displacement
+                // field; membrane, bending and drilling work vanish.
+                let field: Vec<_> = mesh
+                    .nodes
+                    .iter()
+                    .flat_map(|p| [0.0, 0.0, gamma[0] * p[0] + gamma[1] * p[1], 0.0, 0.0, 0.0])
+                    .collect();
+                let expected = 0.5
+                    * width
+                    * (shear[0] * gamma[0] * gamma[0]
+                        + 2.0 * shear[1] * gamma[0] * gamma[1]
+                        + shear[3] * gamma[1] * gamma[1]);
+                near(model.strain_energy(&field).unwrap(), expected, 2e-11);
+            }
+        }
     }
 }
 

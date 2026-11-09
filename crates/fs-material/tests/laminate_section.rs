@@ -218,6 +218,88 @@ fn g0_transverse_shear_from_layers() {
     assert_eq!(section.shear_pa_m()[2], 0.0);
 }
 
+#[test]
+fn g3_lossless_prony_preserves_original_orthotropic_transverse_axes() {
+    let elastic = spruce();
+    let prony =
+        TensorProny::new_mandel(elastic.stiffness(), Vec::new(), elastic.strain_limit).unwrap();
+    let h = 0.003;
+    for angle in [0.0, 0.37, core::f64::consts::FRAC_PI_2] {
+        let reference = LaminateSection::try_new(
+            vec![layer(elastic.clone(), h, angle, 420.0)],
+            ReferenceSurface::Midsurface,
+        )
+        .unwrap();
+        let actual = LaminateSection::try_new(
+            vec![prony_layer(prony.clone(), h, angle, 420.0)],
+            ReferenceSurface::Midsurface,
+        )
+        .unwrap();
+        let (s, c) = angle.sin_cos();
+        let (gxz, gyz) = (elastic.g[2], elastic.g[1]);
+        let expected = [
+            gxz * c * c + gyz * s * s,
+            (gxz - gyz) * c * s,
+            (gxz - gyz) * c * s,
+            gxz * s * s + gyz * c * c,
+        ]
+        .map(|g| (5.0 / 6.0) * h * g);
+        close_shear(actual.shear_pa_m(), &expected, 2e-12);
+        close_shear(actual.shear_pa_m(), reference.shear_pa_m(), 2e-12);
+        for (actual, expected) in [
+            (actual.a_pa_m(), reference.a_pa_m()),
+            (actual.b_pa_m2(), reference.b_pa_m2()),
+            (actual.d_pa_m3(), reference.d_pa_m3()),
+        ] {
+            let scale = max_abs_9(expected);
+            for i in 0..9 {
+                assert!((actual[i] - expected[i]).abs() <= 2e-12 * scale);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_prony_reference_shear_uses_each_original_directional_relaxation() {
+    // Distinct G23/G31 equilibrium values AND increments prevent an axis
+    // interchange from being hidden by isotropic fixtures.
+    let equilibrium = [9e9, 2e9, 1e9, 1.4e9, 1.3e9, 0.08e9];
+    let increment = [0.0, 0.0, 0.0, 0.0, 0.4e9, 0.08e9];
+    let tau = 0.01;
+    let h = 0.003;
+    let angle = 0.37_f64;
+    let (s, c) = angle.sin_cos();
+    for omega in [0.0, 10.0, 100.0] {
+        let branch = PronyBranch::new(diag6(increment), tau).unwrap();
+        let law = TensorProny::new(
+            diag6(equilibrium),
+            None,
+            vec![branch],
+            (omega, omega + 100.0),
+        )
+        .unwrap();
+        let section = LaminateSection::try_new(
+            vec![prony_layer(law, h, angle, 420.0)],
+            ReferenceSurface::Midsurface,
+        )
+        .unwrap();
+        // Independently evaluate the Maxwell storage increment at the
+        // declared reference frequency; the section remains a frozen state.
+        let wt = omega * tau;
+        let fraction = wt * wt / (1.0 + wt * wt);
+        let gxz = 0.5 * (equilibrium[5] + fraction * increment[5]);
+        let gyz = 0.5 * (equilibrium[4] + fraction * increment[4]);
+        let expected = [
+            gxz * c * c + gyz * s * s,
+            (gxz - gyz) * c * s,
+            (gxz - gyz) * c * s,
+            gxz * s * s + gyz * c * c,
+        ]
+        .map(|g| (5.0 / 6.0) * h * g);
+        close_shear(section.shear_pa_m(), &expected, 2e-12);
+    }
+}
+
 fn coupled_shear_layers(rotation: f64) -> Vec<LaminaLayer> {
     // Equal and opposite rotated raw shear tensors cancel their raw cross
     // term. Different in-plane elastic laws produce different traction fields.
@@ -491,7 +573,7 @@ fn g0_complex_abd_elastic_layers_are_real_and_match() {
 
 use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
 
-/// Crate Mandel order [11,22,33,12,13,23]; a diagonal positive Mandel tensor is
+/// Native Mandel order [11,22,33,12,23,31]; a diagonal positive Mandel tensor is
 /// a valid (Poisson-free) orthotropic SPD law, with shear diagonals = 2G.
 fn diag6(d: [f64; 6]) -> Mandel6 {
     core::array::from_fn(|i| core::array::from_fn(|j| if i == j { d[i] } else { 0.0 }))

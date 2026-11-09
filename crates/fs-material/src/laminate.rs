@@ -301,10 +301,10 @@ fn principal_stiffness(
             let (storage0, _) = p
                 .complex_modulus(reference)
                 .map_err(|source| LaminateError::Layer { layer, source })?;
-            // Crate Mandel order is [11,22,33,12,13,23]; a shear diagonal holds
-            // 2·G. The 3-axis is the plate normal, so G_xz = G13 (index 4) and
-            // G_yz = G23 (index 5).
-            let shear = [0.5 * storage0[4][4], 0.5 * storage0[5][5]];
+            // Native Mandel order is [11,22,33,12,23,31]; a shear diagonal
+            // holds 2·G. With axis 3 normal to the plate, [G_xz,G_yz] therefore
+            // uses [31,23], matching the elastic layer's [g[2],g[1]].
+            let shear = [0.5 * storage0[5][5], 0.5 * storage0[4][4]];
             if !shear.iter().all(|v| finite_positive(*v)) {
                 return Err(LaminateError::Invalid {
                     quantity: "transverse shear modulus",
