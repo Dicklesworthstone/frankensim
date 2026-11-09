@@ -933,6 +933,10 @@ pub(super) struct Solver<'a> {
     wall_adjacent: Vec<bool>,
     /// Explicit transient SGS closure and reusable gradient workspace.
     sgs: Option<sgs::State>,
+    /// Actual material M/V for SGS stress and admission only. Empty preserves
+    /// the original constant-density owners. Native time inertia retains its
+    /// independently supplied half-cell masses.
+    sgs_density_kg_m3: Vec<f64>,
     /// Planar loss coefficient per face and component (empty: none).
     planar_loss: [Vec<f64>; 3],
     /// Porous `(mu / kappa, rho C / 2)` per cell and axis (empty: none).
@@ -1318,6 +1322,7 @@ impl<'a> Solver<'a> {
             momentum_rms: [0.0; 3],
             time: None,
             sgs: None,
+            sgs_density_kg_m3: Vec::new(),
             fan: config.fan.map(|fan| {
                 let side = fan.face as usize;
                 let axis = side / 2;
@@ -1344,6 +1349,20 @@ impl<'a> Solver<'a> {
         }
     }
 
+    /// One density authority for cell/edge SGS stress and molecular limits.
+    fn sgs_density(&self, cell: usize) -> f64 {
+        self.sgs_density_kg_m3.get(cell).copied().unwrap_or(self.rho)
+    }
+
+    /// Use the same local density and original molecular coefficient before
+    /// harmonic edge transmission or its physical power partition.
+    fn sgs_total_viscosity(&self, cell: usize, eddy: f64) -> f64 {
+        self.sgs_density(cell).mul_add(
+            eddy,
+            self.molecular_viscosity.get(cell).copied().unwrap_or(self.mu),
+        )
+    }
+
     /// Effective dynamic viscosity of `cell` (molecular plus eddy).
     fn mu_eff(&self, cell: [usize; 3]) -> f64 {
         let molecular = if self.molecular_viscosity.is_empty() {
@@ -1354,7 +1373,7 @@ impl<'a> Solver<'a> {
         if self.eddy_viscosity.is_empty() {
             molecular
         } else {
-            self.rho
+            self.sgs_density(cell_of(self.n, cell))
                 .mul_add(self.eddy_viscosity[cell_of(self.n, cell)], molecular)
         }
     }
@@ -1427,13 +1446,7 @@ impl<'a> Solver<'a> {
             let a = (0..3).find(|&a| minus[a] != plus[a]).unwrap_or((d + 1) % 3);
             let edge_eddy = self.sgs_edge_eddy(minus, plus, d, up);
             let viscosity = |c: [usize; 3]| match edge_eddy {
-                Some(eddy) => self.rho.mul_add(
-                    eddy,
-                    self.molecular_viscosity
-                        .get(cell_of(self.n, c))
-                        .copied()
-                        .unwrap_or(self.mu),
-                ),
+                Some(eddy) => self.sgs_total_viscosity(cell_of(self.n, c), eddy),
                 None => self.mu_eff(c),
             };
             let mut weights = [(0usize, 0.0, 1.0); 4];

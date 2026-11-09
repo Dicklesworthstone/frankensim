@@ -149,7 +149,7 @@ impl Solver<'_> {
                         cell,
                         eddy,
                         molecular,
-                        self.rho,
+                        self.sgs_density(cell),
                         state.config.maximum_eddy_to_molecular,
                     )?;
                 }
@@ -204,7 +204,7 @@ impl Solver<'_> {
                         cell,
                         eddy,
                         molecular[cell],
-                        self.rho,
+                        self.sgs_density(cell),
                         state.config.maximum_eddy_to_molecular,
                     )?;
                 }

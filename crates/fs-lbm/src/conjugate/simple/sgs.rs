@@ -126,6 +126,52 @@ fn derivative(center: f64, minus: (f64, Sample), plus: (f64, Sample)) -> f64 {
 }
 
 impl Solver<'_> {
+    /// Bind the current extensive material mass to this predictor's SGS
+    /// coefficients. This changes neither the native face inertia nor a source
+    /// material's reference density. Call once before closure preparation;
+    /// the field is frozen while this bounded momentum predictor converges.
+    ///
+    /// Build separately so invalid cells or cancellation cannot replace a
+    /// previously admitted density field. The enclosing owner admits its cell
+    /// budget before constructing this solver.
+    pub(in crate::conjugate) fn set_sgs_density(
+        &mut self,
+        mass_kg: &[f64],
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        poll(gate)?;
+        let cells = self.domain.cell_count();
+        if mass_kg.len() != cells {
+            return Err(refuse("SGS density needs the original material mass field"));
+        }
+        let mut density = Vec::new();
+        density
+            .try_reserve_exact(cells)
+            .map_err(|_| refuse("SGS material density allocation failed"))?;
+        for (cell, &mass) in mass_kg.iter().enumerate() {
+            if cell % 64 == 0 {
+                poll(gate)?;
+            }
+            if !self.domain.is_fluid(cell) {
+                if mass != 0.0 {
+                    return Err(refuse("fixed solid cells cannot carry SGS material mass"));
+                }
+                density.push(0.0);
+                continue;
+            }
+            let rho = mass / self.domain.volume(cell);
+            if !(mass.is_finite() && mass > 0.0 && rho.is_finite() && rho > 0.0) {
+                return Err(refuse(format!(
+                    "cell {cell}: actual SGS material density must be finite and positive"
+                )));
+            }
+            density.push(rho);
+        }
+        poll(gate)?;
+        self.sgs_density_kg_m3 = density;
+        Ok(())
+    }
+
     /// The heat law belongs to the original flow controls, including material
     /// endpoint retries. Momentum closure refreshes never replace this value.
     pub(in crate::conjugate) fn turbulent_prandtl(&self) -> f64 {
@@ -232,7 +278,7 @@ impl Solver<'_> {
                     cell,
                     eddy,
                     mu,
-                    self.rho,
+                    self.sgs_density(cell),
                     state.config.maximum_eddy_to_molecular,
                 )?;
             }
@@ -288,7 +334,7 @@ impl Solver<'_> {
                     cell,
                     eddy,
                     molecular,
-                    self.rho,
+                    self.sgs_density(cell),
                     state.config.maximum_eddy_to_molecular,
                 )?;
                 self.eddy_viscosity[cell] = eddy;
@@ -355,3 +401,5 @@ impl Solver<'_> {
 mod tests;
 #[cfg(test)]
 mod vreman_tests;
+#[cfg(test)]
+mod density_tests;

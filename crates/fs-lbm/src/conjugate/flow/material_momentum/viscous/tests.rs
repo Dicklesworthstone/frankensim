@@ -821,3 +821,5 @@ fn viscous_reservoir_scope_pressure_authority_and_cancellation_refuse_atomically
     assert_eq!(h, [10.0; 2]);
     assert_eq!(momentum, [[0.0; 3]; 2]);
 }
+
+mod sgs;

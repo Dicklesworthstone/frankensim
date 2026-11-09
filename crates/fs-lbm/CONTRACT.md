@@ -2268,3 +2268,46 @@ conductivity and transported-endpoint phase resistance. It is first order and
 requires refinement; it does not infer simultaneous endpoint shear feedback.
 Fluid phases must remain mobile. Exact solid locking, moving skeletons and
 free surfaces remain outside this owner.
+
+## Actual-material-density SGS momentum and separated energy transfer
+
+`FlowField::advance_material_momentum_with_viscosity_and_sgs` composes the
+original source-viscosity predictor, force/pressure update and accepted
+mass-route transport on closed fixed geometry. Original cell M/V supplies
+every SGS dynamic-viscosity conversion and local molecular-ratio limit;
+native half-cell masses still supply inertia. Source reference density does
+not replace either authority. Smagorinsky, WALE and Vreman retain their shared
+filter, native reciprocal-edge and explicit exploration policies.
+
+One retained backward-Euler predictor refreshes SGS on its current native
+velocity before the first solve and after every coupled sweep, before the
+same-velocity residual. Original molecular viscosity is sampled once per
+fluid cell and held for the interval. The added stress is deviatoric
+`2 rho nu_t dev(D)`; the original molecular `2 mu D` response retains its
+existing isotropic part. SGS supplies no bulk viscosity. Zero model coefficient
+validates the configuration and then uses the original molecular path exactly.
+
+Normal-cell work and each reciprocal shear-edge work use the SAME total
+dynamic viscosity as momentum. At a material edge, total cell viscosities
+enter harmonic transmission first. Resistance shares distribute the common
+stress work, then each cell's original molecular and SGS fractions divide its
+local loss. Wall traction and wall heat retain the existing molecular closure.
+No independently averaged SGS stress, source-reference-density conversion or
+second momentum solve is introduced.
+
+`MaterialViscosityReport::cell_sgs_transfer_j` and `sgs_transfer_j` retain
+modeled removal from resolved kinetic energy separately from molecular heat.
+Only molecular heat enters the original specific-enthalpy inventory. The
+existing kinetic/work audit includes both physical channels while retaining
+backward-Euler loss, scatter loss and representation work separately. Source,
+cap, solve, heat-insertion or cancellation refusal returns no partial candidate.
+
+This remains a first-order split with frozen material density/viscosity during
+the predictor. The modeled transfer is not an SGS energy-storage, cascade or
+heating equation. Active pressure-mouth SGS remains outside this entry, as do
+a variable-density total-energy qualification and resolved-turbulence accuracy
+claims. Ten focused regression groups cover analytic graded-density decay,
+deviatoric stress, harmonic work partition, molecular-only walls/heat, every
+adjacent edge cap, zero-model identity and refusal/replay. Source parsing,
+scoped formatting and independent arithmetic were checked; native execution
+remains blocked before fs-lbm by the pinned asupersync dependency build.

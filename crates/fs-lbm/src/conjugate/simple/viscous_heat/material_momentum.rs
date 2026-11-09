@@ -5,6 +5,8 @@
 //! or the explicit independent-bulk response 2 mu dev(D) + zeta div(u) I.
 //! Both retain harmonic material jumps, half-cell walls and matching heat.
 //! The source opt-in resolves viscosity at the accepted native endpoint shear.
+//! The closed SGS opt-in adds a deviatoric modeled stress using actual cell
+//! density and reports its energy transfer separately from molecular heating.
 
 mod rheology;
 pub(in crate::conjugate) use rheology::{
@@ -30,7 +32,7 @@ pub struct MaterialViscosityControls {
     pub maximum_energy_defect_j: f64,
 }
 
-/// Physical molecular heat and the distinct numerical/mechanical accounts.
+/// Physical molecular heat, modeled SGS transfer and distinct numerical work.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialViscosityReport {
     pub sweeps: usize,
@@ -47,6 +49,11 @@ pub struct MaterialViscosityReport {
     /// The composition deposits only this physical channel into enthalpy.
     pub cell_molecular_heat_j: Vec<f64>,
     pub molecular_heat_j: f64,
+    /// Modeled transfer out of resolved kinetic energy, owned by each original
+    /// cell. This is NOT molecular heat or an evolved subgrid-energy store.
+    /// Empty on the original molecular path, including exact zero SGS.
+    pub cell_sgs_transfer_j: Vec<f64>,
+    pub sgs_transfer_j: f64,
     pub wall_work_by_face_j: [f64; 6],
     pub wall_work_j: f64,
     pub native_kinetic_energy_change_j: f64,
@@ -58,7 +65,7 @@ pub struct MaterialViscosityReport {
     /// Numerical cell/native-inertia and representable-impulse work. Its
     /// absolute face contributions remain inside the energy defect budget.
     pub representation_work_j: f64,
-    /// Cell delta_K + molecular_heat + BE_loss + scatter_loss
+    /// Cell delta_K + molecular_heat + sgs_transfer + BE_loss + scatter_loss
     /// - wall_work - representation_work.
     pub energy_defect_j: f64,
     pub absolute_energy_defect_j: f64,
@@ -191,6 +198,63 @@ pub(in crate::conjugate) fn kick(
     kick_with_refresh(domain, input, controls, gate, |_| Ok(()))
 }
 
+/// Add closed, resolved-gradient SGS on the original material inertia and
+/// stress owner. Source molecular heat and modeled SGS transfer stay separate.
+pub(in crate::conjugate) fn kick_with_sgs(
+    domain: &VoxelDomain,
+    input: NativeMaterialViscosityInput<'_>,
+    sgs: crate::conjugate::FvSgsConfig,
+    controls: MaterialViscosityControls,
+    gate: &CancelGate,
+) -> Result<NativeMaterialViscosityStep, ChtError> {
+    poll(gate)?;
+    sgs.validate()?;
+    if sgs.model.coefficient() == 0.0 {
+        return kick(domain, input, controls, gate);
+    }
+    if input.pressure_mouth_axis.is_some()
+        || input
+            .boundaries
+            .iter()
+            .any(|boundary| !matches!(boundary, FvBoundary::Wall { .. } | FvBoundary::Symmetry))
+    {
+        return Err(refuse(
+            "material SGS requires closed wall/symmetry boundaries",
+        ));
+    }
+    let mass = input.mass_kg;
+    let mut initialized = false;
+    kick_with_refresh(domain, input, controls, gate, |solver| {
+        if !initialized {
+            solver.set_sgs_density(mass, gate)?;
+            if solver.molecular_bulk_viscosity.is_empty() {
+                // Preserve the ORIGINAL molecular 2 mu D law while adding
+                // only 2 rho nu_t dev(D). Its existing isotropic part is
+                // exactly zeta = 2 mu / 3, not an inferred new material law.
+                let n = solver.domain.cell_count();
+                solver.molecular_bulk_viscosity.resize(n, 0.0);
+                for cell in 0..n {
+                    if cell % 256 == 0 {
+                        poll(gate)?;
+                    }
+                    if solver.domain.is_fluid(cell) {
+                        let bulk = (2.0 / 3.0) * solver.molecular_viscosity[cell];
+                        finite_positive("flow.sgs_original_isotropic_viscosity", bulk)?;
+                        solver.molecular_bulk_viscosity[cell] = bulk;
+                    }
+                }
+            }
+            // Explicit original bulk coefficients have already been admitted
+            // unchanged by the shared native setup. SGS adds no bulk loss.
+            solver.enable_sgs(sgs, gate)?;
+            initialized = true;
+        }
+        // Called before the first solve and after every coupled sweep, BEFORE
+        // all three residuals. No stale closure enters an accepted power audit.
+        solver.update_sgs(gate)
+    })
+}
+
 /// Retain one original native time level through every coupled sweep.
 /// The frozen owner supplies a no-op; a constitutive owner refreshes exact
 /// endpoint coefficients before all three residual rows and the same audit.
@@ -209,7 +273,9 @@ fn kick_with_refresh(
         || input.mass_kg.len() != n
         || input.momentum_kg_m_s.len() != n
         || input.viscosity_pa_s.len() != n
-        || input.bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n)
+        || input
+            .bulk_viscosity_pa_s
+            .is_some_and(|bulk| bulk.len() != n)
     {
         return Err(refuse("viscosity requires bounded original cells"));
     }
@@ -245,7 +311,7 @@ fn kick_with_refresh(
         set_bulk_viscosity(&mut solver, input.viscosity_pa_s, bulk, gate)?;
     }
     solver.pressure_work_axis = input.pressure_mouth_axis;
-    // This is only molecular diffusion. The enclosing owner subsequently
+    // This is only stress diffusion. The enclosing owner subsequently
     // applies body force, pressure and material convection, each once.
     solver.creeping = true;
     let mut face_mass = input.face_mass_kg;
@@ -352,7 +418,9 @@ fn set_bulk_viscosity(
 ) -> Result<(), ChtError> {
     let n = solver.domain.cell_count();
     if shear.len() != n || bulk.len() != n {
-        return Err(refuse("shear and bulk viscosity must match the original grid"));
+        return Err(refuse(
+            "shear and bulk viscosity must match the original grid",
+        ));
     }
     solver.molecular_bulk_viscosity.resize(n, 0.0);
     for (cell, &value) in bulk.iter().enumerate() {
@@ -363,11 +431,12 @@ fn set_bulk_viscosity(
             solver.molecular_bulk_viscosity[cell] = 0.0;
             continue;
         }
-        let law = NewtonianViscosity::new(shear[cell], value)
-            .map_err(|error| ChtError::InvalidInput {
+        let law = NewtonianViscosity::new(shear[cell], value).map_err(|error| {
+            ChtError::InvalidInput {
                 field: "flow.bulk_viscosity_source",
                 reason: format!("cell {cell}: {error}"),
-            })?;
+            }
+        })?;
         finite_positive(
             "flow.longitudinal_viscosity",
             (4.0 / 3.0) * law.shear_viscosity_pa_s() + law.bulk_viscosity_pa_s(),
@@ -392,7 +461,11 @@ fn audit(
     let inertia = time.face_mass_kg.as_ref().expect("actual native inertia");
     let duration = Dd::from_f64(time.dt);
     let half = Dd::from_f64(0.5);
-    let power = solver.sample_molecular_power::<false>(gate)?;
+    let power = if solver.has_sgs() {
+        solver.sample_material_sgs_power(gate)?
+    } else {
+        solver.sample_molecular_power::<false>(gate)?
+    };
     let mut cell_heat = Vec::with_capacity(domain.cell_count());
     let mut heat = Dd::ZERO;
     for (c, watts) in power.heat.iter().copied().enumerate() {
@@ -409,14 +482,40 @@ fn audit(
         cell_heat.push(joules);
         heat = heat + Dd::from_f64(joules);
     }
+    let mut cell_sgs_transfer = Vec::with_capacity(power.sgs_transfer.len());
+    let mut sgs_transfer = Dd::ZERO;
+    for (cell, watts) in power.sgs_transfer.iter().copied().enumerate() {
+        if cell % 256 == 0 {
+            poll(gate)?;
+        }
+        let joules = (duration * Dd::from_f64(watts)).to_f64();
+        finite("flow.sgs_energy_transfer", joules)?;
+        if joules < 0.0 || (!domain.is_fluid(cell) && joules != 0.0) {
+            return Err(refuse(
+                "SGS transfer must be nonnegative and mobile-cell owned",
+            ));
+        }
+        cell_sgs_transfer.push(joules);
+        sgs_transfer = sgs_transfer + Dd::from_f64(joules);
+    }
+    // Preserve the original molecular arithmetic exactly on the empty branch.
+    let dissipation = if cell_sgs_transfer.is_empty() {
+        heat
+    } else {
+        heat + sgs_transfer
+    };
     let wall_by_face = power
         .wall_power_w
         .map(|w| (duration * Dd::from_f64(w)).to_f64());
     let wall = wall_by_face
         .into_iter()
         .fold(Dd::ZERO, |s, w| s + Dd::from_f64(w));
-    let partition = magnitude(heat - duration * Dd::from_f64(power.quadrature_w))
+    let mut partition = magnitude(dissipation - duration * Dd::from_f64(power.quadrature_w))
         + magnitude(heat - duration * Dd::from_f64(power.molecular_heat_w));
+    if !cell_sgs_transfer.is_empty() {
+        partition =
+            partition + magnitude(sgs_transfer - duration * Dd::from_f64(power.sgs_transfer_w));
+    }
     let mut impulses: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; solver.vel[a].len()]);
     let mut face_impulse = [Dd::ZERO; 3];
     let mut face_angular = [Dd::ZERO; 3];
@@ -531,9 +630,9 @@ fn audit(
         angular_defect = angular_defect
             + Dd::from_f64(domain.face_coord(a, domain.dims()[a])) * Dd::from_f64(residual_impulse);
     }
-    let native_defect = native_change + time_loss + heat - wall;
+    let native_defect = native_change + time_loss + dissipation - wall;
     let feedback_defect = cell_energy + scatter - native_change - representation;
-    let defect = cell_energy + time_loss + scatter + heat - wall - representation;
+    let defect = cell_energy + time_loss + scatter + dissipation - wall - representation;
     let energy_defect = magnitude(native_defect)
         + magnitude(feedback_defect)
         + magnitude(defect)
@@ -552,7 +651,11 @@ fn audit(
     let energy_defect = budget(
         energy_defect,
         controls.maximum_energy_defect_j,
-        "molecular work, numerical losses or representation exceed their independent budget",
+        if solver.has_sgs() {
+            "molecular/SGS work, numerical losses or representation exceed their independent budget"
+        } else {
+            "molecular work, numerical losses or representation exceed their independent budget"
+        },
     )?;
     let report = MaterialViscosityReport {
         sweeps: solver.sweeps,
@@ -566,6 +669,8 @@ fn audit(
         absolute_angular_impulse_defect_kg_m2_s: angular_defect,
         cell_molecular_heat_j: cell_heat,
         molecular_heat_j: heat.to_f64(),
+        cell_sgs_transfer_j: cell_sgs_transfer,
+        sgs_transfer_j: sgs_transfer.to_f64(),
         wall_work_by_face_j: wall_by_face,
         wall_work_j: wall.to_f64(),
         native_kinetic_energy_change_j: native_change.to_f64(),
@@ -585,6 +690,7 @@ fn audit(
         .chain(report.wall_work_by_face_j)
         .chain([
             report.molecular_heat_j,
+            report.sgs_transfer_j,
             report.wall_work_j,
             report.native_kinetic_energy_change_j,
             report.cell_kinetic_energy_change_j,

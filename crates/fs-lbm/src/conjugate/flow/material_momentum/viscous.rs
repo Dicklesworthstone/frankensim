@@ -1,18 +1,20 @@
 //! Source-viscosity diffusion and physical heating before the original advance.
 //! Existing entries retain 2 mu D; the bulk opt-in admits independent zeta.
+//! The SGS opt-in adds deviatoric modeled stress with a separate energy ledger.
 
 use super::super::density_projection::face_dual_mass;
 use super::super::{
     DensityMomentumReconstruction, DensityMomentumReconstructionControls, StaggeredBoundaryPressure,
 };
 use super::*;
+use crate::conjugate::FvSgsConfig;
 use crate::conjugate::simple::FvBoundary;
 pub use crate::conjugate::simple::viscous_heat::material_momentum::{
     MaterialViscosityControls, MaterialViscosityReport,
 };
 use crate::conjugate::simple::viscous_heat::material_momentum::{
-    NativeMaterialRheologyInput, NativeMaterialRheologyStep, NativeMaterialViscosityInput,
-    kick, kick_with_source,
+    NativeMaterialRheologyInput, NativeMaterialRheologyStep, NativeMaterialViscosityInput, kick,
+    kick_with_sgs, kick_with_source,
 };
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_math::dd::Dd;
@@ -52,7 +54,8 @@ pub(in crate::conjugate::flow) struct PreparedMaterialRheology {
     pub source_updates: usize,
 }
 
-/// One atomic molecular-viscosity/force/pressure/material-advection candidate.
+/// One atomic viscosity/force/pressure/material-advection candidate.
+/// Modeled SGS transfer, when selected, remains distinct from molecular heat.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViscousMaterialMomentumAdvance {
     pub advance: MaterialMomentumAdvance,
@@ -64,7 +67,8 @@ pub struct ViscousMaterialMomentumAdvance {
     /// Actual sum M*(h_heated-h_original) before material advection.
     pub represented_molecular_heat_j: f64,
     /// Non-cancelling local heat-insertion roundoff, included in the viscosity
-    /// energy gate. Numerical time/scatter/projection losses never enter h.
+    /// energy gate. Modeled SGS transfer and numerical time/scatter/projection
+    /// losses never enter h.
     pub absolute_heat_insertion_defect_j: f64,
 }
 
@@ -114,6 +118,62 @@ impl FlowField {
             input,
             viscosity,
             None,
+            None,
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
+    /// Add an explicit resolved-velocity SGS closure to original-source
+    /// molecular stress on the same actual-density material-momentum step.
+    ///
+    /// The existing reconstruction supplies actual cell `rho = M/V`, native
+    /// face inertia and the velocity gradient for the selected Smagorinsky,
+    /// WALE or Vreman model. Each nonlinear sweep refreshes the closure on
+    /// its current native velocity; cell and reciprocal shear-edge viscosity
+    /// caps use the original source mu and actual adjacent material density.
+    /// Source reference density never replaces material inertia or converts
+    /// the modeled kinematic viscosity into dynamic stress.
+    ///
+    /// Molecular stress retains the original `2 mu D` response. The added
+    /// stress is `2 rho nu_t dev(D)`; it supplies no bulk viscosity. Only
+    /// molecular dissipation enters specific enthalpy. Modeled transfer is
+    /// retained separately in `viscosity.cell_sgs_transfer_j` and
+    /// `viscosity.sgs_transfer_j`, alongside native temporal/scatter losses.
+    /// The original force, pressure and same-mass-route transport then run
+    /// once on this candidate.
+    ///
+    /// This is an exploratory, first-order split on closed fixed geometry
+    /// with walls or symmetry and frozen source mu. The original filter
+    /// policy and applicability limits remain explicit. A zero coefficient
+    /// is the exact existing molecular-only path; acceptance renders refuse.
+    ///
+    /// # Errors
+    /// Invalid model, unsupported boundaries, source, cap, nonlinear solve,
+    /// physical-energy, caloric or cancellation failure publishes no state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_viscosity_and_sgs(
+        &self,
+        domain: &VoxelDomain,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        sgs: FvSgsConfig,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        self.advance_viscous_material(
+            domain,
+            [FlowFace::Wall; 6],
+            None,
+            None,
+            input,
+            viscosity,
+            None,
+            Some(sgs),
             controls,
             viscosity_controls,
             gate,
@@ -146,8 +206,17 @@ impl FlowField {
         gate: &CancelGate,
     ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
         self.advance_viscous_material(
-            domain, [FlowFace::Wall; 6], None, None, input, viscosity,
-            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
+            domain,
+            [FlowFace::Wall; 6],
+            None,
+            None,
+            input,
+            viscosity,
+            Some(bulk_viscosity_pa_s),
+            None,
+            controls,
+            viscosity_controls,
+            gate,
         )
     }
 
@@ -203,6 +272,7 @@ impl FlowField {
             input,
             viscosity,
             None,
+            None,
             controls,
             viscosity_controls,
             gate,
@@ -232,11 +302,22 @@ impl FlowField {
     ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
         poll(gate)?;
         let axis = Self::admit_material_viscosity_pressure_mouth(
-            faces, viscosity.boundaries, input.boundary_velocity_m_s,
+            faces,
+            viscosity.boundaries,
+            input.boundary_velocity_m_s,
         )?;
         self.advance_viscous_material(
-            domain, faces, Some(profile), Some(axis), input, viscosity,
-            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
+            domain,
+            faces,
+            Some(profile),
+            Some(axis),
+            input,
+            viscosity,
+            Some(bulk_viscosity_pa_s),
+            None,
+            controls,
+            viscosity_controls,
+            gate,
         )
     }
 
@@ -250,6 +331,7 @@ impl FlowField {
         input: MaterialMomentumAdvanceInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
         bulk_viscosity_pa_s: Option<&[f64]>,
+        sgs: Option<FvSgsConfig>,
         controls: MaterialMomentumAdvanceControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
@@ -270,7 +352,7 @@ impl FlowField {
             ));
         }
         let duration = controls.mechanics.projection.duration_s;
-        let viscous = self.prepare_material_viscosity(
+        let viscous = self.prepare_material_viscosity_mode(
             domain,
             faces,
             pressure_mouth_axis,
@@ -278,6 +360,7 @@ impl FlowField {
             input.momentum_kg_m_s,
             viscosity,
             bulk_viscosity_pa_s,
+            sgs,
             controls.mechanics.reconstruction,
             duration,
             viscosity_controls,
@@ -390,16 +473,48 @@ impl FlowField {
         duration_s: f64,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
+        admit_source: impl FnMut(usize, &FluidTransportState) -> Result<(), ChtError>,
+    ) -> Result<PreparedMaterialViscosity, ChtError> {
+        self.prepare_material_viscosity_mode(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            mass_kg,
+            momentum_kg_m_s,
+            viscosity,
+            bulk_viscosity_pa_s,
+            None,
+            reconstruction_controls,
+            duration_s,
+            viscosity_controls,
+            gate,
+            admit_source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_material_viscosity_mode(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
+        sgs: Option<FvSgsConfig>,
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
         mut admit_source: impl FnMut(usize, &FluidTransportState) -> Result<(), ChtError>,
     ) -> Result<PreparedMaterialViscosity, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
-        if viscosity.sources.len() != n
-            || bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n)
-        {
+        if viscosity.sources.len() != n || bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n) {
             return Err(refuse("viscosity needs bounded original inventory"));
         }
-        self.prepare_material_viscosity_with_source(
+        self.prepare_material_viscosity_with_source_mode(
             domain,
             faces,
             pressure_mouth_axis,
@@ -407,6 +522,7 @@ impl FlowField {
             momentum_kg_m_s,
             viscosity.boundaries,
             bulk_viscosity_pa_s,
+            sgs,
             reconstruction_controls,
             duration_s,
             viscosity_controls,
@@ -460,6 +576,40 @@ impl FlowField {
         gate: &CancelGate,
         molecular_at_field: impl FnOnce(&FlowField) -> Result<Vec<f64>, ChtError>,
     ) -> Result<PreparedMaterialViscosity, ChtError> {
+        self.prepare_material_viscosity_with_source_mode(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            mass_kg,
+            momentum_kg_m_s,
+            boundaries,
+            bulk_viscosity_pa_s,
+            None,
+            reconstruction_controls,
+            duration_s,
+            viscosity_controls,
+            gate,
+            molecular_at_field,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_material_viscosity_with_source_mode(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        boundaries: [FvBoundary; 6],
+        bulk_viscosity_pa_s: Option<&[f64]>,
+        sgs: Option<FvSgsConfig>,
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        molecular_at_field: impl FnOnce(&FlowField) -> Result<Vec<f64>, ChtError>,
+    ) -> Result<PreparedMaterialViscosity, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
         if n > viscosity_controls.max_cells
@@ -501,22 +651,21 @@ impl FlowField {
         }
         let face_mass =
             material_viscosity_face_masses(domain, &reconstructed, pressure_mouth_axis, gate)?;
-        let viscous = kick(
-            domain,
-            NativeMaterialViscosityInput {
-                field: &reconstructed.field,
-                mass_kg,
-                momentum_kg_m_s,
-                viscosity_pa_s: &molecular,
-                bulk_viscosity_pa_s,
-                face_mass_kg: face_mass,
-                boundaries,
-                pressure_mouth_axis,
-                duration_s,
-            },
-            viscosity_controls,
-            gate,
-        )?;
+        let native = NativeMaterialViscosityInput {
+            field: &reconstructed.field,
+            mass_kg,
+            momentum_kg_m_s,
+            viscosity_pa_s: &molecular,
+            bulk_viscosity_pa_s,
+            face_mass_kg: face_mass,
+            boundaries,
+            pressure_mouth_axis,
+            duration_s,
+        };
+        let viscous = match sgs {
+            Some(sgs) => kick_with_sgs(domain, native, sgs, viscosity_controls, gate)?,
+            None => kick(domain, native, viscosity_controls, gate)?,
+        };
         Ok(PreparedMaterialViscosity {
             momentum_kg_m_s: viscous.momentum_kg_m_s,
             report: viscous.report,

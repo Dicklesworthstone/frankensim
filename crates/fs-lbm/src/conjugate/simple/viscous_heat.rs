@@ -27,6 +27,7 @@
 use super::*;
 
 pub(in crate::conjugate) mod material_momentum;
+mod material_sgs;
 
 pub(in crate::conjugate) mod pressure;
 pub use pressure::creeping_flow_with_pressure_work_heat;
@@ -42,6 +43,9 @@ struct MolecularPower {
     wall_power_w: [f64; 6],
     wall_tangential_force_n: [[f64; 3]; 6],
     molecular_heat_w: f64,
+    /// Empty for the original molecular sampler; modeled transfer otherwise.
+    sgs_transfer: Vec<f64>,
+    sgs_transfer_w: f64,
 }
 
 #[cfg(test)]
@@ -60,9 +64,8 @@ mod strain_tests {
             kinematic_viscosity_m2_s: 1.0,
         };
         let gate = CancelGate::new_clock_free();
-        let mut sampler = material_solver(
-            &domain, &fluid, &[1.0; 125], None, None, &config, &gate,
-        ).unwrap();
+        let mut sampler =
+            material_solver(&domain, &fluid, &[1.0; 125], None, None, &config, &gate).unwrap();
         let center = 2 + 5 * (2 + 5 * 2);
         for gradient in [
             [[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]],
@@ -73,16 +76,19 @@ mod strain_tests {
             for a in 0..3 {
                 for index in 0..sampler.vel[a].len() {
                     let at = sampler.comps[a].coords(index);
-                    sampler.vel[a][index] = (0..3).map(|d| {
-                        gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 })
-                    }).sum();
+                    sampler.vel[a][index] = (0..3)
+                        .map(|d| gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 }))
+                        .sum();
                 }
             }
             let rate = DeformationRate::from_velocity_gradient(gradient).unwrap();
             for bulk in [0.0, 0.4, 7.0] {
                 sampler.molecular_bulk_viscosity = vec![bulk; 125];
-                let expected = NewtonianViscosity::new(1.0, bulk).unwrap()
-                    .evaluate(rate).unwrap().dissipation_w_m3();
+                let expected = NewtonianViscosity::new(1.0, bulk)
+                    .unwrap()
+                    .evaluate(rate)
+                    .unwrap()
+                    .dissipation_w_m3();
                 let actual = sampler.sample_molecular_power::<false>(&gate).unwrap().heat[center];
                 assert!((actual - expected).abs() < 2e-14);
                 let observed = sampler.molecular_shear_rates(&gate).unwrap()[center];
@@ -104,21 +110,32 @@ mod strain_tests {
             kinematic_viscosity_m2_s: 1.0,
         };
         let gate = CancelGate::new_clock_free();
-        let mut sampler = material_solver(
-            &domain, &fluid, &[1.0; 125], None, None, &config, &gate,
-        ).unwrap();
+        let mut sampler =
+            material_solver(&domain, &fluid, &[1.0; 125], None, None, &config, &gate).unwrap();
         for (gradient, expected) in [
-            ([[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]], 0.0),
-            ([[0.0, -0.004, 0.0], [0.004, 0.0, 0.0], [0.0, 0.0, 0.0]], 0.0),
-            ([[-0.002, 0.006, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.006),
-            ([[0.004, 0.0, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]], 0.004 * 3.0_f64.sqrt()),
+            (
+                [[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]],
+                0.0,
+            ),
+            (
+                [[0.0, -0.004, 0.0], [0.004, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                0.0,
+            ),
+            (
+                [[-0.002, 0.006, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]],
+                0.006,
+            ),
+            (
+                [[0.004, 0.0, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]],
+                0.004 * 3.0_f64.sqrt(),
+            ),
         ] {
             for a in 0..3 {
                 for index in 0..sampler.vel[a].len() {
                     let at = sampler.comps[a].coords(index);
-                    sampler.vel[a][index] = (0..3).map(|d| {
-                        gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 })
-                    }).sum();
+                    sampler.vel[a][index] = (0..3)
+                        .map(|d| gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 }))
+                        .sum();
                 }
             }
             // Interior quadrature is independent of the manufactured field's
@@ -128,7 +145,9 @@ mod strain_tests {
             assert!((rate - expected).abs() < 2e-14);
             let full = sampler.sample_molecular_power::<false>(&gate).unwrap().heat[center];
             let divergence = gradient[0][0] + gradient[1][1] + gradient[2][2];
-            assert!((full - expected * expected - (2.0 / 3.0) * divergence * divergence).abs() < 2e-14);
+            assert!(
+                (full - expected * expected - (2.0 / 3.0) * divergence * divergence).abs() < 2e-14
+            );
         }
     }
 }
@@ -280,7 +299,9 @@ fn admit_molecular_boundaries(domain: &VoxelDomain, config: &SimpleConfig) -> Re
                 for a in 0..3 {
                     if velocity[a] != 0.0
                         && !(0..2).any(|s| {
-                            domain.neighbor(c, 2 * a + s).is_some_and(|n| domain.is_fluid(n))
+                            domain
+                                .neighbor(c, 2 * a + s)
+                                .is_some_and(|n| domain.is_fluid(n))
                         })
                     {
                         return Err(invalid_power(
@@ -392,8 +413,17 @@ fn creeping_material_heat(
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     creeping_material_heat_with_darcy_tensor(
-        domain, fluid, viscosity_pa_s, drag_pa_s_m2, None, None,
-        force_density_n_m3, config, controls, false, gate,
+        domain,
+        fluid,
+        viscosity_pa_s,
+        drag_pa_s_m2,
+        None,
+        None,
+        force_density_n_m3,
+        config,
+        controls,
+        false,
+        gate,
     )
 }
 
@@ -414,7 +444,9 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     poll(gate)?;
     let pressure_work_axis = if pressure_work {
-        Some(pressure::admit_pressure_work_heating(domain, config, controls)?)
+        Some(pressure::admit_pressure_work_heating(
+            domain, config, controls,
+        )?)
     } else {
         admit_heating(domain, config, controls)?;
         None
@@ -478,7 +510,9 @@ pub(in crate::conjugate) fn physical_flow_shear_rates(
     gate: &CancelGate,
 ) -> Result<Vec<f64>, ChtError> {
     let pressure_work_axis = if pressure_work {
-        Some(pressure::admit_pressure_work_heating(domain, config, controls)?)
+        Some(pressure::admit_pressure_work_heating(
+            domain, config, controls,
+        )?)
     } else {
         admit_heating(domain, config, controls)?;
         None
@@ -486,17 +520,28 @@ pub(in crate::conjugate) fn physical_flow_shear_rates(
     let mut unit = *fluid;
     unit.kinematic_viscosity_m2_s = 1.0 / unit.density_kg_m3;
     let mut sampler = material_solver(
-        domain, &unit, &vec![1.0; domain.cell_count()], None, None, config, gate,
+        domain,
+        &unit,
+        &vec![1.0; domain.cell_count()],
+        None,
+        None,
+        config,
+        gate,
     )?;
     sampler.pressure_work_axis = pressure_work_axis;
     for (a, fluxes) in field.face_arrays().into_iter().enumerate() {
         if fluxes.len() != sampler.vel[a].len() {
-            return Err(invalid_power("physical shear field differs from the original native grid"));
+            return Err(invalid_power(
+                "physical shear field differs from the original native grid",
+            ));
         }
         for (i, flux) in fluxes.iter().enumerate() {
-            if i % 256 == 0 { poll(gate)?; }
+            if i % 256 == 0 {
+                poll(gate)?;
+            }
             sampler.vel[a][i] = finite_value(
-                "rheology.physical_velocity", *flux / sampler.comp_face_area(a, i),
+                "rheology.physical_velocity",
+                *flux / sampler.comp_face_area(a, i),
             )?;
         }
     }
@@ -540,12 +585,13 @@ impl Solver<'_> {
         controls: ViscousHeatControls,
         gate: &CancelGate,
     ) -> Result<ViscousPower, ChtError> {
-        let power = self.sample_viscous_power(
-            &flow.field, &flow.pressure_pa, controls, gate,
-        )?;
+        let power = self.sample_viscous_power(&flow.field, &flow.pressure_pa, controls, gate)?;
         if power.residual_w.abs() > controls.power_tolerance_w
-            || (power.supplied_wall_power_w + power.supplied_pressure_power_w
-                + power.supplied_body_power_w - power.heat_w).abs()
+            || (power.supplied_wall_power_w
+                + power.supplied_pressure_power_w
+                + power.supplied_body_power_w
+                - power.heat_w)
+                .abs()
                 > controls.power_tolerance_w
         {
             return Err(invalid_power(
@@ -580,7 +626,9 @@ impl Solver<'_> {
                 .iter()
                 .any(|f| !f.is_finite() || (!domain.is_fluid(c) && *f != 0.0))
             {
-                return Err(invalid_power("body-force work needs finite, zero-solid forces"));
+                return Err(invalid_power(
+                    "body-force work needs finite, zero-solid forces",
+                ));
             }
             if !domain.is_fluid(c) {
                 continue;
@@ -628,8 +676,36 @@ impl Solver<'_> {
         &self,
         gate: &CancelGate,
     ) -> Result<MolecularPower, ChtError> {
+        self.sample_stress_power::<DEVIATORIC, false>(gate)
+    }
+
+    /// The SAME native stress quadrature, with physical molecular dissipation
+    /// and modeled SGS transfer kept in distinct original-cell accounts.
+    fn sample_material_sgs_power(&self, gate: &CancelGate) -> Result<MolecularPower, ChtError> {
+        if !self.has_sgs()
+            || self.molecular_viscosity.len() != self.domain.cell_count()
+            || self.molecular_bulk_viscosity.len() != self.domain.cell_count()
+            || self.eddy_viscosity.len() != self.domain.cell_count()
+            || self.pressure_work_axis.is_some()
+        {
+            return Err(invalid_power(
+                "material SGS power requires closed original molecular, bulk and SGS fields",
+            ));
+        }
+        self.sample_stress_power::<false, true>(gate)
+    }
+
+    fn sample_stress_power<const DEVIATORIC: bool, const SGS: bool>(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<MolecularPower, ChtError> {
         let domain = self.domain;
         let mut heat = vec![0.0; domain.cell_count()];
+        let mut sgs_transfer = if SGS {
+            vec![0.0; domain.cell_count()]
+        } else {
+            Vec::new()
+        };
         let mut quadrature_w = 0.0;
         let mut wall_power_w = [0.0; 6];
         let mut wall_tangential_force_n = [[0.0; 3]; 6];
@@ -667,7 +743,14 @@ impl Solver<'_> {
             };
             for gradient in normal {
                 let power = 2.0 * self.mu_eff(at) * domain.volume(c) * gradient * gradient;
-                add(cell_heat, power)?;
+                if SGS {
+                    let [molecular, modeled] =
+                        material_sgs::split_power(self, c, self.eddy_viscosity[c], power)?;
+                    add(cell_heat, molecular)?;
+                    add(&mut sgs_transfer[c], modeled)?;
+                } else {
+                    add(cell_heat, power)?;
+                }
                 add(&mut quadrature_w, power)?;
             }
         }
@@ -708,6 +791,19 @@ impl Solver<'_> {
                     let power =
                         mu * la * ld * domain.width(third, plus[third]) * gradient * gradient;
                     add(&mut quadrature_w, power)?;
+                    if SGS {
+                        let eddy =
+                            self.sgs_edge_eddy(minus_a, plus, d, false).ok_or_else(|| {
+                                invalid_power("material SGS shear edge lacks its native closure")
+                            })?;
+                        let partition = material_sgs::edge_power(self, cells, [a, d], eddy, power)?;
+                        for (p, [molecular, modeled]) in cells.into_iter().zip(partition) {
+                            let cell = cell_of(self.n, p);
+                            add(&mut heat[cell], molecular)?;
+                            add(&mut sgs_transfer[cell], modeled)?;
+                        }
+                        continue;
+                    }
                     let minimum = cells
                         .iter()
                         .map(|&p| self.mu_eff(p))
@@ -768,7 +864,8 @@ impl Solver<'_> {
                             (None, 0.0)
                         };
                         let wall_mu = self.wall_mu(minus, plus);
-                        let coefficient = weight * 2.0 * self.wall_shear_base_conductance(minus, plus, a, d);
+                        let coefficient =
+                            weight * 2.0 * self.wall_shear_base_conductance(minus, plus, a, d);
                         let difference = wall_velocity - self.vel[a][index];
                         let power = coefficient * difference * difference;
                         add(&mut quadrature_w, power)?;
@@ -783,9 +880,16 @@ impl Solver<'_> {
                             )?;
                         }
                         for (p, width) in [(minus, wm), (plus, wp)] {
+                            // Resolved SGS has no wall function: the native
+                            // wall coefficient and ALL its heat stay molecular.
+                            let molecular = if SGS {
+                                self.molecular_viscosity[cell_of(self.n, p)]
+                            } else {
+                                self.mu_eff(p)
+                            };
                             add(
                                 &mut heat[cell_of(self.n, p)],
-                                power * (width / (wm + wp)) * (self.mu_eff(p) / wall_mu),
+                                power * (width / (wm + wp)) * (molecular / wall_mu),
                             )?;
                         }
                     }
@@ -794,8 +898,15 @@ impl Solver<'_> {
         }
         self.pressure_mouth_heat(&mut heat, &mut quadrature_w, gate)?;
         let molecular_heat_w = finite_value("viscous_heat.molecular", heat.iter().sum())?;
+        let sgs_transfer_w = finite_value("viscous_heat.sgs_transfer", sgs_transfer.iter().sum())?;
         Ok(MolecularPower {
-            heat, quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
+            heat,
+            quadrature_w,
+            wall_power_w,
+            wall_tangential_force_n,
+            molecular_heat_w,
+            sgs_transfer,
+            sgs_transfer_w,
         })
     }
 
@@ -811,17 +922,27 @@ impl Solver<'_> {
             || self.molecular_viscosity.len() != self.domain.cell_count()
             || self.molecular_viscosity.iter().any(|mu| *mu != 1.0)
         {
-            return Err(invalid_power("kinematic strain observation requires the unit molecular operator"));
+            return Err(invalid_power(
+                "kinematic strain observation requires the unit molecular operator",
+            ));
         }
         let power = self.sample_molecular_power::<true>(gate)?;
-        power.heat.into_iter().enumerate().map(|(cell, integral)| {
-            poll(gate)?;
-            let square = finite_value("rheology.strain_square", integral / self.domain.volume(cell))?;
-            if square < 0.0 {
-                return Err(invalid_power("negative molecular strain invariant"));
-            }
-            finite_value("rheology.shear_rate", fs_math::det::sqrt(square))
-        }).collect()
+        power
+            .heat
+            .into_iter()
+            .enumerate()
+            .map(|(cell, integral)| {
+                poll(gate)?;
+                let square = finite_value(
+                    "rheology.strain_square",
+                    integral / self.domain.volume(cell),
+                )?;
+                if square < 0.0 {
+                    return Err(invalid_power("negative molecular strain invariant"));
+                }
+                finite_value("rheology.shear_rate", fs_math::det::sqrt(square))
+            })
+            .collect()
     }
 
     fn sample_viscous_power(
@@ -833,13 +954,19 @@ impl Solver<'_> {
     ) -> Result<ViscousPower, ChtError> {
         let domain = self.domain;
         let MolecularPower {
-            mut heat, mut quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
+            mut heat,
+            mut quadrature_w,
+            wall_power_w,
+            wall_tangential_force_n,
+            molecular_heat_w,
+            ..
         } = self.sample_molecular_power::<false>(gate)?;
         let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
             *value = finite_value("viscous_heat.power", *value + amount)?;
             Ok(())
         };
-        let mut cell_forchheimer_heat_w = self.porous_nonlinear
+        let mut cell_forchheimer_heat_w = self
+            .porous_nonlinear
             .then(|| vec![0.0; domain.cell_count()]);
         let mut staggered_forchheimer_w = 0.0;
         let (cell_darcy_heat_w, darcy_heat_w) = if self.porous.is_empty() {
@@ -860,14 +987,19 @@ impl Solver<'_> {
                         let u = self.vel[a][self.cell_face(a, at, plus)];
                         add(cell_heat, (0.5 * domain.volume(c)) * beta * u * u)?;
                         if let Some(cubic) = &mut cell_forchheimer_heat_w {
-                            add(&mut cubic[c], (0.5 * domain.volume(c)) * inertial * u.abs() * u * u)?;
+                            add(
+                                &mut cubic[c],
+                                (0.5 * domain.volume(c)) * inertial * u.abs() * u * u,
+                            )?;
                         }
                     }
                 }
                 if !self.porous_cross.is_empty() {
                     add(cell_heat, self.darcy_cross_power(c))?;
                     if *cell_heat < 0.0 {
-                        return Err(invalid_power("the full symmetric Darcy loss is not representably nonnegative"));
+                        return Err(invalid_power(
+                            "the full symmetric Darcy loss is not representably nonnegative",
+                        ));
                     }
                 }
                 if *cell_heat != 0.0 {
@@ -904,11 +1036,17 @@ impl Solver<'_> {
                             * (0.5 * wm).mul_add(cm * u.abs(), 0.5 * wp * cp * u.abs());
                         add(&mut staggered_forchheimer_w, weight * coefficient * u * u)?;
                         if !self.porous_framed.is_empty() {
-                            add(&mut staggered_forchheimer_w, weight * self.framed_forchheimer_force(a, minus, plus)? * u)?;
+                            add(
+                                &mut staggered_forchheimer_w,
+                                weight * self.framed_forchheimer_force(a, minus, plus)? * u,
+                            )?;
                         }
                     }
                     if !self.porous_cross.is_empty() {
-                        add(&mut staggered_drag_w, weight * self.darcy_cross_force(a, minus, plus) * u)?;
+                        add(
+                            &mut staggered_drag_w,
+                            weight * self.darcy_cross_force(a, minus, plus) * u,
+                        )?;
                     }
                 }
             }
@@ -921,10 +1059,16 @@ impl Solver<'_> {
             add(&mut quadrature_w, staggered_drag_w)?;
             (Some(drag_heat), total)
         };
-        let forchheimer_heat_w = finite_value("viscous_heat.forchheimer",
-            cell_forchheimer_heat_w.as_ref().map_or(0.0, |cells| cells.iter().sum()))?;
+        let forchheimer_heat_w = finite_value(
+            "viscous_heat.forchheimer",
+            cell_forchheimer_heat_w
+                .as_ref()
+                .map_or(0.0, |cells| cells.iter().sum()),
+        )?;
         if (forchheimer_heat_w - staggered_forchheimer_w).abs() > controls.power_tolerance_w {
-            return Err(invalid_power("Forchheimer momentum work and original-cell heat partition disagree"));
+            return Err(invalid_power(
+                "Forchheimer momentum work and original-cell heat partition disagree",
+            ));
         }
         add(&mut quadrature_w, staggered_forchheimer_w)?;
         let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
@@ -947,13 +1091,18 @@ impl Solver<'_> {
                 &mut pressure_constraint_power_w,
                 (if self.pressure_work_axis.is_some() {
                     pressure_pa[c] - self.pressure_reference_pa.at(c)
-                } else { pressure_pa[c] }) * outward,
+                } else {
+                    pressure_pa[c]
+                }) * outward,
             )?;
         }
         let residual_w = finite_value(
             "viscous_heat.residual",
-            supplied_wall_power_w + supplied_pressure_power_w + supplied_body_power_w
-                + pressure_constraint_power_w - heat_w,
+            supplied_wall_power_w
+                + supplied_pressure_power_w
+                + supplied_body_power_w
+                + pressure_constraint_power_w
+                - heat_w,
         )?;
         let reynolds = self.source_reynolds(&self.vel)?;
         if reynolds > controls.maximum_reynolds {
@@ -962,7 +1111,8 @@ impl Solver<'_> {
             ));
         }
         if (heat_w - quadrature_w).abs() > controls.power_tolerance_w
-            || (heat_w - molecular_heat_w - darcy_heat_w - forchheimer_heat_w).abs() > controls.power_tolerance_w
+            || (heat_w - molecular_heat_w - darcy_heat_w - forchheimer_heat_w).abs()
+                > controls.power_tolerance_w
             || pressure_constraint_power_w.abs() > controls.power_tolerance_w
         {
             return Err(invalid_power(
