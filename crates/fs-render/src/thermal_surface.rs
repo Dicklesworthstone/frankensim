@@ -65,6 +65,10 @@ pub mod diffuse_exchange;
 mod coating_emission;
 pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
 
+/// Full polarized Smith reflection with the same local Kirchhoff thermal source.
+pub mod smith;
+pub use smith::{SmithCoatingThermalEmission, SmithThermalError, SmithThermalSample};
+
 #[cfg(feature = "crystal-emission")]
 mod crystal_emission;
 #[cfg(feature = "crystal-emission")]

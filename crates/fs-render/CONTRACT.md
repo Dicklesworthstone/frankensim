@@ -13651,3 +13651,35 @@ replay, shared budgets and cancellation. All 46 optical/math/Philox probe
 groups pass using native optical owners with explicit execution/vector/
 container/hash fixtures. This does not establish full native scene or
 resolved-lens convergence. Refs: frankensim-h7xu5.4 and frankensim-h7xu5.4.5.
+
+### Thermal emission through complete Smith conductor reflection
+
+`thermal_surface::SmithCoatingThermalEmission` binds the original opaque
+conductor optical law to retained film/substrate LTE temperatures. At each
+native Smith collision, positive layer-resolved absorption supplies separate
+s/p Planck radiance in the reciprocal facet mode. The arriving Mueller
+importance contracts that source before original reflection. Summing positive
+sources retains weak loss even when reflected power rounds to one; no
+effective albedo or cancelling one-minus-reflectance approximation is fitted.
+The same walk returns its unmodified reflected beam and microscopic receipt.
+
+Isotropic and physical-tangent anisotropic GGX share the existing geometry.
+The smooth limit consumes no random draws. Exact matching currently admits
+bare substrates and one original lossless or absorbing film; unmatched,
+transmitting and periodic representations refuse. The unit input camera
+keeps physical prefix and index conversion with the caller. Local phase
+index one, original spectral support and per-layer temperatures are required.
+Queries use fixed storage, no heap allocation, and bounded cancellable work;
+no metric microsurface delay, temperature advance, infrared extrapolation or
+bolometric cooling is supplied.
+
+Seven new G1/G3/G4 numerical groups pass using actual coating-emission,
+positive absorption, Planck, Fresnel/Mueller, Smith, fs_math and Philox owners
+with explicit external execution/container/hash fixtures. They include 4608
+per-realization isothermal source-plus-reflection checks, unchanged native
+continuation, weak loss, independent layer temperatures, polarization,
+anisotropic frame covariance and whole-sample refusals. Six original opaque
+Smith groups also pass. Native `cargo check -p fs-render --features
+tracer,volumes,photometry --lib --locked -j 1` passes with one compiler thread
+and debug info disabled; full native scene-test execution remains separate.
+Refs: frankensim-h7xu5.4 and frankensim-material-reality-ui2if.6.4.
