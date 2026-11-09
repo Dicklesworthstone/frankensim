@@ -9,31 +9,36 @@ use crate::sgs3::{SgsLattice3, SgsReport};
 
 /// Original material/transport refusal or shared local SGS coefficient refusal.
 #[derive(Clone, Debug)]
-pub enum BoussinesqOpenMaterialSgsError3<E> {
-    Material(BoussinesqOpenMaterialError3<E>),
+pub enum BoussinesqOpenMaterialSgsError3<E, S = BoussinesqLawError3> {
+    Material(BoussinesqOpenMaterialError3<E, S>),
     Sgs(OpenThermalSgsError3<E>),
 }
-impl<E> From<BoussinesqOpenMaterialError3<E>> for BoussinesqOpenMaterialSgsError3<E> {
-    fn from(error: BoussinesqOpenMaterialError3<E>) -> Self {
+impl<E, S> From<BoussinesqOpenMaterialError3<E, S>> for BoussinesqOpenMaterialSgsError3<E, S> {
+    fn from(error: BoussinesqOpenMaterialError3<E, S>) -> Self {
         Self::Material(error)
     }
 }
-impl<E> From<BoussinesqOpenError3<E>> for BoussinesqOpenMaterialSgsError3<E> {
-    fn from(error: BoussinesqOpenError3<E>) -> Self {
+impl<E, S> From<BoussinesqOpenError3<E, S>> for BoussinesqOpenMaterialSgsError3<E, S> {
+    fn from(error: BoussinesqOpenError3<E, S>) -> Self {
         Self::Material(error.into())
     }
 }
-impl<E> From<OpenThermalSgsError3<E>> for BoussinesqOpenMaterialSgsError3<E> {
+impl<E, S> From<OpenThermalSgsError3<E>> for BoussinesqOpenMaterialSgsError3<E, S> {
     fn from(error: OpenThermalSgsError3<E>) -> Self {
         Self::Sgs(error)
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for BoussinesqOpenMaterialSgsError3<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display
+    for BoussinesqOpenMaterialSgsError3<E, S>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native buoyant material SGS: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for BoussinesqOpenMaterialSgsError3<E> {}
+impl<E: core::fmt::Debug, S: core::fmt::Debug> std::error::Error
+    for BoussinesqOpenMaterialSgsError3<E, S>
+{
+}
 
 /// One accepted native endpoint with original material sources and SGS evidence.
 #[derive(Debug)]
@@ -47,7 +52,9 @@ pub struct BoussinesqOpenMaterialSgsStep3<F> {
     pub maximum_diffusivity_to_molecular: f64,
 }
 
-impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
+impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
+    BoussinesqOpenGrid3<L, Q, P>
+{
     /// Advance with source-dependent molecular mu/k and explicit local SGS.
     ///
     /// Query each original material once at its accepted opening temperature;
@@ -69,9 +76,9 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
     /// Source callbacks must be repeatable; their external effects are not
     /// rolled back. Only the two original material-report vectors allocate.
     ///
-    /// Molecular and modeled rates are held over this interval. The existing
-    /// affine buoyancy law remains authoritative. This adds no source-density
-    /// force law, mechanical heating or higher-order coupled integration.
+    /// Molecular and modeled rates are held over this interval. The retained
+    /// affine or source-density force policy remains authoritative. Mechanical
+    /// heating and higher-order coupled integration are not introduced.
     #[allow(clippy::too_many_arguments)]
     pub fn step_serial_with_material_transport_and_sgs<F: FluidTransport>(
         &mut self,
@@ -83,7 +90,10 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         sgs_workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
-    ) -> Result<BoussinesqOpenMaterialSgsStep3<F>, BoussinesqOpenMaterialSgsError3<L::Error>> {
+    ) -> Result<
+        BoussinesqOpenMaterialSgsStep3<F>,
+        BoussinesqOpenMaterialSgsError3<L::Error, P::Error>,
+    > {
         self.advance_material_sgs_with_poll(
             None,
             config,
@@ -113,7 +123,10 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         sgs_workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
-    ) -> Result<BoussinesqOpenMaterialSgsStep3<F>, BoussinesqOpenMaterialSgsError3<L::Error>> {
+    ) -> Result<
+        BoussinesqOpenMaterialSgsStep3<F>,
+        BoussinesqOpenMaterialSgsError3<L::Error, P::Error>,
+    > {
         self.advance_material_sgs_with_poll(
             Some(background_at_end),
             config,
@@ -141,7 +154,10 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         origin: [f64; 3],
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenMaterialSgsStep3<F>, BoussinesqOpenMaterialSgsError3<L::Error>> {
+    ) -> Result<
+        BoussinesqOpenMaterialSgsStep3<F>,
+        BoussinesqOpenMaterialSgsError3<L::Error, P::Error>,
+    > {
         let applied = self.prepare_material(
             background_at_end.as_deref().map(Vec::as_slice),
             collision_templates,

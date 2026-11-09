@@ -27,6 +27,42 @@ fn make<L: EquilibriumLattice3<Q>, const Q: usize>(
     expansion: f64,
     departure_limit: f64,
 ) -> BoussinesqOpenGrid3<L, Q> {
+    let law =
+        BoussinesqLaw3::try_new(REFERENCE_RHO, 0.5, expansion, GRAVITY, departure_limit).unwrap();
+    make_with_policy(collision, dims, native, faces, initial_temperature, law)
+}
+
+fn make_with_policy<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>(
+    collision: L::Collision,
+    dims: [usize; 3],
+    native: BoundarySpec3,
+    faces: [ThermalOpenFace3; 6],
+    initial_temperature: f64,
+    law: P,
+) -> BoussinesqOpenGrid3<L, Q, P> {
+    let cells: usize = dims.into_iter().product();
+    make_with_initial_temperatures(
+        collision,
+        dims,
+        native,
+        faces,
+        &vec![initial_temperature; cells],
+        law,
+    )
+}
+
+fn make_with_initial_temperatures<
+    L: EquilibriumLattice3<Q>,
+    const Q: usize,
+    P: BoussinesqForceLaw3,
+>(
+    collision: L::Collision,
+    dims: [usize; 3],
+    native: BoundarySpec3,
+    faces: [ThermalOpenFace3; 6],
+    initial_temperatures: &[f64],
+    law: P,
+) -> BoussinesqOpenGrid3<L, Q, P> {
     let cells: usize = dims.into_iter().product();
     let periodic = core::array::from_fn(|axis| {
         matches!(native.face(Face3::ALL[2 * axis]), FaceBoundary3::Periodic)
@@ -48,7 +84,7 @@ fn make<L: EquilibriumLattice3<Q>, const Q: usize>(
     let thermal = ThermalOpenField3::try_new::<ThermalOpenError3>(
         dims,
         &vec![false; cells],
-        &vec![initial_temperature; cells],
+        initial_temperatures,
         0.83,
         ThermalOpenBoundaries3 {
             faces,
@@ -65,8 +101,6 @@ fn make<L: EquilibriumLattice3<Q>, const Q: usize>(
         || Ok(()),
     )
     .unwrap();
-    let law =
-        BoussinesqLaw3::try_new(REFERENCE_RHO, 0.5, expansion, GRAVITY, departure_limit).unwrap();
     BoussinesqOpenGrid3::try_new_with_poll(
         flow,
         thermal,
@@ -165,8 +199,8 @@ fn channel(expansion: f64) -> BoussinesqOpenGrid3<D3q19, 19> {
     coupled
 }
 
-fn advance<L: EquilibriumLattice3<Q>, const Q: usize>(
-    coupled: &mut BoussinesqOpenGrid3<L, Q>,
+fn advance<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>(
+    coupled: &mut BoussinesqOpenGrid3<L, Q, P>,
     heat: &[f64],
 ) -> BoussinesqOpenStep3 {
     coupled
@@ -186,8 +220,8 @@ struct Accepted<const Q: usize> {
     receipt: Option<BoussinesqOpenStep3>,
 }
 
-fn accepted<L: EquilibriumLattice3<Q>, const Q: usize>(
-    coupled: &BoussinesqOpenGrid3<L, Q>,
+fn accepted<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>(
+    coupled: &BoussinesqOpenGrid3<L, Q, P>,
 ) -> Accepted<Q> {
     Accepted {
         flow: coupled
@@ -304,7 +338,7 @@ fn thermal_reversal_cancels_the_buoyant_impulse_without_losing_background_force(
     });
 }
 
-fn total_energy(coupled: &BoussinesqOpenGrid3<D3q19, 19>) -> f64 {
+fn total_energy<P: BoussinesqForceLaw3>(coupled: &BoussinesqOpenGrid3<D3q19, 19, P>) -> f64 {
     let field = coupled.thermal();
     let fluid: f64 = (0..field.populations().len())
         .map(|cell| field.temperature(cell).unwrap())
@@ -658,3 +692,5 @@ mod wall_inputs;
 mod material_transport;
 
 mod reservoir_profiles;
+
+mod density;

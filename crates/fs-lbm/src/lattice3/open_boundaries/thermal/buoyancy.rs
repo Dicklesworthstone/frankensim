@@ -20,10 +20,13 @@ use super::{
 };
 use crate::thermal::boundary::ThermalWall;
 use crate::thermal::boundary::conduction::{WallConductionControls, WallConductionLink};
-pub use crate::thermal::open::buoyancy::{BoussinesqLaw3, BoussinesqLawError3};
+pub use crate::thermal::open::buoyancy::{
+    BoussinesqDensityLaw3, BoussinesqDensityLawError3, BoussinesqForceLaw3, BoussinesqLaw3,
+    BoussinesqLawError3, DensityDepartureLaw3,
+};
 use crate::thermal::open::immersed::ImmersedThermalBody3;
 use crate::thermal::open::immersed::conduction::ImmersedConductionLink3;
-use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3};
+use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3, ThermalTemperatureSample3};
 use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
@@ -35,6 +38,7 @@ mod material;
 pub use material::{
     BoussinesqOpenMaterialConfig3, BoussinesqOpenMaterialError3, BoussinesqOpenMaterialSgsError3,
     BoussinesqOpenMaterialSgsStep3, BoussinesqOpenMaterialStep3, BoussinesqOpenMaterialWorkspace3,
+    MaterialDensitySource3, MaterialDensitySourceError3, material_density_law3,
 };
 
 /// Additional resource and constitutive-consistency limits for this owner.
@@ -53,17 +57,17 @@ pub struct BoussinesqOpenLimits3 {
 }
 
 #[derive(Debug, Clone)]
-pub enum BoussinesqOpenError3<E> {
+pub enum BoussinesqOpenError3<E, S = BoussinesqLawError3> {
     Flow(GridError3<E>),
     Thermal(ThermalOpenError3),
     Law {
         cell: usize,
-        source: BoussinesqLawError3,
+        source: S,
     },
     /// Face 0..6 follows the native ordering; 6 identifies internal walls.
     BoundaryLaw {
         face: usize,
-        source: BoussinesqLawError3,
+        source: S,
     },
     ForceConsistency {
         cell: usize,
@@ -75,17 +79,17 @@ pub enum BoussinesqOpenError3<E> {
     Invalid(&'static str),
     Allocation,
 }
-impl<E> From<GridError3<E>> for BoussinesqOpenError3<E> {
+impl<E, S> From<GridError3<E>> for BoussinesqOpenError3<E, S> {
     fn from(error: GridError3<E>) -> Self {
         Self::Flow(error)
     }
 }
-impl<E> From<ThermalOpenError3> for BoussinesqOpenError3<E> {
+impl<E, S> From<ThermalOpenError3> for BoussinesqOpenError3<E, S> {
     fn from(error: ThermalOpenError3) -> Self {
         Self::Thermal(error)
     }
 }
-impl<E> From<OpenThermalError3<E>> for BoussinesqOpenError3<E> {
+impl<E, S> From<OpenThermalError3<E>> for BoussinesqOpenError3<E, S> {
     fn from(error: OpenThermalError3<E>) -> Self {
         match error {
             OpenThermalError3::Flow(e) => Self::Flow(e),
@@ -93,12 +97,12 @@ impl<E> From<OpenThermalError3<E>> for BoussinesqOpenError3<E> {
         }
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for BoussinesqOpenError3<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display for BoussinesqOpenError3<E, S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native Boussinesq open flow: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for BoussinesqOpenError3<E> {}
+impl<E: core::fmt::Debug, S: core::fmt::Debug> std::error::Error for BoussinesqOpenError3<E, S> {}
 
 /// Independently measured heat/reservoir accounts and prescribed body impulse.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,7 +120,8 @@ pub struct BoussinesqOpenStep3 {
     pub maximum_force_defect: f64,
 }
 
-/// One accepted flow/temperature/force epoch, with bounded retained scratch.
+/// One accepted flow/temperature/force epoch, with a typed retained force policy.
+/// The default policy and existing API remain the original affine law.
 ///
 /// Reference heat capacity, reference-density buoyancy and external mechanical
 /// force are explicit. The background can be held or supplied at the next
@@ -124,17 +129,21 @@ pub struct BoussinesqOpenStep3 {
 /// pressure state, never the thermal density projection. There is no mutable
 /// escape that detaches force history from accepted momentum or permits an
 /// independent thermal time advance.
-pub struct BoussinesqOpenGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
+pub struct BoussinesqOpenGrid3<
+    L: EquilibriumLattice3<Q>,
+    const Q: usize,
+    P: BoussinesqForceLaw3 = BoussinesqLaw3,
+> {
     flow: ForcedOpenBoundaryGrid3<L, Q>,
     thermal: ThermalOpenField3,
-    law: BoussinesqLaw3,
+    law: P,
     background: Vec<[f64; 3]>,
     pending_force: Vec<[f64; 3]>,
     limits: BoussinesqOpenLimits3,
     last_step: Option<BoussinesqOpenStep3>,
 }
 
-fn force_buffer<E>(cells: usize) -> Result<Vec<[f64; 3]>, BoussinesqOpenError3<E>> {
+fn force_buffer<E, S>(cells: usize) -> Result<Vec<[f64; 3]>, BoussinesqOpenError3<E, S>> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(cells)
@@ -143,20 +152,20 @@ fn force_buffer<E>(cells: usize) -> Result<Vec<[f64; 3]>, BoussinesqOpenError3<E
     Ok(values)
 }
 
-fn admit_boundary_temperature<E>(
-    law: BoussinesqLaw3,
+fn admit_boundary_temperature<E, P: BoussinesqForceLaw3>(
+    law: &P,
     face: usize,
     temperature: f64,
-) -> Result<(), BoussinesqOpenError3<E>> {
+) -> Result<(), BoussinesqOpenError3<E, P::Error>> {
     law.sample(temperature, [0.0; 3])
         .map(|_| ())
         .map_err(|source| BoussinesqOpenError3::BoundaryLaw { face, source })
 }
 
-fn admit_boundary_data<E>(
-    law: BoussinesqLaw3,
+fn admit_boundary_data<E, P: BoussinesqForceLaw3>(
+    law: &P,
     boundaries: ThermalOpenBoundaries3,
-) -> Result<(), BoussinesqOpenError3<E>> {
+) -> Result<(), BoussinesqOpenError3<E, P::Error>> {
     for (face, boundary) in boundaries.faces.into_iter().enumerate() {
         match boundary {
             ThermalOpenFace3::Reservoir { temperature }
@@ -172,10 +181,10 @@ fn admit_boundary_data<E>(
     Ok(())
 }
 
-fn admit_boundary_traces<E>(
-    law: BoussinesqLaw3,
+fn admit_boundary_traces<E, P: BoussinesqForceLaw3>(
+    law: &P,
     balance: ThermalOpenBalance3,
-) -> Result<(), BoussinesqOpenError3<E>> {
+) -> Result<(), BoussinesqOpenError3<E, P::Error>> {
     for (face, reservoir) in balance.reservoirs.into_iter().enumerate() {
         if reservoir.links != 0 {
             admit_boundary_temperature(law, face, reservoir.min_temperature)?;
@@ -197,6 +206,15 @@ fn admit_boundary_traces<E>(
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
+    /// The original affine constitutive law; source policies have force_policy().
+    pub fn law(&self) -> BoussinesqLaw3 {
+        self.law
+    }
+}
+
+impl<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
+    BoussinesqOpenGrid3<L, Q, P>
+{
     /// Bind an existing matching native flow and thermal field without an
     /// initial velocity kick. Solid entries of the background must be zero.
     /// All finite wall/conduction controls and accepted thermal history survive.
@@ -204,10 +222,10 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         flow: OpenBoundaryGrid3<L, Q>,
         thermal: ThermalOpenField3,
         cx: &Cx<'_>,
-        law: BoussinesqLaw3,
+        law: P,
         background: Vec<[f64; 3]>,
         limits: BoussinesqOpenLimits3,
-    ) -> Result<Self, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<Self, BoussinesqOpenError3<L::Error, P::Error>> {
         Self::try_new_with_poll(flow, thermal, law, background, limits, &mut || {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)
         })
@@ -216,11 +234,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     pub(super) fn try_new_with_poll(
         flow: OpenBoundaryGrid3<L, Q>,
         thermal: ThermalOpenField3,
-        law: BoussinesqLaw3,
+        law: P,
         background: Vec<[f64; 3]>,
         limits: BoussinesqOpenLimits3,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<Self, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<Self, BoussinesqOpenError3<L::Error, P::Error>> {
         poll()?;
         let cells = flow.grid.f.len();
         let bytes = cells
@@ -245,19 +263,19 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             ));
         }
         flow.admit_thermal_faces(thermal.boundaries())?;
-        admit_boundary_data(law, thermal.boundaries())?;
+        admit_boundary_data(&law, thermal.boundaries())?;
         for face in 0..6 {
             if let Some(profile) = thermal.reservoir_temperature_profile(face) {
                 for (index, &temperature) in profile.iter().enumerate() {
                     if index % 64 == 0 {
                         poll()?;
                     }
-                    admit_boundary_temperature(law, face, temperature)?;
+                    admit_boundary_temperature(&law, face, temperature)?;
                 }
             }
         }
-        let mut initial_force = force_buffer(cells)?;
-        let pending_force = force_buffer(cells)?;
+        let mut initial_force = force_buffer::<L::Error, P::Error>(cells)?;
+        let pending_force = force_buffer::<L::Error, P::Error>(cells)?;
         for cell in 0..cells {
             if cell % 64 == 0 {
                 poll()?;
@@ -299,8 +317,10 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     pub fn thermal(&self) -> &ThermalOpenField3 {
         &self.thermal
     }
-    pub fn law(&self) -> BoussinesqLaw3 {
-        self.law
+    /// The immutable force policy retained with the accepted force epoch.
+    /// No mutable escape can replace its constitutive model between steps.
+    pub fn force_policy(&self) -> &P {
+        &self.law
     }
     /// Mechanical background in the same accepted epoch as total force and heat.
     pub fn background_forces(&self) -> &[[f64; 3]] {
@@ -315,24 +335,24 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         &mut self,
         face: usize,
         temperature: f64,
-    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
-        admit_boundary_temperature(self.law, face, temperature)?;
+    ) -> Result<(), BoussinesqOpenError3<L::Error, P::Error>> {
+        admit_boundary_temperature(&self.law, face, temperature)?;
         self.thermal
             .set_reservoir_temperature(face, temperature)
             .map_err(Into::into)
     }
     /// Prescribe one reservoir's spatial theta field in x-fast plane order.
     /// Every authored value, including currently outflow/inactive slots, must
-    /// satisfy the affine buoyancy envelope before any input is changed. The
+    /// satisfy the retained buoyancy law before any input is changed. The
     /// original thermal storage cap and actual boundary-trace checks still apply.
     /// Populations, finite walls, force history and accepted time are unchanged.
     pub fn set_reservoir_temperature_profile(
         &mut self,
         face: usize,
         temperatures: &[f64],
-    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+    ) -> Result<(), BoussinesqOpenError3<L::Error, P::Error>> {
         for &temperature in temperatures {
-            admit_boundary_temperature(self.law, face, temperature)?;
+            admit_boundary_temperature(&self.law, face, temperature)?;
         }
         self.thermal
             .set_reservoir_temperature_profile(face, temperatures)
@@ -355,9 +375,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         &mut self,
         face: usize,
         wall: ThermalWall,
-    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+    ) -> Result<(), BoussinesqOpenError3<L::Error, P::Error>> {
         if let ThermalWall::Temperature(temperature) = wall {
-            admit_boundary_temperature(self.law, face, temperature)?;
+            admit_boundary_temperature(&self.law, face, temperature)?;
         }
         self.thermal
             .set_wall_boundary(face, wall)
@@ -369,9 +389,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     pub fn set_internal_wall_boundary(
         &mut self,
         wall: ThermalWall,
-    ) -> Result<(), BoussinesqOpenError3<L::Error>> {
+    ) -> Result<(), BoussinesqOpenError3<L::Error, P::Error>> {
         if let ThermalWall::Temperature(temperature) = wall {
-            admit_boundary_temperature(self.law, 6, temperature)?;
+            admit_boundary_temperature(&self.law, 6, temperature)?;
         }
         self.thermal
             .set_internal_wall_boundary(wall)
@@ -459,7 +479,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         heat_per_step: &[f64],
         thermal_relaxation: Option<&[f64]>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.step_with_poll(
             collisions,
             heat_per_step,
@@ -492,7 +512,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         heat_per_step: &[f64],
         diffusion: DiffusivityField<'_, 3>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.step_with_diffusion_poll(
             collisions,
             heat_per_step,
@@ -526,7 +546,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         heat_per_step: &[f64],
         thermal_relaxation: Option<&[f64]>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.advance_with_diffusion_poll(
             Some(background_at_end),
             collisions,
@@ -551,7 +571,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         heat_per_step: &[f64],
         diffusion: DiffusivityField<'_, 3>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.advance_with_diffusion_poll(
             Some(background_at_end),
             collisions,
@@ -570,7 +590,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         thermal_relaxation: Option<&[f64]>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.step_with_diffusion_poll(
             collisions,
             heat_per_step,
@@ -590,7 +610,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         diffusion: Option<DiffusivityField<'_, 3>>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         self.advance_with_diffusion_poll(
             None,
             collisions,
@@ -612,7 +632,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         diffusion: Option<DiffusivityField<'_, 3>>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error, P::Error>> {
         let (report, step) = self.stage_with_diffusion_poll(
             background_at_end.as_deref().map(Vec::as_slice),
             collisions,
@@ -639,7 +659,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         diffusion: Option<DiffusivityField<'_, 3>>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<(BoussinesqOpenStep3, usize), BoussinesqOpenError3<L::Error>> {
+    ) -> Result<(BoussinesqOpenStep3, usize), BoussinesqOpenError3<L::Error, P::Error>> {
         poll()?;
         let cells = self.thermal.populations().len();
         let endpoint_background = background_at_end.unwrap_or(self.background.as_slice());
@@ -663,26 +683,68 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             self.thermal.velocities[cell] = if self.thermal.solid[cell] {
                 [0.0; 3]
             } else {
+                if P::ADMIT_EVERY_THERMAL_SAMPLE {
+                    let temperature = self.thermal.temperature(cell).expect("active thermal cell");
+                    let actual = self
+                        .law
+                        .sample(temperature, self.background[cell])
+                        .map_err(|source| BoussinesqOpenError3::Law { cell, source })?
+                        .total;
+                    for axis in 0..3 {
+                        let applied = self.flow.forces[cell][axis];
+                        let defect = (actual[axis] - applied).abs();
+                        if !defect.is_finite() || defect > self.limits.force_consistency_tolerance {
+                            return Err(BoussinesqOpenError3::ForceConsistency {
+                                cell,
+                                axis,
+                                applied,
+                                actual: actual[axis],
+                                tolerance: self.limits.force_consistency_tolerance,
+                            });
+                        }
+                    }
+                }
                 self.flow.macroscopic(cell)?.1
             };
         }
-        let candidate = if let Some(diffusion) = diffusion {
-            self.thermal
-                .begin_step_tensor::<BoussinesqOpenError3<L::Error>>(
-                    heat_per_step,
-                    diffusion,
-                    || poll().map_err(Into::into),
-                )?
-        } else {
-            self.thermal.begin_step::<BoussinesqOpenError3<L::Error>>(
-                heat_per_step,
-                thermal_relaxation,
+        let candidate =
+            if P::ADMIT_EVERY_THERMAL_SAMPLE {
+                let law = &self.law;
+                self.thermal.begin_step_with_temperature_admission::<
+                BoussinesqOpenError3<L::Error, P::Error>,
+            >(
+                heat_per_step, thermal_relaxation, diffusion,
+                |sample| match sample {
+                    ThermalTemperatureSample3::Cell { cell, temperature } => law
+                        .sample(temperature, [0.0; 3])
+                        .map(|_| ())
+                        .map_err(|source| BoussinesqOpenError3::Law { cell, source }),
+                    ThermalTemperatureSample3::Boundary { face, temperature } =>
+                        admit_boundary_temperature(law, face, temperature),
+                },
                 || poll().map_err(Into::into),
             )?
-        };
-        // These are actual fluid traces, including outflow and implicit wall
-        // conduction. A finite solid's bulk temperature is a separate model.
-        admit_boundary_traces(self.law, candidate)?;
+            } else if let Some(diffusion) = diffusion {
+                self.thermal
+                    .begin_step_tensor::<BoussinesqOpenError3<L::Error, P::Error>>(
+                        heat_per_step,
+                        diffusion,
+                        || poll().map_err(Into::into),
+                    )?
+            } else {
+                self.thermal
+                    .begin_step::<BoussinesqOpenError3<L::Error, P::Error>>(
+                        heat_per_step,
+                        thermal_relaxation,
+                        || poll().map_err(Into::into),
+                    )?
+            };
+        // Affine extrema are sufficient only for the legacy linear law. A
+        // nonlinear policy already admitted EACH original fluid-side trace,
+        // including implicit finite-wall and immersed-body reflections.
+        if !P::ADMIT_EVERY_THERMAL_SAMPLE {
+            admit_boundary_traces(&self.law, candidate)?;
+        }
         for cell in 0..cells {
             if cell % 64 == 0 {
                 poll()?;
@@ -697,12 +759,15 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
                 .trial_temperature(cell)
                 .expect("active thermal cell");
             let half_heat = 0.5 * heat_per_step[cell];
-            // The approximation envelope covers source substeps as well as
-            // retained endpoints, even if wall cooling later removes a spike.
-            for temperature in [opening + half_heat, transported] {
-                self.law
-                    .sample(temperature, self.background[cell])
-                    .map_err(|source| BoussinesqOpenError3::Law { cell, source })?;
+            // Preserve the original affine admission order. Source policies
+            // checked the ACTUAL first-kick and transported sums in the shared
+            // thermal path, including spikes removed later by wall cooling.
+            if !P::ADMIT_EVERY_THERMAL_SAMPLE {
+                for temperature in [opening + half_heat, transported] {
+                    self.law
+                        .sample(temperature, self.background[cell])
+                        .map_err(|source| BoussinesqOpenError3::Law { cell, source })?;
+                }
             }
             self.pending_force[cell] = self
                 .law
@@ -727,11 +792,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
                 .1;
             }
         }
-        let heat = self.thermal.finish_step::<BoussinesqOpenError3<L::Error>>(
-            heat_per_step,
-            candidate,
-            || poll().map_err(Into::into),
-        )?;
+        let heat = self
+            .thermal
+            .finish_step::<BoussinesqOpenError3<L::Error, P::Error>>(
+                heat_per_step,
+                candidate,
+                || poll().map_err(Into::into),
+            )?;
         let mut body = [Dd::ZERO; 3];
         let mut background = [Dd::ZERO; 3];
         let mut maximum_force_defect = 0.0_f64;

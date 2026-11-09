@@ -2,7 +2,7 @@
 //!
 //! Viscosity and conductivity use one original material response per fluid
 //! cell and query epoch. Reference density/Cp retain the scalar's sensible
-//! storage. The existing affine law remains the sole buoyancy force owner.
+//! storage. The retained force policy remains the sole buoyancy force owner.
 //! Opening coefficients are held for one step; endpoint queries admit the
 //! candidate before its original physical publication.
 
@@ -15,6 +15,9 @@ use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
 };
+
+mod density;
+pub use density::{MaterialDensitySource3, MaterialDensitySourceError3, material_density_law3};
 
 mod sgs;
 pub use sgs::{BoussinesqOpenMaterialSgsError3, BoussinesqOpenMaterialSgsStep3};
@@ -99,35 +102,42 @@ pub struct BoussinesqOpenMaterialStep3<F> {
 }
 
 #[derive(Clone, Debug)]
-pub enum BoussinesqOpenMaterialError3<E> {
-    Transport(BoussinesqOpenError3<E>),
+pub enum BoussinesqOpenMaterialError3<E, S = BoussinesqLawError3> {
+    Transport(BoussinesqOpenError3<E, S>),
     Material(MaterialTransportError),
     Invalid(&'static str),
     Allocation,
 }
-impl<E> From<BoussinesqOpenError3<E>> for BoussinesqOpenMaterialError3<E> {
-    fn from(error: BoussinesqOpenError3<E>) -> Self {
+impl<E, S> From<BoussinesqOpenError3<E, S>> for BoussinesqOpenMaterialError3<E, S> {
+    fn from(error: BoussinesqOpenError3<E, S>) -> Self {
         Self::Transport(error)
     }
 }
-impl<E> From<GridError3<E>> for BoussinesqOpenMaterialError3<E> {
+impl<E, S> From<GridError3<E>> for BoussinesqOpenMaterialError3<E, S> {
     fn from(error: GridError3<E>) -> Self {
         Self::Transport(error.into())
     }
 }
-impl<E> From<MaterialTransportError> for BoussinesqOpenMaterialError3<E> {
+impl<E, S> From<MaterialTransportError> for BoussinesqOpenMaterialError3<E, S> {
     fn from(error: MaterialTransportError) -> Self {
         Self::Material(error)
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for BoussinesqOpenMaterialError3<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display
+    for BoussinesqOpenMaterialError3<E, S>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native buoyant material transport: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for BoussinesqOpenMaterialError3<E> {}
+impl<E: core::fmt::Debug, S: core::fmt::Debug> std::error::Error
+    for BoussinesqOpenMaterialError3<E, S>
+{
+}
 
-impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
+impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
+    BoussinesqOpenGrid3<L, Q, P>
+{
     /// Bind the original reference material scaling and allocate reusable
     /// transport arrays without changing temperature, momentum or force history.
     ///
@@ -138,15 +148,16 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
     ///
     /// Source rho/Cp departures are bounded at the opening and endpoint query
     /// epochs. Source density is NOT substituted into native populations or the
-    /// independent affine buoyancy law. Native heat/source/impulse reports keep
-    /// their lattice units; this adapter changes molecular transport only.
+    /// retained force policy. Native heat/source/impulse reports keep their
+    /// lattice units; this adapter changes molecular transport only. A source
+    /// density policy can be bound explicitly with [`material_density_law3`].
     pub fn material_transport_workspace<R: FluidTransport + ?Sized>(
         &self,
         reference: &MaterialScaling<'_, R>,
         config: BoussinesqOpenMaterialConfig3,
     ) -> Result<
         BoussinesqOpenMaterialWorkspace3<L::Collision>,
-        BoussinesqOpenMaterialError3<L::Error>,
+        BoussinesqOpenMaterialError3<L::Error, P::Error>,
     > {
         config.projection().validate()?;
         if !config.temperature_at_zero_k.is_finite()
@@ -234,7 +245,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         workspace: &mut BoussinesqOpenMaterialWorkspace3<L::Collision>,
         origin: [f64; 3],
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
-    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
+    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error, P::Error>>
+    {
         self.advance_material_with_poll(
             None,
             collision_templates,
@@ -259,7 +271,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         workspace: &mut BoussinesqOpenMaterialWorkspace3<L::Collision>,
         origin: [f64; 3],
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
-    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
+    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error, P::Error>>
+    {
         self.advance_material_with_poll(
             Some(background_at_end),
             collision_templates,
@@ -281,7 +294,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         origin: [f64; 3],
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
+    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error, P::Error>>
+    {
         let applied = self.prepare_material(
             background_at_end.as_deref().map(Vec::as_slice),
             collision_templates,
@@ -322,8 +336,10 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         workspace: &mut BoussinesqOpenMaterialWorkspace3<L::Collision>,
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<Vec<TransportSample<BoussinesqMaterial<F>>>, BoussinesqOpenMaterialError3<L::Error>>
-    {
+    ) -> Result<
+        Vec<TransportSample<BoussinesqMaterial<F>>>,
+        BoussinesqOpenMaterialError3<L::Error, P::Error>,
+    > {
         poll()?;
         let cells = self.thermal.populations().len();
         if workspace.dimensions != self.thermal.dimensions()
@@ -372,7 +388,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         step: usize,
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error>> {
+    ) -> Result<BoussinesqOpenMaterialStep3<F>, BoussinesqOpenMaterialError3<L::Error, P::Error>>
+    {
         let endpoint = self.sample_material(
             true,
             collision_templates,
@@ -399,8 +416,10 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> BoussinesqO
         fluid_cells: usize,
         resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<Vec<TransportSample<BoussinesqMaterial<F>>>, BoussinesqOpenMaterialError3<L::Error>>
-    {
+    ) -> Result<
+        Vec<TransportSample<BoussinesqMaterial<F>>>,
+        BoussinesqOpenMaterialError3<L::Error, P::Error>,
+    > {
         // Admit all actual fluid temperatures before invoking a source. Solid
         // mask entries are neither queried nor assigned fluid storage.
         for cell in 0..self.thermal.populations().len() {

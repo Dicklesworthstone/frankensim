@@ -54,6 +54,14 @@ pub struct ThermalOpenBoundaries3 {
     pub internal_wall: ThermalWall,
 }
 
+/// Actual temperature admitted by the original source/streaming path.
+/// Boundary face 6 denotes an immersed or unassigned internal wall.
+#[derive(Clone, Copy)]
+pub(crate) enum ThermalTemperatureSample3 {
+    Cell { cell: usize, temperature: f64 },
+    Boundary { face: usize, temperature: f64 },
+}
+
 /// Fixed resource and numerical envelope for one thermal carrier.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThermalOpenLimits3 {
@@ -477,7 +485,7 @@ impl ThermalOpenField3 {
         thermal_tau: Option<&[f64]>,
         poll: impl FnMut() -> Result<(), E>,
     ) -> Result<ThermalOpenBalance3, E> {
-        self.begin_step_impl(heat, thermal_tau, None, poll)
+        self.begin_step_with_temperature_admission(heat, thermal_tau, None, |_| Ok(()), poll)
     }
 
     pub(crate) fn begin_step_tensor<E: From<ThermalOpenError3>>(
@@ -486,14 +494,18 @@ impl ThermalOpenField3 {
         diffusion: DiffusivityField<'_, 3>,
         poll: impl FnMut() -> Result<(), E>,
     ) -> Result<ThermalOpenBalance3, E> {
-        self.begin_step_impl(heat, None, Some(diffusion), poll)
+        self.begin_step_with_temperature_admission(heat, None, Some(diffusion), |_| Ok(()), poll)
     }
 
-    fn begin_step_impl<E: From<ThermalOpenError3>>(
+    /// A composing constitutive owner admits actual first-kick/transported
+    /// cell sums and EACH actual fluid boundary trace before publication.
+    /// This reuses the original source, reflection and streaming arithmetic.
+    pub(crate) fn begin_step_with_temperature_admission<E: From<ThermalOpenError3>>(
         &mut self,
         heat: &[f64],
         thermal_tau: Option<&[f64]>,
         diffusion: Option<DiffusivityField<'_, 3>>,
+        mut admit: impl FnMut(ThermalTemperatureSample3) -> Result<(), E>,
         mut poll: impl FnMut() -> Result<(), E>,
     ) -> Result<ThermalOpenBalance3, E> {
         let cells = self.populations.len();
@@ -541,7 +553,7 @@ impl ThermalOpenField3 {
             &mut self.trial_history,
             |cell| velocities[cell],
         );
-        self.check_candidate(&mut poll)?;
+        self.check_candidate_with_temperature_admission(&mut admit, &mut poll)?;
         poll()?;
         if let Some(diffusion) = diffusion {
             D3Q7.collide_tensor(
@@ -570,14 +582,15 @@ impl ThermalOpenField3 {
             immersed.prepare(&self.post, self.limits, &mut poll)?;
         }
         poll()?;
-        let mut balance = self.stream(&mut poll)?;
+        let mut balance = self.stream(&mut admit, &mut poll)?;
         balance.source = source.total();
-        self.check_candidate(&mut poll)?;
+        self.check_candidate_with_temperature_admission(&mut admit, &mut poll)?;
         Ok(balance)
     }
 
     fn stream<E: From<ThermalOpenError3>>(
         &mut self,
+        mut admit: impl FnMut(ThermalTemperatureSample3) -> Result<(), E>,
         mut poll: impl FnMut() -> Result<(), E>,
     ) -> Result<ThermalOpenBalance3, E> {
         let mut balance = ThermalOpenBalance3::default();
@@ -631,6 +644,10 @@ impl ThermalOpenField3 {
                                 let incoming = reservoir_incoming(outgoing, u, temperature);
                                 let trace = (0.5 * incoming + 0.5 * outgoing) / weight;
                                 check_boundary_temperature(face, trace, self.limits)?;
+                                admit(ThermalTemperatureSample3::Boundary {
+                                    face,
+                                    temperature: trace,
+                                })?;
                                 let reservoir = &mut balance.reservoirs[face];
                                 if reservoir.links == 0 {
                                     reservoir.min_temperature = trace;
@@ -672,6 +689,10 @@ impl ThermalOpenField3 {
                                 };
                                 check_solid_temperature(face, *law, self.limits)?;
                                 check_wall_response(face, &response, self.limits)?;
+                                admit(ThermalTemperatureSample3::Boundary {
+                                    face,
+                                    temperature: response.temperature,
+                                })?;
                                 walls[face].add(outgoing, &response);
                                 response.incoming
                             }
@@ -701,6 +722,10 @@ impl ThermalOpenField3 {
                                     law.reflect_and_advance(outgoing, weight)
                                 });
                             check_wall_response(6, &response, self.limits)?;
+                            admit(ThermalTemperatureSample3::Boundary {
+                                face: 6,
+                                temperature: response.temperature,
+                            })?;
                             internal.add(outgoing, &response);
                             response.incoming
                         } else {
@@ -845,6 +870,14 @@ impl ThermalOpenField3 {
 
     fn check_candidate<E: From<ThermalOpenError3>>(
         &self,
+        poll: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.check_candidate_with_temperature_admission(|_| Ok(()), poll)
+    }
+
+    fn check_candidate_with_temperature_admission<E: From<ThermalOpenError3>>(
+        &self,
+        mut admit: impl FnMut(ThermalTemperatureSample3) -> Result<(), E>,
         mut poll: impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
         for (cell, populations) in self.trial.iter().enumerate() {
@@ -855,7 +888,9 @@ impl ThermalOpenField3 {
                 if populations.iter().any(|v| !v.is_finite()) {
                     return Err(invalid("nonfinite thermal population").into());
                 }
-                check_temperature(cell, populations.iter().sum(), self.limits)?;
+                let temperature = populations.iter().sum();
+                check_temperature(cell, temperature, self.limits)?;
+                admit(ThermalTemperatureSample3::Cell { cell, temperature })?;
             }
         }
         Ok(())

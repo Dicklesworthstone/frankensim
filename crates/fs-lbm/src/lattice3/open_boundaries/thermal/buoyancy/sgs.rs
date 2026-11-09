@@ -8,28 +8,30 @@ use crate::sgs3::{SgsLattice3, SgsReport, SgsStepError};
 
 /// Closure preparation or the original joint flow/force/heat owner refused.
 #[derive(Clone, Debug)]
-pub enum BoussinesqOpenSgsError3<E> {
+pub enum BoussinesqOpenSgsError3<E, S = BoussinesqLawError3> {
     /// Shared local momentum/thermal coefficient admission.
     Sgs(OpenThermalSgsError3<E>),
     /// Native buoyancy, flow, source, thermal or finite-wall admission.
-    Transport(BoussinesqOpenError3<E>),
+    Transport(BoussinesqOpenError3<E, S>),
 }
-impl<E> From<OpenThermalSgsError3<E>> for BoussinesqOpenSgsError3<E> {
+impl<E, S> From<OpenThermalSgsError3<E>> for BoussinesqOpenSgsError3<E, S> {
     fn from(error: OpenThermalSgsError3<E>) -> Self {
         Self::Sgs(error)
     }
 }
-impl<E> From<BoussinesqOpenError3<E>> for BoussinesqOpenSgsError3<E> {
-    fn from(error: BoussinesqOpenError3<E>) -> Self {
+impl<E, S> From<BoussinesqOpenError3<E, S>> for BoussinesqOpenSgsError3<E, S> {
+    fn from(error: BoussinesqOpenError3<E, S>) -> Self {
         Self::Transport(error)
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for BoussinesqOpenSgsError3<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display
+    for BoussinesqOpenSgsError3<E, S>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native buoyant open SGS: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for BoussinesqOpenSgsError3<E> {}
+impl<E: core::fmt::Debug, S: core::fmt::Debug> std::error::Error for BoussinesqOpenSgsError3<E, S> {}
 
 /// One jointly accepted native temperature, force and turbulent flow endpoint.
 #[derive(Clone, Debug)]
@@ -44,7 +46,9 @@ pub struct BoussinesqOpenSgsStep3 {
     pub maximum_diffusivity_to_molecular: f64,
 }
 
-impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
+impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
+    BoussinesqOpenGrid3<L, Q, P>
+{
     /// Required payload of the existing reusable native SGS/thermal workspace.
     pub fn required_thermal_sgs_workspace_bytes(&self) -> Result<usize, SgsStepError<L::Error>> {
         self.flow.inner.required_thermal_sgs_workspace_bytes()
@@ -56,7 +60,9 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         &self,
         maximum_workspace_bytes: usize,
     ) -> Result<OpenThermalSgsWorkspace3<L::Collision>, SgsStepError<L::Error>> {
-        self.flow.inner.thermal_sgs_workspace(maximum_workspace_bytes)
+        self.flow
+            .inner
+            .thermal_sgs_workspace(maximum_workspace_bytes)
     }
 
     /// Advance heat and buoyant momentum with Smagorinsky, WALE or Vreman stress.
@@ -88,7 +94,7 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         molecular_thermal_relaxation: &[f64],
         workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error>> {
+    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error, P::Error>> {
         self.advance_sgs_with_poll(
             None,
             config,
@@ -116,7 +122,7 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         molecular_thermal_relaxation: &[f64],
         workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
-    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error>> {
+    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error, P::Error>> {
         self.advance_sgs_with_poll(
             Some(background_at_end),
             config,
@@ -140,11 +146,9 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> BoussinesqOpenG
         workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error>> {
-        let (sgs, maximum_eddy_diffusivity_lu, maximum_diffusivity_to_molecular) = self
-            .flow
-            .inner
-            .prepare_open_thermal_sgs(
+    ) -> Result<BoussinesqOpenSgsStep3, BoussinesqOpenSgsError3<L::Error, P::Error>> {
+        let (sgs, maximum_eddy_diffusivity_lu, maximum_diffusivity_to_molecular) =
+            self.flow.inner.prepare_open_thermal_sgs(
                 config,
                 molecular_collisions,
                 molecular_thermal_relaxation,

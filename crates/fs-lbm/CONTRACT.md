@@ -3825,3 +3825,49 @@ an inferred fluid/solid heat partition. Temperature-dependent resistance,
 porosity evolution, compressible enthalpy and a total transported fluid-energy
 balance are outside this composition. The source ordering is the existing
 partitioned native ordering, without a new temporal-order claim.
+
+
+## Original nonlinear material density in native open-flow buoyancy
+
+`BoussinesqOpenGrid3<L, Q, P>` retains an immutable typed force policy with
+its accepted populations, temperature and force epoch. The default remains
+`BoussinesqLaw3`, including its existing affine API and admission order.
+`BoussinesqDensityLaw3<S>` samples the original `DensityDepartureLaw3`
+at actual native temperatures and applies rho_ref times the admitted relative
+density departure times gravity, plus the separately authored mechanical
+background. Nonlinear and nonmonotone density are supported without fitting
+an expansion coefficient. Original source errors remain typed.
+
+The source policy admits each actual source half-kick, transported cell sum,
+individual reservoir/external-wall/immersed-wall fluid trace, force preview
+and final temperature. Extrema alone cannot certify a nonmonotone relation.
+Opening source forces must still agree with retained accepted forces; source
+changes cannot silently reframe momentum. The original collision, Guo force,
+D3Q7 transport, finite-wall heat, tensor diffusion, impulse account and final
+publication gates remain authoritative. No native per-step allocation or
+replacement numerical solver is introduced. Refusal preserves accepted
+populations, thermal/force/wall history, time and receipts.
+
+`material_density_law3` retains the original reference material owner,
+frozen transport snapshot and immutable Kelvin resolver. It uses the original
+MaterialScaling SI acceleration conversion and the original Boussinesq
+rho/Cp admission, with actual resolved source density in buoyancy. Signed
+nonzero Kelvin scales are supported; each actual Kelvin sample must be
+positive and finite. Material viscosity/conductivity and material/ordinary
+SGS facades support the same typed policy and retain their original source
+and reusable-workspace rules. Compositions must supply the same reference,
+coordinates and physical source; independent callbacks are not assumed equal.
+
+This remains fixed-reference-mass, fixed-reference-capacity Boussinesq
+transport within explicit small-departure limits. Population pressure density
+is independent of the material density projection. Variable-mass advection,
+compressible total energy, pressure work and a new temporal-order or empirical
+fluid qualification are not supplied by this extension.
+
+Eight new regression groups cover density maxima, SI/Kelvin conversion,
+nonmonotone boundary and source-step refusal, original material/SGS agreement,
+conservation, retained ownership, cancellation and exact retry. All changed
+Rust sources passed the pinned formatter/parser. The exact standalone force
+law module and its five inline tests passed metadata-only Rust compilation;
+the tests were not executed. Full native integration compilation and runtime
+validation remain pending in a usable workspace build environment.
