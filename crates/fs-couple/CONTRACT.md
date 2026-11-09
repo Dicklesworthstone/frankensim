@@ -12625,6 +12625,61 @@ routing with transport/events, and source/clock/late refusal/retry/cancellation
 isolation. Native execution and shared-helper type checking were unavailable
 when this extension was authored; no runtime validation is inferred.
 
+## Molecular duct fields and sound under the same full exterior load
+
+`RadiatingNetwork::bind_molecular_with_compliant_walls` binds original molecular
+edge laws and exact edge-id `MolecularCompliantWall` Arc owners to the retained
+regional network and exterior. Complete material state, source identities,
+Maxwell response, thickness/restraint and radius/frequency support remain in
+the original wall law, including the existing `LocalMaterialWall` implementation.
+Native media pins remain live on unlisted edges; unknown/duplicate ids and
+overlapping pin/custom declarations refuse through the same duct owner.
+
+`MolecularRadiatingNetwork::prepare_fields` accepts a
+`MolecularRadiatingFieldRequest` with the physical frequency, source clock,
+complete scalar/coupled generators, non-opening scalar loads, original probes
+and `NetworkFieldBudget`. It computes the original full BEM opening basis
+once, then supplies that exact mutual radiation matrix to the native molecular
+field preparation and its single loaded network factorization. The existing
+exterior observation code consumes an exact clone of that solved native port
+bank; it does not independently reconstruct the interior or choose new sources.
+`prepare_fields_with_radiation` derives its optional angular observation from
+the SAME unit-opening BEM solutions.
+
+The returned `PreparedMolecularRadiatingFields` exposes `interior()` and
+`radiating()`. Internal pressure, directed volume flow, coherent moments and
+source-owned cylindrical losses share source coordinates and phases with the
+actual opening flows, directional microphone fields and far-field response.
+Source-amplitude and covariance-factor queries are contractions only. No new
+material evaluation, radial eigensolve, duct factorization or BEM solve occurs
+during these observations.
+
+The original exterior field allowance additionally admits four
+port-by-source complex arrays and one source vector for the retained port-bank
+clone before the BEM solve. Native interior probe/transfer/chain caps remain
+separately binding, as do exterior geometry, angular work, loaded conditioning
+and cancellation. Refusal returns no partial paired preparation and leaves the
+original molecular, material and exterior owners usable.
+
+Mechanical compliance changes the loaded opening flows. The exterior remains
+rigid outside its original opening patches; distributed wall radiation needs
+its own source/trace owner. Gas absorption, mechanical wall work and actual
+opening/exterior work stay separate. Only the native viscous channel is
+declared direct gas caloric heat; thermal and molecular availability and wall
+work do not specify an automatic thermal receiver. Far-field power observes
+the existing exterior load work and is never added again as an energy debit.
+
+Three native regressions in
+`driving_point/network/radiation/tests/prepared/molecular/fields.rs` use the
+original resolved material and Maxwell membrane APIs. They compare independent
+complex line loading, native interior gas/wall work and a separately assembled
+physical BEM velocity boundary; coherent loss, microphone and angular source
+factors; and original material support, retained-bank/field budgets,
+cancellation and retry. The source claims are synthetic implementation
+fixtures, not empirical material validation. These tests and Rust
+parser/formatter checks were not executed because the workspace was
+unavailable; the production source received a bounded independent review.
+
 ## Finite thermal bodies in moving molecular networks
 
 - `molecular_exchange::network::thermal::{step_candidate, step_candidate_with_convection}` couples finite enthalpy and phase-change bodies to the original moving-gas molecular network. Bodies sharing a gas use the existing simultaneous implicit thermal solve. Independent gas groups start from the same snapshot; the original molecular transaction then samples the complete heated snapshot. Both operators cover the same physical duration, with first-order Lie splitting.

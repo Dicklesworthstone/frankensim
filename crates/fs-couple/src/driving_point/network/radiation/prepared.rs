@@ -129,6 +129,70 @@ impl RadiatingNetwork {
         angular: Option<(&[[f64; 3]], PreparedRadiationOptions)>,
         gate: &CancelGate,
     ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
+        self.prepare_sources_with_network(
+            omega,
+            propagation,
+            sources,
+            bank,
+            scalar_loads,
+            angular,
+            false,
+            |boundary| {
+                let network = match (propagation, &self.media) {
+                    (Propagation::Molecular(molecular), _) => molecular.prepare_sources_controlled(
+                        omega,
+                        sources,
+                        bank,
+                        scalar_loads,
+                        Some(boundary),
+                        &mut || gate.is_requested(),
+                    )?,
+                    (Propagation::Duct(loss), Some(media)) => network_prepare_sources_regional(
+                        self.driving.network(),
+                        media,
+                        omega,
+                        loss,
+                        sources,
+                        bank,
+                        scalar_loads,
+                        Some(boundary),
+                    )?,
+                    (Propagation::Duct(loss), None) => network_prepare_sources(
+                        self.driving.network(),
+                        &self.gas,
+                        omega,
+                        loss,
+                        sources,
+                        bank,
+                        scalar_loads,
+                        Some(boundary),
+                    )?,
+                };
+                Ok((network, ()))
+            },
+            gate,
+        )
+        .map(|(prepared, ())| prepared)
+    }
+
+    /// One exterior basis and one caller-supplied native loaded network solve.
+    /// Interior fields can retain that same port bank while the existing BEM
+    /// observation machinery consumes an exact bounded clone of its transfers.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_sources_with_network<'a, T>(
+        &'a self,
+        omega: f64,
+        propagation: Propagation<'a>,
+        sources: &'a [PortSource],
+        bank: Option<&'a CoupledSourceBank>,
+        scalar_loads: &'a [PortTermination],
+        angular: Option<(&[[f64; 3]], PreparedRadiationOptions)>,
+        retain_field_bank: bool,
+        network_at: impl FnOnce(
+            &CoupledTermination,
+        ) -> Result<(PreparedNetworkSources, T), ExteriorNetworkError>,
+        gate: &CancelGate,
+    ) -> Result<(PreparedRadiatingNetwork<'a>, T), ExteriorNetworkError> {
         poll(gate)?;
         let count = sources
             .len()
@@ -157,7 +221,11 @@ impl RadiatingNetwork {
             .filter(|node| matches!(node.boundary, NodeBoundary::Port { .. }))
             .count();
         // All dimensions have already passed their original fixed owner caps.
-        let entries = 5 * n * p + 8 * p * r + 4 * count * (ports + r);
+        // A retained interior owner holds one additional original source bank:
+        // four port-by-source complex arrays plus its default source vector.
+        // Its probe/chain workspace remains bounded by NetworkFieldBudget.
+        let retained_entries = if retain_field_bank { count * (4 * ports + 1) } else { 0 };
+        let entries = 5 * n * p + 8 * p * r + 4 * count * (ports + r) + retained_entries;
         let terms = n * n * n + 3 * p * n * n + 4 * p * n * r + 4 * count * p * r;
         if entries > self.budget.max_field_entries || terms > self.budget.max_solve_terms {
             return Err(bad(
@@ -165,36 +233,7 @@ impl RadiatingNetwork {
             ));
         }
         let (boundary, solutions) = self.exterior_basis(omega, gate)?;
-        let network = match (propagation, &self.media) {
-            (Propagation::Molecular(molecular), _) => molecular.prepare_sources_controlled(
-                omega,
-                sources,
-                bank,
-                scalar_loads,
-                Some(&boundary),
-                &mut || gate.is_requested(),
-            )?,
-            (Propagation::Duct(loss), Some(media)) => network_prepare_sources_regional(
-                self.driving.network(),
-                media,
-                omega,
-                loss,
-                sources,
-                bank,
-                scalar_loads,
-                Some(&boundary),
-            )?,
-            (Propagation::Duct(loss), None) => network_prepare_sources(
-                self.driving.network(),
-                &self.gas,
-                omega,
-                loss,
-                sources,
-                bank,
-                scalar_loads,
-                Some(&boundary),
-            )?,
-        };
+        let (network, fields) = network_at(&boundary)?;
         poll(gate)?;
         let opening_indices = self
             .patches
@@ -272,7 +311,7 @@ impl RadiatingNetwork {
             prepared.receiver_columns.extend_from_slice(&field);
         }
         poll(gate)?;
-        Ok(prepared)
+        Ok((prepared, fields))
     }
 }
 
