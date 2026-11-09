@@ -4751,6 +4751,15 @@ Layer heating comes directly from dissipative modes, so weak absorption is
 retained without subtracting nearly equal incident and outgoing fluxes.
 Wholly lossless films have exactly zero heat.
 
+Coherent two-source contractions retain double-double multiplication residuals
+until both complex paths have combined. This also serves prepared interior
+fields and depth-interval loss modes, so a representable near-node field is
+not erased by separately rounded products before its positive heat is formed.
+The fixed-size contraction remains allocation-free; transfer coefficients are
+still binary64 approximations, not certified exact continuum amplitudes.
+G0/G1/G3 tests cover exact dyadic residuals, weak bare-interface dark-port
+leakage, interior lossy-film nodes, power-of-two scaling and exact cancellation.
+
 Prepared coherent evaluations allocate nothing and cost O(layers). Explicit
 source factors describe a positive second moment C=B B*, with one peak-phasor
 time-average factor 1/2; an independent-source helper supplies only diagonal

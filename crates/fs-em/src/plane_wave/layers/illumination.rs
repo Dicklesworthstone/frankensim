@@ -93,10 +93,18 @@ fn reflection(state: [C64; 2]) -> C64 {
 }
 
 pub(super) fn dot(a: [C64; 2], b: [C64; 2]) -> C64 {
-    let products = [a[0] * b[0], a[1] * b[1]];
+    // A dark port cancels products, not merely their rounded f64 values.
+    // Preserve each multiplication residual through the coherent sum, before
+    // any field, positive loss mode or outgoing power is rounded/squared.
+    let product = |a: C64, b: C64| {
+        let (ar, ai) = (Dd::from_f64(a.re), Dd::from_f64(a.im));
+        let (br, bi) = (Dd::from_f64(b.re), Dd::from_f64(b.im));
+        [ar * br - ai * bi, ar * bi + ai * br]
+    };
+    let products = [product(a[0], b[0]), product(a[1], b[1])];
     C64::new(
-        (Dd::from_f64(products[0].re) + Dd::from_f64(products[1].re)).to_f64(),
-        (Dd::from_f64(products[0].im) + Dd::from_f64(products[1].im)).to_f64(),
+        (products[0][0] + products[1][0]).to_f64(),
+        (products[0][1] + products[1][1]).to_f64(),
     )
 }
 
@@ -630,5 +638,28 @@ impl<'p, 's, 'm> PreparedLayerDepthInterval<'p, 's, 'm> {
             },
             || false,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G0/G3: exact dyadic cancellation, including both complex quadratures.
+    #[test]
+    fn coherent_products_preserve_a_residual_below_one_product_ulp() {
+        let epsilon = 2.0_f64.powi(-27);
+        for exponent in [-450, -200, 0, 200, 450] {
+            let scale = 2.0_f64.powi(exponent);
+            let a = [
+                C64::new(1.0 + epsilon, 1.0 + epsilon).scale(scale),
+                C64::new(1.0, 1.0).scale(scale),
+            ];
+            let b = [C64::from_re((1.0 - epsilon) * scale), C64::from_re(-scale)];
+            let residual = -2.0_f64.powi(2 * exponent - 54);
+            assert_eq!(dot(a, b), C64::new(residual, residual));
+            assert_eq!(dot([a[1], a[0]], [b[1], b[0]]), dot(a, b));
+            assert_eq!(dot(a, [a[1], -a[0]]), C64::ZERO);
+        }
     }
 }

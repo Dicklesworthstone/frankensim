@@ -58,6 +58,91 @@ fn simultaneous_bare_interface_fields_are_continuous_and_power_reciprocal() {
     }
 }
 
+/// G1/G3: a near-dark outgoing channel retains the exact represented source
+/// perturbation. The oracle reduces a*(b+delta)-b*a to a*delta, with no
+/// cancellation or high-precision implementation shared with the observer.
+#[test]
+fn coherent_interface_retains_weak_dark_port_leakage() {
+    let left = material(E, M);
+    let right = material(4.0 * E, M);
+    let stack =
+        PlanarDielectricLayers::try_new(&left, DielectricResponse::Lossless(&right), OMEGA, &[])
+            .unwrap();
+    for pol in [Polarization::Te, Polarization::Tm] {
+        let bank = stack.prepare_illumination(1.0, pol).unwrap();
+        let [a, b] = bank.tangential_e_scattering()[0];
+        assert_eq!(a.im, 0.0);
+        assert_eq!(b.im, 0.0);
+        let perturbed = b.re.next_up();
+        let delta = perturbed - b.re;
+        for exponent in [-450, 0, 450] {
+            let scale = 2.0_f64.powi(exponent);
+            let expected = a.scale(delta * scale);
+            let response = bank
+                .evaluate([C64::from_re(perturbed * scale), -a.scale(scale)], &mut [])
+                .unwrap();
+            let leakage = response.outgoing_tangential_e_v_m[0];
+            complex_near(leakage, expected, 2e-15 * expected.abs());
+            let expected_power = 0.5 * bank.port_admittance_s()[0] * expected.norm_sq();
+            near(
+                response.power.outgoing_w_m2[0],
+                expected_power,
+                2e-15 * expected_power,
+            );
+            let dark = bank
+                .evaluate([b.scale(scale), -a.scale(scale)], &mut [])
+                .unwrap();
+            assert_eq!(dark.outgoing_tangential_e_v_m[0], C64::ZERO);
+            assert_eq!(dark.power.outgoing_w_m2[0], 0.0);
+        }
+    }
+}
+
+/// G1/G3: preserve a small electric-field residue and its physical positive
+/// loss inside a lossy film. Independent exact algebra on the retained source
+/// columns supplies the near-null field; the original Debye law supplies heat.
+#[test]
+fn coherent_film_retains_weak_node_field_and_local_heat() {
+    let outside = material(E, M);
+    let film = debye(E, 2.0 * E, 0.03, 0.001);
+    let layers = [DielectricLayer {
+        response: DielectricResponse::Debye(&film),
+        thickness_m: 0.6 / k(),
+    }];
+    let stack = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        OMEGA,
+        &layers,
+    )
+    .unwrap();
+    let bank = stack.prepare_illumination(1.0, Polarization::Te).unwrap();
+    let point = bank.prepare_point(0, 0.23 * layers[0].thickness_m).unwrap();
+    let a = point.evaluate([C64::ONE, C64::ZERO]).unwrap().electric_v_m[1];
+    let b = point.evaluate([C64::ZERO, C64::ONE]).unwrap().electric_v_m[1];
+    let perturbed = C64::new(b.re.next_up(), b.im);
+    let delta = perturbed.re - b.re;
+    for exponent in [-200, 0, 200] {
+        let scale = 2.0_f64.powi(exponent);
+        let expected = a.scale(delta * scale);
+        let field = point
+            .evaluate([perturbed.scale(scale), -a.scale(scale)])
+            .unwrap();
+        complex_near(field.electric_v_m[1], expected, 2e-14 * expected.abs());
+        // omega*tau=1, so epsilon''=-delta_epsilon/2=-E.
+        let expected_heat = 0.5 * OMEGA * E * expected.norm_sq();
+        near(
+            field.statistics.absorbed_power_w_m3,
+            expected_heat,
+            5e-14 * expected_heat,
+        );
+        assert!(field.statistics.absorbed_power_w_m3 > 0.0);
+        let dark = point.evaluate([b.scale(scale), -a.scale(scale)]).unwrap();
+        assert_eq!(dark.electric_v_m, [C64::ZERO; 3]);
+        assert_eq!(dark.statistics.absorbed_power_w_m3, 0.0);
+    }
+}
+
 // Independent conventional characteristic matrices and face continuity.
 // These modest depths permit growing sin/cos; production must never need them.
 pub(super) fn matrix(
