@@ -8,10 +8,13 @@
 //! local-wall or independent-radiator replacement is introduced.
 //!
 //! This mobility route needs an invertible original bare mechanical pencil.
-//! A singular lossless bare resonance refuses; the existing jointly loaded
-//! dense owners handle cases where radiation alone resolves that singularity.
+//! A singular lossless bare resonance refuses here; [`joint`] keeps the full
+//! structural/acoustic equations when radiation resolves that singularity.
 //! Frozen M/C/K includes full consistent inertia, viscous and gyroscopic terms.
 //! No frequency-dependent material sample is silently made into such a pencil.
+
+/// Simultaneous original structural/acoustic equations, including bare resonances.
+pub mod joint;
 
 use fs_bem::helmholtz::{
     Formulation, HelmholtzError, IterativeError, IterativeOptions, IterativeRadiation, Medium,

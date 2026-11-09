@@ -41,6 +41,9 @@ use std::{
 #[path = "helmholtz_bc_reflection_iterative.rs"]
 pub(crate) mod reflection;
 
+#[path = "helmholtz_iterative/coupled.rs"]
+mod coupled;
+
 /// Right preconditioning leaves GMRES's residual in the original equation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preconditioner {
@@ -1519,12 +1522,16 @@ impl<'a> IterativeRadiation<'a> {
 
     #[must_use]
     pub fn receipt(&self, state: &IterativeState) -> ResourceReceipt {
+        self.receipt_for(state.wall_s, state.matvecs, state.gmres.iters)
+    }
+
+    fn receipt_for(&self, wall_s: f64, matvecs: usize, iterations: usize) -> ResourceReceipt {
         ResourceReceipt {
             host: host(),
-            wall_s: self.setup_s + state.wall_s,
+            wall_s: self.setup_s + wall_s,
             peak_rss_bytes: peak_rss(),
-            matvecs: state.matvecs,
-            iterations: state.gmres.iters,
+            matvecs,
+            iterations,
             fmm_order: self.options.effective_order(),
             near_field_bytes: match self.near_table() {
                 None => self.near_entries * core::mem::size_of::<C64>(),

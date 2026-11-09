@@ -14445,3 +14445,55 @@ internal prefixes. The six changed Rust sources passed the pinned parser,
 formatter and `rustfmt --check`. These new native FEM/thermal integration
 tests remain unexecuted; parsing and static API/oracle review are not runtime
 validation.
+
+## Simultaneous structural and FMM radiation at bare resonances
+
+`vibroacoustic::iterative::joint::PreparedJointStructuralRadiation` retains
+every original structural velocity and surface pressure in one native GMRES
+system. With peak exp(-i omega t), its equations are
+`A p - B(i omega rho T v) = 0` and
+`[C + i(K/omega - omega M)] v + T^T W p = F`.
+The original native Neumann FMM applies A and B, including its selected
+triangle/directional/near corrections. The original all-prescribed mechanical
+owner evaluates Hq and viscous work without factoring H; these trial coordinates
+are Krylov unknowns, not added physical supports. No bare mechanical inverse,
+dense acoustic column matrix, modal replacement or artificial loss is introduced.
+Actual radiation can therefore resolve a bare structural resonance. A truly
+unresolved forced dark resonance still refuses; convergence is not a general
+uniqueness or rank certificate, including for an unforced nullspace.
+
+Original M/C/K admission, full gyroscopic entries, exact outward closed-triangle
+admission, reciprocal trace/traction maps and the native near-block pressure
+preconditioner remain authoritative. Positive solver-coordinate scaling uses
+`d_j^2 = omega M_jj + abs(K_jj)/omega + abs(C_jj) + rho*c*sum_i(area_i*T_ji^2)`
+and pressure scale `sqrt(rho*c/area)`. It changes no physical coefficient.
+The solve returns the original pressure/velocity field, all structural motion,
+signed interface and radiation work, independent viscous heat, a true Euclidean
+residual of the scaled joint system, and independently recomputed force/acoustic
+block defects and work balances. The force-block defect is in the same D^-1
+physical coordinate metric and is explicitly not a coefficientwise backward
+error. The acoustic defect is `norm(Ap-Bq)/(norm(Ap)+norm(Bq))`; neither defect
+certifies spatial quadrature, FMM error or forward accuracy near a loaded pole.
+
+Added payload admits `16*(N+n)*(restart+20) + 8*restart*(restart+4) + 512*n
++ 160*N + 48*(max_iters+1) + 4096` bytes, separately from the original
+mechanical/FMM bounds, borrowed source data and allocator metadata. GMRES counts
+actual Arnoldi updates, including partial final cycles. Native Cx/CancelGate
+checks and a per-composed-matvec predicate preserve immutable retry after refusal.
+The source is still a frozen real M/C/K law at one positive frequency; this
+owner does not infer dispersive materials, incident illumination, mechanical
+traces, startup transients or a coupled adjoint.
+
+Four focused native groups pass with the actual original mechanical
+PSD/LU/refinement/action, full FMM, triangle kernels, geometry, near-block and
+GMRES owners. At an exactly singular bare scalar resonance, the independent
+pulsating-sphere velocity error falls from 8.8931% to 2.1580% under 80-to-320-panel
+refinement; signed work closes within 7.3e-14. A separated-body directional
+full-Triangle gyroscopic fixture agrees with dense acoustic columns composed
+with the original loaded mechanical owner to 5.104e-10 in velocity and 3.671e-10
+in pressure, with 7.91e-15 total-work defect. Other groups cover original-unit
+congruence and coupled dark motion, genuine forced dark singularity, invalid
+mass/force, open geometry, exact added-memory and iteration limits, cancellation,
+bitwise retry and zero forcing. Test execution narrows only executor context
+construction and unrelated dependency/module surfaces; no physical numerical
+owner is substituted. Full Cargo/workspace compilation remains unexecuted.

@@ -4600,3 +4600,23 @@ The bounded numerical evidence is not an arbitrary-null relative certificate.
 Pressure-array preparation now caches one original carrier phase per authored tap and nonempty coherent bank, then composes each retained line's DD relative-frequency phase before its original gain and pressure/velocity field contraction. Independent bright trigonometric values at neighboring frequencies no longer corrupt weak delayed readouts. Banks remain independent, tap order and native source clocks are retained, and actual calibrated or ideal microphone projection still precedes every tap contraction. Preparation processes one bank at a time and reuses the original taps-sized phase buffer; no bank-by-tap cache or query allocation is added. Exact native-frequency calibration rows are validated once and looked up for each retained bank line.
 
 Preparation admission now reserves 3*lines*taps + nonempty_banks*taps plus the original line/bank lookup bound and microphone work. Calibrated rows additionally reserve eight DD coefficient conversions per receiver/retained line. Focused tests execute the actual reordered preparation, microphone projection, readout and correlation code with manufactured original fields and nominal provenance/FirstOrder adapters. They cover both normalized profiles, one-delay/window-translation equivalence, two/three-tone cancellation, signed multitaps and complex calibrated fields, disjoint bank frequency ranges, frequency-dependent calibration, directional pressure/velocity projection, exact work and workspace bounds, zero-delay/dark channels, broad fallback and cancellation/reuse. Eight focused tests pass; the high-carrier readout regression fails on the previous preparation. The two-tone 1ps uniform mean improves from a 2.04e-5 relative discrepancy to about 1.2e-20 against the DD-shifted-window oracle. The tested three-tone null retains the existing DD phasor conditioning limit (1e-7 envelope); no arbitrary-null relative certificate or full native BEM propagation validation is claimed.
+
+### Native Neumann actions for simultaneous structural loading
+
+The existing `IterativeRadiation` exposes its original velocity-to-Bq action,
+bounded A-block right preconditioner, and `finish_coupled_traces` for a larger
+simultaneous physical solve. These operations require a bare Neumann owner;
+nonzero Robin data refuse rather than being silently counted twice. Finishing
+recomputes both original FMM equation sides and checks
+`norm(Ap-Bq)/(norm(Ap)+norm(Bq))` with the original tolerance and deterministic
+scaled norm owner before returning the original observer-bound radiation field.
+This is a backward block defect, not a relative-RHS, FMM or spatial certificate.
+Native signed surface work and its outward roundoff enclosure stay unchanged.
+
+The resource receipt shares the existing preparation accounting; composed
+matvec counters describe complete caller actions, which can apply both A and B,
+and do not claim to count individual FMM potentials or kernels. The original
+standalone solve, near-block inverse and receipt arithmetic remain unchanged.
+The full joint structural/FMM tests in fs-couple exercise these methods with
+exact bare mechanical resonance, independent sphere refinement, directional
+full-Triangle dense comparison, dark modes, resource refusal and cancellation.
