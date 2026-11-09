@@ -9885,3 +9885,34 @@ Native mass, temperature, radius, liquid velocity and their accepted clock remai
 Five new integration tests passed for identical direct/coupled phase trajectories, actual liquid displacement during evaporation, heat-driven mass/acoustic feedback, receiver-medium and late-observer rejection, and cancellation after source admission. Existing gas caloric and conducting-bubble integration tests remain passing. The complete focused source run passed 146 selected tests across material, native cavitation and coupled owners; it was not a full-workspace build.
 
 The `vapor_cavitation` example compares zero heat with an explicitly authored smooth 1 mW pulse under the same pressure cycle, emitting 320 samples of interface/liquid velocities, vapor mass transfer, source flow, causal receiver pressure, heat and independently reconstructed cumulative balances. Both cases include evaporation and condensation. The heat pulse is an external thermal port, not a liquid-conduction correlation. Applicability remains the native incompressible, spherical, locally saturated pure-vapor model plus the original compact-observer limits. Uniform vapor temperature, continuum behavior and rapid phase equilibration remain caller assumptions; the mechanical Mach checks alone do not establish them.
+
+## Hereditary material in cavity/exterior-loaded modal response
+
+`vibroacoustic::ModalStructuralRelaxation` admits the original `fs-phs`
+Maxwell arms through the existing BEM material-memory owner. Structural
+frequencies describe relaxed equilibrium stiffness; every original signed
+strain row adds its excess storage and loss exactly once. A source-owned plate
+adapter preserves the original material/property selection and intersects all
+regional frequency bands. Full, truncated and convergence solves enforce those
+bands at the actual forcing frequency. A scalar structural loss and duplicate
+attachment refuse; a separately identified Kelvin mechanism may coexist.
+
+The native `fs-material` Prony spectral weights assemble the complete complex
+modal stiffness, including mutual terms, without extra factorization dimensions,
+fitted damping ratios or equal-time/rank merging. The original row prefix is
+used under truncation. Branch channel squares independently provide positive
+heat and cycle-mean spring storage. Heat is included once in total structural
+loss while cavity, boundary and exterior-radiation work remain distinct.
+The source owner must establish the actual relaxed basis and material validity;
+equal dimensions do not establish identity. This harmonic composition adds no
+time stepping, nonlinear constitutive or measured-audio claim.
+
+Focused G1/G3 tests compare the coupled two-mode/cavity/radiation response with
+independent spring-dashpot and cavity-elimination equations, including injected
+volume flow, branch heat/storage, loss nullspace, principal-block truncation,
+frequency support, cancellation and zero-arm parity. Native numerical-slice
+verification compiled the original `fs-math` and exact new spectral contraction
+bodies: ten tests passed, comprising six original Prony spectrum controls and
+four contraction controls. Full `fs-couple` Cargo integration tests were not run
+in the disk-constrained session; syntax/static checks and independent complex
+work-balance calculations are distinct from that missing execution.

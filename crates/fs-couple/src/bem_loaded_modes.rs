@@ -36,7 +36,7 @@ use fs_la::nonlinear_eig::{
 use fs_math::{c64::C64, det};
 
 mod shell;
-mod memory;
+pub(crate) mod memory;
 mod harmonic;
 mod molecular;
 mod pencil;

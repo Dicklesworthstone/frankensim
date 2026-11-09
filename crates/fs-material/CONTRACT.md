@@ -23359,3 +23359,17 @@ pinned dependency build.
 For a uniform saturated vapor volume, `m = rho_v(T) V` and `U = m u_v(T)`. With liquid transfer enthalpy `h_l`, the explicit open-system first law is `dU = dQ + h_l dm - p dV`. The source exposes its temperature coefficient `rho_v du_v/dT + (u_v-h_l) d rho_v/dT` and the original latent enthalpy. This coefficient belongs to an exchanging phase inventory, not the isochoric heat capacity of a closed gas. Fixed-temperature growth consequently requires `rho_v (h_v-h_l) dV` of interfacial heat.
 
 The source query is allocation-free on its successful path, has no iteration, and retains the existing 273.15..=623.15 K Gibbs-pair domain. It supplies no phase geometry, kinetic evaporation coefficient, liquid heat-transfer closure, moving interface, nucleation or critical-region extrapolation. Consumers own those physical assumptions and their admissibility. Five focused tests execute the original source and check independent saturation differences, open-system energy, latent heat, retained endpoint data and domain refusal.
+
+## Shared projected Maxwell spectra
+
+`visco::PronySpectrumWeights` exposes the existing binary-scaled original
+Maxwell storage/loss multipliers to coupled frequency-domain consumers.
+`new(omega, tau)` retains finite signed-frequency/DC semantics and requires a
+positive finite relaxation time; `primal(coefficient)` preserves signed modal
+cross terms while refusing nonfinite or overflowing results. Equilibrium
+stiffness is neither inserted nor subtracted. Positive loss follows the
+material owner's exp(+i omega t) convention, so exp(-i omega t) consumers
+negate the imaginary part. Source validity and full-form passivity remain on
+the original material/projection owners. Existing internal tangents and
+arithmetic are unchanged. All six original spectrum tests passed in a native
+standalone module build, including extreme-rate/time and subnormal controls.

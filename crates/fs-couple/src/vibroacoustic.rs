@@ -52,6 +52,12 @@
 //! and exact undamped directions. The structural work audit uses the same
 //! owner's passive channels, including in truncated solves.
 //!
+//! [`VibroacousticModel::with_structural_relaxation`] retains the original
+//! Maxwell/Prony strain channels as a full frequency-dependent modal stiffness.
+//! Structural frequencies then describe relaxed equilibrium stiffness. Material
+//! heat and spring storage are measured separately from cavity/exterior work;
+//! the exact spectral image uses the shared material owner and no fitted Q.
+//!
 //! [`VibroacousticModel::with_cavity_relaxation`] instead binds the cavity to
 //! the original gas's molecular reservoirs. Its constitutive bulk modulus
 //! `K(omega) = p cp(omega)/cv(omega)` enters the pressure row as
@@ -109,6 +115,8 @@ mod boundary;
 pub use boundary::CavityBoundaryAdmittance;
 mod radiation;
 pub use radiation::ModalRadiationLoading;
+mod relaxation;
+pub use relaxation::ModalStructuralRelaxation;
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
 const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
@@ -658,9 +666,12 @@ pub struct PowerBreakdown {
     /// Prescribed cavity-source work `1/2 Re SUM a_q conj(Q_q)`.
     /// Zero for the structural-force-only entry points.
     pub acoustic_input: f64,
-    /// Structural dissipation from the exclusive hysteretic or full modal
-    /// viscous owner. Viscous loss is `1/2 Re(v^H C v)`.
+    /// Total structural dissipation: hysteretic/viscous work plus hereditary
+    /// material heat. Viscous loss is `1/2 Re(v^H C v)`.
     pub structural: f64,
+    /// Positive heat from original Maxwell strain channels [W]. Already
+    /// included once in `structural`; zero without hereditary material.
+    pub structural_relaxation: f64,
     /// Power flowing through the interface into the cavity.
     pub interface: f64,
     /// Total outward cavity power: bulk loss plus `cavity_boundary`.
@@ -689,6 +700,9 @@ pub struct VibroResponse {
     pub b: Vec<C64>,
     /// Cavity modal pressures.
     pub a: Vec<C64>,
+    /// Cycle-mean spring energy in the original relaxing material channels [J].
+    /// This excludes equilibrium structural, cavity and exterior-fluid storage.
+    pub structural_relaxation_stored_energy_j: f64,
     /// Steady-state power accounting.
     pub power: PowerBreakdown,
 }
@@ -721,6 +735,7 @@ pub struct VibroacousticModel {
     omegas_s: Vec<f64>,
     eta_s: f64,
     structural_viscosity: Option<ModalPlateViscosity>,
+    structural_relaxation: Option<ModalStructuralRelaxation>,
     omegas_a: Vec<f64>,
     lambdas: Vec<f64>,
     eta_a: f64,
@@ -828,6 +843,7 @@ impl VibroacousticModel {
             omegas_s: structure.omegas.clone(),
             eta_s: structure.loss_factor,
             structural_viscosity: None,
+            structural_relaxation: None,
             omegas_a: cavity.omegas.clone(),
             lambdas: cavity.lambdas.clone(),
             eta_a: cavity.loss_factor,
@@ -877,6 +893,42 @@ impl VibroacousticModel {
         }
         self.structural_viscosity = Some(viscosity);
         Ok(self)
+    }
+
+    /// Attach the exact frequency image of the ORIGINAL relaxing structural
+    /// material. The supplied natural frequencies must describe its relaxed
+    /// equilibrium stiffness; the channels add only their excess stiffness.
+    /// Full signed coupling changes both cavity pressure and exterior radiation.
+    ///
+    /// A scalar hysteretic loss is refused to avoid counting an unspecified
+    /// material loss twice. Kelvin viscosity may coexist when it represents a
+    /// separately identified physical mechanism. Source bands are checked at
+    /// every solved frequency, including truncated and convergence queries.
+    ///
+    /// # Errors
+    /// Basis size mismatch, scalar structural loss, or an existing attachment.
+    /// The caller owns the actual source basis identity and normalization.
+    pub fn with_structural_relaxation(
+        mut self,
+        relaxation: ModalStructuralRelaxation,
+    ) -> Result<Self, VibroError> {
+        if relaxation.mode_count() != self.omegas_s.len() {
+            return Err(VibroError::ShapeMismatch {
+                what: "structural relaxation must use the original structural mode basis",
+            });
+        }
+        if self.eta_s != 0.0 || self.structural_relaxation.is_some() {
+            return Err(VibroError::BadParameter {
+                what: "structural relaxation requires zero scalar loss and one complete attachment",
+            });
+        }
+        self.structural_relaxation = Some(relaxation);
+        Ok(self)
+    }
+
+    /// Original hereditary material selection, without any frequency refit.
+    pub fn structural_relaxation(&self) -> Option<&ModalStructuralRelaxation> {
+        self.structural_relaxation.as_ref()
     }
 
     /// Use the cavity gas's own frequency-dependent molecular compressibility.
@@ -936,7 +988,8 @@ impl VibroacousticModel {
     /// squaring its condition number or balancing a nonnormal pressure /
     /// displacement pencil. Rescaling a cavity eigenfunction and its norm
     /// leaves the physical frequencies unchanged. Radiation and loss
-    /// factors, boundary admittance and molecular relaxation are ignored; this is the equilibrium
+    /// factors, hereditary structural loss, boundary admittance and molecular
+    /// relaxation are ignored; this is the equilibrium
     /// gas reference. Use the loaded FRF for dissipative/dispersive resonances.
     ///
     /// # Errors
@@ -1118,6 +1171,8 @@ impl VibroacousticModel {
             .as_ref()
             .map(|loading| loading.at_omega(omega))
             .transpose()?;
+        let relaxation = self.structural_relaxation.as_ref()
+            .map(|material| material.at_frequency(omega)).transpose()?;
         let n_s_full = self.omegas_s.len();
         let n_a_full = self.omegas_a.len();
         if modal_force.len() != n_s_full {
@@ -1218,6 +1273,9 @@ impl VibroacousticModel {
                 }
             }
         }
+        if let Some(material) = &relaxation {
+            material.add_stiffness(&mut mat, n, keep_s)?;
+        }
         let mut rhs = vec![C64::ZERO; n];
         rhs[..keep_s].copy_from_slice(&modal_force[..keep_s]);
         if let Some(flow) = cavity_volume_flow {
@@ -1274,6 +1332,10 @@ impl VibroacousticModel {
                 structural += 0.5 * rate.norm_sq();
             }
         }
+        let (structural_relaxation_stored_energy_j, structural_relaxation) = relaxation
+            .as_ref().map(|material| material.energy_and_heat(&b)).transpose()?
+            .unwrap_or((0.0, 0.0));
+        structural += structural_relaxation;
         let mut cavity = 0.0;
         let mut acoustic_input = 0.0;
         for (q, aq) in a.iter().enumerate() {
@@ -1317,11 +1379,13 @@ impl VibroacousticModel {
             omega,
             b,
             a,
+            structural_relaxation_stored_energy_j,
             power: PowerBreakdown {
                 input,
                 structural_input,
                 acoustic_input,
                 structural,
+                structural_relaxation,
                 interface,
                 cavity,
                 cavity_boundary,
@@ -2085,6 +2149,7 @@ mod review_regressions {
             omegas_a: wa,
             eta_s: 0.0,
             structural_viscosity: None,
+            structural_relaxation: None,
             eta_a: 0.0,
             rho_c2: 1.0,
             medium_a: AcousticMedium { rho0: 1.0, c0: 1.0 },

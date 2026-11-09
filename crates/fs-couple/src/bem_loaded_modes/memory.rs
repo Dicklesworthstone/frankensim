@@ -4,10 +4,10 @@
 use super::*;
 use fs_phs::RelaxationBranch;
 
-#[derive(Default)]
-pub(super) struct RetainedMemory {
-    pub(super) rows: Vec<Vec<f64>>,
-    pub(super) times: Vec<f64>,
+#[derive(Default, Clone, Debug)]
+pub(crate) struct RetainedMemory {
+    pub(crate) rows: Vec<Vec<f64>>,
+    pub(crate) times: Vec<f64>,
 }
 
 impl BemLoadedModes {
@@ -58,7 +58,7 @@ impl RetainedMemory {
     /// Preserve each original signed source-coordinate arm without rank or
     /// equal-time merging. The caller admits its complete model dimensions and
     /// payload before construction; this owner validates the constitutive data.
-    pub(super) fn from_branches(
+    pub(crate) fn from_branches(
         modes: usize,
         branches: &[RelaxationBranch],
         maximum_branches: usize,

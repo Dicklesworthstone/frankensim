@@ -39,6 +39,7 @@ use fs_ad::dual::gradient;
 use fs_math::det;
 
 mod prony_spectrum;
+pub use prony_spectrum::PronySpectrumWeights;
 mod prony_sensitivity;
 pub use prony_sensitivity::{PronyRampLinearization, PronyRampSensitivity};
 

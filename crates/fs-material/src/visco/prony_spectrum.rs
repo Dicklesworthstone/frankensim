@@ -73,9 +73,16 @@ impl Scaled {
     }
 }
 
-/// One original branch, including the derivative of C''/omega directly.
-/// Primal and tangent representability are admitted independently.
-pub(crate) struct PronySpectrumWeights {
+/// Exact spectral multipliers of one original Maxwell branch.
+///
+/// The storage/loss pair is `[(omega*tau)^2, omega*tau]/(1+(omega*tau)^2)`.
+/// Positive loss uses the material owner's exp(+i omega t) convention; a
+/// consumer using exp(-i omega t) negates that imaginary part. Binary-scaled
+/// coefficients retain representable projected stiffness even when omega*tau
+/// or its square overflows or underflows. Primal and tangent representability
+/// are admitted independently. These weights do not establish constitutive
+/// applicability or positivity of a supplied signed projection coefficient.
+pub struct PronySpectrumWeights {
     storage: Scaled,
     loss: Scaled,
     storage_derivative: Scaled,
@@ -84,7 +91,10 @@ pub(crate) struct PronySpectrumWeights {
 }
 
 impl PronySpectrumWeights {
-    pub(crate) fn new(omega: f64, tau: f64) -> Option<Self> {
+    /// Bind a finite angular frequency [rad/s] and positive finite time [s].
+    /// Returns `None` for invalid inputs; zero and negative frequencies retain
+    /// the original DC and conjugate-symmetry conventions.
+    pub fn new(omega: f64, tau: f64) -> Option<Self> {
         if !omega.is_finite() || !tau.is_finite() || tau <= 0.0 {
             return None;
         }
@@ -121,7 +131,12 @@ impl PronySpectrumWeights {
         }
     }
 
-    pub(crate) fn primal(&self, stiffness: f64) -> Option<[f64; 2]> {
+    /// Scale the original storage/loss pair by a finite physical coefficient.
+    ///
+    /// Signed modal cross terms are permitted: passivity belongs to the full
+    /// original Gram form. Returns `None` if a result is unrepresentable.
+    /// No equilibrium stiffness is added or subtracted by this operation.
+    pub fn primal(&self, stiffness: f64) -> Option<[f64; 2]> {
         Some([self.storage.apply(stiffness)?, self.loss.apply(stiffness)?])
     }
 
