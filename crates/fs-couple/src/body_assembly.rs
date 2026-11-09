@@ -32,7 +32,7 @@ use fs_plate::shell::mitc::thermal::prestress::{
 use fs_sparse::Csr;
 
 /// One immutable thermal/material owner in its original unloaded coordinates.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ThermalShellComponent<'a> {
     pub thermal: &'a PreparedThermalShell<'a>,
     /// Complete world force/moment vector, including entries on supports [N,Nm].
@@ -163,7 +163,9 @@ impl PrestressedBodyModes<'_, '_> {
                             .phi
                             .iter()
                             .zip(&force)
-                            .fold(Dd::ZERO, |sum, (&a, &b)| sum + Dd::from(a) * Dd::from(b))
+                            .fold(Dd::ZERO, |sum, (&a, &b)| {
+                                sum + Dd::from_f64(a) * Dd::from_f64(b)
+                            })
                             .to_f64();
                         if !value.is_finite() {
                             return Err(bad("assembled modal force overflow"));
@@ -259,7 +261,7 @@ pub fn equilibrate_thermal_shell_body<'a>(
                     if row % 64 == 0 {
                         poll(&mut cancelled)?;
                     }
-                    let sum = (Dd::from(thermal) + Dd::from(dead)).to_f64();
+                    let sum = (Dd::from_f64(thermal) + Dd::from_f64(dead)).to_f64();
                     if !sum.is_finite() {
                         return Err(bad("assembled thermal/dead load overflow"));
                     }
@@ -319,7 +321,7 @@ pub fn equilibrate_thermal_shell_body<'a>(
         &mut cancelled,
     )?;
     for (residual, glue) in joint_residual.iter_mut().zip(glue_force) {
-        *residual = (Dd::from(*residual) + Dd::from(glue)).to_f64();
+        *residual = (Dd::from_f64(*residual) + Dd::from_f64(glue)).to_f64();
     }
     residual_force_n = residual_force_n.max(scaled_residual(
         &assembly,
@@ -382,8 +384,8 @@ fn original_residual(
             let value = columns
                 .iter()
                 .zip(values)
-                .fold(-Dd::from(force[row]), |sum, (&j, &a)| {
-                    sum + Dd::from(a) * Dd::from(coordinates[j])
+                .fold(-Dd::from_f64(force[row]), |sum, (&j, &a)| {
+                    sum + Dd::from_f64(a) * Dd::from_f64(coordinates[j])
                 })
                 .to_f64();
             if !value.is_finite() {

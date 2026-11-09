@@ -30,6 +30,7 @@ use fs_em::conduction::{
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
+use fs_material::conductor::planar::PlanarConductorMaterial;
 use fs_thermal::enthalpy::DepositionSimulation;
 use std::cell::RefCell;
 
