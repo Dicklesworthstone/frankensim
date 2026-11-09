@@ -2961,6 +2961,40 @@ moving geometry, reciprocal moving-wall FSI, a shock adjoint, physical shock
 thickness or experimental validation. The full EOS-specific fully discrete
 entropy/invariant-domain and moving-domain programs remain separate work.
 
+### Translating and piston-driven volumetric gas
+
+`Euler3d::step_moving` advances the original frozen-gas field on a translating
+Cartesian box with at most one deforming axis. `MeshMotion` gives the held
+laboratory velocity of each minimum/maximum plane; interior planes interpolate
+those speeds. The accepted grid retains its origin and spacing, and physical
+cell/face coordinates include that origin. A periodic axis admits translation
+only. Positive endpoint widths exclude collapse throughout the affine motion.
+
+The existing unsplit MUSCL/SSP RK2 owner advances extensive `V*U` using the
+actual stage face areas and divides by the actual stage volumes. A single
+deforming axis makes volume affine, so the same quadrature satisfies the
+discrete geometric conservation law. Shared interior faces retain one ALE
+HLLC/HLL flux with opposite neighbour signs; periodic endpoints copy its bits.
+The original source owns relative advection, all three momenta, caloric
+admission and laboratory energy. Moving slip walls use the original nonlinear
+shock/expansion closure and reflect MUSCL ghosts about the actual wall speed.
+Their mass transfer is zero and their energy transfer is wall speed times
+normal pressure impulse. Accepted per-face loads use both actual RK stages.
+
+Relative face-wave CFL checks, caloric refusals and bounded retries apply to
+the complete field/geometry transaction. Existing preallocated buffers are
+reused. Refusal or cancellation preserves cells, grid, clock, loads and report;
+exactly zero motion delegates to the original stationary entry. Focused native
+regressions cover deforming free streams/GCL on all axes, comoving periodic
+shear and density contacts, piston mass/impulse/work, refinement toward exact
+homogeneous adiabatic expansion, Galilean covariance and rollback/replay.
+
+This entry admits moving reflecting walls and unbound zero-gradient openings.
+Retained hydrostatics, prescribed exterior traces/profiles, pressure-only and
+characteristic outlets, simultaneous multi-axis deformation, remapping,
+molecular moving-volume composition and reciprocal FSI remain unsupported.
+The frozen source and existing opt-in engineering authority are unchanged.
+
 ### Conservative body forcing on the original Cartesian owners
 
 The planar `Euler2d::step_with_forcing` now supplies the same physical source

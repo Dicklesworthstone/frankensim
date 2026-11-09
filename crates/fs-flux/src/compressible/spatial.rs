@@ -4,7 +4,8 @@
 //! NASA9 source. MUSCL reconstruction and SSP RK2 use a combined three-axis
 //! face CFL, including HLL fallback speeds. This stationary Cartesian Euler
 //! lane is Estimated: it does not certify entropy stability, shock thickness,
-//! turbulence, reactions, moving geometry or a shock adjoint.
+//! turbulence, reactions or a shock adjoint. The optional [`moving`] entry
+//! advances translating boxes and one-axis piston deformation conservatively.
 
 use super::cartesian::{StageStats, check_cfl};
 pub use super::{AxisBoundaries, BoundaryCondition, Error, FrozenGas, Reconstruction, StepControl};
@@ -14,6 +15,9 @@ use fs_qty::Time;
 
 mod cartesian;
 mod evolve;
+/// Moving-volume translation and piston deformation on the original time owner.
+pub mod moving;
+pub use moving::MeshMotion;
 mod reservoir;
 pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceState};
 /// Conservative body impulse and mechanical work on the original time owner.
@@ -207,6 +211,7 @@ impl Boundaries3d {
 pub struct CartesianGrid {
     shape: [usize; 3],
     spacing: [f64; 3],
+    origin: [f64; 3],
 }
 impl CartesianGrid {
     /// Admit finite positive geometry, with a bounded, preallocated cell budget.
@@ -242,6 +247,7 @@ impl CartesianGrid {
         Ok(Self {
             shape: [nx, ny, nz],
             spacing: [dx, dy, dz],
+            origin: [0.0; 3],
         })
     }
     /// Cell counts in x/y/z.
@@ -251,6 +257,10 @@ impl CartesianGrid {
     /// Cell widths [m].
     pub const fn spacing(&self) -> [f64; 3] {
         self.spacing
+    }
+    /// Accepted position of the minimum x/y/z planes [m]. New grids start at zero.
+    pub const fn origin(&self) -> [f64; 3] {
+        self.origin
     }
     /// Physical cell volume [m³].
     pub fn cell_volume(&self) -> f64 {
@@ -265,11 +275,13 @@ impl CartesianGrid {
     pub fn face_count(&self, side: BoundarySide) -> usize {
         self.line_count(side.axis())
     }
-    /// Cell centre [m] relative to a caller-selected origin.
+    /// Cell centre [m], including the accepted moving-grid origin.
     pub fn cell_center(&self, index: usize) -> Option<[f64; 3]> {
         (index < self.len()).then(|| {
             let c = self.coordinates(index);
-            std::array::from_fn(|a| c[a] as f64 * self.spacing[a] + 0.5 * self.spacing[a])
+            std::array::from_fn(|a| {
+                self.origin[a] + (c[a] as f64 * self.spacing[a] + 0.5 * self.spacing[a])
+            })
         })
     }
     /// Centre of a physical side's face [m], in the documented face order.
@@ -285,7 +297,7 @@ impl CartesianGrid {
             };
             p[a] = (face % self.shape[a]) as f64 * self.spacing[a] + 0.5 * self.spacing[a];
             p[b] = (face / self.shape[a]) as f64 * self.spacing[b] + 0.5 * self.spacing[b];
-            p
+            std::array::from_fn(|a| self.origin[a] + p[a])
         })
     }
     fn len(&self) -> usize {
@@ -531,7 +543,7 @@ impl Euler3d {
     pub const fn gas(&self) -> &FrozenGas {
         &self.gas
     }
-    /// Fixed physical grid.
+    /// Accepted physical grid, including any completed moving-volume step.
     pub const fn grid(&self) -> &CartesianGrid {
         &self.grid
     }

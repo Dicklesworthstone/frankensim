@@ -50,6 +50,37 @@ pub(super) fn slopes<E: Failure>(
     velocity_components: [usize; 3],
     reconstruction: Reconstruction,
     value: impl Fn(usize, usize) -> f64,
+    coupled: impl FnMut(usize, usize, usize, &mut [f64]) -> Result<usize, E>,
+    output: &mut [f64],
+    admits: impl FnMut(usize, usize, f64, &[f64]) -> bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<usize, E> {
+    slopes_with_wall_velocity(
+        grid,
+        boundaries,
+        width,
+        velocity_components,
+        reconstruction,
+        [[0.0; 2]; 3],
+        value,
+        coupled,
+        output,
+        admits,
+        cancelled,
+    )
+}
+
+// Normal wall ghosts reflect about the physical wall speed, 2*w-u.
+// Zero wall speeds retain the original stationary reconstruction.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn slopes_with_wall_velocity<E: Failure>(
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    width: usize,
+    velocity_components: [usize; 3],
+    reconstruction: Reconstruction,
+    wall_velocity: [[f64; 2]; 3],
+    value: impl Fn(usize, usize) -> f64,
     mut coupled: impl FnMut(usize, usize, usize, &mut [f64]) -> Result<usize, E>,
     output: &mut [f64],
     mut admits: impl FnMut(usize, usize, f64, &[f64]) -> bool,
@@ -69,18 +100,21 @@ pub(super) fn slopes<E: Failure>(
             let offset = start + axis * width;
             let leading = coupled(cell, lo, hi, &mut output[offset..offset + width])?;
             for d in leading..width {
-                let lower = value(lo, d)
-                    * if reflect_lo && d == velocity_components[axis] {
-                        -1.0
+                let ghost = |cell, reflected, end: usize| {
+                    let u = value(cell, d);
+                    if reflected && d == velocity_components[axis] {
+                        let speed = wall_velocity[axis][end];
+                        if speed == 0.0 {
+                            -u
+                        } else {
+                            speed + (speed - u)
+                        }
                     } else {
-                        1.0
-                    };
-                let upper = value(hi, d)
-                    * if reflect_hi && d == velocity_components[axis] {
-                        -1.0
-                    } else {
-                        1.0
-                    };
+                        u
+                    }
+                };
+                let lower = ghost(lo, reflect_lo, 0);
+                let upper = ghost(hi, reflect_hi, 1);
                 output[offset + d] = mc(value(cell, d) - lower, upper - value(cell, d));
             }
         }
