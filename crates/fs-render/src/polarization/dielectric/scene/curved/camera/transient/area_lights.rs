@@ -23,8 +23,11 @@ use super::{
     retarded_time, sample_history,
 };
 use crate::charts::Ray;
+use crate::polarization::dielectric::transport::PolarizedBeam;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
+
+mod sequential;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransientAreaLightCameraError {
@@ -216,17 +219,43 @@ impl<'a, 'h, 's, 'm, 'l> TransientCurvedAreaLightCameraScene<'a, 'h, 's, 'm, 'l>
         surface_samples: impl FnMut(u32) -> [f64; 3],
         area_samples: impl FnMut(u32, usize) -> [f64; 2],
     ) -> Result<AreaLightCameraSample, TransientAreaLightCameraError> {
+        self.observe_launched(
+            cx,
+            || self.camera.launch(ray, wavelength_nm, initial_medium),
+            initial_medium,
+            observation,
+            Dd::ZERO,
+            settings,
+            workspace,
+            surface_samples,
+            area_samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_launched(
+        &self,
+        cx: &Cx<'_>,
+        launch: impl FnOnce() -> Result<PolarizedBeam, CameraRadianceError>,
+        initial_medium: usize,
+        observation: Observation,
+        launch_delay_s: Dd,
+        settings: AreaLightCameraSettings,
+        workspace: &mut AreaLightCameraWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        area_samples: impl FnMut(u32, usize) -> [f64; 2],
+    ) -> Result<AreaLightCameraSample, TransientAreaLightCameraError> {
         let mut source_error = None;
         let result = self.lights.sample_with_modulation(
             cx,
-            || self.camera.launch(ray, wavelength_nm, initial_medium),
+            launch,
             initial_medium,
             settings,
             workspace,
             surface_samples,
             area_samples,
             |path| {
-                self.scale(cx, observation, path).map_err(|error| {
+                self.scale(cx, observation, launch_delay_s, path).map_err(|error| {
                     source_error = Some(error);
                     AreaLightCameraError::NumericalRange
                 })
@@ -242,15 +271,18 @@ impl<'a, 'h, 's, 'm, 'l> TransientCurvedAreaLightCameraScene<'a, 'h, 's, 'm, 'l>
         &self,
         cx: &Cx<'_>,
         observation: Observation,
+        launch_delay_s: Dd,
         source: AreaSourcePath<'_>,
     ) -> Result<f64, TransientCameraError> {
         let (object_id, position_m, wavelength_nm, camera_group_m, connection_group_m) =
             match source {
                 AreaSourcePath::Surface(path) => {
                     return match observation {
-                        Observation::Instant(time) => self.camera.source_scale(cx, time, path),
+                        Observation::Instant(time) => {
+                            self.camera.source_scale_with_delay(cx, time, launch_delay_s, path)
+                        }
                         Observation::Exposure(window) => {
-                            self.camera.exposure_scale(cx, window, path)
+                            self.camera.exposure_scale_with_delay(cx, window, launch_delay_s, path)
                         }
                     };
                 }
@@ -291,6 +323,13 @@ impl<'a, 'h, 's, 'm, 'l> TransientCurvedAreaLightCameraScene<'a, 'h, 's, 'm, 'l>
         if (camera_group_m > 0.0 || connection_group_m > 0.0) && !Dd::ZERO.lt(group_delay_s) {
             return Err(TransientCameraError::UnresolvedClock { object_id });
         }
+        // A resolved lens is a prefix shared by both source strategies. Keep
+        // the original sensor clock and each connection image's own scene path.
+        let group_delay_s = if launch_delay_s == Dd::ZERO {
+            group_delay_s
+        } else {
+            launch_delay_s + group_delay_s
+        };
         let observation_time_s = observation.open_s();
         let query = SurfaceEmissionQuery {
             object_id,

@@ -5342,7 +5342,16 @@ payloads preserve the original mandatory-ray API. Different per-pixel windows
 can express authored row timing; moving geometry, time-varying optical laws,
 and nonlinear sensor response are not inferred. Unsupported source interval
 averages refuse rather than substituting sampled instantaneous values.
-Area-source transient lens coupling remains separate work.
+Timed sequential beams also feed the original finite-area source NEE/MIS
+owner through `TransientCurvedAreaLightCameraScene::sample_sequential_ray_with_samples_at_time`
+and `sample_sequential_ray_with_samples_during_exposure`. Each camera-hit or
+connected-image history receives its native scene group delay plus the complete
+qualified lens DD prefix exactly once, at the unchanged sensor observation
+clock. Full Stokes, lens Beer/Fresnel factors and endpoint normalization stay
+in the reciprocal beam; rear-cap geometric measure remains separate. Raw-beam
+calls refuse a separately configured analyzer, which sequential raster callers
+install at the sensor before the lens. The shutter method uses the original
+source interval average on one frozen camera and connection walk.
 
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into

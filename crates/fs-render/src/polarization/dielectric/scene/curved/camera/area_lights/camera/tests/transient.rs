@@ -1,6 +1,8 @@
 //! Original finite-area connections, per-image clocks and finite shutters.
 
 use super::*;
+
+mod sequential;
 use crate::gradient_index::bundle::{IndexHessian, IndexJet, SecondOrderIndexField};
 use crate::gradient_index::{GradientIndexError, GradientIndexField, GradientIndexSample};
 use crate::polarization::dielectric::scene::curved::camera::transient::area_lights::{
