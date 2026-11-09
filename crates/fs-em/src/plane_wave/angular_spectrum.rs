@@ -101,7 +101,8 @@ pub use exposure::{
     AngularSpectrumExposureStressMomentumField, AngularSpectrumExposureStressMomentumLimits,
     AngularSpectrumExposureStressPoint, AngularSpectrumFactorStatistics,
     AngularSpectrumHeatAreaQuadrature, AngularSpectrumHeatDepthSample,
-    AngularSpectrumHeatVolumeQuadrature, AngularSpectrumIntegratedHeatLimits,
+    AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
+    AngularSpectrumIntegratedHeatLimits,
     PreparedAngularSpectrumApertureEnergyControl, PreparedAngularSpectrumExposureLayer,
     PreparedAngularSpectrumExposureInterferometer,
 };

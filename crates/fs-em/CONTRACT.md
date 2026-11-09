@@ -8258,3 +8258,37 @@ Retained local film heat evaluates each original coherent reservoir field before
 Transparent crystal slabs and multilayer stacks retain the original incident coordinate through every layer and into the isotropic exit basis. Positive authored cosines use the compensated tangential square; equal entrance/exit phase indices retain the original positive normal coordinate directly, with their separate permeabilities still determining E/H and power. Explicit signed tangential-index queries keep their original critical and evanescent meanings. Layer composition no longer reconstructs incidence from a rounded tangential scalar. Transparent and absorbing finite consumers share the same exit-field constructor; absorbing matched-port behavior remains source-bound.
 
 Homogeneous slab/stack controls check unit transmission and finite internal E/H with an observable normal phase at grazing incidence, including multiple authored optic-axis orientations. Original material-source controls match their spectra to the actual resolved incident index rather than assuming nominal decimal indices reconstruct identically. Additional native exit controls retain adjacent propagation/evanescence, exact critical inputs, magnetic contrast and signed-tangent parity. Unresolved boundary systems and exactly grazing incident ports retain their explicit refusals.
+
+## Coherent volume heat over finite source intervals
+
+`PreparedAngularSpectrumExposureLayer::integrated_heat_window` returns mean
+irreversible watts from original fields projected before temporal power
+contraction. `integrated_heat_interval_from_clock_dd` returns double-double
+joules over a positive uniform interval while retaining the original DD source
+epoch. The prepared heat-load spectrum exposes this explicit reconstruction as
+`observe_window_from_fields`; its cached `observe_window` cost is unchanged.
+
+Each source bank independently selects the shared bounded uniform factor
+(3–64 proper tones or 3–32 real tones, at most 17 modes) when its native band is
+admitted. Other bands and profiles retain the original spectral law. Proper
+sources remove only an irrelevant common carrier; real sources retain carrier
+phase and both complex spatial quadratures. Sampled/masked areas, continuous
+Parseval/opposite modes and centered rectangle sum/difference integrals retain
+the original geometry and carrier. Odd-sized axes pair their signed modes.
+Original reservoir filters, proper half-power, volume and duration scales meet
+in exponent-scaled DD arithmetic; negative or unrepresentable results refuse.
+
+`AngularSpectrumHeatWindowLimits` admits reconstruction, FFT, temporal/spatial
+products, fallback terms and heap before field work. One depth's frequency
+planes serve all reservoirs: extra plane storage is O(N*(F+M)), with no retained
+depth history. Rectangles retain their exact quadratic spatial contraction.
+Fixed bounded projection scratch, borrowed inputs and allocator overhead are
+outside the reported heap bound. Unsupported spectral fallbacks retain their
+existing coefficient range limits; no relative-error certificate at a null,
+depth-convergence claim or material transient is inferred.
+
+Nine actual-source numerical tests pass, including independent time/space
+quadrature, fourth-order dark leakage, DD epochs, physical dynamic range,
+original depth/area weights and bounded cancellation. Original math, harmonic,
+rectangle and volume kernels were compiled; the complete source-owner,
+material and FFT adapter graph was inspected but not built or executed.

@@ -70,7 +70,7 @@ pub use layer::{
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
     AngularSpectrumExposureLayerLimits, AngularSpectrumHeatAreaQuadrature,
-    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature,
+    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
     AngularSpectrumIntegratedHeatLimits, PreparedAngularSpectrumExposureLayer,
 };
 
@@ -786,7 +786,7 @@ fn opposite_mode(grid: AngularSpectrumGrid, index: usize) -> Option<usize> {
     let opposite = |bin: usize, count: usize| {
         if bin == 0 {
             Some(0)
-        } else if bin == count / 2 {
+        } else if count % 2 == 0 && bin == count / 2 {
             None
         } else {
             Some(count - bin)
@@ -892,6 +892,22 @@ fn proper_product(kernel: ProperHarmonicProduct, a: C64, b: C64) -> Result<Dd, M
 mod tests {
     use super::super::modes::fields;
     use super::*;
+
+    #[test]
+    fn continuous_cells_pair_every_odd_axis_mode_with_its_signed_opposite() {
+        let odd = AngularSpectrumGrid { width: 3, height: 5, spacing_m: [1.0; 2] };
+        assert_eq!(opposite_mode(odd, 1), Some(2));
+        assert_eq!(opposite_mode(odd, 2), Some(1));
+        assert_eq!(opposite_mode(odd, 7), Some(11));
+        for point in 0..15 {
+            let partner = opposite_mode(odd, point).unwrap();
+            assert_eq!(opposite_mode(odd, partner), Some(point));
+        }
+        let even = AngularSpectrumGrid { width: 4, height: 2, spacing_m: [1.0; 2] };
+        assert_eq!(opposite_mode(even, 2), None);
+        assert_eq!(opposite_mode(even, 4), None);
+        assert_eq!(opposite_mode(even, 1), Some(3));
+    }
 
     fn wave(omega: f64, backwards: bool, transverse: [C64; 2]) -> [C64; 6] {
         let (e, h) = fields(

@@ -29,7 +29,7 @@ mod integrated_heat;
 pub use integrated_heat::{
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumHeatAreaQuadrature,
     AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature,
-    AngularSpectrumIntegratedHeatLimits,
+    AngularSpectrumHeatWindowLimits, AngularSpectrumIntegratedHeatLimits,
 };
 
 mod heat_spectrum;

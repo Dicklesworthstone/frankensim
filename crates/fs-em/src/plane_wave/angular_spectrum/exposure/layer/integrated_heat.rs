@@ -14,6 +14,8 @@ use fs_fft::harmonic_window::{
 };
 
 mod rectangle;
+mod window;
+pub use window::AngularSpectrumHeatWindowLimits;
 
 /// One authored positive depth-quadrature weight, in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]

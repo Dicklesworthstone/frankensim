@@ -31,6 +31,7 @@ pub(super) struct PreparedRectangle {
     aperture: AngularSpectrumAperture,
     x: Axis,
     y: Axis,
+    carrier_rotation: Option<[ScaledDd; 2]>,
     sum_carrier_rotation: Option<[ScaledDd; 2]>,
 }
 
@@ -72,17 +73,18 @@ impl PreparedRectangle {
         poll(cancelled)?;
         Self::workspace_bytes(grid)?;
         let extent = aperture.extent_m();
-        let sum_carrier_rotation = if carrier_rad_m == [0.0; 2] {
+        let carrier_rotation = if carrier_rad_m == [0.0; 2] {
             None
         } else {
-            let rotation = center_rotation(aperture, carrier_rad_m)?;
-            Some(multiply(rotation, rotation))
+            Some(center_rotation(aperture, carrier_rad_m)?)
         };
+        let sum_carrier_rotation = carrier_rotation.map(|rotation| multiply(rotation, rotation));
         Ok(Self {
             grid,
             aperture,
             x: Axis::prepare(grid.width, extent[0], carrier_rad_m[0], kx, cancelled)?,
             y: Axis::prepare(grid.height, extent[1], carrier_rad_m[1], ky, cancelled)?,
+            carrier_rotation,
             sum_carrier_rotation,
         })
     }
@@ -127,6 +129,78 @@ impl PreparedRectangle {
             modes: result,
             center,
         })
+    }
+
+    pub(super) fn centered_electric(
+        &self,
+        field: Vec<[[Dd; 2]; 6]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Electric>, AngularSpectrumError> {
+        Ok(self.electric(field, cancelled)?.modes)
+    }
+
+    /// Exact normalized spatial square of one temporal mode, still in the
+    /// original complex spatial convention. The real center quadrature is
+    /// squared directly, before adding the centered Fourier corrections.
+    pub(super) fn square_centered(
+        &self,
+        modes: &[Electric],
+        proper: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ScaledDd, AngularSpectrumError> {
+        let points = self.grid.width * self.grid.height;
+        if modes.len() != points {
+            return Err(bad(
+                "rectangular heat temporal mode differs from the original grid",
+            ));
+        }
+        let mut center = [[ScaledDd::ZERO; 2]; 3];
+        for (i, field) in modes.iter().enumerate() {
+            if i % 32 == 0 {
+                poll(cancelled)?;
+            }
+            for axis in 0..3 {
+                add_parts(&mut center[axis], field[axis]);
+            }
+        }
+        let mut result = ScaledDd::ZERO;
+        for field in center {
+            if proper {
+                result = result + multiply_conjugate(field, field)[0];
+            } else {
+                let value = self.carrier_rotation.map_or(field, |r| multiply(field, r))[0];
+                result = result + value * value;
+            }
+        }
+        let half = ScaledDd::from_f64(0.5);
+        for i in 0..points {
+            poll(cancelled)?;
+            for j in 0..points {
+                if j % 32 == 0 {
+                    poll(cancelled)?;
+                }
+                let x =
+                    self.x.weights[(i % self.grid.width) * self.grid.width + j % self.grid.width];
+                let y =
+                    self.y.weights[(i / self.grid.width) * self.grid.height + j / self.grid.width];
+                let difference = decrement(x.difference_decrement, y.difference_decrement);
+                let sum = decrement(x.sum_decrement, y.sum_decrement);
+                if difference.is_zero() && (proper || sum.is_zero()) {
+                    continue;
+                }
+                let dot = electric_product(&modes[i], &modes[j], proper);
+                if proper {
+                    result = result + difference * dot.difference[0];
+                } else {
+                    let plain = self
+                        .sum_carrier_rotation
+                        .map_or(dot.sum, |r| multiply(dot.sum, r));
+                    result = result + half * (difference * dot.difference[0] + sum * plain[0]);
+                }
+            }
+        }
+        poll(cancelled)?;
+        Ok(result)
     }
 
     #[allow(clippy::too_many_arguments)]
