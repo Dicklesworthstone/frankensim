@@ -3376,6 +3376,32 @@ index-one observation component; it does not feed absorbed secondary light
 back to heat or solve fluorescence cascades, subcell pump structure, dipole
 anisotropy, surfaces or light-travel delay. Thermal emission remains separate.
 
+### Accepted molecular opacity in luminescence observations
+
+`LuminescenceGrid::with_additional_absorption` binds a sparse original-cell
+map of absorption coefficients in inverse metres at the declared emission
+nodes. This admits the accepted `sigma * ground_count / volume` opacity of
+finite emitters alongside the host's passive mass absorption. Emission and
+background attenuation use the same `rho*kappa + alpha_active` coefficient;
+absorbing cells need not emit. Host and active contributions must not overlap.
+The cell integral retains the transparent and opaque limits, including finite
+radiance when total extinction overflows its direct floating-point product.
+Each ray retains its original traversal budget and allocates no opacity map.
+
+The binding validates original cells, nonnegative finite coefficients, a source
+identity and a preparation cap before publishing an immutable snapshot.
+Source powers and opacity must describe the same accepted physical state;
+separate interval means do not establish a time-integrated exposure when
+opacity changes. The observer evolves no populations or heat. The scattering
+adapter refuses additional opacity because its existing collision sampler
+does not yet include that contribution in its path measure.
+
+Three focused G0/G1/G4 regression groups cover exact layered attenuation,
+unchanged inactive spectral lanes, representable opaque-cell radiance,
+nonemitting foreground absorbers, invalid bindings and cancellation. They are
+source-formatted and reviewed, but remain unexecuted: the genuine renderer
+build was killed in `asupersync` before renderer typechecking.
+
 ### Camera images of nonthermal luminescence
 
 `volumes::transport::luminescence::render_luminescence_camera` samples original

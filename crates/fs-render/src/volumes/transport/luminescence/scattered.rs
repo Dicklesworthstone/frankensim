@@ -60,13 +60,18 @@ impl<'s, 'm, 'g, const M: usize> ScatteringLuminescenceGrid<'s, 'm, 'g, M> {
     /// geometry and cell-selected absorption. A matching cell count alone is
     /// insufficient. Scattering may use independent cell-selected spectra and
     /// phase functions, but its wavelength domain must cover every source node.
+    /// Additional active opacity on the emission field is refused: the native
+    /// scattering flight sampler must own that same extinction before it can
+    /// sample the corresponding physical path measure.
     pub fn try_new(
         cx: &Cx<'_>,
         field: &'s LuminescenceGrid<'m, 'g, M>,
         scattering: &'s ScatteringGrid<'g>,
     ) -> Result<Self, VolumeTransportError> {
         checkpoint(cx)?;
-        if field.medium.content_identity() != scattering.absorption_grid().content_identity() {
+        if field.medium.content_identity() != scattering.absorption_grid().content_identity()
+            || !field.additional_absorption.is_empty()
+        {
             return Err(VolumeTransportError::SourceIdentity);
         }
         let (minimum, maximum) = scattering.wavelength_bounds_nm();

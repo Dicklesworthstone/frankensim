@@ -3,7 +3,7 @@
 //! Each supplied power is integrated over one discrete spectral node/bin and
 //! all directions, in watts. It is spread uniformly through its original cell
 //! and emitted isotropically: `j = P / (4 pi V)`, in W/(m³ sr). The native DDA
-//! integrates `dL/ds = -rho*kappa*L + j` exactly for that cellwise model,
+//! integrates `dL/ds = -(rho*kappa + alpha_active)*L + j` exactly for that cellwise model,
 //! including emission when absorption is zero. No spectral width is inferred.
 //!
 //! This is a stationary, non-scattering, index-one line-of-sight observation.
@@ -65,6 +65,7 @@ pub struct LuminescenceGrid<'m, 'g, const M: usize> {
     source_identity: ContentHash,
     wavelengths_nm: [f64; M],
     emissivity: Vec<(usize, [f64; M])>,
+    additional_absorption: Vec<(usize, [f64; M])>,
     identity: ContentHash,
 }
 
@@ -162,8 +163,65 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
             source_identity,
             wavelengths_nm,
             emissivity,
+            additional_absorption: Vec::new(),
             identity: hash.finalize(),
         })
+    }
+
+    /// Add accepted, cellwise absorption in inverse metres at the original
+    /// spectral nodes. This supports finite molecular populations whose active
+    /// opacity is separate from the host's passive mass absorption. Absorbing
+    /// cells need not emit. The caller must exclude this same contribution from
+    /// the host and supply the opacity from the same accepted state as powers.
+    ///
+    /// The sparse immutable binding is admitted once. Duplicate/unknown cells,
+    /// invalid coefficients, cancellation or a preparation cap refuse before
+    /// publishing the snapshot. Changing opacity during an exposure requires
+    /// time-resolved observations; mean opacity and mean power are insufficient.
+    /// The multiple-scattering adapter does not yet admit this extra opacity.
+    pub fn with_additional_absorption(
+        mut self,
+        cx: &Cx<'_>,
+        absorption_identity: ContentHash,
+        cell_absorption_m_inv: &[(usize, [f64; M])],
+        max_absorbing_cells: usize,
+    ) -> Result<Self, VolumeTransportError> {
+        checkpoint(cx)?;
+        if absorption_identity == ContentHash([0; 32]) || !self.additional_absorption.is_empty() {
+            return Err(VolumeTransportError::SourceIdentity);
+        }
+        if cell_absorption_m_inv.len() > max_absorbing_cells {
+            return Err(VolumeTransportError::Budget);
+        }
+        let mut absorption = Vec::new();
+        absorption
+            .try_reserve_exact(cell_absorption_m_inv.len())
+            .map_err(|_| VolumeTransportError::Budget)?;
+        absorption.extend_from_slice(cell_absorption_m_inv);
+        absorption.sort_unstable_by_key(|(cell, _)| *cell);
+        let mut hash = DomainHasher::new("org.frankensim.render.luminescence-active-opacity.v1");
+        hash.update(self.identity.as_bytes());
+        hash.update(absorption_identity.as_bytes());
+        hash.update(&(absorption.len() as u64).to_le_bytes());
+        let mut previous = None;
+        for (cell, coefficients) in &absorption {
+            checkpoint(cx)?;
+            if *cell >= self.medium.cell_count() || previous == Some(*cell) {
+                return Err(VolumeTransportError::Palette);
+            }
+            previous = Some(*cell);
+            hash.update(&(*cell as u64).to_le_bytes());
+            for coefficient in coefficients {
+                if !coefficient.is_finite() || *coefficient < 0.0 {
+                    return Err(VolumeTransportError::AbsorptionSpectrum);
+                }
+                hash.update(&coefficient.to_bits().to_le_bytes());
+            }
+        }
+        checkpoint(cx)?;
+        self.additional_absorption = absorption;
+        self.identity = hash.finalize();
+        Ok(self)
     }
 
     /// Snapshot identity including the medium, source, spectrum and cell powers.
@@ -265,21 +323,53 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
                 .binary_search_by_key(&segment.cell, |(cell, _)| *cell)
                 .ok()
                 .map(|index| &self.emissivity[index].1);
+            let additional = self
+                .additional_absorption
+                .binary_search_by_key(&segment.cell, |(cell, _)| *cell)
+                .ok()
+                .map(|index| &self.additional_absorption[index].1);
             for lane in 0..M {
-                let tau = if density == 0.0 || kappa[lane] == 0.0 {
+                let host_tau = if density == 0.0 || kappa[lane] == 0.0 {
                     0.0
                 } else {
                     positive_product(density, kappa[lane], segment.length_m)
                 };
+                let extra = additional.map_or(0.0, |values| values[lane]);
+                let tau = if extra == 0.0 {
+                    host_tau
+                } else {
+                    host_tau + positive_product(extra, segment.length_m, 1.0)
+                };
                 if let Some(source) = source {
-                    radiance[lane].add(segment_emission(
-                        source[lane],
-                        density,
-                        kappa[lane],
-                        segment.length_m,
-                        tau,
-                        depth[lane],
-                    ))?;
+                    let value = if extra == 0.0 {
+                        segment_emission(
+                            source[lane],
+                            density,
+                            kappa[lane],
+                            segment.length_m,
+                            tau,
+                            depth[lane],
+                        )
+                    } else {
+                        segment_emission_integral(
+                            source[lane],
+                            segment.length_m,
+                            tau,
+                            depth[lane],
+                            || {
+                                let host = if density == 0.0 || kappa[lane] == 0.0 {
+                                    f64::NEG_INFINITY
+                                } else {
+                                    det::ln(density) + det::ln(kappa[lane])
+                                };
+                                let active = det::ln(extra);
+                                let high = host.max(active);
+                                let low = host.min(active);
+                                -(high + det::ln(1.0 + det::exp(low - high)))
+                            },
+                        )
+                    };
+                    radiance[lane].add(value)?;
                 }
                 depth[lane] += tau;
             }
@@ -305,6 +395,18 @@ fn segment_emission(
     tau: f64,
     foreground: f64,
 ) -> f64 {
+    segment_emission_integral(j, length, tau, foreground, || {
+        -det::ln(density) - det::ln(kappa)
+    })
+}
+
+fn segment_emission_integral(
+    j: f64,
+    length: f64,
+    tau: f64,
+    foreground: f64,
+    opaque_log_length: impl FnOnce() -> f64,
+) -> f64 {
     if j == 0.0 || foreground == f64::INFINITY {
         return 0.0;
     }
@@ -329,7 +431,7 @@ fn segment_emission(
     let log_length = if tau == 0.0 {
         det::ln(length)
     } else if tau.is_infinite() {
-        -det::ln(density) - det::ln(kappa)
+        opaque_log_length()
     } else {
         det::ln(length) + det::ln(-det::expm1(-tau)) - det::ln(tau)
     };

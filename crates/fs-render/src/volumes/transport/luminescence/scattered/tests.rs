@@ -468,3 +468,146 @@ fn g4_cancellation_and_bad_variates_publish_no_partial_radiance() {
         assert!(matches!(cancelled, Err(VolumeTransportError::Cancelled)));
     });
 }
+
+#[test]
+fn g1_active_molecular_opacity_attenuates_sources_and_background_in_original_cells() {
+    with_cx(|cx, _| {
+        let density = [0.0, 2.0];
+        let host = absorption(cx, &density, 0.7);
+        let field = || {
+            LuminescenceGrid::try_new(
+                cx,
+                &host,
+                SOURCE,
+                [510.0, 650.0],
+                &[(0, [FOUR_PI, 2.0 * FOUR_PI]), (1, [3.0 * FOUR_PI, FOUR_PI])],
+                2,
+            )
+            .unwrap()
+        };
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        let passive = field()
+            .transport(cx, origin, direction, f64::INFINITY)
+            .unwrap();
+        let active = field()
+            .with_additional_absorption(
+                cx,
+                ContentHash([188; 32]),
+                &[(1, [1.0, 0.0]), (0, [0.5, 0.0])],
+                2,
+            )
+            .unwrap();
+        let observed = active
+            .transport(cx, origin, direction, f64::INFINITY)
+            .unwrap();
+        // Exact two-layer formal solution: j0=1, alpha0=.5 followed by
+        // j1=3, alpha1=2*.7+1. The second spectral lane has no extra opacity.
+        let expected =
+            -(-0.5_f64).exp_m1() / 0.5 + (-0.5_f64).exp() * 3.0 * -(-2.4_f64).exp_m1() / 2.4;
+        close(observed.emitted_radiance_w_m2_sr[0], expected);
+        close(observed.transmittance[0], (-2.9_f64).exp());
+        assert!(observed.emitted_radiance_w_m2_sr[0] < passive.emitted_radiance_w_m2_sr[0]);
+        assert_eq!(
+            observed.emitted_radiance_w_m2_sr[1],
+            passive.emitted_radiance_w_m2_sr[1]
+        );
+        assert_eq!(observed.transmittance[1], passive.transmittance[1]);
+        assert_eq!(
+            active.content_identity(),
+            field()
+                .with_additional_absorption(
+                    cx,
+                    ContentHash([188; 32]),
+                    &[(0, [0.5, 0.0]), (1, [1.0, 0.0])],
+                    2,
+                )
+                .unwrap()
+                .content_identity(),
+        );
+        assert_ne!(active.content_identity(), field().content_identity());
+    });
+}
+
+#[test]
+fn g0_active_opacity_preserves_representable_opaque_cell_radiance() {
+    with_cx(|cx, _| {
+        let density = [1e155];
+        let host = absorption(cx, &density, 1e154);
+        let field =
+            LuminescenceGrid::try_new(cx, &host, SOURCE, [550.0], &[(0, [FOUR_PI * 1e300])], 1)
+                .unwrap()
+                .with_additional_absorption(cx, ContentHash([188; 32]), &[(0, [1e308])], 1)
+                .unwrap();
+        let observed = field
+            .transport(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                f64::INFINITY,
+            )
+            .unwrap();
+        assert_eq!(observed.transmittance, [0.0]);
+        // j/alpha is representable although alpha=1.1e309 and tau overflow.
+        close(observed.emitted_radiance_w_m2_sr[0], 1e-9 / 1.1);
+    });
+}
+
+#[test]
+fn g4_active_opacity_refuses_invalid_bindings_and_inconsistent_scattering() {
+    with_cx(|cx, gate| {
+        let density = [1.0, 1.0];
+        let host = medium(cx, &density, 0.0, 0.3);
+        let field = || {
+            LuminescenceGrid::try_new(
+                cx,
+                host.absorption_grid(),
+                SOURCE,
+                [550.0],
+                &[(1, [FOUR_PI])],
+                1,
+            )
+            .unwrap()
+        };
+        let identity = ContentHash([188; 32]);
+        assert!(matches!(
+            field().with_additional_absorption(cx, identity, &[(0, [1.0])], 0),
+            Err(VolumeTransportError::Budget),
+        ));
+        assert!(matches!(
+            field().with_additional_absorption(cx, identity, &[(0, [1.0]), (0, [2.0])], 2),
+            Err(VolumeTransportError::Palette),
+        ));
+        assert!(matches!(
+            field().with_additional_absorption(cx, identity, &[(2, [1.0])], 1),
+            Err(VolumeTransportError::Palette),
+        ));
+        assert!(matches!(
+            field().with_additional_absorption(cx, identity, &[(0, [f64::NAN])], 1),
+            Err(VolumeTransportError::AbsorptionSpectrum),
+        ));
+        // An absorbing foreground cell has no source; it must still attenuate.
+        let active = field()
+            .with_additional_absorption(cx, identity, &[(0, [1.0])], 1)
+            .unwrap();
+        let observed = active
+            .transport(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                f64::INFINITY,
+            )
+            .unwrap();
+        close(observed.emitted_radiance_w_m2_sr[0], (-1.0_f64).exp());
+        assert!(matches!(
+            ScatteringLuminescenceGrid::try_new(cx, &active, &host),
+            Err(VolumeTransportError::SourceIdentity),
+        ));
+        let unbound = field();
+        gate.request();
+        assert!(matches!(
+            unbound.with_additional_absorption(cx, identity, &[(0, [1.0])], 1),
+            Err(VolumeTransportError::Cancelled),
+        ));
+    });
+}
