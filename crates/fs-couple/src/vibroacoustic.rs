@@ -77,11 +77,19 @@
 //! coupling. Boundary work is recovered from physical surface pressure,
 //! separately from bulk loss, and enters the same reciprocal solve.
 //!
+//! [`CavityOpeningRadiation`] adds actual outward opening flows to a sealed,
+//! rigid-wall cavity basis. One full exterior impedance couples wall motion
+//! and all mouths, while native frequency-dependent Bessel neck inertia/loss
+//! remain internal. A resolved cavity owns its inner entrance inertia; only a
+//! uniform pressure model may add the native compact inner-end correction. Pressure and flow are solved
+//! together without dividing by a neck or cavity resonance. Their mutual
+//! radiation can reinforce or cancel; no independent-source power sum is used.
+//!
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
 //! per-channel steady-state power breakdown —
-//! `input = structural + cavity + radiated` and
-//! `interface + acoustic_input = cavity` — with both residuals reported.
+//! `input = structural + cavity + opening_necks + radiated` and
+//! `interface + acoustic_input = cavity + cavity_openings` — with both residuals reported.
 //! `input` includes structural and acoustic source work. The signed interface
 //! work may be negative when the cavity drives the structure.
 //! The casebook integrates these over one period into an fs-couple
@@ -93,7 +101,8 @@
 //! complex displacement/pressure fields in their reference energy norm.
 //! Reactive motion and pressure therefore remain observable when active
 //! work vanishes or coherent sources exchange equal and opposite work.
-//! Either relative delta exceeding the caller's tolerance refuses convergence.
+//! Explicit openings also compare their full complex flow vector. Any relative
+//! delta exceeding the caller's tolerance refuses convergence.
 //!
 //! Determinism: dense assembly and solves in fixed traversal order via
 //! `fs_la::eigen_complex`; repeat solves are bitwise identical.
@@ -117,6 +126,10 @@ mod radiation;
 pub use radiation::ModalRadiationLoading;
 mod relaxation;
 pub use relaxation::ModalStructuralRelaxation;
+mod openings;
+pub use openings::{
+    CavityOpeningRadiation, CavityOpeningResponse, CylindricalCavityNeck, MAX_CAVITY_OPENINGS,
+};
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
 const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
@@ -680,13 +693,20 @@ pub struct PowerBreakdown {
     /// surface pressure and `Re(Y)`. Included once in `cavity`; depending on
     /// the supplied boundary owner this may be absorption or outward radiation.
     pub cavity_boundary: f64,
+    /// Signed work leaving the cavity through explicit openings [W].
+    /// This is an internal transfer, not a second total-system debit.
+    pub cavity_openings: f64,
+    /// Positive internal-neck viscous heat [W], excluding exterior radiation.
+    /// Separate from bulk/local-wall `cavity` loss and debited once.
+    pub opening_necks: f64,
     /// Exterior radiated power `1/2 Re (v^H Zm v)` (zero without a
-    /// radiation matrix).
+    /// radiation matrix). With openings this is the COMPLETE joint wall/mouth
+    /// work, retaining every interference term.
     pub radiated: f64,
-    /// `input - structural - cavity - radiated`, relative to the largest
+    /// `input - structural - cavity - opening_necks - radiated`, relative to the largest
     /// absolute input or dissipated power (with a finite zero-work floor).
     pub balance_residual: f64,
-    /// `interface + acoustic_input - cavity`, relative to the largest
+    /// `interface + acoustic_input - cavity - cavity_openings`, relative to the largest
     /// absolute term (with a finite zero-work floor).
     pub interface_residual: f64,
 }
@@ -700,6 +720,9 @@ pub struct VibroResponse {
     pub b: Vec<C64>,
     /// Cavity modal pressures.
     pub a: Vec<C64>,
+    /// Actual opening flows, paired pressures and complete exterior excitation.
+    /// None for a sealed cavity without an explicit opening attachment.
+    pub openings: Option<CavityOpeningResponse>,
     /// Cycle-mean spring energy in the original relaxing material channels [J].
     /// This excludes equilibrium structural, cavity and exterior-fluid storage.
     pub structural_relaxation_stored_energy_j: f64,
@@ -713,7 +736,7 @@ pub struct VibroResponse {
 pub struct ConvergedResponse {
     /// The full-basis response.
     pub response: VibroResponse,
-    /// Maximum of [`Self::input_power_delta`] and [`Self::energy_norm_delta`].
+    /// Maximum of input-power, reference-energy and opening-flow deltas.
     pub truncation_delta: f64,
     /// Relative signed input-power delta between full and halved bases,
     /// normalized by `max(|P_full|, 1e-300 W)`.
@@ -724,6 +747,9 @@ pub struct ConvergedResponse {
     /// changes and conservative resonances are visible even at zero active
     /// power. See [`VibroacousticModel::frf_with_convergence`] for the metric.
     pub energy_norm_delta: f64,
+    /// Relative complex opening-flow vector change, with all original openings
+    /// retained in both solves; zero without explicit openings.
+    pub opening_flow_delta: f64,
     /// Mode counts used: (structure full, cavity full, structure half,
     /// cavity half).
     pub mode_counts: (usize, usize, usize, usize),
@@ -745,6 +771,7 @@ pub struct VibroacousticModel {
     cavity_boundary: Option<CavityBoundaryAdmittance>,
     coupling: Vec<f64>,
     z_modal: Option<ModalRadiationLoading>,
+    openings: Option<CavityOpeningRadiation>,
 }
 
 impl VibroacousticModel {
@@ -856,6 +883,7 @@ impl VibroacousticModel {
             cavity_boundary: None,
             coupling,
             z_modal,
+            openings: None,
         })
     }
 
@@ -954,7 +982,9 @@ impl VibroacousticModel {
         relaxation: RelaxationState,
     ) -> Result<Self, VibroError> {
         let medium = AcousticMedium::try_from_gas(relaxation.gas())?;
-        if medium.rho0 != self.medium_a.rho0 || medium.c0 != self.medium_a.c0 {
+        if medium.rho0 != self.medium_a.rho0 || medium.c0 != self.medium_a.c0
+            || self.openings.as_ref().is_some_and(|openings| openings.gas() != relaxation.gas())
+        {
             return Err(VibroError::BadParameter {
                 what: "cavity basis and molecular law must use the same gas density and sound speed",
             });
@@ -989,8 +1019,8 @@ impl VibroacousticModel {
     /// displacement pencil. Rescaling a cavity eigenfunction and its norm
     /// leaves the physical frequencies unchanged. Radiation and loss
     /// factors, hereditary structural loss, boundary admittance and molecular
-    /// relaxation are ignored; this is the equilibrium
-    /// gas reference. Use the loaded FRF for dissipative/dispersive resonances.
+    /// relaxation and explicit openings are ignored; this is the sealed
+    /// equilibrium gas reference. Use the loaded FRF for dissipative/dispersive resonances.
     ///
     /// # Errors
     /// [`VibroError::EigenFailure`] if the factor is not representable or
@@ -1171,6 +1201,8 @@ impl VibroacousticModel {
             .as_ref()
             .map(|loading| loading.at_omega(omega))
             .transpose()?;
+        let opening_frequency = self.openings.as_ref()
+            .map(|openings| openings.at_frequency(omega)).transpose()?;
         let relaxation = self.structural_relaxation.as_ref()
             .map(|material| material.at_frequency(omega)).transpose()?;
         let n_s_full = self.omegas_s.len();
@@ -1199,7 +1231,8 @@ impl VibroacousticModel {
                 what: "retained mode counts must be in 1..=basis size",
             });
         }
-        let n = keep_s + keep_a;
+        let opening_count = opening_frequency.as_ref().map_or(0, |openings| openings.count());
+        let n = keep_s + keep_a + opening_count;
         let w2 = omega * omega;
         if !w2.is_finite() || w2 == 0.0 {
             return Err(VibroError::BadParameter {
@@ -1273,6 +1306,9 @@ impl VibroacousticModel {
                 }
             }
         }
+        if let Some(openings) = &opening_frequency {
+            openings.add_operator(omega, self.rho_c2, &self.lambdas, &mut mat, keep_s, keep_a)?;
+        }
         if let Some(material) = &relaxation {
             material.add_stiffness(&mut mat, n, keep_s)?;
         }
@@ -1296,7 +1332,10 @@ impl VibroacousticModel {
         let lu = lu_complex(&mat, n).map_err(|_| VibroError::Singular)?;
         lu.solve(&mut rhs);
         let b: Vec<C64> = rhs[..keep_s].to_vec();
-        let a: Vec<C64> = rhs[keep_s..].to_vec();
+        let a: Vec<C64> = rhs[keep_s..keep_s + keep_a].to_vec();
+        let openings = opening_frequency.as_ref().map(|law| {
+            law.response(omega, &b, &a, &rhs[keep_s + keep_a..])
+        }).transpose()?;
 
         // Power accounting (e^{-i omega t}: v_r = -i omega b_r).
         let vel = |b_r: C64| C64::new(0.0, -omega) * b_r;
@@ -1361,24 +1400,31 @@ impl VibroacousticModel {
             .as_ref()
             .map_or(0.0, |boundary| boundary.outward_power(&a));
         cavity += cavity_boundary;
-        let radiated = z_modal.map_or(0.0, |z| radiation::outward_power(z, n_s_full, omega, &b));
+        let cavity_openings = openings.as_ref().map_or(0.0, |o| o.cavity_outward_power_w);
+        let opening_necks = openings.as_ref().map_or(0.0, |o| o.neck_dissipation_w);
+        let radiated = openings.as_ref().map_or_else(
+            || z_modal.map_or(0.0, |z| radiation::outward_power(z, n_s_full, omega, &b)),
+            |o| o.exterior_power_w,
+        );
         let input = structural_input + acoustic_input;
-        let balance = input - structural - cavity - radiated;
+        let balance = input - structural - cavity - opening_necks - radiated;
         let denom = input
             .abs()
             .max(structural_input.abs())
             .max(acoustic_input.abs())
-            .max(structural.abs() + cavity.abs() + radiated.abs())
+            .max(structural.abs() + cavity.abs() + opening_necks.abs() + radiated.abs())
             .max(1e-300);
         let iface_denom = interface
             .abs()
             .max(acoustic_input.abs())
             .max(cavity.abs())
+            .max(cavity_openings.abs())
             .max(1e-300);
         Ok(VibroResponse {
             omega,
             b,
             a,
+            openings,
             structural_relaxation_stored_energy_j,
             power: PowerBreakdown {
                 input,
@@ -1389,16 +1435,18 @@ impl VibroacousticModel {
                 interface,
                 cavity,
                 cavity_boundary,
+                cavity_openings,
+                opening_necks,
                 radiated,
                 balance_residual: balance / denom,
-                interface_residual: (interface + acoustic_input - cavity) / iface_denom,
+                interface_residual: (interface + acoustic_input - cavity - cavity_openings) / iface_denom,
             },
         })
     }
 
-    /// Solve on full and half-retained bases, requiring both the relative
-    /// active input-power delta and the relative complex response energy-norm
-    /// delta to lie within `tolerance`.
+    /// Solve on full and half-retained bases, requiring the relative active
+    /// input-power, complex reference-energy and explicit opening-flow deltas
+    /// to lie within `tolerance`.
     ///
     /// With missing coordinates extended by zero, the response comparison is
     /// `sqrt(E(full - half) / E(full))`, where the original mass-normalized
@@ -1422,7 +1470,8 @@ impl VibroacousticModel {
     /// bound pointwise pressure, a quiet notch, or modes absent from both
     /// bases. Attached dispersive materials/boundaries and exterior radiation
     /// retain their own storage: this fixed reference norm is not a claim
-    /// about their additional stored energy.
+    /// about their additional stored energy. Explicit openings remain in both
+    /// solves and also compare their complete complex volume-flow vector.
     ///
     /// [ANSYS Theory Reference]: https://ansyshelp.ansys.com/public/Views/Secured/corp/v252/en/ans_thry/thyacous_aoq.html
     ///
@@ -1481,7 +1530,8 @@ impl VibroacousticModel {
         let denom = full.power.input.abs().max(1e-300);
         let input_power_delta = (full.power.input - half.power.input).abs() / denom;
         let energy_norm_delta = self.response_energy_norm_delta(&full, &half)?;
-        let truncation_delta = input_power_delta.max(energy_norm_delta);
+        let opening_flow_delta = openings::flow_delta(full.openings.as_ref(), half.openings.as_ref())?;
+        let truncation_delta = input_power_delta.max(energy_norm_delta).max(opening_flow_delta);
         if truncation_delta > tolerance {
             return Err(VibroError::TruncationNotConverged {
                 relative_delta: truncation_delta,
@@ -1493,6 +1543,7 @@ impl VibroacousticModel {
             truncation_delta,
             input_power_delta,
             energy_norm_delta,
+            opening_flow_delta,
             mode_counts: (n_s, n_a, half_s, half_a),
         })
     }
@@ -2157,6 +2208,7 @@ mod review_regressions {
             cavity_boundary: None,
             coupling,
             z_modal: None,
+            openings: None,
         }
     }
 

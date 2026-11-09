@@ -1,4 +1,4 @@
-//! Frequency-qualified exterior loading of the original structural coordinates.
+//! Frequency-qualified exterior loading of original physical velocity/effort ports.
 //!
 //! A radiation impedance is a frequency sample, not a broadband material law.
 //! Keep the producer's exact grid and use the shared physical-port Hermitian
@@ -18,17 +18,23 @@ struct RadiationRow {
     impedance: Vec<C64>,
 }
 
-/// Passive exterior radiation samples in the ORIGINAL mass-normalized modal
-/// velocity/force coordinates, with peak `exp(-i omega t)` phasors.
+/// Passive exterior radiation samples in ORIGINAL physical velocity/effort
+/// coordinates, with peak `exp(-i omega t)` phasors.
 ///
-/// Each matrix maps outward modal velocity to opposing modal force. All mutual
+/// The structural-only attachment uses mass-normalized modal velocities.
+/// [`super::CavityOpeningRadiation`] instead declares a joint basis consisting
+/// of those velocities followed by outward opening volume flows. Every matrix
+/// row is the work-conjugate opposing effort in the same port order; source
+/// traces, SI units and normalization must agree with the chosen attachment.
+///
+/// Each matrix maps outward port flow to its opposing physical effort. All mutual
 /// entries are retained, including reactive coupling and exact loss nullspaces.
 /// The full Hermitian part is checked by the existing `fs-modal` physical-port
 /// owner, once at preparation. Its bounded dense-work and cancellation rules
 /// apply. This is pointwise passivity, not causality or a statement about any
 /// frequency between the supplied rows. The producer owns the geometry, medium,
 /// mode normalization and spatial convergence; dimensions alone do not establish
-/// a match to the structure supplied to [`super::VibroacousticModel`].
+/// a match to the structure or openings supplied to [`super::VibroacousticModel`].
 #[derive(Debug, Clone)]
 pub struct ModalRadiationLoading {
     modes: usize,
@@ -110,7 +116,7 @@ impl ModalRadiationLoading {
         })
     }
 
-    /// Number of original structural coordinates in every impedance matrix.
+    /// Number of original velocity/effort ports in every impedance matrix.
     #[must_use]
     pub const fn mode_count(&self) -> usize {
         self.modes
@@ -150,16 +156,33 @@ pub(super) fn outward_power(
     omega: f64,
     displacement: &[C64],
 ) -> f64 {
+    hermitian_work(impedance, modes, displacement.len(), |r| {
+        let b = displacement[r];
+        C64::new(omega * b.im, -omega * b.re)
+    })
+}
+
+/// The same work form for a COMPLETE original physical-port flow vector.
+pub(super) fn flow_power(impedance: &[C64], ports: usize, flow: &[C64]) -> f64 {
+    hermitian_work(impedance, ports, flow.len(), |r| flow[r])
+}
+
+fn hermitian_work(
+    impedance: &[C64],
+    modes: usize,
+    retained: usize,
+    flow: impl Fn(usize) -> C64,
+) -> f64 {
     let dd = Dd::from_f64;
     let mut work = Dd::ZERO;
-    for (r, &x) in displacement.iter().enumerate() {
-        let v = C64::new(omega * x.im, -omega * x.re);
+    for r in 0..retained {
+        let v = flow(r);
         work = work
             + dd(0.5)
                 * dd(impedance[r * modes + r].re)
                 * (dd(v.re) * dd(v.re) + dd(v.im) * dd(v.im));
-        for (s, &y) in displacement.iter().enumerate().skip(r + 1) {
-            let w = C64::new(omega * y.im, -omega * y.re);
+        for s in r + 1..retained {
+            let w = flow(s);
             let forward = impedance[r * modes + s];
             let reverse = impedance[s * modes + r];
             let re = dd(f64::midpoint(forward.re, reverse.re));

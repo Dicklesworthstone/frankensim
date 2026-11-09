@@ -10709,3 +10709,52 @@ The same source replay, original caloric domains, independent work gates and all
 The original sparse elastic factor/refinement solves the tied equilibrium once. Admission checks the returned coordinates against both the original assembled force/moment residual and the original component forces plus glue forces, using a caller-declared moment length and absolute force tolerance. Recovery uses each same thermal/material owner at that shared displacement. Existing junction rows then assemble the signed native component tangents and add original glue stiffness exactly once; reference mass, supports, damping and maps are unchanged.
 
 The accepted body and its native `fs-modal` windows remain bound by immutable borrows. Physical mode expansion and force projection use the same work-conjugate junction map. Negative eigenvalues remain signed, and a positive requested window alone does not establish global stability. Static displacements are reference offsets, with no fictitious time, heat or work credit. This slice does not provide general nonlinear curved-shell equilibrium, follower loads, changing contact, beam/solid prestress composition or post-buckling.
+
+## Joint wall and opening radiation of modal cavities
+
+`vibroacoustic::CavityOpeningRadiation` adds actual outward volume-flow
+unknowns to a rigid-wall cavity pressure basis. One original sampled exterior
+matrix acts on [full structural modal velocities, opening volume flows],
+retaining wall/mouth and mouth/mouth reaction and interference. Its real cavity
+map and transpose transfer outward modal flow and physical inner pressure.
+Opening flows stay in the simultaneous solve; no cavity or neck resonance is
+divided out. The complete external matrix uses the existing full Hermitian
+passivity admission and exact source frequency grid.
+
+The native Bessel duct owner supplies each internal cylinder's complex series
+impedance at every retained frequency. No resonance-frozen resistance or
+additional exterior end mass is inserted. A resolved cavity owns its entrance
+inertia; an optional fs-phs inner-end correction is restricted to a single
+uniform pressure mode, preventing double counting as higher pressure modes
+resolve that field. The declared bound on |k| times the larger of radius and
+effective neck length cannot exceed 0.25. These are short, straight, quiescent
+necks with one volume flow, not distributed ducts, resolved entry-edge loss,
+thermal compression storage, transverse modes or nonlinear jets.
+
+The cavity's uniform zero mode is required. An already neck-loaded Helmholtz
+mode or an independent structural exterior attachment cannot be combined with
+this joint loading. Original structural viscosity/relaxation, cavity molecular
+compressibility and disjoint local wall boundaries remain in the same equations.
+Neck and cavity gas must agree; the external producer retains its own medium.
+
+Independent accounts report signed cavity-to-opening work, positive internal
+neck heat and complete coherent exterior work:
+`input = structural + cavity + opening_necks + radiated` and
+`interface + acoustic_input = cavity + cavity_openings`.
+Opening transfer is not a second total-system debit. Returned original port
+amplitudes can excite the same native BEM source solutions for field observation.
+Truncated solves retain every opening and zero omitted structural coordinates
+at their original exterior indices. Convergence additionally observes the full
+complex opening-flow vector.
+
+Four native numerical tests passed with actual fs-math and the original fs-la
+complex LU, using the exact new operator, physical response and Hermitian work
+bodies: independent Helmholtz transfer; full mutual work and pressure-basis
+rescaling; coherent wall/opening cancellation; and retained-prefix port
+indices/flow convergence. The isolated carrier narrows only the error type.
+Three public integration tests additionally specify native Bessel geometry,
+a genuine joint Rayleigh bake with hereditary structure, source-frequency
+identity, double-counting refusals and compact/source/cancellation boundaries.
+Their full Cargo execution remains unrun; pinned formatting and source/API
+review do not substitute for that execution. This is a sampled harmonic modal
+composition, without a causal time realization or continuum error certificate.
