@@ -39,6 +39,11 @@ pub use spin_drive::{
     RigidRotorCurrentMotor, RigidRotorCurrentStep, RotorSpinCurrentCommand, RotorSpinDriveControl,
     RotorSpinDriveError,
 };
+mod eccentric;
+pub use eccentric::{
+    ElasticEccentricRotor, ElasticEccentricRotorError, ElasticEccentricRotorLoads,
+    ElasticEccentricRotorStep,
+};
 
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.
 pub const MAX_ROTOR_STATIONS: usize = 256;
@@ -46,7 +51,7 @@ pub const MAX_ROTOR_STATIONS: usize = 256;
 /// One linear radial bearing about its actual operating equilibrium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RadialBearing {
-    /// Signed axial distance from the nominal centroid plane [m].
+    /// Signed axial distance from the rotor's declared reference plane [m].
     pub station_m: f64,
     /// Full `[x,y]` stiffness in the stationary reference axes [N/m].
     pub stiffness_n_per_m: [[f64; 2]; 2],

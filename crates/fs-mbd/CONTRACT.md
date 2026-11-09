@@ -1151,6 +1151,46 @@ refinement, stall heating, reversal/regeneration, passive shaft drag, exact
 native bearing-operator reuse, unsupported-axis/coordinate/domain refusals and
 late cancellation with deterministic retry.
 
+`ElasticEccentricRotor` supplies the finite-rotation reciprocal counterpart for
+an actual eccentric rigid body on conservative elastic radial bearings. The
+original `SpatialInertia` retains mass, COM offset from the authored shaft frame,
+and the complete centroidal tensor. Native `MassProperties` are prepared once
+at that COM; the offset is used only in material shaft-point geometry. Each
+bearing force and its moment `arm_body cross R^-1 force_world` act together,
+so lateral bearing loads accelerate or brake the actual spin. No prescribed
+unbalance force, copied polar inertia or additional eccentric mass is inserted.
+
+In the planar specialization, with shaft position `q`, COM offset `e e_r`,
+`e_t = [-sin(phi), cos(phi)]` and COM polar inertia `J`, this reproduces
+`m q_ddot + m e e_t alpha = F + m e Omega^2 e_r` and
+`(J + m e^2) alpha + m e e_t dot q_ddot = shaft_torque`.
+The parallel-axis term and both reciprocal acceleration couplings arise from
+the original COM equations. Native point-motion queries retain tangential,
+centripetal and full-inertia gyroscopic acceleration, including during reversal.
+
+The prepared reference transform fixes bearing centres and stationary radial
+axes; stations are measured from its authored shaft origin. Full finite pose
+updates use the existing native configuration-force Verlet composition and
+native free rotation. Bearing stiffness must be finite, exactly symmetric and
+resolved positive semidefinite, and bearing damping must be zero. The original
+matrix is retained without symmetrization or a support floor. Velocity damping,
+active/fluid-film bearings, clearance, shaft flexibility and electrical source
+limits are outside this elastic mechanical owner. The balanced electrical drive
+above remains a separate owner; this API takes an explicit finite shaft torque
+following the actual body +z axis and never prescribes speed.
+
+Each step reports original native work, bearing storage and its polarized
+increment, independently integrated endpoint-trapezoidal shaft work, and the
+signed defect `delta(K + gravity potential + bearing potential) - shaft_work`.
+Native bearing work is not counted a second time as source work. This is a
+second-order method with a numerical energy defect, not exact conservation,
+heat, or unconditional stability; users must resolve bearing and spin timescales.
+State and load queries allocate no per-station scratch after bounded preparation;
+cancellation or refusal publishes no partial candidate. The five regressions in
+`tests/rigid_rotor_eccentric.rs` cover an independent coupled mass solve,
+finite-torque reversal, planar ODE refinement with changing spin, original full
+inertia and finite-rotation bearing virtual work, and refusal/late cancellation.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact
