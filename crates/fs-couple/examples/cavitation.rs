@@ -7,10 +7,13 @@
 //! compressibility; the compact observer adds no second radiation loss.
 //! A final pressure sweep preserves nucleus gas inventories and number counts
 //! while updating equilibrium radii and coherent acoustic propagation.
+//! A gas-diffusion spectrum then separates thermal absorption from scattering
+//! using dry-air transport evaluated at each nucleus's actual gas pressure.
 
 use fs_aeroac::curle3d::moving::{MovingCompactLimits, MovingCompactObserver};
 use fs_aeroac::monopole::MonopoleLimits;
 use fs_couple::cavitation::bubble::MaterialBubble;
+use fs_couple::cavitation::bubbly::thermal::ThermalPolydisperseBubblyLiquid;
 use fs_couple::cavitation::bubbly::{BubblyLiquidLimits, PolydisperseBubblyLiquid};
 use fs_couple::cavitation::cluster::MaterialBubbleCluster;
 use fs_couple::cavitation::{
@@ -23,6 +26,7 @@ use fs_flux::cavitation::inception::{
     EquilibriumBranch, EquilibriumControls, InceptionError, blake_threshold,
     equilibrium_at_pressure,
 };
+use fs_flux::cavitation::thermal::ThermalBubbleLimits;
 use fs_flux::cavitation::{
     BubbleCluster, BubbleClusterLimits, BubbleClusterNumerics, BubbleGas, BubbleLimits,
     BubbleNumerics, BubblePopulation, BubblePopulationClass, BubblePressureSample, BubbleState,
@@ -30,6 +34,7 @@ use fs_flux::cavitation::{
 };
 use fs_material::cavitation::SaturatedWaterCavitation;
 use fs_material::fluid_acoustics::FluidAcoustics;
+use fs_material::gas::{GasSpec, GasState};
 use fs_qty::Temperature;
 use fs_thermochem::water::if97::If97SaturationPair;
 use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmLimits, GapPort};
@@ -163,7 +168,9 @@ fn pressure_sweep(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::e
     for (radius, fraction) in [(50e-6_f64, 1e-5), (200e-6_f64, 2e-6)] {
         let bubble = KellerMiksisBubble::try_new(
             liquid,
-            BubbleGas::equilibrium(liquid, radius, reference_pressure, 1.4)?,
+            // Quasistatic gas inventory at the fixed interface temperature.
+            // The dynamic exponent below comes from the gas heat equation.
+            BubbleGas::equilibrium(liquid, radius, reference_pressure, 1.0)?,
             KellerMiksisLimits {
                 bubble: BubbleLimits {
                     minimum_radius_m: 0.5 * radius,
@@ -196,7 +203,7 @@ fn pressure_sweep(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::e
         maximum_iterations: 100,
     };
     let omega = 1000.0;
-    println!("Same nuclei at 1000 rad/s; local pressure envelope 0.01 Pa");
+    println!("Same isothermal nuclei at 1000 rad/s; local pressure envelope 0.01 Pa");
     println!("pressure_Pa alpha R1_um R2_um phase_speed_m_s attenuation_per_m root_residual_Pa");
     for pressure in [20_000.0, 40_000.0, reference_pressure, 180_000.0] {
         let (continued, report) =
@@ -216,6 +223,59 @@ fn pressure_sweep(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::e
             omega / k.re,
             k.im,
             report.maximum_absolute_pressure_residual_pa,
+        );
+    }
+
+    // Evaluate the SAME gas material at each CURRENT partial pressure. A new
+    // operating pressure requires new material evaluations before preparing
+    // thermal response; reference gas density must never be reused blindly.
+    let air = GasSpec::dry_air_ussa1976();
+    let gas_states = original
+        .population()
+        .classes()
+        .iter()
+        .map(|class| -> Result<_, Box<dyn std::error::Error>> {
+            let Some(linear) = class.linearization() else {
+                return Ok(None);
+            };
+            let pressure = class
+                .bubble()
+                .gas()
+                .pressure_at_radius(linear.equilibrium_radius_m)?;
+            Ok(Some(GasState::try_new(
+                &air,
+                liquid.temperature_k(),
+                pressure,
+            )?))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let thermal = ThermalPolydisperseBubblyLiquid::new(
+        &original,
+        &gas_states,
+        ThermalBubbleLimits {
+            maximum_gas_wavenumber_radius: 0.1,
+            maximum_gas_liquid_density_ratio: 0.01,
+            maximum_vapor_pressure_fraction: 0.1,
+        },
+        &mut || false,
+    )?;
+    println!("Dry-air heat diffusion at fixed interface temperature and reference liquid pressure");
+    println!(
+        "omega_rad_s isothermal_c diffusive_c isothermal_attenuation diffusive_attenuation gas_heat_W_m3 liquid_heat_W_m3"
+    );
+    for omega in [100.0, 1000.0, 10_000.0, 30_000.0] {
+        let isothermal = original.response(omega, 0.01)?;
+        let response = thermal.response(omega, 0.01)?;
+        let k = response.acoustic().wavenumber_per_m();
+        let heat = response.mean_absorption_w_m3(0.01)?;
+        println!(
+            "{omega:.1} {:.6} {:.6} {:.6e} {:.6e} {:.6e} {:.6e}",
+            omega / isothermal.wavenumber_per_m().re,
+            omega / k.re,
+            isothermal.wavenumber_per_m().im,
+            k.im,
+            heat.gas_thermal_w_m3,
+            heat.liquid_viscous_w_m3,
         );
     }
     Ok(())

@@ -15,8 +15,11 @@
 //! retained; adding a fitted damping coefficient would change the model.
 //! The bubble mass is negligible and the mixture momentum density is rho_l
 //! to leading dilute order. This is not the finite-mass frozen Wood closure.
-//! Thermal gas relaxation, vapor mass transfer, slip, nonlinear oscillations,
-//! cloud collapse and spatial correlations are outside this model.
+//! The default polytropic response excludes gas heat diffusion. The optional
+//! [`thermal`] adapters supply its material-driven frequency dependence through
+//! these same propagation and admission kernels. Vapor mass transfer, slip,
+//! nonlinear oscillations, cloud collapse and spatial correlations remain out
+//! of scope.
 //!
 //! Small alpha alone does not justify propagation close to resonance. Besides
 //! compactness and long-wavelength homogenization, this owner checks the
@@ -45,6 +48,9 @@ mod population;
 pub use population::{
     PolydisperseBubblyLiquid, PolydisperseBubblyLiquidResponse, PopulationResponseDiagnostics,
 };
+/// Gas thermal diffusion through the same native acoustic and duct owners.
+#[path = "bubbly/thermal.rs"]
+pub mod thermal;
 
 /// Declared physical bounds; no value is a damping fit or a numerical clamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +76,11 @@ pub enum BubblyLiquidError {
     Material(MaterialError),
     Bubble(CavitationError),
     Population(BubblePopulationError),
+    Thermal(fs_flux::cavitation::thermal::ThermalBubbleError),
+    ThermalClass {
+        class_index: usize,
+        cause: fs_flux::cavitation::thermal::ThermalBubbleError,
+    },
     Duct(FluidDuctError),
     MaterialMismatch,
     InvalidInput(&'static str),
@@ -86,6 +97,13 @@ impl core::fmt::Display for BubblyLiquidError {
             Self::Material(error) => write!(f, "bubbly liquid material: {error}"),
             Self::Bubble(error) => write!(f, "bubbly liquid dynamics: {error}"),
             Self::Population(error) => write!(f, "bubbly liquid population: {error}"),
+            Self::Thermal(error) => write!(f, "bubbly liquid gas diffusion: {error}"),
+            Self::ThermalClass { class_index, cause } => {
+                write!(
+                    f,
+                    "bubbly liquid gas diffusion in class {class_index}: {cause}"
+                )
+            }
             Self::Duct(error) => write!(f, "bubbly liquid propagation: {error}"),
             Self::MaterialMismatch => write!(f, "bubble and source must use the identical liquid"),
             Self::InvalidInput(what) => write!(f, "invalid bubbly liquid input: {what}"),
@@ -113,6 +131,11 @@ impl From<CavitationError> for BubblyLiquidError {
 impl From<BubblePopulationError> for BubblyLiquidError {
     fn from(error: BubblePopulationError) -> Self {
         Self::Population(error)
+    }
+}
+impl From<fs_flux::cavitation::thermal::ThermalBubbleError> for BubblyLiquidError {
+    fn from(error: fs_flux::cavitation::thermal::ThermalBubbleError) -> Self {
+        Self::Thermal(error)
     }
 }
 impl From<FluidDuctError> for BubblyLiquidError {
@@ -257,6 +280,33 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
         omega_rad_s: f64,
         maximum_local_pressure_amplitude_pa: f64,
     ) -> Result<BubblyLiquidResponse, BubblyLiquidError> {
+        self.response_with_kernel(
+            omega_rad_s,
+            maximum_local_pressure_amplitude_pa,
+            &mut |linear, medium| {
+                single_bubble_response(
+                    &self.bubble,
+                    linear,
+                    medium,
+                    omega_rad_s,
+                    maximum_local_pressure_amplitude_pa,
+                    self.limits,
+                )
+            },
+        )
+    }
+
+    // Both constitutive choices use exactly the same propagation, scattering
+    // and physical admission. The static generic callback adds no allocation.
+    fn response_with_kernel(
+        &self,
+        omega_rad_s: f64,
+        maximum_local_pressure_amplitude_pa: f64,
+        kernel: &mut impl FnMut(
+            BubbleLinearization,
+            FluidAcousticState,
+        ) -> Result<SingleBubbleResponse, BubblyLiquidError>,
+    ) -> Result<BubblyLiquidResponse, BubblyLiquidError> {
         let (medium, k_l) = admit_harmonic(
             self.material,
             omega_rad_s,
@@ -282,14 +332,7 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
                 diagnostics,
             });
         };
-        let response = single_bubble_response(
-            &self.bubble,
-            linear,
-            medium,
-            omega_rad_s,
-            maximum_local_pressure_amplitude_pa,
-            self.limits,
-        )?;
+        let response = kernel(linear, medium)?;
         diagnostics.fractional_radius_per_pa = response.susceptibility;
         diagnostics.fractional_radius_amplitude = response.fractional_radius_amplitude;
         diagnostics.wall_mach_amplitude = response.wall_mach_amplitude;
@@ -361,6 +404,12 @@ struct SingleBubbleResponse {
     liquid_pressure_ratio: f64,
     scattering_over_radius: f64,
 }
+
+#[derive(Clone, Copy)]
+struct SingleBubbleKernel {
+    pressure_transfer_s2: C64,
+    wall_stiffness_pa: C64,
+}
 fn single_bubble_response(
     bubble: &KellerMiksisBubble,
     linear: BubbleLinearization,
@@ -377,7 +426,36 @@ fn single_bubble_response(
         -linear.damping_coefficient_per_s * omega,
     );
     let pressure_transfer = numerator / denominator;
-    let susceptibility = -pressure_transfer.scale(1.0 / inertia);
+    let wall_stiffness = C64::new(
+        inertia * linear.stiffness_coefficient_per_s2,
+        -4.0 * bubble.liquid().dynamic_viscosity_pa_s() * omega,
+    );
+    admit_single_bubble_response(
+        bubble,
+        linear,
+        medium,
+        omega,
+        amplitude,
+        limits,
+        SingleBubbleKernel {
+            pressure_transfer_s2: pressure_transfer,
+            wall_stiffness_pa: wall_stiffness,
+        },
+    )
+}
+
+fn admit_single_bubble_response(
+    bubble: &KellerMiksisBubble,
+    linear: BubbleLinearization,
+    medium: FluidAcousticState,
+    omega: f64,
+    amplitude: f64,
+    limits: BubblyLiquidLimits,
+    kernel: SingleBubbleKernel,
+) -> Result<SingleBubbleResponse, BubblyLiquidError> {
+    let radius = linear.equilibrium_radius_m;
+    let inertia = medium.density_kg_m3() * radius * radius;
+    let susceptibility = -kernel.pressure_transfer_s2.scale(1.0 / inertia);
     let susceptibility_magnitude = susceptibility.abs();
     if !finite(susceptibility) || susceptibility_magnitude == 0.0 || susceptibility.im >= 0.0 {
         return Err(BubblyLiquidError::InvalidInput(
@@ -405,18 +483,14 @@ fn single_bubble_response(
         wall_mach_amplitude,
         radial_limits.maximum_wall_mach_number,
     )?;
-    let wall_stiffness = C64::new(
-        inertia * linear.stiffness_coefficient_per_s2,
-        -4.0 * bubble.liquid().dynamic_viscosity_pa_s() * omega,
-    );
-    let liquid_pressure_ratio = (C64::ONE + wall_stiffness * susceptibility).abs()
+    let liquid_pressure_ratio = (C64::ONE + kernel.wall_stiffness_pa * susceptibility).abs()
         * (amplitude / medium.adiabatic_bulk_modulus_pa());
     bound(
         "native liquid pressure ratio",
         liquid_pressure_ratio,
         bubble.compressibility_limits().maximum_pressure_ratio,
     )?;
-    let scattering_over_radius = pressure_transfer.scale(omega * omega).abs();
+    let scattering_over_radius = kernel.pressure_transfer_s2.scale(omega * omega).abs();
     if !scattering_over_radius.is_finite() || scattering_over_radius <= 0.0 {
         return Err(BubblyLiquidError::InvalidInput(
             "unrepresentable bubble scattering amplitude",

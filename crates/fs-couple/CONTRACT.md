@@ -8617,3 +8617,50 @@ existing full duct-chain/IF97 tests are excluded from that focused executable.
 Full Cargo/DSR and the complete IF97 example remain unverified because the seven
 constellation siblings and DSR/RCH are unavailable. No experimental-validation
 or model-error certificate is claimed by these numerical checks.
+
+
+## Material-driven thermal response of bubbly liquids
+
+`cavitation::bubbly::thermal` prepares both `ThermalDiluteBubblyLiquid` and
+`ThermalPolydisperseBubblyLiquid` by borrowing the accepted original acoustic
+owner. Each occupied class receives its own coherent gas material snapshot at
+its current gas partial pressure and liquid/interface temperature. Empty classes
+require no fictitious gas source. Preparation retains the native isothermal
+inventory, current radius, absolute number density and original liquid source.
+A changed operating pressure requires re-evaluated gas snapshots from the
+original material law; stale reference gas density/transport is rejected.
+
+The native spherical heat equation supplies complex gas stiffness and thermal
+absorption. Both thermal and original polytropic paths share the same native
+radius, amplitude, wall-Mach, pressure-jump, compactness and scattering admission,
+compensated Foldy accumulation, and existing duct-wave/duct-chain propagation.
+The full complex wall pressure enters the native pressure-jump bound. Splitting
+a histogram class cannot change its physical response or relax collective limits.
+No per-frequency allocation, material query, root solve or state mutation occurs.
+The population preparation has one bounded vector and cancellation per class.
+
+`ThermalBubblyResponse` retains the admitted acoustic response and separate
+thermal/viscous absorption coefficients. `mean_absorption_w_m3` evaluates local
+cycle-mean power only for an actual peak pressure within the admitted envelope.
+Gas thermal loss follows the native pressure-volume work, while Newtonian liquid
+loss is the cycle average of 16 pi mu R Rdot^2. Outgoing radiation and coherent
+scattering are not deposited again as heat. These local coefficients do not
+invent a solved duct field, a spatial heat integral or a finite body's evolution.
+
+The model remains a dilute, small-signal, ideal noncondensable gas with an
+isothermal interface and negligible gas inertia and vapor thermal contribution.
+Gas acoustic compactness is checked separately from liquid compactness. It does
+not extend to nonlinear thermal collapse, vapor kinetics, liquid thermal
+impedance or interacting clouds. The zero-population path is the exact original
+liquid, and cancellation/failure publishes no partial preparation or response.
+
+Four new coupled regression groups independently reconstruct spherical diffusion,
+complex dispersion, pressure-volume thermal work, viscosity cycle quadrature and
+native liquid-momentum impedance. They also cover mono/poly and split-bin parity,
+current-pressure gas refresh, source/inventory retention and transactional limits.
+All 16 focused coupled tests passed alongside all 71 native cavitation tests,
+using original numerical and verbatim material sources with restricted dependency
+facades. Three full duct-chain/IF97 tests remain excluded. The example's updated
+pressure-sweep function, including a gas-diffusion spectrum and separate heating,
+compiled and ran against explicit liquid coefficients. Full IF97 example and
+Cargo/DSR remain unverified without the missing constellation siblings and tools.

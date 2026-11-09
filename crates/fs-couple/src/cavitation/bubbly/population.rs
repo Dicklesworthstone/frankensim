@@ -110,6 +110,36 @@ impl<'a, F: CavitationProperties + ?Sized> PolydisperseBubblyLiquid<'a, F> {
         maximum_local_pressure_amplitude_pa: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PolydisperseBubblyLiquidResponse, BubblyLiquidError> {
+        self.response_with_kernel(
+            omega_rad_s,
+            maximum_local_pressure_amplitude_pa,
+            cancelled,
+            &mut |_, class, linear, medium, limits| {
+                single_bubble_response(
+                    class.bubble(),
+                    linear,
+                    medium,
+                    omega_rad_s,
+                    maximum_local_pressure_amplitude_pa,
+                    limits,
+                )
+            },
+        )
+    }
+
+    pub(super) fn response_with_kernel(
+        &self,
+        omega_rad_s: f64,
+        maximum_local_pressure_amplitude_pa: f64,
+        cancelled: &mut impl FnMut() -> bool,
+        kernel: &mut impl FnMut(
+            usize,
+            &BubblePopulationClass,
+            BubbleLinearization,
+            FluidAcousticState,
+            BubblyLiquidLimits,
+        ) -> Result<SingleBubbleResponse, BubblyLiquidError>,
+    ) -> Result<PolydisperseBubblyLiquidResponse, BubblyLiquidError> {
         poll(cancelled)?;
         let (medium, k_l) = admit_harmonic(
             self.material,
@@ -145,19 +175,12 @@ impl<'a, F: CavitationProperties + ?Sized> PolydisperseBubblyLiquid<'a, F> {
         let mut scattering = Sum::default();
         let mut maximum_radius: f64 = 0.0;
         let mut maximum_scattering_amplitude: f64 = 0.0;
-        for class in self.population.classes() {
+        for (index, class) in self.population.classes().iter().enumerate() {
             poll(cancelled)?;
             let Some(linear) = class.linearization() else {
                 continue;
             };
-            let response = single_bubble_response(
-                class.bubble(),
-                linear,
-                medium,
-                omega_rad_s,
-                maximum_local_pressure_amplitude_pa,
-                self.limits,
-            )?;
+            let response = kernel(index, class, linear, medium, self.limits)?;
             let radius = linear.equilibrium_radius_m;
             let volume_response = response.susceptibility.scale(3.0 * class.void_fraction());
             compliance_real.add(volume_response.re);
@@ -290,7 +313,7 @@ impl PolydisperseBubblyLiquidResponse {
     }
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), BubblyLiquidError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), BubblyLiquidError> {
     if cancelled() {
         Err(CavitationError::Cancelled.into())
     } else {
@@ -298,12 +321,12 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), BubblyLiquidError> {
     }
 }
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     sum: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         let next = self.sum + value;
         self.correction += if self.sum.abs() >= value.abs() {
             (self.sum - next) + value
@@ -312,7 +335,7 @@ impl Sum {
         };
         self.sum = next;
     }
-    fn value(&self) -> f64 {
+    pub(super) fn value(&self) -> f64 {
         self.sum + self.correction
     }
 }
