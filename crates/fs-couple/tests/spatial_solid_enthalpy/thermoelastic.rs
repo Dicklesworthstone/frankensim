@@ -308,3 +308,6 @@ fn loaded_softening_matches_independent_work_and_failed_proposals_are_atomic() {
 
 #[path = "thermoelastic/dynamic.rs"]
 mod dynamic;
+
+#[path = "thermoelastic/contact.rs"]
+mod contact;

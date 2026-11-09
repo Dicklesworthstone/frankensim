@@ -21,7 +21,10 @@ pub mod dynamic;
 
 use super::*;
 use crate::solid_enthalpy::thermoelastic::{MAX_THERMOELASTIC_ITERATIONS, ThermoelasticSolve};
-use fs_conduction::transient::enthalpy::nodal_heat::NodalHeatStep;
+use fs_conduction::transient::enthalpy::nodal_heat::{NodalHeatEndpoint, NodalHeatStep};
+use fs_conduction::interface::temperature::{
+    TemperatureContacts, enthalpy::ContactEnthalpyNewtonConfig,
+};
 use fs_material::elastic::thermal::{
     AffineThermoelastic, ThermoelasticError, ThermoelasticState, ThermoelasticSymmetry,
     exchange::ThermoelasticExchange,
@@ -108,6 +111,64 @@ fn admit_controls(config: ThermoelasticSolve) -> Result<()> {
     }
     Ok(())
 }
+// One dispatch for both native mechanical trajectories. Live contact sets
+// already include their constant interfaces, so a second interface set cannot
+// silently occupy the same faces or apply the transfer twice.
+#[derive(Clone, Copy)]
+enum HeatBoundary<'b, 'mesh, 'card> {
+    Fixed(Option<&'b ThermalInterfaces>, EnthalpyStepConfig),
+    Temperature(&'b TemperatureContacts<'mesh, 'card>, ContactEnthalpyNewtonConfig),
+}
+impl HeatBoundary<'_, '_, '_> {
+    fn step_config(self) -> EnthalpyStepConfig {
+        match self {
+            Self::Fixed(_, config) => config,
+            Self::Temperature(_, config) => config.step,
+        }
+    }
+
+    fn admits_contact_residual(self, residual_norm_j: f64) -> bool {
+        match self {
+            Self::Fixed(..) => true,
+            Self::Temperature(_, config) => residual_norm_j <= config.residual_tolerance_j,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance(
+        self, source: &SpatialSolidEnthalpy<'_, '_, '_>, boundary: &ThermalBoundary,
+        volumetric_source: &ScalarField, old_h: &[f64], dt_s: f64, heat_j: &[Dd],
+        radiation: EnthalpyRadiation<'_>, cx: &Cx<'_>,
+    ) -> Result<NodalHeatStep> {
+        let problem = source.thermal_problem(boundary, volumetric_source)?;
+        Ok(match self {
+            Self::Fixed(interfaces, config) => source.thermal.advance_with_nodal_heat_and_radiation(
+                cx, problem, interfaces, old_h, dt_s, config, heat_j, radiation,
+            )?,
+            Self::Temperature(contacts, config) => source.thermal.advance_with_nodal_heat_and_temperature_contacts(
+                cx, problem, contacts, old_h, dt_s, config, heat_j, radiation,
+            )?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate(
+        self, source: &SpatialSolidEnthalpy<'_, '_, '_>, boundary: &ThermalBoundary,
+        volumetric_source: &ScalarField, old_h: &[f64], candidate_h: &[f64],
+        dt_s: f64, heat_j: &[Dd], radiation: EnthalpyRadiation<'_>, cx: &Cx<'_>,
+    ) -> Result<NodalHeatEndpoint> {
+        let problem = source.thermal_problem(boundary, volumetric_source)?;
+        Ok(match self {
+            Self::Fixed(interfaces, config) => source.thermal.evaluate_endpoint_with_nodal_heat_and_radiation(
+                cx, problem, interfaces, old_h, candidate_h, dt_s, config, heat_j, radiation,
+            )?,
+            Self::Temperature(contacts, config) => source.thermal.evaluate_endpoint_with_nodal_heat_and_temperature_contacts(
+                cx, problem, contacts, old_h, candidate_h, dt_s, config, heat_j, radiation,
+            )?,
+        })
+    }
+}
+
 fn stiffness(model: ThermalStiffnessModel) -> ThermoelasticSymmetry {
     match model {
         ThermalStiffnessModel::Isotropic => ThermoelasticSymmetry::Isotropic,
@@ -323,7 +384,54 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
         radiation: EnthalpyRadiation<'_>,
         cx: &Cx<'_>,
     ) -> Result<SpatialThermoelasticCandidate<'s, 'a, 'm, 'c>> {
+        self.advance_heat_boundary(
+            dt_s, boundary, HeatBoundary::Fixed(interfaces, thermal_config),
+            volumetric_source, loads, config, radiation, cx,
+        )
+    }
+
+    /// Evolve live source-backed contact and this same compatible deformation.
+    /// Both independent thermal traces are queried at each native Newton trial;
+    /// the actual final contact sources remain on the returned thermal endpoint.
+    ///
+    /// The contact owner includes its fixed interfaces and retains original
+    /// source claims, coordinates, geometry, pressure, gap, finish and medium.
+    /// Only its explicitly declared thermal/material coordinates evolve. Fixed
+    /// mechanical supports do not introduce an unstated pressure or gap law.
+    /// Contact transfer is internal heat and is never added as external input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_temperature_contacts(
+        &self,
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        contacts: &TemperatureContacts<'_, '_>,
+        volumetric_source: &ScalarField,
+        loads: &TetLoadCase3<'_, '_>,
+        contact_config: ContactEnthalpyNewtonConfig,
+        config: ThermoelasticSolve,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialThermoelasticCandidate<'s, 'a, 'm, 'c>> {
+        self.advance_heat_boundary(
+            dt_s, boundary, HeatBoundary::Temperature(contacts, contact_config),
+            volumetric_source, loads, config, radiation, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_heat_boundary(
+        &self,
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        heat_boundary: HeatBoundary<'_, '_, '_>,
+        volumetric_source: &ScalarField,
+        loads: &TetLoadCase3<'_, '_>,
+        config: ThermoelasticSolve,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialThermoelasticCandidate<'s, 'a, 'm, 'c>> {
         check(cx)?;
+        let thermal_config = heat_boundary.step_config();
         admit_controls(config)?;
         let end_s = self.time_s + dt_s;
         if !dt_s.is_finite() || dt_s <= 0.0 || !end_s.is_finite() || end_s <= self.time_s
@@ -338,9 +446,8 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
         let mut defects = [f64::INFINITY; 3];
         for iteration in 1..=config.maximum_iterations {
             check(cx)?;
-            let mut thermal = source.thermal.advance_with_nodal_heat_and_radiation(
-                cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, dt_s, thermal_config, &applied, radiation,
+            let mut thermal = heat_boundary.advance(
+                source, boundary, volumetric_source, &self.specific_h, dt_s, &applied, radiation, cx,
             )?;
             let state = source.resolve_at(&thermal.specific_enthalpy_j_kg, end_s, cx)?;
             let equilibrium = state.solve(loads, &self.fixed_dofs, self.solve, cx)?;
@@ -361,10 +468,9 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
             if !within(mechanical_residual, config.energy_tolerance_j)? {
                 return Err(invalid("native nodal work and original element stress work disagree"));
             }
-            let endpoint = source.thermal.evaluate_endpoint_with_nodal_heat_and_radiation(
-                cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, &thermal.specific_enthalpy_j_kg, dt_s, thermal_config,
-                &nodal_heat, radiation,
+            let endpoint = heat_boundary.evaluate(
+                source, boundary, volumetric_source, &self.specific_h,
+                &thermal.specific_enthalpy_j_kg, dt_s, &nodal_heat, radiation, cx,
             )?;
             let external_heat = endpoint.energy.volumetric_source_j
                 + endpoint.energy.dirichlet_in_j - endpoint.energy.neumann_out_j
@@ -378,6 +484,7 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
             let total_energy_residual_j = finite(total)?;
             defects = [heat_defect_j, endpoint.maximum_free_residual_j, total_energy_residual_j];
             if within(heat_defect, config.heat_tolerance_j)?
+                && heat_boundary.admits_contact_residual(endpoint.residual_norm_j)
                 && endpoint.maximum_free_residual_j <= thermal_config.energy_tolerance_j
                 && within(endpoint.energy.residual_j, thermal_config.energy_tolerance_j)?
                 && within(total, config.energy_tolerance_j)?

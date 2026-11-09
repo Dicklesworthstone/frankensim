@@ -167,7 +167,54 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a, 'g, 'mesh>
         radiation: EnthalpyRadiation<'_>,
         cx: &Cx<'_>,
     ) -> Result<DynamicSpatialThermoelasticCandidate<'s, 'a, 'm, 'c, 'g, 'mesh>> {
+        self.advance_heat_boundary(
+            dt_s, boundary, HeatBoundary::Fixed(interfaces, thermal_config),
+            volumetric_source, loads, config, radiation, cx,
+        )
+    }
+
+    /// Live original contact resistance, spatial heat and real inertial motion.
+    /// Every native thermal trial queries both independent contact traces;
+    /// final source receipts and fluxes belong to the actual accepted endpoint.
+    /// Original contact geometry and all undeclared nonthermal coordinates stay
+    /// fixed: this does not infer pressure, gap, friction or contact-area motion.
+    ///
+    /// Contact transfer stays internal. Native kinetic storage, externally
+    /// exported Rayleigh loss and pointwise radiation keep their separate
+    /// accounts; a refused contact query publishes neither heat nor motion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_temperature_contacts(
+        &self,
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        contacts: &TemperatureContacts<'_, '_>,
+        volumetric_source: &ScalarField,
+        loads: &TetLoadCase3<'_, '_>,
+        contact_config: ContactEnthalpyNewtonConfig,
+        config: ThermoelasticSolve,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<DynamicSpatialThermoelasticCandidate<'s, 'a, 'm, 'c, 'g, 'mesh>> {
+        self.advance_heat_boundary(
+            dt_s, boundary, HeatBoundary::Temperature(contacts, contact_config),
+            volumetric_source, loads, config, radiation, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_heat_boundary(
+        &self,
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        heat_boundary: HeatBoundary<'_, '_, '_>,
+        volumetric_source: &ScalarField,
+        loads: &TetLoadCase3<'_, '_>,
+        config: ThermoelasticSolve,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<DynamicSpatialThermoelasticCandidate<'s, 'a, 'm, 'c, 'g, 'mesh>> {
         check(cx)?;
+        let thermal_config = heat_boundary.step_config();
         admit_controls(config)?;
         let end_s = self.time_s() + dt_s;
         if !dt_s.is_finite() || dt_s <= 0.0 || !end_s.is_finite() || end_s <= self.time_s()
@@ -185,9 +232,8 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a, 'g, 'mesh>
         let mut defects = [f64::INFINITY; 3];
         for iteration in 1..=config.maximum_iterations {
             check(cx)?;
-            let mut thermal = source.thermal.advance_with_nodal_heat_and_radiation(
-                cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, dt_s, thermal_config, &applied, radiation,
+            let mut thermal = heat_boundary.advance(
+                source, boundary, volumetric_source, &self.specific_h, dt_s, &applied, radiation, cx,
             )?;
             let state = source.resolve_at(&thermal.specific_enthalpy_j_kg, end_s, cx)?;
             let problem = state.problem(&self.fixed_dofs);
@@ -211,10 +257,9 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a, 'g, 'mesh>
             if !within(mechanical_residual, config.energy_tolerance_j)? {
                 return Err(invalid("native inertia, actual stress work, exported damping and applied work disagree"));
             }
-            let endpoint = source.thermal.evaluate_endpoint_with_nodal_heat_and_radiation(
-                cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, &thermal.specific_enthalpy_j_kg, dt_s, thermal_config,
-                &nodal_heat, radiation,
+            let endpoint = heat_boundary.evaluate(
+                source, boundary, volumetric_source, &self.specific_h,
+                &thermal.specific_enthalpy_j_kg, dt_s, &nodal_heat, radiation, cx,
             )?;
             let external_heat = endpoint.energy.volumetric_source_j
                 + endpoint.energy.dirichlet_in_j - endpoint.energy.neumann_out_j
@@ -229,6 +274,7 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a, 'g, 'mesh>
             let total_energy_residual_j = finite(total)?;
             defects = [heat_defect_j, endpoint.maximum_free_residual_j, total_energy_residual_j];
             if within(heat_defect, config.heat_tolerance_j)?
+                && heat_boundary.admits_contact_residual(endpoint.residual_norm_j)
                 && endpoint.maximum_free_residual_j <= thermal_config.energy_tolerance_j
                 && within(endpoint.energy.residual_j, thermal_config.energy_tolerance_j)?
                 && within(total, config.energy_tolerance_j)?
