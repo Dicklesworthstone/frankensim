@@ -32,8 +32,7 @@ pub mod gas_film;
 pub mod lc;
 /// Material-bound FEEC flow with coherent SI loads, pressure and kinetic energy.
 #[cfg(feature = "continuum")]
-#[path = "ns/material.rs"]
-pub mod material;
+pub use ns::material;
 /// Conservative isothermal diffuse-interface dynamics from the original liquid law.
 #[cfg(feature = "experimental-miscibility")]
 pub mod miscibility;

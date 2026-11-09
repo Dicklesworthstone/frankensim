@@ -31,6 +31,7 @@ pub use windkessel::{
 };
 
 /// Conservative evolving density and native IMEX momentum on one fixed mesh.
+#[path = "mixed/density_transport.rs"]
 pub mod density_transport;
 
 /// Physical effort per metre of out-of-plane depth, about an explicit origin.

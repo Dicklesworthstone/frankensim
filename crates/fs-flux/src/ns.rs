@@ -29,6 +29,8 @@ pub mod boundary;
 pub mod kinematics;
 /// Consistent constitutive and convecting-velocity residual derivatives.
 pub mod linearization;
+/// Material-bound flow sharing this solver's original assembly and time owners.
+pub mod material;
 /// Bounded damped Newton integration of stiff generalized-Newtonian flow.
 pub mod newton;
 /// Spatial intrinsic-permeability tensors in the existing Stokes operator.

@@ -14,6 +14,7 @@ use std::cell::RefCell;
 
 mod mixed;
 pub use mixed::MaterialNavierStokesNewtonStep;
+#[path = "newton/sdirk2.rs"]
 mod sdirk2;
 pub use sdirk2::MaterialFluxSdirk2Step;
 
