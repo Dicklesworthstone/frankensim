@@ -1,6 +1,7 @@
 //! Shared shear/twist failure, explicit release, and actual finite caloric storage.
 
 mod temperature;
+mod timed;
 
 use super::{MASS, close, curves, source, thermal};
 use core::f64::consts::PI;

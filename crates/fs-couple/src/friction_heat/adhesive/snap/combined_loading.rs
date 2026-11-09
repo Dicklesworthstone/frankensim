@@ -11,6 +11,8 @@
 
 /// Prescribed temperature continuation with retained loading and caloric history.
 pub mod temperature;
+/// Prescribed physical loading time, finite transport and contact separation.
+pub mod timed;
 
 use super::{JkrSnapHeatControls, JkrSnapHeatError, Receiver};
 use fs_blake3::ContentHash;

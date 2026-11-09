@@ -445,14 +445,14 @@ fn partition_defect(step: DissipationStep) -> Dd {
 }
 
 #[derive(Default)]
-struct AuditSum {
+pub(super) struct AuditSum {
     // Native incoming mass, incoming energy, external heat, storage and residual.
     values: [Dd; 5],
     substeps: usize,
     events: usize,
 }
 impl AuditSum {
-    fn add(&mut self, audit: EnergyAudit) -> Result<(), JkrSnapHeatError> {
+    pub(super) fn add(&mut self, audit: EnergyAudit) -> Result<(), JkrSnapHeatError> {
         for (sum, value) in self.values.iter_mut().zip([
             audit.incoming_mass_kg,
             audit.incoming_energy_j,
@@ -473,7 +473,7 @@ impl AuditSum {
             .ok_or_else(|| invalid("thermal event count overflow"))?;
         Ok(())
     }
-    fn audit(&self) -> Result<EnergyAudit, JkrSnapHeatError> {
+    pub(super) fn audit(&self) -> Result<EnergyAudit, JkrSnapHeatError> {
         Ok(EnergyAudit {
             incoming_mass_kg: finite(self.values[0].to_f64())?,
             incoming_energy_j: finite(self.values[1].to_f64())?,

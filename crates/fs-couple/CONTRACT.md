@@ -15112,3 +15112,56 @@ also pass. Across the related lower pressure and conversion repair checks,
 25 unique focused tests pass (10 new, 15 existing), with no failures. This
 executes the original numerical kernels and does not claim a full Cargo build
 or the optional solid-conduction/electrical enthalpy-coupling graph.
+
+
+## Event-timed combined adhesion, footprint evolution and separation
+
+`friction_heat::adhesive::snap::combined_loading::timed` consumes the original
+sealed affine loading ramp with exactly matching accepted source history and
+thermal/heat clocks. The explicit boundary policy either stops at the first
+boundary or releases an admitted separating radial fold and follows the
+remaining prescription detached. Opening and nonseparating boundaries retain
+the stopped prefix and expose untraversed time. Original source steps are
+regenerated and compared in full; geometry samples never advance accepted
+mechanical history or manufacture release.
+
+The same native enthalpy timeline owns conduction, ambient/reservoir supplies,
+births and scheduled events. Events at each endpoint execute before footprint
+retargeting or release heat. Original released potential is partitioned once;
+its exact owned patch is then removed, restoring actual ambient exposure before
+any detached-tail transport. The footprint retains its link identity after
+separation. Original ordered receivers, caloric laws, cell geometry/mass and
+exact expected patch/absence are checked before native fluxes and after every
+individual event and step. Scheduled takeover or revival of that link refuses.
+Unrelated thermal links retain their own ownership.
+
+Attached coverage and conductance use explicit bounded left-endpoint footprints.
+Source area samples retarget actual native coverage at interval endpoints;
+conductance uses the fixed original reference G/A, preserving material/geometry
+resistance without cumulative rescaling drift. The complete source radius
+envelope is conservatively reserved against both physical cell faces and
+competing coverage, including the maximum at a reversal through zero load.
+One native contact sweep checks both receiving surfaces with bounded cancellation.
+Reversals split at a represented, separately gated zero-load clock. Internal
+footprint cuts may round downward to respect their duration ceiling; physical
+source/boundary clocks are never moved.
+
+One shared native substep allowance covers every attached interval and detached
+tail. Independent footprint-count/duration and original mechanical-stage budgets
+bound work. Signed and absolute accounts combine each original mechanical/heat
+balance with native transport defects, counting contact heat once and retaining
+ordinary thermal supply and incoming material energy separately. Loading history,
+caloric state, clock, topology and release ledger publish together after the final
+checkpoint. Source, geometry, caloric, topology, budget or cancellation refusal
+leaves all accepted owners unchanged.
+
+This is a first-order footprint approximation requiring independent footprint
+and thermal timestep refinement, with frozen constitutive properties and
+conductance per area. It supplies no exact swept-area integral, automatic
+source-temperature feedback, temperature-dependent conductivity update, inertia,
+recoil or rebonding. Five focused integration groups cover independently computed
+post-event cooling and held/reversing conduction, footprint/clock ownership,
+shared budgets, scheduled contact conflicts and atomic retry. Two additional
+clock tests cover large origins and unchanged physical event times. Formatting
+and whitespace checks passed; these tests were authored but not compiled or
+executed because constellation siblings and DSR/RCH runners remain unavailable.
