@@ -28,6 +28,9 @@ pub(crate) struct MassTransport3 {
     pub before: BTreeMap<MassLocation3, f64>,
     pub after: BTreeMap<MassLocation3, f64>,
     pub routes: Vec<MassRoute3>,
+    /// Measured residuals already admitted against native donor densities.
+    /// They belong to the converting source, not to unrelated route nodes.
+    conversion_roundoff: BTreeMap<MassLocation3, f64>,
     max_routes: usize,
 }
 
@@ -37,8 +40,33 @@ impl MassTransport3 {
             before,
             after: BTreeMap::new(),
             routes: Vec::new(),
+            conversion_roundoff: BTreeMap::new(),
             max_routes,
         }
+    }
+
+    pub(crate) fn record_conversion_roundoff(
+        &mut self,
+        source: MassLocation3,
+        residual: f64,
+    ) -> Result<(), FreeSurfaceError3> {
+        let accumulated = self.conversion_roundoff_at(source) + residual.abs();
+        if !residual.is_finite() || !accumulated.is_finite() {
+            return Err(FreeSurfaceError3::Transport(
+                "nonfinite native conversion roundoff",
+            ));
+        }
+        if residual != 0.0 {
+            self.conversion_roundoff.insert(source, accumulated);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn conversion_roundoff_at(&self, source: MassLocation3) -> f64 {
+        self.conversion_roundoff
+            .get(&source)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     pub(super) fn exchange(
