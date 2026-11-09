@@ -5,10 +5,23 @@
 use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,MAX_HARMONIC_RECEIVERS,ReceiverSet,SourceSweep}};
 #[cfg(test)]
 use fs_bem::{helmholtz::{self,Formulation},radiation_policy::GeometryPolicy};
-use fs_math::c64::C64;
+use fs_math::{c64::C64,dd::Dd};
 use std::{f64::consts::TAU,fmt::Write};
 
 fn finite(v:C64)->bool {v.re.is_finite() && v.im.is_finite()}
+
+// Work-conjugate G^T A p in the original panel coordinates. Preserve both
+// product and summation residuals: opposite panel pressures may leave a small
+// real reaction that disappears if shape*area or each product rounds first.
+fn radiation_projection(shape:&[f64],areas:&[f64],pressure:&[C64])->C64 {
+    let mut sum=[Dd::ZERO;2];
+    for ((&shape,&area),&p) in shape.iter().zip(areas).zip(pressure) {
+        let weight=Dd::from_f64(shape)*Dd::from_f64(area);
+        sum[0]=sum[0]+weight*Dd::from_f64(p.re);
+        sum[1]=sum[1]+weight*Dd::from_f64(p.im);
+    }
+    C64::new(sum[0].to_f64(),sum[1].to_f64())
+}
 
 pub struct LoadingSample {
     /// Row-major generalized force / generalized velocity, in Bank's basis.
@@ -24,8 +37,21 @@ impl LoadingSample {
             .any(|r|r.len()!=response.board_displacement.len()) {
             return Err("pressure projection has a different board basis or frequency".into());
         }
-        let out:Vec<C64>=self.receiver_transfer.iter().map(|row|row.iter()
-            .zip(&response.board_displacement).fold(C64::ZERO,|s,(h,q)|s+*h * *q*C64::new(0.,-w))).collect();
+        let frequency=Dd::from_f64(w);
+        let out:Vec<C64>=self.receiver_transfer.iter().map(|row| {
+            // Coherent modal fields add before the common velocity factor.
+            // Retaining the complex products protects weak harmonics and
+            // spatial nulls from both product rounding and mode ordering.
+            let mut sum=[Dd::ZERO;2];
+            for (&h,&q) in row.iter().zip(&response.board_displacement) {
+                let (hr,hi)=(Dd::from_f64(h.re),Dd::from_f64(h.im));
+                let (qr,qi)=(Dd::from_f64(q.re),Dd::from_f64(q.im));
+                sum[0]=sum[0]+(hr*qr-hi*qi);
+                sum[1]=sum[1]+(hr*qi+hi*qr);
+            }
+            // exp(-i omega t): velocity = -i omega * displacement.
+            C64::new((sum[1]*frequency).to_f64(),(-sum[0]*frequency).to_f64())
+        }).collect();
         if out.iter().any(|p|!finite(*p)) {return Err("loaded receiver pressure overflow".into());}
         Ok(out)
     }
@@ -95,8 +121,7 @@ impl<'a> LoadingSweep<'a> {
         minimum_ppw=minimum_ppw.min(solution.panels_per_wavelength);
         condition_lower_bound=condition_lower_bound.max(solution.condition_lower_bound);
         for (i,row) in boundary.weights.iter().enumerate() {
-            impedance[i*count+j]=row.iter().zip(boundary.surface.areas()).zip(&solution.pressure)
-                .fold(C64::ZERO,|sum,((shape,area),p)|sum+p.scale(shape*area));
+            impedance[i*count+j]=radiation_projection(row,boundary.surface.areas(),&solution.pressure);
         }
         let pressure=evaluation.pressure(solution)?;
         for (row,p) in receiver_transfer.iter_mut().zip(pressure) {row[j]=p;}
@@ -155,6 +180,55 @@ mod tests {
         let obj=geometry::box_obj("skin",[0.,0.,-0.01],[0.1,0.1,0.02]);
         let boundary=Boundary::from_obj(&obj,&spec,&motion).unwrap().loaded(model.bank()).unwrap();
         (boundary,model,spec)
+    }
+    // A projection needs only solved generalized displacements. The other
+    // observables are unused here; no mechanical solve supplies the oracle.
+    fn response_with_displacements(board_displacement:Vec<C64>)->Response {
+        Response {board_displacement,string_displacement:vec![],cavity_displacement:vec![],
+            bridge_velocity:vec![],input_w:0.,board_loss_w:0.,string_loss_w:0.,radiation_w:0.,
+            cavity_loss_w:0.,power_defect_w:0.,backward_error:0.,retained_string_poles:0}
+    }
+    #[test]
+    fn coherent_harmonic_pressure_retains_quiet_modes_and_product_residuals() {
+        // G1/G3: exact dyadic coefficients provide an independent reference.
+        // The large modal fields cancel; their ordering cannot erase the
+        // smaller physical mode, including its relative complex phase.
+        let loud=C64::new(2.0_f64.powi(54),2.0_f64.powi(54));
+        let rows=[loud,C64::new(1.,-0.5),-loud];
+        for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]] {
+            let load=LoadingSample {impedance:vec![],receiver_transfer:vec![order.map(|i|rows[i]).to_vec()],
+                minimum_ppw:8.,condition_lower_bound:1.};
+            for (phase,expected) in [(C64::ONE,C64::new(-1.,-2.)),
+                (C64::new(0.,1.),C64::new(2.,-1.))] {
+                let response=response_with_displacements(vec![phase;3]);
+                assert_eq!(load.pressure(&response,2.).unwrap(),vec![expected]);
+            }
+        }
+        // (1+e)(1-e)-1 = -e^2. Summing already-rounded products would
+        // still lose this harmonic even with a compensated accumulator.
+        let e=2.0_f64.powi(-27);
+        let load=LoadingSample {impedance:vec![],receiver_transfer:vec![
+            vec![C64::new(1.+e,1.+e),C64::new(-1.,-1.)]],
+            minimum_ppw:8.,condition_lower_bound:1.};
+        let response=response_with_displacements(vec![C64::new(1.-e,0.),C64::ONE]);
+        assert_eq!(load.pressure(&response,4.).unwrap(),vec![C64::new(-4.*e*e,4.*e*e)]);
+    }
+    #[test]
+    fn radiation_reaction_retains_panel_cancellation_and_area_products() {
+        // Signed shapes and complex boundary pressures are contracted BEFORE
+        // interpreting dissipative/reactive loading. Preserve their phase.
+        let shape=[2.0_f64.powi(54),1.,-2.0_f64.powi(54)];
+        let pressure=[C64::new(1.,-2.);3];
+        for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]] {
+            assert_eq!(radiation_projection(&order.map(|i|shape[i]),&[1.;3],&pressure),C64::new(1.,-2.));
+        }
+        let e=2.0_f64.powi(-27);
+        assert_eq!(radiation_projection(&[1.+e,-1.],&[1.-e,1.],&[C64::new(1.,-2.);2]),
+            C64::new(-e*e,2.*e*e));
+        // A product error in pressure itself must survive too, not only in
+        // the geometric weight (whose area is exact in this second control).
+        assert_eq!(radiation_projection(&[1.+e,-1.],&[1.;2],
+            &[C64::new(1.-e,-2.*(1.-e)),C64::new(1.,-2.)]),C64::new(-e*e,2.*e*e));
     }
     #[test]
     fn actual_bem_reaction_changes_mobility_and_closes_mechanical_radiation_power() {
