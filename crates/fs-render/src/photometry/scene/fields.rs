@@ -15,6 +15,10 @@ use crate::dielectric::{DielectricGlass, DielectricIor, DielectricSurface};
 use crate::gradient_index::GradientIndexField;
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::instances::InstanceScene;
+use crate::material_state::air_refraction::composition::{
+    AirCompositionGradientField, AirCompositionSecondOrderField,
+    MaterialAirCompositionRefractiveField, PreparedMaterialAirCompositionRefractiveField,
+};
 use crate::material_state::air_refraction::{
     MaterialAirRefractiveField, PreparedMaterialAirRefractiveField,
 };
@@ -352,6 +356,60 @@ impl<'a> NativeGasAmbient<'a> {
         Self {
             field: Field::Differentiable(prepared),
             ..Self::from_prepared_ciddor_field(prepared)
+        }
+    }
+
+    /// Original p/T plus spatial water/CO2 composition, using all Ciddor state responses.
+    pub fn from_ciddor_composition_field<
+        P: PressureTemperatureGradientField + Sync + ?Sized,
+        C: AirCompositionGradientField + Sync + ?Sized,
+    >(
+        field: &'a MaterialAirCompositionRefractiveField<'_, P, C>,
+    ) -> Self {
+        Self {
+            material_identity: field.model_identity(),
+            field_identity: field.content_identity(),
+            wavelength_range_nm: field.wavelength_range_nm(),
+            field: Field::Gradient(field),
+        }
+    }
+
+    /// Retain all four spatial Hessians and all six mixed constitutive responses.
+    pub fn from_differentiable_ciddor_composition_field<
+        P: PressureTemperatureSecondOrderField + Sync + ?Sized,
+        C: AirCompositionSecondOrderField + Sync + ?Sized,
+    >(
+        field: &'a MaterialAirCompositionRefractiveField<'_, P, C>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(field),
+            ..Self::from_ciddor_composition_field(field)
+        }
+    }
+
+    /// Cache only spectral coefficients; composition is sampled at every native ray stage.
+    pub fn from_prepared_ciddor_composition_field<
+        P: PressureTemperatureGradientField + Sync + ?Sized,
+        C: AirCompositionGradientField + Sync + ?Sized,
+    >(
+        prepared: &'a PreparedMaterialAirCompositionRefractiveField<'_, '_, P, C>,
+    ) -> Self {
+        Self {
+            field: Field::Gradient(prepared),
+            ..Self::from_ciddor_composition_field(prepared.source_field())
+        }
+    }
+
+    /// The same original state and wavelength, with native differentiated bundle support.
+    pub fn from_prepared_differentiable_ciddor_composition_field<
+        P: PressureTemperatureSecondOrderField + Sync + ?Sized,
+        C: AirCompositionSecondOrderField + Sync + ?Sized,
+    >(
+        prepared: &'a PreparedMaterialAirCompositionRefractiveField<'_, '_, P, C>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(prepared),
+            ..Self::from_prepared_ciddor_composition_field(prepared)
         }
     }
 

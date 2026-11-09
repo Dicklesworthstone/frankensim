@@ -5,6 +5,9 @@ use crate::gradient_index::bundle::ProjectionOptions;
 use crate::gradient_index::event::GradientEventOptions;
 use crate::gradient_index::thermal::TemperatureField;
 use crate::gradient_index::{GradientIndexError, GradientIndexOptions};
+use crate::material_state::air_refraction::composition::{
+    AirCompositionGradientSample, AirCompositionJet,
+};
 use crate::material_state::gas_scattering::isobaric::IsobaricGasField;
 use crate::material_state::gas_scattering::{GasPartialDensityJet, GasPartialDensitySample};
 use crate::material_state::thermo_optic::{TemperatureGradientSample, TemperatureJet};
@@ -421,6 +424,142 @@ fn g1_ciddor_atmosphere_bends_native_camera_to_original_source_with_group_delay(
                             let path = result.path();
                             let end = path.beam().ray();
                             assert!((-0.095..-0.045).contains(&end.origin.x));
+                            close(end.origin.z, 40.0, 5e-7);
+                            assert_eq!(
+                                path.medium_snapshot_identity(),
+                                Some(field.content_identity())
+                            );
+                            let n0 = prepared.optical_sample(ray().origin).unwrap().phase_index();
+                            let n1 = prepared.optical_sample(end.origin).unwrap().phase_index();
+                            close(n1 * end.dir.z, n0, 2e-9);
+                            assert!(
+                                path.group_optical_path_length_m().unwrap()
+                                    > path.optical_path_length_m() + 1e-4
+                            );
+                            assert_eq!(path.optical_depth(), 0.0);
+                            let expected = 6.0 * SPECTRUM.eval(wavelength) * (n0 / n1).powi(2);
+                            close(result.radiance_w_m2_sr_nm(), expected, expected * 1e-8);
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+    });
+}
+
+struct HumidityAtmosphere;
+impl PressureTemperatureGradientField for HumidityAtmosphere {
+    fn pressure_temperature_gradient(
+        &self,
+        _: Point3,
+    ) -> Result<PressureTemperatureGradientSample, GradientIndexError> {
+        Ok(PressureTemperatureGradientSample {
+            temperature: TemperatureGradientSample {
+                temperature_k: 293.15,
+                gradient_k_per_m: Vec3::new(0.0, 0.0, 0.0),
+            },
+            pressure_pa: 101_325.0,
+            pressure_gradient_pa_per_m: Vec3::new(0.0, 0.0, 0.0),
+        })
+    }
+    fn is_spatially_uniform(&self) -> bool {
+        true
+    }
+}
+impl PressureTemperatureSecondOrderField for HumidityAtmosphere {
+    fn pressure_temperature_jet(
+        &self,
+        p: Point3,
+    ) -> Result<PressureTemperatureJet, GradientIndexError> {
+        let state = self.pressure_temperature_gradient(p)?;
+        Ok(PressureTemperatureJet {
+            temperature: TemperatureJet {
+                sample: state.temperature,
+                diagonal_k_per_m2: [0.0; 3],
+                off_diagonal_k_per_m2: [0.0; 3],
+            },
+            pressure_pa: state.pressure_pa,
+            pressure_gradient_pa_per_m: state.pressure_gradient_pa_per_m,
+            pressure_diagonal_pa_per_m2: [0.0; 3],
+            pressure_off_diagonal_pa_per_m2: [0.0; 3],
+        })
+    }
+}
+impl AirCompositionGradientField for HumidityAtmosphere {
+    fn air_composition_gradient(
+        &self,
+        p: Point3,
+    ) -> Result<AirCompositionGradientSample, GradientIndexError> {
+        let composition = CiddorAir::try_new(0.02 + 0.05 * p.x, 450.0)
+            .map_err(|_| GradientIndexError::OutsideFieldDomain)?;
+        Ok(AirCompositionGradientSample {
+            composition,
+            water_gradient_per_m: Vec3::new(0.05, 0.0, 0.0),
+            co2_gradient_micromol_per_mol_m: Vec3::new(0.0, 0.0, 0.0),
+        })
+    }
+}
+impl AirCompositionSecondOrderField for HumidityAtmosphere {
+    fn air_composition_jet(&self, p: Point3) -> Result<AirCompositionJet, GradientIndexError> {
+        Ok(AirCompositionJet {
+            sample: self.air_composition_gradient(p)?,
+            water_diagonal_per_m2: [0.0; 3],
+            water_off_diagonal_per_m2: [0.0; 3],
+            co2_diagonal_micromol_per_mol_m2: [0.0; 3],
+            co2_off_diagonal_micromol_per_mol_m2: [0.0; 3],
+        })
+    }
+}
+
+#[test]
+fn g1_humidity_alone_bends_native_camera_to_original_emitter() {
+    with_cx(|cx, _| {
+        let state = HumidityAtmosphere;
+        let field = MaterialAirCompositionRefractiveField::try_nonabsorbing(
+            &state,
+            &state,
+            ContentHash([155; 32]),
+        )
+        .unwrap();
+        let first = NativeGasAmbient::from_ciddor_composition_field(&field);
+        let second = NativeGasAmbient::from_differentiable_ciddor_composition_field(&field);
+        // Constant T/P with water fraction alone bending the initially axial ray.
+        // The unchanged straight ray misses this original emitting triangle.
+        let owner = admit(cx, first, scene(40.0, -0.0017, 0.0008, false, false));
+        assert_eq!(first.material_identity(), field.model_identity());
+        assert_eq!(first.wavelength_range_nm(), [300.0, 1700.0]);
+        for wavelength in [450.0, 650.0] {
+            let prepared = field.prepare(wavelength).unwrap();
+            let third = NativeGasAmbient::from_prepared_ciddor_composition_field(&prepared);
+            let fourth =
+                NativeGasAmbient::from_prepared_differentiable_ciddor_composition_field(&prepared);
+            for ambient in [first, second, third, fourth] {
+                assert_eq!(ambient.field_identity(), field.content_identity());
+                owner
+                    .with_curved_camera(
+                        cx,
+                        100_000,
+                        NativeRadianceCalibration::try_new(3.0, 0.0).unwrap(),
+                        ambient,
+                        &[],
+                        |native, _| {
+                            let result = native
+                                .sample_ray_with_samples(
+                                    cx,
+                                    ray(),
+                                    wavelength,
+                                    0,
+                                    settings(),
+                                    |_| panic!("black source has no continuation"),
+                                )
+                                .unwrap();
+                            assert_eq!(
+                                result.endpoint(),
+                                RadianceEndpoint::Surface { object_id: 9 }
+                            );
+                            let path = result.path();
+                            let end = path.beam().ray();
+                            assert!((-0.0025..-0.0009).contains(&end.origin.x));
                             close(end.origin.z, 40.0, 5e-7);
                             assert_eq!(
                                 path.medium_snapshot_identity(),

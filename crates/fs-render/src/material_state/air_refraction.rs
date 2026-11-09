@@ -4,6 +4,8 @@
 //! derivatives, including its full Hessian for bundle transport. This adapter
 //! explicitly models nonabsorbing air: refractive-index data alone do not establish
 //! zero absorption, no scattering, or the absence of condensation.
+//! Spatially varying water/CO2 composition uses [`composition`] with the same
+//! original pressure/temperature reconstruction and full material chain rule.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_geom::{Point3, Vec3};
@@ -18,6 +20,8 @@ use super::water_refraction::pressure_temperature::{
     PressureTemperatureGradientField, PressureTemperatureGradientSample,
     PressureTemperatureSecondOrderField,
 };
+
+pub mod composition;
 
 /// Failure to attach or evaluate the original atmospheric state.
 #[derive(Clone, Copy, Debug, PartialEq)]
