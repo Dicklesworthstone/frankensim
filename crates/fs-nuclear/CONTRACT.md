@@ -3409,3 +3409,23 @@ Compartment rates remain prescribed. Carrier fluid dynamics, transported bulk
 mass and sensible/latent enthalpy are separate owners; this coupling does not
 infer them. Frozen-mean reaction closure, diffusion-model limits and the
 existing kinetic-energy model exclusions still apply.
+
+## Evaluated spontaneous-fission yield input
+
+`endf::fission_yields::spontaneous::SpontaneousFissionYieldEvaluation` admits
+identified ENDF-6 NSUB=5, MF8/MT454 independent products through the existing
+bounded record reader. The source must declare one energy-independent LE=0
+set. Product identities, isomers, multiplicities, uncertainties and source
+energy-field metadata remain unchanged; yields are never normalized to one or
+two. Cumulative MT459 yields cannot substitute for immediate product births.
+
+The opaque type cannot enter incident-neutron collapse. The original induced
+yield API still requires NSUB=11. Fragment yields establish neither half-life,
+branching, event energy nor neutron multiplicity/spectrum; these remain
+separate explicit inputs. Existing allocation/record limits and cancellation
+apply, including a final checkpoint before the evaluation is returned.
+
+Three manufactured regressions cover data retention, cross-sublibrary and
+cumulative/ambiguous/energy-dependent source refusal, explicit bounds and late
+cancellation. Source review and rustfmt were completed; execution of these new
+regressions remains unconfirmed after the native workspace disconnected.

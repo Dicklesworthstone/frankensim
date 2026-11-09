@@ -13,6 +13,8 @@
 //! yields; its single incident energy remains recorded as source metadata.
 //! Format: ENDF-102, section 8.3,
 //! <https://nds.iaea.org/public/endf/endf-manual.pdf>.
+//! The separate [`spontaneous`] type admits NSUB=5 through this same record
+//! reader without making those yields available to incident-neutron collapse.
 
 use std::sync::Arc;
 
@@ -27,6 +29,9 @@ pub mod model;
 
 /// Temperature-dependent removal, product production and prompt event energy.
 pub mod temperature;
+
+/// Independent spontaneous-fission products, without an incident neutron law.
+pub mod spontaneous;
 
 /// Both the selected MAT and the full parent identity must match the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +101,30 @@ pub struct FissionYieldEvaluation {
     points: Arc<[FissionYieldPoint]>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YieldSublibrary {
+    NeutronInduced,
+    Spontaneous,
+}
+
+impl YieldSublibrary {
+    fn number(self) -> i32 {
+        match self {
+            Self::NeutronInduced => 11,
+            Self::Spontaneous => 5,
+        }
+    }
+
+    fn requirement(self) -> &'static str {
+        match self {
+            Self::NeutronInduced => {
+                "ENDF-6 neutron-induced fission-yield sublibrary NSUB=11 required"
+            }
+            Self::Spontaneous => "ENDF-6 spontaneous-fission yield sublibrary NSUB=5 required",
+        }
+    }
+}
+
 impl FissionYieldEvaluation {
     /// Read identified neutron-induced independent yields. This accepts neither
     /// spontaneous/photo-fission sublibraries nor a cumulative MT459 substitute.
@@ -106,6 +135,28 @@ impl FissionYieldEvaluation {
         limits: EndfFissionYieldReadLimits,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<Self, EndfError> {
+        Self::parse_sublibrary(
+            data_id,
+            selection,
+            text,
+            limits,
+            YieldSublibrary::NeutronInduced,
+            &mut checkpoint,
+        )
+    }
+
+    // Shared source admission stays private: public callers cannot turn an
+    // NSUB=5 evaluation into the incident-neutron type by selecting a flag.
+    fn parse_sublibrary(
+        data_id: String,
+        selection: EndfFissionYieldSelection,
+        text: &str,
+        limits: EndfFissionYieldReadLimits,
+        sublibrary: YieldSublibrary,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, EndfError> {
+        let mut poll = || checkpoint();
+        let mut checkpoint = &mut poll;
         checkpoint()?;
         if data_id.trim().is_empty()
             || selection.material_number == 0
@@ -138,6 +189,7 @@ impl FissionYieldEvaluation {
                     &mut reader,
                     record,
                     selection,
+                    sublibrary,
                     &mut checkpoint,
                 )?);
             } else if (record.mf, record.mt) == (8, 454) {
@@ -145,14 +197,16 @@ impl FissionYieldEvaluation {
                     return Err(EndfError::AmbiguousSelection);
                 }
                 let identity = metadata.as_ref().ok_or_else(|| {
-                    record
-                        .error("MF1/MT451 parent and neutron-yield identity must precede MF8/MT454")
+                    record.error(
+                        "MF1/MT451 parent and yield-sublibrary identity must precede MF8/MT454",
+                    )
                 })?;
                 candidate = Some(read_evaluation(
                     &mut reader,
                     record,
                     identity.clone(),
                     limits,
+                    sublibrary,
                     &mut checkpoint,
                 )?);
             }
@@ -194,6 +248,7 @@ fn read_metadata(
     reader: &mut Reader<'_>,
     head: Record<'_>,
     selection: EndfFissionYieldSelection,
+    sublibrary: YieldSublibrary,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
 ) -> Result<FissionYieldMetadata, EndfError> {
     let second = reader.section(head.mat, 1, 451, checkpoint)?;
@@ -216,10 +271,8 @@ fn read_metadata(
         }
     }
     reader.send(head.mat, 1, checkpoint)?;
-    if second.integer(5)? != 6 || third.integer(4)? != 11 {
-        return Err(EndfError::Unsupported(
-            "ENDF-6 neutron-induced fission-yield sublibrary NSUB=11 required",
-        ));
+    if second.integer(5)? != 6 || third.integer(4)? != sublibrary.number() {
+        return Err(EndfError::Unsupported(sublibrary.requirement()));
     }
     let isomer = u16::try_from(second.integer(3)?)
         .map_err(|_| second.error("invalid parent isomer LISO"))?;
@@ -256,6 +309,7 @@ fn read_evaluation(
     head: Record<'_>,
     metadata: FissionYieldMetadata,
     limits: EndfFissionYieldReadLimits,
+    sublibrary: YieldSublibrary,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
 ) -> Result<FissionYieldEvaluation, EndfError> {
     let za = u32::from(metadata.nuclide.atomic_number()) * 1000
@@ -269,6 +323,11 @@ fn read_evaluation(
     let energies = head.count(2)?;
     if energies == 0 {
         return Err(head.error("at least one yield energy row required"));
+    }
+    if sublibrary == YieldSublibrary::Spontaneous && energies != 1 {
+        return Err(EndfError::Unsupported(
+            "spontaneous-fission yields require one energy-independent LE=0 set",
+        ));
     }
     if energies > limits.max_energy_points {
         return Err(budget("fission-yield energy points"));
