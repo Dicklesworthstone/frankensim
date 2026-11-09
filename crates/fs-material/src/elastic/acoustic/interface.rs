@@ -28,6 +28,9 @@ pub mod fluid;
 /// Coherent scattering and interior fields of a finite bonded elastic slab.
 pub mod layer;
 
+/// Exact normal-incidence reflection from original full anisotropic materials.
+pub mod normal;
+
 /// Reflection and P/S conversion at free, clamped or passive-impedance surfaces.
 pub mod surface;
 

@@ -24266,3 +24266,31 @@ Transparent spectra retain finite source support; a disjoint global wavelength
 intersection does not erase valid individual-temperature value queries. This
 owner supplies source optics, not a temperature solver, birefringence model,
 complex-interface law, uncertainty enclosure or invented smooth continuation.
+
+## Normal reflection from original anisotropic elasticity
+
+`elastic::acoustic::interface::normal::NormalElasticCharacteristic` retains the
+original full elastic state and a checked proper surface-to-material frame.
+The native Christoffel owner supplies ascending-speed quasi-modes, their
+polarizations, impedances and energy-velocity walkoff. Original tensor strain
+and traction, Cartesian characteristic/admittance tensors and mode mappings
+remain available without an isotropic projection or another eigensolver.
+Velocity uses the same native polarization in both directions: free reflection
+is +1 and clamped reflection -1 for every mode. Degenerate mode labels identify
+only a subspace. Velocity and traction use surface axes; Mandel strains retain
+the original material axes.
+
+One native 3x3 factorization prepares full passive tensor reflection and a
+separate wall-motion map, retaining tiny reflection near matching and weak
+motion at stiff supports. Original Gram-channel work stays positive and
+separate from independently reconstructed wave flux. The welded two-material
+owner uses a native 6x6 solve for all velocity/traction continuities, coherent
+incidence from both sides, and each original source's whole-halfspace strain
+bound. Prepared drives allocate nothing; preparation is cancellable.
+
+Six authored regression groups cover known full-tensor eigenpairs, an
+independent noncommuting-support oracle, frame covariance and degenerate
+isotropic parity, stiff/matched limits, source bounds, and an independent
+two-sided welded-interface oracle. This is lossless normal-wave bulk physics;
+it adds no oblique anisotropic branches, anisotropic coating propagation,
+attenuation, source calibration or experimental qualification.

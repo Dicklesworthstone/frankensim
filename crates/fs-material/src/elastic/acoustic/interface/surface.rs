@@ -21,7 +21,7 @@
 
 use super::*;
 
-mod tensor;
+pub(super) mod tensor;
 pub use tensor::ElasticSurfaceImpedanceTensor;
 
 /// Passive locally reacting support in the original `exp(-i omega t)` convention.

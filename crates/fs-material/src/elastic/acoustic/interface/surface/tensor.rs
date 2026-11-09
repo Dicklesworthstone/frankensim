@@ -141,7 +141,7 @@ impl ElasticSurfaceImpedanceTensor {
 
 // Preserve products before coherent cancellation, including a nearly undamped
 // direction of the original Gram factor. This uses the existing DD owner.
-pub(super) fn complex_dot(terms: impl IntoIterator<Item = (C64, C64)>) -> C64 {
+pub(in crate::elastic::acoustic::interface) fn complex_dot(terms: impl IntoIterator<Item = (C64, C64)>) -> C64 {
     let mut re = Dd::ZERO;
     let mut im = Dd::ZERO;
     for (a, b) in terms {
