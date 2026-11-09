@@ -8,6 +8,8 @@
 //! and retains coherent interference between supplied incident plane waves.
 //! [`PreparedHalfPlaneMonopole`] resolves the exact finite-distance spherical
 //! Green function and analytic velocity with bounded contour quadrature.
+//! [`PreparedHalfPlaneForce`] differentiates the same Green function in source
+//! and receiver coordinates for physical point forces and full Euler velocity.
 //!
 //! For exp(-i omega t), arrival azimuth alpha and receiver azimuth theta,
 //! the transverse solution is
@@ -37,7 +39,10 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod point;
 mod spectrum;
-pub use point::{HalfPlaneMonopoleDiagnostics, HalfPlaneMonopoleLimits, PreparedHalfPlaneMonopole};
+pub use point::{
+    HalfPlaneForceDiagnostics, HalfPlaneForceLimits, HalfPlaneMonopoleDiagnostics,
+    HalfPlaneMonopoleLimits, PreparedHalfPlaneForce, PreparedHalfPlaneMonopole,
+};
 pub use spectrum::{
     HalfPlaneFace, HalfPlaneFrame, HalfPlaneIncidentWave, HalfPlaneReceiver,
     HalfPlaneSpectrumBudget, MAX_HALF_PLANE_COMPONENTS, PreparedHalfPlaneSpectrum,
@@ -85,13 +90,7 @@ impl HalfPlaneDiffraction {
         propagation_direction: [f64; 3],
         boundary: IdealPlaneBoundary,
     ) -> Result<Self, AeroacError> {
-        Self::with_edge_parallel_flow(
-            acoustic,
-            frequency_hz,
-            propagation_direction,
-            boundary,
-            0.0,
-        )
+        Self::with_edge_parallel_flow(acoustic, frequency_hz, propagation_direction, boundary, 0.0)
     }
 
     /// Bind a stationary sheet in uniform subsonic mean flow along its z edge.
@@ -341,15 +340,15 @@ fn energy_transport(
         line.pressure_pa.im,
         line.particle_velocity_m_s.map(|v| v.im),
     )?;
-    let half_sum = |a, b| {
-        (Dd::from_f64(a) * Dd::from_f64(0.5)
-            + Dd::from_f64(b) * Dd::from_f64(0.5))
-        .to_f64()
-    };
+    let half_sum =
+        |a, b| (Dd::from_f64(a) * Dd::from_f64(0.5) + Dd::from_f64(b) * Dd::from_f64(0.5)).to_f64();
     Ok(energy::AcousticEnergyTransport {
         energy_density_j_m3: half_sum(real.energy_density_j_m3, imag.energy_density_j_m3),
         pressure_work_flux_w_m2: core::array::from_fn(|i| {
-            half_sum(real.pressure_work_flux_w_m2[i], imag.pressure_work_flux_w_m2[i])
+            half_sum(
+                real.pressure_work_flux_w_m2[i],
+                imag.pressure_work_flux_w_m2[i],
+            )
         }),
         energy_flux_w_m2: core::array::from_fn(|i| {
             half_sum(real.energy_flux_w_m2[i], imag.energy_flux_w_m2[i])

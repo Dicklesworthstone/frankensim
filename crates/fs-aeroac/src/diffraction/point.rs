@@ -29,6 +29,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod flow;
+mod force;
+pub use force::{HalfPlaneForceDiagnostics, HalfPlaneForceLimits, PreparedHalfPlaneForce};
 
 /// The same physical p/Q and u/Q tolerances and bounded adaptive work controls
 /// used by the existing spherical-wave interface propagator.

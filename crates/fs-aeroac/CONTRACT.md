@@ -4145,3 +4145,59 @@ Cargo/workspace validation was not executed in the storage-constrained session.
 Nonuniform/sheared or cross-edge flow, source motion, supersonic propagation,
 finite geometry, thermal/viscous bulk attenuation, and source feedback remain
 outside this admitted flow class.
+
+## Physical finite-force diffraction by the original straight edge
+
+`diffraction::PreparedHalfPlaneForce` resolves the complete Cartesian force
+transfer through the original spherical half-plane Green function. The
+prescribed source is a force ON the fluid [N], on its original harmonic clock:
+`p=F.grad_source(G)` and `u=grad_receiver(p)/(i*omega*rho)` under
+`exp(-i*omega*t)`. Its three pressure and nine velocity coefficients are
+analytic derivatives of the same Biot--Tolstoy contour. Source displacement,
+plane-wave impedance, a directional ray gain or an independently fitted
+velocity never replaces that mixed receiver/source derivative. This extends
+the finite-volume source owner using the same material, placed geometry,
+ideal rigid/release boundaries, explicit sheet traces and physical field
+carriers.
+
+All twelve physical transfer channels share each original Gauss--Kronrod
+node and deterministic DD accumulation. Force tolerances reuse the native
+Euclidean pressure-transfer and Frobenius velocity-transfer limits in Pa/N
+and m/s/N. Diagnostics retain Cartesian component error estimates, original
+source-edge-receiver distance, evaluations, depth and panel count. These
+estimates do not include geometry or floating-point error and are not relative
+error certificates at a directional/coherent force null.
+
+The mixed angular derivative retains finite integrated weight at arbitrarily
+narrow geometrical transitions. Finite contour regions use logarithmic
+coordinates between disparate transition/decay widths, so neither side of
+that contribution can hide between initial quadrature nodes. At exactly
+q=0 the visible geometrical Hessian has half weight, matching the continuous
+sum with the one-sided diffraction integral. Force-specific tail envelopes
+control phase refinement only; the complete infinite contour remains in
+the integration, with original bounded depth/work and cancellation.
+
+The immutable observer retains twelve complex coefficients. Changing the
+original complex force vector requires twelve products and DD reductions,
+without allocation, integration or transcendental evaluation. Output includes
+pressure, full particle velocity, signed active/reactive intensity and the
+existing perturbation-energy carrier. The tensor and force vector use world
+Cartesian axes; both source and receiver transformations retain the original
+phase and physical units.
+
+Six new G1/G3 regressions check independent free spherical-force limits,
+source derivatives of the original monopole in light and shadow, Euler and
+continuity/energy balance, both exact sheet faces and occluded image coincidence,
+shadow-transition continuity through offsets from 1e-7 to 1e-13 m, reciprocal
+mixed tensors, source-clock/frame covariance, and physical/resource/cancellation
+refusals. Together with the fourteen original stationary/flow point-source
+tests, twenty tests passed on the pinned nightly-2026-07-06 native numerical
+slice. It compiles the exact production derivative/point/flow kernels, original
+frame/plane-wave and adaptive integration owners, actual fs-math and original
+material numerical snapshot. Narrowed error carriers and excluded unrelated
+source/material wrappers mean this is not full-crate, workspace or DSR proof.
+
+This force owner is stationary and homogeneous/lossless. It does not inherit
+the monopole's edge-flow model: a body force in moving fluid also has convected
+vortical response. Finite barriers, wall impedance/absorption, moving force
+sources, source feedback and measured acoustics remain outside this model.
