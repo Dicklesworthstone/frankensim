@@ -17,6 +17,8 @@ mod natural_network;
 mod sphere;
 #[path = "finite_gas_convection/tube.rs"]
 mod tube;
+#[path = "finite_gas_convection/wall_mass_flow.rs"]
+mod wall_mass_flow;
 #[path = "finite_gas_convection/tube_sections.rs"]
 mod tube_sections;
 #[path = "finite_gas_convection/laminar_sections.rs"]

@@ -5,6 +5,7 @@
 //! this second property query has no mass or energy of its own.
 
 use super::film::FilmGasSource;
+use super::mass_flow::MassFlowInput;
 use super::*;
 use crate::graph::thermal::medium::convection::{
     evaluate_laminar_tube_from_material, evaluate_tube_from_material,
@@ -62,7 +63,28 @@ impl<M: FilmGasSource> Clone for LaminarTubeGasSurface<'_, M> {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Original Sieder--Tate tube law with an explicit stream/recirculation rate.
+///
+/// Construct from the turbulent surface or its explicit `.laminar()` selection.
+/// The actual circular flow area must equal `pi D^2/4`; the heated length and
+/// laminar whole-wall admission remain unchanged. Each nonlinear gas trial
+/// supplies original EOS density for velocity, while its separate same-source
+/// wall query still supplies only viscosity. This adds no open mass/enthalpy
+/// flux, fan work, axial solution or thermal integrator.
+#[derive(Debug)]
+pub struct PrescribedMassFlowTubeGasSurface<'a, M: FilmGasSource = ThermochemicalGasModel> {
+    surface: ForcedTubeGasSurface<'a, M>,
+    law: TubeLaw,
+    flow: MassFlowInput,
+}
+impl<M: FilmGasSource> Copy for PrescribedMassFlowTubeGasSurface<'_, M> {}
+impl<M: FilmGasSource> Clone for PrescribedMassFlowTubeGasSurface<'_, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum TubeLaw {
     Turbulent,
     Laminar,
@@ -74,6 +96,8 @@ pub struct TubeGasConvectionSample<S = ResolvedThermochemicalGasState, W = Equil
     pub interface: FiniteGasConvectionSample<S, W>,
     /// None only for an explicitly insulated zero-area patch.
     pub surface_gas: Option<S>,
+    /// Velocity from the ORIGINAL bulk trial when mass flow was selected.
+    pub prescribed_mass_flow: Option<GasMassFlowState>,
 }
 
 impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
@@ -81,6 +105,45 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
     /// tube. The native finite storage/heat solve and original source stay fixed.
     pub const fn laminar(self) -> LaminarTubeGasSurface<'a, M> {
         LaminarTubeGasSurface { surface: self }
+    }
+
+    /// Replace authored speed with positive mass flow through the same tube.
+    pub fn with_prescribed_mass_flow(
+        self,
+        mass_flow_kg_s: f64,
+        flow_area_m2: f64,
+    ) -> Result<PrescribedMassFlowTubeGasSurface<'a, M>, MaterialConvectionError> {
+        self.select_mass_flow(TubeLaw::Turbulent, mass_flow_kg_s, flow_area_m2)
+    }
+
+    fn select_mass_flow(
+        self,
+        law: TubeLaw,
+        mass_flow_kg_s: f64,
+        flow_area_m2: f64,
+    ) -> Result<PrescribedMassFlowTubeGasSurface<'a, M>, MaterialConvectionError> {
+        let flow = MassFlowInput::new(mass_flow_kg_s, flow_area_m2)?;
+        flow.admit_circular_area(self.diameter.value())?;
+        Ok(PrescribedMassFlowTubeGasSurface {
+            surface: self,
+            law,
+            flow,
+        })
+    }
+
+    fn bind_flow(
+        &mut self,
+        flow: Option<MassFlowInput>,
+        gas: &M::State,
+    ) -> Result<Option<GasMassFlowState>, MaterialConvectionError> {
+        match flow {
+            Some(flow) => {
+                let state = flow.resolve(gas)?;
+                self.speed_m_s = state.speed_m_s;
+                Ok(Some(state))
+            }
+            None => Ok(None),
+        }
     }
 
     pub(super) fn validate(self) -> Result<(), MaterialConvectionError> {
@@ -138,17 +201,19 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
         gas: &M::State,
         body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<TubeGasConvectionSample<M::State>>, MaterialConvectionError> {
-        self.resolve_at_temperature(TubeLaw::Turbulent, gas, body.temperature_k(), body)
+        self.resolve_at_temperature(TubeLaw::Turbulent, None, gas, body.temperature_k(), body)
     }
 
     fn resolve_at_temperature<W>(
-        self,
+        mut self,
         law: TubeLaw,
+        flow: Option<MassFlowInput>,
         gas: &M::State,
         wall: f64,
         body: W,
     ) -> Result<ConductanceSample<TubeGasConvectionSample<M::State, W>>, MaterialConvectionError>
     {
+        let prescribed_mass_flow = self.bind_flow(flow, gas)?;
         self.validate_for(law)?;
         if !wall.is_finite() || wall <= 0.0 {
             return Err(invalid("tube convection needs a positive body temperature"));
@@ -164,6 +229,7 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
                         evaluation: None,
                     },
                     surface_gas: None,
+                    prescribed_mass_flow,
                 },
             });
         }
@@ -209,6 +275,7 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
                     }),
                 },
                 surface_gas: Some(surface_gas),
+                prescribed_mass_flow,
             },
         })
     }
@@ -232,6 +299,7 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
     > {
         self.finite_body_candidate_with(
             TubeLaw::Turbulent,
+            None,
             piston,
             input,
             body,
@@ -243,8 +311,9 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
 
     #[allow(clippy::too_many_arguments)]
     fn finite_body_candidate_with<G: PistonGas<State = M::State>>(
-        self,
+        mut self,
         law: TubeLaw,
+        flow: Option<MassFlowInput>,
         piston: &GasPiston<G>,
         input: PistonInput,
         body: UniformEnthalpyStepInput<'_>,
@@ -258,6 +327,8 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
         if cancelled() {
             return Err(ThermalPistonError::Cancelled);
         }
+        self.bind_flow(flow, piston.gas().state())
+            .map_err(ThermalPistonError::Interface)?;
         self.validate_for(law)
             .map_err(ThermalPistonError::Interface)?;
         if !body.surface_area_m2.is_finite()
@@ -273,7 +344,7 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
             body,
             controls,
             exchange,
-            |gas, wall| self.resolve_at_temperature(law, gas, wall.temperature_k(), wall),
+            |gas, wall| self.resolve_at_temperature(law, flow, gas, wall.temperature_k(), wall),
             cancelled,
         )
     }
@@ -301,12 +372,13 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
         >,
         ConvectionError<WallConvectionError<MaterialConvectionError>>,
     > {
-        self.isochoric_body_candidate_with(TubeLaw::Turbulent, cx, environment, body, wall)
+        self.isochoric_body_candidate_with(TubeLaw::Turbulent, None, cx, environment, body, wall)
     }
 
     fn isochoric_body_candidate_with<G: IsochoricGasStorage<State = M::State>>(
-        self,
+        mut self,
         law: TubeLaw,
+        flow: Option<MassFlowInput>,
         cx: &Cx<'_>,
         environment: &FiniteGasThermalEnvironment<'_, G>,
         body: UniformEnthalpyStepInput<'_>,
@@ -322,6 +394,8 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
     > {
         cx.checkpoint()
             .map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
+        self.bind_flow(flow, environment.gas.state())
+            .map_err(|error| ConvectionError::Convection(WallConvectionError::Source(error)))?;
         self.validate_for(law)
             .map_err(|error| ConvectionError::Convection(WallConvectionError::Source(error)))?;
         if !body.surface_area_m2.is_finite()
@@ -335,6 +409,7 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
         environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
             let sample = self.resolve_at_temperature(
                 law,
+                flow,
                 gas,
                 temperature_k,
                 Temperature::new(temperature_k),
@@ -353,7 +428,18 @@ impl<'a, M: FilmGasSource> ForcedTubeGasSurface<'a, M> {
     }
 }
 
-impl<M: FilmGasSource> LaminarTubeGasSurface<'_, M> {
+impl<'a, M: FilmGasSource> LaminarTubeGasSurface<'a, M> {
+    /// Keep the explicit laminar whole-tube mean while prescribing stream mass
+    /// flow through its actual circular cross section.
+    pub fn with_prescribed_mass_flow(
+        self,
+        mass_flow_kg_s: f64,
+        flow_area_m2: f64,
+    ) -> Result<PrescribedMassFlowTubeGasSurface<'a, M>, MaterialConvectionError> {
+        self.surface
+            .select_mass_flow(TubeLaw::Laminar, mass_flow_kg_s, flow_area_m2)
+    }
+
     /// Evaluate the original whole-length mean using this trial's bulk state
     /// and same-fluid wall viscosity. No finite-section evidence is fabricated.
     pub fn resolve(
@@ -362,7 +448,7 @@ impl<M: FilmGasSource> LaminarTubeGasSurface<'_, M> {
         body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<TubeGasConvectionSample<M::State>>, MaterialConvectionError> {
         self.surface
-            .resolve_at_temperature(TubeLaw::Laminar, gas, body.temperature_k(), body)
+            .resolve_at_temperature(TubeLaw::Laminar, None, gas, body.temperature_k(), body)
     }
 
     /// Advance the same finite gas, body enthalpy and piston momentum residual.
@@ -381,6 +467,7 @@ impl<M: FilmGasSource> LaminarTubeGasSurface<'_, M> {
     > {
         self.surface.finite_body_candidate_with(
             TubeLaw::Laminar,
+            None,
             piston,
             input,
             body,
@@ -407,7 +494,89 @@ impl<M: FilmGasSource> LaminarTubeGasSurface<'_, M> {
         >,
         ConvectionError<WallConvectionError<MaterialConvectionError>>,
     > {
-        self.surface
-            .isochoric_body_candidate_with(TubeLaw::Laminar, cx, environment, body, wall)
+        self.surface.isochoric_body_candidate_with(
+            TubeLaw::Laminar,
+            None,
+            cx,
+            environment,
+            body,
+            wall,
+        )
+    }
+}
+
+impl<M: FilmGasSource> PrescribedMassFlowTubeGasSurface<'_, M> {
+    pub const fn mass_flow_kg_s(&self) -> f64 {
+        self.flow.mass_flow_kg_s()
+    }
+    pub const fn flow_area_m2(&self) -> f64 {
+        self.flow.flow_area_m2()
+    }
+
+    /// Resolve actual bulk velocity and original same-fluid wall viscosity.
+    pub fn resolve(
+        self,
+        gas: &M::State,
+        body: EquilibriumPhaseState,
+    ) -> Result<ConductanceSample<TubeGasConvectionSample<M::State>>, MaterialConvectionError> {
+        self.surface.resolve_at_temperature(
+            self.law,
+            Some(self.flow),
+            gas,
+            body.temperature_k(),
+            body,
+        )
+    }
+
+    /// Use the same finite gas/body/piston residual with per-trial velocity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finite_body_candidate<G: PistonGas<State = M::State>>(
+        self,
+        piston: &GasPiston<G>,
+        input: PistonInput,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        ThermalPistonCandidate<TubeGasConvectionSample<M::State>, G>,
+        ThermalPistonError<MaterialConvectionError>,
+    > {
+        self.surface.finite_body_candidate_with(
+            self.law,
+            Some(self.flow),
+            piston,
+            input,
+            body,
+            controls,
+            exchange,
+            cancelled,
+        )
+    }
+
+    /// Use the same fixed-volume gas/body and source-wall feedback residual.
+    pub fn isochoric_body_candidate<G: IsochoricGasStorage<State = M::State>>(
+        self,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+        wall: WallConvectionSolve,
+    ) -> Result<
+        UniformEnthalpyStep<
+            FiniteGasThermalReport<
+                WallConvectionSample<TubeGasConvectionSample<M::State, Temperature>>,
+                G,
+            >,
+        >,
+        ConvectionError<WallConvectionError<MaterialConvectionError>>,
+    > {
+        self.surface.isochoric_body_candidate_with(
+            self.law,
+            Some(self.flow),
+            cx,
+            environment,
+            body,
+            wall,
+        )
     }
 }

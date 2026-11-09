@@ -1,44 +1,12 @@
 //! Prescribed stream mass flux on the original finite gas/body heat residual.
 use super::*;
 
-/// Velocity used by this convection trial, resolved from its bulk gas density.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GasMassFlowState {
-    pub mass_flow_kg_s: f64,
-    /// Stream cross section, distinct from the exposed thermal area.
-    pub flow_area_m2: f64,
-    pub bulk_density_kg_m3: f64,
-    pub speed_m_s: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct MassFlowInput {
-    mass_flow_kg_s: f64,
-    flow_area_m2: f64,
-    mass_flux_kg_m2_s: f64,
-}
+// Keep the original film-facing public path while all finite owners share
+// one positive-input and original-EOS velocity implementation.
+pub use super::super::GasMassFlowState;
+pub(super) use super::super::mass_flow::MassFlowInput;
 
 impl MassFlowInput {
-    fn new(mass_flow_kg_s: f64, flow_area_m2: f64) -> Result<Self, MaterialConvectionError> {
-        let flux = mass_flow_kg_s / flow_area_m2;
-        if !mass_flow_kg_s.is_finite()
-            || mass_flow_kg_s <= 0.0
-            || !flow_area_m2.is_finite()
-            || flow_area_m2 <= 0.0
-            || !flux.is_finite()
-            || flux <= 0.0
-        {
-            return Err(invalid(
-                "finite-gas convection requires positive finite mass rate and flow area with representable mass flux",
-            ));
-        }
-        Ok(Self {
-            mass_flow_kg_s,
-            flow_area_m2,
-            mass_flux_kg_m2_s: flux,
-        })
-    }
-
     fn admit_geometry(self, law: FilmGasHeatLaw) -> Result<(), MaterialConvectionError> {
         let rectangular_area = |diameter: f64, alpha: f64| {
             if !(alpha > 0.0 && alpha <= 1.0) {
@@ -69,15 +37,7 @@ impl MassFlowInput {
             }
             _ => return Ok(()), // An external stream's cross section is authored independently.
         };
-        if !expected.is_finite()
-            || expected <= 0.0
-            || (self.flow_area_m2 - expected).abs() > 64.0 * f64::EPSILON * expected
-        {
-            return Err(invalid(
-                "prescribed duct mass flow requires the cross section of its actual circular or rectangular passage",
-            ));
-        }
-        Ok(())
+        self.admit_flow_area(expected)
     }
 
     pub(super) fn bind(
@@ -85,29 +45,8 @@ impl MassFlowInput {
         law: FilmGasHeatLaw,
         gas: &impl PistonGasState,
     ) -> Result<(FilmGasHeatLaw, GasMassFlowState), MaterialConvectionError> {
-        // The original trial owns rho. Film/source property sampling still
-        // occurs independently at the law's declared property temperature.
-        let density = gas.density_kg_m3();
-        if !density.is_finite() || density <= 0.0 {
-            return Err(invalid(
-                "prescribed convection requires the original positive bulk density",
-            ));
-        }
-        let speed = self.mass_flux_kg_m2_s / density;
-        if !speed.is_finite() || speed <= 0.0 {
-            return Err(invalid(
-                "bulk-density convection velocity is unrepresentable",
-            ));
-        }
-        Ok((
-            with_speed(law, speed)?,
-            GasMassFlowState {
-                mass_flow_kg_s: self.mass_flow_kg_s,
-                flow_area_m2: self.flow_area_m2,
-                bulk_density_kg_m3: density,
-                speed_m_s: speed,
-            },
-        ))
+        let state = self.resolve(gas)?;
+        Ok((with_speed(law, state.speed_m_s)?, state))
     }
 }
 
@@ -159,10 +98,10 @@ impl<'a, M: FilmGasSource> FilmGasSurface<'a, M> {
 
 impl<M: FilmGasSource> PrescribedMassFlowGasSurface<'_, M> {
     pub const fn mass_flow_kg_s(&self) -> f64 {
-        self.flow.mass_flow_kg_s
+        self.flow.mass_flow_kg_s()
     }
     pub const fn flow_area_m2(&self) -> f64 {
-        self.flow.flow_area_m2
+        self.flow.flow_area_m2()
     }
 
     /// Resolve the original source and current bulk-density velocity together.

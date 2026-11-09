@@ -9,6 +9,9 @@
 /// Source-pinned film properties on the same finite gas/body heat residual.
 pub mod film;
 
+mod mass_flow;
+pub use mass_flow::GasMassFlowState;
+
 /// Forced spheres using bulk transport and source-pinned surface viscosity.
 pub mod sphere;
 pub mod tube;

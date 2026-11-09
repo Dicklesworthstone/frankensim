@@ -6238,3 +6238,29 @@ source-based rates, original scalar parity, shared reciprocal heat, canonical
 ordering, early identity refusal and atomic late source/dilute refusal.
 New Rust modules passed pinned rustfmt parsing/format checks; runtime and
 full-crate compilation remain unverified in this environment.
+
+## Prescribed mass flow with original tube and sphere wall properties
+
+`ForcedTubeGasSurface`, its explicit `laminar()` selection, and
+`ForcedSphereGasSurface` accept `with_prescribed_mass_flow` with a positive
+stream mass rate and flow cross section. They share the film adapter's original
+EOS-density primitive: every nonlinear trial resolves
+`u = mdot/(rho_bulk A_flow)` before the same source is queried at the actual
+body/wall temperature for viscosity. Bulk Re, Pr and conductivity remain bulk
+properties. Tube flow area must match `pi D^2/4` within roundoff; a sphere's
+external stream area is independently authored. Laminar whole-length heated
+area admission remains unchanged.
+
+Both selections reuse the original piston/body and fixed-volume wall-feedback
+solvers, with original source, correlation and geometry admission, exact zero
+thermal-area insulation, and gas mass/energy ownership. Samples retain rate,
+area, actual bulk density and speed. Fixed-speed calls and the existing
+`film::GasMassFlowState` path remain available. Prescribed circulation supplies
+no open mass/enthalpy flux, fan work, axial flow solution, second heat integrator
+or additional empirical gas validity for Sieder--Tate.
+
+Four focused regression definitions compare independent Sieder--Tate/Whitaker
+values and actual bulk/wall source coordinates, distinguish EOS density from
+wall-property density, and cover both native storage owners, latent heat,
+mechanical work, entropy and unchanged source/correlation refusals. Their
+execution is not claimed by this implementation checkpoint.
