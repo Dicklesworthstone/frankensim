@@ -20,8 +20,11 @@
 //! That reference uses the opposite phasor and rotating optical p basis; this
 //! owner retains the parent's fixed tangential-E axis and explicit sourced mu.
 //! [`IncoherentLayerCascade`] joins these coherent blocks across explicitly
-//! incoherent lossless connections. A physical coherence length, roughness,
-//! anisotropy and a mesh Maxwell solve remain outside this planar model.
+//! incoherent lossless connections. [`PreparedLayerThicknessEnsemble`] averages
+//! explicitly authored correlated thickness realizations while retaining their
+//! reflected field statistics and physical absorption. A physical coherence
+//! length, roughness, anisotropy and a mesh Maxwell solve remain outside this
+//! planar model.
 
 use super::{
     DielectricResponse, Polarization, ReflectionError, WaveMedium, finite, interface_response,
@@ -38,6 +41,12 @@ pub use frequency::{LayerAmplitudeDerivative, LayeredFrequencyResponse, LayeredR
 
 mod dispersion;
 pub use dispersion::LayeredFrequencyDispersion;
+
+mod thickness_ensemble;
+pub use thickness_ensemble::{
+    LayerThicknessRealization, PreparedLayerThicknessEnsemble, ThicknessEnsembleBudget,
+    ThicknessEnsembleReflection,
+};
 
 mod transverse;
 pub use transverse::{
@@ -351,6 +360,21 @@ impl<'a> PlanarDielectricLayers<'a> {
         incidence_cosine: f64,
         polarization: Polarization,
     ) -> Result<LayeredReflection, ReflectionError> {
+        self.response_with_layer_thicknesses(incidence_cosine, polarization, None)
+    }
+
+    // The ensemble owner has already admitted a complete nonnegative finite
+    // thickness row. Reuse the identical native solve and cached material laws;
+    // nominal source geometry remains immutable.
+    fn response_with_layer_thicknesses(
+        &self,
+        incidence_cosine: f64,
+        polarization: Polarization,
+        thicknesses_m: Option<&[f64]>,
+    ) -> Result<LayeredReflection, ReflectionError> {
+        let thickness = |index: usize| {
+            thicknesses_m.map_or(self.layers[index].source.thickness_m, |row| row[index])
+        };
         let c = positive(incidence_cosine)?;
         if c > 1.0 {
             return Err(bad("incidence cosine must lie in (0,1]"));
@@ -361,13 +385,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         let mut gains = [C64::ZERO; MAX_LAYERS];
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
-            slabs[i] = Slab::new(
-                layer.wave,
-                self.wave_number,
-                c,
-                polarization,
-                layer.source.thickness_m,
-            )?;
+            slabs[i] = Slab::new(layer.wave, self.wave_number, c, polarization, thickness(i))?;
         }
         // Homogeneous [E, H/Y_inc] retains both 1+r and 1-r without
         // subtracting a reflection already rounded to +/-1. Initialize from
@@ -378,7 +396,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         let mut transmitted_power = exit.transmitted_power_fraction;
         for i in (0..n).rev() {
             let slab = slabs[i];
-            if self.layers[i].source.thickness_m == 0.0 {
+            if thickness(i) == 0.0 {
                 gains[i] = C64::ONE;
                 states[i] = states[i + 1];
                 continue;
@@ -406,11 +424,7 @@ impl<'a> PlanarDielectricLayers<'a> {
                 }
             }
         }
-        let reflected = if self
-            .layers
-            .iter()
-            .all(|layer| layer.source.thickness_m == 0.0)
-        {
+        let reflected = if (0..n).all(|i| thickness(i) == 0.0) {
             // An empty/zero-thickness coating is the original interface.
             // Reconstructing its reflection from rounded E/H would erase
             // the compensated weak Brewster channel retained by that owner.

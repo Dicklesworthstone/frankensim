@@ -45,6 +45,8 @@ mod illumination;
 mod incoherent;
 #[path = "plane_wave/interior.rs"]
 mod interior;
+#[path = "plane_wave/thickness_ensemble.rs"]
+mod thickness_ensemble;
 
 #[path = "plane_wave/ohmic.rs"]
 mod ohmic;
