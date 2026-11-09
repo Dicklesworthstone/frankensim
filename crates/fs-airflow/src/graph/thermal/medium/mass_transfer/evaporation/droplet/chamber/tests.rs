@@ -1,4 +1,7 @@
 //! Shared original gas, heterogeneous sourced films and all-or-nothing support.
+#[path = "transport/tests.rs"]
+mod transport;
+
 use super::*;
 use crate::graph::thermal::medium::mass_transfer::evaporation::droplet::chamber::{
     SourceDropletFilm, SourceDropletFilmSample, SourceGasDropletHeatSurface,

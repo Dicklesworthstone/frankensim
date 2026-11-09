@@ -6264,3 +6264,35 @@ values and actual bulk/wall source coordinates, distinguish EOS density from
 wall-property density, and cover both native storage owners, latent heat,
 mechanical work, entropy and unchanged source/correlation refusals. Their
 execution is not claimed by this implementation checkpoint.
+
+## Original gas transport feeding a collective droplet atmosphere
+
+`evaporation::droplet::chamber::transport` composes the existing original gas
+network with the sourced collective droplet chamber in one immutable
+candidate. The caller explicitly identifies one finite gas region. Every
+authored transport path samples the original network together; all droplet
+films then sample that region's actual transported temperature, pressure and
+composition before one joint phase or heat-then-phase interval.
+
+The accepted chamber gas moves into the complete transported parcel map,
+retaining unrelated nodes and every original fixed volume. The original
+transport owner rechecks its mechanism-specific final driving-force ordering
+after droplet heat and phase change. No second flow is sampled or spent.
+Late source, pressure-order, conservation or cancellation refusal publishes
+no gas or liquid endpoint. Callers retry from the original states.
+
+Original species enthalpy, latent and sensible transfers are applied exactly
+once by their existing owners. The report combines signed residuals and
+noncancelling local mass/species/energy defects under one caller-owned
+whole-interval allowance; opposing stage errors cannot erase that budget.
+Original substep receipts remain available. Transport's entropy receipt
+describes its own substep, not the subsequent droplet process.
+
+This is first-order transport then collective heat/phase splitting with
+explicit interval refinement, source selection, relative speeds and heat
+coefficients. It adds no trajectory, entrainment, drag, shielding, statistical
+weights or variable-volume work. Three focused G0/G3/G4 regression groups
+specify actual nozzle-fed source refresh and independent full inventories,
+empty-path parity, and atomic late pressure-reversal refusal with retry.
+New modules passed pinned rustfmt parsing/format checks; compilation and
+runtime execution remain unverified in this environment.
