@@ -5,6 +5,8 @@
 mod diffusivity;
 #[path = "miscibility_material/nonisothermal.rs"]
 mod nonisothermal;
+#[path = "miscibility_material/phase_field.rs"]
+mod phase_field;
 #[path = "miscibility_material/thermal.rs"]
 mod thermal;
 

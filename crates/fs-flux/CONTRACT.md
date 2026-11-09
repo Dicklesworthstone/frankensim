@@ -8764,6 +8764,36 @@ focused workspace. This first-order controller estimates local temporal error;
 spatial consistency still depends on the original authored graph geometry and
 resolution, and no global trajectory error bound is supplied.
 
+### Original material bindings for local-temperature phase separation
+
+`miscibility::material::phase_field` binds a previously source-resolved
+spatial field to its exact original liquid and caloric objects, retaining the
+original square-gradient model and density/volume allowance. Its one-step and
+adaptive candidates preserve the numerical phase-field owner, interface-energy
+account, paired inventories, elapsed time and original resolved-cell budget.
+Actual endpoint temperatures and compositions refresh density, viscosity,
+transport Cp, conductivity and material receipts through the SAME resolver
+used by the convex nonisothermal material adapter.
+
+The source/caloric identity check precedes initialization. Every returned
+endpoint must satisfy the original material domain and fixed-volume allowance;
+a late source or cancellation refusal publishes no field or partial material
+report. This is endpoint property qualification. Independent material property
+receipts do not qualify every discarded/internal trial, supply an automatic
+face-conductivity law or replace original homogeneous calorics. Diffuse-interface
+cells retain their original homogeneous branch and are never individually
+flashed to bulk equilibrium.
+
+Focused material regressions exercise original source identity, actual local
+temperature/property refresh, preserved energy accounting, adaptive evolution,
+late source refusal and cancellation/replay. They are source-reviewed and
+formatted, but not compiler- or execution-validated in this environment.
+A fresh single-job check of the original material dependency closure with one
+compiler frontend thread and incremental compilation disabled still stopped
+when pinned `asupersync` metadata compilation received `SIGKILL`, before
+reaching `fs-material` or these integration tests. The 89 passing numerical
+miscibility tests do not replace this missing material validation.
+
 ### Compatible molecular stress with variable viscosity
 
 Frozen-composition planar and spatial molecular owners sample the original

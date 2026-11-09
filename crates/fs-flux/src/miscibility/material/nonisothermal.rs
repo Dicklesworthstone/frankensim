@@ -28,10 +28,7 @@ use crate::miscibility::nonisothermal::{
         BinaryNonisothermalAdvance, BinaryNonisothermalAdvanceError, BinaryNonisothermalTimeControl,
     },
     advection::BinaryNonisothermalAdvectionStep,
-    transport::{
-        BinaryNonisothermalTransportStep,
-        adaptive::BinaryNonisothermalTransportAdvance,
-    },
+    transport::{BinaryNonisothermalTransportStep, adaptive::BinaryNonisothermalTransportAdvance},
 };
 use fs_material::liquid::solution::caloric::BinaryLiquidCaloricLaw;
 use fs_qty::Temperature;
@@ -109,7 +106,8 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
         temperature_bracket: [Temperature; 2],
         maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ResolvedBinaryMiscibilityNonisothermalField<'caloric, 'source, 'liquid, 'card>> {
+    ) -> Result<ResolvedBinaryMiscibilityNonisothermalField<'caloric, 'source, 'liquid, 'card>>
+    {
         poll(&mut cancelled)?;
         if !std::ptr::eq(self.source().liquid_law(), caloric.liquid_law()) {
             return Err(BinaryMiscibilityMaterialNonisothermalError::Invalid(
@@ -126,7 +124,8 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
             &mut cancelled,
         )?;
         let cells = resolve_local_cells(
-            &numerical,
+            numerical.component_moles(),
+            numerical.temperatures(),
             self.source(),
             self.maximum_resolved_cells,
             &mut cancelled,
@@ -195,8 +194,9 @@ impl<'caloric, 'source, 'liquid, 'card>
         time: BinaryNonisothermalTimeControl,
         controls: BinaryNonisothermalSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<BinaryMiscibilityMaterialNonisothermalAdvanceCandidate<'caloric, 'source, 'liquid, 'card>>
-    {
+    ) -> Result<
+        BinaryMiscibilityMaterialNonisothermalAdvanceCandidate<'caloric, 'source, 'liquid, 'card>,
+    > {
         let (numerical, advance) = self
             .numerical
             .advance_candidate(duration_s, time, controls, &mut cancelled)?
@@ -214,8 +214,9 @@ impl<'caloric, 'source, 'liquid, 'card>
         advection_controls: BinaryMiscibilityAdvectionControls,
         controls: BinaryNonisothermalSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<BinaryMiscibilityMaterialNonisothermalAdvectionCandidate<'caloric, 'source, 'liquid, 'card>>
-    {
+    ) -> Result<
+        BinaryMiscibilityMaterialNonisothermalAdvectionCandidate<'caloric, 'source, 'liquid, 'card>,
+    > {
         let (numerical, step) = self
             .numerical
             .advect_candidate(
@@ -240,8 +241,9 @@ impl<'caloric, 'source, 'liquid, 'card>
         advection_controls: BinaryMiscibilityAdvectionControls,
         controls: BinaryNonisothermalSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<BinaryMiscibilityMaterialNonisothermalTransportCandidate<'caloric, 'source, 'liquid, 'card>>
-    {
+    ) -> Result<
+        BinaryMiscibilityMaterialNonisothermalTransportCandidate<'caloric, 'source, 'liquid, 'card>,
+    > {
         let (numerical, step) = self
             .numerical
             .transport_candidate(
@@ -267,8 +269,14 @@ impl<'caloric, 'source, 'liquid, 'card>
         controls: BinaryNonisothermalSolve,
         time: BinaryNonisothermalTimeControl,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<BinaryMiscibilityMaterialNonisothermalTransportAdvanceCandidate<'caloric, 'source, 'liquid, 'card>>
-    {
+    ) -> Result<
+        BinaryMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
+            'caloric,
+            'source,
+            'liquid,
+            'card,
+        >,
+    > {
         let (numerical, advance) = self
             .numerical
             .advance_transport_candidate(
@@ -290,7 +298,8 @@ impl<'caloric, 'source, 'liquid, 'card>
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         let cells = resolve_local_cells(
-            &numerical,
+            numerical.component_moles(),
+            numerical.temperatures(),
             self.source(),
             self.maximum_resolved_cells,
             cancelled,
@@ -305,14 +314,20 @@ impl<'caloric, 'source, 'liquid, 'card>
     }
 }
 
-fn resolve_local_cells(
-    numerical: &BinaryNonisothermalField,
+pub(super) fn resolve_local_cells(
+    component_moles: &[[f64; 2]],
+    temperatures: &[Temperature],
     source: &BinaryLiquidSquareGradientLaw<'_, '_>,
     maximum_resolved_cells: usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Arc<[ResolvedBinaryLiquidCell]>> {
     poll(cancelled)?;
-    let count = numerical.component_moles().len();
+    let count = component_moles.len();
+    if temperatures.len() != count {
+        return Err(BinaryMiscibilityMaterialNonisothermalError::Invalid(
+            "each original cell requires exactly one actual temperature",
+        ));
+    }
     if count > maximum_resolved_cells {
         return Err(BinaryMiscibilityMaterialError::CellBudget {
             required: count,
@@ -321,12 +336,7 @@ fn resolve_local_cells(
         .into());
     }
     let mut cells = Vec::with_capacity(count);
-    for (cell, (&amounts, &temperature)) in numerical
-        .component_moles()
-        .iter()
-        .zip(numerical.temperatures())
-        .enumerate()
-    {
+    for (cell, (&amounts, &temperature)) in component_moles.iter().zip(temperatures).enumerate() {
         poll(cancelled)?;
         // Reuse the original volume allowance and homogeneous source resolver;
         // neither an additive-density rule nor a local equilibrium is inferred.
@@ -369,7 +379,8 @@ impl<'caloric, 'source, 'liquid, 'card>
 
 /// Complete adaptive interval with all actual endpoint materials qualified.
 #[derive(Debug)]
-pub struct BinaryMiscibilityMaterialNonisothermalAdvanceCandidate<'caloric, 'source, 'liquid, 'card> {
+pub struct BinaryMiscibilityMaterialNonisothermalAdvanceCandidate<'caloric, 'source, 'liquid, 'card>
+{
     field: ResolvedBinaryMiscibilityNonisothermalField<'caloric, 'source, 'liquid, 'card>,
     advance: BinaryNonisothermalAdvance,
 }
@@ -396,7 +407,12 @@ impl<'caloric, 'source, 'liquid, 'card>
 
 /// Conservative parcel advection and its actual endpoint material evaluations.
 #[derive(Debug)]
-pub struct BinaryMiscibilityMaterialNonisothermalAdvectionCandidate<'caloric, 'source, 'liquid, 'card> {
+pub struct BinaryMiscibilityMaterialNonisothermalAdvectionCandidate<
+    'caloric,
+    'source,
+    'liquid,
+    'card,
+> {
     field: ResolvedBinaryMiscibilityNonisothermalField<'caloric, 'source, 'liquid, 'card>,
     step: BinaryNonisothermalAdvectionStep,
 }
@@ -465,7 +481,12 @@ pub struct BinaryMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
     advance: BinaryNonisothermalTransportAdvance,
 }
 impl<'caloric, 'source, 'liquid, 'card>
-    BinaryMiscibilityMaterialNonisothermalTransportAdvanceCandidate<'caloric, 'source, 'liquid, 'card>
+    BinaryMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
+        'caloric,
+        'source,
+        'liquid,
+        'card,
+    >
 {
     pub const fn field(
         &self,

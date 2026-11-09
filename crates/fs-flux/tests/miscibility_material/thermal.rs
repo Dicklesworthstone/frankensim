@@ -79,7 +79,7 @@ fn pure_cp(species: &str, molar_mass: f64, molar_cp: [f64; 3]) -> IsobaricHeatCa
     .unwrap()
 }
 
-fn caloric<'liquid, 'card>(
+pub(super) fn caloric<'liquid, 'card>(
     liquid: &'liquid BinaryLiquidSolutionLaw<'card>,
 ) -> BinaryLiquidCaloricLaw<'liquid, 'card> {
     BinaryLiquidCaloricLaw::try_new(

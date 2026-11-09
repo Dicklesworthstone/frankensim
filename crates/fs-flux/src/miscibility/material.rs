@@ -13,6 +13,8 @@
 //! energy balance with original pure-liquid calorics. The `nonisothermal`
 //! adapter resolves each evolving local temperature/composition after heat,
 //! species and prescribed-flow transport; momentum remains external.
+//! The `phase_field` adapter retains local-temperature demixing and its
+//! interfacial-energy account through the same original material resolver.
 
 use super::advection::{BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls};
 use super::temperature::BinaryMiscibilityTemperatureChange;
@@ -30,6 +32,9 @@ use std::sync::Arc;
 
 /// Original material sources at each evolving local temperature/composition.
 pub mod nonisothermal;
+
+/// Original liquid and caloric sources for local-temperature energetic interfaces.
+pub mod phase_field;
 
 /// Original pure-liquid calorics for uniform-temperature adiabatic diffusion.
 pub mod thermal;
