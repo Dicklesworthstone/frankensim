@@ -129,44 +129,11 @@ impl ImplicitConductionChain<'_> {
         }
         self.admit(thermal, &mut checkpoint)?;
         let endpoint = self.endpoint(thermal, &mut checkpoint)?;
-        let mut rates = thermal.heat_rates_with_coefficients(
-            f64::MAX,
-            |id, cell| {
-                Ok((
-                    thermal.temperature_k(id)?,
-                    thermal.material_temperature_slopes[&cell.material_id],
-                ))
-            },
-            &endpoint.boundary_values,
-            &endpoint.exchange_values,
-            Some(&endpoint.link_values),
-            &mut checkpoint,
-        )?;
-        for (&id, source) in &endpoint.heat_source_states {
-            checkpoint()?;
-            rates
-                .watts
-                .get_mut(&id)
-                .ok_or(DepositionError::Arithmetic)?
-                .add(source.power_w)?;
-        }
-        if let (Some(source), Some(state)) = (
-            &self.coupled_heat_source,
-            &endpoint.coupled_heat_source_state,
-        ) {
-            for (&id, &power) in source.cells.iter().zip(&state.powers_w) {
-                checkpoint()?;
-                rates
-                    .watts
-                    .get_mut(&id)
-                    .ok_or(DepositionError::Arithmetic)?
-                    .add(power)?;
-            }
-        }
+        let rates = self.stationary_heat_rates(thermal, &endpoint, &mut checkpoint)?;
         let mut slopes = Vec::with_capacity(n);
         for (i, &id) in self.ids.iter().enumerate() {
             checkpoint()?;
-            let net_power_w = rates.watts[&id].value()?;
+            let net_power_w = rates[i];
             if net_power_w.abs() > budget.equilibrium_tolerance_w {
                 return Err(ThermalImpedanceError::NotEquilibrium {
                     cell: id,

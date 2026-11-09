@@ -1,5 +1,35 @@
 # fs-thermal contract
 
+## Stationary operating points of original conduction networks
+
+`ImplicitConductionChain::solve_operating_point` and the graph counterpart
+solve each original cell's net heat rate in watts, using the same analytic
+energy tangent and direct tridiagonal or sparse Krylov owner as native implicit
+evolution. Original calorics, nonlinear conductivity, contact resistance,
+radiative/composed boundaries, density geometry and local/nonlocal source
+feedback remain bound. Physical clocks and scheduled inputs are frozen at the
+queried instant. Bounded Newton/backtracking checks original material domains
+and both cellwise and total heat residuals; no fictitious timestep, clipped
+temperature, apparent latent capacity or regularized null space supplies a root.
+
+Every currently conducting component must reach an active temperature-dependent
+bath. Isolated inventories require conserved-energy constraints and are refused
+by this lane. A stationary latent state retains its supplied enthalpy; a singular
+off-equilibrium plateau is not assigned a phase fraction. Driven steady states
+can have nonzero heat throughput and entropy production. Residual acceptance
+does not imply uniqueness, dynamic stability or continuum accuracy.
+
+The immutable `ThermalOperatingPoint` exposes ordered original enthalpies,
+temperatures, actual cell residuals and work counts. It cannot be consumed as an
+evolved timeline or heat credit. Its `prepare_thermal_impedance` method feeds
+the exact retained material/source state into the existing harmonic owner,
+whose resource, interior-domain and residual gates still apply. The input
+timeline and future event cursor remain unchanged on success and refusal.
+Advection is outside this stationary lane. G1/G3/G4 tests cover analytical
+heated chains, nonlinear conductivity, sparse nonlocal feedback, impedance
+handoff, latent/null-space behavior, source-domain limits, cancellation and
+work ceilings.
+
 ## Continuous prescribed bath-temperature histories
 
 `BathTemperatureSchedule` and `with_bath_temperature_histories` on native

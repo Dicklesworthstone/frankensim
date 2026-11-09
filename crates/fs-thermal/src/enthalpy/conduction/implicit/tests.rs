@@ -1511,3 +1511,6 @@ mod current_geometry;
 
 #[path = "tests/impedance.rs"]
 mod impedance;
+
+#[path = "tests/equilibrium.rs"]
+mod equilibrium;

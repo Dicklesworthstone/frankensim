@@ -44,6 +44,10 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 #[path = "implicit/harmonic.rs"]
 pub mod harmonic;
 
+/// Direct stationary heat balance on the same material and transport owners.
+#[path = "implicit/equilibrium.rs"]
+pub mod equilibrium;
+
 /// Accuracy-controlled comparisons of the same original implicit intervals.
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
@@ -1277,6 +1281,36 @@ impl<'a> ImplicitConductionChain<'a> {
         )
     }
 
+    // The same bounded linear solve serves transient Newton and stationary
+    // heat balance; only their physical residual and identity shift differ.
+    fn solve_direction(
+        &self,
+        workspace: &mut ImplicitConductionWorkspace,
+        report: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), ImplicitConductionError> {
+        match self.topology {
+            LinearTopology::Chain => {
+                let mut cancellation_error = None;
+                let solved = workspace.linear.solve_into(
+                    &workspace.lower,
+                    &workspace.diagonal,
+                    &workspace.upper,
+                    &workspace.rhs,
+                    &mut workspace.direction,
+                    || match checkpoint() {
+                        Ok(()) => false,
+                        Err(error) => { cancellation_error = Some(error); true }
+                    },
+                );
+                if let Some(error) = cancellation_error { return Err(error.into()); }
+                solved?;
+            }
+            LinearTopology::Graph(linear) => graph::solve(workspace, linear, report, checkpoint)?,
+        }
+        Ok(())
+    }
+
     fn solve_step_with_sources<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -1362,32 +1396,7 @@ impl<'a> ImplicitConductionChain<'a> {
             for (rhs, &residual) in workspace.rhs.iter_mut().zip(trial.residual_j()) {
                 *rhs = -residual;
             }
-            match self.topology {
-                LinearTopology::Chain => {
-                    let mut cancellation_error = None;
-                    let solved = workspace.linear.solve_into(
-                        &workspace.lower,
-                        &workspace.diagonal,
-                        &workspace.upper,
-                        &workspace.rhs,
-                        &mut workspace.direction,
-                        || match checkpoint() {
-                            Ok(()) => false,
-                            Err(e) => {
-                                cancellation_error = Some(e);
-                                true
-                            }
-                        },
-                    );
-                    if let Some(error) = cancellation_error {
-                        return Err(error.into());
-                    }
-                    solved?;
-                }
-                LinearTopology::Graph(linear) => {
-                    graph::solve(workspace, linear, report, checkpoint)?;
-                }
-            }
+            self.solve_direction(workspace, report, checkpoint)?;
             report.nonlinear_iterations += 1;
             let mut accepted = None;
             let mut fraction = 1.0;

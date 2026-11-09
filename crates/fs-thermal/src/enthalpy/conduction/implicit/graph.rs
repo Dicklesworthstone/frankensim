@@ -300,6 +300,19 @@ impl<'a> ImplicitConductionGraph<'a> {
         self.inner.cell_ids()
     }
 
+    /// Solve stationary original heat balance with the same sparse tangent,
+    /// material bindings and Krylov budgets as native graph evolution.
+    pub fn solve_operating_point<'s, 'm>(
+        &'s self,
+        initial_guess: &DepositionSimulation<'m>,
+        controls: super::equilibrium::ThermalOperatingControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<super::equilibrium::ThermalOperatingPoint<'s, 'a, 'm>,
+        super::equilibrium::ThermalOperatingError> {
+        self.inner.solve_operating_point(initial_guess, controls, workspace, checkpoint)
+    }
+
     /// Prepare the same original heat-rate tangent for continuous thermal
     /// impedance. See the chain method for equilibrium and frozen-clock scope.
     pub fn prepare_thermal_impedance(
