@@ -76,9 +76,9 @@ impl<'a> ParametricHamiltonian<'a> {
             .first()
             .map_or(0, |row| row.len().saturating_sub(1));
         self.admit_order(harmonics)?;
-        if orbit.omega != self.modulation.omega || !self.tangent.available() {
+        if orbit.omega != self.angular_frequency() || !self.tangent.available() {
             return Err(ParametricError::Invalid(
-                "parametric sensitivity requires original clock and complete H0 tangent",
+                "parametric sensitivity requires the response clock and complete H0 tangent",
             ));
         }
         let (n, m) = (
@@ -86,7 +86,7 @@ impl<'a> ParametricHamiltonian<'a> {
             self.system.port_dim() as u128,
         );
         let bytes = 8 * (2 * n * n + 3 * n + m)
-            + 16 * (harmonics.min(MAX_PARAMETRIC_HARMONICS) as u128 + 1);
+            + 16 * ((harmonics / self.periods).min(MAX_PARAMETRIC_HARMONICS) as u128 + 1);
         if bytes > controls.maximum_payload_bytes as u128 {
             return Err(ForcedSensitivityError::Budget {
                 quantity: "parametric physical direction payload",
@@ -127,6 +127,9 @@ impl PreparedParametricSensitivity<'_, '_> {
     /// `ep=partial_p grad H0 + Qp*x` and the original pHS owner supplies
     /// `(J-R)ep+(Jp-Rp)e+Gp*u+G*up`. The original sI clock column supplies
     /// `i*n*Omega_p*X_n`; Q and the drive gain no extra fixed-time phase term.
+    /// Omega_p is the RESPONSE-chart clock derivative. On an over_periods(m)
+    /// chart the original physical source clock therefore changes by m*Omega_p;
+    /// authored pump/input coefficient directions retain their SOURCE clock.
     ///
     /// These are fixed-order implicit derivatives, not a Floquet stability or
     /// omitted-harmonic certificate. Source refusal/cancellation publishes no

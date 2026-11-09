@@ -26,6 +26,7 @@ pub type PhsStorageHessianAction<'a> = dyn Fn(&[f64], &[f64], &mut [f64]) -> boo
 pub(super) enum StorageAction<'a> {
     Native(&'a dyn ContinuousStorageTangent),
     Callback(&'a PhsStorageHessianAction<'a>),
+    Borrowed(&'a StorageTangent<'a>),
 }
 
 impl StorageAction<'_> {
@@ -33,6 +34,7 @@ impl StorageAction<'_> {
         match self {
             Self::Native(action) => action.apply(state, direction, out),
             Self::Callback(action) => action(state, direction, out),
+            Self::Borrowed(tangent) => tangent.apply_hessian(state, direction, out),
         }
     }
 }
@@ -82,6 +84,18 @@ impl<'a> StorageTangent<'a> {
 
     pub(super) fn available(&self) -> bool {
         !matches!(self, Self::Unavailable)
+    }
+
+    /// A source chart retains the EXACT original tangent, including an authored
+    /// override or unavailable capability. No storage metadata is reconstructed.
+    pub(super) fn borrowed(&self, n: usize) -> StorageTangent<'_> {
+        if !self.available() {
+            return StorageTangent::Unavailable;
+        }
+        StorageTangent::Hessian {
+            action: StorageAction::Borrowed(self),
+            scratch: RefCell::new((vec![0.0; n], vec![0.0; n])),
+        }
     }
 
     /// Apply the same complete effort tangent used by the vector-field

@@ -63,7 +63,7 @@ impl ParametricPowerObjective {
         base: &Scratch,
         change: &Scratch,
     ) -> Result<f64> {
-        let omega = source.modulation.omega;
+        let omega = source.angular_frequency();
         let clock = chart.angular_frequency_derivative;
         if matches!(self.kind(), PowerKind::Pump) {
             // Qdot contains the physical clock even at fixed phase. For work
@@ -166,7 +166,7 @@ impl ParametricHamiltonian<'_> {
         }
         if !objective
             .normalization()
-            .normalize(self.modulation.omega, value, gradient, None)
+            .normalize(self.angular_frequency(), value, gradient, None)
         {
             return Err(ParametricError::SourceRefused);
         }

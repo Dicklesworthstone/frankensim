@@ -235,7 +235,7 @@ fn admit_seed(
 }
 
 
-fn gcd(mut a: usize, mut b: usize) -> usize {
+pub(in crate::phs_orbit) fn gcd(mut a: usize, mut b: usize) -> usize {
     while b != 0 { let remainder = a % b; a = b; b = remainder; }
     a
 }
@@ -284,7 +284,7 @@ fn admit_subharmonic(
 // = 8 sum_{n>0} |X_n|^2 sin^2(pi*n*r/m). Exact integer remainders
 // keep commensurate harmonics EXACTLY zero instead of sin(k*pi) roundoff.
 // Stable hypotenuse accumulation avoids squaring physical state amplitudes.
-fn repeat_rms(row: &[C64], periods: usize, repeat: usize) -> Result<f64, PhsOrbitError> {
+pub(in crate::phs_orbit) fn repeat_rms(row: &[C64], periods: usize, repeat: usize) -> Result<f64, PhsOrbitError> {
     let mut norm = 0.0;
     for (n, coefficient) in row.iter().enumerate().skip(1) {
         let phase = ((n % periods) * repeat) % periods;

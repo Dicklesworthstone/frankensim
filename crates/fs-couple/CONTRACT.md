@@ -13869,3 +13869,47 @@ strain harmonics remain statically condensed by the original model; this is
 not a claim of fully resolved axial waves, exact finite geometry or thermal
 material evolution. Exact propagation applies to the complete declared linear
 block. Nonlinear/contact accuracy still requires temporal and modal refinement.
+
+### Pumped responses over multiple original source periods
+
+`ParametricHamiltonian::over_periods(m)` borrows the unchanged original source
+on an integer multiple of its current response period. Nested views multiply
+the total authored-period count; `angular_frequency`, `period_multiplier`
+and `required_harmonics` expose the response chart. Original Fourier input,
+Q/Qdot coefficients, physical frequencies/phases, J/R/G, nonlinear H0, all
+memory states and native/authored H0 tangents remain unchanged and borrowed.
+Physical-time field, power and tangent evaluation stay identical even for
+nonbinary multipliers. Only the response clock and required numerical
+bandwidth change. Total period multiplier and mapped source bandwidth are
+bounded by 256; invalid clocks, periods or bandwidth refuse before scratch
+allocation or source evaluation.
+
+Existing full seeded/adaptive HB, variational shooting, signed sidebands,
+sensitivities and objective owners use the longer response clock and complete
+response duration. There is no new solver or source-coefficient reconstruction.
+`require_subharmonic_separation` requires at least two original source
+periods and a complete retained waveform on the response clock. It compares
+every proper synchronized repeat through the existing exact-integer Parseval
+`repeat_rms` owner and positive per-original-state physical RMS tolerances.
+Primitive authored-clock gcd includes nonzero input AND pump harmonics,
+admitting pump-only excitation while refusing constant/padded source clocks.
+Memory states count; DC does not inflate tolerances and tiny numerical tails
+cannot establish a longer period. This is neither automatic branch finding
+nor a general primitive-period, existence, stability or infinite-tail proof.
+
+Physical input/modulation parameter directions retain the authored SOURCE
+clock and have bandwidth multiplied by total periods.
+`ForcedSensitivityDirection.angular_frequency_derivative` denotes RESPONSE
+omega_p; source-clock change is m*omega_p, so the explicit pump relative clock
+partial is omega_p/omega_response. Per-cycle objectives use the full response
+period. Pump explicit period/clock cancellation remains analytic, with its
+waveform chain retained.
+
+Three focused tests exercise a biased saturated nonlinear half-frequency
+response with relaxation memory against independently refined original ODEs,
+full-cycle variational shooting and Liouville's determinant, six independent
+physical power/work values, rejection of the ordinary shorter HB branch,
+unchanged physical-time laws and authored Hessian under nested 3x2 views,
+response-clock neighboring-source gradients, mapped-bandwidth refusal and
+cancellation/reuse. Existing parametric and parameter-objective tests remain
+applicable to the original one-period chart.

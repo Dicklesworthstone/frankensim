@@ -20,6 +20,8 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+mod periods;
+
 mod sensitivity;
 pub use sensitivity::{
     ParametricParameterDirection, ParametricPowerObjective, PreparedParametricPowerAdjoint,
@@ -269,6 +271,7 @@ pub struct ParametricHamiltonian<'a> {
     system: &'a PortHamiltonian,
     input: &'a PeriodicPortInput,
     modulation: &'a PeriodicQuadraticModulation,
+    periods: usize,
     tangent: StorageTangent<'a>,
     scratch: RefCell<Scratch>,
     source_refused: Cell<bool>,
@@ -321,6 +324,7 @@ impl<'a> ParametricHamiltonian<'a> {
             system,
             input,
             modulation,
+            periods: 1,
             tangent,
             scratch: RefCell::new(Scratch::new(n, m, modulation.harmonics)),
             source_refused: Cell::new(false),
@@ -331,6 +335,7 @@ impl<'a> ParametricHamiltonian<'a> {
         self.modulation
             .harmonics
             .max(self.input.highest_nonzero_harmonic())
+            * self.periods
     }
     fn admit_order(&self, harmonics: usize) -> Result<()> {
         if harmonics < self.bandwidth() {
@@ -466,7 +471,7 @@ impl<'a> ParametricHamiltonian<'a> {
         let result = solve_hb_scaled_seeded(
             &Adapter(self),
             HbAnchor::Forced {
-                omega: self.modulation.omega,
+                omega: self.angular_frequency(),
             },
             seed,
             budget,
@@ -494,7 +499,7 @@ impl<'a> ParametricHamiltonian<'a> {
         let result = solve_hb_adaptive_scaled_seeded(
             &Adapter(self),
             HbAnchor::Forced {
-                omega: self.modulation.omega,
+                omega: self.angular_frequency(),
             },
             seed,
             budget,
@@ -531,7 +536,7 @@ impl<'a> ParametricHamiltonian<'a> {
         let result = solve_shooting_variational(
             &Adapter(self),
             seed,
-            core::f64::consts::TAU / self.modulation.omega,
+            core::f64::consts::TAU / self.angular_frequency(),
             budget,
             controls,
             &mut cancelled,
@@ -578,7 +583,7 @@ impl<'a> ParametricHamiltonian<'a> {
             .checked_mul(2)
             .and_then(|n| n.checked_add(1))
             .ok_or(ParametricError::Invalid("sideband extent overflows"))?;
-        if orbit.omega != self.modulation.omega
+        if orbit.omega != self.angular_frequency()
             || controls.harmonics > 64
             || width.checked_mul(m) != Some(forcing.len())
             || forcing.iter().any(|z| !finite(*z))

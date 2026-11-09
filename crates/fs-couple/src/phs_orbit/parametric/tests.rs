@@ -4,6 +4,9 @@ use fs_phs::{ContinuousStorageTangent, Storage, mass_spring_damper};
 #[path = "sensitivity/tests.rs"]
 mod sensitivity;
 
+#[path = "periods/tests.rs"]
+mod periods;
+
 const TAU: f64 = core::f64::consts::TAU;
 
 fn complex(amplitude: f64, phase: f64) -> C64 {

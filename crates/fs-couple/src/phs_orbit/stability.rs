@@ -6,6 +6,7 @@ use fs_orbit::{HbOrbit, ShootBudget, ShootOrbit, solve_shooting};
 use fs_phs::PortHamiltonian;
 
 mod subharmonic;
+pub(super) use subharmonic::{gcd, repeat_rms};
 mod variational;
 pub use variational::{
     PhsVariationalFloquetLevel, PhsVariationalForcedStability,

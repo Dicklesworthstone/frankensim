@@ -16,7 +16,7 @@ pub(super) fn with_samples<'s, 'a, 'd, T>(
     if let Some(pump) = direction.modulation {
         if pump.dimension != n
             || pump.omega != source.modulation.omega
-            || pump.harmonics > harmonics
+            || pump.harmonics > harmonics / source.periods
         {
             return Err(ParametricError::Invalid(
                 "pump direction requires original dimension, clock and retained bandwidth",
@@ -26,7 +26,7 @@ pub(super) fn with_samples<'s, 'a, 'd, T>(
     if let Some(input) = direction.physical.input {
         if input.port_count() != m
             || input.omega_rad_s() != source.modulation.omega
-            || input.highest_nonzero_harmonic() > harmonics
+            || input.highest_nonzero_harmonic() > harmonics / source.periods
         {
             return Err(ParametricError::Invalid(
                 "input direction requires original ports, clock and retained bandwidth",
