@@ -2645,9 +2645,11 @@ Newton trials and final reaction assembly; a failed endpoint changes no caller
 history and publishes no partial pair. Newton work limits apply separately
 to both stages. There is no hidden clipping, substepping or boundary fallback.
 
-Physical pressure, bulk molecular heat, Navier loss, advected kinetic power and
-upwind dissipation retain their existing separate owners. These are stage
-rates, not integrated heat deposition or a full discrete energy balance.
+Physical pressure, bulk molecular power, Navier loss, advected kinetic power
+and upwind dissipation retain their existing separate stage owners. The
+returned `dissipated_heat` also integrates original bulk and slip powers with
+the SDIRK2 weights, as specified below. This is generated heat, not thermal
+deposition or a full discrete energy balance.
 Temperature/composition are fixed external fields within each stage and may
 differ between stages; density remains fixed. Smooth temporal data and resolved
 spatial/nonlinear errors are required for second order. Linear L-stability
@@ -2709,8 +2711,9 @@ This controls local velocity time error under smooth data and resolved
 spatial/nonlinear errors. It does not certify pressure or stress, global error,
 adaptive derivatives, positivity, passivity or thermal evolution. Two strongly
 damped endpoints can agree while underresolving fast-mode dissipation history.
-Retained bulk heat, Navier loss and transport remain instantaneous original
-stage rates, not an integrated heat balance or heat-accuracy certificate.
+Retained stage powers and transport remain available. Whole-interval
+`dissipated_heat` accumulates only accepted fine-stage production as specified
+below; velocity acceptance is not a heat-accuracy certificate.
 
 Three focused regression groups cover absolute stage times and retained
 thermal Carreau sources; tolerance refinement and physical RMS invariance
@@ -2722,6 +2725,66 @@ pinned rustfmt parsing. Native compilation and these regressions remain
 and persistent storage capacity. An independent scalar cubic-translation
 calculation gives accumulated errors 1.43913e-4 and 5.94509e-6 for absolute
 tolerances 1e-4 and 1e-6; this is not native PDE validation.
+
+## Accepted original-stage viscous and Navier-slip heat
+
+The original mixed SDIRK2 owner now returns `MaterialDissipatedHeat` with every
+successful fixed step. For original triangle i, its bulk energy is
+`h*area_i*((1-gamma)*Phi_i(stage1) + gamma*Phi_i(stage2))` [J/m], where Phi
+is the existing source-owned `mu*gamma_dot^2` power density [W/m³]. Each
+boundary edge uses the SAME positive weights on its retained Navier-slip
+power `integral beta*|(u-wall)_t|^2` [W/m]. The method supplies its own
+original timestep and cell areas; callers cannot reconstruct or substitute
+those metadata after a solve. No constitutive, strain or heating kernel is
+duplicated, and no material or boundary callback is repeated.
+
+`DiscreteBoundaryReaction::slip_dissipation` exposes the existing retained
+kinematic scalar. `MaterialStokesSolution::boundary_slip_dissipation` provides
+an allocation-free checked view in physical W/m using the same immutable
+reference density. Every entry retains its original edge and connected
+component. Heat needs neither a pressure datum nor a moment origin and does
+not allocate/evaluate full boundary wrenches. Non-slip and perfect-slip edges
+remain present with zero power.
+
+The integrated result exposes elapsed seconds, original-cell bulk energies,
+original-edge/component slip energies, and separate compensated bulk/slip
+totals in J/m of out-of-plane span. Dividing a cell energy by its original
+area gives integrated density in J/m³. Original fixed-step material owners
+remain on the returned two stages. A shared compensated accumulator uses
+O(cells + boundary edges) storage and refuses nonfinite, negative or
+unrepresentable contributions and sums.
+
+Adaptive advancement sums these integrals from BOTH accepted fine half steps
+over the ENTIRE requested interval. Coarse comparison heat, rejected attempts
+and failed stage pairs contribute nothing. Earlier accepted source objects
+are not archived: spatial identity and cumulative physical heat are retained
+in bounded storage, while the final fine stages retain their exact original
+sources. Any later source, boundary, cancellation or representation refusal
+publishes neither partial flow nor partial heat. An accumulated-heat refusal
+is terminal and retains the physical endpoint time; it is not a smaller-step
+retry signal.
+
+Bulk heat and Navier-slip production remain distinct. Slip heat is explicitly
+unassigned between fluid and wall; a thermal owner must choose that partition
+and deposit energy. These outputs exclude mechanical wall/pressure work,
+advected kinetic or thermal energy, numerical upwind/SIP loss, and caloric
+state evolution. They are not a full discrete energy identity, positivity
+theorem or passivity certificate. SDIRK2 heat quadrature is second order under
+resolved smooth source/strain history and spatial/nonlinear error. The
+adaptive controller still estimates velocity error only: agreement of strongly
+damped velocity endpoints cannot certify stress or dissipation-history accuracy.
+
+Focused regressions extend the layered original thermal-Carreau fixture to
+check stage-weighted physical bulk/slip heat and original cell/edge identities.
+A manufactured affine shear u=(1+t)y with mu=0.6 Pa s and two Navier walls of
+beta=1.2 Pa s/m has exact bulk and total slip heat each 1.4 J/m over [0,1] s.
+An independent scalar quadrature gives errors 7.582521472e-4, 1.895630368e-4
+and 4.739075920e-5 for 4, 8 and 16 intervals. A separate cubic translation plus
+steady shear fixture exercises rejected adaptive comparisons, whole-interval
+heat, a late original-source refusal and clean retry. Changed Rust sources
+pass pinned rustfmt parsing; native compilation and these PDE regressions
+remain **unexecuted** because constellation dependencies and persistent storage
+capacity are unavailable. The scalar quadrature is not native PDE validation.
 
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 

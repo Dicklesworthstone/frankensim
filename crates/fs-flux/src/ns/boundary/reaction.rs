@@ -153,6 +153,17 @@ pub struct DiscreteBoundaryReaction {
 }
 
 impl DiscreteBoundaryReaction {
+    /// Retained physical Navier-slip loss per unit depth divided by density
+    /// [m⁴/s³], from the original boundary quadrature. Nonnegative and frame
+    /// invariant; zero for boundary owners without physical tangential slip.
+    /// No pressure datum, origin, source query or boundary reassembly is needed.
+    /// This is separate from wall stress work and numerical upwind loss. A
+    /// thermal consumer must explicitly choose its fluid/wall heat partition.
+    #[must_use]
+    pub const fn slip_dissipation(&self) -> f64 {
+        self.load.slip_dissipation
+    }
+
     /// Advected volume, momentum and kinetic power from this edge's original
     /// quadrature, with a uniform carried-velocity offset. Pressure work and
     /// mechanical stress are separate; no pressure datum is needed.

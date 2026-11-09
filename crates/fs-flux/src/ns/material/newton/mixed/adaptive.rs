@@ -1,10 +1,11 @@
 //! Physical-time error control on the original source-owned mixed SDIRK2 owner.
 
 use super::{
-    MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxSystem, MaterialFluxViscosityTangent,
-    MaterialNavierStokesBoundary, MaterialNavierStokesSdirk2Step,
+    MaterialDissipatedHeat, MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxSystem,
+    MaterialFluxViscosityTangent, MaterialNavierStokesBoundary, MaterialNavierStokesSdirk2Step,
 };
 use crate::ns::boundary::OpenBoundaryPolicy;
+use crate::ns::material::heat::DissipatedHeatAccumulator;
 use crate::ns::newton::{FluxNewtonControls, FluxNewtonError, FluxSdirk2Error, FluxSdirk2Stage};
 use fs_exec::CancelGate;
 use fs_material::MaterialError;
@@ -105,6 +106,12 @@ pub enum MaterialSdirk2AdaptiveError {
     Invalid(&'static str),
     Cancelled,
     Stage(MaterialSdirk2StageFailure),
+    /// Accepted-history heat could not be represented; no partial advancement
+    /// or accumulated heat is published. This is terminal, not a retry signal.
+    Heat {
+        time_s: f64,
+        error: MaterialFluxError,
+    },
     WorkLimit {
         attempts: usize,
         last_numerical_failure: Option<MaterialSdirk2StageFailure>,
@@ -143,12 +150,16 @@ pub struct MaterialSdirk2AdaptiveReport {
 }
 
 /// Only the last ACCEPTED fine comparison is retained, with its original
-/// material owners and physical reactions. Earlier states are not archived.
+/// material owners and physical reactions. Earlier states are not archived;
+/// their accepted original-stage heat is accumulated in bounded storage.
 pub struct MaterialNavierStokesAdaptiveAdvance<G> {
     pub first_half: MaterialNavierStokesSdirk2Step<G>,
     /// Its endpoint is the final result at report.end_time_s.
     pub second_half: MaterialNavierStokesSdirk2Step<G>,
     pub report: MaterialSdirk2AdaptiveReport,
+    /// Whole-interval bulk and slip production [J/m], summed from accepted
+    /// fine half steps only. Coarse and rejected candidates contribute nothing.
+    pub dissipated_heat: MaterialDissipatedHeat,
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
@@ -181,11 +192,14 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     ///
     /// Positive-duration forward intervals are required. This is local time
     /// error control under resolved spatial/nonlinear error and smooth data,
-    /// not a global error certificate, adaptive adjoint or heat integrator.
-    /// Stage heat/reactions remain instantaneous rates. Agreement of two strongly
-    /// damped endpoints cannot certify fast-mode stress or integrated viscous-heat
-    /// history. Stiff accuracy does not imply nonlinear positivity, passivity
-    /// or an integrated energy balance.
+    /// not a global error certificate or adaptive adjoint. Accepted original
+    /// stage powers are integrated into separate bulk and slip heat over the
+    /// WHOLE requested interval. Coarse/rejected heat is discarded, and no
+    /// source is queried again or past source archive retained. Velocity error
+    /// control does not certify heat accuracy: two strongly damped endpoints
+    /// can agree while underresolving fast-mode dissipation history. Stiff
+    /// accuracy does not imply nonlinear positivity, passivity, caloric
+    /// evolution or an integrated energy balance.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_navier_stokes_mixed_rheology_sdirk2<G: FluidTransport>(
         &self,
@@ -230,6 +244,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         let mut error_previous = controls.previous_error_ratio;
         let mut last_failure = None;
         let mut accepted = None;
+        let mut heat = DissipatedHeatAccumulator::new(self.system.mesh.areas.len());
         let mut report = MaterialSdirk2AdaptiveReport {
             start_time_s,
             end_time_s,
@@ -330,6 +345,10 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 continue;
             }
             poll(gate)?;
+            for half in [&first, &second] {
+                heat.add_integral(&half.dissipated_heat)
+                    .map_err(|error| MaterialSdirk2AdaptiveError::Heat { time_s: end, error })?;
+            }
             history.copy_from_slice(fine);
             history_rms = fine_rms;
             report.accepted_comparisons += 1;
@@ -349,10 +368,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         let (first_half, second_half) = accepted.ok_or(MaterialSdirk2AdaptiveError::Invalid(
             "positive duration did not produce an accepted interval",
         ))?;
+        let dissipated_heat = heat.finish(end_time_s - start_time_s).map_err(|error| {
+            MaterialSdirk2AdaptiveError::Heat {
+                time_s: end_time_s,
+                error,
+            }
+        })?;
+        poll(gate)?;
         Ok(MaterialNavierStokesAdaptiveAdvance {
             first_half,
             second_half,
             report,
+            dissipated_heat,
         })
     }
 

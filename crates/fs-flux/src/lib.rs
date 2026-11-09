@@ -77,14 +77,15 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
-    MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialFluxError,
-    MaterialFluxNewtonStep, MaterialFluxNumerics, MaterialFluxRheologyPoint,
-    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSdirk2Step,
-    MaterialFluxSolution, MaterialFluxSystem, MaterialFluxViscosityTangent,
-    MaterialForchheimerSolution, MaterialNavierStokesBoundary, MaterialNavierStokesNewtonStep,
-    MaterialNavierStokesRheologyStep, MaterialNavierStokesSdirk2Step, MaterialNavierStokesStep,
-    MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
+    MaterialBoundaryLoad, MaterialBoundarySlipHeat, MaterialBoundarySlipPower,
+    MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialBrinkmanDragExchange,
+    MaterialBrinkmanSolution, MaterialDissipatedHeat, MaterialFluxError, MaterialFluxNewtonStep,
+    MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
+    MaterialFluxRheologyStep, MaterialFluxSdirk2Step, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialFluxViscosityTangent, MaterialForchheimerSolution, MaterialNavierStokesBoundary,
+    MaterialNavierStokesNewtonStep, MaterialNavierStokesRheologyStep,
+    MaterialNavierStokesSdirk2Step, MaterialNavierStokesStep, MaterialStokesBoundary,
+    MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
     MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
     MaterialStokesResistanceSolution, MaterialStokesRheologyNewtonSolution,
     MaterialStokesRheologySolution, MaterialStokesSolution, MaterialStokesWindkesselBalance,

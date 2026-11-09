@@ -29,6 +29,9 @@ use fs_sparse::Csr;
 use crate::ns::boundary::StokesBoundaryError;
 use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 
+#[path = "material/heat.rs"]
+mod heat;
+pub use heat::{MaterialBoundarySlipHeat, MaterialDissipatedHeat};
 #[path = "material/mixed.rs"]
 pub mod mixed;
 #[path = "material/navier_stokes.rs"]
@@ -43,9 +46,9 @@ mod rheology;
 #[path = "material/sgs.rs"]
 mod sgs;
 pub use mixed::{
-    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
-    MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
-    MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
+    MaterialBoundaryLoad, MaterialBoundarySlipPower, MaterialBoundaryTransport,
+    MaterialBoundaryWrench, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
+    MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
     MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
     MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
     MaterialStokesWindkesselSolution,
