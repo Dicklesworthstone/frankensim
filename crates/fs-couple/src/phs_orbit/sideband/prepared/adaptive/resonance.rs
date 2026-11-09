@@ -440,6 +440,9 @@ fn convert_error(
         ResonanceError::EvaluationBudget { .. } => ResonanceError::EvaluationBudget {
             maximum_evaluations: maximum,
         },
+        ResonanceError::ExtremumBudget { maximum_extrema } => {
+            ResonanceError::ExtremumBudget { maximum_extrema }
+        }
         ResonanceError::Cancelled => ResonanceError::Cancelled,
     };
     campaign_error(mapped, maximum)
