@@ -267,6 +267,12 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
         }
         let mut potential = initial.to_vec();
         for (e, &[a, b]) in mesh.edges.iter().enumerate() {
+            // A fixed trace component has one gauge shift. Its internal edges
+            // have exactly zero increment; adding and subtracting that shift
+            // would unnecessarily round or erase the accepted physical trace.
+            if fixed_component[a as usize] == fixed_component[b as usize] {
+                continue;
+            }
             potential[e] = finite(
                 potential[e] + shift[fixed_component[b as usize]].unwrap()
                     - shift[fixed_component[a as usize]].unwrap(),

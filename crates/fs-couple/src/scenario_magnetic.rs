@@ -5,6 +5,9 @@
 //! residuals and energy recovery. A time sample is a fixed-geometry static
 //! solve: sampling a history does not infer induction or deposit heat.
 
+/// Affine scenario traces on the original retained Faraday-induction step.
+pub mod induction;
+
 use fs_em::spatial::vector_potential::{
     SpatialVectorField, SpatialVectorMagnetostatics, VectorMagneticBoundary,
     VectorMagneticControls, VectorPotentialFace,

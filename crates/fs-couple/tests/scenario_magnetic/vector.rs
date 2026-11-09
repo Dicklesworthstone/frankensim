@@ -1,4 +1,6 @@
 //! G1/G3: canonical vector potential reaches actual oriented edge cochains.
+#[path = "vector/induction.rs"]
+mod induction;
 use super::*;
 use fs_couple::scenario_magnetic::{
     MagneticPotentialBoundary3, solve_vector_potential3, vector_potential_boundary_at,

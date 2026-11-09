@@ -30,6 +30,26 @@ boundaries can also feed the original induction owner. Focused native
 regressions cover rotated pure gauges, exact nonzero uniform B/H and energy
 from affine line averages, shared-edge conflict and interior-face refusal.
 
+`scenario_magnetic::induction::step_induction3` continues the original
+accepted A-phi state from canonical histories. The state clock owns both
+sample times. Authored start traces must match retained edges within the
+explicit positive Wb allowance; the native candidate owns full fixed support,
+charge/current compatibility and magnetic-boundary reaction work. Fixed-frame,
+nonperiodic affine segments and held steps are admitted. Interior knots,
+clamp transitions, endpoint jumps and dynamic frame ancestry refuse rather
+than being smeared into another physical forcing law.
+
+The adapter returns the original unpublished induction candidate and its
+Joule heat, Lorentz work, magnetic storage and boundary-work account. It adds
+no heat integrator or inferred thermal receiver. The original tree gauge now
+preserves exactly the edges whose endpoints share one fixed trace component,
+avoiding cancellation from adding and subtracting an identical gauge shift.
+New regression definitions cover the analytical one-tetrahedron Faraday field
+and 1/160 J Ohmic heat, exact native replay, split affine steps, stale histories,
+unsupported intervals, selected frame ancestry and late atomic cancellation.
+Pinned formatting/source review passed; native execution remains pending
+because existing asupersync compilation exceeded the environment memory limit.
+
 ## Source-resolved speed-dependent Hertz friction and heat
 
 `friction_heat::hertz::rate_dependent` connects the original full local-speed
