@@ -16,6 +16,7 @@ use super::{
     StepReport as TransportStepReport, Totals, allocated, positive, sum,
 };
 use crate::chemistry::{IsochoricKineticsError, IsochoricReactor};
+use crate::body_force::{BodyForce, ForceChange, ForceControl};
 pub use crate::chemistry::{IsochoricKineticsMethod, IsochoricKineticsSolve};
 use fs_qty::{Amount, Time};
 pub use fs_thermochem::kinetics::IdealGasKineticsV1;
@@ -149,7 +150,7 @@ pub struct ReactiveStepReport {
     pub conservation_residual: Totals,
     /// Total mass change minus transport through the boundaries [kg].
     pub mass_residual_kg: f64,
-    /// Physical total-energy change minus transport through boundaries [J].
+    /// Physical total-energy change minus boundary transport and body work [J].
     /// Evaluated from differences, avoiding subtraction of large absolute totals.
     pub absolute_energy_residual_j: f64,
 }
@@ -379,6 +380,75 @@ impl ReactingEuler1d {
         ).map(|(report, _)| report)
     }
 
+    /// Advance finite-rate chemistry, body acceleration and conservative flow.
+    ///
+    /// The existing exact mechanical kicks enclose the original transport step
+    /// inside the chemistry half steps: C(h/2), F(h/2), A(h), F(h/2), C(h/2).
+    /// Acceleration uses the actual mixture density at each force stage; force
+    /// density retains its authored units. Mechanical work changes kinetic and
+    /// total energy together, while chemistry retains the original species and
+    /// formation-energy references. The accepted impulse/work are reported in
+    /// `transport.source_change` and enter the complete balance exactly once.
+    ///
+    /// Heat release and acceleration share the original acoustic retry owner.
+    /// A shortened transport step restarts the entire composition, including
+    /// chemistry and both kicks, from the accepted field. No partial chemistry,
+    /// force, clock or report is published. A zero source takes the unforced
+    /// numerical path. Forcing is held over the accepted interval; this method
+    /// does not infer a time-dependent law, moving walls or entropy authority.
+    pub fn step_with_body_force(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_inner_forced::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            stabilized::MolecularMethod::Explicit(DissipationControl::default()),
+            [None; 2],
+            None,
+            None,
+            Some((force, force_controls)),
+            cancelled,
+        ).map(|(report, _)| report)
+    }
+
+    /// Compose the original molecular half steps with reacting forced flow.
+    ///
+    /// D(h/2) and D(h/2) surround the complete chemistry/force/transport map in
+    /// [`Self::step_with_body_force`]. Molecular stress, species diffusion and
+    /// heat retain the supplied source-bound transport law. Both source kicks
+    /// and both molecular halves use the same finally accepted duration; final
+    /// caloric and Mach admission precede atomic publication. The original
+    /// chemistry and molecular time methods retain their own accuracy limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_and_body_force<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_inner_forced(
+            maximum_duration,
+            controls,
+            Some(operator),
+            stabilized::MolecularMethod::Explicit(dissipation_controls),
+            [None; 2],
+            None,
+            None,
+            Some((force, force_controls)),
+            cancelled,
+        ).map(|(report, _)| report)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn step_impl<L: TransportLaw>(
         &mut self,
@@ -407,11 +477,30 @@ impl ReactingEuler1d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        operator: Option<&mut DissipationOperator<L>>,
+        molecular: stabilized::MolecularMethod<'_>,
+        reservoirs: [Option<Cell<'_>>; 2],
+        interval_budget: Option<&mut stabilized::CouplingBudget>,
+        entropy: Option<&mut entropy::CoupledEntropy>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
+        self.step_inner_forced(
+            maximum_duration, controls, operator, molecular, reservoirs,
+            interval_budget, entropy, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner_forced<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
         mut operator: Option<&mut DissipationOperator<L>>,
         mut molecular: stabilized::MolecularMethod<'_>,
         reservoirs: [Option<Cell<'_>>; 2],
         mut interval_budget: Option<&mut stabilized::CouplingBudget>,
         mut entropy: Option<&mut entropy::CoupledEntropy>,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
         poll(&mut cancelled)?;
@@ -419,6 +508,19 @@ impl ReactingEuler1d {
         if !positive(maximum_duration.value()) {
             return Err(ReactiveError::Invalid(
                 "reacting duration, CFL or retry controls",
+            ));
+        }
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<FlowError>()?;
+            if !force.admit::<FlowError>(self.accepted.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
+        if forcing.is_some()
+            && (entropy.is_some() || reservoirs.iter().any(Option::is_some))
+        {
+            return Err(ReactiveError::Invalid(
+                "reacting body forcing does not compose prescribed reservoirs or entropy accounting",
             ));
         }
         if entropy.as_ref().is_some_and(|account| account.has_exterior_states()) {
@@ -486,7 +588,18 @@ impl ReactingEuler1d {
                     entropy.as_deref_mut(),
                     &mut cancelled,
                 )?;
-                let (transport, transport_entropy) = if let Some(account) = entropy.as_deref_mut() {
+                let (transport, transport_entropy) = if let Some((force, force_controls)) = forcing {
+                    (
+                        self.trial.step_with_body_force(
+                            Time::new(duration),
+                            controls.transport,
+                            force,
+                            force_controls,
+                            &mut cancelled,
+                        )?,
+                        None,
+                    )
+                } else if let Some(account) = entropy.as_deref_mut() {
                     account.advance_transport(
                         &mut self.trial,
                         Time::new(duration),
@@ -528,7 +641,7 @@ impl ReactingEuler1d {
                     )?),
                     None => None,
                 };
-                if second.is_some() && entropy.is_none() {
+                if (second.is_some() || forcing.is_some()) && entropy.is_none() {
                     // The molecular source bank can admit a wider temperature
                     // path than the reactor. In particular, viscous heating
                     // after the last chemistry solve can leave that path.
@@ -546,6 +659,11 @@ impl ReactingEuler1d {
                             return Err(ReactiveError::Invalid(
                                 "final molecular state is outside chemistry interval",
                             ));
+                        }
+                        if let Some((_, force_controls)) = forcing {
+                            force_controls.admit_velocity::<FlowError>(
+                                primitive.velocity, primitive.sound_speed,
+                            )?;
                         }
                     }
                 }
@@ -639,7 +757,7 @@ fn coupled_report(
     let (conservation_residual, mass_residual_kg, absolute_energy_residual_j) = coupled_balance(
         gas, before, after, transport.boundary_change,
         Totals::from_values(&molecular_boundary[..n + 2], n),
-        transport.area_momentum_impulse, &chemistry,
+        transport.area_momentum_impulse, transport.source_change, &chemistry,
     )?;
     Ok(ReactiveStepReport {
         elapsed: transport.elapsed,
@@ -657,6 +775,7 @@ fn coupled_report(
 
 
 // One endpoint balance owner for accepted steps and complete stationary windows.
+#[allow(clippy::too_many_arguments)]
 fn coupled_balance(
     gas: &super::MixtureGas,
     before: Totals,
@@ -664,6 +783,7 @@ fn coupled_balance(
     transport_boundary: Totals,
     molecular_boundary: Totals,
     area_momentum_impulse: f64,
+    source_change: ForceChange,
     chemistry: &ChemistryReport,
 ) -> Result<(Totals, f64, f64), ReactiveError> {
     let n = gas.species_count();
@@ -679,12 +799,14 @@ fn coupled_balance(
         - before.momentum
         - transport_boundary.momentum
         - molecular_boundary.get(n)
-        - area_momentum_impulse;
+        - area_momentum_impulse
+        - source_change.impulse;
     residual[n + 1] = after.energy
         - before.energy
         - transport_boundary.energy
         - molecular_boundary.get(n + 1)
-        - chemistry.referenced_energy_change_j;
+        - chemistry.referenced_energy_change_j
+        - source_change.work;
     let mass_residual_kg = sum((0..n).map(|k| {
         after.species_masses[k]
             - before.species_masses[k]
@@ -692,7 +814,8 @@ fn coupled_balance(
             - molecular_boundary.get(k)
     }));
     let absolute_energy_residual_j = sum(core::iter::once(
-        after.energy - before.energy - transport_boundary.energy - molecular_boundary.get(n + 1),
+        after.energy - before.energy - transport_boundary.energy - molecular_boundary.get(n + 1)
+            - source_change.work,
     )
     .chain((0..n).map(|k| {
         (after.species_masses[k]

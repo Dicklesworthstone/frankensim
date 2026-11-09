@@ -9024,3 +9024,40 @@ equations follow NASA TN D-8274, *Flow Through Normal Shocks*,
 <https://ntrs.nasa.gov/citations/19770008402>; its nitrogen data do not calibrate
 this authored binary PR model.
 
+## Body acceleration in finite-rate reacting transport
+
+`ReactingEuler1d::step_with_body_force` composes the original conservative
+mixture source with finite-rate chemistry on the same species bank and energy
+references. The accepted map is C(h/2), F(h/2), A(h), F(h/2), C(h/2).
+Uniform or cellwise acceleration is multiplied by the actual mixture density
+at each F stage; force per volume keeps its prescribed value. The existing
+mechanical kick couples represented momentum increments to midpoint kinetic
+work, so forcing supplies neither an independent heat source nor a second
+chemical-energy datum.
+
+`step_with_dissipation_and_body_force` adds the original molecular D(h/2)
+steps on both sides. Viscosity, species diffusion and conductivity retain the
+authored source-bound transport law. The original chemistry and molecular
+integrators retain their own order; symmetric composition alone does not
+establish a second-order certificate.
+
+The original acoustic and whole-composition retries choose one accepted h.
+If accelerated or heated transport shortens h, both chemistry halves, both
+force kicks and both optional molecular halves restart from the accepted
+state. Final caloric and authored Mach admission precede publication.
+`transport.source_change` retains the actual mechanical impulse, work and
+representation residual. Complete momentum and physical/gauged-energy
+balances subtract its impulse and work once; the source representation
+residual remains visible rather than being removed from conservation error.
+Cancellation or refusal publishes no accepted cell or time change. Zero
+forcing follows the original unforced numerical map.
+
+The focused G0/G1/G3/G4 cases in
+`multicomponent::reactive::tests::forcing` compare uniform accelerated heat
+release with the independent homogeneous reactor and exact Newton impulse/
+work; refine an independently known accelerating reaction/diffusion Fourier
+mode; compare zero-forcing paths; and exercise late cancellation and retry.
+These are numerical regression definitions, not experimental validation.
+This entry does not add time-dependent feedback, moving-wall forcing,
+prescribed reservoir forcing, stabilized complete-duration forcing, or
+entropy-admitted forced composition.

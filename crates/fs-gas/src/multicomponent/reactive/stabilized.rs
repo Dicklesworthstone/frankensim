@@ -896,6 +896,7 @@ impl IntervalLedger {
             advection,
             molecular,
             self.area_impulse.value,
+            ForceChange::default(),
             &self.chemistry,
         )?;
         Ok(StabilizedReactiveIntervalReport {
