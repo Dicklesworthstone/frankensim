@@ -819,8 +819,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// applies. This API does not select SGS or a thermal wall closure.
     ///
     /// # Errors
-    /// The same closed-wall/symmetry BE, Reynolds, mechanical-power, source
-    /// and nonlinear thermal restrictions as the fluid viscous-heating entry.
+    /// The same closed-wall/symmetry or opposed normal-traction reservoir BE,
+    /// Reynolds, mechanical-power, source and nonlinear thermal restrictions
+    /// as the fluid viscous-heating entry. Signed reservoir work and kinetic
+    /// storage remain separate from the physical heat supplied to these solids.
     /// Any failure returns no partial march, source state or mechanical audit.
     #[cfg(feature = "enthalpy-coupling")]
     #[allow(clippy::too_many_arguments)]
@@ -890,7 +892,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// mechanical equations, and local thermal credits must match the original
     /// endpoint stress work independently of loose material tolerances.
     ///
-    /// This remains first-order BE Stokes with the original closed-wall,
+    /// This remains first-order BE Stokes with closed walls or one opposed
+    /// normal-traction reservoir pair, retaining the original
     /// Reynolds <= 0.1 and work restrictions. No SGS or numerical-loss heat is
     /// introduced; original contacts, radiation and thermostats keep ownership.
     ///

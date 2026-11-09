@@ -28,6 +28,59 @@ exercise changing frames on D3Q19/D3Q27 collision families, actual transported
 density/velocity, relative wall balances, free fall, zero-frame replay,
 periodic-axis refusal, late Mach refusal and cancelled transaction replay.
 
+## Transient reservoir work on the original source-caloric Stokes clock
+
+The existing `march_natural_convection_with_enthalpy_and_viscous_heat`
+entries, including implicit material endpoints and material solids, now admit
+one opposed Pressure/Outlet pair alongside walls/symmetry. The physical-heating
+opt-in selects the same normal-traction, zero-tangential-trace mouth operator
+as steady pressure-work Stokes. Original spatial profiles, scalar programs,
+independent plane histories and component-local pressure references remain
+the mechanical pressure owners. Source thermodynamic pressure is unchanged.
+
+The native backward-Euler momentum row remains intact. Each mirrored mouth
+row represents a physical half cell: its kinetic storage and time loss use
+one half of the mirrored `rho*area*width` inertia. Interior masses retain
+their original arithmetic. Signed reservoir work is sampled independently
+from the actual projected flux and the same centered boundary pressures used
+by momentum. The transient sampler consumes already-centered solver pressure;
+the steady public-field sampler subtracts its current physical datum exactly
+once. Large changing common pressure cannot enter either work calculation.
+
+`UnsteadyHeatingAudit::pressure_work_j` retains the signed contribution of
+each original plane, and `supplied_pressure_work_j` retains the total.
+Positive work supplies the fluid; negative work returns energy to a reservoir
+during braking. Per-step and accumulated accounts close wall + body +
+reservoir work + bounded continuity defect against physical dissipation,
+actual native kinetic change and the separately reported backward-Euler loss.
+Only original molecular/drag dissipation enters the existing caloric source.
+Pressure supply, kinetic energy and numerical loss are never added as heat.
+
+The same signed projected face field carries the original thermal inflow and
+backflow enthalpy. Explicit source epochs, jointly converged implicit epochs,
+nonlinear source h(T), material solids, contacts and thermostats retain their
+existing owners. Failed admission, physical balance, source evaluation or
+cancellation returns no accepted march or partial account. No new public
+march wrapper, per-step pressure graph walk or pressure-field reconstruction
+is introduced.
+
+This is constant-density unsteady Stokes with the existing Reynolds ceiling
+at most 0.1. Momentum convection and advected kinetic energy are omitted
+together; the extension makes no Navier–Stokes open-energy claim. BDF2, SGS,
+moving reservoir tangential traces, multiple opening axes, finite reservoir
+storage and source EOS pressure evolution remain outside this heating owner.
+The separate retained phase-momentum entry keeps its closed-domain admission.
+
+Validation in this session: five tests compiled and passed using the exact
+production kinetic-increment and extensive heating-account source, including
+signed reservoir acceleration/braking and atomic balance/overflow refusal.
+All eight changed Rust files parsed with the pinned formatter. Added native
+regression definitions exercise graded-mouth inertia on all axes, changing
+common-pressure invariance, and explicit/implicit source-caloric reversal with
+physical heat and thermal backflow. These full native solver/thermal tests
+were not compiled or executed because the fs-exec/asupersync dependency
+closure is unavailable.
+
 ## Native implicit Coriolis evolution
 
 `ForcedGrid3::try_new_with_coriolis_preserving_velocity` attaches the local
@@ -91,9 +144,9 @@ before changing either the scalar factor or offsets. Invalid roles, overflow
 or cancellation publish no partial load/march. Programs control at most six
 whole boundary planes; separate openings on one plane share its program.
 They prescribe incompressible mechanical pressure, not thermodynamic source
-pressure, compressibility or reservoir storage. Existing physical-heating
-admission is unchanged; transient open-reservoir viscous heating is not
-enabled by these controls.
+pressure, compressibility or reservoir storage. Selecting these controls alone
+does not enable physical heating. The source-caloric viscous-heating opt-in
+separately admits one opposed traction-mouth pair under its BE Stokes gates.
 
 Focused regressions exercise production reference arithmetic, independent
 all-axis flow reversal and thermal backflow under BE/BDF2, three-opening

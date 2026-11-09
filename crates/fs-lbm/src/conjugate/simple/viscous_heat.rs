@@ -585,7 +585,8 @@ impl Solver<'_> {
         controls: ViscousHeatControls,
         gate: &CancelGate,
     ) -> Result<ViscousPower, ChtError> {
-        let power = self.sample_viscous_power(&flow.field, &flow.pressure_pa, controls, gate)?;
+        let power =
+            self.sample_viscous_power::<true>(&flow.field, &flow.pressure_pa, controls, gate)?;
         if power.residual_w.abs() > controls.power_tolerance_w
             || (power.supplied_wall_power_w
                 + power.supplied_pressure_power_w
@@ -944,7 +945,7 @@ impl Solver<'_> {
             .collect()
     }
 
-    fn sample_viscous_power(
+    fn sample_viscous_power<const PHYSICAL_PRESSURE: bool>(
         &self,
         field: &FlowField,
         pressure_pa: &[f64],
@@ -1088,7 +1089,7 @@ impl Solver<'_> {
             let outward: f64 = (0..6).map(|face| field.outward(domain, c, face)).sum();
             add(
                 &mut pressure_constraint_power_w,
-                (if self.pressure_work_axis.is_some() {
+                (if PHYSICAL_PRESSURE && self.pressure_work_axis.is_some() {
                     pressure_pa[c] - self.physical_pressure_reference_pa(c)
                 } else {
                     pressure_pa[c]

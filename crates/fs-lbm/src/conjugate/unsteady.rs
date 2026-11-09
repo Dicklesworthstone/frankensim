@@ -681,8 +681,10 @@ fn simple_unsteady_inner(
 /// reservoir profile and [`UnsteadyConfig::opening_pressure_programs`] add
 /// independent plane offsets once per endpoint, before momentum/thermal feedback.
 /// The projected signed flux drives the original thermal backflow boundaries.
-/// Physical-heating applicability is unchanged: this does not admit open
-/// reservoirs into a transient heat owner that requires a closed box.
+/// The source-caloric physical-heating opt-in admits one opposed normal-traction
+/// reservoir pair under its original backward-Euler Stokes and power gates.
+/// Its signed reservoir work, kinetic storage and numerical loss remain separate
+/// from molecular heat deposited by the original thermal owner.
 ///
 /// # Errors
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
