@@ -1,6 +1,7 @@
 //! Explicit, bounded 3-D input. The 2-D study schema is deliberately separate.
 use super::*;
 use fs_ascent::projected_al::ProjectedAlOptions;
+use fs_cutfem::elastic3::ElasticityFormulation3;
 use fs_ir::ast::{Node, NodeKind};
 use fs_topopt::sdf3::design::StressDesignOptions3;
 use fs_topopt::sdf3::stress::{StressMeasure3, StressOptions3};
@@ -33,6 +34,8 @@ pub(super) struct Spec {
     pub leaves: usize,
     pub youngs: f64,
     pub poisson: f64,
+    /// Explicit volumetric-strain model; omitted declarations retain Q1 displacement.
+    pub formulation: ElasticityFormulation3,
     pub loads: Vec<([f64; 3], f64)>,
     pub surfaces: Vec<Option<loading::SurfaceSpec>>,
     pub material_acceleration: Option<loading::MaterialAcceleration>,
@@ -198,10 +201,24 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     if bounds.len() != 2 { return Err(invalid("bounds require lower and upper SI vectors")); }
     let bounds = (vector(&bounds[0])?, vector(&bounds[1])?);
     let sampled = if is_sampled { Some(sampled::parse(&domain[2..], bounds)?) } else { None };
-    let physics = fields(&items[9], "physics", &[
-        "type", "initial-level", "maximum-level", "maximum-leaves", "youngs-modulus-pa", "poissons-ratio",
-    ])?;
+    let explicit_formulation = super::super::list(&items[9], "3-D physics")?.len() == 15;
+    let physics = fields(&items[9], "physics", if explicit_formulation {
+        &["type", "initial-level", "maximum-level", "maximum-leaves", "youngs-modulus-pa", "poissons-ratio", "formulation"]
+    } else {
+        &["type", "initial-level", "maximum-level", "maximum-leaves", "youngs-modulus-pa", "poissons-ratio"]
+    })?;
     word(physics[0], "elasticity-3d")?;
+    let formulation = if explicit_formulation {
+        match &physics[6].kind {
+            NodeKind::Symbol(name) | NodeKind::Str(name) if name == "displacement" =>
+                ElasticityFormulation3::Displacement,
+            NodeKind::Symbol(name) | NodeKind::Str(name) if name == "bbar" =>
+                ElasticityFormulation3::BBar,
+            _ => return Err(invalid("formulation requires displacement or bbar")),
+        }
+    } else {
+        ElasticityFormulation3::Displacement
+    };
     let scenario_items = super::super::list(&items[10], "scenario")?;
     let mixed = scenario_items.get(3).is_some_and(|node|
         matches!(&node.kind, NodeKind::Keyword(s) if s == "loads"));
@@ -354,7 +371,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         curvature: if is_constructive || is_sampled { 0.0 } else { scalar(domain[3])? },
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
-        leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
+        leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?, formulation,
         loads, surfaces, material_acceleration, density, volume, radius, updates, move_limit, marking, max_marks,
         schedule, regions: Vec::new(), solver, stress, stress_measure, load_space,
     };
@@ -409,8 +426,12 @@ impl Spec {
             return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));
         }
         geometry::validate(self)?;
-        if !(1e-6..=1e15).contains(&self.youngs) || !(0.0..=1.0 / 3.0).contains(&self.poisson) {
-            return Err(invalid("unsupported finite graph-domain or isotropic material parameters"));
+        let max_poisson = match self.formulation {
+            ElasticityFormulation3::Displacement => 1.0 / 3.0,
+            ElasticityFormulation3::BBar => 0.4999,
+        };
+        if !(1e-6..=1e15).contains(&self.youngs) || !(0.0..=max_poisson).contains(&self.poisson) {
+            return Err(invalid("Young's modulus must be in [1e-6,1e15] Pa; Poisson ratio must be in [0,1/3] for displacement or [0,0.4999] for explicit bbar"));
         }
         if self.surfaces.len() != self.loads.len() { return Err(invalid("surface and body load families must align")); }
         let peak = self.stress.is_some()

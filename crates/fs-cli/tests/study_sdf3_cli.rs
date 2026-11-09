@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const FIXTURE: &str = include_str!("../../../examples/marquee/bracket-3d-adaptive.fsim");
 
+#[path = "study_sdf3_cli/bbar.rs"]
+mod bbar;
+
 #[test]
 fn g1_load_space_cli_uses_the_continuous_force_set_and_exports_its_actual_fields() {
     let source = include_str!("../../../examples/marquee/bracket-3d-load-space.fsim")

@@ -1836,6 +1836,20 @@ continues instead of resetting.
 
 ### Adaptive 3-D topology study
 
+The 3-D `physics` declaration optionally accepts `:formulation displacement`
+or `:formulation bbar` after `:poissons-ratio`. Omission preserves the original
+Q1 displacement operator and its Poisson-ratio range `[0, 1/3]`. Explicit
+`bbar` selects the existing native physical-cut-volume mean-dilation operator
+and admits `[0, 0.4999]`, enabling nearly incompressible design studies without
+silently changing their formulation. The declaration participates in canonical
+study identity and replay. The same selection reaches bulk, surface-loaded,
+embedded-support and mass-backed operators on every initial, correction and
+refined grid, including stress and load-space studies. B-bar does not introduce
+an independent pressure field or certify continuum stability, incompressibility,
+mesh-independent convergence or physical material validity. Focused tests in
+`sdf3/loading_tests.rs` check bounded admission, native operator work, legacy
+arithmetic and nearly incompressible compliance/volume directional derivatives.
+
 With the `sdf3-study` feature, `study <study.fsim> <ledger.db>` admits the
 separate `fsim-sdf3-study :version 1` producer demonstrated by
 `examples/marquee/bracket-3d-adaptive.fsim`. It executes the raw implicit-domain

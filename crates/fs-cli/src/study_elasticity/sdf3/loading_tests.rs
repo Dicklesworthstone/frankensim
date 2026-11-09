@@ -297,3 +297,123 @@ fn material_acceleration_preparation_preserves_cancellation_and_stencil_limits()
     };
     assert_eq!(error.exit, exit::BUDGET);
 }
+
+fn with_formulation(source: &str, formulation: &str, poisson: &str) -> String {
+    source.replace(":poissons-ratio 0.3", &format!(
+        ":poissons-ratio {poisson} :formulation {formulation}"))
+}
+
+#[test]
+fn bbar_is_explicit_identity_bound_and_nearly_incompressible_admission_is_bounded() {
+    use fs_cutfem::elastic3::ElasticityFormulation3;
+
+    let legacy = spec::parse(EXAMPLE).unwrap();
+    assert_eq!(legacy.formulation, ElasticityFormulation3::Displacement);
+    let explicit = spec::parse(&with_formulation(EXAMPLE, "displacement", "0.3")).unwrap();
+    assert_eq!(explicit.formulation, legacy.formulation);
+    assert_ne!(explicit.id, legacy.id, "an explicit declaration remains part of the source");
+    let source = with_formulation(EXAMPLE, "bbar", "0.4999");
+    let bbar = spec::parse(&source).unwrap();
+    assert_eq!(bbar.formulation, ElasticityFormulation3::BBar);
+    assert_eq!(bbar.poisson, 0.4999);
+    assert_eq!(spec::parse(&bbar.canonical).unwrap().id, bbar.id);
+    assert_ne!(bbar.id, legacy.id);
+    assert_ne!(bbar.id, spec::parse(&with_formulation(EXAMPLE, "bbar", "0.49")).unwrap().id);
+    for bad in [
+        with_formulation(EXAMPLE, "automatic", "0.3"),
+        with_formulation(EXAMPLE, "bbar", "0.5"),
+        with_formulation(EXAMPLE, "bbar", "0.49999"),
+        with_formulation(EXAMPLE, "bbar", "-0.01"),
+        with_formulation(EXAMPLE, "displacement", "0.49"),
+        EXAMPLE.replace(":poissons-ratio 0.3", ":poissons-ratio 0.49"),
+        source.replace(":formulation bbar", ":formulation bbar :formulation displacement"),
+        source.replace(":formulation bbar", ":ignored-formulation bbar"),
+    ] { assert!(spec::parse(&bad).is_err(), "unsupported formulations must refuse before physics"); }
+}
+
+#[test]
+fn bbar_reaches_bulk_surface_embedded_and_mass_backed_builders_on_each_grid() {
+    use fs_cutfem::elastic3::ElasticityFormulation3;
+
+    let surface = with_formulation(EXAMPLE, "bbar", "0.4999");
+    let body = surface
+        .replace("(pressure :pa 1000.0 :x-fraction (0.5 1.0))", "none")
+        .replace("(traction :pa (0.0 1000.0 0.0) :x-fraction (0.5 1.0))", "none");
+    let embedded = body.replace(":fixed-boundary left",
+        ":fixed-boundary (embedded :axis x :fraction (0.0 0.5) :penalty 32.0)");
+    for source in [&body, &surface, &embedded] {
+        for native_material in [false, true] {
+            let source = if native_material { with_acceleration(source) } else { source.clone() };
+            let spec = spec::parse(&source).unwrap();
+            for level in [1, 2] {
+                let mut poll = |_| ControlFlow::Continue(());
+                let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
+                let op = build(&spec, level, &mut q).unwrap();
+                assert_eq!(op.formulation(), ElasticityFormulation3::BBar);
+                assert_eq!(op.reference_cell_masses_kg().is_some(), native_material);
+                assert!(op.volumes().iter().sum::<f64>() > 0.0);
+                if spec.fixed.embedded_penalty().is_some() {
+                    assert!(op.embedded_dirichlet_area().unwrap() > 0.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bbar_changes_native_volumetric_work_and_explicit_displacement_preserves_legacy_bits() {
+    use fs_solver::op::LinearOp;
+
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
+    let legacy = build(&spec::parse(EXAMPLE).unwrap(), 1, &mut q).unwrap();
+    let explicit = build(&spec::parse(&with_formulation(EXAMPLE, "displacement", "0.3")).unwrap(), 1, &mut q).unwrap();
+    let bbar = build(&spec::parse(&with_formulation(EXAMPLE, "bbar", "0.3")).unwrap(), 1, &mut q).unwrap();
+    assert_eq!(legacy.nodes(), bbar.nodes());
+    let field: Vec<_> = legacy.nodes().iter().flat_map(|&[x, y, z]|
+        [x * y, x * z, 0.0]).collect();
+    let mut full_action = vec![0.0; legacy.n()];
+    let mut explicit_action = full_action.clone();
+    let mut bbar_action = full_action.clone();
+    legacy.apply(&field, &mut full_action);
+    explicit.apply(&field, &mut explicit_action);
+    bbar.apply(&field, &mut bbar_action);
+    assert_eq!(full_action, explicit_action);
+    let work = |action: &[f64]| field.iter().zip(action).map(|(u, f)| u * f).sum::<f64>();
+    let full_work = work(&full_action);
+    let bbar_work = work(&bbar_action);
+    assert!(bbar_work > 0.0 && bbar_work < full_work * (1.0 - 1e-6),
+        "cell-averaged dilation must change the actual operator, not only metadata: {bbar_work} vs {full_work}");
+}
+
+#[test]
+fn bbar_nearly_incompressible_study_keeps_real_compliance_and_volume_gradients() {
+    use fs_topopt::pipeline::LoadCase;
+    use fs_topopt::sdf3::continuation::controlled_sdf3_gradient_check;
+
+    let source = unit_source().replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0");
+    let spec = spec::parse(&with_formulation(&source, "bbar", "0.4999")).unwrap();
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
+    let op = build(&spec, 1, &mut q).unwrap();
+    with_laws(&spec, |laws| {
+        let forces: Vec<_> = laws.iter().map(|law|
+            op.reference_load(law.load, || ControlFlow::Continue(())).unwrap()).collect();
+        let loads: Vec<_> = laws.iter().zip(&forces).map(|(law, force)|
+            LoadCase { force, weight: law.weight }).collect();
+        let mut study = CutDensityStudy3::new(AdaptiveSolveSpace3::jacobi(op, 100_000_000),
+            spec.radius, SimpParams { penal: 3.0, beta: 2.0, ..Default::default() });
+        let rho: Vec<_> = (0..study.cells()).map(|i| 0.4 + 0.02 * (i % 8) as f64).collect();
+        let before = study.operator().elasticity().scales().to_vec();
+        let mut poll = |_| ControlFlow::Continue(());
+        let mut control = SolveControl::new(SolveBudget {
+            total_iterations: 100_000, per_solve_iterations: 20_000,
+        }, &mut poll);
+        let check = controlled_sdf3_gradient_check(&mut study, &loads, &rho,
+            Default::default(), &mut control).unwrap();
+        assert!(check.passed(), "nearly incompressible native derivatives: {check:?}");
+        assert!(check.baseline_compliance > 0.0);
+        assert!(check.work.linear_iterations > 0);
+        assert_eq!(study.operator().elasticity().scales(), before);
+    });
+}

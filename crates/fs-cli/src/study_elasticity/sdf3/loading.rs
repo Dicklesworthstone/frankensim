@@ -130,6 +130,7 @@ pub(super) fn build_operator(
     };
     let clamp = |p| spec.fixed.contains(p, spec.bounds);
     let options = ElasticityOptions3 {
+        formulation: spec.formulation,
         max_cells: spec.leaves, max_dofs: 50_000, ..Default::default()
     };
     // The legacy E/nu constructor retains no mass density. Self-weight needs
