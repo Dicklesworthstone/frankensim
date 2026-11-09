@@ -47,10 +47,14 @@ test).
 - `roughness::roughness_dw_block` — Daniel-Weber roughness [asper]
   per 8192-sample analysis block (Pa input), ported from the
   Apache-2.0 MoSQITo reference with tables transcribed mechanically
-  ([`dw_tables`]); numerically EXACT against the reference re-run
-  standalone at the same block length (better than 1e-12 relative at
-  every AM modulation frequency, all seven values pinned in the
-  test). Executed port lessons recorded in the module: the
+  ([`dw_tables`]); checked against the reference re-run standalone at
+  the same block length with its FFT frequency axis corrected to k*fs/N,
+  threshold interpolation aligned to that axis, and DC excluded from audible
+  tones. The seven AM-modulation pins and eight sideband cases at 44.1/48/96
+  kHz agree within 1e-12 relative. Correct physical frequencies feed ear
+  weighting, hearing thresholds, Terhardt slopes and Bark-channel placement;
+  the former k+1 labels changed a 1 kHz / 40 Hz AM result by 6.6%.
+  Executed port lessons recorded in the module: the
   reference's empirical 1.42 one-sided factor (a 2.0 doubling read
   2.59 asper at the anchor), its zero negative-frequency H half
   (mirroring + doubling read ~4x), and — review-caught — its
@@ -58,7 +62,11 @@ test).
   H16/H21/H42 (interpolating to each table's own endpoint read only
   7-9 matching digits behind a loose 1e-3 pin). Disclosed residual
   deviations (edge-channel numpy wraparound, corrcoef NaN) in the
-  module doc.
+  module doc. Modulation weights remain zero at and above Nyquist even
+  when a low acquisition rate intersects the tabulated band, so the
+  factor-two reconstruction never double-counts negative-frequency bins.
+  No resampling, DC detrending, alias-removal or perceptual acceptance claim
+  is added.
 - `signal::loudness_stationary_from_pcm` — the reference's
   stationary-from-signal path: 28-band 48 kHz filterbank (biquad
   difference tables in [`filter_tables`], transcribed mechanically),
@@ -324,9 +332,11 @@ test).
     smooth/zero; refusals typed; determinism bitwise.
 14. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the
-   standalone reference run within 1e-12 relative (exactness pins;
-   R(70 Hz) = 1.0448 asper at the published ~1-asper anchor), falls
-   off both sides, and an unmodulated tone is far smoother. Roughness
+   standalone reference with the physical frequency-axis correction within
+   1e-12 relative (R(70 Hz) = 1.0693 asper at the published ~1-asper anchor),
+   falls off both sides, and an unmodulated tone is far smoother. Independent
+   sideband pins cover low carriers and 44.1/48/96 kHz clocks; modulation
+   support tests keep DC and the negative-frequency half zero. Roughness
    refusals (short block, NaN sample, NaN/zero/negative/INFINITE
    sample rate) are typed and executed. (This item was numbered 9
    before the signal path landed.)

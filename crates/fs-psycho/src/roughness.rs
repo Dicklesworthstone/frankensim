@@ -4,13 +4,17 @@
 //! Ported from the Apache-2.0 MoSQITo reference implementation
 //! (github.com/Eomys/MoSQITo, commit d990c33; algorithm from Daniel &
 //! Weber 1997), with its data in [`crate::dw_tables`]. The port is
-//! numerically EXACT against the reference at the same block length
-//! (the AM validation matches to better than 1e-12 relative at every
-//! modulation frequency — reference values pinned in the test).
+//! checked against the reference at the same block length, with its
+//! FFT frequency-axis error corrected before physical weighting.
 //! Stated deviations from the reference:
-//! - the block is 8192 samples (fs-fft is power-of-two; the
+//! - the block is 8192 samples (this path uses a power-of-two FFT; the
 //!   reference default is 0.2 s = 9600 at 48 kHz; the reference
 //!   itself was re-run at 8192 to establish the pinned values);
+//! - bin k is k*fs/N Hz, including DC at zero, rather than (k+1)*fs/N.
+//!   Hearing thresholds, ear weighting, channel assignment and threshold
+//!   interpolation share that physical axis. DC is not an audible tone;
+//! - the modulation filter has support only on strictly positive bins below
+//!   Nyquist, including when a low sample rate cuts through its tabulated band;
 //! - excitation amplitudes for components whose neighbor channel
 //!   falls outside 0..47 read 0.0 here, where numpy's negative-index
 //!   WRAPAROUND makes the reference read column 46 (a reference
@@ -89,7 +93,7 @@ fn h_weight(ch: usize, idx: usize, n: usize, fs: f64) -> f64 {
         _ => (&H42_X, &H42_Y, 502.0),
     };
     let last = ((f_last / fs) * n as f64).floor() as usize;
-    if idx < 2 || idx >= last {
+    if idx < 2 || idx >= n / 2 || idx >= last {
         return 0.0;
     }
     interp(idx as f64 * fs / n as f64, xs, ys)
@@ -152,17 +156,13 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
         .map(|i| C64::new(pcm_pa[i] * win[i] / wsum, 0.0))
         .collect();
     fft.forward(&mut buf, &mut scratch);
-    // One-sided spectrum exactly as the reference slices it: bins
-    // 0..n/2 (DC included) scaled by the reference's empirical 1.42
-    // factor, with the frequency axis labeled (k+1)*fs/n — the
-    // reference's own one-bin offset, kept for faithfulness (a 2.0
-    // doubling instead of 1.42 read 2.59 asper at the calibration
-    // anchor — executed).
+    // Retain the reference's half-open one-sided spectrum and empirical 1.42
+    // scale, but weight each coefficient at its actual DFT frequency. Shifting
+    // that axis by one bin changes ear weighting and Bark-channel membership
+    // while reconstruction still oscillates at k*fs/n.
     let half = n / 2;
     let spec: Vec<C64> = (0..half).map(|k| cscale(buf[k], 1.42)).collect();
-    let freq_axis: Vec<f64> = (0..half)
-        .map(|k| (k as f64 + 1.0) * fs / n as f64)
-        .collect();
+    let freq_axis: Vec<f64> = (0..half).map(|k| k as f64 * fs / n as f64).collect();
     let bark_axis: Vec<f64> = freq_axis.iter().map(|&f| freq_to_bark(f)).collect();
     // a0 outer/middle-ear weighting (applied as amplitude factor).
     let spec_a0: Vec<C64> = spec
@@ -181,12 +181,13 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
             }
         })
         .collect();
-    // Audible components above the roughness-reference threshold.
+    // Audible positive-frequency components above the roughness-reference
+    // threshold. DC has no oscillation and cannot enter the 230/f slope.
     let threshold: Vec<f64> = bark_axis
         .iter()
         .map(|&z| interp(z, &LTQ_R_BARK, &LTQ_R_DB))
         .collect();
-    let audible: Vec<usize> = (0..half).filter(|&k| spec_db[k] > threshold[k]).collect();
+    let audible: Vec<usize> = (1..half).filter(|&k| spec_db[k] > threshold[k]).collect();
     if audible.is_empty() {
         return Ok(0.0);
     }
@@ -204,10 +205,9 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
     let min_excit_db: Vec<f64> = zb
         .iter()
         .map(|&b| {
-            // interp over the positive-bin index axis (1..=half).
-            let axis: f64 = b;
-            let k = axis.clamp(1.0, half as f64);
-            let lo = (k.floor() as usize - 1).min(half - 1);
+            // Threshold[k] belongs to physical bin k, including DC at zero.
+            let k = b.clamp(0.0, (half - 1) as f64);
+            let lo = k.floor() as usize;
             let hi = (lo + 1).min(half - 1);
             let t = k - k.floor();
             threshold[lo] * (1.0 - t) + threshold[hi] * t
@@ -315,4 +315,26 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
         r_total += r_spec;
     }
     Ok(0.25 * r_total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DW_BLOCK, h_weight};
+
+    #[test]
+    fn modulation_support_never_reenters_the_negative_frequency_half() {
+        // At 800 Hz sampling, the H16/H21/H42 tables extend above Nyquist.
+        // Their sampled positive-frequency tail is valid; bins N/2..N-1
+        // must stay zero before the existing factor-two real reconstruction.
+        for channel in [15, 20, 41] {
+            assert!(h_weight(channel, DW_BLOCK / 2 - 1, DW_BLOCK, 800.0) > 0.0);
+            for bin in DW_BLOCK / 2..DW_BLOCK {
+                assert_eq!(h_weight(channel, bin, DW_BLOCK, 800.0), 0.0);
+            }
+        }
+        for channel in [0, 4, 15, 20, 41] {
+            assert_eq!(h_weight(channel, 0, DW_BLOCK, 800.0), 0.0);
+            assert_eq!(h_weight(channel, 1, DW_BLOCK, 800.0), 0.0);
+        }
+    }
 }

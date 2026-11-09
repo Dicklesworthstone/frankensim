@@ -470,23 +470,20 @@ fn roughness_am_tone_peaks_near_70_hz() {
         (55.0..=90.0).contains(&peak_mod),
         "roughness must peak near 70 Hz: peaked at {peak_mod} Hz, curve {r:?}"
     );
-    // EXACTNESS pin (the loudness lesson: never hide a port bug in a
-    // behavioral envelope): the Apache-2.0 reference implementation
-    // (hw._H_weighting + main_calc), re-run standalone at this exact
-    // block length on this exact signal, gives these seven values —
-    // pinned at 1e-12 RELATIVE (an adversarial review caught the
-    // first port reading only 7-9 matching digits: its H-weighting
-    // support ignored the reference's floor() bin truncation; a loose
-    // 1e-3 pin had hidden it). R(70 Hz) also sits at the published
-    // ~1-asper anchor.
+    // Independent MoSQITo d990c33 _H_weighting + main_calc, run on
+    // this exact block with bin k labelled k*fs/N (not the upstream
+    // k+1 offset), the threshold interpolation axis changed to 0..N/2,
+    // and DC excluded from audible components. No amplitudes, channel
+    // weights or asper calibration constants are retuned. The uncorrected
+    // reference gave 0.6609824416318809 at 40 Hz, a 6.6% axis error.
     let reference = [
-        0.197_327_796_978_835_65,
-        0.660_982_441_631_880_9,
-        0.949_126_590_618_143_1,
-        1.044_791_270_606_281_9,
-        0.940_671_646_615_856_8,
-        0.641_113_651_282_113_5,
-        0.335_153_389_958_774_8,
+        0.194_196_002_853_543_44,
+        0.704_532_824_544_503_4,
+        0.992_988_794_659_986_4,
+        1.069_340_328_399_319_3,
+        0.951_081_266_643_639_3,
+        0.638_404_024_576_423_6,
+        0.331_377_482_397_175,
     ];
     for ((&got, &want), &fm) in r.iter().zip(&reference).zip(&mods) {
         assert!(
@@ -513,6 +510,42 @@ fn roughness_am_tone_peaks_near_70_hz() {
     println!(
         "{{\"suite\":\"fs-psycho\",\"case\":\"roughness-am\",\"mods_hz\":{mods:?},\"asper\":{r:?},\"verdict\":\"pass\"}}"
     );
+}
+
+/// G1: physical harmonic sidebands must reach the correct auditory channels
+/// at each acquisition rate, especially near low-frequency Bark boundaries.
+/// Pins come from the independent upstream calculation with the same explicit
+/// physical-axis corrections as the modulation-curve test above.
+#[test]
+fn roughness_uses_physical_bin_frequencies_at_each_sample_rate() {
+    use fs_psycho::roughness::{DW_BLOCK, roughness_dw_block};
+    let cases = [
+        (44_100.0, 125.0, 20.0, 0.227_393_452_114_829_56),
+        (44_100.0, 125.0, 70.0, 0.209_018_813_987_465_63),
+        (48_000.0, 125.0, 40.0, 0.333_935_513_655_525_2),
+        (48_000.0, 125.0, 70.0, 0.195_427_479_853_490_57),
+        (96_000.0, 125.0, 20.0, 0.182_753_551_364_026_6),
+        (96_000.0, 125.0, 40.0, 0.318_996_691_117_692_97),
+        (44_100.0, 250.0, 40.0, 0.457_073_726_380_247_07),
+        (96_000.0, 4_000.0, 70.0, 0.621_996_687_805_664_1),
+    ];
+    let amplitude = fs_math::det::sqrt(2.0) * 0.02;
+    for (sample_rate, carrier_hz, modulation_hz, expected) in cases {
+        let pcm: Vec<f64> = (0..DW_BLOCK)
+            .map(|i| {
+                let t = i as f64 / sample_rate;
+                amplitude
+                    * (1.0 + fs_math::det::sin(core::f64::consts::TAU * modulation_hz * t))
+                    * fs_math::det::sin(core::f64::consts::TAU * carrier_hz * t)
+            })
+            .collect();
+        let actual = roughness_dw_block(&pcm, sample_rate).expect("physical sidebands");
+        assert!(
+            ((actual - expected) / expected).abs() < 1.0e-12,
+            "{carrier_hz} Hz carrier, {modulation_hz} Hz AM at {sample_rate} Hz: \
+             {actual:.17} vs independent reference {expected:.17}"
+        );
+    }
 }
 
 /// Roughness refusal paths are TYPED, by name (review-caught: the
