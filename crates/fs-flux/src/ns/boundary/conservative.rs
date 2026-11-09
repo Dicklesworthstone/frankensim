@@ -77,6 +77,13 @@ pub enum DensityMomentumError {
     Transport(DensityTransportError),
     /// Original native boundary, viscosity, pressure or linear-solve refusal.
     Flow(StokesBoundaryError),
+    /// Original constitutive source refusal at one transported cell.
+    Material {
+        /// Original triangle index at which the constitutive query failed.
+        cell: usize,
+        /// Unmodified material support, state, calibration or parameter error.
+        error: fs_material::MaterialError,
+    },
     /// Invalid units, dimensions, controls or unrepresentable physical output.
     Invalid(&'static str),
     /// A bounded transport allocation could not be reserved.

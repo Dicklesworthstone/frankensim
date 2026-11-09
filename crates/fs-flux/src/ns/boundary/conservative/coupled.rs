@@ -14,9 +14,18 @@ use super::{
 use crate::ns::boundary::flow_control::FlowControl;
 use crate::ns::boundary::{StokesBoundaryError, StokesFlowControlSolution, StokesRheologyControls};
 
+/// Shear-dependent molecular stress at the same density/velocity endpoint.
+#[path = "coupled/rheology.rs"]
+pub mod rheology;
+
 /// Finite external RCR storage coupled to the same transported-density endpoint.
 #[path = "coupled/windkessel.rs"]
 pub mod windkessel;
+
+enum CoupledViscosity<'a, const N: usize> {
+    Spatial(&'a dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> f64),
+    Rheology(&'a rheology::CellRheology<'a, N>),
+}
 
 /// Joint density/inventory/flow endpoint at its own transport velocity.
 pub struct CoupledDensityMomentumStep<const N: usize> {
@@ -212,8 +221,44 @@ impl<'m> FluxSystem<'m> {
         controls: DensityMomentumControls,
         nonlinear: StokesRheologyControls,
         flow_control: Option<FlowControl<'_>>,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<StokesFlowControlSolution<CoupledDensityMomentumStep<N>>> {
+        self.coupled_density_momentum_bdf1_viscosity(
+            numerics,
+            CoupledViscosity::Spatial(dynamic_viscosity),
+            force_density,
+            boundaries,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            nonlinear,
+            flow_control,
+            cancelled,
+        )
+        .map(|(solved, _)| solved)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn coupled_density_momentum_bdf1_viscosity<const N: usize>(
+        &self,
+        numerics: MaterialFluxNumerics,
+        dynamic_viscosity: CoupledViscosity<'_, N>,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        cells: &[DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumControls,
+        nonlinear: StokesRheologyControls,
+        flow_control: Option<FlowControl<'_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        StokesFlowControlSolution<CoupledDensityMomentumStep<N>>,
+        Vec<rheology::CoupledDensityMomentumRheologyCell>,
+    )> {
         poll(&mut cancelled)?;
         self.admit_mixed_bdf1_history(previous_velocity, timestep_s)?;
         if nonlinear.maximum_iterations == 0
@@ -230,6 +275,10 @@ impl<'m> FluxSystem<'m> {
         let cancelled = RefCell::new(cancelled);
         let failure = RefCell::new(None);
         let retained = RefCell::new(None);
+        let response = RefCell::new(match dynamic_viscosity {
+            CoupledViscosity::Spatial(_) => Vec::new(),
+            CoupledViscosity::Rheology(_) => rheology::response_buffer(self, controls)?,
+        });
         let assemble = |velocity: &[f64]| {
             let candidate = (|| -> Result<_> {
                 poll(&mut *cancelled.borrow_mut())?;
@@ -248,9 +297,25 @@ impl<'m> FluxSystem<'m> {
                     controls,
                     &mut *cancelled.borrow_mut(),
                 )?;
+                let mut response = response.borrow_mut();
+                if let CoupledViscosity::Rheology(source) = dynamic_viscosity {
+                    rheology::sample_cells(
+                        self,
+                        source,
+                        velocity,
+                        &prepared.cells,
+                        &mut response,
+                        &mut *cancelled.borrow_mut(),
+                    )?;
+                }
                 let weights = core::mem::take(&mut prepared.current_weights);
                 let momentum = prepared.assemble(
-                    &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
+                    &|cell, point| match dynamic_viscosity {
+                        CoupledViscosity::Spatial(source) => {
+                            source(cell, point, &prepared.cells[cell])
+                        }
+                        CoupledViscosity::Rheology(_) => response[cell].dynamic_viscosity_pa_s,
+                    },
                     weights,
                 )?;
                 poll(&mut *cancelled.borrow_mut())?;
@@ -289,16 +354,19 @@ impl<'m> FluxSystem<'m> {
             &mut *cancelled.borrow_mut(),
         )?;
         poll(&mut *cancelled.borrow_mut())?;
-        Ok(StokesFlowControlSolution {
-            flow: CoupledDensityMomentumStep {
-                step,
-                iterations: solved.flow.iterations,
-                relative_update: solved.flow.relative_update,
-                nonlinear_residual: solved.flow.nonlinear_residual,
+        Ok((
+            StokesFlowControlSolution {
+                flow: CoupledDensityMomentumStep {
+                    step,
+                    iterations: solved.flow.iterations,
+                    relative_update: solved.flow.relative_update,
+                    nonlinear_residual: solved.flow.nonlinear_residual,
+                },
+                pressure_offsets_m2_s2: solved.pressure_offsets_m2_s2,
+                outward_volume_rates_m2_s: solved.outward_volume_rates_m2_s,
+                maximum_flow_residual_m2_s: solved.maximum_flow_residual_m2_s,
             },
-            pressure_offsets_m2_s2: solved.pressure_offsets_m2_s2,
-            outward_volume_rates_m2_s: solved.outward_volume_rates_m2_s,
-            maximum_flow_residual_m2_s: solved.maximum_flow_residual_m2_s,
-        })
+            response.into_inner(),
+        ))
     }
 }

@@ -10612,3 +10612,34 @@ source-reviewed; material compilation/test execution remains blocked by the
 asupersync prerequisite compiler SIGKILL. The separate actual-source
 numerical suite passes all 145 tests, including the eleven thermal stirring
 and coupled-adaptation cases.
+
+
+## Transported-density endpoint with source molecular rheology
+
+`FluxSystem::density_momentum_coupled_bdf1_rheology_step` extends the existing
+endpoint-advector BDF1 owner with a fallible **cellwise** dynamic-viscosity source.
+Every native Picard assembly re-transports the same immutable old density and
+specific inventories, evaluates each original triangle's source at its centroid
+with that candidate's transported state and native `sqrt(2 D:D)` shear rate, and
+uses the retained coefficient at every volume/face stress quadrature site for
+that cell. The existing spatial-viscosity, integral-flow-port and RCR entry
+signatures retain their original behavior through one private shared selector.
+
+The original native Picard owner requires the unrelaxed velocity correction and
+both reassembled endpoint momentum residuals to converge. Accepted density,
+compatible mass flux, source samples, velocity, physical pressure and reactions
+therefore belong to one endpoint. An original `MaterialError` is preserved in
+`DensityMomentumError::Material { cell, error }`; unsupported sources, invalid
+viscosity, transport/CFL failure and cancellation publish no partial state.
+
+The result retains molecular viscosity, objective shear rate and `mu*gamma²`
+[W/m³] per cell, plus its compensated volume integral at the authored depth [W].
+Reporting never queries the source again. Molecular heating remains separate
+from temporal/upwind/SIP numerical losses and is not deposited into a carried
+inventory. Rigid rotation contributes no physical shear. Native material laws
+such as Carreau–Yasuda can be used directly; this entry invents no constitutive
+law, temperature feedback, yield regularization or compressible density model.
+It retains the original first-order endpoint-advector/CFL limits. One reusable
+source buffer is checked against the per-owner storage allowance; that allowance
+is not a native linear-solver or total-process memory cap.
+
