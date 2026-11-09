@@ -25,10 +25,10 @@ use super::{
     RayleighPointLightCameraSettings, camera_settings,
 };
 use super::super::{
-    AreaLightCameraError, ConnectionWork, CurvedPathResult, CurvedPointLightCameraScene,
+    AreaLightCameraError, CameraRadianceError, ConnectionWork, CurvedPathResult, CurvedPointLightCameraScene,
     CurvedSceneError, FixtureConnection, FixtureConnectionRequest, FixtureConnector,
     FixtureContributions, MAX_POINT_LIGHT_BRANCHES, PointLightBranch, PointLightCameraError,
-    SurfaceEmission, SurfaceReceiver, nonnegative, phase_index, receiver_media, validate_settings,
+    PointSourcePath, PolarizedBeam, SurfaceEmission, SurfaceReceiver, nonnegative, phase_index, receiver_media, validate_settings,
 };
 use crate::charts::Ray;
 use crate::photometry::source::PhotometricSource;
@@ -194,6 +194,11 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
         self.groups
     }
 
+    pub(in super::super::super) fn contains_source(&self, source: &PhotometricSource) -> bool {
+        self.owner.contains_source(source)
+            || self.groups.iter().any(|group| core::ptr::eq(group.source, source))
+    }
+
     /// Sum distinct images at each original selected vertex. The source
     /// sampler is keyed by global connection ordinal and per-image replay
     /// draw ordinal. Duplicate seeds never create another source RNG stream.
@@ -210,12 +215,38 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
         flight_samples: impl FnMut(u32) -> [f64; 4],
         source_samples: impl FnMut(u32, u32) -> f64,
     ) -> Result<RayleighPointLightCameraSample, PointLightCameraError> {
+        self.sample_with_modulation(cx,
+            || self.owner.surface_camera().launch(ray, wavelength_nm, initial_medium),
+            initial_medium, settings, workspace, surface_samples, flight_samples, source_samples, |_| Ok(1.0))
+    }
+
+    /// Reuse the complete steady lens response for all discovered source images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_sequential_ray_with_tracking_samples(
+        &self, cx: &Cx<'_>, optical: &crate::camera::SequentialCameraBeam,
+        initial_medium: usize, settings: RayleighPointLightCameraSettings,
+        workspace: &mut CurvedTransmittanceImageWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4], source_samples: impl FnMut(u32, u32) -> f64,
+    ) -> Result<RayleighPointLightCameraSample, PointLightCameraError> {
+        self.sample_with_modulation(cx,
+            || self.owner.surface_camera().launch_sequential(optical, initial_medium),
+            initial_medium, settings, workspace, surface_samples, flight_samples, source_samples, |_| Ok(1.0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super::super) fn sample_with_modulation(
+        &self, cx: &Cx<'_>, launch: impl FnOnce() -> Result<PolarizedBeam, CameraRadianceError>,
+        initial_medium: usize, settings: RayleighPointLightCameraSettings,
+        workspace: &mut CurvedTransmittanceImageWorkspace,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4], source_samples: impl FnMut(u32, u32) -> f64,
+        mut source_scale: impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
+    ) -> Result<RayleighPointLightCameraSample, PointLightCameraError> {
         cx.checkpoint()?;
         validate_settings(settings.point_lights)?;
-        let beam = self
-            .owner
-            .surface_camera()
-            .launch(ray, wavelength_nm, initial_medium)?;
+        let beam = launch()?;
+        let wavelength_nm = beam.wavelength_nm();
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.owner.surface_camera(), initial_index);
         let mut fixtures =
@@ -237,19 +268,15 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                 |event| {
                     let result = match event {
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
-                            emission.observe(path)?;
-                            fixtures.observe_with_connector(cx, path, &mut connector)?;
-                            self.add_groups(cx, path, None, &mut fixtures, &mut connector, workspace)
+                            self.owner.observe_event_modulated(cx,
+                                CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)),
+                                &mut emission, &mut fixtures, &mut connector, &mut source_scale)?;
+                            self.add_groups(cx, path, None, &mut fixtures, &mut connector, workspace, &mut source_scale)
                         }
                         CurvedRayleighEvent::VolumeArrival { path, phase } => {
-                            emission.observe_volume(path)?;
-                            fixtures.observe_volume(
-                                cx,
-                                path,
-                                phase,
-                                self.owner.volume_branches,
-                                &mut connector,
-                            )?;
+                            self.owner.observe_event_modulated(cx,
+                                CurvedRayleighEvent::VolumeArrival { path, phase },
+                                &mut emission, &mut fixtures, &mut connector, &mut source_scale)?;
                             self.add_groups(
                                 cx,
                                 path,
@@ -257,6 +284,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                                 &mut fixtures,
                                 &mut connector,
                                 workspace,
+                                &mut source_scale,
                             )
                         }
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure { path, .. })
@@ -283,6 +311,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
         fixtures: &mut FixtureContributions<'_, 'c, 's, 'm, 'l>,
         connector: &mut ParticipatingFixtureConnector<'_, '_, '_, '_, F>,
         workspace: &mut CurvedTransmittanceImageWorkspace,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
     ) -> Result<(), PointLightCameraError> {
         let (receiver, surface) = if phase.is_some() {
             (PointLightImageReceiver::MolecularMedium(path.medium_index()), None)
@@ -437,7 +466,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                             FixtureContributions::new(&view, fixtures.settings, fixtures.initial_index);
                         contribution.work = fixtures.work;
                         contribution
-                            .add_contact(cx, path, &mut prepared)
+                            .add_contact_modulated(cx, path, &mut prepared, source_scale)
                             .map_err(|error| rebind_error(binding, error))?;
                         fixtures.work = contribution.work;
                         fixtures.radiance = nonnegative(fixtures.radiance + contribution.radiance)?;
@@ -459,12 +488,13 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                         );
                         contribution.work = fixtures.work;
                         contribution
-                            .add_volume(
+                            .add_volume_modulated(
                                 cx,
                                 path,
                                 phase.ok_or(PointLightCameraError::NumericalRange)?,
                                 core::slice::from_ref(&branch),
                                 &mut prepared,
+                                source_scale,
                             )
                             .map_err(|error| rebind_error(binding, error))?;
                         fixtures.work = contribution.work;

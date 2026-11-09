@@ -8,7 +8,7 @@
 use super::super::{
     CameraRadianceError, CurvedPathResult, CurvedPointLightCameraScene, CurvedSceneError,
     FixtureConnectionRequest, FixtureConnector, FixtureContributions, MAX_POINT_LIGHT_BRANCHES,
-    PointLightCameraError, nonnegative, phase_index,
+    PointLightCameraError, PointSourcePath, modulated_fixture_contribution, nonnegative, phase_index,
 };
 use crate::charts::Ray;
 use crate::photometry::source::PhotometricSource;
@@ -95,6 +95,16 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
             })
     }
 
+    pub(super) fn observe_volume_modulated(
+        &mut self, cx: &Cx<'_>, path: &CurvedPathResult, phase: &PhaseFunction,
+        branches: &[MolecularPointLightBranch<'_>], connector: &mut impl FixtureConnector,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
+    ) -> Result<(), CurvedSceneError> {
+        self.add_volume_modulated(cx, path, phase, branches, connector, source_scale).map_err(|error| {
+            self.error = Some(error); CurvedSceneError::NumericalRange
+        })
+    }
+
     pub(super) fn add_volume(
         &mut self,
         cx: &Cx<'_>,
@@ -102,6 +112,14 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
         phase: &PhaseFunction,
         branches: &[MolecularPointLightBranch<'_>],
         connector: &mut impl FixtureConnector,
+    ) -> Result<(), PointLightCameraError> {
+        self.add_volume_modulated(cx, path, phase, branches, connector, &mut |_| Ok(1.0))
+    }
+
+    pub(super) fn add_volume_modulated(
+        &mut self, cx: &Cx<'_>, path: &CurvedPathResult, phase: &PhaseFunction,
+        branches: &[MolecularPointLightBranch<'_>], connector: &mut impl FixtureConnector,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
     ) -> Result<(), PointLightCameraError> {
         let beam = *path.beam();
         for (slot, branch) in branches.iter().enumerate() {
@@ -228,14 +246,22 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
                 return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
             }
             let local_index = phase_index(beam.medium(), beam.wavelength_nm())?;
-            let contribution = volume_contribution(
+            let scale = source_scale(PointSourcePath::Connected {
+                source: branch.source, camera: path, connection: &connection.original,
+            })?;
+            let contribution = if scale == 1.0 {
+                volume_contribution(
                 beam.power().i,
                 self.initial_index,
                 local_index,
                 angular,
                 irradiance,
                 connection.log_scattering_survival,
-            )?;
+            )?
+            } else {
+                modulated_fixture_contribution(beam.power().i, self.initial_index, local_index,
+                    angular, irradiance, connection.log_scattering_survival, scale, false)?
+            };
             self.radiance = nonnegative(self.radiance + contribution)?;
         }
         Ok(())

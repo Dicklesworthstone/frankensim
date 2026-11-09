@@ -10082,9 +10082,9 @@ This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
 with a narrow-band group-delay approximation. It supplies no carrier phase,
 within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
 unmodeled lens transit, interface/coating residence time, or temporal environment,
-volume history. The finite-area adapters below support timed clear-medium and
-molecular connections; the point-fixture adapter adds retarded clear-medium
-connections. Unbound sources remain explicitly steady.
+volume history. The finite-area and point-fixture adapters below support timed
+clear-medium and molecular connections, including native refracted source
+images. Unbound sources remain explicitly steady.
 
 Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
 chromatic pulse arrivals, an independent curved-path group integral, large-epoch
@@ -10452,11 +10452,41 @@ whole requested observation. Steady raw-beam and timed sequential-lens methods
 retain the native polarization analyzer and optical transport.
 
 These histories assume frozen geometry and optics. Environment, LTE and volume
-emission remain steady, and this clear-medium adapter does not make molecular
-point connections time dependent. Three regression fixtures cover separate
+emission remain steady. Molecular point connections and discovered source
+images use the additional adapters below. Three regression fixtures cover separate
 surface/fixture clocks, native work parity, timed analyzed lens pulses and
 shutters, and admission/refusal cases. They were source reviewed and parsed;
 the complete renderer test target was not executed in the editing environment.
+
+## Retarded molecular point fixtures and refracted images
+
+With `volumes`, `TransientCurvedRayleighPointLightCameraScene` and
+`TransientCurvedRayleighImageLightCameraScene` apply the same exact-source
+histories at native surface and accepted molecular vertices. Prescribed
+connections and every deduplicated refracted source image retain their actual
+camera-prefix and connection group paths, source polarization, photometric
+normalization, and independent source-survival realization. Duplicate search
+seeds do not duplicate source events or source streams.
+
+Instantaneous and finite-shutter methods accept ideal rays or complete timed
+sequential-lens beams. The DD lens prefix enters the clock once. Original
+zero-survival, zero-phase and noncontributing guards precede history evaluation;
+null molecular candidates create no invented emission event. A steady
+raw-beam launch remains available without requiring group timing. Surface,
+flight and source-counter streams, original geometry searches, trace budgets
+and cumulative work accounting remain with their native workers.
+
+History/source identity and camera ownership are admitted against every actual
+attached surface, volume and image fixture. Unbound fixtures remain steady and
+bypass new group eligibility; missing group evidence and original history
+failures preserve typed refusal of the entire observation. Frozen geometry and
+optics, steady environment, LTE and volume emission remain explicit limits.
+
+Three additional regression fixtures cover heterogeneous null/real candidates
+and source stochastic zero, distinct polarized images and shutter means with
+exact native trace budgets, and chromatic analyzed-lens timing at a real
+molecular vertex. They were parsed and independently source/API/math reviewed;
+renderer execution was unavailable in this editing environment.
 
 ## Retarded molecular finite-area source connections
 

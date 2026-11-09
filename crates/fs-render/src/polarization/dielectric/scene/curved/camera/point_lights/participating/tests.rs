@@ -825,3 +825,4 @@ fn g1_null_candidates_do_not_emit_and_local_phase_is_shared_with_camera_continua
 }
 
 mod images;
+mod transient;

@@ -22,6 +22,9 @@ use fs_math::dd::Dd;
 
 mod history;
 mod sequential;
+/// Native molecular collisions and independently tracked fixture images.
+#[cfg(feature = "volumes")]
+pub mod participating;
 use history::PointHistoryObserver;
 pub use history::{
     PointEmissionHistory, PointEmissionHistoryBinding, PointEmissionQuery, PointExposureQuery,
