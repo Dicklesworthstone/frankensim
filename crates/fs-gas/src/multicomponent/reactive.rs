@@ -516,11 +516,9 @@ impl ReactingEuler1d {
                 forcing = None;
             }
         }
-        if forcing.is_some()
-            && (entropy.is_some() || reservoirs.iter().any(Option::is_some))
-        {
+        if forcing.is_some() && entropy.is_some() {
             return Err(ReactiveError::Invalid(
-                "reacting body forcing does not compose prescribed reservoirs or entropy accounting",
+                "reacting body forcing does not compose entropy accounting",
             ));
         }
         if entropy.as_ref().is_some_and(|account| account.has_exterior_states()) {
@@ -590,11 +588,12 @@ impl ReactingEuler1d {
                 )?;
                 let (transport, transport_entropy) = if let Some((force, force_controls)) = forcing {
                     (
-                        self.trial.step_with_body_force(
+                        self.trial.step_with_body_force_and_reservoirs(
                             Time::new(duration),
                             controls.transport,
                             force,
                             force_controls,
+                            reservoirs,
                             &mut cancelled,
                         )?,
                         None,

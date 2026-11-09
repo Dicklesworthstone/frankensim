@@ -27,6 +27,70 @@ pub(super) fn admit(
 }
 
 impl ReactingEuler1d {
+    /// Couple held interior body forcing to chemistry and stationary baths.
+    ///
+    /// The same undepleted bath reaches both original advection stages, while
+    /// only the actual interior mixture receives mechanical impulse and work.
+    /// Complete retries repeat both chemistry halves and both force kicks from
+    /// accepted state. Boundary enthalpy, chemical source and mechanical work
+    /// remain separate and each enters the original total-energy balance once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_body_force_and_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_inner_forced::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            stabilized::MolecularMethod::Explicit(DissipationControl::default()),
+            reservoirs,
+            None,
+            None,
+            Some((force, force_controls)),
+            cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
+    /// Add original molecular bath exchange around a forced reacting interval.
+    ///
+    /// Both diffusion halves and advection share the same prescribed baths.
+    /// The existing molecular face law owns species/enthalpy transfer and
+    /// stationary traction work; forcing acts on the evolving interior density.
+    /// Final chemistry-temperature and force-Mach admission occur after the
+    /// second molecular half, before accepted state or time can change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_body_force_and_reservoirs<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_inner_forced(
+            maximum_duration,
+            controls,
+            Some(operator),
+            stabilized::MolecularMethod::Explicit(dissipation_controls),
+            reservoirs,
+            None,
+            None,
+            Some((force, force_controls)),
+            cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
     /// Advance finite-rate chemistry and advection against stationary baths.
     ///
     /// Each supplied bath overrides that physical end for the whole accepted

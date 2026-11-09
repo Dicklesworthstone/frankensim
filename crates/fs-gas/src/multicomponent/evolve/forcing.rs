@@ -85,20 +85,50 @@ impl MixtureEuler1d {
         controls: StepControl,
         force: BodyForce<'_>,
         force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_with_body_force_and_reservoirs(
+            maximum_duration,
+            controls,
+            force,
+            force_controls,
+            [None; 2],
+            cancelled,
+        )
+    }
+
+    /// Advance distributed acceleration with prescribed species-bearing baths.
+    ///
+    /// Baths are held external states in this gas's species order and energy
+    /// gauge. Only interior cells receive the mechanical half-kicks; a bath is
+    /// neither accelerated nor depleted. The original characteristic face law
+    /// supplies species and enthalpy transfer at both transport stages. That
+    /// boundary work and the interior mechanical work remain distinct in the
+    /// returned first-law account. All source, face and CFL refusals restart
+    /// from the original accepted field. No additional source buffer is needed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_body_force_and_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        reservoirs: [Option<Cell<'_>>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
         force_controls.admit::<Error>()?;
         if !force.admit::<Error>(self.cell_count(), &mut cancelled)? {
-            return self.step(maximum_duration, controls, cancelled);
+            return self.step_with_reservoirs(maximum_duration, controls, reservoirs, cancelled);
         }
+        let admitted = self.admit_reservoirs(reservoirs, &mut cancelled)?;
         if self.body_force_stage.is_none() {
             self.body_force_stage = Some(allocated(self.states.len(), 0.0)?);
         }
         self.advance(
             maximum_duration,
             controls,
-            [None; 2],
+            admitted,
             Some((force, force_controls)),
             None,
             cancelled,

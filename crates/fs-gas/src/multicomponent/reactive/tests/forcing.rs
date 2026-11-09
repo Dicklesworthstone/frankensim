@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod reservoir;
+
 const FORCE_CONTROL: ForceControl = ForceControl { maximum_mach: 80.0 };
 
 fn near(actual: f64, expected: f64, tolerance: f64) {

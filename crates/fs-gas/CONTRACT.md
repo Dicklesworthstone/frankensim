@@ -9061,3 +9061,28 @@ These are numerical regression definitions, not experimental validation.
 This entry does not add time-dependent feedback, moving-wall forcing,
 prescribed reservoir forcing, stabilized complete-duration forcing, or
 entropy-admitted forced composition.
+
+## Acceleration with stationary mixture reservoirs
+
+The native mixture and reacting owners expose
+`step_with_body_force_and_reservoirs`. Characteristic reservoir admission,
+caloric inversion and species/enthalpy face fluxes retain one shared owner.
+Only interior cells receive mechanical half-kicks, with their actual stage
+density; the prescribed exterior bath remains stationary and undepleted.
+Source and reservoir checks precede trial publication, and every shortened
+transport interval restarts the complete original reacting composition.
+
+`ReactingEuler1d::step_with_dissipation_body_force_and_reservoirs` supplies
+the same baths to both molecular halves and both advective stages. Mechanical
+impulse/work, chemical formation-energy change, advective enthalpy and
+molecular species/enthalpy/stress exchange remain distinct. Each enters the
+complete momentum and absolute-energy account once. Existing final chemistry
+temperature and force-Mach gates apply after the second molecular half.
+No extra source workspace or new boundary/transport kernel is introduced.
+
+`reactive/tests/forcing/reservoir.rs` covers the inert native source/face
+limit, reservoir species transport, mass-derived mechanical impulse with
+reaction and diffusion, zero-source parity, stationary-bath admission and
+late cancellation/retry. This stationary prescribed-bath extension does not
+infer finite reservoir depletion, moving exterior momentum or entropy
+admission for the forced composition.

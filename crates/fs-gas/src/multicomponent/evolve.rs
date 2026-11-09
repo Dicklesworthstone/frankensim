@@ -437,7 +437,19 @@ impl MixtureEuler1d {
         if reservoirs.iter().all(Option::is_none) {
             return self.step(maximum_duration, controls, cancelled);
         }
-        poll(&mut cancelled)?;
+        let admitted = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        self.advance(maximum_duration, controls, admitted, None, None, cancelled)
+    }
+
+    fn admit_reservoirs<'a>(
+        &self,
+        reservoirs: [Option<Cell<'a>>; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReservoirEnds<'a>, Error> {
+        if reservoirs.iter().all(Option::is_none) {
+            return Ok([None; 2]);
+        }
+        poll(cancelled)?;
         if self.boundaries == Boundaries::Periodic {
             return Err(Error::Invalid(
                 "prescribed mixture reservoirs require physical ends",
@@ -446,16 +458,16 @@ impl MixtureEuler1d {
         let mut admitted = [None; 2];
         for (target, reservoir) in admitted.iter_mut().zip(reservoirs) {
             if let Some(state) = reservoir {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
                 if state.momentum != 0.0 {
                     return Err(Error::Invalid(
                         "stationary mixture reservoir has nonzero momentum",
                     ));
                 }
-                *target = Some((state, self.gas.primitive(state, &mut cancelled)?));
+                *target = Some((state, self.gas.primitive(state, &mut *cancelled)?));
             }
         }
-        self.advance(maximum_duration, controls, admitted, None, None, cancelled)
+        Ok(admitted)
     }
 
     fn advance(
