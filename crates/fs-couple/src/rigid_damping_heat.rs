@@ -23,7 +23,7 @@ pub mod driven;
 /// Original Maxwell memory and native rigid motion on the finite thermal timeline.
 pub mod relaxation;
 
-use fs_math::{dd::Dd, eft::two_sum};
+use fs_math::dd::Dd;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
 use fs_mbd::spatial_loads::internal_motion::{
     HeldExternalLoads,
@@ -33,9 +33,13 @@ use fs_mbd::spatial_loads::internal_motion::{
     },
 };
 use fs_mbd::{MassProperties, RigidBodyState, RigidKineticEnergyChange};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
+    ImplicitConductionObservedError, ImplicitConductionReport, ImplicitConductionWorkspace,
+};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
-    HeatTransfer, StepConfig,
+    HeatTransfer, StepConfig, collect_source_rates,
 };
 use std::{borrow::Cow, cell::RefCell, collections::BTreeMap, convert::Infallible};
 
@@ -68,6 +72,28 @@ pub struct RigidDampingThermalConfig {
     pub maximum_heat_bindings: usize,
     /// Bounds complete residuals, accumulated absolute interval mechanical
     /// defects and absolute cellwise heat-handoff defects independently [J].
+    pub energy_tolerance_j: f64,
+}
+
+/// Native thermal quadrature for the same accepted mechanical intervals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImplicitThermalScheme {
+    BackwardEuler,
+    Sdirk2,
+}
+
+/// Original mechanical limits and native implicit thermal controls.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidDampingImplicitConfig {
+    /// Per-attempt native moving-network controls; rejected attempts still
+    /// contribute to the returned pair-relaxation work count.
+    pub mechanical: ViscousNetworkMotionControls,
+    /// maximum_dt_s also bounds the physical mechanical interval. Source
+    /// restrictions and exact native events may shorten it further.
+    pub thermal: ImplicitConductionControls,
+    pub scheme: ImplicitThermalScheme,
+    pub maximum_heat_bindings: usize,
+    /// Independent whole-call mechanical, handoff and combined energy gates.
     pub energy_tolerance_j: f64,
 }
 
@@ -104,6 +130,7 @@ pub struct RigidDampingThermalReport {
     /// Delta mechanical + delta original thermal storage + unallocated loss
     /// - original incoming inventory - outside mechanical/thermal supply [J].
     pub combined_energy_residual_j: f64,
+    /// Actual native work, including successfully prepared but rejected intervals.
     pub pair_relaxations: usize,
 }
 
@@ -152,6 +179,7 @@ pub enum RigidDampingThermalError<E, S = Infallible> {
         fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionError,
     ),
     Thermal(DepositionError),
+    ImplicitThermal(ImplicitConductionError),
     Observer(E),
     /// Original connector index and the authored source's own refusal.
     Source {
@@ -177,6 +205,14 @@ impl<E, S> From<ViscousNetworkMotionError> for RigidDampingThermalError<E, S> {
         match error {
             ViscousNetworkMotionError::Cancelled => Self::Cancelled,
             error => Self::Motion(error),
+        }
+    }
+}
+impl<E, S> From<ImplicitConductionError> for RigidDampingThermalError<E, S> {
+    fn from(error: ImplicitConductionError) -> Self {
+        match error {
+            ImplicitConductionError::Thermal(DepositionError::Cancelled) => Self::Cancelled,
+            error => Self::ImplicitThermal(error),
         }
     }
 }
@@ -252,6 +288,69 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     .map(|(candidate, _, _)| candidate)
 }
 
+/// Advance native rigid damping and stiff thermal transport on one shared clock.
+///
+/// The caller supplies the original prepared graph and its reusable workspace.
+/// One native mechanical proposal supplies whole-interval physical loss; both
+/// SDIRK stages use that same mean heat. Only the final accepted thermal step
+/// publishes the pending body states and observer history. Nonlinear halving
+/// recomputes mechanical loss from the unchanged accepted body bank, retaining
+/// attempted work counts. No artificial conductive CFL limits the interval.
+///
+/// The graph owns all conduction; inner observer conductance overrides refuse
+/// through its native admission. Original source timestep restrictions and
+/// event/transition clipping remain active. Frozen damping forms, held loads,
+/// caloric/geometry correspondence and temporal-refinement obligations remain
+/// those of [`advance_candidate`]. SDIRK thermal order does not establish the
+/// order of held observed forcing or the moving-mechanics split.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_implicit_candidate<'m, O: DepositionObserver>(
+    input: RigidDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    target_s: f64,
+    conduction: &ImplicitConductionGraph<'_>,
+    config: RigidDampingImplicitConfig,
+    workspace: &mut ImplicitConductionWorkspace,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        RigidDampingThermalCandidate<'m, O>,
+        ImplicitConductionReport,
+    ),
+    O::Error,
+> {
+    let (candidate, _, _, report) = advance_with_source_driver(
+        input,
+        thermal,
+        observer,
+        FrozenSource(input.links),
+        NetworkMotion(config.mechanical),
+        target_s,
+        ThermalControls {
+            thermal: StepConfig {
+                max_dt_s: config.thermal.maximum_dt_s,
+                energy_tolerance_j: config.thermal.total_tolerance_j,
+            },
+            maximum_heat_bindings: config.maximum_heat_bindings,
+            energy_tolerance_j: config.energy_tolerance_j,
+        },
+        ThermalDriver::Implicit {
+            conduction,
+            controls: config.thermal,
+            scheme: config.scheme,
+            workspace,
+        },
+        cancelled,
+    )?;
+    Ok((
+        candidate,
+        report.ok_or(RigidDampingThermalError::Invalid(
+            "implicit thermal advance omitted its native report",
+        ))?,
+    ))
+}
+
 // Only the source binding varies. The original timeline, native mechanics,
 // per-cell heat handoff and independent final energy admission remain shared.
 trait DampingSource: Clone {
@@ -300,6 +399,16 @@ impl From<RigidDampingThermalConfig> for ThermalControls {
             energy_tolerance_j: config.energy_tolerance_j,
         }
     }
+}
+
+enum ThermalDriver<'a, 'law> {
+    Explicit,
+    Implicit {
+        conduction: &'a ImplicitConductionGraph<'law>,
+        controls: ImplicitConductionControls,
+        scheme: ImplicitThermalScheme,
+        workspace: &'a mut ImplicitConductionWorkspace,
+    },
 }
 
 #[derive(Clone)]
@@ -411,6 +520,41 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
     config: ThermalControls,
     cancelled: impl FnMut() -> bool,
 ) -> Result<(RigidDampingThermalCandidate<'m, O>, S, M), O::Error, S::Error> {
+    advance_with_source_driver(
+        input,
+        thermal,
+        observer,
+        source,
+        mechanics,
+        target_s,
+        config,
+        ThermalDriver::Explicit,
+        cancelled,
+    )
+    .map(|(candidate, source, mechanics, _)| (candidate, source, mechanics))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_source_driver<'m, O: DepositionObserver, S: DampingSource, M: MechanicalAdvance>(
+    input: RigidDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    source: S,
+    mechanics: M,
+    target_s: f64,
+    config: ThermalControls,
+    driver: ThermalDriver<'_, '_>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        RigidDampingThermalCandidate<'m, O>,
+        S,
+        M,
+        Option<ImplicitConductionReport>,
+    ),
+    O::Error,
+    S::Error,
+> {
     let cancellation = RefCell::new(cancelled);
     let requested = || (*cancellation.borrow_mut())();
     let checkpoint = || {
@@ -482,8 +626,33 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
         connector_actuator_work: vec![Dd::ZERO; input.links.len()],
         pair_relaxations: 0,
     };
-    let (thermal, mut coupled, audit) =
-        thermal.advance_observed(&coupled, target_s, config.thermal, checkpoint)?;
+    let (thermal, mut coupled, audit, implicit_report) = match driver {
+        ThermalDriver::Explicit => {
+            let (thermal, coupled, audit) =
+                thermal.advance_observed(&coupled, target_s, config.thermal, checkpoint)?;
+            (thermal, coupled, audit, None)
+        }
+        ThermalDriver::Implicit {
+            conduction,
+            controls,
+            scheme,
+            workspace,
+        } => {
+            let advance = match scheme {
+                ImplicitThermalScheme::BackwardEuler => conduction.advance_observed_to(
+                    thermal, &coupled, target_s, controls, workspace, checkpoint,
+                ),
+                ImplicitThermalScheme::Sdirk2 => conduction.advance_sdirk2_observed_to(
+                    thermal, &coupled, target_s, controls, workspace, checkpoint,
+                ),
+            };
+            let (thermal, coupled, report) = advance.map_err(|error| match error {
+                ImplicitConductionObservedError::Implicit(error) => error.into(),
+                ImplicitConductionObservedError::Observer(error) => error,
+            })?;
+            (thermal, coupled, report.energy, Some(report))
+        }
+    };
     if coupled.pending.is_some() || coupled.time_s.to_bits() != target_s.to_bits() {
         return Err(RigidDampingThermalError::Invalid(
             "mechanical and thermal endpoints must agree",
@@ -585,6 +754,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
         },
         coupled.source,
         coupled.mechanics,
+        implicit_report,
     ))
 }
 
@@ -655,9 +825,17 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, check))
+    }
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> core::result::Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(), O::Error, S::Error> {
         self.inner
             .to_mut()
-            .sources(thermal, check)
+            .visit_sources(thermal, emit, check)
             .map_err(RigidDampingThermalError::Observer)
     }
     fn conductances(
@@ -719,12 +897,34 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
         end_s: f64,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start_s, dt_s, end_s, emit, check)
+        })
+    }
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> core::result::Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(), O::Error, S::Error> {
         check()?;
-        if self.pending.is_some() || self.time_s.to_bits() != start_s.to_bits() {
+        if self.time_s.to_bits() != start_s.to_bits()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.start_s.to_bits() != start_s.to_bits())
+        {
             return Err(RigidDampingThermalError::Invalid(
-                "damper interval already pending or stale",
+                "damper preparation must start at the accepted shared clock",
             ));
         }
+        // A smaller nonlinear retry replaces only a proposed receipt. The
+        // native body bank and constitutive memory still belong to the last
+        // accepted step; cumulative preparation work remains charged below.
+        self.pending = None;
         for route in self.input.heat_fractions {
             for id in route.keys() {
                 check()?;
@@ -737,10 +937,9 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
         }
         self.source
             .synchronize::<O::Error>(thermal, self.requested)?;
-        let mut rates = self
-            .inner
+        self.inner
             .to_mut()
-            .step_sources(thermal, start_s, dt_s, end_s, check)
+            .visit_step_sources(thermal, start_s, dt_s, end_s, emit, check)
             .map_err(RigidDampingThermalError::Observer)?;
         let step = self.mechanics.step_with_source::<O::Error, S>(
             self.input,
@@ -749,6 +948,10 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             dt_s,
             self.requested,
         )?;
+        self.pair_relaxations = self
+            .pair_relaxations
+            .checked_add(step.pair_relaxations)
+            .ok_or(DepositionError::Budget("complete damper pair relaxations"))?;
         if step.connector_dissipation_j.len() != self.input.links.len()
             || step
                 .connector_actuator_work_j
@@ -815,16 +1018,10 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             if watts == 0.0 && (heat.hi != 0.0 || heat.lo != 0.0) {
                 return Err(DepositionError::Arithmetic.into());
             }
-            let rate = rates.entry(id).or_insert(0.0);
-            let old = *rate;
-            let (next, lost) = two_sum(old, watts);
-            *rate = number(next)?;
-            let received = (Dd::from_f64(next) - Dd::from_f64(old)) * Dd::from_f64(dt_s);
+            emit(id, watts)?;
+            let received = Dd::from_f64(watts) * Dd::from_f64(dt_s);
             deposited = deposited + received;
             absolute = absolute + Dd::from_f64(value::<O::Error, S::Error>(received - heat)?.abs());
-            if lost != 0.0 {
-                absolute = absolute + Dd::from_f64(number((lost.abs() * dt_s).next_up())?);
-            }
         }
         absolute = absolute
             + Dd::from_f64(value::<O::Error, S::Error>(ideal + unallocated - edge_heat)?.abs());
@@ -838,7 +1035,7 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             unallocated,
             absolute_handoff: absolute,
         });
-        Ok(rates)
+        Ok(())
     }
     fn event(
         &mut self,
@@ -908,10 +1105,6 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
         a.absolute_handoff = a.absolute_handoff + pending.absolute_handoff;
         balance(value(a.absolute_defect)?, self.config.energy_tolerance_j)?;
         balance(value(a.absolute_handoff)?, self.config.energy_tolerance_j)?;
-        self.pair_relaxations = self
-            .pair_relaxations
-            .checked_add(step.pair_relaxations)
-            .ok_or(DepositionError::Budget("complete damper pair relaxations"))?;
         self.mechanics.accept::<O::Error, S::Error>(&mut step)?;
         self.states = Cow::Owned(step.states_after);
         self.time_s = pending.end_s;
