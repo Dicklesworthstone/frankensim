@@ -171,11 +171,91 @@ impl<A: HeatAssembly + ?Sized> BatteryMotorHeatNetwork<'_, A> {
             target_s,
             drive,
             modulation,
-            shaft_torque_nm,
-            auxiliary_load,
-            electrical_controls,
             controls,
             initial_energy_increments_j,
+            1,
+            |original, dt, checkpoint| {
+                averaged_drive_step(
+                    original,
+                    &drive.state,
+                    dt,
+                    shaft_torque_nm,
+                    auxiliary_load,
+                    electrical_controls,
+                    checkpoint,
+                )
+            },
+            |trial, fixed, original| self.resolve(cx, &network, trial, fixed, original, &cancel),
+            &cancel,
+        )?;
+        closed_balance(
+            target_s - thermal.time_s(),
+            candidate.report().total_energy_residual_j,
+            candidate.report().source.network.as_ref(),
+            controls.total_energy_tolerance_j,
+        )
+        .map_err(heat_error)?;
+        cx.checkpoint()
+            .map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        Ok(candidate)
+    }
+    /// Prescribed PWM with the same complete original heat assembly. The native
+    /// cycle owns every substep's ten heat/work integrals; original contacts,
+    /// radiation and finite coolant exchange remain in the shared caloric solve.
+    /// Gate commands are immutable within the candidate and every subdivision
+    /// is charged even on exact-resistance trajectory-cache reuse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_switch_candidate<'t>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        drive: &MaterialBatteryMotorDrive,
+        intervals: &[SwitchInterval],
+        commands: &[BatteryMotorSwitchCommand],
+        substeps_per_interval: usize,
+        electrical_controls: PowerLoadControls,
+        cycle_controls: SwitchCycleControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<
+        BatteryMotorEnthalpyCandidate<'t, A::Sample, BatteryMotorSwitchCycleStep>,
+        Error<A::Error>,
+    > {
+        cx.checkpoint()
+            .map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        let integration_steps =
+            switched_drive_work(intervals, commands, substeps_per_interval).map_err(drive_error)?;
+        super::super::super::super::admit_driver_unknowns(
+            thermal,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        let network = self.network(cx)?;
+        let cancel = RefCell::new(|| cx.checkpoint().is_err());
+        let candidate = network.step_resolved_candidate(
+            thermal,
+            target_s,
+            drive,
+            drive.modulation,
+            controls,
+            initial_energy_increments_j,
+            integration_steps,
+            |original, dt, checkpoint| {
+                switched_drive_step(
+                    original,
+                    &drive.state,
+                    dt,
+                    thermal.time_s(),
+                    target_s,
+                    intervals,
+                    commands,
+                    substeps_per_interval,
+                    electrical_controls,
+                    cycle_controls,
+                    checkpoint,
+                )
+            },
             |trial, fixed, original| self.resolve(cx, &network, trial, fixed, original, &cancel),
             &cancel,
         )?;

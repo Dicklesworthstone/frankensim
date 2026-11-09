@@ -10,8 +10,9 @@
 //! OCV, capacitances, inductances, inertias and reciprocal motor coupling remain
 //! fixed. Bearing drag is authored in N m s/rad, never read as an ohmic source.
 //! Endpoint resistance feedback has first-order coupled accuracy in general.
-//! This owner adds no PWM loss, iron loss, reversible battery heat, temperature
-//! dependent storage, control or protection law.
+//! Prescribed complementary PWM uses the same native drive and ten heat paths.
+//! No switching-transition loss, iron loss, reversible battery heat, temperature
+//! dependent storage, control or protection law is inferred.
 
 /// Source-owned contacts, radiation, reservoir cooling and finite coolant paths.
 pub mod heat;
@@ -20,6 +21,12 @@ use super::*;
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_phs::circuit::{
     converter::battery_fed::motor::{BatteryMotorDrive, BatteryMotorStep},
+    converter::switching::{
+        SwitchCycleControls, SwitchInterval,
+        battery_motor::{
+            BatteryMotorSwitchCommand, BatteryMotorSwitchCycleStep, PreparedBatteryMotorSwitchCycle,
+        },
+    },
     motor::{DcMotor, DcMotorParameters},
 };
 
@@ -95,19 +102,19 @@ pub struct BatteryMotorThermalSample<S = MaterialNetworkSample> {
 }
 
 /// All nine native coordinates and thermal history publish together.
-pub struct BatteryMotorEnthalpyCandidate<'t, S = MaterialNetworkSample> {
+pub struct BatteryMotorEnthalpyCandidate<'t, S = MaterialNetworkSample, Step = BatteryMotorStep> {
     thermal: DepositionSimulation<'t>,
     drive: MaterialBatteryMotorDrive,
-    report: CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep>,
+    report: CircuitEnthalpyReport<BatteryMotorThermalSample<S>, Step>,
 }
-impl<'t, S> BatteryMotorEnthalpyCandidate<'t, S> {
+impl<'t, S, Step> BatteryMotorEnthalpyCandidate<'t, S, Step> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn drive(&self) -> &MaterialBatteryMotorDrive {
         &self.drive
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<BatteryMotorThermalSample<S>, Step> {
         &self.report
     }
     pub fn into_parts(
@@ -115,7 +122,7 @@ impl<'t, S> BatteryMotorEnthalpyCandidate<'t, S> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialBatteryMotorDrive,
-        CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep>,
+        CircuitEnthalpyReport<BatteryMotorThermalSample<S>, Step>,
     ) {
         (self.thermal, self.drive, self.report)
     }
@@ -174,93 +181,233 @@ fn drive_native(
         .map_err(model)
 }
 
-struct DriveDriver {
+// Both original native owners expose the same physical storage/work/heat.
+// This private view adds no trajectory, reconstructed loss or caloric solver.
+struct DriveEnergy {
+    storage: [f64; 7],
+    heat: [f64; BATTERY_MOTOR_HEAT_CHANNELS],
+    battery_work: f64,
+    converter_work: [f64; 2],
+    motor_work: f64,
+    shaft_work: [f64; 2],
+    load_work: f64,
+    electrical_external: Option<f64>,
+}
+trait DriveStep: Clone {
+    fn native(&self) -> &fs_phs::PreparedStepRecord;
+    fn energy(&self) -> DriveEnergy;
+}
+impl DriveStep for BatteryMotorStep {
+    fn native(&self) -> &fs_phs::PreparedStepRecord {
+        &self.native
+    }
+    fn energy(&self) -> DriveEnergy {
+        let e = &self.electrical;
+        DriveEnergy {
+            storage: [
+                e.battery.chemical_energy_change_j,
+                e.battery.polarization_energy_change_j,
+                e.battery.bus_energy_change_j,
+                e.converter_storage_change_j,
+                self.magnetic_energy_change_j,
+                self.kinetic_energy_change_j[0],
+                self.kinetic_energy_change_j[1],
+            ],
+            heat: self.heat_joules(),
+            battery_work: e.battery.terminal_work_j,
+            converter_work: e.converter_terminal_work_j,
+            motor_work: self.motor_electrical_work_j,
+            shaft_work: self.shaft_work_j,
+            load_work: e.load_work_j,
+            electrical_external: Some(e.external_work_j),
+        }
+    }
+}
+impl DriveStep for BatteryMotorSwitchCycleStep {
+    fn native(&self) -> &fs_phs::PreparedStepRecord {
+        &self.native
+    }
+    fn energy(&self) -> DriveEnergy {
+        DriveEnergy {
+            storage: self.storage_change_j,
+            heat: self.heat_joules(),
+            battery_work: self.battery_terminal_work_j,
+            converter_work: self.converter_terminal_work_j,
+            motor_work: self.motor_electrical_work_j,
+            shaft_work: self.shaft_work_j,
+            load_work: self.load_work_j,
+            electrical_external: None,
+        }
+    }
+}
+
+struct DriveDriver<Step> {
     drive: MaterialBatteryMotorDrive,
-    step: BatteryMotorStep,
+    step: Step,
     heat: [f64; BATTERY_MOTOR_HEAT_CHANNELS],
     total_heat_j: f64,
     net_external_work_j: Dd,
 }
-impl ThermalDriver for DriveDriver {
+impl<Step: DriveStep> ThermalDriver for DriveDriver<Step> {
     type Model = MaterialBatteryMotorDrive;
-    type Step = BatteryMotorStep;
+    type Step = Step;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
             resistors: &[],
             contacts: &[],
             heat_j: self.total_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.step.native.delta_h,
+            stored_change_j: self.step.native().delta_h,
             supplied_j: self.net_external_work_j.to_f64(),
         }
     }
     fn retained_energy_balance_j(&self) -> Dd {
-        Dd::from_f64(self.step.native.delta_h) - self.net_external_work_j
+        Dd::from_f64(self.step.native().delta_h) - self.net_external_work_j
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
         (self.drive, self.step)
     }
 }
 
-// Check every physical boundary independently; internal motor electrical work
-// cancels once and never becomes a second external supply or caloric source.
-fn drive_account(
-    step: &BatteryMotorStep,
+// Audit each physical boundary BEFORE depositing heat. The original averaged
+// owner's additional six-state external-port witness remains independently checked.
+fn drive_account<Step: DriveStep>(
+    step: &Step,
     tolerance_j: f64,
 ) -> Result<([f64; BATTERY_MOTOR_HEAT_CHANNELS], Dd, Dd), Error> {
-    let heat = step.heat_joules();
+    let e = step.energy();
+    let heat = e.heat;
     if heat.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err(invalid(
             "battery motor drive needs ten nonnegative physical heats",
         ));
     }
     let total = sum(heat)?;
-    let e = &step.electrical;
-    let exported = Dd::from_f64(finite(e.load_work_j)?);
-    let shaft_work = sum(step.shaft_work_j)?;
+    let exported = Dd::from_f64(finite(e.load_work)?);
+    let shaft_work = sum(e.shaft_work)?;
     let external = shaft_work - exported;
-    let battery_change = sum([
-        e.battery.chemical_energy_change_j,
-        e.battery.polarization_energy_change_j,
-        e.battery.bus_energy_change_j,
-    ])?;
-    let battery_heat = sum([e.battery.series_heat_j, e.battery.polarization_heat_j])?;
-    let converter_change = Dd::from_f64(finite(e.converter_storage_change_j)?);
-    let converter_heat = sum(e.converter_conduction.joules)?;
-    let motor_change = sum([
-        step.magnetic_energy_change_j,
-        step.kinetic_energy_change_j[0],
-        step.kinetic_energy_change_j[1],
-    ])?;
-    let motor_heat = sum([step.copper_heat_j, step.bearing_heat_j])?;
-    let battery_work = Dd::from_f64(finite(e.battery.terminal_work_j)?);
-    let input_work = Dd::from_f64(finite(e.converter_terminal_work_j[0])?);
-    let output_work = Dd::from_f64(finite(e.converter_terminal_work_j[1])?);
-    let motor_work = Dd::from_f64(finite(step.motor_electrical_work_j)?);
-    let electrical_external = Dd::from_f64(finite(e.external_work_j)?);
-    let delta = Dd::from_f64(finite(step.native.delta_h)?);
+    let battery_change = sum(e.storage[..3].iter().copied())?;
+    let battery_heat = sum([heat[5], heat[6]])?;
+    let converter_change = Dd::from_f64(finite(e.storage[3])?);
+    let converter_heat = sum(heat[..5].iter().copied())?;
+    let motor_change = sum(e.storage[4..].iter().copied())?;
+    let motor_heat = sum([heat[8], heat[9]])?;
+    let battery_work = Dd::from_f64(finite(e.battery_work)?);
+    let input_work = Dd::from_f64(finite(e.converter_work[0])?);
+    let output_work = Dd::from_f64(finite(e.converter_work[1])?);
+    let motor_work = Dd::from_f64(finite(e.motor_work)?);
+    let delta = Dd::from_f64(finite(step.native().delta_h)?);
+    let valid = |r: Dd| r.hi.is_finite() && r.lo.is_finite() && r.abs().to_f64() <= tolerance_j;
     let residuals = [
         battery_change + battery_heat - battery_work,
         converter_change + converter_heat - input_work - output_work,
-        battery_work + Dd::from_f64(finite(e.lead_heat_j)?) + input_work,
-        output_work - electrical_external + exported,
-        electrical_external + motor_work,
+        battery_work + Dd::from_f64(heat[7]) + input_work,
+        output_work + motor_work + exported,
         motor_change + motor_heat - motor_work - shaft_work,
         battery_change + converter_change + motor_change - delta,
-        total - Dd::from_f64(finite(step.native.dissipated)?),
-        Dd::from_f64(finite(step.native.supplied)?) - external,
+        total - Dd::from_f64(finite(step.native().dissipated)?),
+        Dd::from_f64(finite(step.native().supplied)?) - external,
         delta + total - external,
     ];
-    if exported.to_f64() < 0.0
-        || residuals
-            .iter()
-            .any(|r| !r.hi.is_finite() || !r.lo.is_finite() || r.abs().to_f64() > tolerance_j)
-    {
+    let original_port_closes = if let Some(work) = e.electrical_external {
+        let work = Dd::from_f64(finite(work)?);
+        valid(output_work - work + exported) && valid(work + motor_work)
+    } else {
+        true
+    };
+    if exported.to_f64() < 0.0 || !original_port_closes || !residuals.into_iter().all(valid) {
         return Err(invalid(
             "battery, converter, motor, shaft and exported load fail independent energy balances",
         ));
     }
     Ok((heat, total, external))
+}
+
+// One original averaged native solve; shared by the ordinary and HeatAssembly
+// entry points. The returned modulation is accepted command metadata only.
+#[allow(clippy::too_many_arguments)]
+fn averaged_drive_step(
+    original: BatteryMotorDrive,
+    state: &[f64; 9],
+    dt: f64,
+    torques: &[f64; 2],
+    load: Option<RegulatedPowerLoad>,
+    controls: PowerLoadControls,
+    checkpoint: &mut dyn FnMut() -> bool,
+) -> Result<([f64; 9], BatteryMotorStep, BridgeModulation), Error> {
+    if torques.iter().any(|v| !v.is_finite()) {
+        return Err(invalid(
+            "battery motor drive needs finite authored shaft torques",
+        ));
+    }
+    let modulation = original.electrical().modulation();
+    let mut native = original
+        .prepare_controlled(dt, controls, &mut *checkpoint)
+        .map_err(electrical)?;
+    let mut next = [0.0; 9];
+    let step = native
+        .step_controlled(state, torques, load, &mut next, &mut *checkpoint)
+        .map_err(electrical)?;
+    Ok((next, step, modulation))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn switched_drive_step(
+    original: BatteryMotorDrive,
+    state: &[f64; 9],
+    dt: f64,
+    start: f64,
+    target: f64,
+    intervals: &[SwitchInterval],
+    commands: &[BatteryMotorSwitchCommand],
+    subdivisions: usize,
+    controls: PowerLoadControls,
+    cycle: SwitchCycleControls,
+    checkpoint: &mut dyn FnMut() -> bool,
+) -> Result<([f64; 9], BatteryMotorSwitchCycleStep, BridgeModulation), Error> {
+    let mut native = PreparedBatteryMotorSwitchCycle::new_controlled(
+        original,
+        intervals,
+        subdivisions,
+        controls,
+        cycle,
+        &mut *checkpoint,
+    )
+    .map_err(electrical)?;
+    let period = native.period_s();
+    let end = finite(start + period)?;
+    let clock_roundoff = 0.5 * (clock_spacing(start) + clock_spacing(target));
+    let duration_roundoff = 64.0 * f64::EPSILON * period.max(dt);
+    if end <= start
+        || end.to_bits() != target.to_bits()
+        || (period - dt).abs() > clock_roundoff + duration_roundoff
+    {
+        return Err(invalid(
+            "the complete battery motor switch cycle must span the thermal interval",
+        ));
+    }
+    let mut next = [0.0; 9];
+    let step = native
+        .step_interval_commands_controlled(state, commands, &mut next, &mut *checkpoint)
+        .map_err(electrical)?;
+    Ok((next, step, native.averaged_modulation()))
+}
+
+fn switched_drive_work(
+    intervals: &[SwitchInterval],
+    commands: &[BatteryMotorSwitchCommand],
+    subdivisions: usize,
+) -> Result<usize, Error> {
+    if commands.len() != intervals.len() {
+        return Err(invalid(
+            "each battery motor switch interval requires its own shaft/load command",
+        ));
+    }
+    intervals
+        .len()
+        .checked_mul(subdivisions)
+        .filter(|work| *work != 0)
+        .ok_or_else(|| invalid("battery motor switching requires representable nonzero work"))
 }
 
 impl BatteryMotorThermalNetwork<'_> {
@@ -408,11 +555,94 @@ impl BatteryMotorThermalNetwork<'_> {
             target_s,
             drive,
             modulation,
-            shaft_torque_nm,
-            auxiliary_load,
-            electrical_controls,
             controls,
             initial_energy_increments_j,
+            1,
+            |original, dt, checkpoint| {
+                averaged_drive_step(
+                    original,
+                    &drive.state,
+                    dt,
+                    shaft_torque_nm,
+                    auxiliary_load,
+                    electrical_controls,
+                    checkpoint,
+                )
+            },
+            |trial, fixed, original| {
+                let coefficients = prepared
+                    .resolve(trial, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let channels = resolve_channels(
+                    self.cells,
+                    self.channels,
+                    trial,
+                    &coefficients.source,
+                    fixed,
+                    original,
+                    false,
+                    &cancel,
+                )?;
+                Ok((coefficients, channels))
+            },
+            &cancel,
+        )
+    }
+
+    /// Resolve every authored PWM interval, all nine R(T,phase) sources and all
+    /// ten heat receivers in the SAME finite-cell solve. Auxiliary load and
+    /// shaft work remain external. Every numerical subdivision consumes one
+    /// circuit trial, including exact-coefficient cache reuse. The source/gate
+    /// program stays fixed within this transaction; storage laws stay fixed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_switch_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        drive: &MaterialBatteryMotorDrive,
+        intervals: &[SwitchInterval],
+        commands: &[BatteryMotorSwitchCommand],
+        substeps_per_interval: usize,
+        electrical_controls: PowerLoadControls,
+        cycle_controls: SwitchCycleControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        BatteryMotorEnthalpyCandidate<'t, MaterialNetworkSample, BatteryMotorSwitchCycleStep>,
+        Error,
+    > {
+        let integration_steps = switched_drive_work(intervals, commands, substeps_per_interval)?;
+        let cancel = RefCell::new(cancelled);
+        check(&cancel)?;
+        super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        let network = self.network();
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_resolved_candidate(
+            thermal,
+            target_s,
+            drive,
+            drive.modulation,
+            controls,
+            initial_energy_increments_j,
+            integration_steps,
+            |original, dt, checkpoint| {
+                switched_drive_step(
+                    original,
+                    &drive.state,
+                    dt,
+                    thermal.time_s(),
+                    target_s,
+                    intervals,
+                    commands,
+                    substeps_per_interval,
+                    electrical_controls,
+                    cycle_controls,
+                    checkpoint,
+                )
+            },
             |trial, fixed, original| {
                 let coefficients = prepared
                     .resolve(trial, || (*cancel.borrow_mut())())
@@ -436,17 +666,20 @@ impl BatteryMotorThermalNetwork<'_> {
     // Only source/transport composition varies. Native integration, heat
     // deposition and acceptance remain identical for every heat provider.
     #[allow(clippy::too_many_arguments)]
-    fn step_resolved_candidate<'t, S, E: From<ConverterThermalError>>(
+    fn step_resolved_candidate<'t, S, E: From<ConverterThermalError>, Step: DriveStep>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         drive: &MaterialBatteryMotorDrive,
         modulation: BridgeModulation,
-        shaft_torque_nm: &[f64; 2],
-        auxiliary_load: Option<RegulatedPowerLoad>,
-        electrical_controls: PowerLoadControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
+        integration_steps: usize,
+        advance: impl Fn(
+            BatteryMotorDrive,
+            f64,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<([f64; 9], Step, BridgeModulation), Error>,
         resolve: impl Fn(
             &DepositionSimulation<'t>,
             [f64; BATTERY_MOTOR_RESISTIVE_CHANNELS],
@@ -459,7 +692,7 @@ impl BatteryMotorThermalNetwork<'_> {
             CircuitEnthalpyError<E>,
         >,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<BatteryMotorEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>> {
+    ) -> Result<BatteryMotorEnthalpyCandidate<'t, S, Step>, CircuitEnthalpyError<E>> {
         check(cancel).map_err(drive_error)?;
         super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         self.admit_bearing(thermal).map_err(drive_error)?;
@@ -467,10 +700,10 @@ impl BatteryMotorThermalNetwork<'_> {
         if drive.time_s.to_bits() != thermal.time_s().to_bits()
             || self.bearing_cell != drive.bearing_cell
             || dt <= 0.0
-            || shaft_torque_nm.iter().any(|v| !v.is_finite())
+            || integration_steps == 0
         {
             return Err(drive_error(invalid(
-                "battery motor and heat need the same positive interval, receivers and finite torques",
+                "battery motor and heat need the same positive interval, receivers and nonzero native work",
             )));
         }
         let fixed = drive_resistances(
@@ -493,7 +726,8 @@ impl BatteryMotorThermalNetwork<'_> {
             None::<(
                 [u64; BATTERY_MOTOR_RESISTIVE_CHANNELS],
                 [f64; 9],
-                BatteryMotorStep,
+                Step,
+                BridgeModulation,
             )>,
         );
         let (thermal, drive, report) = cell_driver_candidate(
@@ -503,7 +737,7 @@ impl BatteryMotorThermalNetwork<'_> {
             initial_energy_increments_j,
             |trial, remaining| {
                 check(cancel).map_err(drive_error)?;
-                if remaining == 0 {
+                if remaining < integration_steps {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
                 let (coefficients, channels) = resolve(trial, fixed, Some(&drive.channels))?;
@@ -528,10 +762,12 @@ impl BatteryMotorThermalNetwork<'_> {
                     .filter(|entry| entry.0 == bits)
                     .cloned();
                 let reused = previous.is_some();
-                let (next, step) = if let Some((_, next, step)) = previous {
-                    (next, step)
+                let (next, step, accepted_modulation) = if let Some((_, next, step, accepted)) =
+                    previous
+                {
+                    (next, step, accepted)
                 } else {
-                    let mut original = drive_native(
+                    let original = drive_native(
                         &drive.curve,
                         converter_parameters,
                         battery_parameters,
@@ -539,28 +775,14 @@ impl BatteryMotorThermalNetwork<'_> {
                         lead,
                         motor_parameters,
                     )
-                    .map_err(drive_error)?
-                    .prepare_controlled(dt, electrical_controls, || (*cancel.borrow_mut())())
-                    .map_err(electrical)
                     .map_err(drive_error)?;
-                    let mut next = [0.0; 9];
-                    let step = original
-                        .step_controlled(
-                            &drive.state,
-                            shaft_torque_nm,
-                            auxiliary_load,
-                            &mut next,
-                            || (*cancel.borrow_mut())(),
-                        )
-                        .map_err(electrical)
-                        .map_err(drive_error)?;
-                    (next, step)
+                    advance(original, dt, &mut || (*cancel.borrow_mut())()).map_err(drive_error)?
                 };
                 let (heat, total, net_external_work_j) =
                     drive_account(&step, controls.total_energy_tolerance_j).map_err(drive_error)?;
                 check(cancel).map_err(drive_error)?;
                 if !reused {
-                    *cache.borrow_mut() = Some((bits, next, step.clone()));
+                    *cache.borrow_mut() = Some((bits, next, step.clone(), accepted_modulation));
                 }
                 Ok(DrivenCoefficients {
                     circuit: DriveDriver {
@@ -569,7 +791,7 @@ impl BatteryMotorThermalNetwork<'_> {
                             curve: drive.curve.clone(),
                             battery_parameters,
                             converter_parameters,
-                            modulation,
+                            modulation: accepted_modulation,
                             lead_resistance_ohm: lead,
                             motor_parameters,
                             state: next,
@@ -589,7 +811,7 @@ impl BatteryMotorThermalNetwork<'_> {
                         bearing_cell: self.bearing_cell,
                         bearing_drag_nm_s_per_rad: motor_parameters.bearing_drag_nm_s_per_rad,
                     },
-                    circuit_trials: 1,
+                    circuit_trials: integration_steps,
                 })
             },
             |candidate, duration, checkpoint| {

@@ -8230,6 +8230,36 @@ both shaft works and auxiliary export, finite-inertia regeneration, all-nine
 R(T) feedback, shared receivers and atomic refusal/retry.
 
 
+### Finite-battery PWM drive with material feedback
+
+`BatteryMotorThermalNetwork::step_switch_candidate` and the existing
+`BatteryMotorHeatNetwork` heat-assembly entry point advance the original
+nine-state switched drive and all ten original caloric receivers together.
+Every thermal proposal refreshes the same nine resistance source laws at its
+actual material state, then restarts the native gate program from the accepted
+charges, fluxes and shaft momenta. The ten original heat integrals enter the
+shared finite-cell residual once; actual auxiliary demand and signed shaft work
+remain external.
+
+Averaged and switched entry points share coefficient resolution,
+exact-coefficient trajectory cache, constituent work/heat gates, deposition
+and publication. The generic candidate defaults to the original averaged
+receipt; switched reports retain the complete cycle receipt. Each numerical
+subdivision charges one circuit trial even on cache reuse; fresh source
+resolution and physical-account admission still run. The represented
+`start + period` must equal the requested endpoint, so local clock allowance
+cannot admit a different end.
+
+The original heat assembly continues to own contact, radiation, reservoir and
+finite coolant transport, retaining its complete source sample and independent
+closed-radiation check. No electrical or caloric solver is duplicated. Fixed
+storage, linear motor reciprocity, authored bearing drag, endpoint-resistance
+temporal accuracy and ideal complementary-gate limits remain. Every
+electrical/mechanical/caloric history publishes atomically. Focused tests cover
+ten-body calorimetry, actual R(T)-dependent motor motion with native replay,
+finite-coolant exchange, clock/refusal/cancellation and full-subdivision trial
+charging.
+
 ## Complete cooling for the finite battery-to-shaft drive
 
 `circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatNetwork` consumes the existing prepared `HeatAssembly` on the original nine-state battery/converter/motor and finite enthalpy timeline. Thermal contacts, integrated layers, closed radiation, prescribed reservoir exchange and finite coolant links resolve at each actual candidate state before the same nine resistance bindings and native drive solve. Cells, topology and full accepted source samples remain owned by that assembly; no additional electrical or thermal integrator is introduced. The ordinary material-network entry point shares those internals and retains its prior API through default sample parameters.

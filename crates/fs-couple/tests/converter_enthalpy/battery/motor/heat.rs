@@ -674,3 +674,96 @@ fn late_cooling_source_refusal_and_cancellation_publish_no_drive_or_coolant_hist
         assert_eq!(drive.time_s(), 0.0);
     });
 }
+
+#[test]
+fn switched_drive_heats_finite_coolant_using_the_same_complete_heat_owner() {
+    use fs_phs::circuit::converter::switching::battery_motor::{
+        BatteryMotorSwitchCommand, PreparedBatteryMotorSwitchCycle,
+    };
+    let cp = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+    with_coolant(cp, 0.0, |cx, gate, heat, thermal| {
+        let prepared = heat
+            .prepare_with_link_conductances(cx, &thermal, &extra_links())
+            .unwrap();
+        let provider = Cooling::new(&prepared, gate);
+        let key = key();
+        let channels = drive_paths(&key);
+        let network = BatteryMotorHeatNetwork {
+            assembly: &provider,
+            channels: &channels,
+            bearing_cell: DRIVE_IDS[9],
+        };
+        let (native, before, torques, load, _) = steady_drive(1.0, 0.1);
+        let drive = network.bind(cx, &thermal, &native, before).unwrap();
+        let dt = 0.02;
+        let intervals = centered_pwm(dt, native.electrical().modulation()).unwrap();
+        let commands = vec![
+            BatteryMotorSwitchCommand {
+                shaft_torque_nm: torques,
+                auxiliary_load: load,
+            };
+            intervals.len()
+        ];
+        let cycle = SwitchCycleControls {
+            absolute_energy_tolerance_j: 1e-9,
+            relative_energy_tolerance: 1e-11,
+            ..SwitchCycleControls::default()
+        };
+        let mut original = PreparedBatteryMotorSwitchCycle::new_controlled(
+            native,
+            &intervals,
+            4,
+            electrical_controls(),
+            cycle,
+            || false,
+        )
+        .unwrap();
+        let mut state = [0.0; 9];
+        let native_step = original
+            .step_interval_commands_controlled(&before, &commands, &mut state, || false)
+            .unwrap();
+        let q = native_step.heat_joules();
+        let mut controls = cooling_controls();
+        controls.maximum_circuit_trials = 20_000;
+        let next = network
+            .step_switch_candidate(
+                cx,
+                &thermal,
+                dt,
+                &drive,
+                &intervals,
+                &commands,
+                4,
+                electrical_controls(),
+                cycle,
+                controls,
+                &[0.0; 11],
+            )
+            .unwrap();
+        assert_eq!(*next.drive().state(), state);
+        assert_eq!(next.report().electrical.heat_joules(), q);
+        // Independently eliminate the ten endpoint body temperatures from
+        // Cp*dT = Q - dt*g*(T-Tfluid); coolant is a finite internal inventory.
+        let g = PATCH_AREA * 0.664 * 100.0 * 2.0 * 0.5 / LENGTH;
+        let fluid_capacity = FLUID_MASS * FLUID_CP;
+        let w = cp.map(|capacity| dt * g * capacity / (capacity + dt * g));
+        let fluid = (fluid_capacity * 290.0
+            + (0..10)
+                .map(|i| 300.0 * w[i] + dt * g * q[i] / (cp[i] + dt * g))
+                .sum::<f64>())
+            / (fluid_capacity + w.iter().sum::<f64>());
+        close(next.thermal().temperature_k(COOLANT).unwrap(), fluid);
+        for i in 0..10 {
+            let t = (cp[i] * 300.0 + q[i] + dt * g * fluid) / (cp[i] + dt * g);
+            close(next.thermal().temperature_k(DRIVE_IDS[i]).unwrap(), t);
+        }
+        close(
+            next.thermal().energy_j() - thermal.energy_j(),
+            q.iter().sum(),
+        );
+        close(next.report().deposited_joule_j, q.iter().sum());
+        close(next.report().non_electrical_heat_j, 0.0);
+        close(next.report().total_energy_residual_j, 0.0);
+        assert!(fluid > 290.0);
+    });
+}
