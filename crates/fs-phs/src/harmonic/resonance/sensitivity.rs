@@ -9,7 +9,7 @@ use super::{
     DrivenResonance, DrivenResonanceError, HarmonicObservation, ResonanceControls, project,
 };
 use crate::harmonic::{
-    HarmonicModel, finite, parameter, poll, resource_bounds, response::HarmonicParameterDirection,
+    HarmonicModel, finite, poll, resource_bounds, response::HarmonicParameterDirection,
 };
 use fs_math::c64::C64;
 
@@ -234,8 +234,13 @@ impl HarmonicModel {
             resonance,
             |omega, second_order, cancelled| {
                 self.resonance_parameter_observation(
-                    input, observation, direction, input_derivative,
-                    omega, second_order, cancelled,
+                    input,
+                    observation,
+                    direction,
+                    input_derivative,
+                    omega,
+                    second_order,
+                    cancelled,
                 )
             },
             &mut cancelled,
@@ -255,15 +260,75 @@ impl HarmonicModel {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ParameterObservationJet, DrivenResonanceError> {
         let factor = self.factor(omega, &mut *cancelled)?;
-        let frequency =
-            factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
-        let parameter = factor.response_with_parameter_derivative(
+        if second_order {
+            let jet = factor.response_with_frequency_parameter_derivative(
+                input,
+                direction,
+                None,
+                None,
+                input_derivative,
+                None,
+                &mut *cancelled,
+            )?;
+            let curvature = &jet.frequency_response;
+            let frequency = &curvature.frequency_response;
+            let parameter = &jet.parameter_response;
+            return Ok(ParameterObservationJet {
+                value: selected(
+                    observation,
+                    &frequency.response.state,
+                    &frequency.response.effort,
+                    &frequency.response.output,
+                    cancelled,
+                )?,
+                frequency: selected(
+                    observation,
+                    &frequency.state_derivative,
+                    &frequency.effort_derivative,
+                    &frequency.output_derivative,
+                    cancelled,
+                )?,
+                parameter: selected(
+                    observation,
+                    &parameter.state_derivative,
+                    &parameter.effort_derivative,
+                    &parameter.output_derivative,
+                    cancelled,
+                )?,
+                second_frequency: selected(
+                    observation,
+                    &curvature.state_second_derivative,
+                    &curvature.effort_second_derivative,
+                    &curvature.output_second_derivative,
+                    cancelled,
+                )?,
+                mixed: selected(
+                    observation,
+                    &jet.state_mixed_derivative,
+                    &jet.effort_mixed_derivative,
+                    &jet.output_mixed_derivative,
+                    cancelled,
+                )?,
+                relative_residual: frequency
+                    .response
+                    .relative_residual
+                    .max(frequency.relative_derivative_residual)
+                    .max(parameter.relative_derivative_residual)
+                    .max(curvature.relative_second_derivative_residual)
+                    .max(jet.relative_mixed_derivative_residual),
+            });
+        }
+        // Width edges need only first tangents. Reuse their original
+        // response rather than another primal solve at the same factor.
+        let frequency = factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
+        let parameter = factor.response_parameter_from_primal(
             input,
             direction,
             input_derivative,
+            frequency.response.clone(),
             &mut *cancelled,
         )?;
-        let mut jet = ParameterObservationJet {
+        Ok(ParameterObservationJet {
             value: selected(
                 observation,
                 &frequency.response.state,
@@ -291,124 +356,9 @@ impl HarmonicModel {
                 .response
                 .relative_residual
                 .max(frequency.relative_derivative_residual)
-                .max(parameter.response.relative_residual)
                 .max(parameter.relative_derivative_residual),
-        };
-        if !second_order {
-            return Ok(jet);
-        }
-        let mut rhs = vec![C64::ZERO; self.n];
-        for (target, &dx) in rhs[..self.n_diff]
-            .iter_mut()
-            .zip(&frequency.state_derivative)
-        {
-            *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
-        }
-        let (second, second_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
-        let second_observation = self.observe_parameter_tangent(
-            observation,
-            &second,
-            None,
-            None,
-            &frequency.effort_derivative,
-            cancelled,
-        )?;
-        let action = parameter::generator_action(
-            self,
-            &direction,
-            &frequency.state_derivative,
-            &frequency.effort_derivative,
-            cancelled,
-        )?;
-        rhs = action.generator;
-        for (target, &dx) in rhs[..self.n_diff]
-            .iter_mut()
-            .zip(&parameter.state_derivative)
-        {
-            *target = *target + C64::new(-dx.im, dx.re);
-        }
-        let (mixed, mixed_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
-        let mixed_observation = self.observe_parameter_tangent(
-            observation,
-            &mixed,
-            Some(&action.storage),
-            direction.ports,
-            &frequency.effort_derivative,
-            cancelled,
-        )?;
-        jet.second_frequency = second_observation;
-        jet.mixed = mixed_observation;
-        jet.relative_residual = jet
-            .relative_residual
-            .max(second_residual)
-            .max(mixed_residual);
-        Ok(jet)
+        })
     }
-
-    // Observe W dx + dQ x and G^T de + dG^T e in original coordinates.
-    // The additive effort/action is already computed by the shared parameter
-    // owner, so there is no second implementation of its physical chain rule.
-    fn observe_parameter_tangent(
-        &self,
-        observation: HarmonicObservation<'_>,
-        state: &[C64],
-        additive_effort: Option<&[C64]>,
-        port_direction: Option<&[f64]>,
-        original_effort: &[C64],
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<C64, DrivenResonanceError> {
-        if let HarmonicObservation::State(weights) = observation {
-            return project(weights, state.iter().copied(), cancelled);
-        }
-        let effort = tangent_effort(self, state, additive_effort, cancelled)?;
-        match observation {
-            HarmonicObservation::Effort(weights) => project(weights, effort, cancelled),
-            HarmonicObservation::Output(weights) => {
-                let output =
-                    tangent_output(self, &effort, port_direction, original_effort, cancelled)?;
-                project(weights, output, cancelled)
-            }
-            HarmonicObservation::State(_) => unreachable!(),
-        }
-    }
-}
-
-pub(in crate::harmonic) fn tangent_effort(
-    model: &HarmonicModel,
-    state: &[C64],
-    additive_effort: Option<&[C64]>,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Vec<C64>, DrivenResonanceError> {
-    let mut effort = state.to_vec();
-    for i in 0..model.n_diff {
-        poll(cancelled)?;
-        effort[i] = project(
-            &model.q[i * model.n..i * model.n + model.n_diff],
-            state[..model.n_diff].iter().copied(),
-            cancelled,
-        )?;
-        if let Some(extra) = additive_effort {
-            effort[i] = effort[i] + extra[i];
-        }
-    }
-    Ok(effort)
-}
-
-pub(in crate::harmonic) fn tangent_output(
-    model: &HarmonicModel,
-    effort: &[C64],
-    port_direction: Option<&[f64]>,
-    original_effort: &[C64],
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Vec<C64>, DrivenResonanceError> {
-    let mut output = vec![C64::ZERO; model.m];
-    for (p, value) in output.iter_mut().enumerate() {
-        poll(cancelled)?;
-        *value = crate::harmonic::port_output_tangent(
-            &model.g, model.m, p, effort, port_direction, original_effort,
-        )?;
-    }
-    Ok(output)
 }
 
 fn selected(
