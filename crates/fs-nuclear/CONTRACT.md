@@ -3428,8 +3428,8 @@ apply, including a final checkpoint before the evaluation is returned.
 
 Three manufactured regressions cover data retention, cross-sublibrary and
 cumulative/ambiguous/energy-dependent source refusal, explicit bounds and late
-cancellation. Source review and rustfmt were completed; execution of these new
-regressions remains unconfirmed after the native workspace disconnected.
+cancellation. All three passed in the recovered original-source native suite,
+with the original induced-yield boundary retained.
 
 ## Prompt fission, finite products and decay energy on one trajectory
 
@@ -3465,10 +3465,9 @@ and energy/precursor/cancellation refusal. One material regression follows an
 initially empty neutron field through radioactive emission, prompt fission,
 beta and delayed-neutron product decay, local heat, radiation and leakage.
 It checks original material temperature/mass, restart and late rollback.
-These new tests received source/API review; native execution remains unavailable
-after the workspace disconnected. Independent numerical evaluation of the
-material fixture confirms its particle balance and stays inside its caloric
-domain; it does not substitute for execution of the Rust tests.
+All five passed in the recovered original-source native suite with `thermal`
+enabled. The material fixture also received an independent particle-balance
+and caloric-domain check.
 
 ## Evaluated multi-product spontaneous decay in native burnup
 
@@ -3515,6 +3514,41 @@ Seven manufactured regressions cover same-interval fragment decay and exact
 parent-average energy, partial/complete exports, reversed source/channel/product
 order with competing capture, ordinary charged-product parity, moving parents
 with local exports, unsupported source declarations, bounds and late refusal.
-Source/API and independent analytic reviews are complete; compilation and
-execution of these new tests remain unavailable after the native workspace
-failed. Existing 64-node native propagation limits remain unchanged.
+All seven passed in the recovered original-source native suite alongside the
+existing finite-inventory, movement and material regressions. Existing 64-node
+native propagation limits remain unchanged.
+
+## Evaluated spontaneous-fission neutron input
+
+`endf::spontaneous_neutrons` imports identified NSUB=4 neutron multiplicities
+and outgoing distributions using the original bounded ENDF record reader.
+MF1/MT452,456,455 retain distinct total, prompt and delayed meanings; only
+constant LNU=1, NC=1 multiplicities are admitted. Delayed LDG=0 decay constants
+retain their original family order. An absent section is not a zero yield,
+and total minus delayed is not silently substituted for an explicit prompt
+source. The opaque types cannot enter the induced NSUB=10 importer.
+
+MF5/MT18 prompt and MF5/MT455 delayed spectra admit energy-independent LF=1
+tabulations with the ENDF-102 §5.4.2 INT=1,2,3 laws and zero-density endpoints.
+Original component probabilities, source order, incident grids, interpolation
+and outgoing points remain available after SI conversion. Every supplied
+incident row must describe the same distribution. Analytic LF laws and actual
+incident dependence refuse explicitly. Neither probabilities nor spectra are
+renormalized; their physical normalization belongs to a separately bounded
+consumer. These quantities are per fission, so a mixed-mode parent's SF branch
+must be applied exactly once when constructing its transformation source.
+
+The source containers alone do not evolve delayed families, assign energy
+from an MF8 average, or add aggregate delayed neutrons to explicit fragment
+decays. Family lifetimes are not family abundances. Record, point, component,
+family and cumulative interpolation limits bound allocation and source work;
+cancellation remains active through the final publication checkpoint.
+Format: [ENDF-102 (2023)](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf),
+§§0.3.2.4, 1.2–1.4, 5.1.1 and 5.4.1–5.4.2.
+
+Five new input regressions, six existing induced-neutron input regressions and
+the preceding 159 selected native regressions passed: 170 tests, zero failures,
+with `thermal` enabled and no compiler diagnostics. The source selection uses
+the original fs-la decay/prepared-LU and thermal timeline/advection owners.
+It is not a full Cargo/constellation gate; the seven pinned sibling checkouts
+and DSR/RCH executors remain unavailable in this workspace.

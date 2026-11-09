@@ -41,6 +41,9 @@ pub mod doppler;
 /// Evaluated prompt, delayed and total fission-neutron multiplicities.
 pub mod neutron_yield;
 
+/// Identified spontaneous-fission neutron multiplicities and outgoing spectra.
+pub mod spontaneous_neutrons;
+
 /// Evaluated prompt and delayed fission-energy components from MF1/MT458.
 pub mod fission_energy;
 
