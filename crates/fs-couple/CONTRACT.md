@@ -15079,3 +15079,36 @@ topology remain caller obligations. Cancellation, missing/flat crossings,
 capacity failure or physical refusal publishes no partial query. Native tests
 execute original coupled recovery and query physics; they do not establish
 complete outer FE mesh-construction or full-workspace Cargo validation.
+
+## Finite thermal wall motion under prescribed gas loading
+
+The original single-body and opposing-body thermal wall adapters expose
+`step_candidate_with_sources`, consuming the lower owner's borrowed
+`FreeSurfaceWallSources`. Authored heat, optional original molecular heating
+and prescribed cell/link gas pressure share the same accepted liquid history.
+The existing heat-only and molecular methods delegate to this path.
+
+The original mechanics are unchanged: one pilot, the existing mass-whitened
+midpoint solve for each body, one final native replay, and independent body,
+guide, spin/orbital momentum and kinetic-work checks. Both bodies share one
+liquid owner. Only the final replay's thermal receipt, molecular samples and
+clock advance are retained. The caller must hold pressure values fixed for the
+same geometry across both trials; arbitrary interior-mutable callback behavior
+is not certified by the function type or affine wall-response check.
+
+Gas pressure acts through the original liquid/gas populations and reaches the
+finite walls through subsequent native evolution. It is not an instantaneous
+extra body force, and neither pressure work nor wall work is deposited as
+caloric heat. The fixed pressure reference, source applicability, low-Mach
+bounds, flooded planar geometry, first-order thermal splitting and absence of
+a gas storage/pressure-volume energy model remain explicit.
+
+Four new original-source tests pass: reference-pressure identity for both body
+adapters with actual gas links; five-tick pressure-driven recoil of both
+initially resting bodies with independently reduced momentum and work; single
+body molecular-source equivalence; and final-replay pressure/cancellation
+refusal with exact retry. All eight existing single/pair thermal-body tests
+also pass. Across the related lower pressure and conversion repair checks,
+25 unique focused tests pass (10 new, 15 existing), with no failures. This
+executes the original numerical kernels and does not claim a full Cargo build
+or the optional solid-conduction/electrical enthalpy-coupling graph.

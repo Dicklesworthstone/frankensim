@@ -3,6 +3,9 @@
 #[path = "thermal/pair.rs"]
 mod pair;
 
+#[path = "thermal/pressure.rs"]
+mod pressure;
+
 use super::*;
 use fs_couple::free_surface_wall::planar::thermal::FreeSurfaceThermalPlanarWall;
 use fs_evidence::ValidityDomain;
@@ -98,6 +101,32 @@ fn with_thermal_domain<R>(
     fully_flooded: bool,
     exercise: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_thermal_cells(
+        hot_viscosity,
+        buoyant,
+        None,
+        |x, y, z| {
+            if fully_flooded {
+                return true;
+            }
+            let coordinate = [x, y, z][axis(wall)];
+            if upper(wall) {
+                coordinate >= 4
+            } else {
+                coordinate < 4
+            }
+        },
+        exercise,
+    )
+}
+
+fn with_thermal_cells<R>(
+    hot_viscosity: f64,
+    buoyant: bool,
+    pressure_reference_pa: Option<f64>,
+    fluid: impl Fn(usize, usize, usize) -> bool,
+    exercise: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let card = card(hot_viscosity, if buoyant { 980.0 } else { 1000.0 });
     let point = QueryPoint::new()
         .with("T", 300.0)
@@ -146,24 +175,17 @@ fn with_thermal_domain<R>(
     } else {
         [0.0; 3]
     };
-    let flow = plan_free_surface_from_material(&source, DX, DT, 0.1)
-        .unwrap()
+    let mut scaling = plan_free_surface_from_material(&source, DX, DT, 0.1).unwrap();
+    if let Some(reference) = pressure_reference_pa {
+        scaling = scaling.with_pressure_reference(reference).unwrap();
+    }
+    let flow = scaling
         .free_surface3(
             MaterialFreeSurfaceDomain3 {
                 gravity_m_s2: gravity,
                 ..domain()
             },
-            |x, y, z| {
-                if fully_flooded {
-                    return true;
-                }
-                let coordinate = [x, y, z][axis(wall)];
-                if upper(wall) {
-                    coordinate >= 4
-                } else {
-                    coordinate < 4
-                }
-            },
+            fluid,
         )
         .unwrap();
     let h = |p: [usize; 3]| 100000.0 + 5000.0 * p[0] as f64 + 3000.0 * p[1] as f64;

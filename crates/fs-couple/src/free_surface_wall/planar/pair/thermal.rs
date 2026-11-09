@@ -5,7 +5,9 @@ use super::{
 };
 use crate::free_surface_wall::planar::thermal::ThermalPlanarWallReport;
 use fs_exec::CancelGate;
-use fs_lbm::material::free_surface::enthalpy::{FreeSurfaceCellHeat, MaterialFreeSurfaceEnthalpy3};
+use fs_lbm::material::free_surface::enthalpy::{
+    FreeSurfaceCellHeat, FreeSurfaceWallSources, MaterialFreeSurfaceEnthalpy3,
+};
 use fs_mbd::Vec3;
 
 /// Two finite bodies and the one original source-bound thermal liquid.
@@ -42,27 +44,15 @@ impl<'s, 'm> PlanarWallPairMotion<MaterialFreeSurfaceEnthalpy3<'s, 'm>> {
         controls: PlanarWallControls,
         gate: &CancelGate,
     ) -> Result<ThermalPlanarWallPairStep<'s, 'm>, PlanarWallPairError> {
-        self.step_candidate_with(
+        self.step_candidate_with_sources(
             external_forces_n,
             external_torques_nm,
+            FreeSurfaceWallSources {
+                heat,
+                ..FreeSurfaceWallSources::default()
+            },
             controls,
             gate,
-            |motions, mass_tolerance, gate| {
-                let (candidate, report) = self.liquid.planar_rigid_wall_pair_candidate_si(
-                    motions,
-                    mass_tolerance,
-                    heat,
-                    gate,
-                )?;
-                Ok((
-                    candidate,
-                    report.walls,
-                    ThermalPlanarWallReport {
-                        enthalpy: report.flow,
-                        molecular_heat: None,
-                    },
-                ))
-            },
         )
     }
 
@@ -79,6 +69,41 @@ impl<'s, 'm> PlanarWallPairMotion<MaterialFreeSurfaceEnthalpy3<'s, 'm>> {
         controls: PlanarWallControls,
         gate: &CancelGate,
     ) -> Result<ThermalPlanarWallPairStep<'s, 'm>, PlanarWallPairError> {
+        self.step_candidate_with_sources(
+            external_forces_n,
+            external_torques_nm,
+            FreeSurfaceWallSources {
+                heat,
+                molecular_heating: true,
+                ..FreeSurfaceWallSources::default()
+            },
+            controls,
+            gate,
+        )
+    }
+
+    /// Advance both finite walls with one shared pressure and thermal source
+    /// input on the original liquid trajectory.
+    ///
+    /// The caller must return the same pressure for the same geometry across
+    /// pilot and final replay; `Fn` alone cannot enforce that frozen-field rule.
+    /// Both three-mode mechanical solves and all body/guide work checks
+    /// remain the original ones; the accepted liquid receives each selected
+    /// heat source once. Pressure reaches each body through native liquid
+    /// evolution and does not create an extra instantaneous pair response.
+    ///
+    /// Prescribed pressure requires an explicit fixed liquid pressure reference.
+    /// Gas pressure and boundary work remain mechanical loading, separately
+    /// from caloric heat. Gas storage and pressure-volume heating are absent.
+    /// Both original planes must remain flooded, with fixed normal geometry.
+    pub fn step_candidate_with_sources(
+        &self,
+        external_forces_n: [Vec3; 2],
+        external_torques_nm: [f64; 2],
+        sources: FreeSurfaceWallSources<'_>,
+        controls: PlanarWallControls,
+        gate: &CancelGate,
+    ) -> Result<ThermalPlanarWallPairStep<'s, 'm>, PlanarWallPairError> {
         self.step_candidate_with(
             external_forces_n,
             external_torques_nm,
@@ -87,10 +112,10 @@ impl<'s, 'm> PlanarWallPairMotion<MaterialFreeSurfaceEnthalpy3<'s, 'm>> {
             |motions, mass_tolerance, gate| {
                 let (candidate, report) = self
                     .liquid
-                    .planar_rigid_wall_pair_candidate_with_viscous_heating_si(
+                    .planar_rigid_wall_pair_candidate_with_sources_si(
                         motions,
                         mass_tolerance,
-                        heat,
+                        sources,
                         gate,
                     )?;
                 Ok((
@@ -98,7 +123,7 @@ impl<'s, 'm> PlanarWallPairMotion<MaterialFreeSurfaceEnthalpy3<'s, 'm>> {
                     report.flow.walls,
                     ThermalPlanarWallReport {
                         enthalpy: report.flow.flow,
-                        molecular_heat: Some(report.applied),
+                        molecular_heat: sources.molecular_heating.then_some(report.applied),
                     },
                 ))
             },
