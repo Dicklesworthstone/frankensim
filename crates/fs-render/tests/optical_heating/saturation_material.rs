@@ -365,6 +365,364 @@ mod finite_pair_material {
     }
 }
 
+mod finite_recycling_material {
+    use super::*;
+    use fs_material::phosphorescence::pump::{
+        GROUND_STATE_PUMP_CROSS_SECTION_DIMS, GROUND_STATE_PUMP_CROSS_SECTION_PROPERTIES,
+        GroundStatePumpStatePoint,
+    };
+    use fs_render::volumes::heating::luminescence::saturation::{
+        PrescribedPhotonPump, SaturableEmitterCell, SaturableLuminescentHeating,
+        recycling::{
+            PhotonRecyclingGeometry, RecyclingEmitterCrossSections, SaturableRecyclingLimits,
+        },
+    };
+
+    const COUNT: f64 = 1e19;
+
+    fn area(temperature: f64) -> f64 {
+        1e-19 * (1.0 + 0.25 * (temperature - 300.0))
+    }
+
+    fn molecular_source(
+        maximum_temperature: f64,
+    ) -> (Arc<MaterialCard>, GroundStatePumpStatePoint) {
+        let wavelength = QuantitySpec::dimensional(fs_qty::Dims([1, 0, 0, 0, 0, 0]));
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let mut data = claims();
+        // Resonant singlet return: all optical loss is escaped light. The
+        // independent native boundary supplies the temperature change.
+        for (index, value) in [
+            HC_J_NM / 650.0,
+            HC_J_NM / 800.0,
+            10.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            data[index].value = PropertyValue::Scalar {
+                value,
+                dims: if index < 2 {
+                    PHOSPHORESCENCE_ENERGY_DIMS
+                } else {
+                    PHOSPHORESCENCE_RATE_DIMS
+                },
+            };
+        }
+        for (target, name) in GROUND_STATE_PUMP_CROSS_SECTION_PROPERTIES
+            .into_iter()
+            .enumerate()
+        {
+            let mut claim = data[0].clone();
+            claim.key = PropertyKey::new(name, GROUND_STATE_PUMP_CROSS_SECTION_DIMS);
+            claim.value = PropertyValue::Surface2D {
+                axes: ["lambda".into(), "T".into()],
+                axis_dims: [wavelength.dims(), Temperature::DIMS],
+                samples: [
+                    [650.0, 300.0],
+                    [800.0, 300.0],
+                    [650.0, maximum_temperature],
+                    [800.0, maximum_temperature],
+                ]
+                .into_iter()
+                .map(|[node, temperature]| {
+                    (
+                        [node / 1e9, temperature],
+                        if target == 0 && node == 650.0 {
+                            area(temperature)
+                        } else {
+                            0.0
+                        },
+                    )
+                })
+                .collect(),
+                triangles: vec![[0, 1, 2], [1, 3, 2]],
+                dims: GROUND_STATE_PUMP_CROSS_SECTION_DIMS,
+            };
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("lambda", wavelength, 650.0 / 1e9, 800.0 / 1e9)
+                .with_quantity("T", temperature, 300.0, maximum_temperature);
+            claim.interpolation = InterpolationPolicy::LinearInside;
+            claim.provenance.source = format!("manufactured resonant recycling absorption: {name}");
+            data.push(claim);
+        }
+        let card = card(data);
+        let source = GroundStatePumpStatePoint::resolve(
+            &card,
+            &point()
+                .with_quantity("lambda", wavelength, 650.0 / 1e9)
+                .unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,
+            "lambda",
+            Some("T"),
+        )
+        .unwrap();
+        (card, source)
+    }
+
+    fn prepare(
+        cx: &Cx<'_>,
+        medium: &AbsorbingGrid<'_>,
+        thermal: &DepositionSimulation<'_>,
+        card: Arc<MaterialCard>,
+        populations: [f64; 3],
+        sections: RecyclingEmitterCrossSections<2>,
+    ) -> SaturableLuminescentHeating<2> {
+        let material = PhosphorescenceStatePoint::resolve(
+            &card,
+            &point(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let singlet = FluorescenceSource::try_new(
+            ContentHash([185; 32]),
+            (380.0, 650.0),
+            (290.0, 800.0),
+            0.0,
+            [650.0, 800.0],
+            [1.0, 0.0],
+        )
+        .unwrap();
+        let triplet = FluorescenceSource::try_new(
+            ContentHash([186; 32]),
+            (380.0, 650.0),
+            (290.0, 800.0),
+            1.0,
+            [650.0, 800.0],
+            [0.0, 1.0],
+        )
+        .unwrap();
+        let (singlet, triplet) = SingletTripletSource::try_material_temperature(
+            card,
+            material,
+            "T",
+            singlet,
+            triplet,
+            SingletTripletLimits::default(),
+        )
+        .unwrap();
+        let pump =
+            PrescribedPhotonPump::try_new(ContentHash([187; 32]), [400.0; 2], [0.0; 2], [0.0; 2])
+                .unwrap();
+        let mut limits = SaturableRecyclingLimits::default();
+        limits.pump.column.relative_tolerance = 2e-4;
+        limits.pump.column.maximum_cell_evaluations = 500_000;
+        limits.annihilation.relative_tolerance = 2e-4;
+        SaturableLuminescentHeating::try_new_with_photon_recycling(
+            cx,
+            medium,
+            singlet,
+            triplet,
+            &[SaturableEmitterCell {
+                grid_cell: 0,
+                thermal_cell: CellId(1),
+                initial_populations: populations,
+                pump,
+            }],
+            thermal,
+            1,
+            1e-8,
+            &[sections],
+            PhotonRecyclingGeometry {
+                histories_per_emitter: 8,
+                maximum_paths: 32,
+                maximum_total_segments: 64,
+                seed: 619,
+                source_id: 37,
+                minimum_temperature_k: 290.0,
+                maximum_temperature_k: 330.0,
+                fraction_roundoff: 64.0 * f64::EPSILON,
+            },
+            limits,
+            || Ok(()),
+        )
+        .unwrap()
+    }
+
+    fn authored(temperature: f64) -> RecyclingEmitterCrossSections<2> {
+        RecyclingEmitterCrossSections::authored(
+            0,
+            ContentHash([188; 32]),
+            [[area(temperature), 0.0], [0.0; 2]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g3_material_recycling_refreshes_absorption_and_observed_opacity_after_native_heat() {
+        with_cx(|cx| {
+            let (card, source) = molecular_source(310.0);
+            let density = [1.0];
+            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
+            let initial = [0.5 * COUNT, 0.5 * COUNT, 0.0];
+            let material = prepare(
+                cx,
+                &medium,
+                &thermal,
+                card.clone(),
+                initial,
+                RecyclingEmitterCrossSections::from_material(0, card.clone(), source).unwrap(),
+            );
+            let control = prepare(
+                cx,
+                &medium,
+                &thermal,
+                card.clone(),
+                initial,
+                authored(300.0),
+            );
+            let (warm, accepted, _) = thermal
+                .advance_observed(&material, 0.1, config(0.1), || Ok(()))
+                .unwrap();
+            let (control_warm, first_control, _) = thermal
+                .advance_observed(&control, 0.1, config(0.1), || Ok(()))
+                .unwrap();
+            for (a, b) in accepted
+                .populations(0)
+                .unwrap()
+                .into_iter()
+                .zip(first_control.populations(0).unwrap())
+            {
+                close(a / COUNT, b / COUNT);
+            }
+            close(warm.energy_j(), control_warm.energy_j());
+            let temperature = warm.temperature_k(CellId(1)).unwrap();
+            assert!(temperature > 300.9);
+            let observed = accepted
+                .recycling_emission_grid(cx, &medium, 1)
+                .unwrap()
+                .transport(
+                    cx,
+                    Point3::new(-1.0, 0.5, 0.5),
+                    Vec3::new(1.0, 0.0, 0.0),
+                    f64::INFINITY,
+                )
+                .unwrap();
+            close(
+                observed.transmittance[0],
+                (-area(temperature) * accepted.populations(0).unwrap()[0]).exp(),
+            );
+            assert_eq!(observed.transmittance[1], 1.0);
+
+            let next_initial = accepted.populations(0).unwrap();
+            let refreshed = prepare(
+                cx,
+                &medium,
+                &warm,
+                card.clone(),
+                next_initial,
+                authored(temperature),
+            );
+            let frozen = prepare(cx, &medium, &warm, card, next_initial, authored(300.0));
+            let (next_warm, next, _) = warm
+                .advance_observed(&accepted, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            let (expected_warm, expected, _) = warm
+                .advance_observed(&refreshed, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            let (_, frozen, _) = warm
+                .advance_observed(&frozen, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            for (a, b) in next
+                .populations(0)
+                .unwrap()
+                .into_iter()
+                .zip(expected.populations(0).unwrap())
+            {
+                close(a / COUNT, b / COUNT);
+            }
+            close(next_warm.energy_j(), expected_warm.energy_j());
+            close(
+                next.energy().escaped_j[0] - accepted.energy().escaped_j[0],
+                expected.energy().escaped_j[0],
+            );
+            assert!(
+                next.populations(0).unwrap()[1] > frozen.populations(0).unwrap()[1] + 1e-4 * COUNT
+            );
+            close(
+                next.populations(0).unwrap().iter().sum::<f64>() / COUNT,
+                1.0,
+            );
+            close(
+                next.energy().initial_excitation_j,
+                next.energy().stored_excitation_j
+                    + next.energy().escaped_j.iter().sum::<f64>()
+                    + next.thermal_input_j(),
+            );
+            assert_eq!(next.absorbed_pump_energy_j(), [0.0; 2]);
+        });
+    }
+
+    #[test]
+    fn g4_material_recycling_refusal_preserves_populations_heat_and_observation() {
+        with_cx(|cx| {
+            let (card, source) = molecular_source(300.01);
+            let density = [1.0];
+            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
+            let sections =
+                RecyclingEmitterCrossSections::from_material(0, card.clone(), source).unwrap();
+            let heating = prepare(
+                cx,
+                &medium,
+                &thermal,
+                card,
+                [0.5 * COUNT, 0.5 * COUNT, 0.0],
+                sections,
+            );
+            let before = heating.clone();
+            assert!(
+                thermal
+                    .advance_observed(&heating, 0.1, config(0.1), || Ok(()))
+                    .is_err()
+            );
+            assert_eq!(heating.populations(0), before.populations(0));
+            assert_eq!(heating.energy(), before.energy());
+            assert_eq!(heating.time_s(), 0.0);
+            assert_eq!(thermal.energy_j(), 0.0);
+            assert_eq!(
+                heating
+                    .recycling_emission_grid(cx, &medium, 1)
+                    .unwrap()
+                    .content_identity(),
+                before
+                    .recycling_emission_grid(cx, &medium, 1)
+                    .unwrap()
+                    .content_identity(),
+            );
+            let (warm, retry, _) = thermal
+                .advance_observed(&heating, 1e-4, config(1e-4), || Ok(()))
+                .unwrap();
+            let (_, fresh, _) = thermal
+                .advance_observed(&before, 1e-4, config(1e-4), || Ok(()))
+                .unwrap();
+            assert!(warm.temperature_k(CellId(1)).unwrap() < 300.01);
+            assert_eq!(retry.populations(0), fresh.populations(0));
+            assert_eq!(retry.energy(), fresh.energy());
+            assert_eq!(
+                retry
+                    .recycling_emission_grid(cx, &medium, 1)
+                    .unwrap()
+                    .content_identity(),
+                fresh
+                    .recycling_emission_grid(cx, &medium, 1)
+                    .unwrap()
+                    .content_identity(),
+            );
+            assert!(retry.energy().escaped_j[0] > 0.0);
+        });
+    }
+}
+
 mod depleting_material {
     use super::*;
     use fs_material::phosphorescence::pump::{

@@ -25,6 +25,9 @@ mod beams;
 #[path = "saturation/annihilation.rs"]
 mod annihilation;
 
+#[path = "saturation/recycling.rs"]
+mod recycling;
+
 include!("saturation_environment.rs");
 
 fn source(level_nm: f64, lifetime_s: f64, weights: [f64; 2], id: u8) -> LuminescenceSource<2> {

@@ -12241,8 +12241,8 @@ remain bin-integrated watts and feed the existing luminescence observers.
 The default prescribed pump field must be justified as optically thin or
 externally maintained. The optional depleting beam below supplies its own
 incident/transmitted photon balance. Stimulated emission, excited-state
-absorption, irreversible photobleaching and active photon recycling remain
-outside this adapter. Triplet-pair laws require the explicit binding below.
+absorption and irreversible photobleaching remain outside this adapter.
+Triplet-pair laws and active photon recycling require the explicit bindings below.
 Cross sections and rates are authored
 inputs, not a material calibration certificate. The example documents synthetic
 coefficients, a 1 us pulse and maximum ground-state optical depth 1e-3. Focused
@@ -12340,8 +12340,8 @@ multi-beam system. Passive host heat from all paths is accumulated once into
 each original thermal receiver.
 
 These beams are mutually incoherent, with additive intensities. Optical phase,
-interference, coherent population dynamics, pump scattering/reflection and
-active recycling of emitted photons are outside this rate model. Within a
+interference, coherent population dynamics and pump scattering/reflection are
+outside this rate model. Active photon return uses the joint extension below. Within a
 cell, every beam addresses the same homogeneous inventory; separated beam
 footprints or a resolved saturation front require spatial refinement. Material
 and native thermal interval limits remain distinct from inner optical coupling
@@ -12391,8 +12391,8 @@ Zero coefficients retain the original linear results. Existing nonlinear and
 optical budgets bound work; componentwise temporal refinement is an accuracy
 indicator, not a certified continuum error bound. Exhaustion refuses instead
 of changing a tolerance or clipping populations. These laws do not establish
-spatial encounter/diffusion physics, active photon recycling, stimulated
-emission or measured coefficients. The existing example accepts
+spatial encounter/diffusion physics, stimulated emission or measured
+coefficients. The existing example accepts
 `--counterpropagating --annihilation`, retaining its synthetic coefficients,
 original cell volumes and separate beam and pair-heat accounts.
 
@@ -12403,6 +12403,71 @@ retry/cancellation and resource refusal. Two sourced groups cover native
 temperature refresh and endpoint refusal with clean retry. These renderer
 tests are source-formatted; native renderer execution remains unverified after
 the unchanged `asupersync` dependency was killed before renderer typechecking.
+
+### Finite-ground emitted-photon recycling and accepted active opacity
+
+`SaturableLuminescentHeating::with_photon_recycling` connects original emitted
+photons, changing ground-state absorption, external depleted beams and optional
+triplet-pair encounters in one native history. The coupled constructor
+`try_new_with_photon_recycling` also admits passive host absorption directly,
+without first constructing an unused fixed-probability transfer operator.
+Every positive-density host cell needs its original thermal receiver; a zero
+emitter inventory can supply that binding. Prescribed local pump hazards must
+be zero: excitation comes from declared depleted beams or initial stores.
+
+`PhotonRecyclingGeometry` explicitly bounds sampled rays and the complete
+path/segment allocation, seed, logical source and passive-host temperature
+domain. The original uniform-cell isotropic sampler and original DDA compile
+complete paths to the open boundary. A traversal refusal discards the binding;
+no unfinished ray becomes escape or heat. Spatial/angular samples are reused
+across physical stages and wavelengths. Their finite quadrature has its own
+ray-count/seed sensitivity; it is not an unbiased nonlinear estimator or an
+empirical confidence bound. No scattering, reflecting/refracting interfaces,
+coherent interference or photon flight-time model is inferred.
+
+`EmitterAbsorptionCrossSections<B>` is the same molecular source for external
+and internally emitted photons. The existing `BeamEmitterCrossSections` name
+is its two-lane alias; `RecyclingEmitterCrossSections<M>` follows the actual
+emission nodes. Original material claims are queried at those vacuum
+wavelengths and each native cell temperature. Source excitation support and
+destination-state energy are both checked. The passive host must exclude the
+same active molecules. Molecular opacity is `N_ground * sigma / V` on the
+original cell; neither host mass density nor an invented beam area replaces it.
+
+The existing shared-beam kinetic owner integrates all unique inventories once.
+Emitted spectral/directional rates are solved from that same history's
+radiative events, and absorption uses their actual receiver ground
+availability. External and recycled absorption, passive heat and excitation
+excess are attributed from original channel events. Only external photons
+enter the pump ledger. Source Stokes heat, receiver relaxation, ordinary dark
+decay, pair heat and bath withdrawal retain separate physical meanings.
+`recycled_excitation_j` counts actual internal excitation-store input; gross
+emission/recycling can exceed external energy without becoming extra supply.
+
+Prepared caches contain immutable paths and constitutive data keyed by source
+identity and every exact native temperature. Changing beams or pulse bindings
+invalidates preparation without caching photon traffic or populations. Native
+acceptance updates populations, energy, per-external-beam accounts and source
+temperatures together. Candidate retry, cancellation, missing material support
+and exhausted work caps publish none of that history.
+
+`recycling_emission_grid` binds accepted endpoint powers to accepted molecular
+absorption and the same original host for the existing native camera integral.
+Both foreground attenuation and emission within each cell use this opacity.
+Endpoint opacity with interval-mean powers is not claimed to integrate an
+exposure through changing opacity; resolve observation times explicitly. The
+extended example accepts `--counterpropagating --recycling --annihilation`,
+uses explicit synthetic spectra/cross sections and reports internal excitation,
+secondary heat and escaped energy separately from each external beam.
+
+Three authored renderer groups cover transparent/zero-active analytic decay,
+passive host heat, transfer into an unpumped original cell, accepted-opacity
+observations, shared beams with pair recovery, and cancellation/retry/budgets.
+Two material groups cover original temperature-dependent emission absorption
+and endpoint domain refusal with clean retry. These renderer fixtures and the
+example are source-formatted and source-reviewed; native execution remains
+unverified because the unchanged `asupersync` dependency was killed before
+renderer typechecking. Lower-owner native tests do not establish this gate.
 
 ## Multiply scattered nonthermal luminescence observations
 

@@ -8,7 +8,8 @@
 //! pump depletion against the finite ground inventory and separately accounts
 //! incident/transmitted photons. Only actual molecular pump events and passive
 //! host absorption supply external energy. Emitted light may use the existing
-//! passive absorption/scattering environment; no active photon recycling is inferred.
+//! passive absorption/scattering environment. Explicit [`recycling`] instead
+//! couples emitted rays to the same finite ground inventory and native heat.
 //!
 //! Original scalar or material-bound singlet/triplet rates refresh at each
 //! thermal interval. Rates and local pump flux are frozen over that interval;
@@ -22,6 +23,10 @@
 pub mod annihilation;
 /// Self-consistent finite-inventory depletion of a directed spectral pump.
 pub mod beam;
+/// Shared authored or material-sourced molecular absorption cross sections.
+pub mod cross_sections;
+/// Emitted photons returning to the same finite ground-state inventories.
+pub mod recycling;
 
 use super::phosphorescence::preserve_checkpoint;
 use super::{
@@ -140,6 +145,7 @@ struct Pending<const M: usize> {
 struct PreparedState {
     beam: Option<Arc<beam::PreparedPumps>>,
     annihilation: Option<Arc<annihilation::PreparedAnnihilation>>,
+    recycling: Option<Arc<recycling::PreparedRecycling>>,
 }
 
 /// Saturation, triplet shelving, heat and observable afterglow on one timeline.
@@ -156,6 +162,7 @@ pub struct SaturableLuminescentHeating<const M: usize> {
     medium_identity: ContentHash,
     beam: Option<beam::DepletingBeam>,
     annihilation: Option<annihilation::AnnihilationFeedback>,
+    recycling: Option<recycling::PhotonRecycling<M>>,
     source_identity: ContentHash,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -183,6 +190,35 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         max_grid_cells: usize,
         energy_tolerance_j: f64,
         environment: Option<AbsorbingLuminescenceEnvironment<M>>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        Self::try_new_impl(
+            medium,
+            singlet,
+            triplet,
+            bindings,
+            thermal,
+            max_grid_cells,
+            energy_tolerance_j,
+            environment,
+            false,
+            checkpoint,
+        )
+    }
+
+    // The coupled constructor binds its complete emission paths immediately;
+    // it does not need an otherwise unused fixed passive-transfer operator.
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_impl(
+        medium: &AbsorbingGrid<'_>,
+        singlet: LuminescenceSource<M>,
+        triplet: SingletTripletSource<M>,
+        bindings: &[SaturableEmitterCell],
+        thermal: &DepositionSimulation<'_>,
+        max_grid_cells: usize,
+        energy_tolerance_j: f64,
+        environment: Option<AbsorbingLuminescenceEnvironment<M>>,
+        emission_transport_pending: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalHeatingError> {
         checkpoint()?;
@@ -206,7 +242,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
                 ));
             }
             environment.check_state(thermal, &mut checkpoint)?;
-        } else {
+        } else if !emission_transport_pending {
             for cell in 0..medium.cell_count() {
                 checkpoint()?;
                 let coefficients = medium
@@ -324,6 +360,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             medium_identity: medium.content_identity(),
             beam: None,
             annihilation: None,
+            recycling: None,
             source_identity: hash.finalize(),
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -388,7 +425,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             .ok()
             .map(|i| self.emitters[i].populations)
     }
-    /// Endpoint bin-integrated emitted watts, before passive propagation.
+    /// Endpoint bin-integrated emitted watts, before propagation.
     pub fn cell_emission_w(&self) -> &[(usize, [f64; M])] {
         &self.emission_w
     }
@@ -431,7 +468,16 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             .as_ref()
             .map(|beam| beam.check_state(self, thermal, checkpoint))
             .transpose()?;
-        Ok(PreparedState { beam, annihilation })
+        let recycling = self
+            .recycling
+            .as_ref()
+            .map(|recycling| recycling.prepare(self, thermal, checkpoint))
+            .transpose()?;
+        Ok(PreparedState {
+            beam,
+            annihilation,
+            recycling,
+        })
     }
 
     fn next_edge(&self, after_s: f64) -> Option<f64> {
@@ -503,6 +549,22 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         let pumped = self
             .pump_window_s
             .is_none_or(|(start, end)| start_s >= start && start_s < end);
+        if self.recycling.is_some() {
+            return recycling::step_sources(
+                self,
+                thermal,
+                start_s,
+                duration_s,
+                end_s,
+                pumped,
+                prepared
+                    .recycling
+                    .as_deref()
+                    .expect("prepared photon recycling"),
+                prepared.annihilation.as_deref(),
+                checkpoint,
+            );
+        }
         let mut accounts = self.accounts.clone();
         accounts.duration.add(duration_s)?;
         let mut populations = Vec::with_capacity(self.emitters.len());
@@ -761,6 +823,9 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         }
         if let (Some(pairs), Some(prepared)) = (&mut self.annihilation, prepared.annihilation) {
             pairs.accept(prepared);
+        }
+        if let (Some(recycling), Some(prepared)) = (&mut self.recycling, prepared.recycling) {
+            recycling.accept(prepared);
         }
         self.mean_emission_w = pending.mean_emission_w;
         self.emission_w = emission_w;

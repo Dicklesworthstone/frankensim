@@ -4283,19 +4283,25 @@ no residual deposited as heat. Refusal preserves caller state. Scattering,
 reflection, stimulated emission, excited-state absorption and finite photon
 flight are not introduced by this owner.
 
-Four focused native regression groups passed against the corrected
-production sources: independent exponential-integral self-return decay;
-exact emitted-fluence saturation of a finite second cell with separate
-spectral heat; a near-closed pumped equilibrium retaining 200,000 radiative
-events per emitter in one accepted stationary step; and no-active-return
-parity with cancellation, work refusal and retry. The self-return transient
-used 525 accepted substeps, with a global residual of -7.80e-20 J. The
-stationary residual was 4.14e-25 J. An additional independent recycling/pair
-equilibrium test is authored. Its execution and the combined rerun of the
-twenty-one earlier focused regressions remain unconfirmed after an executor
-outage. The authored source was recovered from the recorded edit patches;
-post-recovery formatting and native execution were unavailable. Renderer
-integration and its native execution remain separate work.
+Five focused native regression groups passed against the corrected production
+sources: independent exponential-integral self-return decay; exact emitted-fluence
+saturation of a finite second cell with separate spectral heat; a near-closed
+pumped equilibrium retaining 200,000 radiative events per emitter in one accepted
+stationary step; no-active-return parity with cancellation, work refusal and
+retry; and an independent stationary recycling/triplet-pair heat balance.
+The self-return transient used 525 accepted substeps, with a global residual
+of -7.80e-20 J. The near-closed stationary residual was 4.14e-25 J. The mixed
+pair/recycling equilibrium used one substep and one cell evaluation, with
+a residual of -2.65e-23 J.
+
+Together with the eighteen existing column/shared-beam/pair regressions and
+three prescribed pair-kinetics oracles, all twenty-six focused native tests
+passed with unchanged controls and no compiler diagnostics. The previously
+recovered authored source, after the pinned formatter, matches the restored
+production source byte-for-byte. The renderer now binds this owner to original
+geometry, material absorption, native heat and accepted endpoint opacity.
+Its separate full-runtime tests remain unexecuted; lower-owner checks do not
+establish that renderer gate.
 
 ## Stationary and harmonic prescribed throughflow
 

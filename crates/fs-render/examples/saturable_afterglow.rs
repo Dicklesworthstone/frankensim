@@ -7,6 +7,10 @@
 //! sharing the same finite inventory in two original thermal/optical cells.
 //! Add `--annihilation` to any mode to include explicitly authored triplet-pair
 //! quenching and delayed singlet fluorescence; compare the late singlet column.
+//! Add `--recycling` with either depleted-pump mode for finite-ground photon
+//! reabsorption. This explicitly changes the synthetic triplet level to 650 nm:
+//! 600 nm singlet light can excite it, while 750 nm triplet light escapes.
+//! The endpoint view includes the same accepted molecular absorption.
 //!
 //! All coefficients are SYNTHETIC, not measurements of a particular phosphor.
 //! A prescribed local photon flux pumps 1e13 emitters in a 1 cm cube for 1 us.
@@ -45,6 +49,9 @@ use fs_render::volumes::heating::luminescence::{
         PrescribedPhotonPump, SaturableEmitterCell, SaturableLuminescentHeating,
         annihilation::{AnnihilationLimits, PhosphorescenceAnnihilation, TripletAnnihilation},
         beam::{BeamEmitterCrossSections, DepletingPumpBeam, PumpBeamsLimits, PumpColumnLimits},
+        recycling::{
+            PhotonRecyclingGeometry, RecyclingEmitterCrossSections, SaturableRecyclingLimits,
+        },
     },
 };
 use fs_render::volumes::transport::luminescence::LuminescenceGrid;
@@ -85,11 +92,19 @@ fn source(
     yield_: f64,
     weights: [f64; 2],
     id: u8,
+    recycling: bool,
 ) -> Result<LuminescenceSource<2>, Box<dyn Error>> {
     Ok(LuminescenceSource::try_new(
         FluorescenceSource::try_new(
             ContentHash([id; 32]),
-            (380.0, 420.0),
+            (
+                380.0,
+                if recycling {
+                    level_nm.min(600.0)
+                } else {
+                    420.0
+                },
+            ),
             (295.0, 400.0),
             yield_,
             [600.0, 750.0],
@@ -100,7 +115,12 @@ fn source(
     )?)
 }
 
-fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Error>> {
+fn run(
+    cx: &Cx<'_>,
+    mode: PumpMode,
+    annihilation: bool,
+    recycling: bool,
+) -> Result<(), Box<dyn Error>> {
     let depleting = mode != PumpMode::Prescribed;
     let counterpropagating = mode == PumpMode::Counterpropagating;
     let emitters = if depleting { 1e17 } else { 1e13 };
@@ -163,9 +183,16 @@ fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Er
         },
     )?;
     let mut thermal = empty.advance_to(0.0, config, || Ok(()))?.0;
-    let singlet = source(450.0, 1e-7, 0.6, [1.0, 0.0], 240)?;
+    let singlet = source(450.0, 1e-7, 0.6, [1.0, 0.0], 240, recycling)?;
     let triplet = SingletTripletSource::try_new(
-        source(550.0, 2e-5, 0.8, [0.0, 1.0], 241)?,
+        source(
+            if recycling { 650.0 } else { 550.0 },
+            2e-5,
+            0.8,
+            [0.0, 1.0],
+            241,
+            recycling,
+        )?,
         1e7,
         ArrheniusQuenching::try_new(0.0, 0.0)?,
         SingletTripletLimits::default(),
@@ -313,10 +340,67 @@ fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Er
     } else {
         println!("Synthetic optically thin prescribed-flux pulse; pump switches off at 1 us.");
     }
+    if recycling {
+        let sections: Vec<_> = (0..cell_count)
+            .map(|grid_cell| {
+                RecyclingEmitterCrossSections::authored(
+                    grid_cell,
+                    ContentHash([247; 32]),
+                    [[0.0, 1e-20], [0.0; 2]],
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        heating = heating.with_photon_recycling(
+            cx,
+            &medium,
+            &sections,
+            &thermal,
+            PhotonRecyclingGeometry {
+                histories_per_emitter: 32,
+                maximum_paths: 256,
+                maximum_total_segments: 1024,
+                seed: 248,
+                source_id: 249,
+                minimum_temperature_k: 295.0,
+                maximum_temperature_k: 400.0,
+                fraction_roundoff: 1e-12,
+            },
+            SaturableRecyclingLimits {
+                pump: PumpBeamsLimits {
+                    column: PumpColumnLimits {
+                        relative_tolerance: 1e-4,
+                        absolute_energy_tolerance_j: 1e-12,
+                        maximum_substeps: 4096,
+                        maximum_cell_evaluations: 1_048_576,
+                        ..PumpColumnLimits::default()
+                    },
+                    maximum_coupling_iterations: 128,
+                },
+                annihilation: AnnihilationLimits {
+                    relative_tolerance: 1e-4,
+                    absolute_energy_tolerance_j: 1e-12,
+                    maximum_substeps: 4096,
+                },
+                maximum_feedback_iterations: 128,
+            },
+            || Ok(()),
+        )?;
+        println!(
+            "Synthetic active recycling: 32 uniform-cell isotropic rays/cell, sigma(600nm,G→T)=1e-20 m², triplet level=650nm; 750nm remains transparent."
+        );
+        println!(
+            "Ballistic open-grid quadrature, quasistatic flight; ray-count/seed refinement is separate from kinetic and thermal refinement."
+        );
+    }
     heating = heating.with_pump_window(0.0, pulse_end_s)?;
     println!(
-        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}{}",
+        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}{}{}",
         if annihilation { ",pair_heat_J" } else { "" },
+        if recycling {
+            ",recycled_excitation_J,secondary_heat_J,escaped_emission_J"
+        } else {
+            ""
+        },
         if counterpropagating {
             ",left_400nm_incident_J,left_transmitted_J,left_molecular_absorption_J,left_passive_absorption_J,left_pump_closure_J,right_410nm_incident_J,right_transmitted_J,right_molecular_absorption_J,right_passive_absorption_J,right_pump_closure_J,left_ground_fraction,right_ground_fraction,kinetic_substeps,coupling_iterations"
         } else if depleting {
@@ -359,14 +443,18 @@ fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Er
             .fold([0.0; 2], |sum, (_, power)| {
                 [sum[0] + power[0], sum[1] + power[1]]
             });
-        let view = LuminescenceGrid::try_new(
-            cx,
-            &medium,
-            heating.emission_source_identity(),
-            [600.0, 750.0],
-            heating.cell_emission_w(),
-            cell_count,
-        )?;
+        let view = if recycling {
+            heating.recycling_emission_grid(cx, &medium, cell_count)?
+        } else {
+            LuminescenceGrid::try_new(
+                cx,
+                &medium,
+                heating.emission_source_identity(),
+                [600.0, 750.0],
+                heating.cell_emission_w(),
+                cell_count,
+            )?
+        };
         let observed = view.transport(
             cx,
             Point3::new(-0.01, 0.005, 0.005),
@@ -424,8 +512,18 @@ fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Er
         } else {
             String::new()
         };
+        let recycling_accounts = if recycling {
+            format!(
+                ",{:.9e},{:.9e},{:.9e}",
+                heating.energy().recycled_excitation_j,
+                heating.energy().secondary_absorption_heat_j,
+                heating.energy().escaped_j.iter().sum::<f64>()
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "{target:.6e},{:.6e},{:.6e},{:.6e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.12},{:.9e},{:.9e},{:.3e}{pair_accounts}{beam_accounts}",
+            "{target:.6e},{:.6e},{:.6e},{:.6e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.12},{:.9e},{:.9e},{:.3e}{pair_accounts}{recycling_accounts}{beam_accounts}",
             counts[0] / emitters,
             counts[1] / emitters,
             counts[2] / emitters,
@@ -447,6 +545,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let mut mode = PumpMode::Prescribed;
     let mut annihilation = false;
+    let mut recycling = false;
     for argument in &arguments {
         match argument.as_str() {
             "--depleting" if mode == PumpMode::Prescribed => mode = PumpMode::Depleting,
@@ -454,11 +553,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 mode = PumpMode::Counterpropagating
             }
             "--annihilation" if !annihilation => annihilation = true,
+            "--recycling" if !recycling => recycling = true,
             _ => return Err(
-                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation]"
+                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation] [--recycling]"
                     .into(),
             ),
         }
+    }
+    if recycling && mode == PumpMode::Prescribed {
+        return Err("--recycling requires --depleting or --counterpropagating".into());
     }
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -478,6 +581,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
             mode,
             annihilation,
+            recycling,
         )
     })
 }

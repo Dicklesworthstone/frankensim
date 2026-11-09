@@ -126,7 +126,72 @@ impl DepletingBeam {
         Ok(Arc::new(PreparedPumps {
             temperatures,
             solver,
+            paths,
         }))
+    }
+
+    /// Remap the already prepared optical paths to the complete original
+    /// emitter inventory, including cells outside every external pump.
+    pub(in crate::volumes::heating::luminescence::saturation) fn recycling_paths<const M: usize>(
+        &self,
+        owner: &SaturableLuminescentHeating<M>,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<SaturablePumpPath<2>>, OpticalHeatingError> {
+        let prepared = self.prepare(owner, thermal, checkpoint)?;
+        let mut paths = prepared.paths.clone();
+        for path in &mut paths {
+            for segment in &mut path.segments {
+                checkpoint()?;
+                segment.cell_index = self.model.cells[segment.cell_index];
+            }
+        }
+        Ok(paths)
+    }
+
+    pub(in crate::volumes::heating::luminescence::saturation) fn incident_rates(
+        &self,
+        time_s: f64,
+        globally_pumped: bool,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<[f64; 2]>, OpticalHeatingError> {
+        self.model
+            .paths
+            .iter()
+            .map(|path| {
+                checkpoint()?;
+                Ok(
+                    if globally_pumped
+                        && path
+                            .pump_window_s
+                            .is_none_or(|(start, end)| time_s >= start && time_s < end)
+                    {
+                        path.incident_photon_rates_s
+                    } else {
+                        [0.0; 2]
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(in crate::volumes::heating::luminescence::saturation) fn recycling_accounts(
+        &self,
+        step: &fs_thermal::luminescence::transfer::pump_beams::recycling::SaturableRecyclingStep<2>,
+        duration_s: f64,
+        tolerance_j: f64,
+    ) -> Result<BeamAccounts, OpticalHeatingError> {
+        let mut accounts = self.accounts.clone();
+        accounts.add_paths(
+            &step.external_beams,
+            duration_s,
+            step.substeps,
+            step.cell_evaluations,
+            step.coupling_iterations,
+            step.max_energy_discrepancy_j,
+            tolerance_j,
+        )?;
+        Ok(accounts)
     }
 
     pub(in crate::volumes::heating::luminescence::saturation) fn check_state<const M: usize>(
@@ -162,21 +227,7 @@ impl DepletingBeam {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BeamCandidate, OpticalHeatingError> {
         let prepared = self.prepare(owner, thermal, checkpoint)?;
-        let mut rates = Vec::with_capacity(self.model.paths.len());
-        for path in &self.model.paths {
-            checkpoint()?;
-            rates.push(
-                if globally_pumped
-                    && path
-                        .pump_window_s
-                        .is_none_or(|(start, end)| owner.time_s >= start && owner.time_s < end)
-                {
-                    path.incident_photon_rates_s
-                } else {
-                    [0.0; 2]
-                },
-            );
-        }
+        let rates = self.incident_rates(owner.time_s, globally_pumped, checkpoint)?;
         let mut accounts = self.accounts.clone();
         let mut roundoff = CheckedSum::default();
         let mut steps = vec![None; owner.emitters.len()];

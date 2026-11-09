@@ -21,132 +21,28 @@ use crate::volumes::heating::feedback::IncidentBeam;
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError, positive_product};
 use fs_exec::Cx;
 use fs_thermal::enthalpy::CellId;
-use fs_thermal::luminescence::transfer::pump_column::{
-    SaturablePumpCell, SaturablePumpColumn,
-};
-use fs_thermal::luminescence::transfer::saturation::SaturableSingletTripletStep;
-use std::sync::Arc;
 use fs_thermal::luminescence::transfer::pump_beams::{
     SaturablePumpBeams, SaturablePumpPath, SaturablePumpSegment,
 };
+use fs_thermal::luminescence::transfer::pump_column::{SaturablePumpCell, SaturablePumpColumn};
+use fs_thermal::luminescence::transfer::saturation::SaturableSingletTripletStep;
+use std::sync::Arc;
 
-pub use fs_thermal::luminescence::transfer::pump_column::PumpColumnLimits;
 pub use fs_thermal::luminescence::transfer::pump_beams::PumpBeamsLimits;
+pub use fs_thermal::luminescence::transfer::pump_column::PumpColumnLimits;
 
 mod accounts;
 mod binding;
 mod evolution;
+pub(super) use accounts::BeamAccounts;
 pub use accounts::{DepletingPumpBeamEnergy, DepletingPumpEnergy, DepletingPumpReport};
 pub use binding::DepletingPumpBeam;
-pub(super) use accounts::BeamAccounts;
 
-#[derive(Clone, Debug)]
-enum CrossSections {
-    Authored {
-        identity: ContentHash,
-        values: [[f64; 2]; 2],
-    },
-    #[cfg(feature = "material-state")]
-    Material {
-        card: Arc<fs_matdb::MaterialCard>,
-        source: fs_material::phosphorescence::pump::GroundStatePumpStatePoint,
-    },
-}
+use super::cross_sections::{CrossSections, EmitterAbsorptionCrossSections};
 
-/// Molecular cross sections for one original emitter cell. Rows are the two
-/// incident wavelength lanes; columns are transitions [ground->singlet,
-/// ground->triplet]. Both transitions compete for the SAME incident photons.
-/// Bulk mass absorption is a separate passive host channel.
-#[derive(Clone, Debug)]
-pub struct BeamEmitterCrossSections {
-    grid_cell: usize,
-    source: CrossSections,
-}
-
-impl BeamEmitterCrossSections {
-    /// Bind explicit, nonnegative square metres per ground-state emitter.
-    /// The source identity attributes authored data; it does not certify it.
-    pub fn authored(
-        grid_cell: usize,
-        source_identity: ContentHash,
-        cross_sections_m2: [[f64; 2]; 2],
-    ) -> Result<Self, OpticalHeatingError> {
-        if source_identity == ContentHash([0; 32])
-            || !cross_sections_m2.into_iter().flatten().all(nonnegative)
-        {
-            return Err(invalid("invalid molecular pump cross sections"));
-        }
-        Ok(Self {
-            grid_cell,
-            source: CrossSections::Authored {
-                identity: source_identity,
-                values: cross_sections_m2,
-            },
-        })
-    }
-
-    /// Bind the original selected molecular cross-section claims. Both vacuum
-    /// wavelength and absolute temperature must be explicit owned coordinates;
-    /// every other physical condition remains fixed by the native query.
-    #[cfg(feature = "material-state")]
-    pub fn from_material(
-        grid_cell: usize,
-        card: Arc<fs_matdb::MaterialCard>,
-        source: fs_material::phosphorescence::pump::GroundStatePumpStatePoint,
-    ) -> Result<Self, OpticalHeatingError> {
-        if source.temperature_axis().is_none() {
-            return Err(invalid(
-                "thermal pump source requires an owned absolute-temperature axis",
-            ));
-        }
-        // Re-query at the exact initial point to reject a different card now.
-        source
-            .at_query_point(&card, &source.resolved().query())
-            .map_err(|_| invalid("pump cross sections differ from original material card"))?;
-        Ok(Self {
-            grid_cell,
-            source: CrossSections::Material { card, source },
-        })
-    }
-
-    pub const fn grid_cell(&self) -> usize {
-        self.grid_cell
-    }
-
-    fn identity(&self) -> ContentHash {
-        match &self.source {
-            CrossSections::Authored { identity, .. } => *identity,
-            #[cfg(feature = "material-state")]
-            CrossSections::Material { source, .. } => source.identity(),
-        }
-    }
-
-    fn evaluate(
-        &self,
-        wavelengths_nm: [f64; 2],
-        temperature_k: f64,
-    ) -> Result<[[f64; 2]; 2], OpticalHeatingError> {
-        match &self.source {
-            CrossSections::Authored { values, .. } => {
-                let _ = (wavelengths_nm, temperature_k);
-                Ok(*values)
-            }
-            #[cfg(feature = "material-state")]
-            CrossSections::Material { card, source } => {
-                let mut values = [[0.0; 2]; 2];
-                for lane in 0..2 {
-                    values[lane] = source.at_wavelength_temperature(
-                        card,
-                        finite(wavelengths_nm[lane] / 1e9)?,
-                        Some(temperature_k),
-                    ).map_err(|_| invalid("molecular pump wavelength/temperature is outside original material support"))?
-                        .cross_sections_m2();
-                }
-                Ok(values)
-            }
-        }
-    }
-}
+/// The two incident pump nodes use the same molecular source carrier as
+/// reabsorbed luminescence. Bulk mass absorption remains a passive host channel.
+pub type BeamEmitterCrossSections = EmitterAbsorptionCrossSections<2>;
 
 #[derive(Clone, Debug)]
 struct BeamCell {
@@ -196,6 +92,8 @@ enum PreparedSolver {
 pub(super) struct PreparedPumps {
     temperatures: Vec<u64>,
     solver: PreparedSolver,
+    /// Same original paths, retained for joint emitted-photon feedback.
+    paths: Vec<SaturablePumpPath<2>>,
 }
 
 pub(super) struct BeamCandidate {
