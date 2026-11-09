@@ -78,6 +78,8 @@ pub mod iso9613;
 /// Equilibrium charge carriers and sourced DC/harmonic collisional transport.
 pub mod ionized_gas;
 pub mod phase;
+/// Cold single-photon surface emission with separate charge, work and heat.
+pub mod photoelectric;
 /// Original singlet/triplet energies and transition rates for delayed light.
 pub mod phosphorescence;
 /// Source-bound reciprocal longitudinal piezoelectric stress, field and storage.
