@@ -281,6 +281,15 @@ impl CutElasticity3 {
     pub fn prescribed_displacement_load(
         &self,
         prescribed: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        self.prescribed_displacement_load_impl(prescribed, false, checkpoint)
+    }
+
+    pub(super) fn prescribed_displacement_load_impl(
+        &self,
+        prescribed: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        include_supports: bool,
         mut checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<Vec<f64>, ElasticityError3> {
         let cells = self.displacement_cells(prescribed, &mut checkpoint)?;
@@ -288,7 +297,7 @@ impl CutElasticity3 {
         for (id, cell) in self.cells.iter().enumerate() {
             poll(&mut checkpoint)?;
             for i in 0..24 {
-                if !self.fixed[cell.nodes[i / 3]] {
+                if include_supports || !self.fixed[cell.nodes[i / 3]] {
                     rhs[3 * cell.nodes[i / 3] + i % 3] += self.scales[id] * cells[id][i];
                 }
             }

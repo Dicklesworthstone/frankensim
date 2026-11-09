@@ -68,13 +68,19 @@ impl CutElasticity3 {
     /// Missing surface support is refused before invoking either callback.
     /// Geometry and stiffness are never changed; an error returns no partial RHS.
     pub fn reference_load(&self, law: ReferenceLoad3<'_>,
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
+        self.reference_load_impl(law, false, checkpoint)
+    }
+
+    pub(in crate::elastic3) fn reference_load_impl(&self, law: ReferenceLoad3<'_>,
+        include_supports: bool,
         mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
         law.admit(self, &mut checkpoint)?;
         let body = match law.body {
-            Some(f) => Some(self.body_load(f, &mut checkpoint)?), None => None,
+            Some(f) => Some(self.body_load_impl(f, include_supports, &mut checkpoint)?), None => None,
         };
         let surface = match law.surface {
-            Some(f) => Some(self.surface_load(&|p, n| f.value(p, n), &mut checkpoint)?.rhs), None => None,
+            Some(f) => Some(self.surface_load_impl(&|p, n| f.value(p, n), include_supports, &mut checkpoint)?.rhs), None => None,
         };
         let result = match (body, surface) {
             (Some(mut b), Some(s)) => {

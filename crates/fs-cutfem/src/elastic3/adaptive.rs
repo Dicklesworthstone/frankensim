@@ -14,6 +14,7 @@ mod body;
 mod eigenstrain;
 pub mod dirichlet;
 pub mod enrichment;
+mod equilibrium;
 mod mass;
 pub mod stress;
 

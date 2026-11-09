@@ -549,6 +549,15 @@ impl CutElasticity3 {
     pub fn body_load(
         &self,
         force: &dyn Fn([f64; 3]) -> [f64; 3],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        self.body_load_impl(force, false, checkpoint)
+    }
+
+    fn body_load_impl(
+        &self,
+        force: &dyn Fn([f64; 3]) -> [f64; 3],
+        include_supports: bool,
         mut checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<Vec<f64>, ElasticityError3> {
         let mut rhs = vec![0.0; self.n()];
@@ -566,7 +575,7 @@ impl CutElasticity3 {
                 }
                 let (values, _) = q1(cell.bounds, p);
                 for a in 0..8 {
-                    if !self.fixed[cell.nodes[a]] {
+                    if include_supports || !self.fixed[cell.nodes[a]] {
                         for c in 0..3 {
                             rhs[3 * cell.nodes[a] + c] += w * values[a] * f[c];
                         }
@@ -1050,6 +1059,9 @@ fn add_ghosts(
 
 /// Q1-conforming locally refined octree execution of this 3-D kernel.
 pub mod adaptive;
+
+/// Uneliminated discrete force balance and strong-support reactions.
+pub mod equilibrium;
 
 /// Native-density body loads with prepared occupancy actions and pullbacks.
 pub mod body;

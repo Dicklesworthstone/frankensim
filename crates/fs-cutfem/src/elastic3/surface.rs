@@ -100,6 +100,15 @@ impl CutElasticity3 {
     pub fn surface_load(
         &self,
         traction: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<SurfaceLoad3, ElasticityError3> {
+        self.surface_load_impl(traction, false, checkpoint)
+    }
+
+    pub(super) fn surface_load_impl(
+        &self,
+        traction: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        include_supports: bool,
         mut checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<SurfaceLoad3, ElasticityError3> {
         surface_poll(&mut checkpoint)?;
@@ -134,7 +143,7 @@ impl CutElasticity3 {
                 }
                 let (values, _) = q1(cell.bounds, node.position);
                 for a in 0..8 {
-                    if !self.fixed[cell.nodes[a]] {
+                    if include_supports || !self.fixed[cell.nodes[a]] {
                         for c in 0..3 {
                             load.rhs[3 * cell.nodes[a] + c] += node.weight * values[a] * f[c];
                         }

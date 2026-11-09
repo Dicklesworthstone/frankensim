@@ -1,5 +1,23 @@
 # fs-cutfem CONTRACT
 
+## Complete 3-D strong-support force balance
+
+Cartesian and adaptive elasticity expose `equilibrium_load` and
+`equilibrium_response`. Complete body/surface loads and optional embedded
+motion lifting retain supported entries; the original solve still masks its
+strong rows. Recovered residuals include original scaled cell, B-bar,
+Nitsche and ghost actions. Adaptive forces use the full hanging-node
+transpose. Strong-support force/moment and the free residual norm remain
+separate from embedded reactions.
+
+Original full-field material admission and cancellation apply before
+publication. A solved field is required to interpret supported residuals as
+equilibrium reactions. These are discrete variational forces, not sampled
+continuum traction. Existing masked/prepared load stencils cannot recover
+discarded supported entries; use the complete load path. The six
+`equilibrium3` regressions cover extension, supported loading, cut/graded
+balance, mixed supports, pressure and refusal/retry behavior.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). CutFEM on SDFs (plan §8.1 frontend 2, bead tfz.8):
