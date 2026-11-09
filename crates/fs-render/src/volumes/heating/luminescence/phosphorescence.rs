@@ -391,9 +391,9 @@ impl<const M: usize> SingletTripletFeedback<M> {
         let mut nonradiative = [0.0; 2];
         for (i, decay) in decays.iter().enumerate() {
             radiative[i] = rate_power(1.0, decay.quantum_yield(), decay.lifetime_s())?;
-            nonradiative[i] = rate_power(1.0, 1.0 - decay.quantum_yield(), decay.lifetime_s())?;
+            nonradiative[i] = rate_power(1.0, decay.nonradiative_yield(), decay.lifetime_s())?;
             if (decay.quantum_yield() > 0.0 && radiative[i] == 0.0)
-                || (decay.quantum_yield() < 1.0 && nonradiative[i] == 0.0)
+                || (decay.nonradiative_yield() > 0.0 && nonradiative[i] == 0.0)
             {
                 return Err(invalid(
                     "positive singlet/triplet removal rate is below representation",

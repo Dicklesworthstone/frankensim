@@ -740,3 +740,24 @@ mod material_rates {
         });
     }
 }
+
+/// A dark branch below one radiative-yield ulp must still heat the native cell.
+#[test]
+fn g1_sub_ulp_quenching_reaches_the_phosphorescence_heat_account() {
+    with_cx(|cx| {
+        let source = singlet()
+            .with_quenching(ArrheniusQuenching::try_new(1e-18, 0.0).unwrap());
+        assert_eq!(source.decay_at_temperature(300.0).unwrap().quantum_yield(), 1.0);
+        let (thermal, heating) = setup(cx, source);
+        let heating = coupled(heating, &thermal, triplet(), [0.0; 2]);
+        let (_, accepted, _) = thermal
+            .advance_observed(&heating, 1.0, config(1.0), || Ok(()))
+            .unwrap();
+        // The original 400-nm 10-W beam feeds an 8-W, 500-nm store.
+        // At tau=1 and t=1 its integrated release is 8/e joules.
+        let expected_heat = 8.0 * (-1.0_f64).exp() * 1e-18;
+        let heat = accepted.energy().nonradiative_heat_j;
+        assert!(heat > 0.0);
+        assert!((heat / expected_heat - 1.0).abs() < 1e-10);
+    });
+}

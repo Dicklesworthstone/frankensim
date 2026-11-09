@@ -3774,3 +3774,36 @@ temperature/heat-rate pairing is in K W, not a second physical heat account.
 Focused G1/G3/G4 regressions compare scalar RC and two-cell mutual impedances,
 the passive quadratic identity, native time-domain refinement, nonlinear
 source/conductivity feedback, latent storage, DC refusal and cancellation.
+
+## Finite ground-state populations in luminescence
+
+`luminescence::transfer::saturation::SaturableSingletTripletPlan` extends the
+existing authored singlet/triplet law with an explicit ground-state inventory.
+The original positive `ReactionPlan` evolves conserved mean counts in
+`[ground, singlet, triplet]` order under constant per-ground pumping hazards.
+Only actual ground-to-excited transitions debit the supplied pump-event energy.
+Energy above the destination state is prompt heat. Radiative, nonradiative and
+forward/reverse crossing channels retain their original units and meanings.
+
+Excited-population, total-emitter and external-energy balances are checked
+independently. The large ground inventory does not inflate the excited-count
+allowance, and net bath exchange prevents reversible crossing traffic from
+inflating the energy allowance. No clipping or residual-to-heat correction is
+applied. Prepared propagators are reusable; native work, accuracy and
+cancellation limits remain explicit.
+
+This is a prescribed-field rate model, suitable for an explicitly justified
+optically thin or externally maintained field. Optical pumping requires
+authored cross sections and local photon flux. Fixed dilute Beer absorption
+must not be relabeled as a saturable pump. The model does not solve pump
+depletion, carrier transport, stimulated emission, excited-state absorption,
+photobleaching, trap distributions or pair annihilation. Radiative energy is
+released before the original spectrum, transport and Stokes partition.
+
+Seven focused G0/G1/G3 tests in the module compare independent analytic
+saturation, triplet shelving, a finite stable store, pump-off equivalence,
+all-channel split-step composition, nanosecond/SI population scaling, and
+admission/cancellation/resource failures. These seven tests passed using the
+unchanged production math, reaction and thermal source files with the pinned
+Rust toolchain. Full-workspace and renderer-integration gates were not run
+successfully in this session.
