@@ -11431,3 +11431,65 @@ Those public tests were source/API reviewed and syntax parsed, but full Cargo
 execution remains unavailable in this session because sibling workspace
 sources and writable dependency/build storage are unavailable. The native
 source-slice result does not claim a whole-workspace build.
+
+## Adaptive simultaneous moving-gas molecular networks
+
+`molecular_exchange::network::trajectory::advance_candidate` evolves the
+original bounded network transaction over one requested physical window.
+Every full/half trial calls `network::step_candidate` on its actual finite
+gas inventories, temperatures, compositions and velocities. All apertures
+sample that same original snapshot before reconstruction; simultaneous
+incoming material cannot fund outgoing mass. Only accepted two-half-step
+histories survive. Native maximum duration caps trials, and only the original
+typed gross-withdrawal refusal permits physical retry. Source, drift, caloric,
+closure and cancellation failures refuse the complete candidate.
+
+The original pair trajectory's gas-state control type is reused. Local error
+includes temperature, pressure, each original catalog species' mass (including
+entry from exact zero), and velocity increments rather than common drift.
+Each link/species also controls both gross directions and the authoritative
+signed net mass, vector momentum and reference energy separately. Opposing
+streams cannot hide their individual integration errors. Stream moments use
+the explicitly declared common translating energy frame; normal directions
+and aperture velocities are held in their original inertial axes.
+
+Each species' fixed caloric reference is selected from a real positive initial
+inventory in canonical gas-ID order. Active gases must preserve one original
+caloric source per species. The original NASA caloric integrals and retained
+molecular crossing corrections remove arbitrary formation datums before
+arithmetic. Fixed caloric reference selection uses a real initial inventory rather than an
+absent species at a receiver's window-start temperature. The original per-step
+enthalpy crosswalk and its source-domain admission remain binding. Signed net stream energy retains the native source-relative
+coordinate, including small-drift net mass, instead of subtracting rounded
+gross formation energies. Closed apertures leave their source, normal and
+drift inactive; isolated gases remain exact.
+
+Every accepted interval audits actual original-to-current total/species mass,
+inertial vector momentum and source-relative internal-plus-bulk energy in both
+common and laboratory frames. Kinetic changes reuse the original changing-mass
+momentum identity. Fixed window budgets also debit absolute per-gas native
+defects, pooled impulse/energy defects, gross/net mass uncertainty and actual
+accepted-step closure. Opposite signed errors cannot refund these budgets,
+and no allowance grows with step count. Canonical compensated link totals and
+native chronological receipts retain all accepted transfer accounts. Attempts,
+accepted intervals, native gas/link/species caps and checked history cardinality
+bound work and storage; cancellation is polled through reporting as well as
+physical trials. Refusal publishes no partial state or history.
+
+This controls local first-order temporal error of the existing fixed-volume
+aperture operator. It does not supply other-wall pressure/support forces,
+container motion, molecular flight storage, spatial gas gradients, a closed
+vessel equilibrium/passivity claim, or a certified global error bound.
+
+Six focused G0/G1/G3/G4 groups cover entering-species propagation and exact
+native-history replay; convergence to an independent continuous three-gas
+Gaussian-half-space moment/RK4 reference; stream-only refinement with loose
+endpoint tolerances; formation-reference/common-boost invariance; fixed window
+budgets and late atomic cancellation; and native withdrawal, source, work,
+minimum-step, zero-area and empty-network behavior. Before an executor outage,
+pinned Rustfmt parsed and formatted the new production and test files, and
+the parent-module whitespace check passed. Recovery recreated the three new
+files from their complete original patches, including the final reporting
+cancellation polls; their recovered formatting was not rechecked. These
+cross-crate native regressions were authored and source/API reviewed but
+were not compiled or executed; no repository-wide DSR verdict is claimed.

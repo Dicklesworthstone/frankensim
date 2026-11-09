@@ -7,6 +7,9 @@
 //! This is a first-order fixed-volume interface operator. Container motion,
 //! flight time, remaining wall forces and closed-system passivity are not inferred.
 
+/// Adaptive histories of the same simultaneous finite-inventory transaction.
+pub mod trajectory;
+
 use super::{
     DriftingEffusiveExchange, EffusiveDriftInterface, GasEnergyError, MAX_EFFUSIVE_SPECIES,
     MolecularExchangeError, MolecularExchangeSurface, MovingGasBoundaryError,

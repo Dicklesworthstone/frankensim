@@ -1,4 +1,6 @@
 //! G0/G1/G3/G4: one snapshot, physical moments, original shared inventory.
+mod trajectory;
+
 use super::*;
 use crate::molecular_exchange::network::{
     self, MolecularNetworkControls, MolecularNetworkError, MolecularNetworkLink,
