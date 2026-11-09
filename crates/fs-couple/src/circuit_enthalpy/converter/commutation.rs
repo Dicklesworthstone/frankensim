@@ -13,6 +13,9 @@ pub mod battery_motor;
 mod capacitors;
 pub use capacitors::{DeviceCapacitanceBinding, DeviceCapacitanceMaterial};
 
+mod charge;
+pub use charge::{DeviceChargeBinding, DeviceChargeMaterial};
+
 mod devices;
 pub use devices::{DeviceConductionBinding, DeviceConductionKeys, DeviceConductionMaterial};
 

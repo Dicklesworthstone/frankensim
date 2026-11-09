@@ -10,12 +10,15 @@
 //! stay fixed. Endpoint material feedback needs time refinement. Native sampled
 //! device limits do not certify unresolved peaks or semiconductor safe area.
 //! The default nine-state lane has no device capacitor states; `capacitance`
-//! adds explicit constant output-charge storage. Neither lane models gate-drive
-//! energy, reverse recovery, avalanche or a general nonlinear capacitance law.
+//! adds explicit constant output-charge storage; `charge` retains complete Q(V)
+//! laws. Gate-drive energy, reverse recovery, avalanche and temperature-varying
+//! charge laws remain outside these fixed-storage material connections.
 
 use super::*;
 
 pub mod capacitance;
+/// Complete immutable voltage-charge laws on the original eleven coordinates.
+pub mod charge;
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError, closed_balance};
 use crate::circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatError;

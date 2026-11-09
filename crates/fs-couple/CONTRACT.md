@@ -8681,6 +8681,47 @@ or executed in this delivery; the dependency set was incomplete and the runtime
 became unavailable. Gate-drive energy, reverse recovery, avalanche, nonlinear
 Coss and unresolved-peak qualification remain outside this constant-C lane.
 
+### Full device charge curves through the material and heat owners
+
+`converter::commutation::battery_motor::charge` connects four original Q(V)
+laws to the same eleven-state finite battery/converter/motor owner and shared
+finite-cell/`HeatAssembly` thermal path. Curves follow input high/low then
+output high/low drain-to-source signs. Binding compares every authored
+charge/voltage knot and its full support against the material law before
+accepting total electrode charges. Constant-capacitance coordinates and a
+sampled differential capacitance cannot replace that law.
+
+Each source declares a coulomb property, an owned typed volt axis and finite
+support on both voltage polarities. The complete selected `PropertyLineSlice`
+and claim remain retained. An exactly uncharged point inside an original
+affine segment may be inserted without changing its law or integral.
+Temperature/phase applicability refreshes at each actual caloric proposal;
+only voltage may change constitutive charge. A temperature-dependent charge
+law, changed support/claim/held context or changed curve refuses. Once the
+fresh complete path matches the retained law, its original admitted slope
+and energy tables are shared rather than rebuilt.
+
+Native device energy is the original integral of V dQ. Its four signed
+changes remain separate in the actual receipt and contribute to converter
+storage, while the existing fourteen physical losses alone heat their declared
+bodies. Optional auxiliary routing uses actual delivered work. The same
+independent energy gates, coefficient cache, full electrical trial charge,
+represented clock and original heat/radiation transport serve nonlinear and
+constant laws. Exact native chord traversal has an explicit numerical budget
+recorded with each proposal; exhaustion refuses instead of resampling or
+weakening the law.
+
+Four regression definitions exercise independent motoring/regenerative heat,
+integral energy distinct from QV/2 with all eleven discrete balance equations
+and hot-diode continuation, full-law/source/domain/temperature refusals and
+affine zero-reference insertion, and original two-inventory heat transport.
+The new coupled source and tests pass a syntax parse with the pinned Rust
+formatter. Coupled typechecking and execution remain unverified because the
+available native dependency set is incomplete. Endpoint feedback requires
+time refinement. Synthetic curves do not qualify measured devices, gate
+dynamics, recovery, hysteresis, avalanche, temperature-dependent reversible
+field energy or unresolved operating peaks.
+
 ## Finite source impedance, regulated demand and material heat
 
 `converter::voltage::power_load` adds `step_power_loaded_candidate` to the
