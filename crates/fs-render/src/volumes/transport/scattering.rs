@@ -34,7 +34,7 @@ pub use indexed::ScatteringOptics;
 pub use phase::{
     MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
     PhasePacketSample, PhaseSample, ScatteringMixtureComponent, SpectralPhaseMixture,
-    SpectralPhaseTable, TabulatedPhase, SphericalPhaseTable, SphericalPhaseValue,
+    SpectralPhaseTable, SphericalPhaseTable, SphericalPhaseValue, TabulatedPhase,
 };
 /// Incident power absorbed after any number of native scattering events.
 pub mod deposition;
@@ -505,6 +505,53 @@ impl<'a> ScatteringGrid<'a> {
             u_distance,
             (&absorption, &scattering, &extinction),
             true,
+        )
+    }
+
+    /// Nonthermal source observations reuse the original exact free flight,
+    /// with no evaluation of unrelated LTE sources. The callback integrates
+    /// every full segment using its original cell, length, density, extinction
+    /// and foreground depth. It never receives stochastic continuation weights.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::volumes::transport) fn sample_segment_observed_source<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        samples: [f64; 2],
+        max_cell_visits: u32,
+        mut source: impl FnMut(
+            usize,
+            f64,
+            f64,
+            &[f64; N],
+            &[f64; N],
+        ) -> Result<(), VolumeTransportError>,
+    ) -> Result<(FreeFlightSample<N>, u32), VolumeTransportError> {
+        checkpoint(cx)?;
+        validate_ray(origin, direction, f64::INFINITY)?;
+        if samples.iter().any(|&value| !unit_variate(value)) {
+            return Err(VolumeTransportError::Sample);
+        }
+        let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
+        let medium = prepared::LiveOptics::new(
+            self,
+            *wavelengths_nm,
+            (&absorption, &scattering, &extinction),
+        );
+        prepared::sample_extinction_observed(
+            &medium,
+            &mut || checkpoint(cx),
+            origin,
+            direction,
+            f64::INFINITY,
+            samples[0],
+            samples[1],
+            false,
+            max_cell_visits,
+            true,
+            &mut source,
         )
     }
 

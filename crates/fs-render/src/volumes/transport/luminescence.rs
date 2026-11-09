@@ -13,6 +13,8 @@
 //! values, or interval averages for fixed geometry and optics. There is no
 //! time-of-flight, directional dipole emission, subcell pump profile, surface
 //! reflection/refraction or calibrated source data inferred by this adapter.
+//! [`ScatteringLuminescenceGrid`] explicitly extends the same accepted source
+//! with elastic multiple scattering; the direct observer retains its semantics.
 
 use super::cells::{CellRay, validate_ray};
 use super::mixture::PositiveSum;
@@ -23,9 +25,15 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod camera;
+mod scattered;
 pub use camera::{
     LuminescenceCameraError, LuminescenceCameraImage, LuminescenceCameraPixel,
-    LuminescenceCameraSettings, render_luminescence_camera,
+    LuminescenceCameraRadianceImage, LuminescenceCameraSettings, VolumeCameraBackground,
+    render_luminescence_camera, render_luminescence_camera_with_background,
+    render_scattered_luminescence_camera,
+};
+pub use scattered::{
+    LuminescenceScatteringBudget, ScatteredLuminescenceSample, ScatteringLuminescenceGrid,
 };
 
 const SOLID_ANGLE_SR: f64 = 4.0 * core::f64::consts::PI;
@@ -308,7 +316,11 @@ fn segment_emission(
     let unattenuated = j * length;
     let transmitted = det::exp(-foreground);
     let value = unattenuated * fraction * transmitted;
-    if unattenuated.is_finite() && unattenuated >= f64::MIN_POSITIVE && value >= f64::MIN_POSITIVE {
+    if unattenuated.is_finite()
+        && unattenuated >= f64::MIN_POSITIVE
+        && value.is_finite()
+        && value >= f64::MIN_POSITIVE
+    {
         return value;
     }
     // A very bright source can remain visible behind a transmittance that

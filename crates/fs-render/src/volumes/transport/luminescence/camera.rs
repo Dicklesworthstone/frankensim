@@ -7,7 +7,7 @@ use super::super::camera::{
     CameraSample, approximate_xyz, composite, render_camera, render_camera_radiance,
 };
 use super::super::checkpoint;
-use super::LuminescenceGrid;
+use super::{LuminescenceGrid, LuminescenceScatteringBudget, ScatteringLuminescenceGrid};
 use crate::camera::PhysicalCamera;
 use crate::volumes::DvrError;
 use fs_blake3::ContentHash;
@@ -212,11 +212,11 @@ impl<const M: usize> LuminescenceCameraImage<M> {
     }
 }
 
-/// Observed bin-integrated radiance after per-ray background transport.
+/// Observed bin-integrated radiance after per-ray transport.
 ///
 /// Original source bins retain their declared nodes and integrated units.
-/// Filtering averages each ray's foreground plus its own transmitted
-/// illumination, preserving pixel/pupil correlations with opacity.
+/// Filtering averages complete ray observations, including correlated
+/// backgrounds or multiply scattered emission when explicitly selected.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LuminescenceCameraRadianceImage<const M: usize> {
     resolution: [usize; 2],
@@ -245,8 +245,9 @@ impl<const M: usize> LuminescenceCameraRadianceImage<M> {
         self.source_identity
     }
 
-    /// Accepted absorption/emission field identity, independent of the
-    /// callback-owned illumination source.
+    /// Accepted emission/transport field identity, independent of any
+    /// callback-owned illumination source. Scattered observations retain the
+    /// full original scattering and phase snapshot in this identity.
     #[must_use]
     pub const fn field_identity(&self) -> ContentHash {
         self.field_identity
@@ -384,6 +385,76 @@ pub fn render_luminescence_camera_with_background<const M: usize>(
                 )?,
                 transmittance: sample.transport.transmittance,
                 optical_depth: sample.optical_depth,
+                cell_visits: sample.cell_visits,
+            })
+        },
+    )?;
+    Ok(LuminescenceCameraRadianceImage {
+        resolution: settings.resolution,
+        wavelengths_nm: *field.wavelengths_nm(),
+        source_identity: field.source_identity(),
+        field_identity: field.content_identity(),
+        radiance,
+    })
+}
+
+/// Render accepted nonthermal emission through elastic multiple scattering.
+///
+/// Each original raster/pupil sample launches one independent spectral path,
+/// using the same pinhole/thin-lens geometry and the same pixel stream as the
+/// absorption-only luminescence camera. Native exact extinction, the phase law
+/// of each actual collision cell, and the original sparse emitting-cell map
+/// determine the result. The output remains bin-integrated W/(m² sr): no LTE
+/// source, wavelength width, exposure gain or display transformation is added.
+///
+/// Pixel samples average complete path radiances. These estimates carry Monte
+/// Carlo error; this function does not infer a confidence bound from sample
+/// count. Both per-history limits and the actual cumulative whole-image cell
+/// allowance are binding. A history that reaches a surviving collision cap
+/// refuses the whole image rather than silently dropping unresolved light.
+/// Retry the entire image with the same seed and a larger work allowance.
+///
+/// This is an open, stationary, index-one volume observation. Background
+/// illumination, surfaces, refraction, wavelength-changing scattering and
+/// photon flight delays remain separate. Cancellation/refusal returns no
+/// partial image. With no scattering, the original exact source integral and
+/// raster/pupil draw order are retained bit-for-bit.
+pub fn render_scattered_luminescence_camera<const M: usize>(
+    cx: &Cx<'_>,
+    field: &ScatteringLuminescenceGrid<'_, '_, '_, M>,
+    camera: &PhysicalCamera,
+    settings: LuminescenceCameraSettings,
+    budget: LuminescenceScatteringBudget,
+) -> Result<LuminescenceCameraRadianceImage<M>, LuminescenceCameraError> {
+    let mut path_id = 0_u64;
+    let radiance = render_camera_radiance(
+        cx,
+        camera,
+        settings,
+        0x6c75_6d63,
+        |origin, direction, remaining_cells| {
+            let sample = field.sample_ray(
+                cx,
+                origin,
+                direction,
+                LuminescenceScatteringBudget {
+                    max_cell_visits: budget
+                        .max_cell_visits
+                        .min(u32::try_from(remaining_cells).unwrap_or(u32::MAX)),
+                    ..budget
+                },
+                settings.seed,
+                path_id,
+            )?;
+            path_id = path_id
+                .checked_add(1)
+                .ok_or(super::VolumeTransportError::Budget)?;
+            Ok(CameraSample {
+                emission: sample.radiance_w_m2_sr,
+                // The shared radiance-only accumulator reads no opacity.
+                // Scattered light cannot be represented by a scalar screen.
+                transmittance: [1.0; M],
+                optical_depth: [0.0; M],
                 cell_visits: sample.cell_visits,
             })
         },

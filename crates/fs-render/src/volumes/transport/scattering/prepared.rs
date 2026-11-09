@@ -184,6 +184,40 @@ pub(super) fn sample_extinction<const N: usize>(
     u_distance: f64,
     include_emission: bool,
 ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
+    Ok(sample_extinction_observed(
+        medium,
+        check,
+        origin,
+        direction,
+        max_distance_m,
+        u_lane,
+        u_distance,
+        include_emission,
+        u32::MAX,
+        false,
+        &mut |_, _, _, _, _| Ok(()),
+    )?
+    .0)
+}
+
+/// The original flight and an independently integrated source share one DDA.
+/// The source reads each full cell's incoming extinction depth before the
+/// sampled continuation weight. Completing its ray after a sampled collision
+/// is essential: stopping a deterministic source integral there would bias it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sample_extinction_observed<const N: usize>(
+    medium: &impl PreparedOptics<N>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    origin: Point3,
+    direction: Vec3,
+    max_distance_m: f64,
+    u_lane: f64,
+    u_distance: f64,
+    include_emission: bool,
+    max_cell_visits: u32,
+    complete_source: bool,
+    source: &mut impl FnMut(usize, f64, f64, &[f64; N], &[f64; N]) -> Result<(), VolumeTransportError>,
+) -> Result<(FreeFlightSample<N>, u32), VolumeTransportError> {
     check()?;
     let wavelengths_nm = medium.wavelengths();
     let mut result = FreeFlightSample {
@@ -197,18 +231,21 @@ pub(super) fn sample_extinction<const N: usize>(
         origin,
         direction,
         max_distance_m,
-        medium.geometry().max_steps,
+        medium.geometry().max_steps.min(max_cell_visits),
     )?
     else {
-        return Ok(result);
+        return Ok((result, 0));
     };
     let hero = ((u_lane * N as f64) as usize).min(N - 1);
     let mut remaining_tau = -det::ln(u_distance.max(f64::MIN_POSITIVE));
     let mut depth = [0.0; N];
     let mut source_cache = [(f64::NAN, 0.0); N];
+    let mut cell_visits = 0_u32;
     while let Some(segment) = ray.next_with_checkpoint(check)? {
+        cell_visits += 1;
         let rho = medium.geometry().grid.data[segment.cell];
         if rho == 0.0 || segment.length_m == 0.0 {
+            source(segment.cell, segment.length_m, rho, &[0.0; N], &depth)?;
             continue;
         }
         let (absorption, scattering, extinction) = medium.coefficients(segment.cell)?;
@@ -219,6 +256,7 @@ pub(super) fn sample_extinction<const N: usize>(
                 positive_product(rho, k, segment.length_m)
             }
         });
+        source(segment.cell, segment.length_m, rho, &extinction, &depth)?;
         if result.event.is_none() && extinction[hero] > 0.0 && remaining_tau < tau[hero] {
             let local_m = divide_product(remaining_tau, rho, extinction[hero]);
             let parameter = segment.start_m + local_m;
@@ -250,8 +288,8 @@ pub(super) fn sample_extinction<const N: usize>(
                 distance_m,
             });
             result.escape_probability = 0.0;
-            if !include_emission || !medium.has_emission() {
-                return Ok(result);
+            if !complete_source && (!include_emission || !medium.has_emission()) {
+                return Ok((result, cell_visits));
             }
         }
         if result.event.is_none() {
@@ -285,7 +323,7 @@ pub(super) fn sample_extinction<const N: usize>(
         result.weight = relative.map(|t| t * (N as f64 / sum));
         result.escape_probability = depth.iter().map(|tau| det::exp(-tau)).sum::<f64>() / N as f64;
     }
-    Ok(result)
+    Ok((result, cell_visits))
 }
 
 /// Deterministic attenuation/LTE shares the same prepared coefficients and DDA.

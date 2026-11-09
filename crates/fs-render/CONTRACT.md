@@ -11825,3 +11825,74 @@ Seven focused source-level G1/G3 checks passed using the original material, geom
 ## Shared absolute catalog-glass material law
 
 `AirRelativeSellmeierIor` delegates source admission, phase/group evaluation and mapped wavelength support to `fs-material::catalog_refraction::AirRelativeSellmeier`. Its existing constructors, source conventions and renderer identity encoding are retained. `material_law()` exposes the same immutable original law to native electromagnetic consumers; no renderer dependency is introduced below LUMEN. Five existing focused renderer checks passed with this delegation, covering independent reference/coordinate atmospheres, inward support mapping, original Fresnel/thin-lens behavior and identity sensitivity. The catalog reference atmosphere remains independent of the actual scene medium and glass thermal state.
+
+## Finite emitter inventories on the native thermal clock
+
+`heating::luminescence::saturation::{PrescribedPhotonPump,
+SaturableEmitterCell, SaturableLuminescentHeating}` connects the original
+finite-population kinetic owner to the original enthalpy timeline. Each
+binding supplies mean counts [ground, singlet, triplet], an optical cell,
+a thermal cell, two molecular cross sections and two prescribed local photon
+fluxes. Hazards are cross section times photon flux, in inverse seconds per
+available ground-state emitter. The shared positive reaction owner integrates
+actual absorbed pump events, ground-state recovery, triplet shelving and all
+radiative, nonradiative and intersystem-crossing channels. It does not clamp a
+dilute solution or deposit a separate Beer-law pump budget.
+
+The original scalar or material-bound constitutive rates are resolved at the
+actual thermal temperature. Rates are fixed over each accepted thermal interval;
+step refinement assesses this feedback approximation. Intrinsic lifetimes do
+not force lifetime-sized thermal timesteps. Immutable prepared propagators are
+reused per emitter when duration, rates and pump remain unchanged. A bounded
+pump window splits native steps at both pulse edges. Initial excitation enters
+the conservation account explicitly. Failed or retried thermal steps publish
+neither tentative populations nor their accumulated heat/light channels.
+
+Actual pump absorption plus initial excitation equals final excitation, net
+native heat, escaped light and explicitly unresolved light. Reverse crossing
+draws its state-energy gap from the bath. Spectral relaxation and passive
+absorption use the existing original owners. Absorbing emission requires an
+explicit passive transport environment; passive absorption creates heat rather
+than new emitter populations. Accepted endpoint and last-interval mean spectra
+remain bin-integrated watts and feed the existing luminescence observers.
+
+The supplied pump field must be justified as optically thin or externally
+maintained. This adapter does not solve pump depletion, stimulated emission,
+excited-state absorption, bleaching, pair annihilation or active photon
+recycling. Cross sections and rates are authored inputs, not a material
+calibration certificate. The `saturable_afterglow` example documents synthetic
+coefficients, a 1 us pulse and maximum ground-state optical depth 1e-3. Focused
+integration tests cover analytic saturation, triplet shelving, exact pulse
+edges and afterglow, precharged stores, retry/cancellation/refusal and original
+temperature-dependent material rates. Native execution of these renderer
+fixtures remains separate from the passing lower kinetic-owner tests.
+
+## Multiply scattered nonthermal luminescence observations
+
+`volumes::transport::luminescence::{ScatteringLuminescenceGrid,
+render_scattered_luminescence_camera}` borrows accepted sparse cell-emission
+powers and the same complete absorption snapshot extended by its original
+elastic scattering and reciprocal phase laws. The native spectral-mixture free
+flight and actual collision-cell phase supply continuation; a source hook in
+that same DDA integrates the complete ray's `j=P/(4*pi*V)` under total extinction
+before applying continuation weights. Original discrete nodes remain
+bin-integrated W/(m² sr), with no wavelength width, absorptivity or LTE source
+applied to the authored emission. Logarithmic path weights and the existing
+logarithmic source fallback preserve representable weighted source radiance.
+
+The pinhole/thin-lens image shares original raster/pupil sampling and returns
+spectral radiance. Zero scattering retains the original exact integral and draw
+order. Logical path IDs and seeds determine independent streams. Per-history
+collision and actual DDA-visit limits, plus the whole-image visit limit, are
+binding; an unresolved surviving continuation at a cap refuses the entire
+sample/image. Refused histories must not be discarded or replaced with zero.
+Sampling uncertainty is not certified by a completed image.
+
+This is an open, stationary/quasistatic, index-one observation with uniform
+isotropic cell emission; surfaces, flight delay, wavelength-changing scattering
+and kinetic/thermal updates remain outside this observer. Seven regression
+groups in `luminescence/scattered/tests.rs` cover zero-scattering and camera
+parity, independent two-lane one-scatter integrals, actual cell-selected phase,
+lossless boundary flux, source arithmetic range, deterministic replay and
+admission/cancellation/work limits. Native execution must be reported
+separately; a formatted source or completed image does not establish those gates.
