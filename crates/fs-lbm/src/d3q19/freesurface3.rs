@@ -1584,6 +1584,7 @@ impl FreeSurface3 {
         }
 
         self.apply_conversions(transport)?;
+        self.admit_body_acceleration_state(gate)?;
 
         let ledger_after = self.ledger_mass();
         let violation = relative_mass_violation(ledger_before, ledger_after);

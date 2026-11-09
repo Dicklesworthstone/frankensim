@@ -92,6 +92,221 @@ fn moments(surface: &FreeSurface3, xyz: [usize; 3]) -> ([f64; 3], [[f64; 3]; 3])
     (momentum, stress)
 }
 
+fn flooded_tank() -> FreeSurface3 {
+    let cells: Vec<_> = (0..8)
+        .flat_map(|z| {
+            (0..8).flat_map(move |y| {
+                (0..8).map(move |x| FreeSurfaceInitialCell3 {
+                    coordinates: [x, y, z],
+                    fill_fraction: 1.0,
+                    density: 1.0
+                        + 0.02 * (x as f64 * core::f64::consts::TAU / 8.0).cos()
+                        + 0.01 * (y as f64 * core::f64::consts::TAU / 8.0).sin(),
+                    velocity: [0.01, -0.008, 0.002],
+                })
+            })
+        })
+        .collect();
+    surface(&cells, [0.0; 3])
+}
+
+#[test]
+fn g1_rigid_wall_acceleration_keeps_actual_density_impulse_and_wall_work_separate() {
+    let gate = CancelGate::new_clock_free();
+    let old = affine_field();
+    let next = BodyAccelerationField3::Affine {
+        origin: [4.0; 3],
+        acceleration: [-0.002, 0.001, -0.001],
+        gradient: [[0.0, 0.0003, 0.0], [-0.0004, 0.0, 0.0], [0.0; 3]],
+    };
+    for wall in [PlanarWall3::ZMin, PlanarWall3::XMax] {
+        let mut initial = flooded_tank();
+        initial.rebind_body_acceleration_field(old, &gate).unwrap();
+        let mut translation = [0.004, -0.003, 0.002];
+        translation[wall.axis()] = 0.0;
+        let motion = PlanarRigidWallMotion3 {
+            wall,
+            origin: [4.0; 3],
+            velocity_at_origin: translation,
+            angular_speed: 0.001,
+        };
+        let (held, held_wall) = initial
+            .planar_rigid_wall_motion_candidate(motion, 1e-12, &gate)
+            .unwrap();
+        let (evolved, wall_report) = initial
+            .planar_rigid_wall_motion_with_body_acceleration_candidate(
+                motion, 1e-12, next, &gate,
+            )
+            .unwrap();
+        assert_eq!(initial.body_acceleration_field(), Some(old));
+        assert_eq!(evolved.body_acceleration_field(), Some(next));
+        // Without gas links, both candidates collide/stream precisely the same
+        // OLD source and reflection. Only the physical endpoint half source
+        // differs. A zero-time reframe, or collision with the future source,
+        // would violate these population and physical-momentum identities.
+        assert_eq!(held.grid.state_bits(), evolved.grid.state_bits());
+        assert_eq!(held_wall.fluid_impulse, wall_report.fluid_impulse);
+        assert_eq!(
+            held_wall.fluid_angular_impulse,
+            wall_report.fluid_angular_impulse
+        );
+        assert_eq!(held_wall.fluid_response, wall_report.fluid_response);
+        assert_eq!(held_wall.fluid_work, wall_report.fluid_work);
+        assert_eq!(wall_report.wall_work, -wall_report.fluid_work);
+        let work = (0..3)
+            .map(|d| translation[d] * wall_report.fluid_impulse[d])
+            .sum::<f64>()
+            + motion.angular_speed * wall_report.fluid_angular_impulse[wall.axis()];
+        assert!((wall_report.fluid_work - work).abs() < 2e-13);
+        assert!((evolved.ledger_mass() - initial.ledger_mass()).abs() < 2e-11);
+        let mut density_change = 0.0_f64;
+        let mut impulse = [0.0; 3];
+        let mut expected_impulse = [0.0; 3];
+        for (&key, tile) in &evolved.tiles {
+            for (lane, &cell) in tile.cells.iter().enumerate() {
+                if cell == Cell3::Gas {
+                    continue;
+                }
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                let xyz = [x as usize, y as usize, z as usize];
+                let before = initial.sample_at(xyz[0], xyz[1], xyz[2]).unwrap();
+                let after = evolved.sample_at(xyz[0], xyz[1], xyz[2]).unwrap();
+                let p0 = moments(&held, xyz).0;
+                let p1 = moments(&evolved, xyz).0;
+                let a0 = old.at_cell(key, lane).unwrap();
+                let a1 = next.at_cell(key, lane).unwrap();
+                assert_eq!(
+                    evolved.force_density_at(xyz[0], xyz[1], xyz[2]).unwrap(),
+                    a1.map(|a| after.density * a)
+                );
+                density_change = density_change.max((after.density - before.density).abs());
+                for d in 0..3 {
+                    let expected = 0.5 * after.density * (a1[d] - a0[d]);
+                    assert!((p1[d] - p0[d] - expected).abs() < 3e-15);
+                    impulse[d] += p1[d] - p0[d];
+                    expected_impulse[d] += expected;
+                }
+            }
+        }
+        assert!(density_change > 1e-4, "exercise transported density");
+        for d in 0..3 {
+            assert!((impulse[d] - expected_impulse[d]).abs() < 3e-13);
+        }
+        let mut committed = initial.clone();
+        let receipt = committed
+            .advance_body_acceleration_with_planar_rigid_wall_motion(
+                next, motion, 1e-12, &gate,
+            )
+            .unwrap();
+        unchanged(&evolved, &committed);
+        assert_eq!(wall_report, receipt);
+        let (equal, same_receipt) = initial
+            .planar_rigid_wall_motion_with_body_acceleration_candidate(
+                motion, 1e-12, old, &gate,
+            )
+            .unwrap();
+        unchanged(&held, &equal);
+        assert_eq!(held_wall, same_receipt);
+    }
+}
+
+#[test]
+fn g1_rigid_wall_acceleration_uses_next_field_for_converted_interfaces() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = FreeSurface3::new(
+        8,
+        8,
+        8,
+        0.8,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        |_, _, z| z < 4,
+    )
+    .unwrap();
+    flow.rebind_body_acceleration([0.0; 3], &gate).unwrap();
+    // One accepted interface has conversion excess. Its redistribution runs
+    // during the same step as wall reflection and the new force endpoint.
+    let (slot, lane) = flow.grid.resolve_source(3, 3, 3).unwrap();
+    let key = flow.grid.active_keys()[slot];
+    assert_eq!(flow.tiles[&key].cells[lane], Cell3::Interface);
+    let rho = flow.grid.populations(slot, lane).iter().sum::<f64>();
+    flow.tiles.get_mut(&key).unwrap().mass[lane] = 1.01 * rho;
+    let before = flow.clone();
+    let motion = PlanarRigidWallMotion3 {
+        wall: PlanarWall3::ZMin,
+        origin: [4.0, 4.0, 0.0],
+        velocity_at_origin: [0.003, -0.002, 0.0],
+        angular_speed: 0.0005,
+    };
+    let next = affine_field();
+    flow.advance_body_acceleration_with_planar_rigid_wall_motion(next, motion, 1e-12, &gate)
+        .unwrap();
+    assert!(flow.conversions.gas_to_interface > before.conversions.gas_to_interface);
+    assert!((flow.ledger_mass() - before.ledger_mass()).abs() < 2e-11);
+    for (&key, tile) in &flow.tiles {
+        for (lane, &cell) in tile.cells.iter().enumerate() {
+            if cell != Cell3::Gas {
+                let slot = flow.grid.slot_of(key).unwrap();
+                let rho = flow.grid.populations(slot, lane).iter().sum::<f64>();
+                assert_eq!(
+                    flow.force_at_lane(key, lane),
+                    next.at_cell(key, lane).unwrap().map(|a| rho * a)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_acceleration_endpoint_mach_and_rigid_wall_refusals_keep_the_accepted_state() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = flooded_tank();
+    flow.rebind_body_acceleration([0.0; 3], &gate).unwrap();
+    let before = flow.clone();
+    let excessive = BodyAccelerationField3::Uniform([0.5, 0.0, 0.0]);
+    // Collision still sees zero force and produces valid populations. Only
+    // actual endpoint velocity reveals the high-Mach half-source increment.
+    assert!(matches!(
+        flow.advance_body_acceleration_field(excessive, &gate),
+        Err(FreeSurfaceError3::Transport(
+            "body-acceleration endpoint exceeds the physical lattice Mach domain"
+        ))
+    ));
+    unchanged(&before, &flow);
+    let motion = PlanarRigidWallMotion3 {
+        wall: PlanarWall3::ZMin,
+        origin: [4.0, 4.0, 0.0],
+        velocity_at_origin: [0.003, -0.002, 0.0],
+        angular_speed: 0.0005,
+    };
+    for next in [excessive, BodyAccelerationField3::Uniform([f64::NAN; 3])] {
+        assert!(
+            flow.advance_body_acceleration_with_planar_rigid_wall_motion(
+                next, motion, 1e-12, &gate,
+            )
+            .is_err()
+        );
+        unchanged(&before, &flow);
+    }
+    let next = affine_field();
+    gate.request();
+    assert!(matches!(
+        flow.advance_body_acceleration_with_planar_rigid_wall_motion(next, motion, 1e-12, &gate),
+        Err(FreeSurfaceError3::Cancelled)
+    ));
+    unchanged(&before, &flow);
+    let retry = CancelGate::new_clock_free();
+    let (expected, expected_receipt) = before
+        .planar_rigid_wall_motion_with_body_acceleration_candidate(motion, 1e-12, next, &retry)
+        .unwrap();
+    let receipt = flow
+        .advance_body_acceleration_with_planar_rigid_wall_motion(next, motion, 1e-12, &retry)
+        .unwrap();
+    unchanged(&expected, &flow);
+    assert_eq!(expected_receipt, receipt);
+}
+
 #[test]
 fn g3_material_force_handoff_restores_actual_density_gravity_without_impulse() {
     let cells = [

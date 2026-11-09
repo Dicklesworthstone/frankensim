@@ -265,9 +265,60 @@ impl FreeSurface3 {
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
     ) -> Result<(Self, PlanarRigidWallReport3), FreeSurfaceError3> {
+        self.planar_rigid_wall_candidate_with_acceleration(
+            motion,
+            maximum_relative_mass_defect,
+            None,
+            gate,
+        )
+    }
+
+    /// Propose rigid wall motion and a body-acceleration endpoint in ONE native
+    /// collision, gas reconstruction, moving reflection and conversion step.
+    ///
+    /// First bind the initial uniform/affine acceleration explicitly. Collision
+    /// uses its retained local force `F_n`; the accepted physical velocity and
+    /// gas pressure use `F_next = rho_next * next(x)`, including newly wet cells.
+    /// No force reframe discards the changing load's physical half impulse.
+    /// The original reflection alone supplies the reported wall impulse,
+    /// angular impulse and work; body loading is not charged to the wall.
+    ///
+    /// The motion is the prescribed interval wall velocity; its geometric plane
+    /// remains fixed and completely flooded. Translation must be tangential
+    /// and rotation axial. Supply the appropriate interval/midpoint velocity
+    /// when the actuator accelerates. This does not evolve a finite-inertia
+    /// body or supply an isothermal energy/heat balance. The actual final wet
+    /// velocities, including the next half source, retain native Mach limits.
+    /// Any source, boundary, conversion or cancellation refusal changes no
+    /// accepted population, acceleration history or mass.
+    pub fn planar_rigid_wall_motion_with_body_acceleration_candidate(
+        &self,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        next: BodyAccelerationField3,
+        gate: &CancelGate,
+    ) -> Result<(Self, PlanarRigidWallReport3), FreeSurfaceError3> {
+        self.planar_rigid_wall_candidate_with_acceleration(
+            motion,
+            maximum_relative_mass_defect,
+            Some(next),
+            gate,
+        )
+    }
+
+    fn planar_rigid_wall_candidate_with_acceleration(
+        &self,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        next: Option<BodyAccelerationField3>,
+        gate: &CancelGate,
+    ) -> Result<(Self, PlanarRigidWallReport3), FreeSurfaceError3> {
         let mut prepared =
             self.prepare_planar_rigid_wall_motion(motion, maximum_relative_mass_defect, gate)?;
-        let mut candidate = self.clone();
+        let mut candidate = match next {
+            Some(next) => self.body_acceleration_endpoint_candidate(next, gate)?,
+            None => self.clone(),
+        };
         candidate.step_inner_with_wall(gate, None, None, None, Some(&mut prepared.exchange))?;
         let report = candidate.finish_planar_rigid_wall_motion(
             motion,
@@ -491,6 +542,26 @@ impl FreeSurface3 {
     ) -> Result<PlanarRigidWallReport3, FreeSurfaceError3> {
         let (candidate, report) =
             self.planar_rigid_wall_motion_candidate(motion, maximum_relative_mass_defect, gate)?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Publish the fully admitted rigid-wall/body-acceleration candidate.
+    /// Equal acceleration endpoints preserve the original held-field step.
+    pub fn advance_body_acceleration_with_planar_rigid_wall_motion(
+        &mut self,
+        next: BodyAccelerationField3,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+    ) -> Result<PlanarRigidWallReport3, FreeSurfaceError3> {
+        let (candidate, report) = self.planar_rigid_wall_motion_with_body_acceleration_candidate(
+            motion,
+            maximum_relative_mass_defect,
+            next,
+            gate,
+        )?;
         check_cancel(gate)?;
         *self = candidate;
         Ok(report)

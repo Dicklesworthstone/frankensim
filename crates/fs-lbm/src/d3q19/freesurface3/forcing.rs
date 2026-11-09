@@ -619,6 +619,21 @@ impl FreeSurface3 {
         gate: &CancelGate,
         pressure: Option<&pressure::GasPressure3<'_>>,
     ) -> Result<(), FreeSurfaceError3> {
+        let mut candidate = self.body_acceleration_endpoint_candidate(next, gate)?;
+        candidate.step_inner(gate, None, None, pressure)?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    // A native boundary owner can stage this SAME source epoch on its one
+    // private candidate. The returned populations still carry F_n; callers
+    // must run the native stream/conversion before publishing the candidate.
+    pub(super) fn body_acceleration_endpoint_candidate(
+        &self,
+        next: BodyAccelerationField3,
+        gate: &CancelGate,
+    ) -> Result<Self, FreeSurfaceError3> {
         check_cancel(gate)?;
         self.admit_body_acceleration_mode()?;
         if self.body_acceleration.is_none() {
@@ -638,9 +653,53 @@ impl FreeSurface3 {
                 BodyAccelerationField3::Affine { .. } => None,
             };
         }
-        candidate.step_inner(gate, None, None, pressure)?;
-        check_cancel(gate)?;
-        *self = candidate;
+        Ok(candidate)
+    }
+
+    // Collision admits the OLD source. The endpoint half source can make the
+    // actual next physical velocity inadmissible even with positive, low-speed
+    // raw populations. Run after conversion so new and retargeted wet cells
+    // receive the same final admission, without altering their momentum.
+    pub(super) fn admit_body_acceleration_state(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        if self.body_acceleration.is_none() {
+            return Ok(());
+        }
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active acceleration tile");
+            for (lane, cell) in tile.cells.iter().enumerate() {
+                if *cell == Cell3::Gas {
+                    continue;
+                }
+                if self
+                    .grid
+                    .populations(slot, lane)
+                    .iter()
+                    .any(|v| !v.is_finite() || *v <= 0.0)
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "body acceleration needs positive finite final wet populations",
+                    ));
+                }
+                let (rho, raw) = self.grid.cell_macros(slot, lane);
+                let force = self.force_at_lane(key, lane);
+                let velocity: [f64; 3] =
+                    core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
+                let speed = velocity[0].hypot(velocity[1]).hypot(velocity[2]);
+                if !rho.is_finite()
+                    || rho <= 0.0
+                    || !speed.is_finite()
+                    || speed / CS2_3.sqrt() >= crate::MACH_LIMIT
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "body-acceleration endpoint exceeds the physical lattice Mach domain",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 

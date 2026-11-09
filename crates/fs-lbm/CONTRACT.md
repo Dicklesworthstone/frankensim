@@ -1,3 +1,24 @@
+## Acceleration endpoints during native sparse rigid-wall motion
+
+`FreeSurface3::planar_rigid_wall_motion_with_body_acceleration_candidate` and
+`advance_body_acceleration_with_planar_rigid_wall_motion` compose uniform/affine
+body-acceleration endpoints with prescribed tangential translation and axial
+spin of the existing completely flooded fixed plane. One native collision,
+stream, gas reconstruction and conversion uses the accepted old force and
+`F_next = rho_next * a_next(x)`. No zero-time reframe removes the changing load's
+half impulse. Newly wet cells retain their own density and position. Actual
+reflected populations still own wall impulse, angular impulse and mechanical
+work; body acceleration is not added to those boundary receipts.
+
+Every acceleration-owned native step now admits positive finite final wet
+populations and actual force-corrected Mach after conversion, including cells
+whose raw velocity alone would pass. All native/source/boundary/cancellation
+refusals preserve the accepted state. Equal endpoints retain held-field bits.
+Focused regressions cover heterogeneous transported density, endpoint impulse,
+rigid-wall work, conversion, and refused high-Mach candidate replay. Motion is
+prescribed over the interval; this fixed-plane isothermal path adds no normal
+geometry motion, finite-inertia wall dynamics or fluid heat/energy equation.
+
 ## Actual-density acceleration through native open reservoirs
 
 `ForcedOpenBoundaryGrid3::try_new_with_body_acceleration_preserving_velocity`
