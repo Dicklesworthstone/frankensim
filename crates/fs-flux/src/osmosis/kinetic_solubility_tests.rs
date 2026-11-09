@@ -246,6 +246,136 @@ fn coupled_phase_transport_converges_under_native_step_refinement() {
     assert!(errors[2] < 0.6 * errors[1], "errors={errors:?}");
 }
 
+fn particle_compartment(dissolved: f64, solid: f64, conductance: f64) -> OsmoticCompartment {
+    let model = SolubilityKineticsV1::new(
+        law(1.0),
+        VolumetricFlowRate::new(conductance),
+        PrecipitationPolicyV1::ExistingSolidOnly,
+    )
+    .unwrap()
+    .with_particle_surface(Amount::new(solid))
+    .unwrap();
+    let material = KineticSolubilitySolution::new(
+        Temperature::new(T),
+        18e-6,
+        Volume::new(1.0),
+        vec![(
+            model,
+            SolubilityKineticStateV1::from_phases(Amount::new(dissolved), Amount::new(solid))
+                .unwrap(),
+        )],
+    )
+    .unwrap();
+    OsmoticCompartment::with_kinetic_solubility(
+        material,
+        OsmoticPressureVolume::new(1.0, 0.0, 0.0).unwrap(),
+        1e-6,
+    )
+    .unwrap()
+}
+
+fn particle_breakthrough() -> OsmoticNetwork {
+    network(
+        vec![
+            particle_compartment(0.0, 1.0, 0.4),
+            particle_compartment(0.05, 0.25, 0.0),
+        ],
+        vec![membrane(0.0, 0.0, 0.4)],
+    )
+}
+
+// Independent continuous three-stock ODE for the specific particle case above.
+// The receiver's quarter mole of inert crystals never enters either flux.
+// Classical RK4 is used only here; it calls no production kinetic or transport
+// kernel and resolves the reference well below the native refinement errors.
+fn particle_breakthrough_oracle(duration: f64, steps: usize) -> [f64; 3] {
+    let rate = |[left, right, solid]: [f64; 3]| {
+        let dissolution = 0.4 * solid.powf(2.0 / 3.0) * (1.0 - left);
+        let transport = 0.4 * (left - right);
+        [dissolution - transport, transport, -dissolution]
+    };
+    let h = duration / steps as f64;
+    let mut state = [0.0, 0.05, 1.0];
+    for _ in 0..steps {
+        let k1 = rate(state);
+        let k2 = rate(core::array::from_fn(|i| state[i] + 0.5 * h * k1[i]));
+        let k3 = rate(core::array::from_fn(|i| state[i] + 0.5 * h * k2[i]));
+        let k4 = rate(core::array::from_fn(|i| state[i] + h * k3[i]));
+        state = core::array::from_fn(|i| {
+            state[i] + h * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0
+        });
+    }
+    state
+}
+
+#[test]
+fn native_membrane_coupling_evolves_particle_area_and_transports_only_dissolved_stock() {
+    let expected = particle_breakthrough_oracle(3.0, 4000);
+    let coarse_reference = particle_breakthrough_oracle(3.0, 2000);
+    for (fine, coarse) in expected.into_iter().zip(coarse_reference) {
+        near(fine, coarse, 1e-11);
+    }
+    let mut system = particle_breakthrough();
+    let report = system.advance(3.0, controls(0.5), || false).unwrap();
+    let donor = phase(&system.cells[0]);
+    let receiver = phase(&system.cells[1]);
+    for (actual, expected) in [
+        donor.dissolved().value(),
+        receiver.dissolved().value(),
+        donor.solid().value(),
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        near(actual, expected, 1e-4);
+    }
+    assert_eq!(receiver.solid().value(), 0.25);
+    let original = &system.cells[0]
+        .kinetic_solubility
+        .as_ref()
+        .unwrap()
+        .models()[0];
+    assert_eq!(original.particle_reference_solid(), Some(Amount::new(1.0)));
+    assert!(original.conductance_at(donor.solid()).unwrap().value() < 0.4);
+    near(
+        donor.dissolved().value()
+            + donor.solid().value()
+            + receiver.dissolved().value()
+            + receiver.solid().value(),
+        1.3,
+        2e-11,
+    );
+    near(report.solute_balance_residual_mol[0], 0.0, 2e-11);
+    assert_eq!(report.water_balance_residual_m3, 0.0);
+    near(
+        system.cells[0].solution().osmotic_pressure_pa().unwrap(),
+        R * T * donor.dissolved().value(),
+        1e-10,
+    );
+    assert!(report.phase_evaluations >= 12 * report.accepted_steps);
+}
+
+#[test]
+fn native_particle_transport_refines_toward_the_independent_coupled_ode() {
+    let expected = particle_breakthrough_oracle(3.0, 4000)[1];
+    let errors: Vec<_> = [0.5, 0.25, 0.125]
+        .into_iter()
+        .map(|step| {
+            let mut system = particle_breakthrough();
+            let mut options = controls(step);
+            options.relative_tolerance = 0.2;
+            options.absolute_amount_tolerance_mol = 0.01;
+            let report = system.advance(3.0, options, || false).unwrap();
+            assert_eq!(report.rejected_steps, 0);
+            assert_eq!(phase(&system.cells[1]).solid().value(), 0.25);
+            near(report.solute_balance_residual_mol[0], 0.0, 2e-12);
+            (system.cells[1].solution().solute_moles()[0] - expected).abs()
+        })
+        .collect();
+    assert!(errors[1] < 0.65 * errors[0], "errors={errors:?}");
+    assert!(errors[2] < 0.65 * errors[1], "errors={errors:?}");
+}
+
 #[test]
 fn late_cancellation_and_work_limit_preserve_every_phase_and_allow_exact_retry() {
     let original = breakthrough(0.1);

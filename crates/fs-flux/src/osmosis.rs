@@ -21,12 +21,14 @@
 //! Solute transfer can exhaust or replenish that stock during the same implicit
 //! water step. Solid-bearing cells exclude concentration films and ion models.
 //! Alternatively, a finite-rate owner retains actual dissolved and crystal
-//! stocks. Exact fixed-volume phase half-stages surround each membrane sweep;
+//! stocks. Original-law fixed-volume phase half-stages surround each membrane sweep;
 //! crystals remain fixed during transport, and step doubling controls their
 //! coupling to dilution and permeation. The implicit membrane sweep keeps the
-//! overall method first order. Declared conductances and nucleation policies
-//! remain with the original material owner; no equilibrium target replaces an
-//! actual inventory, and no phase heat or changing crystal area is inferred.
+//! overall method first order. Declared conductances, optional self-similar
+//! particle geometry and growth policies remain with the original material
+//! owner. Particle area follows actual local crystal stock and retains its
+//! reference across transport. No equilibrium target replaces an actual
+//! inventory; no phase heat, particle breakup or nucleation law is inferred.
 //! Ideal selective membranes can use quasi-steady concentration films, which
 //! reconstruct actual membrane-face concentrations without hidden inventories.
 //! Nonideal compartments use their shared free-energy pressure with fully
@@ -346,8 +348,9 @@ impl OsmoticCompartment {
     }
     /// Prepare actual neutral dissolved/solid stocks with declared finite-rate
     /// exchange. Native adaptive membrane steps evolve this same material owner;
-    /// dissolution and precipitation never bypass its conductance or seeding
-    /// policy. Only actual dissolved molecules permeate or exert osmotic pressure.
+    /// dissolution and precipitation never bypass its conductance, selected
+    /// particle geometry or growth policy. Only actual dissolved molecules
+    /// permeate or exert osmotic pressure.
     /// This constructor selects kinetics instead of instantaneous equilibrium.
     pub fn with_kinetic_solubility(
         solution: KineticSolubilitySolution,
@@ -1338,7 +1341,7 @@ fn sweep_all(
     }
 }
 
-/// Exact original-law phase evolution at each compartment's current volume.
+/// Original-law phase evolution at each compartment's current solvent volume.
 /// The native controller compares complete coupled trials; it never publishes
 /// either this half-stage or a partially completed membrane sweep separately.
 fn advance_phases(

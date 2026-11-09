@@ -1,4 +1,4 @@
-//! Finite-rate dissolution, concentration-induced crystallization, and coupled heat.
+//! Fixed-area versus shrinking-particle dissolution, crystal growth and coupled heat.
 //!
 //! Run: cargo run -p fs-material --example solubility_dissolution
 //! All coefficients below are authored demonstration values for one neutral
@@ -29,11 +29,12 @@ fn print_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let phase = bath.last_steps()[0].state();
     println!(
-        "{label}: dissolved={:.9} mol, solid={:.9} mol, equilibrium dissolved={:.9} mol, activity={:.9}",
+        "{label}: dissolved={:.9} mol, solid={:.9} mol, equilibrium dissolved={:.9} mol, activity={:.9}, kA={:.9e} m3/s",
         phase.dissolved().value(),
         phase.solid().value(),
         bath.last_steps()[0].equilibrium().dissolved.value(),
         bath.solution().water_activity()?,
+        bath.models()[0].conductance_at(phase.solid())?.value(),
     );
     Ok(())
 }
@@ -78,14 +79,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SolubilityKineticStateV1::new(Amount::new(0.2), Amount::new(0.0))?,
         )],
     )?;
+    // The same film coefficient and initial area, now carried by a fixed number
+    // of self-similar crystals. Their kA changes as (solid/reference solid)^(2/3).
+    // Solvent-volume changes preserve that original reference stock.
+    let mut particles = KineticSolubilitySolution::new(
+        temperature,
+        molar_volume,
+        volume,
+        vec![(
+            kinetic.models()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.2))?,
+            *kinetic.last_steps()[0].state(),
+        )],
+    )?;
     print_state("Initial finite-rate bath", &kinetic)?;
     for seconds in [10.0, 20.0, 30.0, 120.0] {
         kinetic.advance(Time::new(seconds), || false)?;
-        print_state(&format!("After another {seconds:.0} s"), &kinetic)?;
+        particles.advance(Time::new(seconds), || false)?;
+        print_state(
+            &format!("Fixed area after another {seconds:.0} s"),
+            &kinetic,
+        )?;
+        print_state(
+            &format!("Shrinking particles after another {seconds:.0} s"),
+            &particles,
+        )?;
     }
     // Prescribed solvent removal retains both actual phase stocks immediately.
-    // Crystallization then takes time under the same explicit fixed-area law.
-    let mut concentrated = kinetic.with_solvent_volume_m3(2.5e-4)?;
+    // The same crystals then grow, increasing area under the retained model.
+    let mut concentrated = particles.with_solvent_volume_m3(2.5e-4)?;
     print_state("Immediately after solvent removal", &concentrated)?;
     concentrated.advance(Time::new(60.0), || false)?;
     print_state("After 60 s of crystal growth", &concentrated)?;
@@ -100,8 +123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             law.clone(),
         )?],
     )?;
-    let coupled = SolubilityThermalKineticsV1::new(thermal.clone(), kinetic.models().to_vec())?;
-    let adiabatic = kinetic.advance_with_heat(
+    let coupled = SolubilityThermalKineticsV1::new(thermal.clone(), particles.models().to_vec())?;
+    let adiabatic = particles.advance_with_heat(
         &coupled,
         Time::new(60.0),
         0.0,

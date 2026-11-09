@@ -14084,6 +14084,11 @@ the instantaneous-equilibrium target is a separate diagnostic. Construction
 accepts explicitly unequilibrated stocks or the complete original equilibrium
 owner through `from_equilibrium`, with caller-supplied conductances and growth
 policies. Original phase heat-capacity bindings remain attached to each law.
+The `new` constructor also retains each original law's opt-in particle surface:
+fixed particle count and self-similar shape give `G(s)=G_ref*(s/s_ref)^(2/3)`.
+The original reference solid stock remains unchanged during drying, dilution,
+temperature changes and transport; actual crystals shrink or grow with their
+local inventory. This option requires existing solid and supplies no nuclei.
 
 Prescribed solvent-volume and temperature changes retain both phase stocks.
 Only subsequent kinetic steps cause dissolution or precipitation. Repeated
@@ -14102,11 +14107,14 @@ remain in the preparation memory estimate. Native membrane transport uses this
 boundary and evolves the original kinetic owner on its adaptive timeline.
 
 The basic `advance` operation is isothermal and infers no thermostat heat,
-changing crystal area, nonideal chemistry or spontaneous nucleation. The
+particle breakup/agglomeration, nonideal chemistry or spontaneous nucleation. The
 coupled thermal operation below explicitly accounts for heat and temperature.
 Focused cases verify opposed phase transfers, actual osmotic response,
 finite-rate dilution/heating lag, retained crystals through transport,
 original source sharing, buffer reuse, layout refusal and cancellation.
+Particle regressions check drying-induced growth followed by analytical
+redissolution after dilution, evolving conductance, unchanged reference geometry
+through dissolved transport and refusal of incompatible geometry checkpoints.
 
 ### Finite-rate thermal material evolution
 
@@ -14121,14 +14129,18 @@ input material untouched.
 
 Zero-time phase receipts refresh the accepted endpoint targets; whole-window
 heat, residual and adaptive statistics remain on the thermal report. The
-underlying method is first order, keeps volume and declared conductances fixed
-over the heat window, and does not simultaneously transport solvent or solute.
-Three adapter regressions cover live transported inventories with an independent
+underlying method is first order, keeps volume and declared reference conductances
+fixed over the heat window, and does not simultaneously transport solvent or solute.
+Selected particle geometry changes the actual surface conductance through the
+same kinetic owner; exact source matching includes its reference stock.
+Adapter regressions cover live transported inventories with an independent
 heat/pressure/activity calculation, rate/policy/solvent-source mismatch,
 final-publication cancellation/retry and sensible-only heating with trace
-crystals. `cargo run -p fs-material --example solubility_dissolution` demonstrates
-isothermal dissolution, concentration-induced crystallization, coupled
-adiabatic finite-rate cooling and a separate equilibrium heat calculation.
+crystals. An independent constant-Cp energy balance also covers particle
+dissolution and its slower cooling relative to a fixed-area bath.
+`cargo run -p fs-material --example solubility_dissolution` demonstrates
+fixed-area and shrinking-particle dissolution, concentration-induced crystal
+growth, coupled adiabatic finite-rate cooling and a separate equilibrium heat calculation.
 All demonstration coefficients are explicitly authored.
 
 ## Shared cavitation coefficients and frozen mixture acoustics

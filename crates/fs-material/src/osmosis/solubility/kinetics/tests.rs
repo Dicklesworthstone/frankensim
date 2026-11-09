@@ -262,3 +262,125 @@ fn prepared_transport_copies_preserve_trace_solids_and_reject_different_sources(
     assert!(prepared.heap_bytes() >= core::mem::size_of_val(prepared.last_steps()));
     assert_eq!(prepared.solvent(), &SpeciesId::new("water").unwrap());
 }
+
+fn particle_reservoir(reference_solid: f64) -> KineticSolubilitySolution {
+    let model = SolubilityKineticsV1::new(
+        law("A", 125.0, 0.0),
+        VolumetricFlowRate::new(5e-4),
+        PrecipitationPolicyV1::ExistingSolidOnly,
+    )
+    .unwrap()
+    .with_particle_surface(Amount::new(reference_solid))
+    .unwrap();
+    KineticSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![(
+            model,
+            SolubilityKineticStateV1::from_phases(Amount::new(0.125), Amount::new(0.125)).unwrap(),
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn drying_grows_particle_area_and_dilution_retains_it_through_analytical_redissolution() {
+    let original = particle_reservoir(0.125);
+    let mut concentrated = original.with_solvent_volume_m3(5e-4).unwrap();
+    assert_eq!(
+        concentrated.last_steps()[0].state(),
+        original.last_steps()[0].state()
+    );
+    concentrated.advance(Time::new(0.4), || false).unwrap();
+    let grown = concentrated.last_steps()[0].state().solid();
+    assert!(grown.value() > 0.125);
+    assert!(
+        concentrated.models()[0]
+            .conductance_at(grown)
+            .unwrap()
+            .value()
+            > 5e-4
+    );
+
+    let mut diluted = concentrated.with_solvent_volume_m3(2e-3).unwrap();
+    assert!(std::ptr::eq(diluted.models(), original.models()));
+    assert_eq!(diluted.last_steps()[0].state().solid(), grown);
+    let phase_buffer = diluted.last_steps().as_ptr();
+    let aqueous_buffer = diluted.solution().solute_moles().as_ptr();
+    diluted.advance(Time::new(3.0), || false).unwrap();
+
+    // V*c_sat equals the complete component stock. Integrating the spherical
+    // area law then gives s(t)=s0/[1+(2/3)*(Gref/V)*(s0/sref)^(2/3)*t]^(3/2).
+    // This independent endpoint also detects accidental reference-area reset
+    // during concentration, dilution or aqueous-buffer reconstruction.
+    let expected = grown.value()
+        / (1.0 + (2.0 / 3.0) * (5e-4 / 2e-3) * (grown.value() / 0.125).powf(2.0 / 3.0) * 3.0)
+            .powf(1.5);
+    let phase = diluted.last_steps()[0].state();
+    assert!((phase.solid().value() / expected - 1.0).abs() < 2e-10);
+    near(phase.total_solute().value(), 0.25);
+    near(phase.dissolved().value() + phase.solid().value(), 0.25);
+    assert!(phase.solid().value() < grown.value());
+    assert!(
+        diluted.models()[0]
+            .conductance_at(phase.solid())
+            .unwrap()
+            .value()
+            < 5e-4
+    );
+    near(
+        diluted.solution().osmotic_pressure_pa().unwrap(),
+        R * 300.0 * phase.dissolved().value() / 2e-3,
+    );
+    assert_eq!(diluted.last_steps().as_ptr(), phase_buffer);
+    assert_eq!(diluted.solution().solute_moles().as_ptr(), aqueous_buffer);
+}
+
+#[test]
+fn dissolved_transport_retains_particle_geometry_and_incompatible_checkpoint_refuses() {
+    let mut original = particle_reservoir(0.125);
+    original
+        .replace_dissolved_inventories(1e-3, &[0.0])
+        .unwrap();
+    let initial = *original.last_steps()[0].state();
+    assert_eq!(initial.solid().value(), 0.125);
+    assert_eq!(
+        original.models()[0]
+            .conductance_at(initial.solid())
+            .unwrap()
+            .value(),
+        5e-4
+    );
+    original.advance(Time::new(0.5), || false).unwrap();
+    let expected_solid = 0.125 / (1.0_f64 + (2.0 / 3.0) * 0.5 * 0.5).powf(1.5);
+    assert!(
+        (original.last_steps()[0].state().solid().value() / expected_solid - 1.0).abs() < 2e-10
+    );
+    assert_eq!(
+        original.models()[0].conductance(),
+        VolumetricFlowRate::new(5e-4)
+    );
+    assert!(
+        original.models()[0]
+            .saturation_deficit_half_life(Volume::new(1e-3))
+            .is_err()
+    );
+
+    let mut other_geometry = particle_reservoir(0.25);
+    let before = other_geometry.clone();
+    assert!(other_geometry.copy_state_from(&original).is_err());
+    assert_eq!(other_geometry, before);
+
+    let mut stopped = original.clone();
+    let before = stopped.clone();
+    let mut polls = 0;
+    assert_eq!(
+        stopped.advance(Time::new(0.5), || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(KineticSolubilityError::Cancelled)
+    );
+    assert_eq!(stopped, before);
+}

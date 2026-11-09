@@ -5,11 +5,14 @@
 //! change of temperature or solvent volume preserves both phase stocks until a
 //! kinetic step is taken. It does not silently impose instantaneous saturation.
 //!
-//! Coefficients and fixed surface applicability remain explicit caller inputs.
+//! Coefficients and surface applicability remain explicit caller inputs. An
+//! original law can retain a fixed surface or a self-similar particle population
+//! whose area changes with actual solid stock. Dilution and transported dissolved
+//! amounts never reset that law's reference particle stock.
 //! `advance` is isothermal during each step. [`caloric`] instead couples these
 //! actual phases to the original finite thermal bath and prescribed heat input.
 //! Neither operation supplies simultaneous spatial transport, nonideal chemistry,
-//! shrinking particle geometry, or a nucleation law.
+//! particle breakup/agglomeration, or a nucleation law.
 
 /// Coupled finite-rate phase exchange and the original shared-bath heat balance.
 pub mod caloric;
@@ -101,7 +104,9 @@ impl KineticSolubilitySolution {
     }
 
     /// Start finite-rate evolution from the ORIGINAL equilibrium owner's stocks.
-    /// Conductances and growth policies follow its exact ordered solute layout.
+    /// Fixed-area conductances and growth policies follow its exact ordered solute
+    /// layout. Use `new` with the original laws' `with_particle_surface` option
+    /// when a retained reference particle stock should control evolving area.
     pub fn from_equilibrium(
         original: &FiniteSolubilitySolution,
         transfer: &[(VolumetricFlowRate, PrecipitationPolicyV1)],
@@ -247,8 +252,9 @@ impl KineticSolubilitySolution {
 
     /// Advance every component at the original common T and solvent volume.
     /// Uses only prepared buffers and bounded stack storage; no heap allocation
-    /// or iterative phase solve occurs during this step. Cancellation is polled
-    /// before work, between components and before publishing any accepted state.
+    /// occurs. Particle surfaces use the original bounded scalar phase solve.
+    /// Cancellation is polled before work, between components and before
+    /// publishing any accepted state.
     pub fn advance(
         &mut self,
         duration: Time,
@@ -309,7 +315,8 @@ impl KineticSolubilitySolution {
 
     /// Externally prescribe a temperature inside every original pair domain.
     /// Actual stocks remain unchanged. The caller owns heat/thermostat accounting
-    /// and must ensure each fixed conductance applies at the new temperature.
+    /// and must ensure each declared film coefficient applies at the new
+    /// temperature. Particle reference stocks and their area response are retained.
     pub fn with_temperature(&self, temperature: Temperature) -> Result<Self> {
         Self::prepare(
             temperature,

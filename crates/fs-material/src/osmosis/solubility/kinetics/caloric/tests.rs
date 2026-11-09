@@ -245,3 +245,75 @@ fn closed_surface_heats_sensibly_and_preserves_explicit_trace_crystals() {
         2e-14,
     );
 }
+
+#[test]
+fn shrinking_particles_share_the_original_heat_balance_and_geometry_source_identity() {
+    let fixed = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let particles = SolubilityThermalKineticsV1::new(
+        fixed.caloric().clone(),
+        vec![
+            fixed.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.2))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let owner = material(&particles, 0.05, 0.2);
+    let before = owner.clone();
+    let result = owner
+        .advance_with_heat(&particles, Time::new(2.0), 0.0, controls(), || false)
+        .unwrap();
+    let endpoint = result.solution();
+    let phase = endpoint.last_steps()[0].state();
+    let temperature = endpoint.solution().temperature_k();
+    assert_eq!(owner, before);
+    assert_eq!(endpoint.models(), owner.models());
+    assert_eq!(
+        phase.total_solute(),
+        before.last_steps()[0].state().total_solute()
+    );
+    assert!(phase.solid().value() > 0.0 && phase.solid().value() < 0.2);
+    assert!(
+        endpoint.models()[0]
+            .conductance_at(phase.solid())
+            .unwrap()
+            .value()
+            < 1e-4
+    );
+    assert!(temperature < 300.0);
+
+    let capacity = 1e-3 / MOLAR_VOLUME * SOLVENT_CP + 0.25 * SOLUTE_CP;
+    let energy = capacity * (temperature - 300.0)
+        + DISSOLUTION_ENTHALPY * (phase.dissolved().value() - 0.05);
+    near(energy, 0.0, 1e-7);
+    near(result.balance().energy_residual_j(), energy, 2e-9);
+    near(
+        endpoint.solution().osmotic_pressure_pa().unwrap(),
+        R * temperature * phase.dissolved().value() / 1e-3,
+        1e-7,
+    );
+
+    let fixed_owner = material(&fixed, 0.05, 0.2);
+    let fixed_result = fixed_owner
+        .advance_with_heat(&fixed, Time::new(2.0), 0.0, controls(), || false)
+        .unwrap();
+    assert!(phase.dissolved().value() < fixed_result.solution().solution().solute_moles()[0]);
+    assert!(temperature > fixed_result.solution().solution().temperature_k());
+
+    let other_geometry = SolubilityThermalKineticsV1::new(
+        fixed.caloric().clone(),
+        vec![
+            fixed.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.4))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        owner.advance_with_heat(&other_geometry, Time::new(2.0), 0.0, controls(), || false),
+        Err(KineticSolubilityHeatError::SourceMismatch)
+    ));
+    assert_eq!(owner, before);
+}

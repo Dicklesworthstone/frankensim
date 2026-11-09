@@ -5242,13 +5242,15 @@ checkpoints, unsupported mode admission and atomic cancellation.
 
 `OsmoticCompartment::with_kinetic_solubility` instead binds the original
 `KineticSolubilitySolution` and retains its actual dissolved and crystal stocks.
-Exact fixed-temperature, fixed-volume phase half-stages surround the existing
+Original fixed-temperature, fixed-volume phase half-stages surround the existing
 implicit membrane sweep. Only dissolved molecules are exchanged in that sweep;
 crystals remain in place. The original material boundary then updates solvent
 and dissolved inventories without repartitioning or erasing a trace solid.
 Equilibrium, kinetic and ordinary aqueous compartments can share one network
 when their original laws and species ordering are compatible. Conductances and
-explicit growth-surface policies may differ by compartment.
+explicit growth-surface policies may differ by compartment. The original
+opt-in self-similar particle law changes area with actual retained solid stock;
+reference stock and film coefficient survive membrane sweeps and checkpoints.
 
 The native whole-step/two-half-step comparison controls phase/transport coupling,
 including separate dissolved, total and solid amount scales. The membrane
@@ -5267,12 +5269,16 @@ Donnan exchange, and nonideal/coupled molecular diffusion explicitly refuse
 these phase owners until those pathways account for their evolution and energy.
 
 This is still a well-mixed isothermal ideal-neutral model with fixed declared
-surface conductance. It supplies no phase heat, variable crystal area,
-spontaneous nucleation or reactive electrolyte transport. Eight focused
+film coefficients and either fixed area or the original particle-area response.
+It supplies no phase heat, particle breakup/agglomeration, spontaneous nucleation
+or reactive electrolyte transport. Focused
 regressions cover an independent continuous dissolution/permeation oracle,
 finite-rate concentration/dilution, seeding, temporal refinement, complete
 rollback and retry, trace crystals, mixed equilibrium/kinetic cells and
-unsupported-path refusal.
+unsupported-path refusal. Particle cases additionally compare the native coupled
+timeline with an independent continuous dissolution/permeation ODE, verify
+temporal refinement and decreasing conductance, retain a receiver's inert
+crystals, and close the complete solid-plus-dissolved inventory.
 
 ## Nonideal finite-volume osmosis
 

@@ -1,9 +1,9 @@
 //! Finite-rate phase exchange and heat using the original material inventories.
 //!
 //! The thermochemical owner supplies all kinetic and caloric equations. This
-//! adapter binds its exact ordered laws, conductances, growth policies and solvent
-//! convention to the current material, then rebuilds the aqueous view from the
-//! actual accepted phases at the solved temperature. It introduces no additional
+//! adapter binds its exact ordered laws, conductances, surface geometry, growth
+//! policies and solvent convention to the current material, then rebuilds its
+//! aqueous view from actual accepted phases at the solved temperature. It introduces no additional
 //! energy law or instantaneous equilibrium projection.
 
 use super::{KineticSolubilityError, KineticSolubilitySolution, MAX_OSMOTIC_SOLUTES};
@@ -66,8 +66,9 @@ impl KineticSolubilitySolution {
     /// remain fixed; temperature and actual dissolved/solid amounts evolve
     /// together under the original thermochemical adaptive integrator.
     ///
-    /// Every original law, conductance, growth policy and solvent convention
-    /// must match. Refusal or cancellation leaves this material untouched.
+    /// Every original law, conductance, surface geometry, growth policy and
+    /// solvent convention must match. Refusal or cancellation leaves this
+    /// material untouched.
     /// The returned aqueous view uses the accepted dissolved amounts at the
     /// solved temperature, without equilibrium projection. Its zero-time phase
     /// receipts refresh target diagnostics; the window's heat and temporal
