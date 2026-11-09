@@ -18,6 +18,9 @@ mod evolve;
 /// Moving-volume translation and piston deformation on the original time owner.
 pub mod moving;
 pub use moving::MeshMotion;
+/// Reciprocal pressure impulse and work on two finite guided end planes.
+pub mod inertial_walls;
+pub use inertial_walls::{InertialWallsError, SpatialInertialWallsStep};
 mod reservoir;
 pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceState};
 /// Conservative body impulse and mechanical work on the original time owner.

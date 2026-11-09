@@ -3082,6 +3082,40 @@ characteristic outlets, simultaneous multi-axis deformation, remapping,
 molecular moving-volume composition and reciprocal FSI remain unsupported.
 The frozen source and existing opt-in engineering authority are unchanged.
 
+### Reciprocal finite-piston volumetric gas
+
+`Euler3d::step_with_inertial_walls` evolves the original three-dimensional
+gas together with both finite guided pistons on a selected Cartesian axis.
+It reuses `fs-gas`'s simultaneous two-wall midpoint-speed solve, original
+finite masses, bounded Newton/backtracking, and independent wall/combined
+impulse and work acceptance. Each proposal advances the same accepted field
+with the native ALE MUSCL/SSP RK2 operator at one fixed duration. All retries
+reuse the field scratch; no trial clones the gas or publishes elapsed time.
+
+The actual stage-integrated boundary pressure impulses accelerate the two
+walls, and those same impulses paired with midpoint speeds supply the gas
+work. Exterior pressure and additional centre-applied axial forces remain
+explicit. The selected axis has two reflecting ends; transverse directions
+are periodic or stationary reflecting walls. Combined axial momentum and
+gas-plus-wall energy are checked against actual changes; transverse support
+impulses remain in the original gas report. Nonuniform pressure also produces
+per-piston angular impulse about each plane's geometric centre, with the
+equal and opposite ideal-guide angular impulse reported explicitly. The
+orientation guides have zero rotational velocity and do no rotational work.
+
+Accepted cells, grid, time, wall velocities, per-face loads and the gas report
+publish together after the final cancellation gate. Unrepresentable plane
+travel refuses even if a small displacement disappears only at the upper
+endpoint. Native regressions cover equilibrium/translation on every axis,
+pressure-area/mass acceleration, repeated unequal-mass expansion and combined
+energy/momentum, exact replay through prescribed native ALE motion, nonuniform
+pressure torque, axial Galilean boosts, complete retries and atomic rollback.
+The original frozen-composition inviscid authority remains Estimated; gravity,
+leakage, open transverse faces, prescribed exterior profiles, molecular heat
+or stress, piston rotation, surface deformation and contact stops are outside
+this entry. The guides and stationary transverse walls are explicit supports.
+
+
 ### Conservative body forcing on the original Cartesian owners
 
 The planar `Euler2d::step_with_forcing` now supplies the same physical source

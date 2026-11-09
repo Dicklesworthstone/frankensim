@@ -15,6 +15,9 @@ use super::{
 };
 use fs_qty::Time;
 
+mod coupling;
+pub use coupling::{WallGasExchange, solve_coupled};
+
 /// Loads on one wall, held over the same accepted gas interval.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InertialWallLoad {
