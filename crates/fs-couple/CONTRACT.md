@@ -10069,10 +10069,20 @@ The returned candidate contains both accepted owners and their common
 electrical-work/thermal-energy accounting.
 
 Original cell routes must match the complete swept volume and constant-density
-caloric chart. The volume-only entry point refuses contact-bearing electrical
-owners until an explicit source-refresh and surface heat partition is supplied.
-No radial thermal mesh, expansion law or second heat integrator is inferred.
+caloric chart. `step_axisymmetric_contact_candidate` adds finite electrical
+interfaces through the existing `ConductionContactThermal` bindings. Each
+original contact refreshes its source from both actual thermal/phase states;
+fixed pressure/history, material order and selected sources remain pinned.
+Its exact swept-surface loss enters the original adjacent receivers under the
+authored two-sided heat fraction, separately from bulk cell heat and exactly
+once in the common energy account. The volume-only entry continues to refuse
+contact-bearing electrical owners.
+
+No radial thermal mesh, expansion law, inferred heat split or second heat
+integrator is introduced. Original Fourier links remain independently
+authored; electrical contact resistance does not imply thermal resistance.
 See [axisymmetric electrothermal semantics](docs/axisymmetric-electrothermal.md)
 for source, geometry, budget and continuation details. Focused manufactured
 regressions cover sector scaling, unequal radial volumes, Fourier transfer,
-temperature/latent-phase feedback, compliance, refusal and atomic retry.
+temperature/latent-phase feedback, swept contact work, asymmetric heat
+partitions, source continuation, compliance, refusal and atomic retry.

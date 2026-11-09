@@ -8,8 +8,11 @@
 //!
 //! Thermal links retain their authored areas and material half-paths; this
 //! bridge does not infer a radial thermal mesh or add a second heat integrator.
-//! Geometry and material frames remain fixed. Electrical contacts require an
-//! explicit source-refresh and receiving-surface partition and are refused here.
+//! Geometry and material frames remain fixed. Electrical contacts use the same
+//! residual through [`contacts`], with explicit original surface sources and
+//! authored two-sided heat partitions; the bulk-only entry refuses them.
+
+pub mod contacts;
 
 use super::super::{
     CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
@@ -17,8 +20,9 @@ use super::super::{
     material::{MaterialNetwork, MaterialNetworkSample},
 };
 use super::{
-    ConductionDrive, ConductionThermalNetwork, ConductionThermalStep, Error, check, field_error,
-    invalid, material, same_material,
+    ConductionDrive, ConductionThermalNetwork, ConductionThermalStep, Error, check,
+    contacts::{self as contact_thermal, ConductionContactThermal},
+    field_error, invalid, material, same_material,
 };
 use fs_em::conduction::{
     ConductionControls,
@@ -178,6 +182,35 @@ impl ConductionThermalNetwork<'_> {
                 "axisymmetric contact heat requires explicit surface partitions and source refresh",
             ));
         }
+        self.step_axisymmetric_with_contacts_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            &[],
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            &cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_axisymmetric_with_contacts_candidate<'t, C: PlanarConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &AxisymmetricConduction<C>,
+        drive: ConductionDrive<'_>,
+        bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<AxisymmetricConductionEnthalpyCandidate<'t, C>, Error> {
+        check(cancel)?;
         let dt = self.admit_mesh_step(
             thermal,
             target_s,
@@ -186,7 +219,7 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
         )?;
-        let routes = self.admit_mesh_routes(thermal, problem.mesh(), &cancel)?;
+        let routes = self.admit_mesh_routes(thermal, problem.mesh(), cancel)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -198,8 +231,18 @@ impl ConductionThermalNetwork<'_> {
         let accepted = prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
             .map_err(material)?;
+        let contacts = contact_thermal::PreparedContacts::new_for_contacts(
+            self,
+            problem.mesh(),
+            problem.contacts(),
+            problem.contact_liquid_mass_fraction_axes(),
+            bindings,
+            &routes,
+            &accepted.source,
+            cancel,
+        )?;
         let initial =
-            self.materials_from_sources(problem.conductors(), &accepted.source, &routes, &cancel)?;
+            self.materials_from_sources(problem.conductors(), &accepted.source, &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b)
                 || a.frame() != b.frame()
@@ -215,7 +258,7 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _remaining| {
-                check(&cancel)?;
+                check(cancel)?;
                 let coefficients = prepared
                     .resolve(state, || (*cancel.borrow_mut())())
                     .map_err(material)?;
@@ -223,14 +266,32 @@ impl ConductionThermalNetwork<'_> {
                     problem.conductors(),
                     &coefficients.source,
                     &routes,
-                    &cancel,
+                    cancel,
                 )?;
-                let next = AxisymmetricConduction::new(
-                    problem.mesh().clone(),
-                    sources,
-                    assembly,
-                    &mut || (*cancel.borrow_mut())(),
-                )
+                let next = if problem.contacts().is_empty() {
+                    // Keep the original bulk source admission when no interface
+                    // exists; the contact constructor has its own static laws.
+                    AxisymmetricConduction::new(
+                        problem.mesh().clone(),
+                        sources,
+                        assembly,
+                        &mut || (*cancel.borrow_mut())(),
+                    )
+                } else {
+                    let surfaces = contacts.refresh_contacts(
+                        problem.contacts(),
+                        &coefficients.source,
+                        cancel,
+                    )?;
+                    AxisymmetricConduction::new_with_phase_contacts(
+                        problem.mesh().clone(),
+                        sources,
+                        surfaces,
+                        problem.contact_liquid_mass_fraction_axes().to_vec(),
+                        assembly,
+                        &mut || (*cancel.borrow_mut())(),
+                    )
+                }
                 .map_err(field_error)?;
                 let field = drive
                     .solve_axisymmetric(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
@@ -256,7 +317,7 @@ impl ConductionThermalNetwork<'_> {
                     electric_field_v_m: field.electric_field_v_m().to_vec(),
                     current_density_a_m2: field.current_density_a_m2().to_vec(),
                     cell_power_w: field.cell_power_w().to_vec(),
-                    contacts: Vec::new(),
+                    contacts: contacts.heat(field.contact_response())?,
                     nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
                     nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),
                     boundary_current_a: field.boundary_current_a(),
@@ -278,11 +339,14 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                self.deposit_power(&candidate.step.cell_power_w, &routes, checkpoint)
+                let mut powers =
+                    self.deposit_power(&candidate.step.cell_power_w, &routes, checkpoint)?;
+                contact_thermal::deposit(&candidate.step.contacts, &mut powers, checkpoint)?;
+                Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(AxisymmetricConductionEnthalpyCandidate {
             thermal,
             problem,

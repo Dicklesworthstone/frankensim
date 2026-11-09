@@ -2,6 +2,8 @@
 //! Manufactured laws verify this coupled model, not measured conductor data.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "axisymmetric_conduction_enthalpy/contacts.rs"]
+mod contacts;
 
 use common::{boundary, config, material, material_with_electrical_basis, near, point};
 use fs_couple::circuit_enthalpy::{

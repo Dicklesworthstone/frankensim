@@ -32,14 +32,42 @@ correspondence and cancellation return neither updated owner.
 The original constant-density chart requirement applies through phase change.
 An isothermal latent-heat interval still refreshes conductivity through its
 declared liquid-fraction coordinate. Geometry motion, expansion, azimuthal
-current and a circuit storage model are outside this adapter. Contact-bearing
-electrical owners refuse until an explicit surface heat partition and contact
-source refresh are supplied; their surface losses must not be dropped or
-counted twice.
+current and a circuit storage model are outside this adapter.
+
+## Finite electrical contacts and two-sided heat
+
+`step_axisymmetric_contact_candidate` additionally accepts the existing
+`ConductionContactThermal` declarations, one per original electrical contact
+in its canonical order. Each names the original interface card, ordered bulk
+cards, thermal/phase coordinates, fixed pressure/history context and authored
+fraction of contact heat entering surface A. The remainder enters B. Receiving
+thermal cells come from the original adjacent electrical volume routes; neither
+a new receiver nor an equal split is inferred.
+
+The same residual refreshes both bulk and contact sources at every trial.
+Independent surface temperature and liquid-fraction coordinates follow their
+actual caloric receivers, including unequal fractions at one melting
+temperature. Source selections, fixed external state and declared phase axes
+remain pinned. The native field integrates voltage jumps, current and loss
+over the actual swept surface with its exact radial basis moments.
+
+Bulk `cell_power_w` and surface `contact_response` losses are deposited once
+through their respective original routes. Their sum equals terminal source
+work and the finite thermal energy account. Contact heat fractions are fixed
+physical inputs; interface storage, motion, arcing and a thermal resistance
+inferred from electrical resistance are outside this model. Authored Fourier
+links continue to supply heat transfer independently.
+
+Use the explicit contact entry when surfaces dissipate power. The bulk-only
+entry continues to refuse a contact-bearing electrical owner. Both entries
+share the existing enthalpy solver and return an atomic electrical/thermal
+candidate.
 
 Focused regression definitions cover sector scaling, unequal swept triangle
 volumes, local current heating with material Fourier transfer, opposite
 voltage/current feedback, regulated-power continuation, latent-phase source
-refresh, and late-refusal retry. These use manufactured material laws and do
-not qualify measured conductor data or establish continuum accuracy. Refine
+refresh, swept contact work with asymmetric heat partitions, source-bound
+surface continuation, latent contact response and late-refusal retry. These
+use manufactured material laws and do not qualify measured conductor data or
+establish continuum accuracy. Refine
 the original spatial and first-order temporal models for the intended case.
