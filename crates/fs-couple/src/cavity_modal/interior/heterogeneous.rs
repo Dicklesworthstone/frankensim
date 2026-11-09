@@ -9,6 +9,8 @@
 
 /// Original gas/liquid material sources on conforming tetrahedral regions.
 pub mod regions;
+/// Full pressure fields in conforming free-fluid and rigid porous regions.
+pub mod porous;
 /// Source-bound cylindrical membrane reflection in the distributed time solver.
 pub mod mechanical;
 

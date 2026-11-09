@@ -1746,6 +1746,34 @@ rejects unsupported form degrees and preserves the same coefficient checks as
 assembled Hodge operators. Admission proves neither mesh validity nor a global
 boundary/gauge condition; those remain with each original field owner.
 
+## Resolved passive equivalent-fluid volumes
+
+`acoustics::helmholtz::heterogeneous::PreparedEquivalentFluid` extends the
+original full pressure FE space to complex effective density and bulk modulus
+at one explicit frequency. In `exp(+i omega t)` it retains
+`div((1/rho_eff) grad p) + omega^2 p/K_eff = 0` on original affine or quadratic
+tetrahedra. Material callbacks own their constitutive law, source domain and
+spatial variation; jumps must conform to original element faces. The original
+boundary forms, exact pressure-release constraints, equilibrated complex LU
+and physical residual corrections are reused. No modal reduction is introduced.
+
+Positive-real passive rho/K admission fixes the loss signs. Each original
+element retains separate positive density and compression loss forms, evaluated
+on the coherent pressure field as `Im(1/rho_eff)|grad p|^2/(2 omega)` and
+`-omega Im(1/K_eff)|p|^2/2`. Their quadrature volumes and powers remain in
+original tetrahedron order. Boundary absorption stays separate; no net-power
+subtraction supplies heat. Explicit total volume-sample, retained local-matrix,
+free-DOF and dense-factor limits precede material callbacks. Cancellation
+publishes no partial preparation, pressure field or heat table.
+
+`tests/equivalent_fluid.rs` specifies three-rung lossy plane-wave convergence,
+independent density/compression heat integrals, complex-interface reflection,
+the original lossless pressure-release limit, material signs, limits and
+cancellation. A single-frequency constitutive sample supplies neither a
+dispersive stored-energy law nor a causal transient realization. Mean flow,
+elastic porous-frame waves, negative-parameter media and experimental material
+qualification remain outside this numerical formulation.
+
 ## Heterogeneous resolved pressure acoustics
 
 `acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe` borrows the

@@ -13,6 +13,11 @@ use std::collections::BTreeSet;
 
 mod dispersive;
 pub use dispersive::BoundaryAdmittanceFrequencySample;
+mod equivalent;
+pub use equivalent::{
+    EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
+    EquivalentFluidPressureField, PreparedEquivalentFluid,
+};
 mod frequency;
 mod mechanical;
 pub use mechanical::{
@@ -432,9 +437,23 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         require_passive: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Csr, Csr), HeterogeneousError> {
-        let mut real = Coo::new(self.ndof(), self.ndof());
-        let mut imaginary = Coo::new(self.ndof(), self.ndof());
-        let quad = tri_quadrature(self.geometry.face_quadrature_order(self.geometry.order + 1));
+        Self::boundary_coefficient_matrices_for(
+            self.geometry,
+            boundaries,
+            require_passive,
+            cancelled,
+        )
+    }
+
+    fn boundary_coefficient_matrices_for<'a>(
+        geometry: &super::super::HelmholtzFe<'_>,
+        boundaries: impl IntoIterator<Item = (&'a [[u32; 3]], C64)>,
+        require_passive: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Csr, Csr), HeterogeneousError> {
+        let mut real = Coo::new(geometry.ndof(), geometry.ndof());
+        let mut imaginary = Coo::new(geometry.ndof(), geometry.ndof());
+        let quad = tri_quadrature(geometry.face_quadrature_order(geometry.order + 1));
         let mut seen = BTreeSet::new();
         for (faces, y) in boundaries {
             if !finite(y) || (require_passive && y.re < 0.0) || faces.is_empty() {
@@ -449,7 +468,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 if !seen.insert(key) {
                     return Err(invalid("admittance boundary faces must not overlap").into());
                 }
-                let rule = self.geometry.face_rule(face, &quad)?;
+                let rule = geometry.face_rule(face, &quad)?;
                 for (i, &row) in rule.dofs.iter().enumerate() {
                     for (j, &col) in rule.dofs.iter().enumerate().skip(i) {
                         let value: f64 = rule
@@ -485,8 +504,16 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         traces: &[VelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HeterogeneousError> {
-        let quad = tri_quadrature(self.geometry.face_quadrature_order(self.geometry.order + 1));
-        let mut load = vec![C64::ZERO; self.ndof()];
+        Self::velocity_load_for(self.geometry, traces, cancelled)
+    }
+
+    fn velocity_load_for(
+        geometry: &super::super::HelmholtzFe<'_>,
+        traces: &[VelocityTrace],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HeterogeneousError> {
+        let quad = tri_quadrature(geometry.face_quadrature_order(geometry.order + 1));
+        let mut load = vec![C64::ZERO; geometry.ndof()];
         let mut seen = BTreeSet::new();
         for &(face, values) in traces {
             poll(cancelled)?;
@@ -497,7 +524,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                     invalid("velocity trace requires unique faces and finite values").into(),
                 );
             }
-            let rule = self.geometry.face_rule(face, &quad)?;
+            let rule = geometry.face_rule(face, &quad)?;
             let mut local_values = [C64::ZERO; 3];
             for (i, vertex) in rule.vertices.iter().enumerate() {
                 let input = face

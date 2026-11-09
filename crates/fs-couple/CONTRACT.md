@@ -1,3 +1,29 @@
+## Original free-fluid and porous sources in resolved acoustic volumes
+
+`cavity_modal::interior::heterogeneous::porous::PorousRegionsInterior` binds
+one original source slot to every tetrahedron of the complete pressure FE
+owner. Free fluids supply their coherent `FluidAcoustics` state. Rigid porous
+regions use the original `PorousFluidLaw::effective_fluid`, or its joint
+`effective_relaxing` molecular/pore-wall response, at the exact solve frequency.
+Each used region is evaluated once after mapping and FE-budget admission;
+unused slots are not queried. Sources, region maps and actual frozen responses
+are retained through repeated coherent boundary drives.
+
+The native porous and interior owners share `exp(+i omega t)`. Effective rho/K
+already include porosity; no additional porosity, phase conjugation, air
+attenuation or surface-impedance substitution is introduced. Pressure and
+superficial normal velocity meet through the common original weak form. Local
+volume heat comes from the original separate density/compression loss forms;
+exterior boundary dissipation remains separate. Geometry, h/p and material
+quadrature require convergence; the law remains rigid-frame, small-signal,
+fully saturated and within the original source's fluid/frequency domain.
+No elastic Biot waves, evolving pore state or new empirical qualification is
+inferred. Reprepare for changed frequency or equilibrium.
+
+`tests/porous_interior.rs` specifies a three-rung full-volume JCAL slab against
+the original analytic layer impedance, a free-fluid/porous layer with interface
+and area continuity, and exact source reuse, work closure and native refusals.
+
 ## Free-free cooling in reacting magnetized gas heating
 
 `MagnetizedIonizedGasHeating::advance_reacting_with_optically_thin_bremsstrahlung`
