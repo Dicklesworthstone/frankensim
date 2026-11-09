@@ -6,6 +6,9 @@
 //! film, two-face angular-spectrum, mixed-statistics and volume-heat owners then
 //! rebuild the applied watt spectrum. Native enthalpy evolution consumes that
 //! spectrum once, with its absolute phase clock retained in double-double.
+//! Original Debye relaxation, Lorentz resonance and independent Ohmic leakage
+//! keep their separate reservoir laws; each refresh retains every selected
+//! source role, including Lorentz frequency/damping and same-state permeability.
 //!
 //! Coefficients are HELD over the requested feedback interval, even when the
 //! thermal solver takes smaller steps. The temperature-excursion bound controls
@@ -51,7 +54,10 @@ use fs_fft::harmonic_window::PreparedHarmonicProductSpectrum;
 use fs_matdb::{MaterialCard, PropertyUsageReceipt};
 use fs_material::{
     conductor::{ConductorError, ResolvedConductorState},
-    field_storage::{FieldStorageError, dielectric::ResolvedDebyeCapacitor},
+    field_storage::{
+        FieldStorageError,
+        dielectric::{ResolvedDebyeCapacitor, lorentz::ResolvedLorentzMaterial},
+    },
     phase::{EquilibriumPhaseState, PhaseStateError},
     state_point::{MaterialStatePointError, ResolvedMaterialStatePoint},
 };
@@ -187,15 +193,22 @@ impl<'a> QuasiSteadyFilmState<'a> {
 
 pub(super) enum RefreshedFilmLaw {
     Debye(ResolvedDebyeCapacitor),
+    Lorentz(ResolvedLorentzMaterial),
     Ohmic(ResolvedConductorState),
     DebyeWithOhmic(ResolvedDebyeCapacitor, ResolvedConductorState),
+    LorentzWithOhmic(ResolvedLorentzMaterial, ResolvedConductorState),
 }
 impl RefreshedFilmLaw {
     pub(super) fn response(&self) -> DielectricResponse<'_> {
         match self {
             Self::Debye(source) => DielectricResponse::Debye(source),
+            Self::Lorentz(source) => DielectricResponse::Lorentz(source),
             Self::Ohmic(source) => DielectricResponse::Ohmic(source),
             Self::DebyeWithOhmic(dielectric, conductor) => DielectricResponse::DebyeWithOhmic {
+                dielectric,
+                conductor,
+            },
+            Self::LorentzWithOhmic(dielectric, conductor) => DielectricResponse::LorentzWithOhmic {
                 dielectric,
                 conductor,
             },
@@ -758,7 +771,7 @@ fn admit_thermal_context(
 }
 
 impl RefreshedFilmLaw {
-    /// Refresh the complete original Debye/Ohmic source, including mu and the
+    /// Refresh the complete original causal source, including mu and the
     /// same-state bundle shared by combined dielectric/conductor reservoirs.
     pub(super) fn at_temperature(
         original: DielectricResponse<'_>,
@@ -774,6 +787,13 @@ impl RefreshedFilmLaw {
         Ok(match original {
             DielectricResponse::Debye(source) => {
                 RefreshedFilmLaw::Debye(source.at_query_point(card, &point)?)
+            }
+            DielectricResponse::Lorentz(source) => {
+                RefreshedFilmLaw::Lorentz(ResolvedLorentzMaterial::try_from_material(
+                    source.material().at_query_point(card, &point)?,
+                    source.high_frequency_property(),
+                    source.pole_properties(),
+                )?)
             }
             DielectricResponse::Ohmic(source) => {
                 let material = source.material().at_query_point(card, &point)?;
@@ -792,7 +812,30 @@ impl RefreshedFilmLaw {
                 let conductor = conductor.with_material(dielectric.material().clone())?;
                 RefreshedFilmLaw::DebyeWithOhmic(dielectric, conductor)
             }
-            _ => return Err(bad("feedback requires an original Debye and/or Ohmic film")),
+            DielectricResponse::LorentzWithOhmic {
+                dielectric,
+                conductor,
+            } => {
+                if dielectric.material().identity() != conductor.material().identity() {
+                    return Err(bad(
+                        "Lorentz and Ohmic laws must retain the same complete original snapshot",
+                    ));
+                }
+                // Resolve the original complete bundle once. The same refreshed
+                // snapshot owns oscillator coefficients, permeability and leakage.
+                let dielectric = ResolvedLorentzMaterial::try_from_material(
+                    dielectric.material().at_query_point(card, &point)?,
+                    dielectric.high_frequency_property(),
+                    dielectric.pole_properties(),
+                )?;
+                let conductor = conductor.with_material(dielectric.material().clone())?;
+                RefreshedFilmLaw::LorentzWithOhmic(dielectric, conductor)
+            }
+            _ => {
+                return Err(bad(
+                    "feedback requires original Debye, Lorentz and/or Ohmic reservoirs",
+                ));
+            }
         })
     }
 }
@@ -805,10 +848,14 @@ pub(super) fn admit_refresh_source(
     if !matches!(
         original,
         DielectricResponse::Debye(_)
+            | DielectricResponse::Lorentz(_)
             | DielectricResponse::Ohmic(_)
             | DielectricResponse::DebyeWithOhmic { .. }
+            | DielectricResponse::LorentzWithOhmic { .. }
     ) {
-        return Err(bad("feedback requires an original Debye and/or Ohmic film"));
+        return Err(bad(
+            "feedback requires original Debye, Lorentz and/or Ohmic reservoirs",
+        ));
     }
     let material = original.material();
     let absolute = QuantitySpec::semantic(SemanticType::new(

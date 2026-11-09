@@ -31,7 +31,10 @@ use fs_material::{
     field_storage::{
         ELECTRIC_PERMITTIVITY_DIMS as EPS, ELECTRIC_PERMITTIVITY_PROPERTY as EPS_NAME,
         MAGNETIC_PERMEABILITY_DIMS as MU, MAGNETIC_PERMEABILITY_PROPERTY as MU_NAME,
-        dielectric::{DebyePoleProperties, ResolvedDebyeCapacitor},
+        dielectric::{
+            DebyePoleProperties, ResolvedDebyeCapacitor,
+            lorentz::{LorentzPoleProperties, ResolvedLorentzMaterial},
+        },
     },
     phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase},
     state_point::{
@@ -42,7 +45,7 @@ use fs_material::{
 use fs_math::{c64::C64, dd::Dd};
 use fs_qty::{
     Dims, QuantitySpec, Time,
-    semantic::{QuantityKind, SemanticType, ValueForm},
+    semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 
 const WIDTH: f64 = 0.25;
@@ -350,6 +353,36 @@ fn reference_power(
         dielectric,
         conductor,
     };
+    reference_reservoir_power(
+        medium,
+        response,
+        sigma,
+        lines,
+        nodes,
+        carrier,
+        time,
+        |omega| {
+            C64::new(0.0, omega * pole.permittivity_increment_f_m)
+                / C64::new(1.0, omega * pole.relaxation_time_s)
+        },
+        pole.relaxation_time_s / pole.permittivity_increment_f_m,
+    )
+}
+
+// Shared independent field/ensemble integral. The caller supplies Pdot/E and
+// the physical positive heat coefficient from its original oscillator ODE.
+#[allow(clippy::too_many_arguments)]
+fn reference_reservoir_power(
+    medium: &ResolvedMaterialStatePoint,
+    response: DielectricResponse<'_>,
+    sigma: f64,
+    lines: &[ThermalInterferenceLine<'_>],
+    nodes: &[AngularSpectrumHeatDepthSample],
+    carrier: [f64; 2],
+    time: f64,
+    transfer: impl Fn(f64) -> C64,
+    dissipation: f64,
+) -> f64 {
     let stacks: Vec<_> = lines
         .iter()
         .map(|line| {
@@ -434,8 +467,7 @@ fn reference_power(
                     let omega = line.angular_frequency_rad_s;
                     let (s, c) = (omega * time).sin_cos();
                     let temporal = coefficient * C64::new(c, s);
-                    let filter = C64::new(0.0, omega * pole.permittivity_increment_f_m)
-                        / C64::new(1.0, omega * pole.relaxation_time_s);
+                    let filter = transfer(omega);
                     for axis in 0..3 {
                         electric[axis] = electric[axis] + field[axis] * temporal;
                         current[axis] = current[axis] + filter * field[axis] * temporal;
@@ -445,14 +477,221 @@ fn reference_power(
                     * (0..3)
                         .map(|axis| {
                             sigma * mean_square(electric[axis])
-                                + pole.relaxation_time_s / pole.permittivity_increment_f_m
-                                    * mean_square(current[axis])
+                                + dissipation * mean_square(current[axis])
                         })
                         .sum::<f64>();
             }
         }
     }
     total
+}
+
+fn lorentz_card() -> MaterialCard {
+    let base = card("temperature-dependent original Lorentz film", 360.0, true);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in base.claims().claims_ordered() {
+        claims.insert_claim(claim.clone()).unwrap();
+    }
+    for (name, q, values) in [
+        (
+            "omega0",
+            quantity(QuantityKind::Frequency(FrequencyConvention::Angular)),
+            [2.8, 2.2],
+        ),
+        (
+            "gamma",
+            QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0])),
+            [0.16, 0.48],
+        ),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::with_quantity(name, q),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(280.0, values[0]), (360.0, values[1])],
+                    dims: q.dims(),
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        quantity(QuantityKind::AbsoluteTemperature),
+                        280.0,
+                        360.0,
+                    )
+                    .with_quantity(
+                        "pressure",
+                        quantity(QuantityKind::Pressure),
+                        90_000.0,
+                        110_000.0,
+                    ),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored temperature-dependent inertial polarization".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+#[test]
+fn g1_hot_lorentz_refraction_and_mixed_heat_follow_the_original_reservoir_ode() {
+    let medium = state(&card("Lorentz feedback exterior", 360.0, false), false);
+    let card = lorentz_card();
+    let material = state(&card, true)
+        .with_additional_requirements(
+            &card,
+            &[
+                ScalarPropertyRequirement::try_with_quantity(
+                    "omega0",
+                    quantity(QuantityKind::Frequency(FrequencyConvention::Angular)),
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap(),
+                ScalarPropertyRequirement::try_new(
+                    "gamma",
+                    Dims([0, 0, -1, 0, 0, 0]),
+                    ScalarAdmissibility::NonNegative,
+                )
+                .unwrap(),
+            ],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+    let dielectric = ResolvedLorentzMaterial::try_from_material(
+        material.clone(),
+        EPS_NAME,
+        &[LorentzPoleProperties {
+            permittivity_increment: "delta".into(),
+            angular_frequency: "omega0".into(),
+            damping_rate: "gamma".into(),
+        }],
+    )
+    .unwrap();
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        material.clone(),
+        ElectricalPropertyBasis::Conductivity,
+    )
+    .unwrap();
+    let warm = ResolvedLorentzMaterial::try_from_material(
+        material.at_query_point(&card, &at(320.0)).unwrap(),
+        dielectric.high_frequency_property(),
+        dielectric.pole_properties(),
+    )
+    .unwrap();
+    let warm_conductor = conductor.with_material(warm.material().clone()).unwrap();
+    let chart = chart(&card);
+    let body = body(&chart);
+    let lines = lines();
+    let factors = factors(&lines);
+    let nodes = depth();
+    let carrier = [0.7, -0.45];
+    for leaky in [false, true] {
+        let response = if leaky {
+            DielectricResponse::LorentzWithOhmic {
+                dielectric: &dielectric,
+                conductor: &conductor,
+            }
+        } else {
+            DielectricResponse::Lorentz(&dielectric)
+        };
+        let warm_response = if leaky {
+            DielectricResponse::LorentzWithOhmic {
+                dielectric: &warm,
+                conductor: &warm_conductor,
+            }
+        } else {
+            DielectricResponse::Lorentz(&warm)
+        };
+        let stack = PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            2.0,
+            &[DielectricLayer {
+                response,
+                thickness_m: WIDTH,
+            }],
+        )
+        .unwrap();
+        let owner = QuasiSteadyFilmHeating::try_new_with_carrier(
+            &stack,
+            0,
+            &card,
+            "T",
+            &body,
+            GRID,
+            carrier,
+            ThermalInterferenceDrive {
+                source_clock: "original Lorentz oscillator",
+                mean: &lines[..2],
+                factors: &factors,
+            },
+            AngularSpectrumHeatVolumeQuadrature {
+                transverse: AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell,
+                ..volume(&nodes)
+            },
+            limits(),
+            || false,
+        )
+        .unwrap();
+        let cold = owner
+            .heat_load(owner.initial_state(Dd::ZERO, 0.0).unwrap(), || false)
+            .unwrap();
+        let hot = owner
+            .heat_load(owner.initial_state(Dd::ZERO, 20.0 * CP).unwrap(), || false)
+            .unwrap();
+        assert_eq!(hot.response().material(), warm.material());
+        assert_eq!(cold.response().material(), &material);
+        if let DielectricResponse::LorentzWithOhmic { dielectric, conductor } = hot.response() {
+            assert_eq!(dielectric.material(), conductor.material());
+        }
+        // Independent elimination of Pddot + gamma Pdot + omega0² P
+        // = Delta_epsilon omega0² E. Damping heat is gamma Pdot²/(Delta omega0²).
+        // Inertial/restoring storage and net electromagnetic work are not heat.
+        let omega0: f64 = 2.5;
+        let gamma: f64 = 0.32;
+        let delta: f64 = 0.8;
+        let sigma = if leaky { 0.6 } else { 0.0 };
+        let susceptibility = |omega: f64| {
+            C64::from_re(delta * omega0.powi(2))
+                / C64::new(omega0.powi(2) - omega.powi(2), gamma * omega)
+        };
+        for omega in [2.0, 2.35] {
+            let expected = C64::new(2.2, -sigma / omega) + susceptibility(omega);
+            let actual = hot.response().permittivity_f_m(omega).unwrap();
+            close(actual.re, expected.re, 2e-14);
+            close(actual.im, expected.im, 2e-14);
+        }
+        for time in [0.0, 0.17, 0.71, 1.4] {
+            close(
+                hot.spectrum().evaluate(time).unwrap(),
+                reference_reservoir_power(
+                    &medium,
+                    warm_response,
+                    sigma,
+                    &lines,
+                    &nodes,
+                    carrier,
+                    time,
+                    |omega| C64::new(0.0, omega) * susceptibility(omega),
+                    gamma / (delta * omega0.powi(2)),
+                ),
+                3e-11,
+            );
+        }
+        assert!(
+            (hot.spectrum().evaluate(0.17).unwrap() - cold.spectrum().evaluate(0.17).unwrap())
+                .abs()
+                > 1e-3
+        );
+        assert_eq!(dielectric.material(), &material);
+    }
 }
 
 #[test]

@@ -10348,3 +10348,37 @@ area partition, weak loss/tails, zero arms and refusal/retry. The combined
 source run passes all 24 shared-kernel, original felt/Prony and adapter groups.
 Full reference rendering and engine-piano integration remain unrun. Generic
 DrivenBody assembly and the remaining felt-adapter unification remain open.
+
+## Temperature-dependent Lorentz refraction in coherent heating
+
+The existing `layered_wave_heating::interference` and
+`spatial_interference::feedback` owners admit original Lorentz polarization,
+with optional independently sourced Ohmic leakage. Each accepted temperature
+refreshes the original complete material selection, preserving the named
+high-frequency permittivity, pole increments, angular frequencies, damping,
+permeability and additional requirements. A combined Lorentz/Ohmic law resolves
+that bundle once and shares the same refreshed snapshot between both laws.
+
+Every frequency rebuilds the original common field stack from those local
+cell states. Two-face illumination, polarization, transverse refraction,
+continuous-footprint interference and real/proper source factors retain the
+native electromagnetic owners. The original inertial reservoirs provide
+positive damping heat `gamma Pdot²/(Delta_epsilon omega0²)`; their reversible
+storage and independent Ohmic work remain separate. Native spectral products
+retain frequency cross terms rather than substituting per-line mean losses.
+
+The applied and endpoint source bundles travel with the original native
+thermal transaction. The existing source-domain, frequency-response,
+temperature-excursion, work/storage and cancellation gates remain authoritative;
+a late refusal publishes neither heat history nor phase-clock advancement.
+This remains an explicit quasi-steady split with settled periodic reservoirs
+held over each interval. It does not transport transient polarization or
+parameter work across a temperature refresh, infer causal oscillators from
+optical tables, move geometry or resolve lateral heat transport.
+
+Three focused G1/G3/G4 regressions specify independent oscillator-ODE heat
+under mixed coherent illumination, nonuniform native-cell refraction and
+caloric continuation, and atomic late Lorentz-domain refusal. Native Rust
+execution is pending because the recovered environment has no Rust toolchain;
+an independent scalar field/heat calculation and source checks are bounded
+implementation evidence, not a runtime or measured-material validation claim.

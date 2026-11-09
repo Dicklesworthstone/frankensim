@@ -13,8 +13,12 @@ use fs_couple::layered_wave_heating::{
 use fs_em::plane_wave::angular_spectrum::{
     AngularSpectrumFactorStatistics, AngularSpectrumIlluminationLimits,
 };
+use fs_material::field_storage::dielectric::lorentz::{
+    LorentzPoleProperties, ResolvedLorentzMaterial,
+};
+use fs_qty::semantic::FrequencyConvention;
 
-fn temperature_card(upper: f64) -> MaterialCard {
+fn temperature_card(upper: f64, lorentz: bool) -> MaterialCard {
     let base = card("temperature-dependent causal film", 2.7, 0.6);
     let mut claims = ClaimSet::new();
     for (_, claim) in base.claims().claims_ordered() {
@@ -59,6 +63,53 @@ fn temperature_card(upper: f64) -> MaterialCard {
                 },
             })
             .unwrap();
+    }
+    if lorentz {
+        for (name, q, values) in [
+            (
+                "omega0",
+                quantity(QuantityKind::Frequency(FrequencyConvention::Angular)),
+                [1.35 * OMEGA, 1.05 * OMEGA],
+            ),
+            (
+                "gamma",
+                QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0])),
+                [0.12 * OMEGA, 0.25 * OMEGA],
+            ),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(name, q),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(280.0, values[0]), (360.0, values[1])],
+                        dims: q.dims(),
+                    },
+                    validity: ValidityDomain::unconstrained()
+                        .with_quantity(
+                            "T",
+                            quantity(QuantityKind::AbsoluteTemperature),
+                            280.0,
+                            upper,
+                        )
+                        .with_quantity(
+                            "pressure",
+                            quantity(QuantityKind::Pressure),
+                            90_000.0,
+                            200_000.0,
+                        ),
+                    interpolation: InterpolationPolicy::LinearInside,
+                    uncertainty: UncertaintyModel::Unstated,
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: "authored spatial Lorentz feedback oracle".into(),
+                        license: "test-only".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
     }
     MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
 }
@@ -136,14 +187,50 @@ fn feedback_limits() -> SpatialInterferenceFeedbackLimits {
     }
 }
 
-fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
+fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
     let outside = state(&card("feedback-exterior", 1.0, 0.0), false, 100_000.0);
-    let source_card = temperature_card(if endpoint_domain_refusal {
-        300.000001
-    } else {
-        360.0
-    });
+    let source_card = temperature_card(
+        if endpoint_domain_refusal { 300.000001 } else { 360.0 },
+        lorentz,
+    );
     let source = debye(&source_card, 100_000.0);
+    let resonant = lorentz.then(|| {
+        let material = source
+            .material()
+            .with_additional_requirements(
+                &source_card,
+                &[
+                    ScalarPropertyRequirement::try_with_quantity(
+                        "omega0",
+                        quantity(QuantityKind::Frequency(FrequencyConvention::Angular)),
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                    .unwrap(),
+                    ScalarPropertyRequirement::try_new(
+                        "gamma",
+                        Dims([0, 0, -1, 0, 0, 0]),
+                        ScalarAdmissibility::NonNegative,
+                    )
+                    .unwrap(),
+                ],
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+        ResolvedLorentzMaterial::try_from_material(
+            material,
+            EPS_NAME,
+            &[LorentzPoleProperties {
+                permittivity_increment: "delta".into(),
+                angular_frequency: "omega0".into(),
+                damping_rate: "gamma".into(),
+            }],
+        )
+        .unwrap()
+    });
+    let response = resonant
+        .as_ref()
+        .map(DielectricResponse::Lorentz)
+        .unwrap_or(DielectricResponse::Debye(&source));
     let width = 0.6 / k();
     let native = body(&[&source_card], &[width], &[2], 0.2);
     let laws = native.thermal_laws(false).unwrap();
@@ -153,7 +240,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
         DielectricResponse::Lossless(&outside),
         DielectricResponse::Lossless(&outside),
         OMEGA,
-        &[DielectricResponse::Debye(&source)],
+        &[response],
         || false,
     )
     .unwrap();
@@ -337,13 +424,14 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
             .any(|((_, warm), (_, held))| (warm - held).abs() > 1e-5 * warm.abs())
     );
     for (index, &temperature) in result.applied_temperatures_k.iter().enumerate() {
-        let reference = source
+        let reference = response
+            .material()
             .at_query_point(&source_card, &at(temperature, 100_000.0))
             .unwrap();
         let applied = result.applied_response(index).unwrap();
         assert_eq!(
             applied.material().identity(),
-            reference.material().identity()
+            reference.identity()
         );
         assert_eq!(applied.material().state_coordinate("T"), Some(temperature));
         assert_eq!(
@@ -352,9 +440,25 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
         );
         near(
             fs_material::field_storage::linear_magnetic_permeability(applied.material()).unwrap(),
-            fs_material::field_storage::linear_magnetic_permeability(reference.material()).unwrap(),
+            fs_material::field_storage::linear_magnetic_permeability(&reference).unwrap(),
             1e-20,
         );
+        if lorentz {
+            // Original authored coefficients, independently eliminated at each
+            // accepted local temperature; neither a layer mean nor T0 is used.
+            let fraction = (temperature - 280.0) / 80.0;
+            let omega0 = (1.35 - 0.3 * fraction) * OMEGA;
+            let gamma = (0.12 + 0.13 * fraction) * OMEGA;
+            let delta = (0.4 + 1.2 * fraction) * E;
+            for omega in [OMEGA, OMEGA + 50.0] {
+                let expected = C64::from_re(2.1 * E)
+                    + C64::from_re(delta * omega0.powi(2))
+                        / C64::new(omega0.powi(2) - omega.powi(2), gamma * omega);
+                let epsilon = applied.permittivity_f_m(omega).unwrap();
+                near(epsilon.re, expected.re, 1e-24);
+                near(epsilon.im, expected.im, 1e-24);
+            }
+        }
         let endpoint = result
             .step
             .state
@@ -469,15 +573,25 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
 
 #[test]
 fn nonuniform_native_cells_refresh_causal_sources_without_resetting_mixed_bank_clocks() {
-    exercise(false, [0.0; 2]);
+    exercise(false, [0.0; 2], false);
 }
 
 #[test]
 fn off_axis_envelopes_heat_finite_cells_and_keep_their_carrier_through_temperature_rebuilds() {
-    exercise(false, [0.65, -0.4]);
+    exercise(false, [0.65, -0.4], false);
 }
 
 #[test]
 fn endpoint_optical_domain_refusal_leaves_the_original_cell_history_unchanged() {
-    exercise(true, [0.0; 2]);
+    exercise(true, [0.0; 2], false);
+}
+
+#[test]
+fn local_lorentz_resonances_refract_and_heat_coherent_fields_on_the_native_thermal_clock() {
+    exercise(false, [0.65, -0.4], true);
+}
+
+#[test]
+fn late_lorentz_source_refusal_preserves_both_native_cells_and_the_original_phase_clock() {
+    exercise(true, [0.0; 2], true);
 }

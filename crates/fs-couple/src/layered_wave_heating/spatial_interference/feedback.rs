@@ -1,6 +1,6 @@
 //! Explicit temperature feedback for coherent finite-footprint cell heating.
 //!
-//! Every original cell refreshes its own complete Debye/Ohmic material bundle
+//! Every original cell refreshes its complete Debye, Lorentz or Ohmic bundle
 //! at its accepted native temperature. The original mean and real/proper factor
 //! banks then rebuild one common two-face field across ALL those cells at each
 //! authored frequency. Spatial/frequency interference is never replaced by
