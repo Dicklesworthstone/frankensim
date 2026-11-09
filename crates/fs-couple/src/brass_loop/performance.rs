@@ -24,6 +24,10 @@
 //! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
 //! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
 //! lip_rim_stop inelastic|elastic                           optional; the lip gap may not exceed the first bore cone's diameter (two limit cases of an unmeasured restitution)
+//! player_tract mouth <tau_s>                               optional (or `player_tract lung`); a player's tract upstream of the lip, the card's pressure measured in the mouth or at the lung
+//! player_tract_section <length_m> <area_m2>                1 to 256 rows beside `player_tract`, lip side first, each a cylinder of that area (the glottis a section of its own)
+//! player_tract_wall <surface_density> <stiffness> <resistance>  optional; every tract tube's locally reacting wall (rigid without it)
+//! player_airway weibel-1963 saab-2021-table-1-B <generations>   optional; the first generations of Weibel's tree beyond the last section
 //! lip <mass_kg> <stiffness_n_m> <damping_n_s_m> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_source <free text to end of line>      required provenance sentence
 //! cup_volume_m3 <volume>
@@ -149,6 +153,14 @@
 //! restitution no source measures, reported side by side and neither called measured. Linear loop only; refused with `bore nonlinear`
 //! and with `lip_response_mode2`. A file without the record is bit-identical to one written before it existed.
 //!
+//! `player_tract` puts a player's tract upstream of the lip ([`super::BrassVoice::with_player_tract`], and [`super::player_tract`]
+//! for what it is): the rows are the reed side's, word for word. The tract is a Thevenin source in series with the aperture; with
+//! `mouth` the airway's DC resistance comes out at DC only through a one-pole of time constant `tau_s` on the flow (a numerical
+//! regulation constant with no default, not a measurement) and the voice refuses a tract whose mouth-pressure load is active on
+//! any bin; with `lung` the card's pressure is the source at the far end. The airway takes the bore gas and its own default
+//! convergence ladder. Linear loop only: refused with `bore nonlinear`, `jet_noise` and `constriction_noise`. The rows may stand in
+//! any order; `player_tract_section` rows keep their file order. A file without the rows is bit-identical to one written before.
+//!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
 //! stated end radii over the stated length, expanded into `pieces` cones whose
 //! end radii lie exactly on that curve (the piecewise-conic image every
@@ -181,8 +193,10 @@ use fs_math::det;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 use fs_vfit::discretize::DelayedFilter;
 
+use super::player_tract::TractPressure;
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland, LipMode2};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::upstream_airway::{AirwayChain, AirwaySection, WEIBEL_SAAB_2021_TABLE_1_B_MM};
 use crate::brass_sequence::mouth::{MAX_MOUTH_FLOW_TAPS, MouthFlowConfig, modal_flow_lines, plane_flow_line};
 use crate::driving_point::LineLadder;
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
@@ -309,6 +323,9 @@ fn minimum_resistance_ratio(kernel: &fs_duct::modal::MouthKernel) -> f64 {
 #[cfg(feature = "nonlinear-brass")]
 const MOUTH_LOAD_MINIMUM_RESISTANCE_RATIO: f64 = -1.0e-3;
 
+/// `player_tract_section` rows: a measured area function, its glottis among them, with room to spare (the reed side's bound).
+const MAX_PLAYER_TRACT_SECTIONS: usize = 256;
+
 const NONLINEAR_FEATURE: &str = "bore nonlinear needs fs-couple's nonlinear-brass feature (build music_render with --features nonlinear-brass)";
 
 /// A parsed, validated, not yet realized performance.
@@ -345,6 +362,8 @@ pub struct LipDescription {
     lip_mode2: Option<LipMode2>,
     lip_area_exponent: Option<f64>,
     lip_rim_stop: Option<super::RimStopKind>,
+    /// The optional player's tract upstream of the lip: its airway chain (lip side first) and where the card's pressure acts.
+    player_tract: Option<(AirwayChain, TractPressure)>,
 }
 
 struct Fields<'a> {
@@ -549,6 +568,10 @@ impl LipDescription {
         let mut lip_mode2_raw: Option<(f64, f64, f64)> = None;
         let mut lip_area_exponent_raw: Option<f64> = None;
         let mut lip_rim_stop_raw: Option<super::RimStopKind> = None;
+        let mut player_tract_raw: Option<TractPressure> = None;
+        let mut tract_sections: Vec<(f64, f64)> = Vec::new();
+        let mut tract_wall: Option<fs_phs::WallPin> = None;
+        let mut tract_generations: Option<usize> = None;
         let mut lip_source: Option<String> = None;
         let mut bore_source: Option<String> = None;
         let mut cup: Option<f64> = None;
@@ -658,6 +681,41 @@ impl LipDescription {
                         _ => return f.err("expected inelastic or elastic (the two limit cases of an unmeasured restitution)"),
                     };
                     once(&mut lip_rim_stop_raw, kind, &f)?;
+                    f.finish()?;
+                }
+                "player_tract" => {
+                    let pressure = match f.word()? {
+                        "mouth" => TractPressure::Mouth { tau_s: f.positive()? },
+                        "lung" => TractPressure::Lung,
+                        _ => return f.err("expected `mouth <tau_s>` or `lung`"),
+                    };
+                    once(&mut player_tract_raw, pressure, &f)?;
+                    f.finish()?;
+                }
+                "player_tract_section" => {
+                    let (length_m, area_m2) = (f.positive()?, f.positive()?);
+                    if tract_sections.len() == MAX_PLAYER_TRACT_SECTIONS {
+                        return f.err("a player tract takes at most 256 sections");
+                    }
+                    tract_sections.push((length_m, area_m2));
+                    f.finish()?;
+                }
+                "player_tract_wall" => {
+                    let surface_density = f.positive()?;
+                    let (stiffness_per_area, resistance) = (f.number()?, f.number()?);
+                    if stiffness_per_area < 0.0 || resistance < 0.0 {
+                        return f.err("needs a nonnegative stiffness and resistance");
+                    }
+                    let pin = fs_phs::WallPin { surface_density, stiffness_per_area, resistance };
+                    once(&mut tract_wall, pin, &f)?;
+                    f.finish()?;
+                }
+                "player_airway" => {
+                    if f.word()? != "weibel-1963" || f.word()? != "saab-2021-table-1-B" {
+                        return f.err("takes `weibel-1963 saab-2021-table-1-B <generations>`");
+                    }
+                    let generations = f.count(WEIBEL_SAAB_2021_TABLE_1_B_MM.len() as u64)? as usize;
+                    once(&mut tract_generations, generations, &f)?;
                     f.finish()?;
                 }
                 "lip" => {
@@ -960,6 +1018,40 @@ impl LipDescription {
             }
             Some(kind) => Some(kind),
         };
+        // `player_tract` and its rows (module doc): the chain is built here, so a malformed tract refuses at the parse.
+        let player_tract = match player_tract_raw {
+            None => {
+                if !tract_sections.is_empty() || tract_wall.is_some() || tract_generations.is_some() {
+                    return Err("player_tract_section, player_tract_wall and player_airway need a player_tract row".into());
+                }
+                None
+            }
+            Some(pressure) => {
+                if tract_sections.is_empty() {
+                    return Err("player_tract needs at least one player_tract_section row".into());
+                }
+                if nonlinear.is_some() {
+                    return Err("player_tract is on the linear bore only and is refused with bore nonlinear".into());
+                }
+                if jet_noise.is_some() || constriction_noise.is_some() {
+                    return Err("player_tract is not combined with jet_noise or constriction_noise".into());
+                }
+                let tubes = tract_sections
+                    .iter()
+                    .map(|&(length_m, area_m2)| AirwaySection::from_area(length_m, area_m2, 1, tract_wall))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| "player_tract sections need positive finite lengths and areas".to_string())?;
+                let chain = AirwayChain::new(tubes, LossModel::Bessel)
+                    .map_err(|_| "player_tract sections did not form an airway".to_string())?;
+                let chain = match tract_generations {
+                    Some(generations) => AirwayChain::weibel_saab_2021_b(generations, tract_wall)
+                        .and_then(|tree| chain.ahead_of(&tree))
+                        .map_err(|_| "player_airway did not join the tract".to_string())?,
+                    None => chain,
+                };
+                Some((chain, pressure))
+            }
+        };
         let nonlinear = match nonlinear {
             None => None,
             Some(_) if !cfg!(feature = "nonlinear-brass") => return Err(NONLINEAR_FEATURE.into()),
@@ -1041,7 +1133,20 @@ impl LipDescription {
             lip_mode2,
             lip_area_exponent,
             lip_rim_stop,
+            player_tract,
         })
+    }
+
+    /// Where the opt-in player tract's card pressure acts, if the file declared one ([`super::BrassVoice::with_player_tract`]).
+    #[must_use]
+    pub fn player_tract_pressure(&self) -> Option<TractPressure> {
+        self.player_tract.as_ref().map(|(_, pressure)| *pressure)
+    }
+
+    /// The opt-in player tract's airway chain (lip side first), if the file declared one.
+    #[must_use]
+    pub fn player_tract_chain(&self) -> Option<&AirwayChain> {
+        self.player_tract.as_ref().map(|(chain, _)| chain)
     }
 
     /// The opt-in lip jet-noise record, if the file declared one ([`crate::turbulence_noise::LipJetNoise`]).
@@ -1295,6 +1400,12 @@ impl LipDescription {
             Some(card) => voice
                 .with_constriction_noise(card)
                 .map_err(|e| format!("constriction_noise refused: {e}"))?,
+            None => voice,
+        };
+        let voice = match &self.player_tract {
+            Some((chain, pressure)) => voice
+                .with_player_tract(chain, *pressure, bore_state, &LineLadder::default())
+                .map_err(|e| format!("player_tract refused: {e}"))?,
             None => voice,
         };
         let line = voice
@@ -2330,6 +2441,105 @@ mod tests {
         );
         assert_ne!(a.input_hash, b.input_hash);
         assert_eq!(a.lip.mass_kg.to_bits(), b.lip.mass_kg.to_bits(), "the lip's own motion is untouched");
+    }
+
+    // The digitized LOW tract of a trumpeter (Kaburagi et al. 2011, Fig. 3, Eb4) as card rows: 40 equal sections from the lips, then the
+    // printed glottis. A tract invented for this test (five sections) was refused by the airway's own passivity check, so the card test
+    // takes numbers the airway realizes.
+    const TRACT_ROWS: &str = "player_tract_section 0.00435 1.42e-05\n\
+        player_tract_section 0.00435 6.79e-05\n\
+        player_tract_section 0.00435 0.0004216\n\
+        player_tract_section 0.00435 0.0005289\n\
+        player_tract_section 0.00435 0.0004784\n\
+        player_tract_section 0.00435 0.0003205\n\
+        player_tract_section 0.00435 0.0003016\n\
+        player_tract_section 0.00435 0.0002763\n\
+        player_tract_section 0.00435 0.0002511\n\
+        player_tract_section 0.00435 0.0002574\n\
+        player_tract_section 0.00435 0.0001658\n\
+        player_tract_section 0.00435 0.0001089\n\
+        player_tract_section 0.00435 5.84e-05\n\
+        player_tract_section 0.00435 4.58e-05\n\
+        player_tract_section 0.00435 3.63e-05\n\
+        player_tract_section 0.00435 6.79e-05\n\
+        player_tract_section 0.00435 5.84e-05\n\
+        player_tract_section 0.00435 4.89e-05\n\
+        player_tract_section 0.00435 4.26e-05\n\
+        player_tract_section 0.00435 0.0001279\n\
+        player_tract_section 0.00435 9.63e-05\n\
+        player_tract_section 0.00435 9.95e-05\n\
+        player_tract_section 0.00435 0.0001153\n\
+        player_tract_section 0.00435 0.0001626\n\
+        player_tract_section 0.00435 0.0002068\n\
+        player_tract_section 0.00435 0.0003458\n\
+        player_tract_section 0.00435 0.0003047\n\
+        player_tract_section 0.00435 0.0002858\n\
+        player_tract_section 0.00435 0.0002732\n\
+        player_tract_section 0.00435 0.0002984\n\
+        player_tract_section 0.00435 0.0004626\n\
+        player_tract_section 0.00435 0.0004342\n\
+        player_tract_section 0.00435 0.0003995\n\
+        player_tract_section 0.00435 0.0002037\n\
+        player_tract_section 0.00435 0.0001247\n\
+        player_tract_section 0.00435 9.95e-05\n\
+        player_tract_section 0.00435 7.74e-05\n\
+        player_tract_section 0.00435 9.32e-05\n\
+        player_tract_section 0.00435 9.95e-05\n\
+        player_tract_section 0.00435 0.0001216\n\
+        player_tract_section 1.2e-3 1.4e-5\n";
+
+    #[test]
+    fn player_tract_parses_is_refused_by_name_and_reaches_the_radiated_pressure() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        assert_eq!(parse("").expect("parses").player_tract_pressure(), None);
+        // The rows stand in any order: the sections here come before the `player_tract` row.
+        let ok = parse(&format!("{TRACT_ROWS}player_tract mouth 0.02\n")).expect("parses");
+        assert_eq!(ok.player_tract_pressure(), Some(TractPressure::Mouth { tau_s: 0.02 }));
+        assert_eq!(ok.player_tract_chain().expect("a chain").sections().len(), 41);
+        assert_eq!(
+            parse(&format!("player_tract lung\n{TRACT_ROWS}")).expect("parses").player_tract_pressure(),
+            Some(TractPressure::Lung)
+        );
+        let one = "player_tract lung\nplayer_tract_section 0.01 0.0001\n";
+        for (extra, needle) in [
+            ("player_tract\n".to_string(), "missing field"),
+            ("player_tract mouth\n".to_string(), "missing field"),
+            ("player_tract mouth 0\n".to_string(), "expected a positive number"),
+            ("player_tract mouth 0.02 1\n".to_string(), "unexpected extra field"),
+            ("player_tract sideways\n".to_string(), "expected `mouth <tau_s>` or `lung`"),
+            ("player_tract lung\nplayer_tract lung\n".to_string(), "may only appear once"),
+            ("player_tract lung\n".to_string(), "at least one player_tract_section"),
+            ("player_tract_section 0.01 0.0001\n".to_string(), "need a player_tract row"),
+            ("player_tract_wall 1 1 1\n".to_string(), "need a player_tract row"),
+            ("player_airway weibel-1963 saab-2021-table-1-B 3\n".to_string(), "need a player_tract row"),
+            ("player_tract lung\nplayer_tract_section 0.01\n".to_string(), "missing field"),
+            ("player_tract lung\nplayer_tract_section 0.01 -1\n".to_string(), "expected a positive number"),
+            ("player_tract lung\nplayer_tract_section 0.01 0.0001 5\n".to_string(), "unexpected extra field"),
+            (format!("{one}player_tract_wall 1 -1 0\n"), "nonnegative"),
+            (format!("{one}player_tract_wall 1 1 1\nplayer_tract_wall 1 1 1\n"), "may only appear once"),
+            (format!("{one}player_airway weibel-1963 other 3\n"), "takes `weibel-1963"),
+            (format!("{one}player_airway weibel-1963 saab-2021-table-1-B 0\n"), "count outside its admitted range"),
+            (format!("{one}player_airway weibel-1963 saab-2021-table-1-B 25\n"), "count outside its admitted range"),
+            (format!("{one}jet_noise 7 1.3e-3 0.045 0.115 1700\n"), "not combined with jet_noise"),
+            (format!("{one}constriction_noise 7 8.4e-3\n"), "not combined with jet_noise or constriction_noise"),
+        ] {
+            let error = parse(&extra).expect_err(&extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        // The rendered pressure: the same file renders the same bits, the tract reaches the radiated pressure, and a file
+        // without the rows is the original input (the hash covers the file; the lip's own numbers are untouched).
+        let build = |extra: &str| pressure(&LipDescription::from_bytes(fixture(extra).as_bytes()).expect("parses"));
+        let plain = build("");
+        assert!(plain.iter().zip(&build("")).all(|(a, b)| a.to_bits() == b.to_bits()), "the same file must render the same bits");
+        let lung = build(&format!("player_tract lung\n{TRACT_ROWS}"));
+        assert!(lung.iter().all(|x| x.is_finite()));
+        assert_ne!(plain, lung, "the tract must reach the radiated pressure");
+        let (a, b) = (
+            LipDescription::from_bytes(fixture("").as_bytes()).expect("parses"),
+            LipDescription::from_bytes(fixture(&format!("player_tract lung\n{TRACT_ROWS}")).as_bytes()).expect("parses"),
+        );
+        assert_ne!(a.input_hash, b.input_hash);
+        assert_eq!(a.lip.mass_kg.to_bits(), b.lip.mass_kg.to_bits(), "the lip's own motion numbers are untouched");
     }
 
     #[test]

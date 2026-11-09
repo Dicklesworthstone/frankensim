@@ -46,6 +46,10 @@ pub mod performance;
 #[cfg(feature = "nonlinear-brass")]
 pub mod nonlinear;
 
+/// The player's tract upstream of the lip (opt-in): a measured airway between the blowing pressure and the aperture.
+pub mod player_tract;
+use player_tract::{LipTract, TractPressure};
+
 mod tension;
 use tension::{TensionWork, spring_work_j};
 
@@ -226,6 +230,8 @@ pub struct BrassVoice {
     /// Dynamic viscosity of the ambient gas [Pa s] (only the opt-in jet noise's Reynolds gate reads it).
     mu: f64,
     dt: f64,
+    /// The voice's clock [Hz]; `dt` is its reciprocal (the opt-in player tract is realized on it).
+    rate_hz: u32,
     block_index: u64,
     diags: Vec<BrassBlockDiag>,
     /// Opt-in lip jet noise ([`LipJetNoise`]: Stevens' form with Verge's constant, an extrapolation); `None` adds nothing.
@@ -239,6 +245,9 @@ pub struct BrassVoice {
     area_exponent: f64,
     /// The opt-in rim stop ([`BrassVoice::with_lip_rim_stop`]); `None` runs exactly the original loop.
     rim_stop: Option<RimStop>,
+    /// The opt-in player's tract upstream of the lip ([`BrassVoice::with_player_tract`]); `None` is the ideal pressure source
+    /// the loop was built on, bit for bit.
+    player_tract: Option<LipTract>,
 }
 
 impl BrassVoice {
@@ -296,6 +305,7 @@ impl BrassVoice {
             rho: gas.density,
             mu: gas.dynamic_viscosity,
             dt: 1.0 / f64::from(config.sample_rate_hz),
+            rate_hz: config.sample_rate_hz,
             block_index: 0,
             diags: Vec::new(),
             jet_noise: None,
@@ -303,6 +313,7 @@ impl BrassVoice {
             lip2: None,
             area_exponent: 1.0,
             rim_stop: None,
+            player_tract: None,
         })
     }
 
@@ -407,6 +418,39 @@ impl BrassVoice {
     #[must_use]
     pub fn rim_stop_hits(&self) -> Option<u64> {
         self.rim_stop.map(|stop| stop.hits)
+    }
+
+    /// Put a player's tract upstream of the lip before any sample is rendered (module [`player_tract`] says what it is, where
+    /// the card's pressure acts and what the junction does): `chain`, aperture side first, realized in `gas` (the gas the
+    /// bore, cup and lip hold) on the voice's own clock with `ladder`. The tract is a Thevenin source in series with the
+    /// aperture; a mouth pressure's load is read on every positive bin and refused if it is active anywhere. A voice without
+    /// a tract is bit-identical to one built before this existed.
+    ///
+    /// # Errors
+    /// The reason, when the voice has advanced or already has a tract, carries the lip jet noise or the constriction noise
+    /// (their sources read the pressure drop of the ideal-source drive), or the tract is refused (the airway's own
+    /// refusals, a bad `tau`, a negative passivity margin).
+    pub fn with_player_tract(
+        mut self,
+        chain: &crate::upstream_airway::AirwayChain,
+        pressure: TractPressure,
+        gas: &GasState,
+        ladder: &crate::driving_point::LineLadder,
+    ) -> Result<BrassVoice, String> {
+        if self.block_index != 0 || self.player_tract.is_some() {
+            return Err("a player tract needs a voice that has not advanced and has no tract yet".to_string());
+        }
+        if self.jet_noise.is_some() || self.constriction_noise.is_some() {
+            return Err("a player tract is not combined with jet_noise or constriction_noise".to_string());
+        }
+        self.player_tract = Some(LipTract::realize(chain, pressure, gas, self.rate_hz, self.dt, ladder)?);
+        Ok(self)
+    }
+
+    /// The player's tract upstream of the lip, if one was set.
+    #[must_use]
+    pub const fn player_tract(&self) -> Option<&LipTract> {
+        self.player_tract.as_ref()
     }
 
     /// The flow aperture `w h (h/H0)^(q-1)` [m^2] for the lip gap `h`; exactly `w h` when the exponent is 1 or the lip is closed.
@@ -680,7 +724,17 @@ impl BrassVoice {
                     drive += noise;
                 }
             }
-            let dp_lip = drive - self.p_bore_prev;
+            // The opt-in player's tract (`player_tract`) is a Thevenin source in series with the aperture: this sample's port is
+            // taken now, the lip force reads its open-circuit pressure against the previous sample's flow, and the flow solve
+            // below takes it in series. Without one `drive` is the ideal source it always was, bit for bit.
+            let tract_port = match self.player_tract.as_mut() {
+                Some(tract) => Some(tract.port(self.blow_pa)?),
+                None => None,
+            };
+            let dp_lip = match (&tract_port, self.player_tract.as_ref()) {
+                (Some(port), Some(tract)) => tract.force_pressure_pa(*port) - self.p_bore_prev,
+                _ => drive - self.p_bore_prev,
+            };
             let force = dp_lip * self.lip.face_area_m2;
             let (displacement, defect) = self.step_lip(force, dt)?;
             worst_defect = worst_defect.max(defect);
@@ -706,8 +760,12 @@ impl BrassVoice {
             let flow = if wh <= 0.0 {
                 0.0
             } else {
-                let b = 2.0 * wh * wh / (self.rho * a);
-                let head = drive - k_off;
+                // With a tract in series `1 / a` becomes `1 / a + Z` and the head is its open-circuit pressure less `k`: the same
+                // quadratic. Without one these are the original operands.
+                let (b, head) = match &tract_port {
+                    None => (2.0 * wh * wh / (self.rho * a), drive - k_off),
+                    Some(port) => (2.0 * wh * wh * (1.0 / a + port.impedance) / self.rho, port.open_circuit_pa - k_off),
+                };
                 if head >= 0.0 {
                     let c = 2.0 * wh * wh * head / self.rho;
                     -0.5 * b + (0.25 * b * b + c).sqrt()
@@ -716,7 +774,9 @@ impl BrassVoice {
                     0.5 * b - (0.25 * b * b + c).sqrt()
                 }
             };
-            blow_work += drive * flow * dt;
+            if tract_port.is_none() {
+                blow_work += drive * flow * dt;
+            }
             if let Some(source) = self.jet_noise.as_mut() {
                 source.record(flow, gap);
             }
@@ -731,6 +791,11 @@ impl BrassVoice {
                 zc0,
                 dt,
             );
+            // The tract takes the aperture flow (the flow the junction took) and reports the mouth pressure the work is done at.
+            if let (Some(port), Some(tract)) = (tract_port, self.player_tract.as_mut()) {
+                let mouth_pa = tract.commit(port, flow)?;
+                blow_work += mouth_pa * flow * dt;
+            }
             let _ = self.bank.push(p_plus)?;
             if let Some(trace) = outgoing.as_deref_mut() {
                 trace[index] = p_plus;
