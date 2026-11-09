@@ -44,6 +44,21 @@ pub struct FiniteNortonCreep {
 }
 
 impl FiniteNortonCreep {
+    /// Internal access to the complete native kinetic owner, never a
+    /// rate-independent material conversion.
+    pub(in crate::plastic::finite) fn mixed_native(&self) -> &FiniteOverstressJ2 {
+        &self.native
+    }
+
+    pub(in crate::plastic::finite) fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        include_bulk: bool,
+    ) -> Result<super::ReturnMap, FiniteJ2Error> {
+        self.native.return_map_selected(f, old, include_bulk)
+    }
+
     /// Admit independent elastic moduli, finite-strain bounds, physical Norton
     /// kinetics and a strictly positive finite physical duration.
     pub fn new(

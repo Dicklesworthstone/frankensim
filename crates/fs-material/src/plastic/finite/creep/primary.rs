@@ -114,8 +114,9 @@ pub(in crate::plastic::finite) fn standalone(
     primary: StrainHardeningCreep,
     f: &[f64; 9],
     old: &FiniteJ2State,
+    include_bulk: bool,
 ) -> Result<ReturnMap, FiniteJ2Error> {
-    standalone_with_memory(law, primary, f, old, old.alpha)
+    standalone_with_memory(law, primary, f, old, old.alpha, include_bulk)
 }
 
 // Recovery may use a distinct kinetic memory. The original permanent metric
@@ -126,6 +127,7 @@ pub(in crate::plastic::finite) fn standalone_with_memory(
     f: &[f64; 9],
     old: &FiniteJ2State,
     kinetic_memory: f64,
+    include_bulk: bool,
 ) -> Result<ReturnMap, FiniteJ2Error> {
     if !kinetic_memory.is_finite() || kinetic_memory < 0.0 {
         return Err(FiniteJ2Error::State(
@@ -151,7 +153,7 @@ pub(in crate::plastic::finite) fn standalone_with_memory(
     let (creep, q, scale, correction) = relaxation(law, primary, q_trial, kinetic_memory)?;
     let heat = q * creep;
     let potential = rate_potential(law, primary, kinetic_memory, creep, q)?;
-    backbone.finish_return(
+    backbone.finish_return_selected(
         f,
         old,
         trial,
@@ -167,6 +169,7 @@ pub(in crate::plastic::finite) fn standalone_with_memory(
             primary_potential: 0.0,
             rate_potential: potential,
         },
+        include_bulk,
     )
 }
 

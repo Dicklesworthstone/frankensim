@@ -207,10 +207,20 @@ impl FiniteOverstressJ2 {
         f: &[f64; 9],
         old: &FiniteJ2State,
     ) -> Result<super::ReturnMap, FiniteJ2Error> {
+        self.return_map_selected(f, old, true)
+    }
+
+    pub(in crate::plastic::finite) fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        include_bulk: bool,
+    ) -> Result<super::ReturnMap, FiniteJ2Error> {
         if let Some(primary) = self.active_primary() {
-            super::creep::primary::standalone(self, primary, f, old)
+            super::creep::primary::standalone(self, primary, f, old, include_bulk)
         } else {
-            self.backbone.return_map_with_rate(f, old, Some(self))
+            self.backbone
+                .return_map_selected(f, old, Some(self), include_bulk)
         }
     }
 
@@ -389,10 +399,20 @@ pub(super) fn validate_viscous_committed(
     state: &FiniteJ2State,
     yield_tolerance_pa: f64,
 ) -> Result<(), FiniteJ2Error> {
+    validate_viscous_committed_selected(backbone, f, state, yield_tolerance_pa, true)
+}
+
+pub(in crate::plastic::finite) fn validate_viscous_committed_selected(
+    backbone: &FiniteJ2,
+    f: &[f64; 9],
+    state: &FiniteJ2State,
+    yield_tolerance_pa: f64,
+    include_bulk: bool,
+) -> Result<(), FiniteJ2Error> {
     if backbone.maximum_creep_alpha.is_some() {
         // An inspection backbone from the combined law still requires
         // equilibrium plastic yield; wrapping it cannot relax that gate.
-        return backbone.validate_committed(f, state, yield_tolerance_pa);
+        return backbone.validate_committed_selected(f, state, yield_tolerance_pa, include_bulk);
     }
     if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
         return Err(FiniteJ2Error::Parameters(
@@ -401,11 +421,17 @@ pub(super) fn validate_viscous_committed(
     }
     let endpoint = backbone.elastic_endpoint(f, state)?;
     backbone.check_elastic_domain(endpoint.log_j, &endpoint.deviator)?;
-    backbone.energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
+    if include_bulk {
+        backbone.energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
+    } else {
+        backbone.remainder_energy(&endpoint.deviator, state.alpha)?;
+    }
     let p = backbone.parameters();
     let mut tau = endpoint.deviator.map(|value| 2.0 * p.shear_modulus_pa * value);
-    for i in [0, 4, 8] {
-        tau[i] += p.bulk_modulus_pa * endpoint.log_j;
+    if include_bulk {
+        for i in [0, 4, 8] {
+            tau[i] += p.bulk_modulus_pa * endpoint.log_j;
+        }
     }
     let inverse_transpose = super::transpose(&super::inverse(f, endpoint.jacobian)?);
     let piola = super::multiply(&tau, &inverse_transpose);

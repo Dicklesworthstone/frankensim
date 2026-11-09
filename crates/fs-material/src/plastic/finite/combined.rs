@@ -120,6 +120,15 @@ impl FiniteNortonJ2 {
         self.return_map_with_creep_memory(f, old, old.creep_alpha)
     }
 
+    pub(in crate::plastic::finite) fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        include_bulk: bool,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
+        self.return_map_with_creep_memory_selected(f, old, old.creep_alpha, include_bulk)
+    }
+
     /// The recovery owner supplies kinetic memory independently of both
     /// permanent paths. Only the primary scalar law sees this override; the
     /// original history still owns metric reconstruction and energetic alpha.
@@ -128,6 +137,16 @@ impl FiniteNortonJ2 {
         f: &[f64; 9],
         old: &FiniteJ2State,
         kinetic_memory: f64,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
+        self.return_map_with_creep_memory_selected(f, old, kinetic_memory, true)
+    }
+
+    pub(in crate::plastic::finite) fn return_map_with_creep_memory_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        kinetic_memory: f64,
+        include_bulk: bool,
     ) -> Result<ReturnMap, FiniteJ2Error> {
         let backbone = self.backbone();
         let trial = backbone.elastic_endpoint(f, old)?;
@@ -146,7 +165,7 @@ impl FiniteNortonJ2 {
             ));
         }
         let radial = self.radial_return(q_trial, old.alpha, kinetic_memory)?;
-        backbone.finish_return(f, old, trial, q_trial, radial)
+        backbone.finish_return_selected(f, old, trial, q_trial, radial, include_bulk)
     }
 
     fn radial_return(

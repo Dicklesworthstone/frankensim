@@ -16,10 +16,16 @@
 //! need not equal pressure-reconstructed `J(p)`.
 //!
 //! Linear, Voce and tabulated energetic hardening retain the same original
-//! owner. This module does not convert a creep/Perzyna inspection backbone into
-//! a rate-independent law or supply thermal, porous or ductile evolution.
+//! owner. Explicit Perzyna, Norton, simultaneous creep/J2 and recovering
+//! primary-creep owners retain their original physical interval and complete
+//! history. Their flow potential and physical heat remain separate. No kinetic
+//! inspection backbone is converted to a rate-independent law; thermal,
+//! porous and ductile evolution remain separate owners.
 
-use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Response, FiniteJ2State, ReturnMap};
+use super::{
+    FiniteInelasticMaterial, FiniteJ2, FiniteJ2Error, FiniteJ2Material, FiniteJ2Response,
+    FiniteJ2State, ReturnMap,
+};
 use crate::MaterialError;
 use crate::hyper::Volumetric;
 use crate::hyper::mixed::{
@@ -27,13 +33,78 @@ use crate::hyper::mixed::{
     RemainderResponse, VolumetricTreatment, combine_response, combine_state, pressure_potential,
 };
 
-/// A borrowed original law and accepted history. Every Newton trial starts
-/// here; observing this value cannot publish a plastic update.
-#[derive(Clone, Copy, Debug)]
-pub struct FrozenFiniteJ2Remainder<'a> {
-    law: &'a FiniteJ2,
-    accepted: &'a FiniteJ2State,
+mod kinetic;
+
+/// Complete native finite history and kinetics admitted to a mixed solid.
+///
+/// The physical interval and history type belong to [`FiniteInelasticMaterial`].
+/// These methods omit only bulk storage/stress/tangent at their native assembly
+/// sites; they do not change the return, flow potential, physical losses or
+/// original material limits. Accepted-state inspection never consumes another
+/// interval. A spatial consumer must retain the complete returned `State` and
+/// require one common physical duration for its kinetic points.
+pub trait MixedFiniteInelasticMaterial: FiniteInelasticMaterial {
+    /// Borrow the complete original owner and accepted memory for Newton trials.
+    fn freeze_remainder<'a>(
+        &'a self,
+        accepted: &'a Self::State,
+    ) -> Result<FrozenFiniteInelasticRemainder<'a, Self>, FiniteJ2Error>;
+
+    /// Native candidate history and heat, with bulk-free stress and energies.
+    fn remainder_response(
+        &self,
+        f: &[f64; 9],
+        old: &Self::State,
+    ) -> Result<FiniteJ2Response<Self::State>, FiniteJ2Error>;
+
+    /// Inspect original deviatoric/hardening storage without advancing history.
+    fn stored_remainder_energy(
+        &self,
+        f: &[f64; 9],
+        state: &Self::State,
+    ) -> Result<f64, FiniteJ2Error>;
+
+    /// Inspect accepted history/domain and the original mechanism's yield gate.
+    /// Perzyna overstress and creep stress are not projected to equilibrium yield.
+    fn validate_remainder_committed(
+        &self,
+        f: &[f64; 9],
+        state: &Self::State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error>;
 }
+
+/// A borrowed complete original law and accepted history. Every Newton trial
+/// starts here; observing this value cannot publish or recover any memory.
+/// The private preparation function retains the actual native kinetics while
+/// sharing the original logarithmic tangent and pressure-dual completion.
+pub struct FrozenFiniteInelasticRemainder<'a, L: FiniteInelasticMaterial + ?Sized> {
+    law: &'a L,
+    accepted: &'a L::State,
+    backbone: &'a FiniteJ2,
+    native_accepted: &'a FiniteJ2State,
+    prepare_return: fn(&L, &[f64; 9], &L::State) -> Result<ReturnMap, FiniteJ2Error>,
+}
+
+impl<L: FiniteInelasticMaterial + ?Sized> Copy for FrozenFiniteInelasticRemainder<'_, L> {}
+impl<L: FiniteInelasticMaterial + ?Sized> Clone for FrozenFiniteInelasticRemainder<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<L: FiniteInelasticMaterial + ?Sized> core::fmt::Debug
+    for FrozenFiniteInelasticRemainder<'_, L>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FrozenFiniteInelasticRemainder")
+            .field("owner", &core::any::type_name::<L>())
+            .field("accepted", self.accepted)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Original rate-independent adapter name, retaining its public compatibility.
+pub type FrozenFiniteJ2Remainder<'a> = FrozenFiniteInelasticRemainder<'a, FiniteJ2>;
 
 fn material_error(error: FiniteJ2Error) -> MaterialError {
     MaterialError::State {
@@ -57,12 +128,7 @@ impl FiniteJ2 {
         &'a self,
         accepted: &'a FiniteJ2State,
     ) -> Result<FrozenFiniteJ2Remainder<'a>, FiniteJ2Error> {
-        self.check_mixed_selection()?;
-        self.validate_history(accepted)?;
-        Ok(FrozenFiniteJ2Remainder {
-            law: self,
-            accepted,
-        })
+        MixedFiniteInelasticMaterial::freeze_remainder(self, accepted)
     }
 
     /// The original return, with bulk-free stress, tangent and energy fields.
@@ -109,12 +175,53 @@ impl FiniteJ2 {
     }
 }
 
-impl FrozenFiniteJ2Remainder<'_> {
+impl<T: FiniteJ2Material + ?Sized> MixedFiniteInelasticMaterial for T {
+    fn freeze_remainder<'a>(
+        &'a self,
+        accepted: &'a Self::State,
+    ) -> Result<FrozenFiniteInelasticRemainder<'a, Self>, FiniteJ2Error> {
+        let backbone = self.finite_j2();
+        backbone.check_mixed_selection()?;
+        backbone.validate_history(accepted)?;
+        Ok(FrozenFiniteInelasticRemainder {
+            law: self,
+            accepted,
+            backbone,
+            native_accepted: accepted,
+            prepare_return: |law, f, old| law.finite_j2().return_map_selected(f, old, None, false),
+        })
+    }
+
+    fn remainder_response(
+        &self,
+        f: &[f64; 9],
+        old: &Self::State,
+    ) -> Result<FiniteJ2Response<Self::State>, FiniteJ2Error> {
+        self.finite_j2().remainder_response(f, old)
+    }
+
+    fn stored_remainder_energy(
+        &self,
+        f: &[f64; 9],
+        state: &Self::State,
+    ) -> Result<f64, FiniteJ2Error> {
+        self.finite_j2().stored_remainder_energy(f, state)
+    }
+
+    fn validate_remainder_committed(
+        &self,
+        f: &[f64; 9],
+        state: &Self::State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        self.finite_j2()
+            .validate_remainder_committed(f, state, yield_tolerance_pa)
+    }
+}
+
+impl<L: FiniteInelasticMaterial + ?Sized> FrozenFiniteInelasticRemainder<'_, L> {
     fn prepare(&self, f: &[f64; 9]) -> Result<ReturnMap, MaterialError> {
-        self.law.check_mixed_selection().map_err(material_error)?;
-        self.law
-            .return_map_selected(f, self.accepted, None, false)
-            .map_err(material_error)
+        (self.prepare_return)(self.law, f, self.accepted).map_err(material_error)
     }
 
     fn pressure_from_return(
@@ -144,21 +251,21 @@ impl FrozenFiniteJ2Remainder<'_> {
                 }
                 pressure_potential(
                     Volumetric::LogSquared {
-                        kappa: self.law.parameters.bulk_modulus_pa,
+                        kappa: self.backbone.parameters.bulk_modulus_pa,
                     },
                     pressure_pa,
                 )?
             }
         };
-        if bulk.volume_ratio <= self.law.limits.minimum_jacobian {
+        if bulk.volume_ratio <= self.backbone.limits.minimum_jacobian {
             return Err(material_error(FiniteJ2Error::Domain {
                 quantity: "pressure-reconstructed J, strict lower bound",
                 value: bulk.volume_ratio,
-                limit: self.law.limits.minimum_jacobian,
+                limit: self.backbone.limits.minimum_jacobian,
             }));
         }
         let returned_deviator = returned.trial.deviator.map(|x| returned.scale * x);
-        self.law
+        self.backbone
             .check_elastic_domain(
                 super::log_one_plus(bulk.volume_increment),
                 &returned_deviator,
@@ -176,18 +283,21 @@ impl FrozenFiniteJ2Remainder<'_> {
             potential_pa: returned.potential,
             first_piola_pa: returned.first_piola,
             tangent_pa: self
-                .law
-                .return_tangent(f, self.accepted, returned)
+                .backbone
+                .return_tangent(f, self.native_accepted, returned)
                 .map_err(material_error)?,
         })
     }
 }
 
-impl MixedFiniteStrainPotential for FrozenFiniteJ2Remainder<'_> {
+impl<L: FiniteInelasticMaterial + ?Sized> MixedFiniteStrainPotential
+    for FrozenFiniteInelasticRemainder<'_, L>
+{
     fn validate_mixed(&self) -> Result<(), MaterialError> {
-        self.law.check_mixed_selection().map_err(material_error)?;
-        self.law
-            .validate_history(self.accepted)
+        // Construction already admitted complete typed history, including any
+        // recovering resistance. These immutable borrows cannot change it.
+        self.backbone
+            .validate_history(self.native_accepted)
             .map_err(material_error)
     }
 

@@ -62,12 +62,38 @@ volume weakly; physical bulk storage is `U(J(p))`, not a second `U(det F)`.
 `remainder_response`, `stored_remainder_energy` and
 `validate_remainder_committed` expose candidate history, physical remainder
 storage and independent accepted-state admission to native mixed solid owners.
-Newton trials never mutate accepted history. No rate, thermal, porous, ductile,
-spatial locking-convergence or experimental-validation claim is added.
+Newton trials never mutate accepted history. This baseline adapter adds no
+thermal, porous, ductile, spatial locking-convergence or experimental-validation claim.
 Focused G0/G1/G3 cases in `tests/plastic_finite_mixed.rs` compare the full native
 return and pressure condensation, independently difference every mixed tangent
 block, continue reverse plastic loading, and test an unused overflowing bulk
 penalty plus unchanged-history refusals.
+
+## Mixed finite creep and overstress
+
+`plastic::finite::mixed::MixedFiniteInelasticMaterial` extends the original
+complete-history protocol to the same mixed pressure formulation.
+`FrozenFiniteInelasticRemainder` borrows the original source owner and typed
+accepted state. Perzyna, Norton, simultaneous Norton/J2, primary hardening and
+independent resistance recovery reuse their original implicit returns and
+physical interval. The original rate-independent API and source adapters remain
+available. Bulk contributions are omitted directly; no kinetic law is replaced
+by its inspection backbone or a different modulus.
+
+Accepted Perzyna overstress and creep stress remain physical; combined J2 still
+enforces equilibrium plastic yield. Recovering resistance stays distinct from
+permanent plastic/creep accumulation and carries no invented storage or heat.
+Flow potential, physical plastic/creep losses and pressure-constraint work remain
+separate. Fixed-history energy/domain checks do not flow or recover again, and
+exact incompressibility never evaluates unused penalty storage or stress.
+Spatial consumers must use one common kinetic interval and publish complete
+history only after equilibrium and work acceptance. Thermal evolution remains
+with its existing separate owner.
+
+`tests/plastic_finite_mixed_kinetic.rs` covers full native/condensed parity for
+all admitted kinetic families, independent value/stress derivatives, an unused
+overflowing penalty, and analytical unloaded recovery with unchanged-history
+refusals. These synthetic regressions make no material-calibration claim.
 
 ## Source-bound Johnson--Cook ductile initiation
 

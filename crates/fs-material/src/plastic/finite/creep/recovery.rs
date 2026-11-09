@@ -162,6 +162,15 @@ impl FiniteRecoveringNortonCreep {
         f: &[f64; 9],
         old: &FiniteRecoveringCreepState,
     ) -> Result<(ReturnMap, f64), FiniteJ2Error> {
+        self.return_map_selected(f, old, true)
+    }
+
+    pub(in crate::plastic::finite) fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteRecoveringCreepState,
+        include_bulk: bool,
+    ) -> Result<(ReturnMap, f64), FiniteJ2Error> {
         self.validate_history(old)?;
         let law = &self.prepared.native;
         let returned = if let Some(primary) = law.active_primary() {
@@ -171,11 +180,12 @@ impl FiniteRecoveringNortonCreep {
                 f,
                 &old.native,
                 old.resistance_strain,
+                include_bulk,
             )?
         } else {
             // Disabled primary resistance preserves the exact secondary path.
             law.backbone()
-                .return_map_with_rate(f, &old.native, Some(law))?
+                .return_map_selected(f, &old.native, Some(law), include_bulk)?
         };
         let resistance = self.recovery.next_resistance(
             old.resistance_strain,
@@ -307,10 +317,24 @@ impl FiniteRecoveringNortonJ2 {
         f: &[f64; 9],
         old: &FiniteRecoveringCreepState,
     ) -> Result<(ReturnMap, f64), FiniteJ2Error> {
+        self.return_map_selected(f, old, true)
+    }
+
+    pub(in crate::plastic::finite) fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteRecoveringCreepState,
+        include_bulk: bool,
+    ) -> Result<(ReturnMap, f64), FiniteJ2Error> {
         self.validate_history(old)?;
         let returned =
             self.prepared
-                .return_map_with_creep_memory(f, &old.native, old.resistance_strain)?;
+                .return_map_with_creep_memory_selected(
+                    f,
+                    &old.native,
+                    old.resistance_strain,
+                    include_bulk,
+                )?;
         // Use the original solved creep increment, not a rounded subtraction
         // of accumulated counters and never the accompanying plastic increment.
         let resistance = self.recovery.next_resistance(
