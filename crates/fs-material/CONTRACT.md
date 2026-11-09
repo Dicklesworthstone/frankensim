@@ -24129,3 +24129,40 @@ Original material freezing re-closes pressure at exact mass/volume. Its amount-o
 This is an immutable near-saturation incompressible caloric reference for matching liquid storage and advective enthalpy to the existing vapor interface. It does not assign the actual liquid pressure to saturation, invent a metastable equation of state, or include pressure-motion heating. Density, thermal expansion, isothermal compressibility, sound speed and the unmodified source pair are exposed for consumer applicability checks. The source retains the intersection of its thermodynamic and transport domains, 273.16..=623.15 K; the 273.15 K IF97 caloric extension is refused by the original transport source.
 
 Successful queries allocate no memory and require no root solve. Four new tests compare the analytic capacity with independent original-source differences, establish exact liquid/vapor transfer-enthalpy identity, retain actual source transport and the pressure-path defect, and exercise source-domain refusal. All 29 selected material-source and prior caloric/phase regressions passed.
+
+## Adaptive collective spherical evaporation
+
+`evaporation::gas::droplet::chamber::adaptive` evolves a fixed roster of positive
+spherical liquid inventories in one original fixed-volume gas parcel. Each
+comparison runs one original coarse interval and two original fine intervals;
+only the conservative fine pair is accepted. Actual interval-start mass sets
+radius, area and transfer length again, with shared vapor depletion and original
+caloric closure retained. The common callback also permits original source-backed
+intervals without inventing film coefficients in the material controller.
+
+Local first-order error includes each droplet's mass, enthalpy, temperature and
+radius, the shared gas temperature, and every original gas species inventory.
+Relative scales use coordinate changes from the comparison start, keeping
+enthalpy datum shifts out of accuracy decisions. Original method-order arithmetic
+handles unequal representable half spans. The accepted endpoint is not
+Richardson-extrapolated; this estimate is not a global trajectory certificate.
+
+Only original positive step-size limits permit physical retries. Source,
+admissibility, conservation and cancellation refusals retain their identity.
+Zero duration still performs original physical admission. Explicit comparison,
+reduction and span bounds constrain work, with atomic refusal and reusable row
+buffers; no trajectory history is retained.
+
+Accepted fine intervals alone enter the compensated physical account and final
+payload. Noncancelling mass and energy defects share one complete-window
+allowance. Final per-droplet, per-species and total gas inventory changes are
+checked independently, including carrier species. Latent energy is a subaccount
+of the original phase exchange, not an extra gas energy source.
+
+Four regression groups cover refinement against 512 original intervals,
+reciprocal sensible heat and enthalpy-datum invariance, canonical permutation and
+resume, and physical step reductions/budgets/cancellation/zero-time admission.
+Formatting and bounded static review passed; these tests were not compiled or
+executed because this workspace has no runnable Cargo toolchain. Complete
+dry-out, nucleation, drag, shielding and moving-volume work remain outside this
+positive-seed, well-mixed chamber path.

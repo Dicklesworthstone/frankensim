@@ -14,6 +14,9 @@
 //! or complete dry-out. The prescribed gas volume stays fixed and external;
 //! droplet volume displacement and pressure work are not inferred.
 
+/// Conservative finite-duration evolution with refreshed spherical geometry.
+pub mod adaptive;
+
 use super::super::chamber::{
     GasLiquidChamberCandidate, GasLiquidChamberSolve, GasLiquidChamberStep,
     GasLiquidChamberSurface, GasLiquidChamberSurfaceStep, Total, advance_chamber_with_gas,
