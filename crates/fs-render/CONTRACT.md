@@ -12516,7 +12516,8 @@ transmitted, molecular and passive energies have an independent cumulative
 audit. Passive pump absorption appears exactly once as external input and once
 as native heat; host coefficients must exclude the same active emitters. Every
 passive absorbing path cell requires its original thermal receiver, which may
-be bound with zero emitter counts. Unilluminated emitters decay normally.
+be bound with zero emitter counts. Emitters outside every beam retain their
+prescribed local excitation and intrinsic decay.
 Passive host coefficients retain the original optical snapshot; the molecular
 and kinetic material refresh below does not infer a host temperature law.
 
@@ -12566,7 +12567,8 @@ claims at each beam wavelength and actual shared cell temperature. Its cache
 contains only immutable constitutive data, keyed by every unique cell's exact
 temperature. Pulse activity, populations and photon histories are excluded
 from the cache. The original one-beam entry point delegates to the same binding
-and retains its one-column evolution path.
+and retains its one-column evolution path when its cells have no prescribed
+local excitation; co-driven cells use the shared finite-inventory solve.
 
 Each beam's pulse intersects the existing global pump window. Every strictly
 future edge splits the native thermal interval, so staggered pulses, overlap
@@ -12656,8 +12658,9 @@ triplet-pair encounters in one native history. The coupled constructor
 `try_new_with_photon_recycling` also admits passive host absorption directly,
 without first constructing an unused fixed-probability transfer operator.
 Every positive-density host cell needs its original thermal receiver; a zero
-emitter inventory can supply that binding. Prescribed local pump hazards must
-be zero: excitation comes from declared depleted beams or initial stores.
+emitter inventory can supply that binding. Prescribed local fields, declared
+depleted beams and initial stores may supply excitation together, with each
+original emitter inventory advanced once.
 
 `PhotonRecyclingGeometry` explicitly bounds sampled rays and the complete
 path/segment allocation, seed, logical source and passive-host temperature
@@ -12719,6 +12722,53 @@ and endpoint domain refusal with clean retry. These renderer fixtures and the
 example are source-formatted and source-reviewed; native execution remains
 unverified because the unchanged `asupersync` dependency was killed before
 renderer typechecking. Lower-owner native tests do not establish this gate.
+
+### Maintained local excitation with beams and photon return
+
+Existing `PrescribedPhotonPump` bindings may now remain active when depleted
+beams or finite-ground recycling are bound. The renderer passes their original
+hazards and photon energies to the shared native population owner before
+advancing the cell. Local fields and every transported pump compete for the
+same available ground molecules, including optional triplet-pair reactions.
+A prescribed field must represent distinct optically thin or externally
+maintained illumination; photons already declared in a beam must not also
+appear in that field. No beam area or physical illumination is inferred.
+
+The existing global pump window gates local fields and external beams. Each
+beam's own narrower window affects only that beam. Every pulse edge splits
+the same native thermal timeline; cells outside all beam paths continue to
+receive their declared local excitation. Dark continuation closes both
+external supplies while retained excitation, recycling and pair reactions
+continue on the original clock. Empty local input preserves the previous
+numerical routes, including the original single-column fast path.
+
+`absorbed_pump_energy_j()` includes consumed local and external beam photons,
+ordered by destination state. Each beam's incident/transmitted/absorbed report
+continues to describe that beam alone. The recycling adapter adds the native
+`LocalPumpStep` absorption and relaxation directly into external totals;
+it never recovers a weak local contribution by subtracting large recycled
+traffic. Combined cell kinetics supply heat once. Populations, accepted
+material temperatures, source powers and all cumulative accounts retain the
+same transactional acceptance and retry behavior.
+
+The synthetic example accepts `--recycling` alone with its existing thin
+prescribed pump, or
+`--counterpropagating --background-pump --recycling --annihilation` for
+maintained local excitation alongside opposed beams. The additional background
+is explicitly authored as 400 nm, 5e24 photons/(m² s), giving a 5e4/s hazard per
+available ground emitter under the global pulse. Output labels total external
+absorption separately from per-beam columns. Coefficients remain synthetic.
+
+Three new renderer fixture groups cover analytic excitation outside beam
+paths with global/per-beam pulse intersections, analytic local-only transparent
+recycling, and local triplet pumping with a depleted singlet beam and pair
+recovery both with and without active return, including retry and dark
+continuation. These fixtures and example are formatted and source-reviewed
+against the exact new native APIs; full renderer execution remains unverified
+because its genuine `asupersync` dependency build is killed before renderer
+typechecking. The lower owner separately passed all 28 focused pump tests,
+including three new independent physical oracles; those passes do not replace
+this full renderer gate.
 
 ## Multiply scattered nonthermal luminescence observations
 

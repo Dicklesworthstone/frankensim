@@ -33,10 +33,30 @@ pub(in crate::volumes::heating::luminescence::saturation) fn step_sources<const 
         None => Vec::new(),
     };
     let initial: Vec<_> = owner.emitters.iter().map(|e| e.populations).collect();
+    let local_pumps = if pumped
+        && owner
+            .emitters
+            .iter()
+            .any(|emitter| emitter.binding.pump.rates_s() != [0.0; 2])
+    {
+        owner
+            .emitters
+            .iter()
+            .map(|emitter| emitter.binding.pump.local_photon_pump(true))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let step = preserve_checkpoint(checkpoint, |cancelled| {
-        prepared
-            .solver
-            .advance(&initial, &incident, duration_s, &laws, limits, cancelled)
+        prepared.solver.advance_with_local_pumps(
+            &initial,
+            &incident,
+            &local_pumps,
+            duration_s,
+            &laws,
+            limits,
+            cancelled,
+        )
     })?;
     let beam_accounts = owner
         .beam
@@ -58,6 +78,9 @@ pub(in crate::volumes::heating::luminescence::saturation) fn step_sources<const 
     for (index, emitter) in owner.emitters.iter().enumerate() {
         checkpoint()?;
         let kinetics = &step.cells[index];
+        // The native owner normalizes inactive local supplies to an empty
+        // report. These direct events are external energy, not recycled light.
+        let local_pump = step.local_pumps.get(index).copied().unwrap_or_default();
         let mut heat = CheckedSum::default();
         let mut local = CheckedSum::default();
         local.add(kinetics.residual_j)?;
@@ -74,9 +97,11 @@ pub(in crate::volumes::heating::luminescence::saturation) fn step_sources<const 
             local.add(kinetics.radiative_decay_energy_j[state])?;
             local.add(-source_heat)?;
             accounts.absorbed[state].add(step.external_absorbed_pump_energy_j[index][state])?;
+            accounts.absorbed[state].add(local_pump.absorbed_energy_j[state])?;
             accounts
                 .prompt
                 .add(step.external_pump_relaxation_heat_j[index][state])?;
+            accounts.prompt.add(local_pump.relaxation_heat_j[state])?;
             accounts
                 .secondary
                 .add(step.recycled_pump_relaxation_heat_j[index][state])?;

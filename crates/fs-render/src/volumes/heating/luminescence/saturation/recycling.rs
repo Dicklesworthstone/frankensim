@@ -94,9 +94,10 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
     /// together. This admits passive host absorption without first building an
     /// unused fixed-probability operator. Every positive-density host cell needs its
     /// original thermal binding; a zero emitter inventory is permitted.
-    /// Prescribed local hazards must be zero. External depleting beams may be
-    /// bound before or after this constructor, and dark precharged stores work
-    /// without an external beam. Existing pair laws remain independently bound.
+    /// Maintained prescribed excitation and external depleting beams address
+    /// the same inventories; beams may be bound before or after construction.
+    /// Dark precharged stores also work without an external pump. Existing pair
+    /// laws remain independently bound.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_with_photon_recycling(
         cx: &Cx<'_>,
@@ -158,13 +159,9 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             || self.energy.duration_s != 0.0
             || self.emitters.is_empty()
             || self.medium_identity != medium.content_identity()
-            || self
-                .emitters
-                .iter()
-                .any(|e| e.binding.pump.rates_s() != [0.0; 2])
         {
             return Err(invalid(
-                "finite photon recycling requires original unadvanced inventories and depleting or dark excitation",
+                "finite photon recycling requires original unadvanced inventories and matching medium",
             ));
         }
         let mut hash = DomainHasher::new("org.frankensim.render.finite-photon-recycling.v1");

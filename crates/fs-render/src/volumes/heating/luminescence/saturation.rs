@@ -40,6 +40,7 @@ use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
 };
 use fs_thermal::luminescence::transfer::SingletTripletDecay;
+use fs_thermal::luminescence::transfer::pump_beams::LocalPhotonPump;
 use fs_thermal::luminescence::transfer::saturation::SaturableSingletTripletPlan;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -110,6 +111,13 @@ impl PrescribedPhotonPump {
     /// Hazards per available ground-state emitter, inverse seconds.
     pub const fn rates_s(&self) -> [f64; 2] {
         self.rates_s
+    }
+
+    fn local_photon_pump(self, active: bool) -> LocalPhotonPump {
+        LocalPhotonPump {
+            rates_s: if active { self.rates_s } else { [0.0; 2] },
+            photon_energies_j: self.energies_j,
+        }
     }
 }
 
@@ -408,6 +416,8 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         &self.energy
     }
     /// Actual external pump consumption, ordered `[G -> S, G -> T]`, joules.
+    /// Includes maintained local fields and depleted beams; internal recycled
+    /// photons remain separate, and each beam report contains only that beam.
     pub const fn absorbed_pump_energy_j(&self) -> [f64; 2] {
         self.pump_account.absorbed_j
     }
@@ -612,7 +622,7 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
                     thermal.temperature_k(binding.thermal_cell)?,
                     &mut cached_model,
                 )?;
-                let rates = if pumped && self.beam.is_none() {
+                let rates = if pumped {
                     binding.pump.rates_s
                 } else {
                     [0.0; 2]

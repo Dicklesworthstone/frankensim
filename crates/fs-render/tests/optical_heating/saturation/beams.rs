@@ -469,3 +469,102 @@ fn g1_simultaneous_passive_pump_absorption_is_deposited_once_per_native_cell() {
         accounts(&accepted);
     });
 }
+
+#[test]
+fn g3_local_excitation_survives_outside_beams_and_uses_the_original_global_pulse() {
+    with_cx(|cx| {
+        let density = [1.0, 1.0];
+        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let thermal = thermal(
+            vec![cell(1, 1.0, 1.0, 0.0), cell(2, 1.0, 1.0, 0.0)],
+            &SENSIBLE,
+            vec![],
+        );
+        let pump = PrescribedPhotonPump::try_new(
+            ContentHash([186; 32]),
+            [400.0, 450.0],
+            [1e-20; 2],
+            [2e20, 0.0],
+        )
+        .unwrap();
+        let bindings: Vec<_> = (0..2)
+            .map(|grid_cell| SaturableEmitterCell {
+                grid_cell,
+                thermal_cell: CellId(grid_cell as u64 + 1),
+                initial_populations: [COUNT, 0.0, 0.0],
+                pump,
+            })
+            .collect();
+        let triplet = SingletTripletSource::try_new(
+            source(600.0, 5.0, [0.0, 1.0], 187),
+            0.0,
+            ArrheniusQuenching::try_new(0.0, 0.0).unwrap(),
+            SingletTripletLimits::default(),
+        )
+        .unwrap();
+        let heating = SaturableLuminescentHeating::try_new(
+            &medium,
+            source(500.0, 1.0, [1.0, 0.0], 188),
+            triplet,
+            &bindings,
+            &thermal,
+            2,
+            1e-7,
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        let cross_sections = sections(1, [[1.0 / COUNT, 0.0], [0.0; 2]]);
+        // Travel in y through cell 0, leaving cell 1 outside every beam.
+        let power = COUNT * HC / 400.0;
+        let mut incident = ray(2, false, [400.0, 450.0], [power, 0.0]);
+        incident.origin = Point3::new(0.5, -1.0, 0.5);
+        incident.unit_direction = Vec3::new(0.0, 1.0, 0.0);
+        let heating = bind(
+            cx,
+            &medium,
+            &thermal,
+            heating,
+            &[DepletingPumpBeam {
+                source_identity: ContentHash([189; 32]),
+                beam: incident,
+                cross_sections: &cross_sections,
+                pump_window_s: Some((0.4, 0.6)),
+            }],
+        )
+        .with_pump_window(0.2, 0.8)
+        .unwrap();
+        let (warm, whole, audit) = thermal
+            .advance_observed(&heating, 1.0, config(1.0), || Ok(()))
+            .unwrap();
+        let (middle, first, _) = thermal
+            .advance_observed(&heating, 0.6, config(1.0), || Ok(()))
+            .unwrap();
+        let (_, split, _) = middle
+            .advance_observed(&first, 1.0, config(1.0), || Ok(()))
+            .unwrap();
+        assert_eq!(whole.populations(0), split.populations(0));
+        assert_eq!(whole.populations(1), split.populations(1));
+        assert_eq!(whole.energy(), split.energy());
+        assert_eq!(whole.depleting_pump_report(), split.depleting_pump_report());
+        assert!(audit.substeps >= 5);
+        // The unvisited cell has W=2/s, radiative decay=1/s. It is pumped for
+        // .6 s under the GLOBAL window, then decays for .2 s. The individual
+        // beam's narrower window must not suppress this local excitation.
+        let expected = COUNT * (2.0 / 3.0) * -(-1.8_f64).exp_m1() * (-0.2_f64).exp();
+        relative(whole.populations(1).unwrap()[1], expected);
+        assert!(whole.populations(0).unwrap()[1] > whole.populations(1).unwrap()[1]);
+        for index in 0..2 {
+            relative(whole.populations(index).unwrap().iter().sum(), COUNT);
+        }
+        let beam = &whole.depleting_pump_report().unwrap().beams[0];
+        relative(beam.incident_j[0], power * (0.6 - 0.4));
+        relative(
+            beam.incident_j[0],
+            beam.transmitted_j[0] + beam.absorbed_j[0],
+        );
+        assert!(whole.absorbed_pump_energy_j()[0] > beam.absorbed_j[0]);
+        relative(warm.energy_j(), whole.thermal_input_j());
+        balance(&whole);
+    });
+}

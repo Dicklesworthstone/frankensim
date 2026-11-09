@@ -92,7 +92,12 @@ impl DepletingBeam {
                 segments,
             });
         }
-        let solver = if paths.len() == 1 {
+        let local_excitation = self
+            .model
+            .cells
+            .iter()
+            .any(|&index| owner.emitters[index].binding.pump.rates_s() != [0.0; 2]);
+        let solver = if paths.len() == 1 && !local_excitation {
             let path = &paths[0];
             let cells: Vec<_> = path
                 .segments
@@ -292,6 +297,21 @@ impl DepletingBeam {
                     .iter()
                     .map(|&index| owner.emitters[index].populations)
                     .collect();
+                let local_pumps = if globally_pumped
+                    && self
+                        .model
+                        .cells
+                        .iter()
+                        .any(|&index| owner.emitters[index].binding.pump.rates_s() != [0.0; 2])
+                {
+                    self.model
+                        .cells
+                        .iter()
+                        .map(|&index| owner.emitters[index].binding.pump.local_photon_pump(true))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let step = if let Some(pairs) = annihilation {
                     let laws: Vec<_> = self
                         .model
@@ -300,9 +320,10 @@ impl DepletingBeam {
                         .map(|&index| pairs.laws[index])
                         .collect();
                     preserve_checkpoint(checkpoint, |cancelled| {
-                        beams.advance_with_annihilation(
+                        beams.advance_with_local_pumps_and_annihilation(
                             &populations,
                             &rates,
+                            &local_pumps,
                             duration_s,
                             &laws,
                             self.model.limits,
@@ -312,9 +333,10 @@ impl DepletingBeam {
                     })?
                 } else {
                     preserve_checkpoint(checkpoint, |cancelled| {
-                        beams.advance(
+                        beams.advance_with_local_pumps(
                             &populations,
                             &rates,
+                            &local_pumps,
                             duration_s,
                             self.model.limits,
                             cancelled,

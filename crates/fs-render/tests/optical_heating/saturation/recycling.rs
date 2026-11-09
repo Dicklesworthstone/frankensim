@@ -337,3 +337,194 @@ fn g3_shared_pumps_pairs_recycling_and_retry_keep_one_native_inventory_and_exter
         );
     });
 }
+
+#[test]
+fn g1_prescribed_excitation_with_transparent_recycling_keeps_analytic_local_accounts() {
+    with_cx(|cx| {
+        let density = [1.0];
+        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        let mut binding = bindings(&[[COUNT, 0.0, 0.0]]);
+        binding[0].pump = PrescribedPhotonPump::try_new(
+            ContentHash([78; 32]),
+            [400.0, 450.0],
+            [1e-20; 2],
+            [0.0, 1.5e20],
+        )
+        .unwrap();
+        let (singlet, triplet) = sources();
+        let heating = SaturableLuminescentHeating::try_new_with_photon_recycling(
+            cx,
+            &medium,
+            singlet,
+            triplet,
+            &binding,
+            &thermal,
+            1,
+            1e-7,
+            &molecule(1, [[0.0; 2]; 2]),
+            geometry(),
+            controls(),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_pump_window(0.0, 0.2)
+        .unwrap();
+        let (warm, charged, audit) = thermal
+            .advance_observed(&heating, 0.2, config(0.2), || Ok(()))
+            .unwrap();
+        let duration = 0.2_f64;
+        let rate = 1.5;
+        let decay = 0.2;
+        let a = rate + decay;
+        let fraction = -(-a * duration).exp_m1();
+        let expected_triplet = COUNT * rate / a * fraction;
+        let integrated_triplets = COUNT * rate / a * (duration - fraction / a);
+        let local_events = rate * (COUNT * duration - integrated_triplets);
+        relative(charged.populations(0).unwrap()[2], expected_triplet);
+        relative(
+            charged.absorbed_pump_energy_j()[1],
+            local_events * HC / 450.0,
+        );
+        assert_eq!(charged.absorbed_pump_energy_j()[0], 0.0);
+        assert_eq!(charged.energy().recycled_excitation_j, 0.0);
+        assert!(charged.depleting_pump_report().is_none());
+        relative(audit.external_heat_j, charged.thermal_input_j());
+        balance(&charged);
+        let (_, dark, _) = warm
+            .advance_observed(&charged, 0.4, config(0.2), || Ok(()))
+            .unwrap();
+        relative(
+            dark.populations(0).unwrap()[2],
+            expected_triplet * (-0.04_f64).exp(),
+        );
+        assert_eq!(
+            dark.absorbed_pump_energy_j(),
+            charged.absorbed_pump_energy_j()
+        );
+        balance(&dark);
+    });
+}
+
+#[test]
+fn g3_local_triplet_excitation_competes_with_a_singlet_beam_pairs_and_photon_return() {
+    with_cx(|cx| {
+        for recycling in [false, true] {
+            let density = [1.0];
+            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+            let mut binding = bindings(&[[COUNT, 0.0, 0.0]]);
+            binding[0].pump = PrescribedPhotonPump::try_new(
+                ContentHash([79; 32]),
+                [400.0, 450.0],
+                [1e-20; 2],
+                [0.0, 1.5e20],
+            )
+            .unwrap();
+            let (singlet, triplet) = sources();
+            let mut base = SaturableLuminescentHeating::try_new(
+                &medium,
+                singlet,
+                triplet,
+                &binding,
+                &thermal,
+                1,
+                1e-7,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            if recycling {
+                base = base
+                    .with_photon_recycling(
+                        cx,
+                        &medium,
+                        &molecule(1, [[0.0, 2.0 / COUNT], [0.0; 2]]),
+                        &thermal,
+                        geometry(),
+                        controls(),
+                        || Ok(()),
+                    )
+                    .unwrap();
+            }
+            let cross_sections = sections(1, [[1.0 / COUNT, 0.0], [0.0; 2]]);
+            let power = COUNT * HC / 400.0;
+            let heating = bind(
+                cx,
+                &medium,
+                &thermal,
+                base,
+                &[DepletingPumpBeam {
+                    source_identity: ContentHash([80; 32]),
+                    beam: ray(1, false, [400.0, 450.0], [power, 0.0]),
+                    cross_sections: &cross_sections,
+                    pump_window_s: Some((0.0, 0.1)),
+                }],
+            )
+            .with_triplet_annihilation(
+                &[PhosphorescenceAnnihilation {
+                    grid_cell: 0,
+                    law: TripletAnnihilation::try_new(1.0 / COUNT, 1.0, 0.5).unwrap(),
+                }],
+                controls().annihilation,
+            )
+            .unwrap()
+            .with_pump_window(0.0, 0.2)
+            .unwrap();
+            let mut candidate = heating.clone();
+            candidate
+                .step_sources(&thermal, 0.0, 0.08, 0.08, &mut || Ok(()))
+                .unwrap();
+            let retry = candidate
+                .step_sources(&thermal, 0.0, 0.04, 0.04, &mut || Ok(()))
+                .unwrap();
+            let fresh = heating
+                .clone()
+                .step_sources(&thermal, 0.0, 0.04, 0.04, &mut || Ok(()))
+                .unwrap();
+            assert_eq!(retry, fresh);
+            assert_eq!(candidate.populations(0), heating.populations(0));
+            assert_eq!(candidate.energy(), heating.energy());
+            assert_eq!(
+                candidate.depleting_pump_report(),
+                heating.depleting_pump_report()
+            );
+            let (warm, charged, audit) = thermal
+                .advance_observed(&heating, 0.2, config(0.2), || Ok(()))
+                .unwrap();
+            let beam = &charged.depleting_pump_report().unwrap().beams[0];
+            relative(beam.incident_j[0], 0.1 * power);
+            relative(
+                beam.incident_j[0],
+                beam.transmitted_j[0] + beam.absorbed_j[0],
+            );
+            // Only the declared beam supplies external G->S photons. Only
+            // the maintained local field supplies external G->T photons;
+            // recycled G->T photons must not enter either external account.
+            relative(charged.absorbed_pump_energy_j()[0], beam.absorbed_j[0]);
+            assert!(charged.absorbed_pump_energy_j()[1] > 0.0);
+            assert!(charged.energy().annihilation_heat_j > 0.0);
+            assert!(charged.populations(0).unwrap()[2] > 0.0);
+            if recycling {
+                assert!(charged.energy().recycled_excitation_j > 0.0);
+                assert!(charged.energy().secondary_absorption_heat_j > 0.0);
+            } else {
+                assert_eq!(charged.energy().recycled_excitation_j, 0.0);
+            }
+            relative(audit.external_heat_j, charged.thermal_input_j());
+            balance(&charged);
+            let (_, dark, _) = warm
+                .advance_observed(&charged, 0.4, config(0.2), || Ok(()))
+                .unwrap();
+            assert_eq!(
+                dark.absorbed_pump_energy_j(),
+                charged.absorbed_pump_energy_j()
+            );
+            assert_eq!(
+                dark.depleting_pump_report().unwrap().beams[0].incident_j,
+                beam.incident_j
+            );
+            balance(&dark);
+        }
+    });
+}

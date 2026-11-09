@@ -7,10 +7,17 @@
 //! sharing the same finite inventory in two original thermal/optical cells.
 //! Add `--annihilation` to any mode to include explicitly authored triplet-pair
 //! quenching and delayed singlet fluorescence; compare the late singlet column.
-//! Add `--recycling` with either depleted-pump mode for finite-ground photon
-//! reabsorption. This explicitly changes the synthetic triplet level to 650 nm:
+//! Add `--recycling` to any mode for finite-ground photon reabsorption. Used
+//! alone, it retains the existing explicitly thin/maintained local pump and
+//! enables photon return without a depleted beam. Recycling explicitly changes
+//! the synthetic triplet level to 650 nm:
 //! 600 nm singlet light can excite it, while 750 nm triplet light escapes.
 //! The endpoint view includes the same accepted molecular absorption.
+//! Add `--background-pump` to a depleted-pump mode to also supply an explicitly
+//! maintained 400 nm local field: 5e24 photons/(m² s), or a 5e4/s excitation
+//! hazard per available ground-state emitter, under the same global pulse.
+//! This separate source competes with the beams for the original populations;
+//! its photons are not also included in a beam's declared incident power.
 //!
 //! All coefficients are SYNTHETIC, not measurements of a particular phosphor.
 //! A prescribed local photon flux pumps 1e13 emitters in a 1 cm cube for 1 us.
@@ -120,6 +127,7 @@ fn run(
     mode: PumpMode,
     annihilation: bool,
     recycling: bool,
+    background_pump: bool,
 ) -> Result<(), Box<dyn Error>> {
     let depleting = mode != PumpMode::Prescribed;
     let counterpropagating = mode == PumpMode::Counterpropagating;
@@ -201,7 +209,13 @@ fn run(
         ContentHash([242; 32]),
         [400.0; 2],
         [CROSS_SECTION_M2, 0.0],
-        if depleting { [0.0; 2] } else { [5e26, 0.0] },
+        if background_pump {
+            [5e24, 0.0]
+        } else if depleting {
+            [0.0; 2]
+        } else {
+            [5e26, 0.0]
+        },
     )?;
     let bindings: Vec<_> = (0..cell_count)
         .map(|grid_cell| SaturableEmitterCell {
@@ -222,6 +236,11 @@ fn run(
         None,
         || Ok(()),
     )?;
+    if background_pump {
+        println!(
+            "Synthetic maintained background: 400 nm, 5e24 photons/(m² s), shared ground-state hazard=5e4/s, gated by the global pump window."
+        );
+    }
     if annihilation {
         let pairs: Vec<_> = (0..cell_count)
             .map(|grid_cell| {
@@ -394,8 +413,16 @@ fn run(
         );
     }
     heating = heating.with_pump_window(0.0, pulse_end_s)?;
+    let absorbed_label = if background_pump {
+        println!(
+            "Total external absorption includes the maintained background and beams; each beam's energy columns contain only that beam."
+        );
+        "total_external_absorbed_J"
+    } else {
+        "absorbed_pump_J"
+    };
     println!(
-        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}{}{}",
+        "time_s,ground_fraction,singlet_fraction,triplet_fraction,{absorbed_label},singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}{}{}",
         if annihilation { ",pair_heat_J" } else { "" },
         if recycling {
             ",recycled_excitation_J,secondary_heat_J,escaped_emission_J"
@@ -547,6 +574,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut mode = PumpMode::Prescribed;
     let mut annihilation = false;
     let mut recycling = false;
+    let mut background_pump = false;
     for argument in &arguments {
         match argument.as_str() {
             "--depleting" if mode == PumpMode::Prescribed => mode = PumpMode::Depleting,
@@ -555,14 +583,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "--annihilation" if !annihilation => annihilation = true,
             "--recycling" if !recycling => recycling = true,
+            "--background-pump" if !background_pump => background_pump = true,
             _ => return Err(
-                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation] [--recycling]"
+                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation] [--recycling] [--background-pump]"
                     .into(),
             ),
         }
     }
-    if recycling && mode == PumpMode::Prescribed {
-        return Err("--recycling requires --depleting or --counterpropagating".into());
+    if background_pump && mode == PumpMode::Prescribed {
+        return Err("--background-pump requires --depleting or --counterpropagating".into());
     }
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -583,6 +612,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mode,
             annihilation,
             recycling,
+            background_pump,
         )
     })
 }
