@@ -1,6 +1,9 @@
 //! G0/G1/G3: graded physical inertia through both native quadratic hex families.
 //! Exact monomial integrals are independent of the assembly quadrature.
 
+#[path = "hex_reference_density/thermal.rs"]
+mod thermal;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

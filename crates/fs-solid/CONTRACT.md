@@ -14058,3 +14058,8 @@ rigid translations, whose discontinuities need not appear in constitutive
 strains. The explicit nodal-work bound includes the bounded carrier grouping.
 `cancelled_rigid_carriers_preserve_bias_without_hiding_nodal_jumps` exercises
 both refusal of a new rigid offset and preservation of an already accepted one.
+
+
+### Graded reference density through hexahedral thermal prestress
+
+`Hex8ElasticProblem` and `HexElasticProblem` expose `solve_thermal_tangent_with_reference_density` and `solve_thermal_tangent_with_reference_density_and_prescribed_dofs`. The positive Q1 eight-corner reference inventory reaches consistent prestressed mass through the native graded assembler; changed elastic-material density never refreshes that inventory. The prescribed-support entry retains physical nonzero support displacement and homogeneous incremental vibration supports. Hex8 preserves Standard/BBar and `max(3, stiffness_points_per_dir)` mass integration. Hex20/27 retain independent explicit mass quadrature and their original affine/curved admission. Density and mass-rule admission precede equilibrium. The complete profile and mass order bind prestress and configuration identities, including inventory whose moments are hidden by support elimination. Native thermal equilibrium, stress recovery and signed geometric stiffness retain their existing owners and limits; these entries add no finite-strain, follower-load or modal-transfer capability.

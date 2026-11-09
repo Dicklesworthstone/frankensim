@@ -171,6 +171,7 @@ impl Hex8ElasticProblem<'_> {
             thermal_strains,
             None,
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -195,8 +196,74 @@ impl Hex8ElasticProblem<'_> {
     ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains,
+            None,
             Some(nodal_forces_n),
             None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Thermal/dead-load tangent with the original positive Q1 reference-density
+    /// profile in canonical element/corner order [kg/m³].
+    ///
+    /// The native Hex8 consistent mass retains all eight corner values, using
+    /// at least three Gauss points per direction on the reference geometry.
+    /// Compatible or B-bar equilibrium and signed geometric stiffness retain
+    /// their original owners. Pass an empty force slice for thermal loading
+    /// alone. Density is admitted before solving equilibrium and cannot be
+    /// replaced by hot material density. The complete profile and mass rule
+    /// bind both pencil and configuration identities, including hidden moments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_reference_density(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        corner_density_kg_m3: &[[f64; 8]],
+        nodal_forces_n: &[(usize, f64)],
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            Some(corner_density_kg_m3),
+            Some(nodal_forces_n),
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Graded-reference-density tangent with physical prescribed support motion.
+    ///
+    /// Thermal expansion, dead loads and nonzero supports generate the accepted
+    /// stress with the same compatible or B-bar owner. The original Q1 inventory
+    /// remains frozen. Support values and their bound retain
+    /// `solve_thermal_response_with_prescribed_dofs` semantics; incremental
+    /// vibration supports remain homogeneous about that accepted equilibrium.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_reference_density_and_prescribed_dofs(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        corner_density_kg_m3: &[[f64; 8]],
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            Some(corner_density_kg_m3),
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -223,6 +290,7 @@ impl Hex8ElasticProblem<'_> {
     ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains,
+            None,
             Some(nodal_forces_n),
             Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
@@ -236,6 +304,7 @@ impl Hex8ElasticProblem<'_> {
     fn solve_thermal_tangent_impl(
         &self,
         thermal_strains: TetThermalStrainField<'_>,
+        corner_density_kg_m3: Option<&[[f64; 8]]>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         prescribed: Option<(&[(usize, f64)], f64)>,
         config: TetStaticSolveConfig,
@@ -243,6 +312,11 @@ impl Hex8ElasticProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        // Admit original inertia before the equilibrium solve, preserving the
+        // existing operation order when no explicit density field is supplied.
+        let graded_pencil = corner_density_kg_m3
+            .map(|density| self.assemble_with_reference_density(density, cx))
+            .transpose()?;
         let response = self.solve_thermal_response_impl(
             thermal_strains.into(),
             nodal_forces_n,
@@ -252,8 +326,11 @@ impl Hex8ElasticProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble(cx)?;
-        isoparametric::thermal_response::prestress::assemble::<8, 24, _>(
+        let pencil = match graded_pencil {
+            Some(pencil) => pencil,
+            None => self.assemble(cx)?,
+        };
+        let tangent = isoparametric::thermal_response::prestress::assemble::<8, 24, _>(
             self.nodes_m,
             self.hexahedra,
             self.materials,
@@ -264,7 +341,15 @@ impl Hex8ElasticProblem<'_> {
             |nodes, reference, element, point| self.point(nodes, reference, element, point),
             maximum_absolute_mandel_strain,
             cx,
-        )
+        )?;
+        match corner_density_kg_m3 {
+            Some(density) => tangent.bind_hex_reference_density(
+                density,
+                self.stiffness_points_per_dir.max(3),
+                cx,
+            ),
+            None => Ok(tangent),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

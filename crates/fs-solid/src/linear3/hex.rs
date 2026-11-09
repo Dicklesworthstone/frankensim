@@ -874,6 +874,7 @@ impl HexElasticProblem<'_> {
             thermal_strains.into(),
             None,
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -898,8 +899,77 @@ impl HexElasticProblem<'_> {
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
+            None,
             Some(nodal_forces_n),
             None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Thermal/dead-load tangent with the original positive Q1 reference-density
+    /// profile in canonical element/corner order [kg/m³].
+    ///
+    /// Consistent inertia uses the same native graded mass operator as
+    /// `assemble_thermoelastic_with_reference_density`, independently of the
+    /// stiffness rule. Three Gauss points per direction suffice on an affine
+    /// cell; nontrivial curved profiles require at least six. The eight values
+    /// may jump across interfaces and never use the signed quadratic shapes.
+    /// Pass an empty force slice for thermal loading alone. Density admission
+    /// precedes equilibrium; the complete profile and mass rule bind both
+    /// pencil and configuration identities, even when supports hide moments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_reference_density<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        nodal_forces_n: &[(usize, f64)],
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains.into(),
+            Some((corner_density_kg_m3, mass_quadrature)),
+            Some(nodal_forces_n),
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Graded-reference-density tangent with physical prescribed support motion.
+    ///
+    /// The same admitted Q1 inventory and mass rule as
+    /// `solve_thermal_tangent_with_reference_density` survive thermal, dead-load
+    /// and support-generated prestress. Support values and their displacement
+    /// bound retain `solve_thermal_response_with_prescribed_dofs` semantics;
+    /// incremental vibration supports are homogeneous about that equilibrium.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_reference_density_and_prescribed_dofs<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains.into(),
+            Some((corner_density_kg_m3, mass_quadrature)),
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -926,6 +996,7 @@ impl HexElasticProblem<'_> {
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
+            None,
             Some(nodal_forces_n),
             Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
@@ -939,6 +1010,7 @@ impl HexElasticProblem<'_> {
     fn solve_thermal_tangent_impl(
         &self,
         thermal_strains: QuadraticThermalStrainField<'_>,
+        reference_density: Option<(&[[f64; 8]], HexQuadrature)>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         prescribed: Option<(&[(usize, f64)], f64)>,
         config: super::TetStaticSolveConfig,
@@ -946,6 +1018,13 @@ impl HexElasticProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        // Admit the complete original inventory and its mass rule before solving
+        // equilibrium. Preserve the existing scalar path's operation order.
+        let graded_pencil = reference_density
+            .map(|density| {
+                self.assemble_with_thermal_materials(Some(thermal_strains), Some(density), cx)
+            })
+            .transpose()?;
         let response = self.solve_thermal_response_impl(
             thermal_strains,
             nodal_forces_n,
@@ -955,9 +1034,12 @@ impl HexElasticProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?;
+        let pencil = match graded_pencil {
+            Some(pencil) => pencil,
+            None => self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?,
+        };
         let q = self.quadrature.points()?;
-        match self.elements {
+        let tangent = match self.elements {
             HexConnectivity::Hex20(elements) => {
                 super::isoparametric::thermal_response::prestress::assemble::<20, 60, _>(
                     self.nodes_m,
@@ -1002,6 +1084,12 @@ impl HexElasticProblem<'_> {
                     cx,
                 )
             }
+        }?;
+        match reference_density {
+            Some((density, mass_rule)) => {
+                tangent.bind_hex_reference_density(density, mass_rule.points_per_dir, cx)
+            }
+            None => Ok(tangent),
         }
     }
 

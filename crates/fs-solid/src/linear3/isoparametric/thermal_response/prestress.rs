@@ -99,6 +99,40 @@ impl QuadraticPrestressedAssembly {
         Ok(self)
     }
 
+    // Called after the native Hex8/20/27 operator admits the positive Q1 field
+    // and mass rule. Bind inventory even when fixed rows hide mass moments;
+    // stiffness quadrature alone does not describe the independent mass rule.
+    pub(in crate::linear3) fn bind_hex_reference_density(
+        mut self,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_points_per_dir: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TetElasticError> {
+        let mut profile = DomainHasher::new("org.frankensim.fs-solid.hex-reference-density.v1");
+        hash_usize(&mut profile, mass_points_per_dir)?;
+        hash_usize(&mut profile, corner_density_kg_m3.len())?;
+        for (element, density) in corner_density_kg_m3.iter().enumerate() {
+            if element % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            for value in density {
+                profile.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        let profile = profile.finalize();
+        let mut identity = DomainHasher::new("org.frankensim.fs-solid.hex-density-prestress.v1");
+        identity.update(self.identity.as_bytes());
+        identity.update(profile.as_bytes());
+        let mut configuration =
+            DomainHasher::new("org.frankensim.fs-solid.hex-density-prestress-configuration.v1");
+        configuration.update(self.configuration_identity.as_bytes());
+        configuration.update(profile.as_bytes());
+        checkpoint(cx)?;
+        self.identity = identity.finalize();
+        self.configuration_identity = configuration.finalize();
+        Ok(self)
+    }
+
     // Original geometry, source tensors, quadrature, formulation and supports;
     // thermal strains, dead loads and prescribed values are the affine load path.
     pub(crate) const fn configuration_identity(&self) -> ContentHash {
@@ -306,4 +340,98 @@ fn invalid(what: &'static str) -> TetElasticError {
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TetElasticError> {
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
+}
+
+#[cfg(test)]
+mod density_tests {
+    use super::*;
+    use crate::linear::Formulation;
+    use crate::linear3::hex::HEX27_REFERENCE_NODES;
+    use crate::linear3::hex8::Hex8ElasticProblem;
+    use crate::linear3::{
+        TetAssemblyBudget, TetElasticMaterial, TetStaticSolveConfig, TetThermalStrainField,
+        TetThermalStrainState,
+    };
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    #[test]
+    fn hidden_hex_inventory_invalidates_configuration_even_with_identical_reduced_operators() {
+        let gate = CancelGate::new_clock_free();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 64,
+                    kernel_id: 64,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let nodes: Vec<_> = [0.0, 4.0]
+                .into_iter()
+                .flat_map(|offset| {
+                    HEX27_REFERENCE_NODES[..8].iter().map(move |p| {
+                        let [x, y, z] = p.map(f64::from);
+                        [x + offset, y, z]
+                    })
+                })
+                .collect();
+            let cells = [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15]];
+            let fixed: Vec<_> = (1..48).collect();
+            let material = TetElasticMaterial::try_new(2000.0, 1e6, 0.25, [64; 32]).unwrap();
+            let thermal = TetThermalStrainState::try_new(
+                300.0,
+                300.0,
+                [0.0; 6],
+                [64; 32],
+                ContentHash([65; 32]),
+                0.01,
+            )
+            .unwrap();
+            let problem = Hex8ElasticProblem {
+                nodes_m: &nodes,
+                hexahedra: &cells,
+                materials: TetMaterialField::Uniform(&material),
+                formulation: Formulation::Standard,
+                fixed_dofs: &fixed,
+                budget: TetAssemblyBudget::standard(),
+                stiffness_points_per_dir: 2,
+            };
+            let a_profile = [[2000.0; 8]; 2];
+            let mut b_profile = a_profile;
+            b_profile[1][0] = 1000.0;
+            b_profile[1][1] = 3000.0;
+            let solve = |density: &[[f64; 8]]| {
+                problem
+                    .solve_thermal_tangent_with_reference_density(
+                        TetThermalStrainField::Uniform(&thermal),
+                        density,
+                        &[],
+                        TetStaticSolveConfig::default(),
+                        ContentHash([66; 32]),
+                        0.01,
+                        &cx,
+                    )
+                    .unwrap()
+            };
+            let a = solve(&a_profile);
+            let b = solve(&b_profile);
+            assert_eq!(a.response(), b.response());
+            assert_eq!(a.pencil().mass.to_dense(), b.pencil().mass.to_dense());
+            assert_eq!(
+                a.pencil().stiffness.to_dense(),
+                b.pencil().stiffness.to_dense()
+            );
+            assert_ne!(a.configuration_identity(), b.configuration_identity());
+            assert_ne!(a.identity(), b.identity());
+            assert_eq!(
+                b.configuration_identity(),
+                solve(&b_profile).configuration_identity()
+            );
+        });
+    }
 }
