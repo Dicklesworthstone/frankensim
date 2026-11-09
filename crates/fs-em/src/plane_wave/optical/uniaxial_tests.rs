@@ -1500,3 +1500,118 @@ mod partial_coherence;
 
 #[path = "uniaxial_tests/absorbing_slab_box.rs"]
 mod absorbing_slab_box;
+
+
+#[test]
+fn g1_original_crystal_group_slopes_reach_native_carrier_and_independent_dispersion_gradient() {
+    let source_incident = incident(1.3, 0.8 * MU);
+    let (o, e) = axes([2.8, 1.2], [3.1, 1.4], [0.0; 2], Some(1.7 * MU), [400.0, 800.0], 2);
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let omega = frequency(600.0);
+    // Original n(lambda) lines have intercepts 4.4 and 4.8. Their group
+    // indices are these intercepts, not their carrier phase-index samples.
+    let groups = law.group_indices(omega).unwrap();
+    near(groups[0], 4.4, 3e-14);
+    near(groups[1], 4.8, 3e-14);
+    fn slope(f: impl Fn(f64) -> f64, x: f64, h: f64) -> f64 {
+        (f(x - 2.0 * h) - 8.0 * f(x - h) + 8.0 * f(x + h) - f(x + 2.0 * h))
+            / (12.0 * h)
+    }
+    for authored_axis in [[1.0_f64, 2.0], [-1.0, 2.0]] {
+        let length = authored_axis[0].hypot(authored_axis[1]);
+        let [ax, az] = authored_axis.map(|v| v / length);
+        let interface = PrincipalPlaneUniaxialInterface::try_new(
+            DielectricResponse::Lossless(&source_incident), law, authored_axis,
+        ).unwrap();
+        for p in [-0.65, 0.65] {
+            for polarization in [Polarization::Te, Polarization::Tm] {
+                let prepared = interface.group_velocity_response_at_tangential_index(
+                    omega, p, polarization,
+                ).unwrap();
+                assert!(core::ptr::eq(prepared.source(), &interface));
+                assert!(core::ptr::eq(prepared.source().crystal_response().ordinary_source(), &o));
+                assert_eq!(prepared.angular_frequency_rad_s(), omega);
+                assert_eq!(prepared.carrier(),
+                    interface.response_at_tangential_index(omega, p, polarization).unwrap());
+                assert_eq!(prepared.principal_group_indices(), groups);
+                let carrier = prepared.carrier();
+                let k = [carrier.tangential_wavenumber_rad_m, carrier.transmitted_normal_wavenumber_rad_m.re];
+                let velocity = prepared.group_velocity_m_s().unwrap();
+                // Independently perturb the full k/omega dispersion relation,
+                // evaluating the authored wavelength lines without a production jet.
+                let dispersion = |w: f64, k: [f64; 2]| {
+                    let lambda = core::f64::consts::TAU * C0 * 1e9 / w;
+                    let no = 2.8 + (1.2 - 2.8) * ((lambda - 400.0) / 400.0);
+                    let ne = 3.1 + (1.4 - 3.1) * ((lambda - 400.0) / 400.0);
+                    let transverse = match polarization {
+                        Polarization::Te => (k[0] * k[0] + k[1] * k[1]) / (no * no),
+                        Polarization::Tm => {
+                            let parallel = ax * k[0] + az * k[1];
+                            let perpendicular = -az * k[0] + ax * k[1];
+                            parallel * parallel / (no * no) + perpendicular * perpendicular / (ne * ne)
+                        }
+                    };
+                    transverse - (w / C0) * (w / C0)
+                };
+                let d_omega = slope(|w| dispersion(w, k), omega, omega * 1e-5);
+                let step_k = k[0].hypot(k[1]) * 1e-5;
+                for j in 0..2 {
+                    let d_k = slope(|value| {
+                        let mut changed = k;
+                        changed[j] = value;
+                        dispersion(omega, changed)
+                    }, k[j], step_k);
+                    near(velocity[j], -d_k / d_omega, 5e-10 * C0);
+                }
+            }
+        }
+        let by_angle = interface.group_velocity_response(omega, 0.8, Polarization::Tm).unwrap();
+        let by_tangent = interface.group_velocity_response_at_tangential_index(
+            omega, 1.3 * 0.6, Polarization::Tm,
+        ).unwrap();
+        for j in 0..2 {
+            near(by_angle.group_velocity_m_s().unwrap()[j],
+                by_tangent.group_velocity_m_s().unwrap()[j], 2e-13 * C0);
+        }
+    }
+}
+
+#[test]
+fn g0_crystal_group_sources_keep_loss_band_and_zero_or_anomalous_slope_semantics() {
+    let source_incident = incident(1.0, MU);
+    let (o, e) = axes([1.4, 1.6], [1.8, 2.0], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let interface = PrincipalPlaneUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&source_incident), law, [0.6, 0.8],
+    ).unwrap();
+    for wavelength in [400.0, 800.0] {
+        // Inclusive monochromatic support is not a two-sided derivative domain.
+        assert!(interface.response(frequency(wavelength), 0.85, Polarization::Tm).is_ok());
+        assert!(law.group_indices(frequency(wavelength)).is_err());
+        assert!(interface.group_velocity_response(frequency(wavelength), 0.85, Polarization::Tm).is_err());
+    }
+    let (loss_o, loss_e) = axes([1.4, 1.6], [1.8, 2.0], [0.01, 0.0], Some(MU), [400.0, 800.0], 0);
+    let lossy = UniaxialOpticalResponse::try_new(&loss_o, &loss_e, SPAN).unwrap();
+    assert!(lossy.group_indices(frequency(600.0)).is_err());
+    for (samples, expected_group) in [([1.0, 2.0], 0.0), ([0.5, 1.5], -0.5)] {
+        let (o, e) = axes(samples, samples, [0.0; 2], Some(MU), [400.0, 800.0], 0);
+        let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+        let interface = PrincipalPlaneUniaxialInterface::try_new(
+            DielectricResponse::Lossless(&source_incident), law, [0.6, 0.8],
+        ).unwrap();
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let prepared = interface.group_velocity_response(frequency(600.0), 0.85, polarization).unwrap();
+            for value in prepared.principal_group_indices() {
+                near(value, expected_group, 2e-15);
+            }
+            if expected_group == 0.0 {
+                assert_eq!(prepared.group_velocity_m_s(), None);
+            } else {
+                // Preserve the signed local spectral slope without clipping it
+                // into a positive ray-energy or subluminal signal-speed claim.
+                assert!(prepared.group_velocity_m_s().unwrap()[1] < 0.0);
+                assert!(prepared.carrier().energy_direction.unwrap()[1] > 0.0);
+            }
+        }
+    }
+}

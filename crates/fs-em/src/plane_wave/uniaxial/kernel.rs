@@ -337,6 +337,86 @@ pub(crate) fn solve(input: Input) -> Result<UniaxialInterfaceResponse, &'static 
     })
 }
 
+
+/// Differentiate the ORIGINAL ordinary/extraordinary bulk dispersion surface.
+/// The carrier remains the native outgoing interface mode; there is no second
+/// root solve or angular finite difference here.
+///
+/// For the extraordinary wave, F=k^T M(omega) k-omega²/c0²=0, with
+/// M=(I-aa^T)/ne²+aa^T/no². Thus v_group=-F_k/F_omega. Write
+/// u=(q.a)/no, v=(q.b)/ne, q=c0*k/omega and b perpendicular to a.
+/// Then v_group=c0*M*q/[u²*ng_o/no+v²*ng_e/ne].
+/// Native Poynting direction supplies the robust orientation at critical
+/// incidence and negative normal phase velocity. Positive dispersive denominator
+/// aligns group and Poynting directions; an anomalous signed slope is not
+/// promoted to a positive energy or signal velocity.
+/// MIT 6.974 section 2.8.3, equations 2.412--2.414, plus differentiation of
+/// the original frequency-dependent principal indices.
+pub(crate) fn group_velocity(
+    carrier: UniaxialInterfaceResponse,
+    omega_rad_s: f64,
+    indices: [f64; 2],
+    group_indices: [f64; 2],
+    optic_axis: [f64; 2],
+) -> Result<Option<[f64; 2]>, &'static str> {
+    let omega = positive(omega_rad_s)?;
+    let [no, ne] = indices.map(positive);
+    let (no, ne) = (no?, ne?);
+    if group_indices.iter().any(|value| !value.is_finite()) {
+        return Err("uniaxial group indices must be finite");
+    }
+    let Some(direction) = carrier.energy_direction else {
+        // An evanescent field is not a bulk wave packet travelling into z>0.
+        return Ok(None);
+    };
+    let speed = if carrier.mode == UniaxialMode::Ordinary {
+        if group_indices[0] == 0.0 {
+            return Ok(None);
+        }
+        LIGHT_SPEED_M_S / group_indices[0]
+    } else {
+        let axis = unit_axis(optic_axis)?;
+        let k0 = positive(omega / LIGHT_SPEED_M_S)?;
+        let q = [
+            carrier.tangential_wavenumber_rad_m / k0,
+            carrier.transmitted_normal_wavenumber_rad_m.re / k0,
+        ];
+        let along = (axis[0] * q[0] + axis[1] * q[1]) / no;
+        let across = (-axis[1] * q[0] + axis[0] * q[1]) / ne;
+        if !q.into_iter().chain([along, across]).all(f64::is_finite) {
+            return Err("uniaxial group-wave coordinates are unrepresentable");
+        }
+        // Compensate the signed spectral contraction: a rounded cancellation
+        // must not invent an infinite group velocity for unequal source slopes.
+        let ordinary_slope = Dd::from_f64(group_indices[0]) / Dd::from_f64(no);
+        let extraordinary_slope = Dd::from_f64(group_indices[1]) / Dd::from_f64(ne);
+        let denominator = Dd::from_f64(along) * Dd::from_f64(along) * ordinary_slope
+            + Dd::from_f64(across) * Dd::from_f64(across) * extraordinary_slope;
+        if denominator == Dd::ZERO {
+            return Ok(None);
+        }
+        let denominator = denominator.to_f64();
+        if !denominator.is_finite() || denominator == 0.0 {
+            return Err("uniaxial dispersive denominator is unrepresentable");
+        }
+        let metric_q = [
+            axis[0] * (along / no) - axis[1] * (across / ne),
+            axis[1] * (along / no) + axis[0] * (across / ne),
+        ];
+        let magnitude = positive(det::hypot(metric_q[0], metric_q[1]))?;
+        (magnitude / denominator) * LIGHT_SPEED_M_S
+    };
+    let velocity = direction.map(|component| component * speed);
+    if !speed.is_finite()
+        || speed == 0.0
+        || velocity.iter().any(|value| !value.is_finite())
+        || velocity == [0.0; 2]
+    {
+        return Err("uniaxial group velocity is unrepresentable");
+    }
+    Ok(Some(velocity))
+}
+
 #[cfg(test)]
 #[path = "kernel_tests.rs"]
 mod tests;

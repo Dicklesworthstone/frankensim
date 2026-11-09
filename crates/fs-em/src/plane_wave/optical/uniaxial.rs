@@ -122,6 +122,33 @@ impl<'a> UniaxialOpticalResponse<'a> {
         ])
     }
 
+    /// Original principal group indices [ordinary, extraordinary], n+omega*dn/domega.
+    /// Both original frequency jets must remain lossless. Their wavelength
+    /// coordinates, interpolation gaps, endpoint and cusp refusals are retained.
+    /// Zero and negative values are kept: a local slope is not a signal-speed
+    /// or causal energy-storage model. This query allocates no storage.
+    pub fn group_indices(self, omega_rad_s: f64) -> Result<[f64; 2], ReflectionError> {
+        let jets = [
+            self.ordinary_response.frequency_jet(omega_rad_s)?,
+            self.extraordinary_response.frequency_jet(omega_rad_s)?,
+        ];
+        if jets
+            .iter()
+            .any(|jet| jet.epsilon.im != 0.0 || jet.first_s_m.im != 0.0)
+        {
+            return Err(ReflectionError::Invalid(
+                "transparent uniaxial group transport requires lossless original frequency jets",
+            ));
+        }
+        let indices = jets.map(|jet| jet.first_s_m.re * super::VACUUM_SPEED_M_S);
+        if indices.iter().any(|value| !value.is_finite()) {
+            return Err(ReflectionError::Invalid(
+                "uniaxial principal group indices are unrepresentable",
+            ));
+        }
+        Ok(indices)
+    }
+
     /// Original principal SI permittivities N²/(mu*c0²) [F/m]. The shared
     /// scalar mu belongs to the same complete source snapshot. Negative real
     /// epsilon is admitted; positive extinction may never round to zero loss.

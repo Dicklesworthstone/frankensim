@@ -6654,8 +6654,33 @@ classification and weak positive transmission. Queries allocate nothing.
 The scope is one homogeneous principal-plane half-space interface, including
 an exact isotropic constitutive limit. It does not extend the existing isotropic
 film, angular-spectrum or rendering owners to arbitrary anisotropic media.
-Biaxial crystals, absorbing anisotropy, mode-coupled films and dispersive
-group-delay magnitudes require separate capabilities.
+Biaxial crystals, absorbing anisotropy, mode-coupled films and broadband
+pulse evolution require separate capabilities.
+
+### Local dispersive crystal group transport
+
+`UniaxialOpticalResponse::group_indices` differentiates both original
+principal spectral laws in their authored wavelength coordinate.
+`PrincipalPlaneUniaxialInterface::group_velocity_response` and its signed
+tangential-index counterpart return the unchanged native carrier together
+with both principal group indices and local `grad_k(omega)` in [x,z] m/s.
+The result borrows its complete interface owner. No second Snell/root solve,
+fitted spectrum, angular finite difference or allocation is introduced.
+
+The extraordinary velocity differentiates the full dispersion relation
+`k^T M(omega) k=omega^2/c0^2`, retaining both ordinary and extraordinary
+spectral slopes and native crystal walk-off. The ordinary mode reduces to
+`c0/ng_o` along its phase direction; equal phase indices do not erase unequal
+principal slopes. Positive dispersive energy aligns group and Poynting
+directions in this transparent reciprocal model. Anomalous signs remain
+signed; they are not a signal-front or positive energy-speed claim.
+
+Original source endpoints, interpolation cusps, gaps and extinction remain
+authoritative. Critical modes may have finite tangential group velocity with
+zero normal power. Evanescent modes and exactly vanishing dispersive
+denominators have no finite bulk group vector; unrepresentable nonzero
+velocities refuse. This is local homogeneous principal-plane transport,
+not a normal-transfer phase delay or broadband propagation solver.
 
 ### Arbitrarily oriented transparent crystals
 

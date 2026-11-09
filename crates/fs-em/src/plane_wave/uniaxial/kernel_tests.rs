@@ -397,3 +397,145 @@ fn malformed_or_unrepresentable_ports_refuse_instead_of_inventing_a_mode() {
         assert!(solve(data).is_err());
     }
 }
+
+// Independent Brillouin energy: E* d(omega*epsilon)/domega E / 4 + mu |H|²/4.
+// This reconstructs Cartesian Maxwell fields from the permittivity tensor;
+// it does not use the production group-velocity metric or denominator.
+fn dispersive_energy_velocity(
+    data: Input,
+    carrier: UniaxialInterfaceResponse,
+    group: [f64; 2],
+) -> [f64; 2] {
+    let [ax, az] = norm(data.optic_axis);
+    let no2 = data.ordinary_index * data.ordinary_index;
+    let ne2 = data.extraordinary_index * data.extraordinary_index;
+    let epsilon_xx = no2 + (ne2 - no2) * ax * ax;
+    let epsilon_xz = (ne2 - no2) * ax * az;
+    let epsilon_zz = no2 + (ne2 - no2) * az * az;
+    let determinant = epsilon_xx * epsilon_zz - epsilon_xz * epsilon_xz;
+    let k0 = data.omega_rad_s / LIGHT_SPEED_M_S;
+    let qx = carrier.tangential_wavenumber_rad_m / k0;
+    let qz = carrier.transmitted_normal_wavenumber_rad_m.re / k0;
+    let mu = data.crystal_mu_h_m;
+    let de_o = (2.0 * data.ordinary_index * group[0] - no2)
+        / (mu * LIGHT_SPEED_M_S * LIGHT_SPEED_M_S);
+    let de_e = (2.0 * data.extraordinary_index * group[1] - ne2)
+        / (mu * LIGHT_SPEED_M_S * LIGHT_SPEED_M_S);
+    let (energy, flux) = match data.mode {
+        UniaxialMode::Ordinary => {
+            let hx = -qz / (mu * LIGHT_SPEED_M_S);
+            let hz = qx / (mu * LIGHT_SPEED_M_S);
+            (0.25 * (de_o + mu * (hx * hx + hz * hz)), [0.5 * hz, -0.5 * hx])
+        }
+        UniaxialMode::Extraordinary => {
+            let ex = mu * LIGHT_SPEED_M_S * (epsilon_zz * qz + epsilon_xz * qx) / determinant;
+            let ez = mu * LIGHT_SPEED_M_S * (-epsilon_xz * qz - epsilon_xx * qx) / determinant;
+            let parallel = ax * ex + az * ez;
+            let perpendicular = -az * ex + ax * ez;
+            let energy = 0.25 * (de_o * perpendicular * perpendicular + de_e * parallel * parallel + mu);
+            (energy, [-0.5 * ez, 0.5 * ex])
+        }
+    };
+    assert!(energy > 0.0);
+    flux.map(|value| value / energy)
+}
+
+#[test]
+fn g1_group_velocity_recovers_isotropic_and_ordinary_group_speed() {
+    for mode in [UniaxialMode::Ordinary, UniaxialMode::Extraordinary] {
+        let data = input(1.2, 1.7, 1.7, 0.8, [0.37, -0.91], mode);
+        let carrier = solve(data).unwrap();
+        let group = [2.9; 2];
+        let velocity = group_velocity(carrier, data.omega_rad_s, [1.7; 2], group, data.optic_axis)
+            .unwrap().unwrap();
+        let direction = carrier.phase_direction.unwrap();
+        for j in 0..2 {
+            near(velocity[j], direction[j] * LIGHT_SPEED_M_S / group[0], 4e-15 * LIGHT_SPEED_M_S);
+        }
+    }
+    // The ordinary wave sees no extraordinary group-index substitution.
+    let data = input(1.2, 1.7, 2.4, -0.8, [0.8, 0.6], UniaxialMode::Ordinary);
+    let carrier = solve(data).unwrap();
+    let velocity = group_velocity(carrier, data.omega_rad_s, [1.7, 2.4], [3.0, 8.0], data.optic_axis)
+        .unwrap().unwrap();
+    for j in 0..2 {
+        near(velocity[j], carrier.phase_direction.unwrap()[j] * LIGHT_SPEED_M_S / 3.0, 3e-15 * LIGHT_SPEED_M_S);
+    }
+}
+
+#[test]
+fn g1_extraordinary_group_transport_matches_independent_dispersive_field_energy() {
+    for (data, group) in [
+        (input(2.0, 1.0, 2.0, 1.5, [1.0, 1.0], UniaxialMode::Extraordinary), [1.0, 2.0]),
+        (input(2.0, 1.0, 2.0, 1.5, [1.0, 1.0], UniaxialMode::Extraordinary), [2.4, 3.3]),
+        (input(1.2, 1.5, 2.0, 0.0, [1.0, 1.0], UniaxialMode::Extraordinary), [3.0, 4.5]),
+        // Equal phase indices at a crossing do not erase unequal source slopes.
+        (input(1.2, 1.5, 1.5, -0.8, [0.3, 0.7], UniaxialMode::Extraordinary), [1.8, 3.0]),
+    ] {
+        let carrier = solve(data).unwrap();
+        let velocity = group_velocity(carrier, data.omega_rad_s,
+            [data.ordinary_index, data.extraordinary_index], group, data.optic_axis).unwrap().unwrap();
+        let expected = dispersive_energy_velocity(data, carrier, group);
+        for j in 0..2 {
+            near(velocity[j], expected[j], 2e-13 * LIGHT_SPEED_M_S);
+        }
+        compare_direction(Some(norm(velocity)), carrier.energy_direction.unwrap(), 5e-14);
+        assert!(velocity[1] > 0.0);
+        let reversed = group_velocity(carrier, data.omega_rad_s,
+            [data.ordinary_index, data.extraordinary_index], group,
+            data.optic_axis.map(|x| -x)).unwrap().unwrap();
+        for j in 0..2 {
+            near(velocity[j], reversed[j], 5e-15 * LIGHT_SPEED_M_S);
+        }
+    }
+}
+
+#[test]
+fn g0_group_transport_retains_critical_tangency_evanescence_and_signed_slopes() {
+    let mut data = input(2.0, 1.4, 1.0, 1.0, [0.0, 1.0], UniaxialMode::Extraordinary);
+    let critical = solve(data).unwrap();
+    assert_eq!(critical.wave_kind, UniaxialWaveKind::Critical);
+    let group = [2.1, 1.7];
+    let velocity = group_velocity(critical, data.omega_rad_s, [1.4, 1.0], group, data.optic_axis)
+        .unwrap().unwrap();
+    near(velocity[0], LIGHT_SPEED_M_S / group[1], 5e-15 * LIGHT_SPEED_M_S);
+    assert_eq!(velocity[1], 0.0);
+    assert_eq!(critical.transmitted_power_fraction, 0.0);
+    let anomalous = group_velocity(critical, data.omega_rad_s, [1.4, 1.0],
+        group.map(|x| -x), data.optic_axis).unwrap().unwrap();
+    near(anomalous[0], -velocity[0], 5e-15 * LIGHT_SPEED_M_S);
+    assert_eq!(group_velocity(critical, data.omega_rad_s, [1.4, 1.0], [0.0; 2], data.optic_axis).unwrap(), None);
+    data.incidence = Incidence::TangentialIndex(1.1);
+    let evanescent = solve(data).unwrap();
+    assert_eq!(evanescent.wave_kind, UniaxialWaveKind::Evanescent);
+    assert_eq!(group_velocity(evanescent, data.omega_rad_s, [1.4, 1.0], group, data.optic_axis).unwrap(), None);
+    assert!(group_velocity(critical, data.omega_rad_s, [1.4, 1.0], [f64::NAN, 1.7], data.optic_axis).is_err());
+}
+
+#[test]
+fn g0_near_cancelling_principal_slopes_keep_finite_signed_group_velocity() {
+    // At this equal-phase crossing, the extraordinary mode has the mean of
+    // the two ORIGINAL principal group indices. Dividing each by n in f64
+    // first would round the ratios to equal and opposite values and lose it.
+    let data = input(1.0, 1.5, 1.5, 0.0, [1.0, 1.0], UniaxialMode::Extraordinary);
+    let carrier = solve(data).unwrap();
+    let group = [
+        f64::from_bits(1.5_f64.to_bits() + 1),
+        -f64::from_bits(1.5_f64.to_bits() + 2),
+    ];
+    assert_eq!(group[0] / 1.5, -group[1] / 1.5);
+    let effective_group = 0.5 * (group[0] + group[1]);
+    assert!(effective_group < 0.0);
+    let expected = LIGHT_SPEED_M_S / effective_group;
+    let velocity = group_velocity(
+        carrier,
+        data.omega_rad_s,
+        [1.5; 2],
+        group,
+        data.optic_axis,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(velocity[0], 0.0);
+    near(velocity[1], expected, 2e-14 * expected.abs());
+}
