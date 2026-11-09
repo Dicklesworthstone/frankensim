@@ -6649,3 +6649,13 @@ native energy exchange, area ownership and conductivity-sensitive cooling.
 All changed sources passed the pinned parser; these cross-crate integration
 tests remain uncompiled and unexecuted. The four standalone analytic fin-kernel
 tests executed successfully as recorded in the fs-convection contract.
+
+### Resolved transient Carreau networks with original flow-dependent head laws
+
+`graph::rheology::transient::head` adds a source-retaining `FlowHeadSource` and `FlowHeadLaw`; `TransientCarreauGraph::step_with_head_laws` solves each original radial midpoint response together with its authored signed flow-dependent pressure head. Continuous nonincreasing head laws are admitted so the exact condensed conductance `G / (1 - G dH/dQ)` remains positive for the original graph pressure solve. A separate pressure residual tolerance and bounded source-query budget control the scalar head solve; every original radial trial consumes the existing branch-work budget.
+
+The original source owns its inclusive signed flow interval, pressure, derivative and any reference-density restriction. No extrapolation, clipped source value, inferred reverse quadrant or substituted viscosity is permitted. Midpoint source queries remain inside support; both endpoints of the accepted affine flow history must also be supported. Final-flow support is checked after the coupled graph pressure/storage solve, so an unaccepted pressure guess cannot prematurely reject an otherwise admissible operating point. Mathematical head brackets do not require evaluating inadmissible extreme radial profiles.
+
+Accepted reports retain the exact shared source identity, actual midpoint head and derivative, effective conductance, and signed `H(Q_mid) Q_mid dt` work. Numerical head-residual work remains separately visible in the mechanical reconciliation; it is never deposited as viscous heat. Existing held heads, radial inertia, original nonlinear rheology, compliance work, source errors and cancellation retain their native ownership and atomic state publication.
+
+Verification: the bounded existing original-source network recipe compiled and passed 67 tests, including five new independent annular/nonlinear-head, Schur-tangent, extreme-support, coupled-storage-support and refusal/retry regressions. The recipe uses the actual production numerical modules with a context-only cancellation facade; full Cargo integration and native asupersync runtime execution remain unverified.
