@@ -1,5 +1,8 @@
 //! Original-chart nonuniform heat, pressure work and conservative inventories.
 
+#[cfg(feature = "implicit-enthalpy-coupling")]
+mod implicit;
+
 use super::*;
 use crate::conjugate::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, DensityForceControls,

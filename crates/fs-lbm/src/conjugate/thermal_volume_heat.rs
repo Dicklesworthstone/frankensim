@@ -11,6 +11,10 @@ use fs_exec::CancelGate;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_math::dd::Dd;
 
+/// Original implicit conduction and finite-solid storage inside heat/work closure.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod implicit;
+
 /// Native transport/pressure gates plus a bounded heat/work source iteration.
 #[derive(Clone, Copy, Debug)]
 pub struct SuppliedHeatThermalVolumeControls {
@@ -110,174 +114,262 @@ impl FlowField {
         controls: SuppliedHeatThermalVolumeControls,
         gate: &CancelGate,
     ) -> Result<SuppliedHeatThermalVolumeStep, ChtError> {
-        poll(gate)?;
-        let n = domain.cell_count();
-        if n > controls.native.volume.thermal.volume.transport.max_cells
-            || supplied_heat_j.len() != n
-            || input.volume.net_enthalpy_increment_j.len() != n
-            || controls.maximum_heat_work_iterations == 0
-            || !controls.work_relaxation.is_finite()
-            || controls.work_relaxation <= 0.0
-            || controls.work_relaxation > 1.0
-            || [
-                controls.maximum_absolute_local_heat_defect_j,
-                controls.maximum_total_heat_defect_j,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0)
-        {
+        let accepted = close_native_heat_work(
+            domain,
+            curve,
+            input,
+            supplied_heat_j,
+            controls,
+            gate,
+            |net| {
+                self.advance_piecewise_thermal_volume_momentum(
+                    domain,
+                    faces,
+                    curve,
+                    ThermalVolumeMomentumInput {
+                        volume: super::CoexistenceVolumeInput {
+                            net_enthalpy_increment_j: net,
+                            ..input.volume
+                        },
+                        ..input
+                    },
+                    controls.native,
+                    gate,
+                )
+                .map(|evolution| NativeHeatWorkTrial {
+                    evolution,
+                    conductive_heat_j: None,
+                    receipt: (),
+                })
+            },
+        )?;
+        let NativeHeatWorkTrial {
+            evolution,
+            receipt: (),
+            ..
+        } = accepted.trial;
+        Ok(SuppliedHeatThermalVolumeStep {
+            evolution,
+            net_enthalpy_increment_j: accepted.authored_net_enthalpy_increment_j,
+            cell_pressure_work_j: accepted.cell_pressure_work_j,
+            report: accepted.report,
+        })
+    }
+}
+
+// One concrete native trial. Optional Fourier heat belongs to the original
+// implicit graph; its finite-solid/source receipt stays with this exact trial.
+struct NativeHeatWorkTrial<T> {
+    evolution: ThermalVolumeMomentumStep,
+    conductive_heat_j: Option<Vec<f64>>,
+    receipt: T,
+}
+
+struct NativeHeatWorkAcceptance<T> {
+    trial: NativeHeatWorkTrial<T>,
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    absolute_local_heat_defect: Dd,
+    authored_net_enthalpy_increment_j: Vec<f64>,
+    cell_pressure_work_j: Vec<f64>,
+    report: SuppliedHeatThermalVolumeReport,
+}
+
+// Both public entries use this SAME source-work closure and acceptance gates.
+// A native thermal producer may refresh Fourier heat, never mass routes,
+// pressure, source laws or a separate time trajectory.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn close_native_heat_work<T>(
+    domain: &VoxelDomain,
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    input: ThermalVolumeMomentumInput<'_>,
+    supplied_heat_j: &[f64],
+    controls: SuppliedHeatThermalVolumeControls,
+    gate: &CancelGate,
+    mut advance: impl FnMut(&[f64]) -> Result<NativeHeatWorkTrial<T>, ChtError>,
+) -> Result<NativeHeatWorkAcceptance<T>, ChtError> {
+    poll(gate)?;
+    let n = domain.cell_count();
+    if n > controls.native.volume.thermal.volume.transport.max_cells
+        || supplied_heat_j.len() != n
+        || input.volume.net_enthalpy_increment_j.len() != n
+        || controls.maximum_heat_work_iterations == 0
+        || !controls.work_relaxation.is_finite()
+        || controls.work_relaxation <= 0.0
+        || controls.work_relaxation > 1.0
+        || [
+            controls.maximum_absolute_local_heat_defect_j,
+            controls.maximum_total_heat_defect_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(refuse(
+            "invalid spatial heat/work input or iteration budget",
+        ));
+    }
+    let mut supplied = Dd::ZERO;
+    for (c, &heat) in supplied_heat_j.iter().enumerate() {
+        poll_cell(gate, c)?;
+        if !heat.is_finite() || (!domain.is_fluid(c) && heat != 0.0) {
             return Err(refuse(
-                "invalid spatial heat/work input or iteration budget",
+                "physical heat must be finite and zero in solid grid cells",
             ));
         }
-        let mut supplied = Dd::ZERO;
-        for (c, &heat) in supplied_heat_j.iter().enumerate() {
-            poll_cell(gate, c)?;
-            if !heat.is_finite() || (!domain.is_fluid(c) && heat != 0.0) {
-                return Err(refuse(
-                    "physical heat must be finite and zero in solid grid cells",
-                ));
-            }
-            supplied = supplied + Dd::from_f64(heat);
-        }
-        if !number(supplied).is_finite() {
-            return Err(refuse("supplied spatial heat is unrepresentable"));
-        }
-        let dt = controls
-            .native
-            .volume
-            .thermal
-            .volume
-            .transport
-            .projection
-            .duration_s;
-        let mut net = input.volume.net_enthalpy_increment_j.to_vec();
-        let mut next_net = vec![0.0; n];
-        let mut work = vec![0.0; n];
-        let mut volume_source_iterations = 0usize;
-        for iteration in 1..=controls.maximum_heat_work_iterations {
-            poll(gate)?;
-            let trial = self.advance_piecewise_thermal_volume_momentum(
-                domain,
-                faces,
-                curve,
-                ThermalVolumeMomentumInput {
-                    volume: super::CoexistenceVolumeInput {
-                        net_enthalpy_increment_j: &net,
-                        ..input.volume
-                    },
-                    ..input
-                },
-                controls.native,
-                gate,
-            )?;
-            let volume = &trial.thermal.volume;
-            let projection = &volume.transport.projection;
-            if projection.report.projection.pinned_components != 0 {
-                return Err(refuse(
-                    "heat/work closure requires a reference-pressure Free opening in every fluid component",
-                ));
-            }
-            volume_source_iterations = volume_source_iterations
-                .checked_add(trial.thermal.source_iterations)
-                .ok_or_else(|| refuse("spatial heat/work source count overflow"))?;
-            let mut represented = Dd::ZERO;
-            let mut partitioned_work = Dd::ZERO;
-            let mut absolute_local = Dd::ZERO;
-            let mut maximum_local = 0.0_f64;
-            let mut changed = false;
-            for c in 0..n {
-                poll_cell(gate, c)?;
-                if !domain.is_fluid(c) {
-                    continue;
-                }
-                let original = input.volume.phase_states[c].ok_or_else(|| {
-                    refuse("native heat/work trial lost its original phase state")
-                })?;
-                // Same original fixed-mass caloric advance as the native
-                // volume owner; no subtraction of extensive absolute H.
-                let heated = curve
-                    .advance_specific_energy(original, net[c] / input.volume.mass_kg[c])
-                    .map_err(|error| refuse(error.to_string()))?;
-                let increment = Dd::from_f64(input.volume.mass_kg[c])
-                    * (Dd::from_f64(heated.specific_enthalpy_j_kg())
-                        - Dd::from_f64(original.specific_enthalpy_j_kg()));
-                let cell_work = Dd::from_f64(dt)
-                    * Dd::from_f64(projection.pressure_correction_pa[c])
-                    * Dd::from_f64(volume.volume_source_m3_s[c]);
-                let residual = increment + cell_work - Dd::from_f64(supplied_heat_j[c]);
-                let residual_j = number(residual);
-                let proposed = number(
-                    Dd::from_f64(net[c]) - Dd::from_f64(controls.work_relaxation) * residual,
-                );
-                work[c] = number(cell_work);
-                if !residual_j.is_finite() || !work[c].is_finite() || !proposed.is_finite() {
-                    return Err(refuse("spatial heat/work arithmetic is unrepresentable"));
-                }
-                represented = represented + increment;
-                partitioned_work = partitioned_work + cell_work;
-                absolute_local = absolute_local + magnitude(residual);
-                maximum_local = maximum_local.max(residual_j.abs());
-                next_net[c] = proposed;
-                changed |= proposed.to_bits() != net[c].to_bits();
-            }
-            let work_defect =
-                partitioned_work - Dd::from_f64(projection.report.pressure_source_work_j);
-            let total_defect = Dd::from_f64(volume.report.material_enthalpy_change_j)
-                - Dd::from_f64(volume.transport.report.carried_enthalpy_j)
-                + Dd::from_f64(projection.report.pressure_source_work_j)
-                - supplied;
-            if !number(represented).is_finite()
-                || !number(partitioned_work).is_finite()
-                || !number(work_defect).is_finite()
-                || !number(absolute_local).is_finite()
-                || !number(total_defect).is_finite()
-            {
-                return Err(refuse("spatial heat/work readback is unrepresentable"));
-            }
-            if exceeds(
-                work_defect,
-                controls.native.mechanics.projection.maximum_energy_defect_j,
-            ) {
-                return Err(refuse(
-                    "cell pressure work disagrees with the original native account",
-                ));
-            }
-            if !exceeds(
-                absolute_local,
-                controls.maximum_absolute_local_heat_defect_j,
-            ) {
-                if exceeds(total_defect, controls.maximum_total_heat_defect_j) {
-                    return Err(refuse(
-                        "actual spatial inventory, carried enthalpy and pressure work exceed the heat budget",
-                    ));
-                }
-                let report = SuppliedHeatThermalVolumeReport {
-                    supplied_heat_j: number(supplied),
-                    represented_net_enthalpy_increment_j: number(represented),
-                    source_pressure_work_j: number(partitioned_work),
-                    maximum_local_heat_defect_j: maximum_local,
-                    absolute_local_heat_defect_j: number(absolute_local),
-                    pressure_work_partition_defect_j: number(work_defect),
-                    total_heat_defect_j: number(total_defect),
-                    heat_work_iterations: iteration,
-                    volume_source_iterations,
-                };
-                poll(gate)?;
-                return Ok(SuppliedHeatThermalVolumeStep {
-                    evolution: trial,
-                    net_enthalpy_increment_j: net,
-                    cell_pressure_work_j: work,
-                    report,
-                });
-            }
-            if !changed || iteration == controls.maximum_heat_work_iterations {
-                return Err(refuse("spatial heat/work iteration stalled or exhausted"));
-            }
-            core::mem::swap(&mut net, &mut next_net);
-        }
-        Err(refuse("spatial heat/work iteration exhausted"))
+        supplied = supplied + Dd::from_f64(heat);
     }
+    if !number(supplied).is_finite() {
+        return Err(refuse("supplied spatial heat is unrepresentable"));
+    }
+    let dt = controls
+        .native
+        .volume
+        .thermal
+        .volume
+        .transport
+        .projection
+        .duration_s;
+    let mut net = input.volume.net_enthalpy_increment_j.to_vec();
+    let mut next_net = vec![0.0; n];
+    let mut work = vec![0.0; n];
+    let mut volume_source_iterations = 0usize;
+    for iteration in 1..=controls.maximum_heat_work_iterations {
+        poll(gate)?;
+        let trial = advance(&net)?;
+        if trial
+            .conductive_heat_j
+            .as_ref()
+            .is_some_and(|heat| heat.len() != n)
+        {
+            return Err(refuse(
+                "native conduction returned an invalid fluid heat field",
+            ));
+        }
+        let volume = &trial.evolution.thermal.volume;
+        let projection = &volume.transport.projection;
+        if projection.report.projection.pinned_components != 0 {
+            return Err(refuse(
+                "heat/work closure requires a reference-pressure Free opening in every fluid component",
+            ));
+        }
+        volume_source_iterations = volume_source_iterations
+            .checked_add(trial.evolution.thermal.source_iterations)
+            .ok_or_else(|| refuse("spatial heat/work source count overflow"))?;
+        let mut trial_supplied = supplied;
+        let mut represented = Dd::ZERO;
+        let mut partitioned_work = Dd::ZERO;
+        let mut absolute_local = Dd::ZERO;
+        let mut maximum_local = 0.0_f64;
+        let mut changed = false;
+        for c in 0..n {
+            poll_cell(gate, c)?;
+            let conductive = trial.conductive_heat_j.as_ref().map(|heat| heat[c]);
+            if conductive
+                .is_some_and(|heat| !heat.is_finite() || (!domain.is_fluid(c) && heat != 0.0))
+            {
+                return Err(refuse("native conduction returned invalid physical heat"));
+            }
+            if !domain.is_fluid(c) {
+                continue;
+            }
+            let original = input.volume.phase_states[c]
+                .ok_or_else(|| refuse("native heat/work trial lost its original phase state"))?;
+            // Same original fixed-mass caloric advance as the native
+            // volume owner; no subtraction of extensive absolute H.
+            // Native implicit conduction assembles this same rounded sum
+            // before the original caloric/volume advance. The physical heat
+            // sum below retains its low part for the independent local gate.
+            let (combined, physical_heat) = match conductive {
+                Some(heat) => {
+                    trial_supplied = trial_supplied + Dd::from_f64(heat);
+                    (
+                        net[c] + heat,
+                        Dd::from_f64(supplied_heat_j[c]) + Dd::from_f64(heat),
+                    )
+                }
+                None => (net[c], Dd::from_f64(supplied_heat_j[c])),
+            };
+            let heated = curve
+                .advance_specific_energy(original, combined / input.volume.mass_kg[c])
+                .map_err(|error| refuse(error.to_string()))?;
+            let increment = Dd::from_f64(input.volume.mass_kg[c])
+                * (Dd::from_f64(heated.specific_enthalpy_j_kg())
+                    - Dd::from_f64(original.specific_enthalpy_j_kg()));
+            let cell_work = Dd::from_f64(dt)
+                * Dd::from_f64(projection.pressure_correction_pa[c])
+                * Dd::from_f64(volume.volume_source_m3_s[c]);
+            let residual = increment + cell_work - physical_heat;
+            let residual_j = number(residual);
+            let proposed =
+                number(Dd::from_f64(net[c]) - Dd::from_f64(controls.work_relaxation) * residual);
+            work[c] = number(cell_work);
+            if !residual_j.is_finite() || !work[c].is_finite() || !proposed.is_finite() {
+                return Err(refuse("spatial heat/work arithmetic is unrepresentable"));
+            }
+            represented = represented + increment;
+            partitioned_work = partitioned_work + cell_work;
+            absolute_local = absolute_local + magnitude(residual);
+            maximum_local = maximum_local.max(residual_j.abs());
+            next_net[c] = proposed;
+            changed |= proposed.to_bits() != net[c].to_bits();
+        }
+        let work_defect = partitioned_work - Dd::from_f64(projection.report.pressure_source_work_j);
+        let total_defect = Dd::from_f64(volume.report.material_enthalpy_change_j)
+            - Dd::from_f64(volume.transport.report.carried_enthalpy_j)
+            + Dd::from_f64(projection.report.pressure_source_work_j)
+            - trial_supplied;
+        if !number(represented).is_finite()
+            || !number(partitioned_work).is_finite()
+            || !number(work_defect).is_finite()
+            || !number(absolute_local).is_finite()
+            || !number(total_defect).is_finite()
+            || !number(trial_supplied).is_finite()
+        {
+            return Err(refuse("spatial heat/work readback is unrepresentable"));
+        }
+        if exceeds(
+            work_defect,
+            controls.native.mechanics.projection.maximum_energy_defect_j,
+        ) {
+            return Err(refuse(
+                "cell pressure work disagrees with the original native account",
+            ));
+        }
+        if !exceeds(
+            absolute_local,
+            controls.maximum_absolute_local_heat_defect_j,
+        ) {
+            if exceeds(total_defect, controls.maximum_total_heat_defect_j) {
+                return Err(refuse(
+                    "actual spatial inventory, carried enthalpy and pressure work exceed the heat budget",
+                ));
+            }
+            let report = SuppliedHeatThermalVolumeReport {
+                supplied_heat_j: number(trial_supplied),
+                represented_net_enthalpy_increment_j: number(represented),
+                source_pressure_work_j: number(partitioned_work),
+                maximum_local_heat_defect_j: maximum_local,
+                absolute_local_heat_defect_j: number(absolute_local),
+                pressure_work_partition_defect_j: number(work_defect),
+                total_heat_defect_j: number(total_defect),
+                heat_work_iterations: iteration,
+                volume_source_iterations,
+            };
+            poll(gate)?;
+            return Ok(NativeHeatWorkAcceptance {
+                trial,
+                #[cfg(feature = "implicit-enthalpy-coupling")]
+                absolute_local_heat_defect: absolute_local,
+                authored_net_enthalpy_increment_j: net,
+                cell_pressure_work_j: work,
+                report,
+            });
+        }
+        if !changed || iteration == controls.maximum_heat_work_iterations {
+            return Err(refuse("spatial heat/work iteration stalled or exhausted"));
+        }
+        core::mem::swap(&mut net, &mut next_net);
+    }
+    Err(refuse("spatial heat/work iteration exhausted"))
 }
 
 fn number(value: Dd) -> f64 {
