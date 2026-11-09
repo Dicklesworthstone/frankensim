@@ -15,7 +15,7 @@ pub mod continuation;
 mod sensitivity;
 pub use sensitivity::{
     PhsAutonomousParameterDirection, PhsAutonomousSensitivityError,
-    PreparedPhsAutonomousSensitivity,
+    PreparedPhsAutonomousAdjoint, PreparedPhsAutonomousSensitivity,
 };
 
 mod shooting;

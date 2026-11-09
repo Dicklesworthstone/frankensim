@@ -10306,3 +10306,21 @@ material/clock partials separately, including `partial_p H` for a storage
 objective. Cancellation and refusal publish no result and preserve reuse.
 Finite-order/sampling evidence does not prove harmonic-tail convergence or
 stability.
+
+
+### Physical autonomous-cycle objective adjoints
+
+`PreparedPhsAutonomousSensitivity::mean_objective` and `mean_stored_energy`
+expose the complete original cycle, with independently admitted value and
+coefficient/frequency covector. Stored energy evaluates the source Hamiltonian
+and every memory-coordinate partial and has zero explicit clock partial.
+`PreparedPhsAutonomousAdjoint` retains the original phase border and solved
+frequency. Its `gradient_parameter` shares the exact J/R/G/storage/feedback
+direction owner with `solve_parameter`, including the direct conjugate-flow
+chain once. The caller supplies the direct objective parameter partial at
+fixed coefficients and frequency; the frequency partial belongs in adjoint
+preparation, including changing-period effects for per-cycle energy. There is
+no waveform-direction solve, source perturbation, refit or state reduction per
+objective parameter query. Existing physical source refusals, cancellation,
+budgets and two-grid direction admission remain. This is a local finite-harmonic
+fixed-phase derivative, not a proof of stability or harmonic-tail convergence.

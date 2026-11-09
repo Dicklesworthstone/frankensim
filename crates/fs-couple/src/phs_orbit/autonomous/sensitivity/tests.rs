@@ -440,3 +440,304 @@ fn refused_feedback_direction_and_cancellation_leave_the_factor_reusable() {
     assert_eq!(result.angular_frequency_derivative, 0.0);
     assert!(result.coeffs.iter().flatten().all(|z| *z == C64::ZERO));
 }
+
+fn objective_controls() -> ForcedMeanObjectiveControls {
+    ForcedMeanObjectiveControls {
+        objective_scale: 1.0,
+        maximum_value_sampling_defect: 1e-10,
+        maximum_gradient_sampling_defect: 1e-10,
+    }
+}
+
+impl Cycle {
+    fn shifted(&self, slope: &Self, h: f64) -> Self {
+        Self {
+            j: self.j + h * slope.j,
+            r: self.r + h * slope.r,
+            g: self.g + h * slope.g,
+            k: self.k + h * slope.k,
+            eta: self.eta + h * slope.eta,
+            mu: self.mu + h * slope.mu,
+            h: self.h + h * slope.h,
+            gain: self.gain + h * slope.gain,
+            saturation: self.saturation + h * slope.saturation,
+            shear: self.shear + h * slope.shear,
+            beta: self.beta + h * slope.beta,
+            alpha: self.alpha + h * slope.alpha,
+        }
+    }
+
+    // Independent closed-form physical observations, including both relaxing
+    // stores and their frequency-dependent phase/amplitude.
+    fn energy_and_cycle_loss(&self) -> (f64, f64) {
+        let a = self.radius_squared();
+        let w = self.frequency();
+        let b = a * (self.h * self.alpha).powi(2) / ((self.eta * self.mu).powi(2) + w * w);
+        (
+            0.5 * (self.k * a + self.mu * b),
+            core::f64::consts::TAU / w
+                * (self.r * self.k * self.k * a + self.eta * self.mu * self.mu * b),
+        )
+    }
+}
+
+#[test]
+fn physical_objectives_include_all_material_feedback_and_changing_period_chains() {
+    let cycle = Cycle::source();
+    let slope = Cycle::slope();
+    let system = cycle.system();
+    let orbit = cycle.orbit();
+    let jacobian = |x: &[f64], flows: &[f64], out: &mut [f64]| cycle.jacobian(x, flows, out);
+    let feedback = |x: &[f64], flows: &[f64], dy: &[f64], out: &mut [f64]| {
+        cycle.parameter(&slope, x, flows, dy, out)
+    };
+    let storage = |x: &[f64], out: &mut [f64]| {
+        for j in 0..4 {
+            out[j] = x[j] * if j < 2 { slope.k } else { slope.mu };
+        }
+        true
+    };
+    let mut dj = vec![0.0; 16];
+    dj[1] = -slope.j;
+    dj[4] = slope.j;
+    let dr = diagonal([slope.r, slope.r, slope.eta, slope.eta]);
+    let dg = diagonal([slope.g, slope.g, slope.h, slope.h]);
+    let direction = || PhsAutonomousParameterDirection {
+        structure: PhsStructureParameterDirection {
+            interconnection: Some(&dj),
+            dissipation: Some(&dr),
+            ports: Some(&dg),
+        },
+        storage: Some(&storage),
+        feedback: &feedback,
+    };
+    let mut prepared = PreparedPhsAutonomousSensitivity::new(
+        &system,
+        &cycle,
+        &jacobian,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &scales(),
+        || false,
+    )
+    .unwrap();
+    let w = orbit.omega;
+    let period = core::f64::consts::TAU / w;
+    let a = cycle.radius_squared();
+    let b = a * (cycle.h * cycle.alpha).powi(2) / ((cycle.eta * cycle.mu).powi(2) + w * w);
+    let h = 2e-5;
+    let lo = cycle.shifted(&slope, -h).energy_and_cycle_loss();
+    let hi = cycle.shifted(&slope, h).energy_and_cycle_loss();
+    let base = cycle.energy_and_cycle_loss();
+    for per_cycle in [false, true] {
+        let objective = if per_cycle {
+            prepared
+                .mean_objective(
+                    objective_controls(),
+                    |_, x, value, gradient, frequency| {
+                        let effort = [
+                            cycle.k * x[0],
+                            cycle.k * x[1],
+                            cycle.mu * x[2],
+                            cycle.mu * x[3],
+                        ];
+                        *value = period * system.resistance_power_from_effort(&effort).unwrap();
+                        for j in 0..4 {
+                            let coefficient = if j < 2 {
+                                cycle.r * cycle.k * cycle.k
+                            } else {
+                                cycle.eta * cycle.mu * cycle.mu
+                            };
+                            gradient[j] = 2.0 * period * coefficient * x[j];
+                        }
+                        *frequency = -*value / w;
+                        true
+                    },
+                    || false,
+                )
+                .unwrap()
+        } else {
+            prepared
+                .mean_stored_energy(objective_controls(), || false)
+                .unwrap()
+        };
+        let explicit = if per_cycle {
+            period
+                * ((slope.r * cycle.k * cycle.k + 2.0 * cycle.r * cycle.k * slope.k) * a
+                    + (slope.eta * cycle.mu * cycle.mu + 2.0 * cycle.eta * cycle.mu * slope.mu) * b)
+        } else {
+            0.5 * (slope.k * a + slope.mu * b)
+        };
+        let mut adjoint = prepared
+            .prepare_adjoint(
+                &objective.gradient,
+                objective.angular_frequency_partial,
+                1.0,
+                || false,
+            )
+            .unwrap();
+        let derivative = adjoint
+            .gradient_parameter(0.2, explicit, direction(), || false)
+            .unwrap();
+        let (expected, reference) = if per_cycle {
+            (base.1, (hi.1 - lo.1) / (2.0 * h))
+        } else {
+            (base.0, (hi.0 - lo.0) / (2.0 * h))
+        };
+        assert!((objective.value - expected).abs() < 3e-12);
+        assert!(
+            (derivative.derivative - reference).abs() < 3e-9,
+            "per_cycle={per_cycle}: {} versus {reference}",
+            derivative.derivative
+        );
+        assert!(adjoint.prepared().dual_residual() < 1e-10);
+    }
+}
+
+#[test]
+fn physical_frequency_objective_uses_the_original_bordered_cycle() {
+    let cycle = Cycle::source();
+    let system = cycle.system();
+    let orbit = cycle.orbit();
+    let jacobian = |x: &[f64], flows: &[f64], out: &mut [f64]| cycle.jacobian(x, flows, out);
+    let feedback = |_: &[f64], flows: &[f64], dy: &[f64], out: &mut [f64]| {
+        assert!(dy.iter().all(|v| *v == 0.0));
+        out.copy_from_slice(&[flows[0], flows[1], 0.0, 0.0]);
+        true
+    };
+    let mut prepared = PreparedPhsAutonomousSensitivity::new(
+        &system,
+        &cycle,
+        &jacobian,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &scales(),
+        || false,
+    )
+    .unwrap();
+    let objective = prepared
+        .mean_objective(
+            objective_controls(),
+            |_, _, value, gradient, frequency| {
+                *value = orbit.omega;
+                gradient.fill(0.0);
+                *frequency = 1.0;
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let mut adjoint = prepared
+        .prepare_adjoint(
+            &objective.gradient,
+            objective.angular_frequency_partial,
+            1.0,
+            || false,
+        )
+        .unwrap();
+    let result = adjoint
+        .gradient_parameter(
+            0.2,
+            0.0,
+            PhsAutonomousParameterDirection {
+                structure: Default::default(),
+                storage: None,
+                feedback: &feedback,
+            },
+            || false,
+        )
+        .unwrap();
+    let h = 1e-5;
+    let mut lo = Cycle::source();
+    lo.gain -= h;
+    let mut hi = Cycle::source();
+    hi.gain += h;
+    assert!((result.derivative - (hi.frequency() - lo.frequency()) / (2.0 * h)).abs() < 1e-9);
+    assert!(result.derivative.abs() > 1e-2);
+}
+
+#[test]
+fn physical_autonomous_objective_refuses_missing_clock_or_feedback_and_recovers() {
+    let cycle = Cycle::source();
+    let system = cycle.system();
+    let orbit = cycle.orbit();
+    let jacobian = |x: &[f64], flows: &[f64], out: &mut [f64]| cycle.jacobian(x, flows, out);
+    let mut prepared = PreparedPhsAutonomousSensitivity::new(
+        &system,
+        &cycle,
+        &jacobian,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &scales(),
+        || false,
+    )
+    .unwrap();
+    assert!(
+        prepared
+            .mean_objective(
+                objective_controls(),
+                |_, _, value, gradient, _| {
+                    *value = 0.0;
+                    gradient.fill(0.0);
+                    true
+                },
+                || false
+            )
+            .is_err()
+    );
+    let objective = prepared
+        .mean_stored_energy(objective_controls(), || false)
+        .unwrap();
+    let mut adjoint = prepared
+        .prepare_adjoint(
+            &objective.gradient,
+            objective.angular_frequency_partial,
+            1.0,
+            || false,
+        )
+        .unwrap();
+    let incomplete = |_: &[f64], _: &[f64], _: &[f64], out: &mut [f64]| {
+        out[0] = 0.0;
+        true
+    };
+    assert!(
+        adjoint
+            .gradient_parameter(
+                1.0,
+                0.0,
+                PhsAutonomousParameterDirection {
+                    structure: Default::default(),
+                    storage: None,
+                    feedback: &incomplete,
+                },
+                || false
+            )
+            .is_err()
+    );
+    let zero = |_: &[f64], _: &[f64], _: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        true
+    };
+    let direction = || PhsAutonomousParameterDirection {
+        structure: Default::default(),
+        storage: None,
+        feedback: &zero,
+    };
+    let mut polls = 0;
+    assert!(matches!(
+        adjoint.gradient_parameter(1.0, 0.0, direction(), || {
+            polls += 1;
+            polls > 8
+        }),
+        Err(PhsAutonomousSensitivityError::Sensitivity(
+            ForcedSensitivityError::Cancelled
+        ))
+    ));
+    let result = adjoint
+        .gradient_parameter(1.0, 0.7, direction(), || false)
+        .unwrap();
+    assert_eq!(result.derivative, 0.7);
+}
