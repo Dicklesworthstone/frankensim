@@ -57,6 +57,9 @@ pub mod contact;
 /// Original-reference release of a relaxed accepted body into native thermal liquid.
 pub mod liquid;
 
+mod tangent;
+use tangent::CachedTangent;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -211,6 +214,20 @@ impl HyperelasticMaterial for FiniteSolidMaterial {
             ),
         }
     }
+
+    fn consistent_tangent_action(
+        &self,
+        deformation: &[f64; 9],
+        direction: &[f64; 9],
+    ) -> Result<[f64; 9], fs_material::MaterialError> {
+        match &self.thermal {
+            None => self.law.law().tangent_action(deformation, direction),
+            Some(thermal) => thermal.pullback_piola(self.law.law().tangent_action(
+                &thermal.elastic_deformation(deformation),
+                &thermal.elastic_deformation_increment(direction),
+            )?),
+        }
+    }
 }
 
 /// Budget for the existing native consistent-initial-acceleration solve.
@@ -352,6 +369,24 @@ pub struct FiniteSolidStep {
     pub support_reactions_n: Vec<(usize, f64)>,
 }
 
+/// Storage for the ordinary midpoint material Jacobian.
+/// Energy-momentum steps retain their assembled algorithmic endpoint Jacobian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FiniteSolidTangentStorage {
+    /// Original global sparse assembly and repeated sparse matrix products.
+    #[default]
+    Assembled,
+    /// Cache 81 material coefficients per tetrahedron and apply them directly.
+    /// Avoids material stiffness triplet assembly, but can use more retained
+    /// memory and action arithmetic than a compact CSR on connected meshes.
+    LocalHessians {
+        /// Allowance for the retained constitutive Hessians only. Reused full
+        /// direction/force/scratch vectors and external sparse derivatives are
+        /// additional storage. A failed preparation leaves the body unchanged.
+        maximum_tangent_bytes: usize,
+    },
+}
+
 /// Accepted finite-strain motion with immutable source and reference operators.
 #[derive(Debug, Clone)]
 pub struct FiniteSolidBody<'a> {
@@ -366,10 +401,24 @@ pub struct FiniteSolidBody<'a> {
     pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
     reference_mass_kg: f64,
     initialization: SolveReport,
+    tangent_storage: FiniteSolidTangentStorage,
     state: SecondOrderState,
 }
 
 impl<'a> FiniteSolidBody<'a> {
+    /// Select ordinary midpoint tangent storage without changing physical state.
+    /// The local payload allowance is checked when a Newton tangent is prepared.
+    #[must_use]
+    pub fn with_tangent_storage(mut self, storage: FiniteSolidTangentStorage) -> Self {
+        self.tangent_storage = storage;
+        self
+    }
+
+    /// Selected storage policy for ordinary midpoint tangents.
+    pub const fn tangent_storage(&self) -> FiniteSolidTangentStorage {
+        self.tangent_storage
+    }
+
     /// Bind native geometry and same-card materials, then solve the initial
     /// physical acceleration with fs-time's existing bounded mass solver.
     ///
@@ -660,6 +709,7 @@ impl<'a> FiniteSolidBody<'a> {
             pressure_surface,
             reference_mass_kg,
             initialization: initial.report,
+            tangent_storage: FiniteSolidTangentStorage::Assembled,
             state,
         };
         body.kinetic_energy_j()?;
@@ -1007,6 +1057,7 @@ impl<'a> FiniteSolidBody<'a> {
         );
         operator.energy_momentum_start = energy_momentum.then_some(before_u.as_slice());
         operator.gravity = self.gravity.as_ref();
+        operator.tangent_storage = self.tangent_storage;
         let integrator =
             OperatorGeneralizedAlpha::new(self.free.len(), duration_s, 1.0, controls.solve);
         // Immutable matrices are shared; only the physical trajectory is copied.
@@ -1278,7 +1329,8 @@ struct DynamicOperator<'a, 'b, 'cx> {
     gravity_force_at: RefCell<Option<(Vec<f64>, Vec<f64>)>>,
     cx: &'b Cx<'cx>,
     energy_momentum_start: Option<&'b [f64]>,
-    tangent: RefCell<Option<(Vec<f64>, Csr)>>,
+    tangent_storage: FiniteSolidTangentStorage,
+    tangent: RefCell<Option<(Vec<f64>, CachedTangent<'b>)>>,
     // Void native operator callbacks communicate a persistent error here.
     // Speculative validate_state refusals remain recoverable by line search.
     error: RefCell<Option<HyperTetError>>,
@@ -1304,6 +1356,7 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
             gravity_force_at: RefCell::new(None),
             cx,
             energy_momentum_start: None,
+            tangent_storage: FiniteSolidTangentStorage::Assembled,
             tangent: RefCell::new(None),
             error: RefCell::new(None),
         }
@@ -1341,68 +1394,6 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
                 .problem
                 .energy_momentum_internal_force(before, after, self.cx),
         }
-    }
-
-    fn ensure_tangent(&self, q: &[f64]) -> Result<(), HyperTetError> {
-        let rebuild = self
-            .tangent
-            .borrow()
-            .as_ref()
-            .is_none_or(|(at, _)| at.as_slice() != q);
-        if rebuild {
-            let displacement = inflate(q, self.free, self.fixed);
-            let mut full = if let Some(before) = self.energy_momentum_start {
-                let after: Vec<f64> = displacement
-                    .iter()
-                    .zip(before)
-                    .map(|(mid, old)| 2.0 * mid - old)
-                    .collect();
-                match self.pressure {
-                    Some((surface, pressure_pa)) => {
-                        self.problem.energy_momentum_tangent_with_pressure(
-                            before,
-                            &after,
-                            surface,
-                            pressure_pa,
-                            self.cx,
-                        )?
-                    }
-                    None => self
-                        .problem
-                        .energy_momentum_tangent(before, &after, self.cx)?,
-                }
-            } else {
-                self.problem.tangent_matrix(&displacement, self.cx)?
-            };
-            if self.energy_momentum_start.is_none()
-                && let Some((surface, pressure_pa)) = self.pressure
-            {
-                let external = surface.force_tangent(&displacement, pressure_pa, self.cx)?;
-                let mut combined = Coo::new(full.nrows(), full.nrows());
-                for row in 0..full.nrows() {
-                    checkpoint(self.cx)?;
-                    for (matrix, scale) in [(&full, 1.0), (&external, -1.0)] {
-                        let (columns, values) = matrix.row(row);
-                        for (&column, &value) in columns.iter().zip(values) {
-                            combined.push(row, column, scale * value);
-                        }
-                    }
-                }
-                full = combined.assemble();
-                for row in 0..full.nrows() {
-                    checkpoint(self.cx)?;
-                    if full.row(row).1.iter().any(|value| !value.is_finite()) {
-                        return Err(HyperTetError::InvalidInput {
-                            what: "native solid minus pressure tangent is not representable".into(),
-                        });
-                    }
-                }
-            }
-            full = self.combine_gravity_tangent(full, &displacement)?;
-            let reduced = reduce_matrix(&full, self.free, self.cx)?;
-            self.tangent.replace(Some((q.to_vec(), reduced)));
-        }
-        Ok(())
     }
 
     fn finite_output(&self, output: &mut [f64]) {
@@ -1502,19 +1493,27 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             self.refuse(error, output);
             return;
         }
-        if let Some((_, matrix)) = self.tangent.borrow().as_ref() {
-            matrix.spmv(direction, output);
-            // Native rho_inf=1 evaluates forces at midpoint q. Endpoint
-            // reconstruction has d(q_after)/d(q_mid)=2, including this tangent.
-            // A bound gravity tangent already combines the material endpoint
-            // chain factor with the unscaled midpoint gravity derivative.
-            if self.energy_momentum_start.is_some() && self.gravity.is_none() {
-                for value in output.iter_mut() {
-                    *value *= 2.0;
-                }
+        let result = {
+            let mut tangent = self.tangent.borrow_mut();
+            match tangent.as_mut() {
+                Some((_, tangent)) => tangent.apply(direction, output, self.free, self.cx),
+                None => Err(HyperTetError::InvalidInput {
+                    what: "native dynamic tangent is missing".into(),
+                }),
             }
-        } else {
-            output.fill(f64::NAN);
+        };
+        if let Err(error) = result {
+            self.refuse(error, output);
+            return;
+        }
+        // Native rho_inf=1 evaluates forces at midpoint q. Endpoint
+        // reconstruction has d(q_after)/d(q_mid)=2, including this tangent.
+        // A bound gravity tangent already combines the material endpoint
+        // chain factor with the unscaled midpoint gravity derivative.
+        if self.energy_momentum_start.is_some() && self.gravity.is_none() {
+            for value in output.iter_mut() {
+                *value *= 2.0;
+            }
         }
         self.finite_output(output);
     }
@@ -1536,7 +1535,7 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             return;
         }
         let tangent = self.tangent.borrow();
-        let Some((_, matrix)) = tangent.as_ref() else {
+        let Some((_, tangent)) = tangent.as_ref() else {
             output.fill(f64::NAN);
             return;
         };
@@ -1546,7 +1545,7 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
                 .mul_add(
                     self.mass.get(row, row),
                     weights.tangent
-                        * matrix.get(row, row)
+                        * tangent.diagonal(row)
                         * if self.energy_momentum_start.is_some() && self.gravity.is_none() {
                             2.0
                         } else {

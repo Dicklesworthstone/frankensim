@@ -258,6 +258,14 @@ impl ThermalReference {
             Self::Expansion(x) => x.elastic_deformation(f),
         }
     }
+    pub(super) fn elastic_deformation_increment(&self, increment: &[f64; 9]) -> [f64; 9] {
+        match self {
+            Self::Mean(x) => increment.map(|value| value / x.stretch()),
+            Self::Expansion(x) => x
+                .reference_deformation()
+                .elastic_deformation_increment(increment),
+        }
+    }
     pub(super) fn pullback_piola(&self, elastic: [f64; 9]) -> Result<[f64; 9], MaterialError> {
         let p = match self {
             Self::Mean(x) => elastic.map(|value| x.area_ratio() * value),

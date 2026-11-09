@@ -22,6 +22,8 @@ mod reference_density;
 mod split;
 #[path = "finite_solid/thermal.rs"]
 mod thermal;
+#[path = "finite_solid/tangent.rs"]
+mod tangent;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::finite_solid::*;
 use fs_evidence::ValidityDomain;

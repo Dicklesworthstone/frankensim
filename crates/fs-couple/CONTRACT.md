@@ -1,3 +1,33 @@
+## Optional local material tangents in finite-solid motion
+
+`FiniteSolidBody::with_tangent_storage` selects ordinary midpoint Newton tangent
+storage without changing the accepted physical state. `Assembled` remains the
+default. `LocalHessians { maximum_tangent_bytes }` retains the original 81
+constitutive coefficients per tetrahedron, applies the native prepared material
+operator, and obtains its signed diagonal from the same local coefficients.
+The allowance covers only that Hessian payload; reusable full direction, force
+and scratch vectors, a reduced diagonal, and optional external sparse
+derivatives require additional memory. Insufficient allowance refuses tangent
+preparation without advancing the accepted body.
+
+Local actions avoid global material stiffness triplets and reuse their vector
+storage across Krylov products at the same displacement. Prescribed-coordinate
+variations remain zero even for nonzero held displacements. Follower pressure
+and gravity retain their original signed, potentially nonsymmetric derivatives;
+the preconditioner receives the material plus external diagonal before its
+existing scalar safeguards. Local storage is an explicit choice because its
+retained memory and product cost can exceed compact assembled CSR on connected
+meshes. Energy-momentum integration keeps its separate assembled algorithmic
+endpoint Jacobian and original endpoint/midpoint chain factor for either choice.
+
+Finite-solid material tangent actions forward the original directional
+constitutive derivative. Thermal references map increments linearly by the
+original inverse reference deformation and pull Piola increments back with the
+same original volume/area factors as forces; tiny variations are never formed
+by subtracting two identity-bearing deformations. Original material domains,
+positive Jacobians, external-load owners, candidate acceptance, and cancellation
+remain authoritative.
+
 ## Original free-fluid and porous sources in resolved acoustic volumes
 
 `cavity_modal::interior::heterogeneous::porous::PorousRegionsInterior` binds

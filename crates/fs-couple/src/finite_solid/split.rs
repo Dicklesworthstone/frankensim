@@ -521,6 +521,7 @@ impl<'a> FiniteSolidBody<'a> {
             cx,
         );
         operator.gravity = self.gravity.as_ref();
+        operator.tangent_storage = self.tangent_storage;
         let acceleration = second_order_acceleration(
             &operator,
             &candidate.state.q,

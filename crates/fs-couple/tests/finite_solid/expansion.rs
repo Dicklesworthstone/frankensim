@@ -21,6 +21,25 @@ const MESH: ContentHash = ContentHash([2; 32]);
 const Q: [[f64; 3]; 3] = [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]];
 const STRETCHES: [f64; 3] = [1.10, 0.96, 1.04];
 
+#[test]
+fn thermal_tangent_action_retains_the_original_reference_and_tiny_directions() {
+    let source = card(STRETCHES, "T", false);
+    let material = bind_expansion(&source, Q, 310.0);
+    let f = [1.15, 0.04, 0.0, -0.03, 0.98, 0.02, 0.0, 0.01, 1.08];
+    let tangent = material.consistent_tangent(&f).unwrap();
+    for scale in [1e-25, 1.0, -2.0] {
+        let direction = core::array::from_fn(|i| scale * ((i as f64 + 1.0) * 0.03 - 0.1));
+        let actual = material.consistent_tangent_action(&f, &direction).unwrap();
+        let expected: [f64; 9] =
+            core::array::from_fn(|i| (0..9).map(|j| tangent[i][j] * direction[j]).sum());
+        let norm = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        assert!(norm > 0.0);
+        for (a, b) in actual.into_iter().zip(expected) {
+            assert!((a - b).abs() <= 2e-12 * norm, "{a:e} != {b:e}");
+        }
+    }
+}
+
 fn key(axis: usize) -> PropertyKey {
     PropertyKey::new(format!("engineering_length_change_{axis}"), Dims::NONE)
 }
