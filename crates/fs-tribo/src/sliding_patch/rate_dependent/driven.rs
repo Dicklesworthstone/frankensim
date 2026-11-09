@@ -14,6 +14,8 @@
 //! tails, speed capture and fabricated terminal heat are never used with drive.
 //! Genuine Coulomb delegates the existing driven owner, including its exact
 //! rays and explicitly first-order curved events.
+//! Original affine invariant translation/spin additionally has analytic event,
+//! travel and heat integration, including static dwell and overdriven reversal.
 
 use core::f64::consts::{PI, SQRT_2};
 use fs_math::det;
@@ -38,10 +40,12 @@ type M = [[f64; 3]; 3];
 const K: f64 = 3.0 * PI / 16.0;
 const PAD: f64 = 1024.0 * f64::EPSILON;
 
+mod invariant;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HertzRateDrivenControls {
     /// Adaptive physical-time errors/budgets. The stopping-time tolerance does
-    /// not authorize a nonconstant driven arrest in this bounded owner.
+    /// not authorize an unresolved event; admitted affine events are analytic.
     pub integration: HertzTransientControls,
     /// Admission only for an explicitly retained resting constraint [m/s].
     pub rest_scaled_rate_tolerance_m_s: f64,
@@ -50,12 +54,18 @@ pub struct HertzRateDrivenControls {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HertzRateDrivenReport {
     pub trajectory: HertzDrivenReport,
+    /// Analytic invariant affine solution, separately from adaptive estimates.
+    pub exact_invariant: bool,
+    /// First resolved arrest interval. Analytic events give the same computed
+    /// time at both ends; this is not a validated floating-point enclosure.
+    pub stopping_time_bracket_s: Option<[f64; 2]>,
     pub local_speed_bound_m_s: f64,
     pub kinetic_coefficient_bounds: [f64; 2],
     /// Includes original static support as well as the moving pressure bound.
     pub maximum_scaled_wrench_norm_n: f64,
-    /// False for delegated Coulomb: its zero fields do not assert measured zero
-    /// temporal error. Its curved continuation retains its refinement contract.
+    /// False for analytic invariant motion and delegated Coulomb: zero fields
+    /// do not assert measured adaptive error. Coulomb curved continuation still
+    /// retains its refinement contract; `exact_invariant` identifies this path.
     pub adaptive_error_estimates_available: bool,
     pub estimated_scaled_rate_error_m_s: f64,
     pub estimated_scaled_impulse_error_ns: f64,
@@ -266,6 +276,22 @@ impl HertzFrictionPatch {
             checked(normal * zero * upper_norm * (1.0 + PAD))?,
             checked(normal * slope * (1.0 + PAD))?,
         ];
+        if let Some(exact) = invariant::advance(
+            self,
+            input,
+            original,
+            initial,
+            drive,
+            demand,
+            factor,
+            config,
+            quadrature,
+            controls,
+            &limit,
+            &mut cancelled,
+        )? {
+            return Ok(exact);
+        }
         let mut evaluations = 0;
         let mut projection_iterations = 0;
         let mut release = None;
@@ -713,8 +739,15 @@ fn report(
     available: bool,
     errors: [f64; 4],
 ) -> HertzRateDrivenReport {
+    let stopping_time_bracket_s = if trajectory.arrest_time_is_exact {
+        trajectory.first_arrest_time_s.map(|t| [t, t])
+    } else {
+        None
+    };
     HertzRateDrivenReport {
         trajectory,
+        exact_invariant: false,
+        stopping_time_bracket_s,
         local_speed_bound_m_s: speed,
         kinetic_coefficient_bounds: bounds,
         maximum_scaled_wrench_norm_n: wrench,

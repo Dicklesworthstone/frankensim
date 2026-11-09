@@ -1,3 +1,23 @@
+## Affine friction stopping and reversal on finite bodies
+
+The original rate-driven Hertz adapter retains the law's `exact_invariant`
+flag and first stopping interval through every native trial and accepted body
+publication. Admitted affine sliding and spinning paths can now stop, transmit
+a supported static load, or reverse under an opposing load outside the original
+static surface. The source curve, complete body mobility, force/couple transport
+and held geometry remain the existing owners; no velocity threshold captures a
+moving state.
+
+Native source work includes common-body motion during a relative-contact hold.
+Friction heat stops when relative motion stops, while the applied loads can
+continue to accelerate the pair. Closed-form event receipts are distinguished
+from embedded adaptive estimates; delegated curved Coulomb motion still needs
+its independent timestep refinement. Focused analytic finite-body tests cover
+translation/spin braking, reversal, static continuation, split replay, original
+momenta and actual supplied work. Failed effort and cancellation gates retain
+both bodies and the prior mode. General curved and non-affine stopping events
+remain subject to the original law's explicit admission/refusal boundary.
+
 ## Driven original local-speed Hertz friction on finite bodies
 
 `tangential_friction::hertz::rate_dependent::driven` advances the original
@@ -20,8 +40,8 @@ zero time-discretization error.
 
 Poses, contact arms, inertia, load, radius and external drive remain held within
 a phase. Pressure resolution and adaptive time errors require independent
-refinement; no general nonconstant driven arrest, changing normal geometry or
-source-regime inference is added. Focused native regressions compare analytic
+refinement; general curved or non-affine driven arrest, changing normal geometry
+and source-regime inference remain outside this phase owner. Focused native regressions compare analytic
 affine translation/spin/release and true full-body source work, an independent
 mixed weakening body-coordinate ODE, world-frame transformation, reusable source
 trials, geometry refusal, atomic mode publication and spectator preservation.

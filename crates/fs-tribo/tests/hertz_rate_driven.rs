@@ -175,7 +175,8 @@ fn affine_terminal_translation_and_spin_include_right_limit_release_and_true_hea
                 );
                 assert_eq!(r.trajectory.mode, HertzDrivenMode::Sliding);
                 assert_eq!(r.trajectory.first_arrest_time_s, None);
-                assert!(r.adaptive_error_estimates_available);
+                assert!(r.exact_invariant);
+                assert!(!r.adaptive_error_estimates_available);
             }
         }
     }
@@ -594,13 +595,28 @@ fn phase_splitting_and_signed_frame_change_preserve_rate_curve_work() {
 fn unresolved_arrest_cancellation_and_budgets_never_publish_candidate_mode() {
     let patch = HertzFrictionPatch::new(N, A, affine(0.4, 0.3)).unwrap();
     let snapshot = patch.clone();
-    let input = scalar(0, 0.1, 0.0, 1.0);
+    // Non-invariant curved arrest remains explicitly outside the analytic
+    // event owner. Scalar affine braking is now a resolved physical event.
+    let matrix = [[2.0, 0.3, 0.4], [0.3, 1.7, -0.2], [0.4, -0.2, 3.5]];
+    let input = make_input(
+        [0.1, -0.04, 0.06],
+        matrix,
+        [0.0; 3],
+        1.0,
+        HertzDrivenMode::Sliding,
+    );
     let before = input;
     assert!(matches!(
         patch.advance_driven(&input, config(), grid(1), controls(), || false),
         Err(HertzRateDrivenError::UnresolvedDrivenEvent { .. })
     ));
-    let moving = scalar(0, 0.8, 0.3, 0.1);
+    let moving = make_input(
+        [0.8, -0.3, 0.5],
+        matrix,
+        [0.2, -0.05, 0.1],
+        0.1,
+        HertzDrivenMode::Sliding,
+    );
     assert_eq!(
         patch.advance_driven(&moving, config(), grid(1), controls(), || true),
         Err(HertzRateDrivenError::Transient(
@@ -646,3 +662,6 @@ fn unresolved_arrest_cancellation_and_budgets_never_publish_candidate_mode() {
     assert_eq!(patch, snapshot);
     assert_eq!(input, before);
 }
+
+#[path = "hertz_rate_driven/invariant.rs"]
+mod invariant;

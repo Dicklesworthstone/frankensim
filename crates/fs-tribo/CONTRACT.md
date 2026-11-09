@@ -1,3 +1,33 @@
+## Analytic affine Hertz stopping, static hold and reversal
+
+The original rate-driven Hertz owner now recognizes invariant pure translation
+and pure spin under the complete supplied mobility and parallel external drive.
+It uses the original affine-law classification, including genuinely affine
+limits of the other source families. Translation retains the Hertz normal-load
+moment; spin retains the dry moment `3*pi/16` and viscous moment `2/5` in
+radius-scaled coordinates. Each fixed-sign branch integrates velocity, traction,
+travel and physical power analytically.
+
+Analytic admission bounds accumulated transverse rate and travel over the whole
+phase before consuming a constitutive evaluation. Insufficient collinearity
+accuracy falls back to the original full-matrix IVP.
+
+Moving states enter the static solve only at their resolved first zero.
+The original joint static surface then holds the load or releases a reversed
+branch. Clipped affine translation splits at its actual zero-traction boundary,
+including coasting and subsequent re-entry. Small-speed capture, arbitrary
+weakening-root selection and endpoint energy residuals are not used as heat.
+Asymptotic viscous decay and unstable weakening equilibria retain their original
+initial-value behavior; unrepresentable moving endpoints refuse.
+
+`exact_invariant` distinguishes this formula path from adaptive estimates.
+Its first stopping interval is a point at the computed analytic time, not a
+validated floating-point enclosure. Original effort, work, evaluation/attempt
+budgets and cancellation gates remain active. Partly clipped spinning disks,
+non-affine curves and non-invariant motion retain the existing original-pressure
+integrator and its explicit unresolved-event boundary. Load, geometry, source
+parameters and drive remain held within each phase.
+
 ## Driven original local-speed Hertz trajectories
 
 `HertzFrictionPatch::advance_driven` follows the original three-coordinate
@@ -22,7 +52,7 @@ Nonconstant driven zero-rate events lacking a proved continuation return
 `UnresolvedDrivenEvent`, without speed capture, passive stopping tails or invented
 terminal heat. Genuine Coulomb delegates its existing event owner and explicitly
 marks adaptive error estimates unavailable. Unloaded nonconstant curves retain
-finite free-path bounds on their original coefficients. General nonconstant
+finite free-path bounds on their original coefficients. General curved or non-affine
 arrest/restart, evolving normal geometry and source changes within a phase remain
 outside this owner. Focused tests cover analytic forced affine and full-SPD
 viscous motion, unstable weakening, clipped re-entry, independent Stribeck

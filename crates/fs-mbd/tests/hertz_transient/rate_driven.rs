@@ -101,6 +101,216 @@ fn run(
     .unwrap()
 }
 
+// Independent closed-form body-coordinate reference on one side of zero.
+// The dry traction and the viscous pressure moment are integrated separately;
+// heat is not recovered by subtracting endpoint kinetic energies.
+fn affine_segment(
+    initial: f64,
+    direction: f64,
+    acceleration: f64,
+    mobility: f64,
+    dry: f64,
+    viscous: f64,
+    dt: f64,
+) -> [f64; 3] {
+    let decay = mobility * viscous;
+    let terminal = (acceleration - mobility * dry * direction) / decay;
+    let offset = initial - terminal;
+    let phi = -(-decay * dt).exp_m1() / decay;
+    let travel = terminal * dt + offset * phi;
+    let square = terminal * terminal * dt
+        + 2.0 * terminal * offset * phi
+        + offset * offset * (-(-2.0 * decay * dt).exp_m1()) / (2.0 * decay);
+    [
+        terminal + offset * (-decay * dt).exp(),
+        travel,
+        dry * direction * travel + viscous * square,
+    ]
+}
+
+#[test]
+fn speed_dependent_braking_holds_or_reverses_with_actual_body_work() {
+    let law = patch(0.8);
+    for spin in [false, true] {
+        for reverse in [false, true] {
+            let initial = if spin { 3.0 } else { 0.2 };
+            let f = centre(initial, spin);
+            let inertia = f.properties.map(|p| {
+                if spin {
+                    p.principal_inertia_body().z
+                } else {
+                    p.mass()
+                }
+            });
+            let mobility = inertia[0].recip() + inertia[1].recip();
+            let dry = 3.0
+                * if spin {
+                    3.0 * core::f64::consts::PI * R / 16.0
+                } else {
+                    1.0
+                };
+            let viscous = 8.0 * if spin { 2.0 * R * R / 5.0 } else { 1.0 };
+            // A below-static drive retains common body acceleration after
+            // stopping. An opposing over-static drive produces a real reversal.
+            let supplied = inertia[0] * mobility * dry * if reverse { -4.0 } else { 0.5 };
+            let acceleration = supplied / inertia[0];
+            let decay = mobility * viscous;
+            let stop = (decay * initial / (mobility * dry - acceleration)).ln_1p() / decay;
+            let dt = stop + 0.3;
+            let before_stop =
+                affine_segment(initial, 1.0, acceleration, mobility, dry, viscous, stop);
+            let after_stop = if reverse {
+                affine_segment(0.0, -1.0, acceleration, mobility, dry, viscous, dt - stop)
+            } else {
+                [0.0; 3]
+            };
+            let endpoint = after_stop[0];
+            let travel = before_stop[1] + after_stop[1];
+            let heat = before_stop[2] + after_stop[2];
+            let impulse = (endpoint - initial - acceleration * dt) / mobility;
+            let external = [
+                if spin {
+                    Wrench {
+                        torque_body: Vec3::new(0.0, 0.0, supplied),
+                        ..Wrench::ZERO
+                    }
+                } else {
+                    Wrench {
+                        force_world: Vec3::new(supplied, 0.0, 0.0),
+                        ..Wrench::ZERO
+                    }
+                },
+                Wrench::ZERO,
+            ];
+            let result = run(&f, &law, external, HertzDrivenMode::Sliding, dt);
+            let m = &result.report.mechanical;
+            let path = &m.driven;
+            assert!(result.report.exact_invariant);
+            assert!(path.arrest_time_is_exact);
+            let bracket = result.report.stopping_time_bracket_s.unwrap();
+            assert_eq!(bracket[0], bracket[1]);
+            close(bracket[0], stop, 2e-9);
+            assert_eq!(
+                path.mode,
+                if reverse {
+                    HertzDrivenMode::Sliding
+                } else {
+                    HertzDrivenMode::Resting
+                }
+            );
+            close(path.first_arrest_time_s.unwrap(), stop, 2e-9);
+            close(
+                if spin {
+                    path.spin_rate_after_rad_s
+                } else {
+                    path.velocity_after_m_s[0]
+                },
+                endpoint,
+                2e-8,
+            );
+            close(
+                if spin {
+                    path.spin_increment_rad
+                } else {
+                    path.slip_increment_m[0]
+                },
+                travel,
+                3e-9,
+            );
+            close(
+                if spin {
+                    path.spin_angular_impulse_nms
+                } else {
+                    path.force_impulse_ns[0]
+                },
+                impulse,
+                3e-9,
+            );
+            close(m.dissipated_energy_j, heat, 3e-9);
+            let total = inertia[0] + inertia[1];
+            let travel_a = inertia[0] * initial / total * dt
+                + 0.5 * supplied / total * dt * dt
+                + inertia[1] / total * travel;
+            close(m.external_work_j, supplied * travel_a, 4e-9);
+            close(m.kinetic_change_j + heat, supplied * travel_a, 4e-9);
+            for (i, expected) in [inertia[0] * initial + supplied * dt + impulse, -impulse]
+                .into_iter()
+                .enumerate()
+            {
+                close(
+                    if spin {
+                        result.bodies_after[i].angular_momentum_body().z
+                    } else {
+                        result.bodies_after[i].linear_momentum_world().x
+                    },
+                    expected,
+                    3e-9,
+                );
+            }
+
+            // Split before the event, retaining the actual two finite bodies.
+            // The continuation must resolve the same physical stop/release.
+            let first_dt = 0.4 * stop;
+            let first = run(&f, &law, external, HertzDrivenMode::Sliding, first_dt);
+            let continued = Fixture {
+                bodies: first.bodies_after,
+                ..centre(initial, spin)
+            };
+            let second = run(
+                &continued,
+                &law,
+                external,
+                first.report.mechanical.driven.mode,
+                dt - first_dt,
+            );
+            for i in 0..2 {
+                close_vec(
+                    second.bodies_after[i].linear_momentum_world(),
+                    result.bodies_after[i].linear_momentum_world(),
+                    3e-9,
+                );
+                close_vec(
+                    second.bodies_after[i].angular_momentum_body(),
+                    result.bodies_after[i].angular_momentum_body(),
+                    3e-10,
+                );
+            }
+            close(
+                first_dt + second.report.mechanical.driven.first_arrest_time_s.unwrap(),
+                stop,
+                2e-9,
+            );
+            close(
+                first.report.mechanical.dissipated_energy_j
+                    + second.report.mechanical.dissipated_energy_j,
+                heat,
+                4e-9,
+            );
+            close(
+                first.report.mechanical.external_work_j + second.report.mechanical.external_work_j,
+                m.external_work_j,
+                5e-9,
+            );
+
+            if !reverse {
+                let held = Fixture {
+                    bodies: result.bodies_after,
+                    ..centre(initial, spin)
+                };
+                let hold = run(&held, &law, external, HertzDrivenMode::Resting, 0.2);
+                assert_eq!(hold.report.mechanical.driven.mode, HertzDrivenMode::Resting);
+                assert_eq!(hold.report.mechanical.dissipated_energy_j, 0.0);
+                assert!(hold.report.mechanical.external_work_j > 0.0);
+                close(
+                    hold.report.mechanical.kinetic_change_j,
+                    hold.report.mechanical.external_work_j,
+                    4e-9,
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn driven_affine_slide_spin_and_release_match_exact_terminal_motion_and_body_power() {
     let law = patch(0.8);
@@ -169,7 +379,8 @@ fn driven_affine_slide_spin_and_release_match_exact_terminal_motion_and_body_pow
             let m = &result.report.mechanical;
             let path = &m.driven;
             assert_eq!(path.mode, HertzDrivenMode::Sliding);
-            assert!(result.report.adaptive_error_estimates_available);
+            assert!(result.report.exact_invariant);
+            assert!(!result.report.adaptive_error_estimates_available);
             close(
                 if spin {
                     path.spin_rate_after_rad_s
@@ -441,6 +652,8 @@ fn prepared_rate_trials_and_atomic_mode_publication_keep_original_geometry_and_s
         },
         Wrench::ZERO,
     ];
+    let mut limited = native_controls();
+    limited.contact.maximum_force_n = 0.01;
     assert!(
         apply_rigid_hertz_rate_driven(
             &mut bodies,
@@ -449,7 +662,7 @@ fn prepared_rate_trials_and_atomic_mode_publication_keep_original_geometry_and_s
             brake,
             &mut mode,
             1.0,
-            native_controls(),
+            limited,
             quadrature(),
             rate_controls(),
             &gate

@@ -10,6 +10,8 @@
 //! stay fixed within the phase. Spatial pressure and adaptive physical-time
 //! errors remain separate. An unresolved driven arrest is an explicit original
 //! law refusal; the adapter never clips rates or selects an algebraic branch.
+//! Admitted affine invariant paths retain their closed-form stopping interval
+//! and event exactness through native impulse, work and atomic-mode publication.
 
 use super::super::driven::{
     DrivenRigidPair, HertzDrivenMode, RigidHertzDrivenError, RigidHertzDrivenReport,
@@ -28,10 +30,16 @@ pub struct RigidHertzRateDrivenReport {
     pub kinetic_coefficient_bounds: [f64; 2],
     /// Includes resting static reactions and the complete kinetic trajectory.
     pub maximum_scaled_wrench_norm_n: f64,
-    /// False for the original delegated Coulomb method, whose maximum step
-    /// remains an independent refinement control. Its zero estimate fields
-    /// do not imply a measured zero discretization error.
+    /// False for analytic invariant paths and the delegated Coulomb method.
+    /// `exact_invariant` distinguishes the closed-form solution from Coulomb's
+    /// curved time stepping, whose maximum step remains a refinement control.
     pub adaptive_error_estimates_available: bool,
+    /// Original-law closed-form evolution on an admitted invariant direction.
+    pub exact_invariant: bool,
+    /// Original law's first arrest interval, relative to this phase [s].
+    /// A point interval denotes an analytic event, not an adaptive estimate.
+    /// It does not certify a floating-point enclosure of the physical clock.
+    pub stopping_time_bracket_s: Option<[f64; 2]>,
     pub estimated_scaled_rate_error_m_s: f64,
     pub estimated_scaled_impulse_error_ns: f64,
     pub estimated_scaled_travel_error_m: f64,
@@ -146,6 +154,8 @@ impl PreparedRigidHertzRateDriven {
                 kinetic_coefficient_bounds: resolved.kinetic_coefficient_bounds,
                 maximum_scaled_wrench_norm_n: resolved.maximum_scaled_wrench_norm_n,
                 adaptive_error_estimates_available: resolved.adaptive_error_estimates_available,
+                exact_invariant: resolved.exact_invariant,
+                stopping_time_bracket_s: resolved.stopping_time_bracket_s,
                 estimated_scaled_rate_error_m_s: resolved.estimated_scaled_rate_error_m_s,
                 estimated_scaled_impulse_error_ns: resolved.estimated_scaled_impulse_error_ns,
                 estimated_scaled_travel_error_m: resolved.estimated_scaled_travel_error_m,
