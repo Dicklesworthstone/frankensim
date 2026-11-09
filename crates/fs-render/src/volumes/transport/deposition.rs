@@ -71,6 +71,17 @@ pub(crate) struct BeamCellSegment {
     pub length_m: f64,
 }
 
+/// Native geometry for an independently declared finite emitter inventory.
+/// Counts belong to the complete original cell, so molecular cross sections
+/// multiply `length_m / cell_volume_m3`, without a host-density factor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(feature = "optical-heating")]
+pub(crate) struct BeamPopulationSegment {
+    pub cell_index: usize,
+    pub length_m: f64,
+    pub cell_volume_m3: f64,
+}
+
 impl AbsorbingGrid<'_> {
     #[cfg(feature = "optical-heating")]
     pub(crate) fn beam_cell_path(
@@ -107,6 +118,56 @@ impl AbsorbingGrid<'_> {
                     cell_index: cell.cell,
                     density_kg_m3: density,
                     length_m: cell.length_m,
+                });
+            }
+        }
+        checkpoint(cx)?;
+        Ok(path)
+    }
+
+    /// Retain every positive-length original cell in directed traversal order.
+    /// A zero host mass density does not remove a separately authored emitter
+    /// count. The optical model and its vacuum flag never suppress geometry.
+    /// Native DDA work and output allocation have independent bounds, and a
+    /// refused traversal publishes no partial path.
+    #[cfg(feature = "optical-heating")]
+    pub(crate) fn population_beam_cell_path(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        max_distance_m: f64,
+        max_cells: usize,
+    ) -> Result<Vec<BeamPopulationSegment>, VolumeTransportError> {
+        checkpoint(cx)?;
+        validate_ray(origin, unit_direction, max_distance_m)?;
+        let volume = positive_product(self.grid.cell[0], self.grid.cell[1], self.grid.cell[2]);
+        if !volume.is_finite() || volume <= 0.0 {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        let mut path = Vec::new();
+        if let Some(mut cells) = CellRay::clip(
+            &self.grid,
+            origin,
+            unit_direction,
+            max_distance_m,
+            self.max_steps,
+        )? {
+            while let Some(cell) = cells.next(cx)? {
+                if cell.length_m == 0.0 {
+                    continue;
+                }
+                if path.len() == max_cells {
+                    return Err(VolumeTransportError::Budget);
+                }
+                if path.len() == path.capacity() {
+                    path.try_reserve_exact(path.capacity().max(16).min(max_cells - path.len()))
+                        .map_err(|_| VolumeTransportError::Budget)?;
+                }
+                path.push(BeamPopulationSegment {
+                    cell_index: cell.cell,
+                    length_m: cell.length_m,
+                    cell_volume_m3: volume,
                 });
             }
         }

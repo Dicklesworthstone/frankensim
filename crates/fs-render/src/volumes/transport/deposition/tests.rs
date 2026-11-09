@@ -3,7 +3,9 @@
 use super::*;
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::AbsorbingGridBudget;
-use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction, ScatteringGrid};
+use crate::volumes::transport::scattering::{
+    MassScatteringSpectrum, PhaseFunction, ScatteringGrid,
+};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
@@ -59,6 +61,145 @@ fn balance<const N: usize>(report: &BeamPowerDeposition<N>) {
                 && c.scattered_power_w[lane] >= 0.0
         }));
     }
+}
+
+#[test]
+#[cfg(feature = "optical-heating")]
+fn g3_population_beam_preserves_native_xyz_order_and_zero_density_inventory() {
+    with_cx(|cx, _| {
+        let dims = [2, 3, 2];
+        let density = [0.0; 12];
+        let origin = [10.0, -3.0, 4.0];
+        let width = [0.25, 0.5, 2.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new(dims, &density, origin, width),
+            super::super::MassAbsorptionSpectrum::constant(0.0).unwrap(),
+            None,
+            budget(8),
+        )
+        .unwrap();
+        assert!(medium.is_vacuum());
+        for axis in 0..3 {
+            for reverse in [false, true] {
+                let mut start: [f64; 3] = std::array::from_fn(|a| origin[a] + 1.5 * width[a]);
+                start[axis] = origin[axis]
+                    + if reverse {
+                        dims[axis] as f64 * width[axis]
+                    } else {
+                        0.0
+                    };
+                let mut direction = [0.0; 3];
+                direction[axis] = if reverse { -1.0 } else { 1.0 };
+                let start = Point3::new(start[0], start[1], start[2]);
+                let direction = Vec3::new(direction[0], direction[1], direction[2]);
+                let distance = dims[axis] as f64 * width[axis];
+                let path = medium
+                    .population_beam_cell_path(cx, start, direction, distance, dims[axis])
+                    .unwrap();
+                assert_eq!(path.len(), dims[axis]);
+                for (position, segment) in path.iter().enumerate() {
+                    let mut index = [1; 3];
+                    index[axis] = if reverse {
+                        dims[axis] - 1 - position
+                    } else {
+                        position
+                    };
+                    assert_eq!(
+                        segment.cell_index,
+                        index[0] + dims[0] * (index[1] + dims[1] * index[2])
+                    );
+                    close(segment.length_m, width[axis]);
+                    close(segment.cell_volume_m3, 0.25);
+                }
+                // Existing mass-density transport must keep its old vacuum
+                // filtering despite the independent population geometry.
+                assert!(
+                    medium
+                        .beam_cell_path(cx, start, direction, distance, 0)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    });
+}
+
+#[test]
+#[cfg(feature = "optical-heating")]
+fn g1_population_beam_keeps_oblique_partial_native_segments() {
+    with_cx(|cx, _| {
+        let density = [1.0, 0.0, 0.0, 2.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([2, 2, 1], &density, [0.0; 3], [1.0; 3]),
+            super::super::MassAbsorptionSpectrum::constant(1.0).unwrap(),
+            None,
+            budget(8),
+        )
+        .unwrap();
+        let path = medium
+            .population_beam_cell_path(
+                cx,
+                Point3::new(0.25, 0.25, 0.5),
+                Vec3::new(0.6, 0.8, 0.0),
+                1.5,
+                3,
+            )
+            .unwrap();
+        assert_eq!(path.len(), 3);
+        // y=1 at 15/16 m, x=1 at 5/4 m, then the requested
+        // endpoint truncates the third cell at 3/2 m.
+        for (segment, (cell, length)) in path.iter().zip([(0, 0.9375), (2, 0.3125), (3, 0.25)]) {
+            assert_eq!(segment.cell_index, cell);
+            close(segment.length_m, length);
+            close(segment.cell_volume_m3, 1.0);
+        }
+    });
+}
+
+#[test]
+#[cfg(feature = "optical-heating")]
+fn g4_population_beam_refuses_work_output_and_cancellation_without_partial_path() {
+    with_cx(|cx, gate| {
+        let density = [0.0, 1.0, 0.0];
+        let origin = Point3::new(0.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        for (steps, limit) in [(2, 3), (8, 2)] {
+            let medium = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([3, 1, 1], &density, [0.0; 3], [1.0, 2.0, 3.0]),
+                super::super::MassAbsorptionSpectrum::constant(0.0).unwrap(),
+                None,
+                budget(steps),
+            )
+            .unwrap();
+            assert_eq!(
+                medium.population_beam_cell_path(cx, origin, direction, 3.0, limit),
+                Err(VolumeTransportError::Budget)
+            );
+        }
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([3, 1, 1], &density, [0.0; 3], [1.0, 2.0, 3.0]),
+            super::super::MassAbsorptionSpectrum::constant(0.0).unwrap(),
+            None,
+            budget(8),
+        )
+        .unwrap();
+        assert!(
+            medium
+                .population_beam_cell_path(cx, origin, direction, 0.0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        gate.request();
+        assert_eq!(
+            medium.population_beam_cell_path(cx, origin, direction, 3.0, 3),
+            Err(VolumeTransportError::Cancelled)
+        );
+        assert_eq!(density, [0.0, 1.0, 0.0]);
+    });
 }
 
 #[test]

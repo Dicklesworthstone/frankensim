@@ -11923,16 +11923,69 @@ explicit passive transport environment; passive absorption creates heat rather
 than new emitter populations. Accepted endpoint and last-interval mean spectra
 remain bin-integrated watts and feed the existing luminescence observers.
 
-The supplied pump field must be justified as optically thin or externally
-maintained. This adapter does not solve pump depletion, stimulated emission,
-excited-state absorption, bleaching, pair annihilation or active photon
-recycling. Cross sections and rates are authored inputs, not a material
-calibration certificate. The `saturable_afterglow` example documents synthetic
+The default prescribed pump field must be justified as optically thin or
+externally maintained. The optional depleting beam below supplies its own
+incident/transmitted photon balance. Stimulated emission, excited-state
+absorption, irreversible photobleaching, pair annihilation and active photon
+recycling remain outside this adapter. Cross sections and rates are authored
+inputs, not a material calibration certificate. The example documents synthetic
 coefficients, a 1 us pulse and maximum ground-state optical depth 1e-3. Focused
 integration tests cover analytic saturation, triplet shelving, exact pulse
 edges and afterglow, precharged stores, retry/cancellation/refusal and original
 temperature-dependent material rates. Native execution of these renderer
 fixtures remains separate from the passing lower kinetic-owner tests.
+
+### Depleting spectral pumps and material cross sections
+
+`saturation::beam::BeamEmitterCrossSections` and
+`SaturableLuminescentHeating::with_depleting_beam` bind one directed,
+quadrature-weighted two-wavelength beam to the existing finite inventories.
+Each wavelength can excite both singlet and triplet states. The original DDA
+retains every positive-length cell in ray order, including separately authored
+inventories at zero host density. Molecular opacity uses cross section times
+ray length divided by the original cell volume, then the complete ground
+inventory. Host mass density enters only separately declared passive absorption.
+Stable original arithmetic avoids intermediate underflow/overflow in both
+geometric factors. No beam area, emitter count or material dataset is inferred.
+
+The shared thermal column owner solves pumping and ground residence together,
+with bounded temporal refinement of the complete ordered column. It feeds
+actual transmitted photons downstream and keeps wavelength-order beam energies
+separate from destination-order excitation energies. Accepted incident,
+transmitted, molecular and passive energies have an independent cumulative
+audit. Passive pump absorption appears exactly once as external input and once
+as native heat; host coefficients must exclude the same active emitters. Every
+passive absorbing path cell requires its original thermal receiver, which may
+be bound with zero emitter counts. Unilluminated emitters decay normally.
+Passive host coefficients retain the original optical snapshot; the molecular
+and kinetic material refresh below does not infer a host temperature law.
+
+With `material-state`, cross sections come from the original
+`GroundStatePumpStatePoint` claims at each actual pump wavelength and thermal
+cell temperature. Other source coordinates and selected claims remain pinned.
+Immutable prepared columns are shared across snapshots while all cell
+temperatures agree exactly; changed endpoint temperatures re-query original
+support before acceptance. Populations and photon histories are never cached
+as constitutive data. Pump windows, cancellation and failed thermal trials keep
+the same transactional semantics as the original observer.
+
+This is a cell-uniform, quasistatic, one-pass pump model. Spatial refinement
+resolves longitudinal/transverse saturation; native thermal interval refinement
+resolves temperature feedback separately from the inner population/opacity
+solve. Pump scattering, reflection, stimulated emission, excited-state
+absorption and simultaneous overlapping beams are outside its scope. Existing
+passive emitted-light transport and camera observation remain authoritative.
+The synthetic `saturable_afterglow --depleting` example supplies an initial
+optical depth of 10 and a 10 microsecond pulse, then reports both afterglow
+spectra, native heat, remaining ground opacity and the full pump ledger.
+
+Focused integration fixtures cover dense downstream shielding and reverse ray
+order, competing excitation destinations, passive host heating, pulse-off
+afterglow, exact pulse boundaries, cancellation/retry and missed/empty beams.
+Material fixtures compare both wavelengths with independently authored cold
+and warm cross sections, then check endpoint domain refusal and clean retry.
+These renderer tests are authored and formatted; their native execution is not
+established by the independently passing lower-owner and material-source tests.
 
 ## Multiply scattered nonthermal luminescence observations
 

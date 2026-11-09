@@ -16,6 +16,9 @@ use fs_thermal::luminescence::ArrheniusQuenching;
 const HC: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
 const COUNT: f64 = 1e19;
 
+#[path = "saturation/beam.rs"]
+mod beam;
+
 include!("saturation_environment.rs");
 
 fn source(level_nm: f64, lifetime_s: f64, weights: [f64; 2], id: u8) -> LuminescenceSource<2> {

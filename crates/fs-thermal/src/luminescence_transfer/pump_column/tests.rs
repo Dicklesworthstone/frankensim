@@ -292,3 +292,84 @@ fn g3_a_weak_high_energy_pump_keeps_its_heat_below_the_mean_photon_energy_ulp() 
     // Averaging these photon energies first rounds to the resonant value.
     assert_eq!(4e-19 + 1e-18 * (5e-19 - 4e-19), 4e-19);
 }
+
+#[test]
+fn g1_recovering_absorber_preserves_steady_transmission_across_a_million_lifetimes() {
+    // For one excited state returning to ground at rate k, steady transport
+    // obeys ln(s_out/s_in) + s_out - s_in = -tau0, where s=a*photon_rate/k
+    // and tau0=a*N. This independent equation includes ground recovery;
+    // cumulative pump events are not bounded by the number of emitters.
+    let count = 1e12;
+    let tau0 = 2.0;
+    let coefficient = tau0 / count;
+    let decay = 1e9;
+    let duration = 1e-3;
+    let s_in = 3.0;
+    // 90-digit Lambert-W evaluation: W(3*exp(3-2)).
+    let s_out = 1.617_642_466_776_074_3;
+    let ground = count * ((tau0 - s_in + s_out) / tau0);
+    let initial = [ground, count - ground, 0.0];
+    let incident_rate = s_in * decay / coefficient;
+    let model =
+        SingletTripletDecay::try_new([4e-19, 3e-19], [decay, 0.0], [0.0; 2], [0.0; 2]).unwrap();
+    let column = SaturablePumpColumn::try_new(
+        &[SaturablePumpCell {
+            model,
+            optical_depth_per_ground: [[coefficient, 0.0]],
+            passive_optical_depth: [0.0],
+        }],
+        [5e-19],
+        1,
+        || false,
+    )
+    .unwrap();
+    let limits = PumpColumnLimits {
+        relative_tolerance: 1e-10,
+        maximum_substeps: 4,
+        maximum_cell_evaluations: 256,
+        ..PumpColumnLimits::default()
+    };
+    let step = column
+        .advance(&[initial], [incident_rate], duration, limits, || false)
+        .unwrap();
+    let kinetics = &step.cells[0].kinetics;
+    let expected_absorbed = (s_in - s_out) * (decay / coefficient) * duration;
+    close(kinetics.populations[0], initial[0], 5e-12);
+    close(kinetics.populations[1], initial[1], 5e-12);
+    assert_eq!(kinetics.populations[2], 0.0);
+    close(kinetics.populations.iter().sum(), count, 2e-12);
+    close(
+        step.transmitted_photons[0] / step.incident_photons[0],
+        s_out / s_in,
+        5e-12,
+    );
+    close(step.absorbed_photons[0], expected_absorbed, 5e-12);
+    close(kinetics.pump_events[0], expected_absorbed, 5e-12);
+    close(
+        kinetics.radiative_events[0],
+        decay * initial[1] * duration,
+        5e-12,
+    );
+    assert!(kinetics.pump_events[0] > 1e5 * count);
+    close(
+        kinetics.pump_relaxation_heat_j[0],
+        expected_absorbed * (5e-19 - 4e-19),
+        5e-12,
+    );
+    close(
+        step.incident_photons[0],
+        step.transmitted_photons[0] + step.absorbed_photons[0],
+        2e-12,
+    );
+    assert_eq!(step.passive_absorbed_photons[0], 0.0);
+    assert!(step.residual_j.abs() < 1e-12);
+    assert!(step.substeps <= 4);
+    assert!(step.cell_evaluations <= 256);
+    eprintln!(
+        "steady recovering absorber: substeps={}, evaluations={}, absorbed_per_emitter={:.9e}, energy_residual_j={:.9e}",
+        step.substeps,
+        step.cell_evaluations,
+        step.absorbed_photons[0] / count,
+        step.residual_j,
+    );
+}

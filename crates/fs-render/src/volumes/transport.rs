@@ -922,7 +922,7 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), VolumeTransportError> {
     cx.checkpoint().map_err(|_| VolumeTransportError::Cancelled)
 }
 
-fn positive_product(a: f64, b: f64, c: f64) -> f64 {
+pub(super) fn positive_product(a: f64, b: f64, c: f64) -> f64 {
     let ab = a * b;
     let product = ab * c;
     if ab >= f64::MIN_POSITIVE && product > 0.0 && product.is_finite() {

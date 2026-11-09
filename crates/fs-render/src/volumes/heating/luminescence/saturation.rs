@@ -3,17 +3,22 @@
 //! A prescribed local photon field supplies a per-ground-emitter hazard
 //! `W = cross_section * photon_flux`. Actual absorption is `W * N_ground`,
 //! integrated by the native three-state kinetic owner. An optically thin or
-//! externally maintained pump field must be justified by the caller: this
-//! adapter does not solve pump attenuation or reuse a dilute Beer deposition.
-//! There is no fictitious incident/transmitted beam budget. Only actual pump
-//! events supply external energy. Emitted light may use the existing passive
-//! absorption/scattering environment; no active photon recycling is inferred.
+//! externally maintained pump field must be justified by the caller for the
+//! default prescribed-field mode. The optional [`beam`] adapter instead solves
+//! pump depletion against the finite ground inventory and separately accounts
+//! incident/transmitted photons. Only actual molecular pump events and passive
+//! host absorption supply external energy. Emitted light may use the existing
+//! passive absorption/scattering environment; no active photon recycling is inferred.
 //!
 //! Original scalar or material-bound singlet/triplet rates refresh at each
 //! thermal interval. Rates and local pump flux are frozen over that interval;
 //! thermal-step refinement assesses feedback error. Intrinsic lifetimes do
 //! not force lifetime-sized thermal steps. Stimulated emission, excited-state
-//! absorption, bleaching and pair annihilation remain outside this model.
+//! absorption, irreversible photobleaching and pair annihilation remain outside
+//! this model; reversible ground-state bleaching is part of the beam solve.
+
+/// Self-consistent finite-inventory depletion of a directed spectral pump.
+pub mod beam;
 
 use super::phosphorescence::preserve_checkpoint;
 use super::{
@@ -126,6 +131,7 @@ struct Pending<const M: usize> {
     populations: Vec<[f64; 3]>,
     mean_emission_w: Vec<(usize, [f64; M])>,
     accounts: Accounts<2, M>,
+    beam_accounts: Option<beam::BeamAccounts>,
 }
 
 /// Saturation, triplet shelving, heat and observable afterglow on one timeline.
@@ -139,6 +145,8 @@ pub struct SaturableLuminescentHeating<const M: usize> {
     emitters: Vec<Emitter>,
     environment: Option<AbsorbingLuminescenceEnvironment<M>>,
     pump_window_s: Option<(f64, f64)>,
+    medium_identity: ContentHash,
+    beam: Option<beam::DepletingBeam>,
     source_identity: ContentHash,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -304,6 +312,8 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             emitters,
             environment,
             pump_window_s: None,
+            medium_identity: medium.content_identity(),
+            beam: None,
             source_identity: hash.finalize(),
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -382,7 +392,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         thermal: &DepositionSimulation<'_>,
         match_clock: bool,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), OpticalHeatingError> {
+    ) -> Result<Option<Arc<beam::PreparedColumn>>, OpticalHeatingError> {
         checkpoint()?;
         if match_clock && self.time_s != thermal.time_s() {
             return Err(invalid("finite-population and thermal clocks differ"));
@@ -400,7 +410,10 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         if let Some(environment) = &self.environment {
             environment.check_state(thermal, checkpoint)?;
         }
-        Ok(())
+        self.beam
+            .as_ref()
+            .map(|beam| beam.check_state(self, thermal, checkpoint))
+            .transpose()
     }
 
     fn next_edge(&self, after_s: f64) -> Option<f64> {
@@ -469,53 +482,76 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         let mut populations = Vec::with_capacity(self.emitters.len());
         let mut mean_emission_w = Vec::with_capacity(self.emitters.len());
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
+        let mut beam_candidate = self
+            .beam
+            .as_ref()
+            .map(|beam| beam.advance(self, thermal, duration_s, pumped, checkpoint))
+            .transpose()?;
+        if let Some(candidate) = &beam_candidate {
+            for &(cell, heat_j) in &candidate.passive_heat_j {
+                checkpoint()?;
+                sources
+                    .entry(cell)
+                    .or_default()
+                    .add(finite(heat_j / duration_s)?)?;
+                accounts.passive_pump.add(heat_j)?;
+            }
+            accounts.roundoff.add(candidate.absolute_roundoff_j)?;
+        }
         let mut cached_model = None;
         let mut previous_plan: Option<Arc<SaturableSingletTripletPlan>> = None;
-        for emitter in &mut self.emitters {
+        for (emitter_index, emitter) in self.emitters.iter_mut().enumerate() {
             checkpoint()?;
             let binding = emitter.binding;
-            let model = resolve_model(
-                &self.singlet,
-                &self.triplet,
-                thermal.temperature_k(binding.thermal_cell)?,
-                &mut cached_model,
-            )?;
-            let rates = if pumped {
-                binding.pump.rates_s
+            let step = if let Some(step) = beam_candidate
+                .as_mut()
+                .and_then(|candidate| candidate.steps[emitter_index].take())
+            {
+                step
             } else {
-                [0.0; 2]
-            };
-            let matches = |plan: &SaturableSingletTripletPlan| {
-                *plan.model() == model
-                    && plan.duration_s() == duration_s
-                    && plan.pump_rates_s() == rates
-                    && plan.pump_energies_j() == binding.pump.energies_j
-            };
-            if emitter.prepared.as_ref().is_none_or(|plan| !matches(plan)) {
-                if let Some(plan) = previous_plan.as_ref().filter(|plan| matches(plan)) {
-                    emitter.prepared = Some(Arc::clone(plan));
+                let model = resolve_model(
+                    &self.singlet,
+                    &self.triplet,
+                    thermal.temperature_k(binding.thermal_cell)?,
+                    &mut cached_model,
+                )?;
+                let rates = if pumped && self.beam.is_none() {
+                    binding.pump.rates_s
                 } else {
-                    emitter.prepared =
-                        Some(Arc::new(preserve_checkpoint(checkpoint, |cancelled| {
-                            SaturableSingletTripletPlan::prepare(
-                                model,
-                                rates,
-                                binding.pump.energies_j,
-                                duration_s,
-                                self.triplet.evolution_limits(),
-                                cancelled,
-                            )
-                        })?));
+                    [0.0; 2]
+                };
+                let matches = |plan: &SaturableSingletTripletPlan| {
+                    *plan.model() == model
+                        && plan.duration_s() == duration_s
+                        && plan.pump_rates_s() == rates
+                        && plan.pump_energies_j() == binding.pump.energies_j
+                };
+                if emitter.prepared.as_ref().is_none_or(|plan| !matches(plan)) {
+                    if let Some(plan) = previous_plan.as_ref().filter(|plan| matches(plan)) {
+                        emitter.prepared = Some(Arc::clone(plan));
+                    } else {
+                        emitter.prepared =
+                            Some(Arc::new(preserve_checkpoint(checkpoint, |cancelled| {
+                                SaturableSingletTripletPlan::prepare(
+                                    model,
+                                    rates,
+                                    binding.pump.energies_j,
+                                    duration_s,
+                                    self.triplet.evolution_limits(),
+                                    cancelled,
+                                )
+                            })?));
+                    }
                 }
-            }
-            let plan = emitter
-                .prepared
-                .as_ref()
-                .expect("prepared finite emitter interval");
-            previous_plan = Some(Arc::clone(plan));
-            let step = preserve_checkpoint(checkpoint, |cancelled| {
-                plan.advance_with_cancel(emitter.populations, cancelled)
-            })?;
+                let plan = emitter
+                    .prepared
+                    .as_ref()
+                    .expect("prepared finite emitter interval");
+                previous_plan = Some(Arc::clone(plan));
+                preserve_checkpoint(checkpoint, |cancelled| {
+                    plan.advance_with_cancel(emitter.populations, cancelled)
+                })?
+            };
             let (singlet_light, singlet_heat) =
                 partition(&self.singlet, step.radiative_decay_energy_j[0])?;
             let (triplet_light, triplet_heat) =
@@ -604,12 +640,13 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
             populations,
             mean_emission_w,
             accounts,
+            beam_accounts: beam_candidate.map(|candidate| candidate.accounts),
         });
         Ok(sources)
     }
 
     fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
-        self.check_state(thermal, true, &mut || Ok(()))
+        self.check_state(thermal, true, &mut || Ok(())).map(|_| ())
     }
 
     fn step(
@@ -620,7 +657,7 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        self.check_state(thermal, false, checkpoint)?;
+        let prepared_beam = self.check_state(thermal, false, checkpoint)?;
         let pending = self
             .pending
             .as_ref()
@@ -668,6 +705,11 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
             emitter.populations = populations;
         }
         self.accounts = pending.accounts;
+        if let (Some(beam), Some(accounts), Some(prepared)) =
+            (&mut self.beam, pending.beam_accounts, prepared_beam)
+        {
+            beam.accept(accounts, prepared);
+        }
         self.mean_emission_w = pending.mean_emission_w;
         self.emission_w = emission_w;
         self.pump_account = pump_account;

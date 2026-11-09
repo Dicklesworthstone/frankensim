@@ -179,6 +179,9 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub unresolved_radiation_j: [f64; M],
     /// Immediate pump-to-emitting-state relaxation heat, joules.
     pub prompt_heat_j: f64,
+    /// Pump light absorbed directly by the passive host, joules. This is both
+    /// external input and local heat, separately from molecular excitation.
+    pub passive_pump_absorption_j: f64,
     /// Stored excitation released by nonradiative transitions, joules.
     pub nonradiative_heat_j: f64,
     /// Heat from triplet-pair events after any productive singlet creation, joules.
@@ -198,7 +201,7 @@ pub struct LuminescenceEnergy<const M: usize> {
     /// Current total nonthermal excitation store, including both spin states
     /// when singlet/triplet coupling is explicitly bound, joules.
     pub stored_excitation_j: f64,
-    /// Initial excitation plus absorbed pump minus escape, unresolved light,
+    /// Initial excitation plus active/passive absorbed pump minus escape, unresolved light,
     /// all heat and final excitation.
     pub residual_j: f64,
     /// Sum of absolute local energy defects over the accepted history.
@@ -228,6 +231,7 @@ struct Accounts<const N: usize, const M: usize> {
     emitted: [CheckedSum; M],
     unresolved: [CheckedSum; M],
     prompt: CheckedSum,
+    passive_pump: CheckedSum,
     dark: CheckedSum,
     annihilation: CheckedSum,
     crossing: CheckedSum,
@@ -251,6 +255,7 @@ impl<const N: usize, const M: usize> Default for Accounts<N, M> {
             emitted: [CheckedSum::default(); M],
             unresolved: [CheckedSum::default(); M],
             prompt: CheckedSum::default(),
+            passive_pump: CheckedSum::default(),
             dark: CheckedSum::default(),
             annihilation: CheckedSum::default(),
             crossing: CheckedSum::default(),
@@ -1025,6 +1030,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             emitted_j: [0.0; M],
             unresolved_radiation_j: [0.0; M],
             prompt_heat_j: self.prompt.value()?,
+            passive_pump_absorption_j: self.passive_pump.value()?,
             nonradiative_heat_j: self.dark.value()?,
             annihilation_heat_j: self.annihilation.value()?,
             crossing_heat_j: self.crossing.value()?,
@@ -1039,6 +1045,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         let mut heat = CheckedSum::default();
         for value in [
             energy.prompt_heat_j,
+            energy.passive_pump_absorption_j,
             energy.nonradiative_heat_j,
             energy.annihilation_heat_j,
             energy.crossing_heat_j,
@@ -1059,6 +1066,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         };
         let mut balance = CheckedSum::default();
         balance.add(self.initial_excitation_j)?;
+        balance.add(energy.passive_pump_absorption_j)?;
         for lane in 0..N {
             pump.incident_j[lane] = self.incident[lane].value()?;
             pump.transmitted_j[lane] = self.transmitted[lane].value()?;
@@ -1106,8 +1114,9 @@ fn rate_power(energy: f64, fraction: f64, lifetime: f64) -> Result<f64, OpticalH
     if energy == 0.0 || fraction == 0.0 {
         return Ok(0.0);
     }
-    let rate = (energy * fraction) / lifetime;
-    if rate.is_finite() && rate > 0.0 {
+    let product = energy * fraction;
+    let rate = product / lifetime;
+    if product >= f64::MIN_POSITIVE && rate.is_finite() && rate > 0.0 {
         return Ok(rate);
     }
     finite(fs_math::det::exp(

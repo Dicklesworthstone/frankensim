@@ -4052,10 +4052,14 @@ stimulated emission, excited-state absorption, multiple overlapping beams and
 active recycling of emitted photons are outside this column's scope. Thermal
 and optical owners supply original geometry and refresh their own material state.
 
-Seven focused native tests cover exact ground residence, passive spectral
+Eight focused native tests cover exact ground residence, passive spectral
 transport, the independent saturable-slab fluence solution, two-cell bleaching
 and pulse composition, competing spectral/destination channels, weak energetic
-branches, and bounded work/cancellation. These and all 64 preceding thermal
+branches, steady recovery and bounded work/cancellation. A recovering absorber
+retains its independent steady transmission across one million radiative
+lifetimes in two temporal substeps, while absorbing over 691,000 photons per
+emitter without limiting cumulative excitations to the finite inventory.
+These and all 64 preceding thermal
 luminescence tests passed against the actual production math and reaction
 sources with the pinned Rust toolchain. Renderer/material integration tests
-are separate from these 71 executed lower-owner tests.
+are separate from these 72 executed lower-owner tests.
