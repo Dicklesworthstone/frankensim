@@ -16,6 +16,9 @@ pub mod enclosure;
 
 use super::*;
 use fs_material::fluid_transport::{ThermalFluidTransport, ThermalFluidTransportState};
+use fs_material::liquid::ResolvedLiquidState;
+use fs_qty::QuantitySpec;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 /// Authored property-evaluation convention required by the selected correlation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +59,18 @@ pub enum SourceCellConvectionLaw {
     /// bulk properties are mandatory for the explicit K=1 model. Re-evaluating
     /// a cell does not restart its inlet or introduce a wall-property correction.
     ForcedTubeSection {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+    },
+    /// Gnielinski's liquid wall-Pr correction on the same turbulent interval.
+    /// Primary properties must be actual bulk properties. The SAME resolver
+    /// is queried at the wall temperature and must retain original liquid
+    /// owners with the same card, selected claims and non-temperature context.
+    /// Numeric-only and gas sources refuse rather than imply liquid identity.
+    /// The empirical correction and finite-section model retain their original
+    /// validity limits; no single-phase or experimental-error bound is inferred.
+    ForcedTubeSectionLiquidWall {
         speed_m_s: f64,
         start: Length,
         end: Length,
@@ -112,6 +127,11 @@ impl SourceCellConvectionLaw {
                 | CorrelationId::SiederTateLaminar, .. })
     }
 
+    pub(crate) fn needs_surface_transport(self) -> bool {
+        self.needs_surface_viscosity()
+            || matches!(self, Self::ForcedTubeSectionLiquidWall { .. })
+    }
+
     // Admit prescribed strip geometry before invoking an external resolver.
     // The same native law also checks it when consuming a borrowed snapshot.
     pub(crate) fn admit_geometry(self, length: Length) -> Result<(), ConvectionSourceError> {
@@ -119,7 +139,9 @@ impl SourceCellConvectionLaw {
             CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
                 .admit_area(0.0, length)?;
         }
-        if let Self::ForcedTubeSection { speed_m_s, start, end } = self {
+        if let Self::ForcedTubeSection { speed_m_s, start, end }
+            | Self::ForcedTubeSectionLiquidWall { speed_m_s, start, end } = self
+        {
             CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
                 .admit_area(0.0, length)?;
         }
@@ -161,6 +183,7 @@ impl SourceCellConvectionLaw {
         }
         if matches!(self, Self::Forced { correlation: CorrelationId::GnielinskiDeveloping, .. }
             | Self::ForcedTubeSection { .. }
+            | Self::ForcedTubeSectionLiquidWall { .. }
             | Self::ForcedLaminarTubeSection { .. }
             | Self::ForcedRectangularDuctSection { .. })
             && convention != ConvectionPropertyTemperature::Reservoir
@@ -183,6 +206,65 @@ impl SourceCellConvectionLaw {
         {
             return Err(ConvectionSourceError::Invalid(
                 "plate sections, horizontal or spherical natural convection and aiding mixed convection require mean wall/bulk film properties",
+            ));
+        }
+        Ok(())
+    }
+
+    // Liquid-only corrections require an actual original source, not phase
+    // inference from a numeric tuple or an authored material name.
+    fn admit_liquid_sources<F: ThermalFluidTransport>(
+        self,
+        primary: &SurfaceConvectionMaterialSample<F>,
+        surface: Option<&SurfaceConvectionMaterialSample<F>>,
+    ) -> Result<(), ConvectionSourceError> {
+        if !matches!(self, Self::ForcedTubeSectionLiquidWall { .. }) {
+            return Ok(());
+        }
+        let bulk = original_liquid(primary)?;
+        let surface = surface.ok_or(ConvectionSourceError::Invalid(
+            "liquid wall-Pr correction requires its original wall-temperature source",
+        ))?;
+        let wall = original_liquid(surface)?;
+        let bulk_material = bulk.material();
+        let wall_material = wall.material();
+        let bulk_query = bulk_material.query();
+        let wall_query = wall_material.query();
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static,
+        ));
+        let mut temperatures = bulk_query.axis_quantities().iter()
+            .filter(|(_, quantity)| **quantity == absolute);
+        let (temperature_axis, _) = temperatures.next().ok_or(
+            ConvectionSourceError::Invalid(
+                "liquid wall-Pr correction requires one explicitly typed absolute-temperature coordinate",
+            ),
+        )?;
+        if temperatures.next().is_some()
+            || bulk_query.axes().get(temperature_axis) != Some(&primary.thermal.temperature_k())
+            || wall_query.axes().get(temperature_axis) != Some(&surface.thermal.temperature_k())
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "liquid wall-Pr source temperature must be unique and match each sampled state",
+            ));
+        }
+        let bulk_properties = bulk_material.properties();
+        let wall_properties = wall_material.properties();
+        if bulk_material.card_identity() != wall_material.card_identity()
+            || bulk.requirements() != wall.requirements()
+            || bulk_properties.len() != wall_properties.len()
+            || bulk_properties.iter().zip(wall_properties).any(|(a, b)| {
+                a.requirement() != b.requirement()
+                    || a.answer().receipt.selected != b.answer().receipt.selected
+            })
+            || bulk_query.axis_quantities() != wall_query.axis_quantities()
+            || bulk_query.axes().len() != wall_query.axes().len()
+            || bulk_query.axes().iter().any(|(axis, value)| {
+                axis != temperature_axis && wall_query.axes().get(axis) != Some(value)
+            })
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "liquid wall-Pr correction must retain one card, selected source bundle and non-temperature context",
             ));
         }
         Ok(())
@@ -243,6 +325,14 @@ impl SourceCellConvectionLaw {
             }
             Self::ForcedTubeSection { speed_m_s, start, end } => {
                 CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
+            }
+            Self::ForcedTubeSectionLiquidWall { speed_m_s, start, end } => {
+                CellConvectionLaw::ForcedTubeSectionLiquidWall {
+                    speed_m_s, start, end,
+                    surface_transport: surface.ok_or(ConvectionSourceError::Invalid(
+                        "liquid wall-Pr correction is missing the actual wall-temperature source",
+                    ))?.transport(),
+                }
             }
             Self::ForcedLaminarTubeSection { speed_m_s, start, end } => {
                 CellConvectionLaw::ForcedLaminarTubeSection { speed_m_s, start, end }
@@ -311,8 +401,8 @@ pub struct CellConvectionMaterialSample<F> {
     pub property_temperature_k: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
-    /// Present for forced spheres and Sieder-Tate tubes: the SAME fluid at the actual wall
-    /// temperature; it has no separate thermal storage or mass.
+    /// Present for a selected wall-property relation: the SAME fluid at the
+    /// actual wall temperature, with no separate thermal storage or mass.
     pub surface: Option<SurfaceConvectionMaterialSample<F>>,
 }
 
@@ -321,6 +411,25 @@ pub struct CellConvectionMaterialSample<F> {
 pub struct SurfaceConvectionMaterialSample<F> {
     pub material: F,
     pub thermal: ThermalFluidTransportState,
+}
+
+// A source witness is useful only if it describes this SAME sampled state.
+fn original_liquid<F: ThermalFluidTransport>(
+    sample: &SurfaceConvectionMaterialSample<F>,
+) -> Result<&ResolvedLiquidState, ConvectionSourceError> {
+    let liquid = sample.material.resolved_liquid_source().ok_or(
+        ConvectionSourceError::Invalid(
+            "liquid wall-Pr correction requires an original resolved liquid source",
+        ),
+    )?;
+    let thermal = liquid.thermal_transport_state()
+        .map_err(|error| ConvectionSourceError::Material(error.into()))?;
+    if thermal != sample.thermal {
+        return Err(ConvectionSourceError::Invalid(
+            "liquid source witness does not match the retained thermal transport state",
+        ));
+    }
+    Ok(liquid)
 }
 
 // One source/temperature admission for reservoir, film and surface queries.
@@ -364,12 +473,13 @@ fn resolve_cell_material<F: ThermalFluidTransport, E>(
     let primary = material_at(binding.cell, property_temperature_k, || {
         resolve(binding, Temperature::new(property_temperature_k))
     })?;
-    let surface = if binding.law.needs_surface_viscosity() {
+    let surface = if binding.law.needs_surface_transport() {
         check(cancelled)?;
         Some(material_at(binding.cell, wall, || {
             resolve(binding, Temperature::new(wall))
         })?)
     } else { None };
+    binding.law.admit_liquid_sources(&primary, surface.as_ref())?;
     Ok(CellConvectionMaterialSample {
         cell: binding.cell,
         property_temperature_k,

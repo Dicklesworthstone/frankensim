@@ -172,6 +172,10 @@ impl<T: ThermalFluidTransport + ?Sized> ThermalFluidTransport for &T {
     fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
         T::thermal_transport_state(*self)
     }
+
+    fn resolved_liquid_source(&self) -> Option<&ResolvedLiquidState> {
+        T::resolved_liquid_source(*self)
+    }
 }
 
 impl FluidTransport for FluidTransportState {

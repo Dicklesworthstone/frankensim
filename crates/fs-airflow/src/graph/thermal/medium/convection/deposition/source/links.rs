@@ -39,9 +39,9 @@ pub struct ConvectiveLinkSample<F> {
     pub heat_into_fluid_w: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
-    /// Fluid query at the ACTUAL wall temperature for Whitaker spheres and
-    /// Sieder-Tate tubes. Only its viscosity enters the wall correction;
-    /// the primary state stays bulk.
+    /// Fluid query at the ACTUAL wall temperature for a selected wall-property
+    /// relation. Whitaker/Sieder-Tate consume its viscosity; explicit liquid
+    /// Gnielinski consumes its Pr. The primary state stays bulk.
     pub surface: Option<SurfaceConvectionMaterialSample<F>>,
     /// None only at exact natural-convection thermal equilibrium.
     pub evaluation: Option<CellConvectionEvaluation>,
@@ -91,8 +91,10 @@ impl<F> ResolvedLinkConvection<F> {
 /// and fixed conditions as the native caloric law; a generic transport trait
 /// cannot prove this identity or invent pressure/composition evolution. Retain
 /// prepared material laws across calls so nonlinear trials do not select new
-/// sources. Forced spheres and Sieder-Tate tubes query that fluid at the wall
-/// temperature. Every returned owner stays with its heat-transfer result.
+/// sources. Wall-property relations query that fluid at the wall temperature.
+/// Explicit liquid Gnielinski also admits the same original liquid card,
+/// selected claims and non-temperature context. Every returned owner stays
+/// with its heat-transfer result.
 ///
 /// This returns total conductances for existing links. Use them directly in
 /// `BackwardEulerStep` coefficients or the native observer's conductance hook:
@@ -261,7 +263,7 @@ fn evaluate_admitted_surface<F: ThermalFluidTransport, E>(
     let primary = material_at(fluid_cell, property_temperature_k, || {
         resolve(binding, thermal, Temperature::new(property_temperature_k))
     })?;
-    let surface = if binding.law.needs_surface_viscosity() {
+    let surface = if binding.law.needs_surface_transport() {
         check(cancelled)?;
         Some(material_at(fluid_cell, wall_temperature_k, || {
             resolve(binding, thermal, Temperature::new(wall_temperature_k))
@@ -269,6 +271,7 @@ fn evaluate_admitted_surface<F: ThermalFluidTransport, E>(
     } else {
         None
     };
+    binding.law.admit_liquid_sources(&primary, surface.as_ref())?;
     let law = binding.law.resolve(
         &primary.thermal,
         surface.as_ref().map(|sample| &sample.thermal),

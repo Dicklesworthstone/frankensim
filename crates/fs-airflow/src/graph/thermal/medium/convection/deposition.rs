@@ -66,6 +66,17 @@ pub enum CellConvectionLaw {
         start: Length,
         end: Length,
     },
+    /// Explicit Gnielinski liquid wall-Pr correction on the same turbulent
+    /// circular section. Re, Pr and k remain the primary bulk properties; only
+    /// this same liquid's wall Pr enters (Pr_bulk/Pr_wall)^0.11. A borrowed
+    /// numerical state is an authored assumption, not liquid-source evidence;
+    /// source-backed callbacks require and retain original liquid owners.
+    ForcedTubeSectionLiquidWall {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+        surface_transport: FluidTransportState,
+    },
     /// Hausen laminar circular-tube interval measured from the physical heated
     /// entrance. Characteristic length is diameter; the original bulk source
     /// supplies Re, Pr and k. No turbulent fallback or entrance reset is used.
@@ -156,6 +167,7 @@ impl CellConvectionLaw {
             }
         }
         if let Self::ForcedTubeSection { speed_m_s, start, end }
+            | Self::ForcedTubeSectionLiquidWall { speed_m_s, start, end, .. }
             | Self::ForcedLaminarTubeSection { speed_m_s, start, end } = self
         {
             let wetted_area = core::f64::consts::PI * length.value() * (end.value() - start.value());
@@ -508,6 +520,22 @@ pub(crate) fn evaluate_convection_state(
         CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end } => {
             let evaluated = evaluate_turbulent_tube_section_from_material(
                 transport, speed_m_s, length, start, end,
+            )?;
+            let (_, nusselt, coefficient, section) = evaluated.into_parts();
+            return Ok(Some(CellConvectionEvaluation {
+                nusselt, coefficient, section: None, tube_section: Some(section),
+                rectangular_section: None,
+            }));
+        }
+        CellConvectionLaw::ForcedTubeSectionLiquidWall {
+            speed_m_s, start, end, surface_transport,
+        } => {
+            let evaluated = evaluate_turbulent_tube_section_from_material(
+                transport, speed_m_s, length, start, end,
+            )?.with_property_correction(
+                fs_convection::developing::TurbulentTubePropertyCorrection::Liquid {
+                    wall_prandtl: surface_transport.prandtl(),
+                },
             )?;
             let (_, nusselt, coefficient, section) = evaluated.into_parts();
             return Ok(Some(CellConvectionEvaluation {

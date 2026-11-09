@@ -6083,3 +6083,36 @@ mean-film sources, both phase directions with finite kinetics, reciprocal
 heat, late refusals and original IF97/NASA calorics. The water fixture now
 constructs mole fractions by original species identity. All new regression
 execution remains unclaimed because the execution workspace is unavailable.
+
+## Finite-cell liquid wall-Pr convection
+
+Source-backed deposition boundaries and reciprocal finite-fluid links can select
+`SourceCellConvectionLaw::ForcedTubeSectionLiquidWall` explicitly. The existing
+Gnielinski turbulent circular-section owner receives bulk Re, Pr and conductivity
+from the original fluid source, while that same resolver supplies wall Pr at the
+actual trial wall temperature. The correction is `(Pr_bulk/Pr_wall)^0.11`; the
+physical inlet, original cumulative means, corrected section Nu/coefficient and
+correlation evidence remain available. Unselected `ForcedTubeSection` retains
+K=1 and its single bulk-property query.
+
+Liquid eligibility comes from `ThermalFluidTransport::resolved_liquid_source`,
+which defaults to no source and returns the retained `ResolvedLiquidState` for
+the original liquid owner, including borrowed views. Admission verifies both
+thermal snapshots, one explicitly typed absolute-temperature coordinate, one
+immutable card, identical property requirements and viscosity basis, selected
+claim receipts, and unchanged non-temperature coordinates. Numeric-only and gas
+callbacks, inconsistent witnesses and switched source bundles refuse.
+
+Boundary exchange supplies one external power; a finite link carries one
+conductance with equal and opposite heat on the two existing caloric cells.
+No surface fluid mass, second temperature history or solver is added. Prepared
+implicit liquid boundaries retain their existing
+`with_gnielinski_wall_correction()` selection; the callback-only enum variant
+refuses at implicit construction. Original empirical and property-ratio admission
+remains in force. Corrected section model discrepancy is unbounded; this adds no
+single-phase stability claim or independent experimental accuracy bound.
+
+Four focused regression definitions cover independent heating/cooling transfer,
+original bulk/wall sources, both native finite stores and link reversal, gas and
+numeric-source refusal, and changed source claims or non-temperature context.
+Their execution is not claimed by this implementation checkpoint.

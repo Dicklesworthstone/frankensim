@@ -2,7 +2,8 @@
 
 use super::*;
 use fs_convection::developing::{
-    TurbulentCircularDuctSection, evaluate_turbulent_circular_duct_section,
+    TurbulentCircularDuctSection, TurbulentTubePropertyCorrection,
+    evaluate_turbulent_circular_duct_section,
 };
 
 /// Physical circular-tube interval and the actual section-average coefficient.
@@ -63,6 +64,21 @@ impl<F: FluidTransport + ?Sized> MaterialTurbulentTubeSection<'_, F> {
     /// The actual section coefficient, with its own model discrepancy boundary.
     pub const fn coefficient(&self) -> &Evidence<HeatTransferCoefficient> {
         &self.coefficient
+    }
+
+    // Source-backed callback owners admit and retain the original wall fluid.
+    // This numerical lowering updates the actual section and its evidence,
+    // while leaving both original cumulative K=1 means available for replay.
+    pub(crate) fn with_property_correction(
+        mut self,
+        correction: TurbulentTubePropertyCorrection,
+    ) -> Result<Self, MaterialConvectionError> {
+        self.section = self.section.with_property_correction(correction)?;
+        self.coefficient = self.section.heat_transfer_coefficient(
+            ThermalConductivity::new(self.transport.thermal_conductivity_w_m_k()),
+            self.diameter,
+        )?;
+        Ok(self)
     }
 
     pub(crate) fn into_parts(self) -> (

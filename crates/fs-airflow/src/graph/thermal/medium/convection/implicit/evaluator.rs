@@ -69,6 +69,11 @@ pub(super) fn admit(
             return Err(Invalid("the original caloric endpoints must be physical"));
         }
     }
+    if matches!(settings.law, SourceCellConvectionLaw::ForcedTubeSectionLiquidWall { .. }) {
+        return Err(Invalid(
+            "implicit liquid wall-Pr correction uses ForcedTubeSection with with_gnielinski_wall_correction",
+        ));
+    }
     if let SourceCellConvectionLaw::AidingVerticalPlate { settings } = settings.law {
         settings.validate()?;
     }
@@ -431,6 +436,11 @@ pub(super) fn evaluate(
         }
         SourceCellConvectionLaw::ForcedRectangularDuctSection { .. } => {
             unreachable!("pointwise rectangular geometry is refused at construction")
+        }
+        SourceCellConvectionLaw::ForcedTubeSectionLiquidWall { .. } => {
+            return Err(Invalid(
+                "implicit liquid wall-Pr correction requires its original prepared liquid builder",
+            ));
         }
     };
     // Moving source properties can have a zero aggregate group derivative

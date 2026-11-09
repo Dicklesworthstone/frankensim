@@ -64,6 +64,15 @@ impl ThermalFluidTransportState {
 pub trait ThermalFluidTransport: FluidTransport {
     /// Resolve one coherent snapshot. Missing source temperature refuses.
     fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError>;
+
+    /// Original liquid owner when this view retains one. Numerical snapshots,
+    /// gases and otherwise unknown sources do not establish liquid eligibility.
+    /// Wrappers may delegate the SAME retained owner; consumers must verify
+    /// that its thermal state agrees with the view before using liquid-only
+    /// constitutive assumptions. This does not establish phase stability.
+    fn resolved_liquid_source(&self) -> Option<&ResolvedLiquidState> {
+        None
+    }
 }
 
 impl FluidTransport for ThermalFluidTransportState {
@@ -116,6 +125,10 @@ impl ThermalFluidTransport for ResolvedThermochemicalGasState {
     }
 }
 impl ThermalFluidTransport for ResolvedLiquidState {
+    fn resolved_liquid_source(&self) -> Option<&ResolvedLiquidState> {
+        Some(self)
+    }
+
     fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
         if let Some(expansion) = self.density_expansion() {
             return ThermalFluidTransportState::try_new(

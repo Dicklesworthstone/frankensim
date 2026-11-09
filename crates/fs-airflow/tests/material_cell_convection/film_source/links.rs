@@ -11,6 +11,8 @@ mod mixed_convection;
 mod sphere;
 #[path = "links/tube.rs"]
 mod tube;
+#[path = "links/liquid_wall.rs"]
+mod liquid_wall;
 #[path = "links/plate_sections.rs"]
 mod plate_sections;
 #[path = "links/laminar_sections.rs"]
