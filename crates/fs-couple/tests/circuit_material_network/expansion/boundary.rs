@@ -580,3 +580,85 @@ fn g4_surface_source_coverage_changes_and_late_cancellation_preserve_histories()
     assert_eq!(updated.cells(), &saved);
     assert_eq!(circuit, saved_circuit);
 }
+
+#[test]
+fn g1_oblique_expansion_area_drives_the_native_implicit_boundary_heat() {
+    let alpha = [0.006, 0.003, 0.009];
+    let (card, caloric, keys) = material_expansion(ElectricalPropertyBasis::Conductivity, alpha);
+    let context = temperature(300.0);
+    let cells = [cell(&card, &caloric, &context)];
+    let resistors = [resistor(0)];
+    let network = MaterialNetwork {
+        cells: &cells,
+        resistors: &resistors,
+        links: &[],
+    };
+    let heat = timeline(
+        &caloric,
+        Boundary {
+            ambient_k: 320.0,
+            htc_w_m2_k: 0.2,
+            reservoir: None,
+            source_w: 0.0,
+        },
+        vec![],
+    );
+    let source = path(&card, &keys, 380.0);
+    // Area = 6 m² with normal (3/5,4/5,0) in the material principal frame.
+    let exposed = PreparedExpansionSurface::try_new(source.clone(), [0.0; 3])
+        .unwrap()
+        .with_oriented_patches(&[[3.6, 4.8, 0.0]])
+        .unwrap();
+    let expanded = network
+        .prepare_with_bases(&heat, &[(0, ElectricalPropertyBasis::Conductivity)], || false)
+        .unwrap()
+        .with_free_expansion_and_boundaries(
+            &heat,
+            &[ConductorFreeExpansion {
+                branch: 0,
+                source,
+                longitudinal_axis: 0,
+            }],
+            &[ExpandingBoundary {
+                branch: 0,
+                exposed,
+                reservoir: None,
+            }],
+            || false,
+        )
+        .unwrap();
+    let circuit = driven(
+        expanded
+            .resolve_with_boundary_conductances(&heat, || false)
+            .unwrap()
+            .bulk
+            .resistors,
+    );
+    let actual_area = |t: f64| {
+        let s = alpha.map(|a| 1.0 + a * (t - 300.0));
+        ((3.6 * s[1] * s[2]).powi(2) + (4.8 * s[0] * s[2]).powi(2)).sqrt()
+    };
+    let dt = 0.2;
+    let old_t = heat.temperature_k(CELL).unwrap();
+    let expected = root(old_t, 379.0, |t| {
+        CP * (t - old_t)
+            - dt * (16.0 / resistance(alpha, 0, t) + 0.2 * actual_area(t) * (320.0 - t))
+    });
+    let (candidate, _) = expanded
+        .step_candidate_with_entropy(
+            &heat, dt, &circuit, &[4.0], config(), &[0.0], || false,
+        )
+        .unwrap();
+    let t = candidate.thermal().temperature_k(CELL).unwrap();
+    assert!((t - expected).abs() < 1e-7);
+    let report = candidate.report();
+    let boundary = &report.source.boundaries[0];
+    near(boundary.exposed.total_area_m2(), actual_area(t));
+    near(boundary.ambient_conductance_w_k, 0.2 * actual_area(t));
+    let boundary_heat = dt * 0.2 * actual_area(t) * (320.0 - t);
+    near(report.non_electrical_heat_j, boundary_heat);
+    near(
+        report.thermal.stored_energy_change_j,
+        report.deposited_joule_j + boundary_heat,
+    );
+}

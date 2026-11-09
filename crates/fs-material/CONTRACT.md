@@ -13198,13 +13198,20 @@ reference normalization and the declared principal/isotropic basis remain
 authoritative. Zero selected faces remain zero; electrical L/A does not infer
 a thermal surface or boundary coverage.
 
-Three `expansion_surface` regressions cover normalized anisotropy and one-sided
+The `expansion_surface` regressions cover normalized anisotropy and one-sided
 source knots, exact tangents and selected/zero patches, legitimate derivative
-cancellation, foreign paths and domain/area refusal. This owner admits aligned
-faces under diagonal unconstrained free expansion. Arbitrary curved normals,
-shear, constrained stress and moving interbody contact coverage require their
-own geometry owners. Thermal boundary laws and disjoint coverage admission
-remain with the consumer; surface geometry alone adds no heat or storage.
+cancellation, foreign paths and domain/area refusal. `with_oriented_patches`
+also admits bounded planar reference-area vectors in the same principal frame.
+The exact Nanson map `a = cof(F) a_ref` gives each current area and its temperature
+tangent; oblique faces are not counted as independent projected principal faces.
+Totals include both portions and retain allocation-free runtime evaluation.
+The triangle-cross-product, normal-sign/axis-permutation, isotropic-limit and
+extreme-area tests exercise this geometry; the circuit expansion boundary test
+passes its total area into the original implicit heat/entropy solve.
+Curved surfaces require an explicit facet/quadrature approximation. Shear,
+constrained stress and moving interbody contact coverage require their own
+geometry owners. Thermal boundary laws and disjoint coverage admission remain
+with the consumer; surface geometry alone adds no heat or storage.
 
 ## Sealed dense-water heat exchange on the shared thermal timeline
 

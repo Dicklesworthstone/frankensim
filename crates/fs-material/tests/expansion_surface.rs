@@ -1,4 +1,7 @@
 //! Face geometry follows the same source, reference datum and principal axes.
+#[path = "expansion_surface/oriented.rs"]
+mod oriented;
+
 use fs_blake3::ContentHash;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
