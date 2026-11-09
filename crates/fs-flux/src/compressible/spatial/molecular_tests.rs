@@ -661,3 +661,9 @@ mod stabilized;
 
 #[path = "molecular/inertial_walls_tests.rs"]
 mod inertial_walls;
+
+#[path = "molecular/moving_forcing_tests.rs"]
+mod moving_forcing;
+
+#[path = "molecular/inertial_forcing_tests.rs"]
+mod inertial_forcing;

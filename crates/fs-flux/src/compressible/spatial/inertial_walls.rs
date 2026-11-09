@@ -105,6 +105,79 @@ impl Euler3d {
         gas_controls: StepControl,
         loads: [InertialWallLoad; 2],
         controls: InertialWallsControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInertialWallsStep, InertialWallsError> {
+        self.step_inertial_walls_impl(
+            axis,
+            walls,
+            maximum_duration,
+            gas_controls,
+            loads,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Couple the original moving gas and finite pistons under held body forcing.
+    ///
+    /// Native source half-kicks surround every nonlinear proposal's ALE solve.
+    /// Their actual old/new volumes supply all three body impulses and kinetic
+    /// work. Only the pressure-face exchange drives the piston masses; gas-body
+    /// impulse and work remain explicit in the gas report and are subtracted
+    /// from the combined mechanical acceptance residual. Every forced cell,
+    /// reconstructed trace and endpoint obeys the authored physical Mach cap
+    /// and mesh-relative wave bound. Zero force follows the original method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_and_forcing(
+        &mut self,
+        axis: usize,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInertialWallsStep, InertialWallsError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.states.len(), &mut cancelled)?;
+        workspace.admit(self.states.len())?;
+        if !active {
+            return self.step_with_inertial_walls(
+                axis,
+                walls,
+                maximum_duration,
+                gas_controls,
+                loads,
+                controls,
+                cancelled,
+            );
+        }
+        self.step_inertial_walls_impl(
+            axis,
+            walls,
+            maximum_duration,
+            gas_controls,
+            loads,
+            controls,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inertial_walls_impl(
+        &mut self,
+        axis: usize,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialInertialWallsStep, InertialWallsError> {
         poll(&mut cancelled)?;
@@ -140,6 +213,9 @@ impl Euler3d {
         let mut rate = 0.0_f64;
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
+            if let Some((_, control, _)) = &forcing {
+                control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             let local: f64 = (0..3)
                 .map(|a| {
                     let speed = if a == axis {
@@ -198,25 +274,46 @@ impl Euler3d {
                     motion.lower_velocity[axis] = speed[0];
                     motion.upper_velocity[axis] = speed[1];
                     let candidate_grid = motion.grid_after(&grid, dt)?;
-                    let stats = moving::attempt(
-                        &self.gas,
-                        &grid,
-                        &candidate_grid,
-                        self.boundaries,
-                        motion,
-                        &self.states,
-                        &mut self.work,
-                        dt,
-                        gas_controls.cfl,
-                        reconstruction,
-                        &mut cancelled,
-                    )?;
+                    let (stats, source) = match forcing.as_mut() {
+                        Some((force, control, workspace)) => forcing::attempt_moving(
+                            &self.gas,
+                            &grid,
+                            &candidate_grid,
+                            self.boundaries,
+                            motion,
+                            &self.states,
+                            &mut self.work,
+                            workspace,
+                            *force,
+                            *control,
+                            dt,
+                            gas_controls.cfl,
+                            reconstruction,
+                            &mut cancelled,
+                        )?,
+                        None => (
+                            moving::attempt(
+                                &self.gas,
+                                &grid,
+                                &candidate_grid,
+                                self.boundaries,
+                                motion,
+                                &self.states,
+                                &mut self.work,
+                                dt,
+                                gas_controls.cfl,
+                                reconstruction,
+                                &mut cancelled,
+                            )?,
+                            ForceChange3d::default(),
+                        ),
+                    };
                     let after = checked_totals(
                         &self.work.candidate,
                         candidate_grid.cell_volume(),
                         &mut cancelled,
                     )?;
-                    let gas = moving::reported_step(
+                    let mut gas = moving::reported_step(
                         before,
                         after,
                         &self.work.boundary_trial,
@@ -226,6 +323,9 @@ impl Euler3d {
                         reconstruction != gas_controls.reconstruction,
                         &mut cancelled,
                     )?;
+                    if forcing.is_some() {
+                        gas = moving::with_source(gas, source)?;
+                    }
                     let mut inward = [Totals::default(); 2];
                     for end in 0..2 {
                         let sum = sum_arrays(
@@ -256,8 +356,23 @@ impl Euler3d {
                     next_grid = candidate_grid;
                     Ok(WallGasExchange {
                         gas,
-                        momentum_change_n_s: after.momentum[axis] - before.momentum[axis],
-                        energy_change_j: after.energy - before.energy,
+                        momentum_change_n_s: after.momentum[axis]
+                            - before.momentum[axis]
+                            - source.impulse[axis],
+                        energy_change_j: if forcing.is_some() {
+                            sum_arrays(
+                                [
+                                    after.energy - before.energy,
+                                    (after.mass - before.mass) * self.gas.energy_reference(),
+                                    -source.work,
+                                ]
+                                .into_iter()
+                                .map(|x| [x]),
+                                &mut cancelled,
+                            )?[0]
+                        } else {
+                            after.energy - before.energy
+                        },
                         boundary_impulse_n_s: inward.map(|q| q.momentum[axis]),
                         boundary_work_j: inward.map(|q| q.energy),
                         displacement_m: displacement,
@@ -269,7 +384,35 @@ impl Euler3d {
                         InertialWallsError::Cancelled | InertialWallsError::Flow(Error::Allocation)
                     )
                 },
-            );
+            )
+            .and_then(|mechanics| {
+                if forcing.is_some() {
+                    // Check the independently evolved referenced equation as
+                    // well as the physical-energy gate in the shared solve.
+                    let residual = sum_arrays(
+                        [
+                            mechanics.gas.after.energy - before.energy,
+                            -mechanics.gas.source_change.work,
+                        ]
+                        .into_iter()
+                        .chain((0..2).map(|end| {
+                            mechanics.kinetic_energy_change_j[end]
+                                + mechanics.exterior_pressure_work_j[end]
+                                - mechanics.external_force_work_j[end]
+                        }))
+                        .map(|x| [x]),
+                        &mut cancelled,
+                    )?[0];
+                    if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j {
+                        return Err(PistonError::Balance {
+                            momentum_residual_n_s: mechanics.combined_momentum_residual_n_s.abs(),
+                            energy_residual_j: residual.abs(),
+                        }
+                        .into());
+                    }
+                }
+                Ok(mechanics)
+            });
             match result {
                 Ok(mut mechanics) => {
                     let next_walls = [

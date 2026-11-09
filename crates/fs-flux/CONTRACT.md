@@ -11887,3 +11887,32 @@ transactional input/work/cancellation refusal. The original consistent-mass
 LU and extreme-contrast diffusion oracles remain green. This is focused
 original-numerical-source validation, not full Cargo/runtime or experimental
 mixing qualification.
+
+
+### Body forcing in moving frozen molecular flow and finite pistons
+
+`spatial::molecular::MolecularEuler3d::step_moving_with_forcing` composes
+the original molecular and mechanical sources as
+`D/2–K/2–ALE–K/2–D/2`. Each phase uses its actual incoming state and
+old/new geometry. The final molecular endpoint obeys laboratory Mach and
+mesh-relative acoustic admission. A shortened central interval or a later
+refusal restarts the complete split. Direct molecular wall heat and traction
+work remain separate from the source-owned `ForceChange3d`.
+
+Both frozen Euler and molecular Euler provide
+`step_with_inertial_walls_and_forcing`. Their original simultaneous
+`solve_coupled` mechanics consumes actual pressure and molecular face
+impulses. Prescribed gas-body impulse and kinetic work remain explicit external
+terms and are removed from combined gas/piston mechanical acceptance. Physical
+and referenced energy are checked independently; fixed-side support impulse,
+transverse guide reactions, wall torques and thermal exchange retain their
+original accounts. Forces on piston bodies remain explicitly authored through
+their mechanical loads.
+
+Prepared source scratch is reused without full-field allocation during trials.
+Zero forcing delegates to the original unforced transaction. Accepted gas,
+geometry, clock, loads, reports, molecular binding and piston states publish
+only after the final cancellation checkpoint. Cellwise force coefficients are
+held in original cell order throughout motion and retries. Existing closed or
+periodic moving-domain and single-axis affine-deformation restrictions remain
+authoritative.
