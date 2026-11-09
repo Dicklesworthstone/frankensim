@@ -426,13 +426,13 @@ impl<L: ForcedLattice3<Q>, const Q: usize> EndpointPass<'_, '_, L, Q> {
 }
 
 #[derive(Clone, Copy)]
-struct SourceEndpoint3 {
-    law: DarcyForchheimer3,
-    velocity: [f64; 3],
-    drag: [f64; 3],
+pub(in crate::lattice3) struct SourceEndpoint3 {
+    pub(in crate::lattice3) law: DarcyForchheimer3,
+    pub(in crate::lattice3) velocity: [f64; 3],
+    pub(in crate::lattice3) drag: [f64; 3],
 }
 
-fn held_exchange<L: ForcedLattice3<Q>, const Q: usize>(
+pub(in crate::lattice3) fn held_exchange<L: ForcedLattice3<Q>, const Q: usize>(
     initial: SourceEndpoint3,
     end: SourceEndpoint3,
     cell: usize,
@@ -475,7 +475,7 @@ fn held_exchange<L: ForcedLattice3<Q>, const Q: usize>(
 // than its stored representation resolves. Do not then substitute a different
 // constitutive reaction for the force actually applied by collision. Accepted
 // drag is retained verbatim, and an unresolved constitutive state refuses.
-fn admit_drag<L: ForcedLattice3<Q>, const Q: usize>(
+pub(in crate::lattice3) fn admit_drag<L: ForcedLattice3<Q>, const Q: usize>(
     law: DarcyForchheimer3,
     velocity: [f64; 3],
     drag: [f64; 3],

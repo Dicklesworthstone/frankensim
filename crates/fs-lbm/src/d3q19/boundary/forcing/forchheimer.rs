@@ -53,7 +53,7 @@ impl DarcyForchheimer3 {
         core::array::from_fn(|a| linear[a] + coefficient * relative[a])
     }
 
-    pub(super) fn force(self, velocity: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn force(self, velocity: [f64; 3]) -> [f64; 3] {
         if self.quadratic == 0.0 {
             return self.linear.force(velocity);
         }

@@ -52,7 +52,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
             collisions,
             Some(&self.forces),
             None,
-            Some((acceleration_at_end, &mut self.pending_forces)),
+            Some((
+                super::super::EndpointSource3::Acceleration(acceleration_at_end),
+                super::super::EndpointWorkspace3 {
+                    forces: &mut self.pending_forces,
+                    drag: None,
+                },
+            )),
             origin,
             &mut poll,
         )?;
@@ -82,7 +88,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
             collisions,
             Some(&self.forces),
             None,
-            Some((acceleration_at_end, &mut self.pending_forces)),
+            Some((
+                super::super::EndpointSource3::Acceleration(acceleration_at_end),
+                super::super::EndpointWorkspace3 {
+                    forces: &mut self.pending_forces,
+                    drag: None,
+                },
+            )),
             origin,
         )?;
         self.publish_acceleration(step);

@@ -29,6 +29,7 @@ use fs_math::dd::Dd;
 use std::sync::Mutex;
 
 mod characteristic;
+mod endpoint;
 /// Spatial force epochs on the same native reservoir and population owner.
 pub mod forcing;
 pub use characteristic::CharacteristicOutlet3;
@@ -42,6 +43,7 @@ pub mod thermal;
 mod velocity;
 
 use characteristic::PreparedOutlet3;
+use endpoint::{EndpointSource3, EndpointWorkspace3};
 use pressure::PressureProfile3;
 use velocity::VelocityProfile3;
 
@@ -290,7 +292,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         forces_at_start: Option<&[[f64; 3]]>,
         forces_at_end: Option<&[[f64; 3]]>,
-        acceleration: Option<(&[[f64; 3]], &mut [[f64; 3]])>,
+        endpoint: Option<(EndpointSource3<'_>, EndpointWorkspace3<'_>)>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<(OpenBoundaryMomentumTransport3, usize), GridError3<L::Error>> {
@@ -298,8 +300,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         for forces in [forces_at_start, forces_at_end].into_iter().flatten() {
             super::sources::admit_forces(&self.grid, forces, collisions, poll)?;
         }
-        let (acceleration, mut resolved) =
-            self.admit_acceleration(acceleration, collisions, poll)?;
+        let (endpoint, mut resolved) = self.admit_endpoint(endpoint, collisions, poll)?;
         let grid = &mut self.grid;
         let data = StepData::<L, Q> {
             dims: grid.dims,
@@ -325,13 +326,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
             characteristic_outlets: &self.characteristic_outlets,
-            acceleration,
+            endpoint,
         };
         for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
             poll()?;
             let field = resolved
-                .as_deref_mut()
-                .map(|field| &mut field[tile * 64..tile * 64 + chunk.len()]);
+                .as_mut()
+                .map(|field| field.part(tile * 64..tile * 64 + chunk.len()));
             view.process(&grid.post, chunk, tile * 64, field)?;
         }
         let receipt = view.measure(&grid.post, &grid.next, origin, poll)?;
@@ -401,7 +402,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         forces_at_start: Option<&[[f64; 3]]>,
         forces_at_end: Option<&[[f64; 3]]>,
-        acceleration: Option<(&[[f64; 3]], &mut [[f64; 3]])>,
+        endpoint: Option<(EndpointSource3<'_>, EndpointWorkspace3<'_>)>,
         origin: [f64; 3],
     ) -> Result<(OpenBoundaryMomentumTransport3, usize), GridError3<L::Error>> {
         let mut poll = || {
@@ -415,8 +416,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         for forces in [forces_at_start, forces_at_end].into_iter().flatten() {
             super::sources::admit_forces(&self.grid, forces, collisions, &mut poll)?;
         }
-        let (acceleration, resolved) =
-            self.admit_acceleration(acceleration, collisions, &mut poll)?;
+        let (endpoint, resolved) = self.admit_endpoint(endpoint, collisions, &mut poll)?;
         let grid = &mut self.grid;
         let data = StepData::<L, Q> {
             dims: grid.dims,
@@ -439,15 +439,29 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
             characteristic_outlets: &self.characteristic_outlets,
-            acceleration,
+            endpoint,
         };
         {
             let chunks = match resolved {
-                Some(field) => grid
+                Some(EndpointWorkspace3 { forces, drag: Some(drag) }) => grid
                     .next
                     .chunks_mut(64)
-                    .zip(field.chunks_mut(64))
-                    .map(|(pop, forces)| Mutex::new((pop, Some(forces))))
+                    .zip(forces.chunks_mut(64))
+                    .zip(drag.chunks_mut(64))
+                    .map(|((pop, forces), drag)| {
+                        Mutex::new((pop, Some(EndpointWorkspace3 {
+                            forces,
+                            drag: Some(drag),
+                        })))
+                    })
+                    .collect(),
+                Some(EndpointWorkspace3 { forces, drag: None }) => grid
+                    .next
+                    .chunks_mut(64)
+                    .zip(forces.chunks_mut(64))
+                    .map(|(pop, forces)| {
+                        Mutex::new((pop, Some(EndpointWorkspace3 { forces, drag: None })))
+                    })
                     .collect(),
                 None => grid
                     .next
@@ -472,24 +486,6 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         poll()?;
         self.pending_wall_exchange = walls;
         Ok((receipt, step))
-    }
-
-    fn admit_acceleration<'a>(
-        &self,
-        field: Option<(&'a [[f64; 3]], &'a mut [[f64; 3]])>,
-        collisions: Option<&[L::Collision]>,
-        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<(Option<&'a [[f64; 3]]>, Option<&'a mut [[f64; 3]]>), GridError3<L::Error>> {
-        match field {
-            None => Ok((None, None)),
-            Some((acceleration, resolved)) => {
-                super::sources::admit_forces(&self.grid, acceleration, collisions, poll)?;
-                if resolved.len() != self.grid.f.len() {
-                    return Err(GridError3::Input("endpoint force workspace length"));
-                }
-                Ok((Some(acceleration), Some(resolved)))
-            }
-        }
     }
 
     fn admit_step(
@@ -680,7 +676,7 @@ struct OpenStep<'a, L: EquilibriumLattice3<Q>, const Q: usize> {
     pressure_profiles: &'a [Option<PressureProfile3>; 6],
     velocity_profiles: &'a [Option<VelocityProfile3>; 6],
     characteristic_outlets: &'a [Option<PreparedOutlet3>; 6],
-    acceleration: Option<&'a [[f64; 3]]>,
+    endpoint: Option<EndpointSource3<'a>>,
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
@@ -689,7 +685,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
         src: &[[f64; Q]],
         dst: &mut [[f64; Q]],
         base: usize,
-        mut resolved: Option<&mut [[f64; 3]]>,
+        mut resolved: Option<EndpointWorkspace3<'_>>,
     ) -> Result<(), GridError3<L::Error>> {
         self.data
             .process_stream_with_update::<false>(src, dst, base, |cell, output, _| {
@@ -700,7 +696,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
                         self.reconstruct(src, cell, donor, face, walls, open, output)?;
                     }
                 }
-                let (_, velocity, force) = self.endpoint_state(output, cell)?;
+                let (_, velocity, force, drag) = self.endpoint_state(output, cell)?;
                 let collision = self
                     .data
                     .collisions
@@ -711,34 +707,14 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
                     cell,
                     self.data.budget.maximum_mach,
                 )?;
-                if let Some(field) = resolved.as_deref_mut() {
-                    field[cell - base] = force;
+                if let Some(field) = resolved.as_mut() {
+                    field.forces[cell - base] = force;
+                    if let Some(stored_drag) = field.drag.as_deref_mut() {
+                        stored_drag[cell - base] = drag;
+                    }
                 }
                 Ok(())
             })
-    }
-
-    // Donor and final observations use their OWN actual density. Computing
-    // moments once also supplies the resolved endpoint field inside its worker.
-    fn endpoint_state(
-        &self,
-        populations: &[f64; Q],
-        cell: usize,
-    ) -> Result<(f64, [f64; 3], [f64; 3]), GridError3<L::Error>> {
-        if let Some(field) = self.acceleration {
-            let (rho, momentum) = raw_moments_cell::<L, Q>(populations, cell)?;
-            let force = field[cell].map(|a| rho * a);
-            let velocity = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
-            Ok((rho, velocity, force))
-        } else {
-            let force = self
-                .data
-                .forces
-                .map_or(self.data.force, |field| field[cell]);
-            let (rho, velocity) =
-                macro_cell::<L, Q>(populations, force, cell, self.data.budget.maximum_mach)?;
-            Ok((rho, velocity, force))
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -755,7 +731,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
         let mut source = [0.0; Q];
         self.data.pull_cell(src, &mut source, donor);
         self.reflect_walls(src, &mut source, donor)?;
-        let (rho_source, velocity_source, force) = self.endpoint_state(&source, donor)?;
+        let (rho_source, velocity_source, force, _) = self.endpoint_state(&source, donor)?;
         let donor_law = self
             .data
             .collisions
@@ -823,7 +799,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
             }
             reconstructed[q] += L::W[q] * contraction / (2.0 * L::CS2 * L::CS2);
         }
-        if let Some(field) = self.acceleration {
+        if let Some(EndpointSource3::Acceleration(field)) = self.endpoint {
             return self.finish_accelerated_reconstruction(
                 cell,
                 law,
@@ -835,10 +811,10 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
                 output,
             );
         }
-        let target_force = self
-            .data
-            .forces
-            .map_or(self.data.force, |field| field[cell]);
+        let target_force = match self.endpoint {
+            Some(EndpointSource3::Resistance(laws)) => laws[cell].force(velocity),
+            _ => self.data.forces.map_or(self.data.force, |field| field[cell]),
+        };
         initial::attach_force::<L, Q>(&mut reconstructed, law, velocity, target_force);
         for q in 0..Q {
             if walls == 0 || open & (1 << q) != 0 {
@@ -986,7 +962,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
 struct OpenStream<'a, 'b, L: EquilibriumLattice3<Q>, const Q: usize> {
     view: &'a OpenStep<'b, L, Q>,
     src: &'a [[f64; Q]],
-    chunks: Vec<Mutex<(&'a mut [[f64; Q]], Option<&'a mut [[f64; 3]]>)>>,
+    chunks: Vec<Mutex<(&'a mut [[f64; Q]], Option<EndpointWorkspace3<'a>>)>>,
 }
 impl<L: EquilibriumLattice3<Q>, const Q: usize> TileKernel for OpenStream<'_, '_, L, Q> {
     type Out = FirstError<L::Error>;
@@ -1004,7 +980,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> TileKernel for OpenStream<'_, '_
                     self.src,
                     populations,
                     tile as usize * 64,
-                    forces.as_deref_mut(),
+                    forces.as_mut().map(|field| field.part(0..field.forces.len())),
                 )
             }
             Err(_) => Err(GridError3::Poisoned),

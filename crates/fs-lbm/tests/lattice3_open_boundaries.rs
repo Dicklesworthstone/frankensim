@@ -18,6 +18,9 @@ mod velocity_profiles;
 #[path = "lattice3_open_boundaries/characteristic.rs"]
 mod characteristic;
 
+#[path = "lattice3_open_boundaries/resistance.rs"]
+mod resistance;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

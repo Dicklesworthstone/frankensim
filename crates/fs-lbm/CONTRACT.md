@@ -3345,3 +3345,56 @@ restores that unchanged fallback without advancing heat, finite walls, flow,
 forces, time or history. Thermal face kinds remain fixed; profile operations
 on non-reservoir faces refuse. A later refused or cancelled coupled step
 retains the previously authored profile and all accepted physical state.
+
+## Native porous through-flow and prescribed skeleton velocity
+
+`lattice3::open_boundaries::forcing::resistance::ResistanceOpenGrid3`
+couples the existing implicit `DarcyForchheimer3` law to the original native
+D3Q19/D3Q27 velocity/pressure reservoir operator. The held law is
+`F = b - D(u-v_s) - beta |u-v_s| (u-v_s)`. Fluid velocity, prescribed skeleton
+velocity and material axes share grid coordinates. Coefficients are lattice
+force-density/velocity and force-density/velocity², with any physical density
+factor already included; the owner does not multiply drag by rho again.
+
+Attachment changes the native half-source representation while preserving
+physical density, velocity, force-corrected stress, time and boundary controls.
+Collision uses the accepted force. Streamed donors and final populations use
+their own density, raw momentum and the original implicit constitutive solve.
+A complete reservoir trace computes its law-derived force at the prescribed
+physical velocity, attaches the original collision-specific source, and
+re-admits the represented endpoint. Spatial/time-updated profiles and the
+linear characteristic outlet continue to own their original target moments.
+
+Active linear or nonlinear resistance on a mixed wall/open cell refuses.
+Zero-drag seams retain the original force-density reconstruction. Interior
+porous cells and stationary voxel walls are supported; exterior motion follows
+the existing tangential, locally impermeable fixed-wall law. Rebinding controls
+cannot change topology or expose a mutable force-only step that loses drag
+history. Constitutive coefficients and skeleton motion remain held.
+
+The original `ResistanceMomentumExchange3` reports independent body impulse,
+skeleton reaction/work and nonnegative relative dissipation, plus actual
+reservoir transport, ALL stationary/moving/voxel wall links, and native periodic
+angular transport. Pure reservoir links are excluded from the wall probe;
+mixed links retain wall ownership. No term is inferred from a global residual.
+Drag is retained separately from total force so a larger independent body load
+does not erase its constitutive receipt. Original unresolved half-force and
+work-cancellation refusals remain authoritative.
+
+Native stream tiles resolve force and drag into reusable scratch; serial
+steps allocate no source storage and invoke no user law callback. A canonical
+measurement pass uses accepted/staged physical velocities and the original
+periodic pull, without another collision or nonlinear solve. Populations,
+force/drag history, time and the last complete receipt publish only after all
+endpoint, wall, work and cancellation checks pass. Existing source-density and
+actual-density-acceleration paths retain their original arithmetic.
+
+This is fixed-geometry, low-Mach isothermal porous flow with prescribed
+skeleton motion. It does not evolve porosity, remap moving solids, integrate
+skeleton inertia or deposit drag heat. The held-law work identity
+`fluid_drag_work + skeleton_work = -relative_dissipation` is not a total
+transported fluid kinetic-energy balance. The focused tests cover preserved
+attachment, a manufactured anisotropic/nonlinear physical endpoint and common
+velocity boost, pressure-driven porous-slab flow, zero-law population parity,
+complete wall/reservoir/periodic momentum, updated traces, seam refusal and
+transaction rollback.

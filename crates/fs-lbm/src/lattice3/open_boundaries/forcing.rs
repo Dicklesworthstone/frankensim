@@ -23,6 +23,8 @@ use crate::lattice3::sources::admit_forces;
 use fs_exec::{CancelGate, Cx};
 
 mod acceleration;
+/// Held implicit porous resistance through the same native open faces.
+pub mod resistance;
 
 /// An open grid whose accepted force field is inseparable from its populations.
 /// Force values are densities in lattice units, not accelerations. Solid grid
