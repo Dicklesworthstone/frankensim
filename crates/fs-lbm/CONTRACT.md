@@ -19,6 +19,57 @@ rigid-wall work, conversion, and refused high-Mach candidate replay. Motion is
 prescribed over the interval; this fixed-plane isothermal path adds no normal
 geometry motion, finite-inertia wall dynamics or fluid heat/energy equation.
 
+## Retained pressure programs in coupled native marches
+
+`UnsteadyConfig::pressure_program` now owns a validated inline
+`PressureProgram` for native transient momentum **and** its shared coupled
+thermal timeline. The default is exact factor-one identity. One to sixteen
+finite `(time_s, factor)` knots are retained without heap allocation; time is
+non-negative and strictly increasing. Factors may be positive, zero or
+negative. Samples interpolate linearly between knots and hold the first/last
+factor outside the tabulated interval. Each original step samples at its end
+time; knots do not insert substeps. The total march end time must remain
+finite.
+
+The sampled factor acts on the original differential reservoir profile:
+`p_face(t) = p_reference + factor(t) * (p_authored - p_reference)`.
+Each connected fluid component keeps its original pressure reference and all
+spatial face profiles. This drives the original momentum rows, pressure
+projection and signed thermal backflow flux without rebuilding the solver,
+walking the component graph or allocating during program evaluation. An
+unchanged factor keeps the existing boundary-validation fast path. BE/BDF2
+velocity history survives ramps and reversals; fan curves, body forces and
+other loads retain their independent original inputs. A flow-only callback
+from `simple_unsteady_with_pressure_schedule` or its SGS variant multiplies
+the retained program and is still sampled exactly once per endpoint.
+
+The shared application point precedes every thermal/material endpoint trial.
+It covers ordinary and SGS conjugate marches, the wall-heat march, native
+implicit Boussinesq feedback and the existing source-material explicit,
+implicit, source-enthalpy and material-solid coupled entries that receive
+`UnsteadyConfig`. Every nonlinear pass sees the same endpoint pressure load
+and the same previous/older momentum levels. Original source identity,
+thermodynamic pressure, composition, caloric law and heat storage ownership
+are unchanged. Their existing validity and convergence refusals still apply.
+Reference-density Boussinesq owners do not become compressible material flow.
+
+This is scalar modulation of one authored differential pressure profile,
+not independent per-port pressure histories or common-mode thermodynamic
+pressure evolution. It does not add pressure control to a distinct liquid
+owner that does not receive `UnsteadyConfig`, nor change physical-heating
+admission: the current native transient viscous-heat entry still requires a
+closed domain. Pressure forcing is not directly deposited as a heat source.
+
+The native regression `tests/native_pressure_program.rs` checks actual
+coupled SIMPLE/energy solves against independently assembled four-cell
+upwind heat equations through pressure-driven reversal on all three axes,
+including BE/BDF2 inertia, hot/cold reservoir exchange and closure. It also
+checks large pressure-offset invariance, exact factor-one parity, composition
+with the existing flow callback, retained source-density/viscosity feedback
+with explicit and implicit material clocks, and refusal without partial
+publication or input mutation. Module regressions cover knot admission,
+endpoint holds and finite interpolation of extreme signed factors.
+
 ## Actual-density acceleration through native open reservoirs
 
 `ForcedOpenBoundaryGrid3::try_new_with_body_acceleration_preserving_velocity`

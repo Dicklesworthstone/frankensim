@@ -46,9 +46,13 @@ use fs_exec::CancelGate;
 
 mod endpoint;
 mod native_buoyancy;
-pub use native_buoyancy::{march_conjugate_implicit_buoyancy, march_conjugate_with_sgs_implicit_buoyancy};
+mod pressure_program;
 pub(crate) use endpoint::MaterialEndpointCoupling;
 pub use endpoint::{MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport};
+pub use native_buoyancy::{
+    march_conjugate_implicit_buoyancy, march_conjugate_with_sgs_implicit_buoyancy,
+};
+pub use pressure_program::PressureProgram;
 
 #[cfg(feature = "enthalpy-coupling")]
 mod material;
@@ -153,6 +157,11 @@ pub struct UnsteadyConfig {
     pub average_from_step: usize,
     /// Cell whose velocity every step records.
     pub probe: Option<usize>,
+    /// Differential reservoir-pressure factor sampled at each step endpoint.
+    /// This retained program reaches ordinary, SGS, wall-heat and material
+    /// conjugate marches, including implicit endpoint feedback. A flow-only
+    /// pressure callback, when supplied, multiplies this factor.
+    pub pressure_program: PressureProgram,
 }
 
 impl UnsteadyConfig {
@@ -168,6 +177,7 @@ impl UnsteadyConfig {
             inner_tolerance: 1e-6,
             average_from_step: steps / 2 + 1,
             probe: None,
+            pressure_program: PressureProgram::IDENTITY,
         }
     }
 }
@@ -253,6 +263,10 @@ fn admit_unsteady(
             "steps and inner_iterations must be at least one",
         );
     }
+    finite_positive(
+        "unsteady.end_time_s",
+        unsteady.steps as f64 * unsteady.time_step_s,
+    )?;
     if unsteady.average_from_step == 0 || unsteady.average_from_step > unsteady.steps {
         return refuse(
             "unsteady.average_from_step",
@@ -485,8 +499,9 @@ pub fn simple_unsteady(
 
 /// March from rest with a time-dependent differential reservoir pressure.
 ///
-/// At each step's end time, the finite signed `pressure_schedule(t)` modulates
-/// every authored Pressure/Outlet value, including spatial profiles, as
+/// At each step's end time, the finite signed `pressure_schedule(t)` multiplies
+/// [`UnsteadyConfig::pressure_program`]. Their product modulates every authored
+/// Pressure/Outlet value, including spatial profiles, as
 /// `p_face(t) = p_reference + factor(t) * (p_face_authored - p_reference)`.
 /// Each disconnected fluid component retains its original reference, chosen
 /// from its first exposed reservoir. Thus the schedule changes pressure
@@ -616,9 +631,10 @@ fn simple_unsteady_inner(
         poll(gate)?;
         let time_s = step as f64 * unsteady.time_step_s;
         let inflow = inlet_schedule(time_s);
-        marcher
-            .solver
-            .scale_pressure(pressure_schedule(time_s), gate)?;
+        marcher.solver.scale_pressure(
+            unsteady.pressure_program.sample(time_s)? * pressure_schedule(time_s),
+            gate,
+        )?;
         marcher.step(step, inflow, gate)?;
         marcher.solver.advance_time();
     }
@@ -629,6 +645,11 @@ fn simple_unsteady_inner(
 /// inlets follow `inlet_schedule(t)` and sources `power_schedule(t)`;
 /// buoyancy (when declared) follows the previous step's temperature, and
 /// radiation (when declared) converges emission and irradiation at the new endpoint.
+/// [`UnsteadyConfig::pressure_program`] scales the original differential
+/// reservoir profile once per endpoint, before momentum and thermal feedback.
+/// The projected signed flux drives the original thermal backflow boundaries.
+/// Physical-heating applicability is unchanged: this does not admit open
+/// reservoirs into a transient heat owner that requires a closed box.
 ///
 /// # Errors
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
@@ -1247,6 +1268,11 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     for step in 1..=unsteady.steps {
         poll(gate)?;
         let time_s = step as f64 * unsteady.time_step_s;
+        // Hold the same authored reservoir load through every coupled trial.
+        // The original solver, pressure datum and time history remain intact.
+        marcher
+            .solver
+            .scale_pressure(unsteady.pressure_program.sample(time_s)?, gate)?;
         let (next, record) = if let Some(feedback) = endpoint.as_deref_mut() {
             let inflow = inlet_schedule(time_s);
             let scale = power_schedule(time_s);

@@ -55,6 +55,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// and EVERY endpoint, including the last. Inertia, divergence-free volume
     /// flux, heat-capacity advection and sensible storage retain reference rho/Cp.
     /// Source identity, pressure and composition remain the callback's context.
+    /// `unsteady.pressure_program` changes native differential reservoir heads
+    /// before each momentum interval; the same signed projected flux transports
+    /// heat, including reversal. It does not change source thermodynamic pressure.
     ///
     /// Material feedback is explicit and FIRST ORDER in time even with BDF2
     /// momentum. No endpoint fixed-point convergence or second-order coupled

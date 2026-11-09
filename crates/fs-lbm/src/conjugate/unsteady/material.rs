@@ -49,6 +49,7 @@ fn controls(dt: f64, config: &SimpleConfig) -> UnsteadyConfig {
         inner_tolerance: config.tolerance,
         average_from_step: 1,
         probe: None,
+        pressure_program: super::PressureProgram::IDENTITY,
     }
 }
 
