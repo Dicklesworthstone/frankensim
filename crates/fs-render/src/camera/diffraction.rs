@@ -46,32 +46,30 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
-    InterferometerTemporalCoherence,
-    CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer,
-    PolarizedCoherentInterferometerPixelExposure,
-    PolarizedCoherentInterferometerExposureSample,
-    CoherentInterferometerPixelExposure,
-    CoherentInterferometerExposureLimits, CoherentInterferometerExposureSample,
-    CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample,
-    CoherentInterferometerPixelPower,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
-    CoherentDiffractionInterferometer, CoherentInterferometerSample,
-    CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
-    CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
-    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilLayer,
-    CoherentJonesPupilLimits, CoherentJonesPupilResponse, CoherentJonesPupilWave,
-    CoherentPupilIllumination, CoherentPupilWave, JonesPupilCoherenceFactor,
-    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
-    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
-    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    CoherentDiffractionInterferometer, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionPixelExposure, CoherentDiffractionPixelLimits,
+    CoherentDiffractionPixelPower, CoherentDiffractionSample, CoherentDiffractionShutter,
+    CoherentDiffractionTone, CoherentInterferometerExposureLimits,
+    CoherentInterferometerExposureSample, CoherentInterferometerPixelExposure,
+    CoherentInterferometerPixelPower, CoherentInterferometerSample, CoherentJonesArm,
+    CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesInterferometerResponse,
+    CoherentJonesPupilIllumination, CoherentJonesPupilLayer, CoherentJonesPupilLimits,
+    CoherentJonesPupilResponse, CoherentJonesPupilWave, CoherentPupilIllumination,
+    CoherentPupilWave, InterferometerTemporalCoherence, JonesPupilCoherenceFactor,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_ARM_LAYERS, MAX_COHERENT_JONES_PUPIL_MODES,
+    MAX_COHERENT_PUPIL_TANGENT, PolarizedCoherentDiffractionExposureSample,
+    PolarizedCoherentDiffractionPixelExposure, PolarizedCoherentDiffractionPixelPower,
+    PolarizedCoherentDiffractionSample, PolarizedCoherentInterferometerExposureSample,
+    PolarizedCoherentInterferometerPixelExposure, PolarizedCoherentInterferometerSample,
     PolarizedDiffractionCoherency, PreparedCoherentDiffraction,
     PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
-    PreparedPolarizedCoherentDiffraction, PupilCoherenceFactor,
+    PreparedCoherentJonesInterferometer, PreparedPolarizedCoherentDiffraction,
+    PupilCoherenceFactor,
 };
 #[cfg(feature = "tracer")]
-pub use dispersive::{DispersiveThinLens, ThinLensElement};
+pub use dispersive::{DispersiveThinLens, GeometricSpectralProjection, ThinLensElement};
 #[cfg(feature = "tracer")]
 pub(crate) use layered::ProjectedPupilFootprint;
 pub use layered::{LayeredCameraRay, LayeredDiffraction};

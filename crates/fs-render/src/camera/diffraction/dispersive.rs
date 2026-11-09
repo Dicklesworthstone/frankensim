@@ -29,6 +29,9 @@ use crate::dielectric::DielectricIor;
 use fs_exec::Cx;
 use fs_math::{dd::Dd, det};
 
+mod projection;
+pub use projection::GeometricSpectralProjection;
+
 /// One ideal thin optical element with a native material phase-index law.
 ///
 /// Signed curvatures are reciprocals of surface radii, in inverse metres:

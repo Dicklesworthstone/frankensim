@@ -26,7 +26,6 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    InterferometerTemporalCoherence,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionInterferometer, CoherentDiffractionLimits, CoherentDiffractionPixel,
@@ -38,26 +37,28 @@ pub use diffraction::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesInterferometerResponse,
     CoherentJonesPupilIllumination, CoherentJonesPupilLayer, CoherentJonesPupilLimits,
     CoherentJonesPupilResponse, CoherentJonesPupilWave, CoherentPupilIllumination,
-    CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction, JonesPupilCoherenceFactor,
-    LayeredCameraRay, LayeredDiffraction, MAX_COHERENT_DIFFRACTION_TONES,
-    MAX_COHERENT_JONES_ARM_LAYERS, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
-    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
-    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
-    PolarizedCoherentInterferometerExposureSample, PolarizedCoherentInterferometerPixelExposure,
-    PolarizedCoherentInterferometerSample, PolarizedDiffractionCoherency,
-    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure,
-    PreparedCoherentJonesDiffractionExposure, PreparedCoherentJonesInterferometer,
-    PreparedPolarizedCoherentDiffraction, PupilCoherenceFactor, SpectralCameraRay,
+    CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction, InterferometerTemporalCoherence,
+    JonesPupilCoherenceFactor, LayeredCameraRay, LayeredDiffraction,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_ARM_LAYERS, MAX_COHERENT_JONES_PUPIL_MODES,
+    MAX_COHERENT_PUPIL_TANGENT, PolarizedCoherentDiffractionExposureSample,
+    PolarizedCoherentDiffractionPixelExposure, PolarizedCoherentDiffractionPixelPower,
+    PolarizedCoherentDiffractionSample, PolarizedCoherentInterferometerExposureSample,
+    PolarizedCoherentInterferometerPixelExposure, PolarizedCoherentInterferometerSample,
+    PolarizedDiffractionCoherency, PreparedCoherentDiffraction,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PreparedCoherentJonesInterferometer, PreparedPolarizedCoherentDiffraction,
+    PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
-pub use diffraction::{DispersiveThinLens, ThinLensElement};
+pub use diffraction::{DispersiveThinLens, GeometricSpectralProjection, ThinLensElement};
 #[cfg(feature = "tracer")]
 mod sequential;
 #[cfg(feature = "tracer")]
 pub use sequential::{
     LensCoating, LensCoatingLayer, LensGhostPath, LensSurface, ParaxialFocusSensitivity,
     SequentialCameraBeam, SequentialCameraRay, SequentialLens, SequentialLensFocus,
-    SequentialLensRay, SequentialProjection, SequentialProjectionError, SequentialProjectionOptions,
+    SequentialLensRay, SequentialProjection, SequentialProjectionError,
+    SequentialProjectionOptions,
 };
 
 const PI: f64 = core::f64::consts::PI;

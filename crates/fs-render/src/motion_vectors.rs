@@ -23,6 +23,11 @@ mod sequential;
 #[cfg(feature = "tracer")]
 pub use sequential::compute_sequential_motion_vectors;
 
+#[cfg(feature = "tracer")]
+mod dispersive;
+#[cfg(feature = "tracer")]
+pub use dispersive::compute_geometric_dispersive_motion_vectors;
+
 /// Bit-affecting semantics for feature selection, projection, and motion-vector
 /// direction. Increment when any result bit or categorical outcome can change.
 pub const MOTION_VECTOR_SEMANTICS_VERSION: u32 = 1;
@@ -933,6 +938,8 @@ fn subtract2(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tracer")]
+    mod dispersive;
     #[cfg(feature = "tracer")]
     mod sequential;
 

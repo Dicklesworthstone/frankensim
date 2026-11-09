@@ -5068,6 +5068,31 @@ not require their approximate layer-occlusion composition.
 
 ### Native material dispersion in thin camera lenses
 
+`PhysicalCamera::project_geometric_spectral_point` analytically inverts one
+original geometric material-dispersive ray at a supplied wavelength and pupil
+sample. Fixed-size double-double reciprocal-basis contractions preserve the
+authored world frame. The zero-power-difference limit uses the original finite
+world-space focus construction and actual rounded pupil origin. Every result
+is checked against one newly generated native ray under an explicit positive
+metre residual tolerance; no iterative solve or per-query allocation is added.
+
+The inverse retains original material/exterior source bands, optical-opening
+and full-pupil paraxial gates. It refuses behind-camera targets, unsupported
+wave/sequential modes and unresolved residuals. Off-screen coordinates remain
+valid. This is a conditional ideal-phase-lens image, not a pupil average,
+visibility certificate or finite-thickness optical model.
+
+`compute_geometric_dispersive_motion_vectors` uses that inverse on the original
+stable material-point correspondence, fixing the actual wavelength and pupil
+draw across frames. It shares original identity/time admission, normals,
+camera cuts, target-minus-current raster signs and behind-camera categories.
+Reusing the current frame as an unused endpoint reuses the accepted projection.
+Three native fixture groups cover rotated frames, circular/annular/polygonal
+pupils, reference and dispersed wavelengths, source support, cancellation,
+correspondence and motion signs. The changed Rust was parsed and independently
+source/API reviewed; these integration fixtures were not executed here.
+
+
 With `tracer`, `ThinLensElement` and `DispersiveThinLens` explicitly enable
 longitudinal chromatic aberration in explicitly selected geometric,
 finite-defocus and layered camera paths. A prescription contains one to eight coincident ideal thin
