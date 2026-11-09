@@ -14631,3 +14631,50 @@ variational/Liouville checks, signed sidebands, refusal and cancellation/reuse.
 The branch needs an actual adaptive harmonic ladder up to order 32 at the
 stated tolerances. These checks establish bounded numerical behavior, not
 infinite tails, stability, constitutive validity or measured-instrument fidelity.
+
+
+## Combined adhesive failure, finite caloric release and retained thermal history
+
+`friction_heat::adhesive::snap::combined_loading` regenerates ordered proportional
+shear/twist segments and explicit separating-fold release through the original
+`JkrCombinedLoading`. Reaching the first boundary and detaching are distinct
+operations. Only newly released total contact potential enters the caller's
+explicit two-surface/outside partition. Signed prescribed work and the four
+reversible stores remain mechanical; previously accumulated release imported
+with source history is never heated retroactively. A nonzero outside share
+requires a named physical destination.
+
+Original ordered material cards, exact registered caloric objects and receiver
+cell, segment, body, material, mass and geometry remain pinned. Mechanical
+history, revision, cumulative release ledger and both finite cells publish
+together after bounded source and caller cancellation checks. A failed second
+receiver, late cancellation, stale history or inadmissible separation publishes
+neither owner. Cost is linear in the bounded segment count plus original source
+solves and one thermal candidate clone; receiver checks are constant-size.
+
+The reports retain each original accepted/clipped segment and close
+`Delta U_contact + Delta H_A + Delta H_B + E_outside - W_prescribed`.
+Compensated signed and absolute accounts keep constitutive, telescoping,
+partition, ledger-accumulation and each receiver's relative caloric defects
+separate. Explicit transfer and total-energy budgets apply independently of the
+original source and individual-cell tolerances. No subtraction of large absolute
+thermal reference energies is used to recover a small heat increment.
+
+`propose_temperature_continuation` adopts the sealed original loading successor
+with unchanged receiver bindings and accumulated heat ledger. Held coordinates,
+source step count and prior release remain authoritative, including detached
+history after all attached equilibria disappear. Independently transported
+thermal time may advance but cannot go backwards. The new revision invalidates
+the old stamp. This prescribed source update does not deposit its signed
+parameter work or equate source temperatures with finite-cell temperatures.
+Adopt the source continuation and its explicit external-work account together.
+
+This same-time, frozen-source impulse composition supplies no loading clock,
+conducting link, body recoil, automatic fold detachment, rebonding, partial slip,
+or implicit thermal feedback. Eight focused integration groups cover reversible
+zero-heat loading, independently reconstructed shared-fold release and partition,
+complete balance, once-only transfer, receiver and boundary refusals, atomic
+caloric/cancellation failure, and temperature continuation of loaded and released
+histories. Formatting/parser and whitespace checks passed. These groups were not
+compiled or executed: required constellation siblings and DSR/RCH runners were
+absent in the working environment.

@@ -27,6 +27,8 @@ pub mod native;
 
 /// Explicit temperature-driver work for loaded rolling and torsion histories.
 pub mod angular_temperature;
+/// Original combined shear/twist loading and fold release into finite cells.
+pub mod combined_loading;
 mod normal_motion;
 mod power;
 /// Retained rolling cycles with separate normal-snap and spring-release heating.
@@ -107,6 +109,68 @@ struct Receiver {
     material: MaterialId,
     mass_kg: f64,
     geometry: CellGeometry,
+}
+
+impl Receiver {
+    fn capture(
+        source: &SourceJkrSphereContact,
+        thermal: &DepositionSimulation<'_>,
+        cells: [CellId; 2],
+        caloric: [&EquilibriumEnthalpyPhaseCurve; 2],
+    ) -> Result<[Self; 2], JkrSnapHeatError> {
+        let elastic = source.normal_state().elastic();
+        let card = [
+            elastic.surface_a_state().resolved().card_identity(),
+            elastic.surface_b_state().resolved().card_identity(),
+        ];
+        let receiver = |side: usize| -> Result<Self, JkrSnapHeatError> {
+            let cell = thermal
+                .cells()
+                .get(&cells[side])
+                .ok_or(JkrSnapHeatError::Invalid("inactive original heat receiver"))?;
+            if caloric[side].material_card_identity() != card[side]
+                || !thermal.uses_material_law(cell.material_id, caloric[side])
+            {
+                return Err(JkrSnapHeatError::Invalid(
+                    "normal and caloric owners need the same ordered original material cards",
+                ));
+            }
+            Ok(Self {
+                cell: cell.id,
+                segment: cell.segment_id,
+                body: cell.body_id,
+                material: cell.material_id,
+                mass_kg: cell.mass_kg,
+                geometry: cell.geometry,
+            })
+        };
+        Ok([receiver(0)?, receiver(1)?])
+    }
+
+    fn admit(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        caloric: &EquilibriumEnthalpyPhaseCurve,
+    ) -> Result<(), JkrSnapHeatError> {
+        let cell = thermal
+            .cells()
+            .get(&self.cell)
+            .ok_or(JkrSnapHeatError::Invalid(
+                "original heat receiver is no longer active",
+            ))?;
+        if cell.segment_id != self.segment
+            || cell.body_id != self.body
+            || cell.material_id != self.material
+            || cell.mass_kg != self.mass_kg
+            || cell.geometry != self.geometry
+            || !thermal.uses_material_law(cell.material_id, caloric)
+        {
+            return Err(JkrSnapHeatError::Invalid(
+                "heat receiver changed its original material, body, mass or geometry",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Accepted original branch and its explicit surface/outside work destinations.
@@ -205,33 +269,7 @@ impl<'s> JkrSnapHeat<'s> {
         if regenerated != initial {
             return Err(JkrSnapHeatError::HistoryMismatch);
         }
-        let elastic = source.normal_state().elastic();
-        let card = [
-            elastic.surface_a_state().resolved().card_identity(),
-            elastic.surface_b_state().resolved().card_identity(),
-        ];
-        let receiver = |side: usize| -> Result<Receiver, JkrSnapHeatError> {
-            let cell = thermal
-                .cells()
-                .get(&cells[side])
-                .ok_or(JkrSnapHeatError::Invalid("inactive original heat receiver"))?;
-            if caloric[side].material_card_identity() != card[side]
-                || !thermal.uses_material_law(cell.material_id, caloric[side])
-            {
-                return Err(JkrSnapHeatError::Invalid(
-                    "normal and caloric owners need the same ordered original material cards",
-                ));
-            }
-            Ok(Receiver {
-                cell: cell.id,
-                segment: cell.segment_id,
-                body: cell.body_id,
-                material: cell.material_id,
-                mass_kg: cell.mass_kg,
-                geometry: cell.geometry,
-            })
-        };
-        let receivers = [receiver(0)?, receiver(1)?];
+        let receivers = Receiver::capture(source, thermal, cells, caloric)?;
         Ok(Self {
             source,
             caloric,
@@ -438,23 +476,7 @@ impl<'s> JkrSnapHeat<'s> {
 
     fn admit_receivers(&self, thermal: &DepositionSimulation<'_>) -> Result<(), JkrSnapHeatError> {
         for (side, receiver) in self.receivers.iter().enumerate() {
-            let cell = thermal
-                .cells()
-                .get(&receiver.cell)
-                .ok_or(JkrSnapHeatError::Invalid(
-                    "original heat receiver is no longer active",
-                ))?;
-            if cell.segment_id != receiver.segment
-                || cell.body_id != receiver.body
-                || cell.material_id != receiver.material
-                || cell.mass_kg != receiver.mass_kg
-                || cell.geometry != receiver.geometry
-                || !thermal.uses_material_law(cell.material_id, self.caloric[side])
-            {
-                return Err(JkrSnapHeatError::Invalid(
-                    "heat receiver changed its original material, body, mass or geometry",
-                ));
-            }
+            receiver.admit(thermal, self.caloric[side])?;
         }
         Ok(())
     }
