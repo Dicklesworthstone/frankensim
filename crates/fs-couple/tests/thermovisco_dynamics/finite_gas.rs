@@ -189,6 +189,148 @@ fn g1_finite_source_gas_matches_two_capacity_solution_and_opposite_heat() {
 }
 
 #[test]
+fn g1_simultaneous_body_exchange_keeps_large_gas_pulses_inside_source_domain() {
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            geometry(0.0), 300.0, 0.0, 0.0).unwrap();
+        let reservoir = gas(300.0, 1e-6);
+        let saved = reservoir.clone();
+        let body = boundary(&source, 100.0);
+        let input = UniformEnthalpyStepInput {
+            curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+            mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+            surface_area_m2: old.geometry().thermal_surface_m2,
+            internal_heat_j: 0.0, duration_s: 0.01,
+        };
+        let controls = GasEnergySolve {
+            minimum_temperature_k: 295.0, maximum_temperature_k: 305.0,
+            ..gas_solve()
+        };
+        let cs = input.mass_kg * 2.0;
+        let cv = 2.5 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028;
+        let cg = reservoir.mass_kg() * cv;
+        let a = input.duration_s * body.convection_w_per_m2_k * input.surface_area_m2;
+        for gas_heat_j in [-0.006, 0.006] {
+            let mut isolated = reservoir.clone();
+            assert!(isolated.add_heat(gas_heat_j, controls, || false).is_err());
+            assert_eq!(isolated, reservoir);
+            let environment = FiniteGasThermalEnvironment {
+                gas: &reservoir, body: &body, gas_heat_j,
+                gas_solve: controls, exchange: exchange(1.0),
+                maximum_gas_temperature_increment_k: 4.0,
+            };
+            let result = environment.advance(cx, input).unwrap();
+            let expected_q = -a * gas_heat_j / cg
+                / (1.0 + a * (1.0 / cs + 1.0 / cg));
+            close(result.report.solid_to_gas_heat_j, expected_q, 1e-11);
+            close(result.state.temperature_k(), 300.0 - expected_q / cs, 1e-8);
+            close(result.report.next_gas.state().state().temperature,
+                300.0 + (gas_heat_j + expected_q) / cg, 1e-8);
+            assert!(result.report.combined_energy_residual_j.abs()
+                <= environment.exchange.energy_tolerance_j);
+            assert!(result.report.trials <= environment.exchange.maximum_iterations + 2);
+            assert_eq!(result.external_heat_j, -result.report.solid_to_gas_heat_j);
+            assert_eq!(reservoir, saved);
+        }
+    });
+}
+
+#[test]
+fn g3_wide_authored_exchange_brackets_do_not_probe_outside_gas_calorics() {
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let reservoir = gas(300.0, 1e-6);
+        let body = boundary(&source, 100.0);
+        for body_k in [290.0, 310.0] {
+            let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+                geometry(0.0), body_k, 0.0, 0.0).unwrap();
+            let input = UniformEnthalpyStepInput {
+                curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+                mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+                surface_area_m2: old.geometry().thermal_surface_m2,
+                internal_heat_j: 0.0, duration_s: 0.01,
+            };
+            let environment = FiniteGasThermalEnvironment {
+                gas: &reservoir, body: &body, gas_heat_j: 0.0,
+                gas_solve: GasEnergySolve {
+                    minimum_temperature_k: 295.0, maximum_temperature_k: 305.0,
+                    ..gas_solve()
+                },
+                exchange: exchange(1000.0),
+                maximum_gas_temperature_increment_k: 5.0,
+            };
+            let broad = environment.advance(cx, input).unwrap();
+            let narrow = FiniteGasThermalEnvironment {
+                exchange: exchange(0.0041), ..environment.clone()
+            }.advance(cx, input).unwrap();
+            let cs = input.mass_kg * 2.0;
+            let cv = 2.5 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028;
+            let cg = reservoir.mass_kg() * cv;
+            let a = input.duration_s * body.convection_w_per_m2_k * input.surface_area_m2;
+            let expected_q = a * (body_k - 300.0) / (1.0 + a * (1.0 / cs + 1.0 / cg));
+            close(broad.report.solid_to_gas_heat_j, expected_q, 1e-11);
+            close(broad.report.solid_to_gas_heat_j, narrow.report.solid_to_gas_heat_j, 1e-11);
+            close(broad.state.temperature_k(), narrow.state.temperature_k(), 1e-8);
+            close(broad.report.next_gas.state().state().temperature,
+                narrow.report.next_gas.state().state().temperature, 1e-8);
+            assert!(broad.report.trials <= environment.exchange.maximum_iterations + 2);
+            assert!(FiniteGasThermalEnvironment {
+                exchange: exchange(0.001), ..environment
+            }.advance(cx, input).is_err());
+        }
+    });
+}
+
+#[test]
+fn g1_idle_finite_gas_does_not_require_unused_caloric_endpoints() {
+    use fs_couple::finite_gas_thermal::ConvectionCoefficient;
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            geometry(0.0), 300.0, 0.0, 0.0).unwrap();
+        let reservoir = gas(300.0, 1e-6);
+        let body = boundary(&source, 100.0);
+        let input = UniformEnthalpyStepInput {
+            curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+            mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+            surface_area_m2: old.geometry().thermal_surface_m2,
+            internal_heat_j: 0.0, duration_s: 0.01,
+        };
+        // The source stops at 900 K; neither this unused endpoint nor a bracket
+        // missing the accepted 300 K reference invalidates native exact idle.
+        for [minimum_temperature_k, maximum_temperature_k] in [[200.0, 1000.0], [301.0, 305.0]] {
+            let controls = GasEnergySolve {
+                minimum_temperature_k, maximum_temperature_k, ..gas_solve()
+            };
+            let mut isolated = reservoir.clone();
+            isolated.add_heat(0.0, controls, || false).unwrap();
+            assert_eq!(isolated, reservoir);
+            let environment = FiniteGasThermalEnvironment {
+                gas: &reservoir, body: &body, gas_heat_j: 0.0,
+                gas_solve: controls, exchange: exchange(1.0),
+                maximum_gas_temperature_increment_k: 1000.0,
+            };
+            let mut calls = 0;
+            let result = environment.advance_with_convection(cx, input, |_| {
+                calls += 1;
+                Ok::<_, core::convert::Infallible>(ConvectionCoefficient {
+                    coefficient_w_per_m2_k: body.convection_w_per_m2_k,
+                    source: (),
+                })
+            }).unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(result.report.trials, 1);
+            assert_eq!(result.state, input.initial);
+            assert_eq!(result.report.next_gas, reservoir);
+            assert_eq!(result.report.solid_to_gas_heat_j, 0.0);
+            assert_eq!(result.report.combined_energy_residual_j, 0.0);
+            assert_eq!(result.report.source_residual_j, 0.0);
+        }
+    });
+}
+
+#[test]
 fn g1_wall_convection_retains_the_original_constant_coefficient_solution() {
     use fs_couple::finite_gas_thermal::{ConvectionCoefficient, WallConvectionSolve};
     scope(|cx, _| {

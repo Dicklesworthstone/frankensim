@@ -154,6 +154,73 @@ fn latent_enthalpy_supplies_entropy_once_without_a_temperature_jump() {
 }
 
 #[test]
+fn latent_storage_offsets_gas_pulses_outside_the_isolated_caloric_domain() {
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+            source.caloric.curve().material_card_identity(),
+            [
+                (-40.0, 280.0, 0.0),
+                (0.0, 300.0, 0.0),
+                (100.0, 300.0, 1.0),
+                (180.0, 340.0, 1.0),
+            ]
+            .map(|(h, t, liquid)| EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: h,
+                temperature_k: t,
+                liquid_mass_fraction: liquid,
+                bulk_density_kg_m3: 1000.0,
+            })
+            .to_vec(),
+        ).unwrap();
+        let input = UniformEnthalpyStepInput {
+            curve: &curve,
+            initial: curve.state_at_specific_enthalpy(50.0).unwrap(),
+            mass_kg: 0.001,
+            volume_m3: 1e-6,
+            surface_area_m2: 0.0013,
+            internal_heat_j: 0.0,
+            duration_s: 0.01,
+        };
+        let reservoir = gas(300.0, 1e-6);
+        let saved = reservoir.clone();
+        let body = boundary(&source, 100.0);
+        let controls = GasEnergySolve {
+            minimum_temperature_k: 295.0, maximum_temperature_k: 305.0,
+            ..gas_solve()
+        };
+        let cv = 2.5 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028;
+        let cg = reservoir.mass_kg() * cv;
+        let a = input.duration_s * body.convection_w_per_m2_k * input.surface_area_m2;
+        for gas_heat_j in [-0.006, 0.006] {
+            let mut isolated = reservoir.clone();
+            assert!(isolated.add_heat(gas_heat_j, controls, || false).is_err());
+            let environment = FiniteGasThermalEnvironment {
+                gas: &reservoir, body: &body, gas_heat_j,
+                gas_solve: controls, exchange: exchange(1.0),
+                maximum_gas_temperature_increment_k: 5.0,
+            };
+            let step = environment.advance(cx, input).unwrap();
+            // On the latent plateau the original curve fixes T_body=300 K;
+            // only the liquid fraction changes as it receives the same -Q.
+            let expected_q = -a * gas_heat_j / (cg + a);
+            close(step.report.solid_to_gas_heat_j, expected_q, 1e-11);
+            assert_eq!(step.state.temperature_k(), 300.0);
+            close(step.report.next_gas.state().state().temperature,
+                300.0 + (gas_heat_j + expected_q) / cg, 1e-8);
+            close(step.state.liquid_mass_fraction(),
+                (50.0 - expected_q / input.mass_kg) / 100.0, 1e-9);
+            close(step.report.entropy.storage_change_j_k[0], -expected_q / 300.0, 1e-14);
+            assert!(step.report.combined_energy_residual_j.abs()
+                <= environment.exchange.energy_tolerance_j);
+            assert!(step.report.trials <= environment.exchange.maximum_iterations + 2);
+            balanced(step.report.entropy);
+            assert_eq!(reservoir, saved);
+        }
+    });
+}
+
+#[test]
 fn radiation_uses_actual_enclosure_and_prescribed_heat_remains_unclassified() {
     scope(|cx, _| {
         let source = sources(2.0, 1000.0, false, false);

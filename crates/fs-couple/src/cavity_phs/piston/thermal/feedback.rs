@@ -46,11 +46,27 @@ pub(crate) fn solve<T, E, C: FnMut() -> bool>(
 /// A degenerate zero bracket can admit an idle state but cannot make progress.
 pub(crate) fn solve_scalar<T, E, C: FnMut() -> bool>(
     bracket: [f64; 2], tolerance: f64, maximum_iterations: usize,
+    evaluate: impl FnMut(f64, usize, &mut C) -> Result<(T, f64), E>,
+    cancelled: &mut C,
+) -> Result<T, ScalarError<E>> {
+    if bracket[0] > 0.0 || bracket[1] < 0.0 {
+        return Err(ScalarError::Invalid("scalar bracket must contain zero"));
+    }
+    solve_scalar_interval(bracket, tolerance, maximum_iterations, evaluate, cancelled)
+}
+
+/// The same bounded solve after a physical owner intersects the authored
+/// bracket with its supported storage domain. Zero need not remain admissible:
+/// a simultaneous transfer can offset an otherwise unsupported external source.
+/// Start at the supported coordinate nearest zero and retain the same at-most
+/// `maximum_iterations + 2` complete proposals and actual-residual acceptance.
+pub(crate) fn solve_scalar_interval<T, E, C: FnMut() -> bool>(
+    bracket: [f64; 2], tolerance: f64, maximum_iterations: usize,
     mut evaluate: impl FnMut(f64, usize, &mut C) -> Result<(T, f64), E>,
     cancelled: &mut C,
 ) -> Result<T, ScalarError<E>> {
     let [mut lo, mut hi] = bracket;
-    if !lo.is_finite() || !hi.is_finite() || lo > hi || lo > 0.0 || hi < 0.0
+    if !lo.is_finite() || !hi.is_finite() || lo > hi
         || !positive(tolerance) || !(1..=128).contains(&maximum_iterations)
     { return Err(ScalarError::Invalid("invalid scalar bracket or work limits")); }
     let mut sample = |coordinate, trials| {
@@ -63,14 +79,20 @@ pub(crate) fn solve_scalar<T, E, C: FnMut() -> bool>(
         if cancelled() { return Err(ScalarError::Cancelled); }
         Ok((candidate, residual))
     };
-    let (first, f0) = sample(0.0, 1)?;
+    let initial = 0.0_f64.clamp(lo, hi);
+    let (first, f0) = sample(initial, 1)?;
     if f0.abs() <= tolerance { return Ok(first); }
+    if lo == hi {
+        return Err(ScalarError::OutsideBracket { lower: f0, upper: f0 });
+    }
     // Select the side indicated by the actual zero-source residual. This is
     // not a uniqueness/monotonicity claim for an arbitrary constitutive law.
-    let edge = if f0 < 0.0 { lo = 0.0; hi } else { hi = 0.0; lo };
+    // A domain excluding zero instead needs both original supported endpoints.
+    let edge = if lo > 0.0 { hi } else if hi < 0.0 { lo }
+        else if f0 < 0.0 { lo = initial; hi } else { hi = initial; lo };
     let (end, fe) = sample(edge, 2)?;
     if fe.abs() <= tolerance { return Ok(end); }
-    let (mut fl, mut fu) = if f0 < 0.0 { (f0, fe) } else { (fe, f0) };
+    let (mut fl, mut fu) = if edge == hi { (f0, fe) } else { (fe, f0) };
     if fl > 0.0 || fu < 0.0 || lo == hi {
         return Err(ScalarError::OutsideBracket { lower: fl, upper: fu });
     }

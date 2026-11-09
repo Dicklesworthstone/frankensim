@@ -164,6 +164,12 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
     /// explicit source residual. Measured body and combined energy residuals
     /// must separately meet `exchange.energy_tolerance_j` after convergence.
     /// Numerical mismatch is never relabeled as heat or corrected by rescaling.
+    /// The authored exchange bracket is intersected with the original gas
+    /// caloric domain and its temperature-increment limit before nonzero heat.
+    /// An idle proposal preserves the gas owner's exact zero-heat path without
+    /// requiring caloric data at unused temperature-bracket endpoints.
+    /// Prescribed gas heat and reciprocal transfer are solved together: the
+    /// isolated gas-heating stage need not be admissible when their sum is.
     ///
     /// Radiation is exchanged with its independently prescribed enclosure,
     /// never deposited into this gas. Spatial gas gradients, pressure work,
@@ -237,61 +243,88 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
                 "finite prescribed gas heat and positive gas temperature-increment limit required",
             ).into());
         }
-        let solved = feedback::solve_scalar(
-            self.exchange.heat_bracket_j,
-            self.exchange.source_tolerance_j,
-            self.exchange.maximum_iterations,
-            |q, trials, cancelled| {
-                let gas_heat = self.gas_heat_j + q;
-                if !gas_heat.is_finite()
-                    || (q != 0.0 && gas_heat == self.gas_heat_j)
-                    || (self.gas_heat_j != 0.0 && gas_heat == q)
-                {
+        let mut evaluate = |q: f64, trials: usize|
+            -> Result<(Candidate<S, G>, f64), ConvectionError<E>> {
+            let gas_heat = self.gas_heat_j + q;
+            if !gas_heat.is_finite()
+                || (q != 0.0 && gas_heat == self.gas_heat_j)
+                || (self.gas_heat_j != 0.0 && gas_heat == q)
+            {
+                return Err(Error::Invalid(
+                    "gas source or exchange heat overflows or disappears when combined",
+                ).into());
+            }
+            let mut next_gas = G::clone(self.gas);
+            let gas = next_gas
+                .add_heat(gas_heat, self.gas_solve, || cx.checkpoint().is_err())
+                .map_err(gas_error)?;
+            let mut environment = self.body.clone();
+            environment.temperature_k = next_gas.temperature_k();
+            let convection = resolve(next_gas.state(), q).map_err(ConvectionError::Convection)?;
+            if !convection.coefficient_w_per_m2_k.is_finite()
+                || convection.coefficient_w_per_m2_k < 0.0
+            {
+                return Err(Error::Invalid("convection coefficient must be finite and nonnegative").into());
+            }
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            environment.convection_w_per_m2_k = convection.coefficient_w_per_m2_k;
+            let body = environment.advance(cx, input).map_err(Error::Interface)?;
+            let endpoint = body.report.samples().last().ok_or(Error::Invalid(
+                "thermal owner returned no accepted endpoint",
+            ))?;
+            let convective_heat = input.duration_s * endpoint.convection_into_body_w;
+            let residual = q + convective_heat;
+            if !convective_heat.is_finite()
+                || !residual.is_finite()
+                || (endpoint.convection_into_body_w != 0.0 && convective_heat == 0.0)
+            {
+                return Err(Error::Invalid("convective heat is unrepresentable").into());
+            }
+            Ok((
+                Candidate {
+                    next_gas,
+                    gas,
+                    body,
+                    convection,
+                    heat_j: q,
+                    source_residual_j: residual,
+                    trials,
+                },
+                residual,
+            ))
+        };
+        // The native gas owner admits exact idle without querying unneeded
+        // caloric endpoints. Preserve that path, and cache its complete body
+        // proposal if feedback is needed so the trial ceiling stays unchanged.
+        let zero = if self.gas_heat_j == 0.0 {
+            let first = evaluate(0.0, 1)?;
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            Some(first)
+        } else { None };
+        let solved = match zero {
+            Some((candidate, residual))
+                if residual.abs() <= self.exchange.source_tolerance_j => candidate,
+            mut zero => {
+                let heat_bracket_j = self.supported_heat_bracket()?;
+                if zero.is_some() && (heat_bracket_j[0] > 0.0 || heat_bracket_j[1] < 0.0) {
                     return Err(Error::Invalid(
-                        "gas source or exchange heat overflows or disappears when combined",
+                        "gas caloric storage domain excludes zero heat",
                     ).into());
                 }
-                let mut next_gas = G::clone(self.gas);
-                let gas = next_gas
-                    .add_heat(gas_heat, self.gas_solve, &mut *cancelled)
-                    .map_err(gas_error)?;
-                let mut environment = self.body.clone();
-                environment.temperature_k = next_gas.temperature_k();
-                let convection = resolve(next_gas.state(), q).map_err(ConvectionError::Convection)?;
-                if !convection.coefficient_w_per_m2_k.is_finite()
-                    || convection.coefficient_w_per_m2_k < 0.0
-                {
-                    return Err(Error::Invalid("convection coefficient must be finite and nonnegative").into());
-                }
                 cx.checkpoint().map_err(|_| Error::Cancelled)?;
-                environment.convection_w_per_m2_k = convection.coefficient_w_per_m2_k;
-                let body = environment.advance(cx, input).map_err(Error::Interface)?;
-                let endpoint = body.report.samples().last().ok_or(Error::Invalid(
-                    "thermal owner returned no accepted endpoint",
-                ))?;
-                let convective_heat = input.duration_s * endpoint.convection_into_body_w;
-                let residual = q + convective_heat;
-                if !convective_heat.is_finite()
-                    || !residual.is_finite()
-                    || (endpoint.convection_into_body_w != 0.0 && convective_heat == 0.0)
-                {
-                    return Err(Error::Invalid("convective heat is unrepresentable").into());
-                }
-                Ok((
-                    Candidate {
-                        next_gas,
-                        gas,
-                        body,
-                        convection,
-                        heat_j: q,
-                        source_residual_j: residual,
-                        trials,
+                feedback::solve_scalar_interval(
+                    heat_bracket_j,
+                    self.exchange.source_tolerance_j,
+                    self.exchange.maximum_iterations,
+                    |q, trials, _| {
+                        if let Some(first) = zero.take() {
+                            Ok(first)
+                        } else { evaluate(q, trials) }
                     },
-                    residual,
-                ))
-            },
-            &mut || cx.checkpoint().is_err(),
-        ).map_err(feedback_error)?;
+                    &mut || cx.checkpoint().is_err(),
+                ).map_err(feedback_error)?
+            }
+        };
         let Candidate {
             next_gas,
             gas,
@@ -372,5 +405,48 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
                 trials,
             },
         })
+    }
+
+    /// Bound the actual source-plus-exchange heat with the original fixed-density
+    /// caloric law. This costs two source integrals once per whole proposal;
+    /// every trial still uses the native EOS inversion and material admission.
+    /// In particular no constant-Cv estimate or enthalpy-as-internal-energy
+    /// substitution may decide which temperatures are physically reachable.
+    fn supported_heat_bracket(&self) -> Result<[f64; 2], Error> {
+        let initial = self.gas.temperature_k();
+        let lower_temperature = self.gas_solve.minimum_temperature_k.max(
+            initial - self.maximum_gas_temperature_increment_k,
+        );
+        let upper_temperature = self.gas_solve.maximum_temperature_k.min(
+            initial + self.maximum_gas_temperature_increment_k,
+        );
+        if !initial.is_finite()
+            || initial < lower_temperature
+            || initial > upper_temperature
+        {
+            return Err(Error::Invalid(
+                "gas caloric bracket must contain the accepted temperature",
+            ));
+        }
+        let mut supported = [0.0; 2];
+        for (bound, temperature_k) in supported.iter_mut()
+            .zip([lower_temperature, upper_temperature])
+        {
+            let change = self.gas.mass_kg()
+                * self.gas.specific_internal_energy_change_to_temperature_j_kg(temperature_k)
+                    .map_err(gas_error)?;
+            *bound = change - self.gas_heat_j;
+            if !change.is_finite() || !bound.is_finite() {
+                return Err(Error::Invalid("gas caloric heat bounds are unrepresentable"));
+            }
+        }
+        let lower = self.exchange.heat_bracket_j[0].max(supported[0]);
+        let upper = self.exchange.heat_bracket_j[1].min(supported[1]);
+        if supported[0] > supported[1] || lower > upper {
+            return Err(Error::Invalid(
+                "authored exchange cannot keep gas heat inside its caloric/increment bounds",
+            ));
+        }
+        Ok([lower, upper])
     }
 }

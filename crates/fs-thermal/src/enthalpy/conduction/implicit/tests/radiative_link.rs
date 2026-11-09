@@ -4,6 +4,7 @@ use super::super::link::{GrayRadiativeControls, GrayRadiativeLink};
 use super::*;
 use std::cell::Cell;
 
+#[path = "radiative_link/surface_sources.rs"]
 mod surface_sources;
 
 const SIGMA: f64 = 5.670_374_419e-8;
