@@ -158,7 +158,7 @@
 //! `mouth` the airway's DC resistance comes out at DC only through a one-pole of time constant `tau_s` on the flow (a numerical
 //! regulation constant with no default, not a measurement) and the voice refuses a tract whose mouth-pressure load is active on
 //! any bin; with `lung` the card's pressure is the source at the far end. The airway takes the bore gas and its own default
-//! convergence ladder. Linear loop only: refused with `bore nonlinear`, `jet_noise` and `constriction_noise`. The rows may stand in
+//! convergence ladder. Linear loop only: refused with `bore nonlinear` and `jet_noise`; the `constriction_noise` joins the tract as a series source. The rows may stand in
 //! any order; `player_tract_section` rows keep their file order. A file without the rows is bit-identical to one written before.
 //!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
@@ -1033,8 +1033,8 @@ impl LipDescription {
                 if nonlinear.is_some() {
                     return Err("player_tract is on the linear bore only and is refused with bore nonlinear".into());
                 }
-                if jet_noise.is_some() || constriction_noise.is_some() {
-                    return Err("player_tract is not combined with jet_noise or constriction_noise".into());
+                if jet_noise.is_some() {
+                    return Err("player_tract is not combined with jet_noise".into());
                 }
                 let tubes = tract_sections
                     .iter()
@@ -2521,7 +2521,6 @@ mod tests {
             (format!("{one}player_airway weibel-1963 saab-2021-table-1-B 0\n"), "count outside its admitted range"),
             (format!("{one}player_airway weibel-1963 saab-2021-table-1-B 25\n"), "count outside its admitted range"),
             (format!("{one}jet_noise 7 1.3e-3 0.045 0.115 1700\n"), "not combined with jet_noise"),
-            (format!("{one}constriction_noise 7 8.4e-3\n"), "not combined with jet_noise or constriction_noise"),
         ] {
             let error = parse(&extra).expect_err(&extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
@@ -2534,6 +2533,11 @@ mod tests {
         let lung = build(&format!("player_tract lung\n{TRACT_ROWS}"));
         assert!(lung.iter().all(|x| x.is_finite()));
         assert_ne!(plain, lung, "the tract must reach the radiated pressure");
+        // The constriction noise rides on the tract as a series source: the pair renders, and differs from the tract alone and from the noise alone.
+        let noisy = build(&format!("player_tract lung\n{TRACT_ROWS}constriction_noise 7 8.4e-3\n"));
+        assert!(noisy.iter().all(|x| x.is_finite()));
+        assert_ne!(noisy, lung, "the noise must reach the pressure through the tract");
+        assert_ne!(noisy, build("constriction_noise 7 8.4e-3\n"), "the tract must reach the pressure through the noise");
         let (a, b) = (
             LipDescription::from_bytes(fixture("").as_bytes()).expect("parses"),
             LipDescription::from_bytes(fixture(&format!("player_tract lung\n{TRACT_ROWS}")).as_bytes()).expect("parses"),

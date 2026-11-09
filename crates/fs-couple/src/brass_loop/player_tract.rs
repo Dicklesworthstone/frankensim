@@ -1,7 +1,7 @@
 //! The player's tract upstream of the lip (opt-in, [`super::BrassVoice::with_player_tract`]): a measured airway
 //! ([`crate::upstream_airway`]) between the card's blowing pressure and the lip's aperture, the lip-side use that module
-//! names. The reed side is `crate::render::player_tract`; the card rows and the two pure pieces ([`TractPressure`],
-//! [`one_pole_response`], [`admitted_margin`]) are the same, word for word.
+//! names. The reed side is `crate::render::player_tract`, which owns the pure pieces ([`TractPressure`],
+//! [`one_pole_response`], [`admitted_margin`]) this module re-exports; the card rows are its rows, word for word.
 //!
 //! **Where the card's pressure acts.** [`TractPressure::Lung`]: the card's blowing pressure is the source at the airway's far
 //! end and the aperture sees the whole airway, `p = p_oc - Z U`. [`TractPressure::Mouth`]: the card's pressure was measured
@@ -24,27 +24,17 @@
 //!
 //! Limits, not hidden: the airway's own (cylinders, plane waves, a symmetric tree, a stationary gas, no junction or
 //! separation loss where the area steps); one held tract shape over the whole note (a measured posture, not an
-//! articulation); the voice's bore gas in every section. Not combined with the jet or constriction noise (their sources
-//! read the pressure drop of the ideal-source drive) or the nonlinear bore (a second step). Without a tract the voice is
+//! articulation); the voice's bore gas in every section. Not combined with the jet noise (its bound reads the pressure
+//! drop of the ideal-source drive) or the nonlinear bore (a second step); the constriction noise reads only the held pressure
+//! and rides on the tract's open-circuit pressure as a series source. Without a tract the voice is
 //! the original, bit for bit.
 
 use crate::driving_point::{DrivingPointError, LineLadder};
 use crate::mm_line::MmLineError;
 use crate::upstream_airway::{AirwayChain, UpstreamAirway};
 use fs_material::gas::GasState;
-use fs_math::c64::C64;
 
-/// Where a card's blowing pressure acts when a player's tract sits upstream of the lip (module doc).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TractPressure {
-    /// A lung pressure: the source at the airway's far end, the whole airway at the aperture.
-    Lung,
-    /// A mouth pressure: `R_dc` out at DC only, through the one-pole of time constant `tau_s`.
-    Mouth {
-        /// The one-pole's time constant [s].
-        tau_s: f64,
-    },
-}
+pub use crate::render::player_tract::{TractPressure, admitted_margin, one_pole_response};
 
 /// One sample's tract port, between [`LipTract::port`] and [`LipTract::commit`].
 #[derive(Debug, Clone, Copy)]
@@ -72,60 +62,6 @@ fn airway_error(_: DrivingPointError) -> MmLineError {
     MmLineError::Invalid {
         what: "player tract airway refused",
     }
-}
-
-/// `H(w)` of the one-pole `s_n = s_{n-1} + a (U_{n-1} - s_{n-1})` on a clock of period `dt` (module doc).
-#[must_use]
-pub fn one_pole_response(pole: f64, omega: f64, dt: f64) -> C64 {
-    let (s, c) = fs_math::det::sin_cos(omega * dt);
-    let delay = C64::new(c, s);
-    delay.scale(pole) * (C64::ONE - delay.scale(1.0 - pole)).recip()
-}
-
-/// The smallest `Re Z_in(w) - R_dc Re H(w)` [Pa s/m^3] of `chain` in `gas` over the bins `w_k = 2 pi k rate / n`,
-/// `k = 1..=n/2`, with its frequency [Hz]: the load a mouth-pressure tract puts at the aperture is passive where this is
-/// not negative (module doc). `response(w)` is `H` at `w`. `Z_in` is the chain's ANALYTIC input impedance at each bin
-/// ([`AirwayChain::input_impedance`]), not the realized band-limited FIR port, so the refusal is the model's.
-///
-/// # Errors
-/// A zero clock or `n` below 2; the chain's own refusal at a bin; a non-finite margin; a negative margin, refused by name
-/// with its value and frequency.
-pub fn admitted_margin(
-    chain: &AirwayChain,
-    gas: &GasState,
-    sample_rate_hz: u32,
-    n: usize,
-    response: impl Fn(f64) -> C64,
-) -> Result<(f64, f64), String> {
-    if sample_rate_hz == 0 || n < 2 {
-        return Err(
-            "a tract passivity read needs a positive clock and at least two bins".to_string(),
-        );
-    }
-    let r_dc = chain.dc_resistance(gas);
-    let mut worst = (f64::INFINITY, 0.0);
-    for k in 1..=n / 2 {
-        let hz = k as f64 * f64::from(sample_rate_hz) / n as f64;
-        let omega = core::f64::consts::TAU * hz;
-        let z = chain
-            .input_impedance(gas, omega)
-            .map_err(|e| format!("player tract airway refused at {hz:.3} Hz: {e:?}"))?;
-        let margin = z.re - r_dc * response(omega).re;
-        if !margin.is_finite() {
-            return Err("player tract passivity margin left the finite set".to_string());
-        }
-        if margin < worst.0 {
-            worst = (margin, hz);
-        }
-    }
-    if worst.0 < 0.0 {
-        return Err(format!(
-            "player tract refused: Re Z_in - R_dc Re H is {:.6e} Pa s/m^3 at {:.3} Hz, so the mouth-pressure load would be \
-             active there",
-            worst.0, worst.1
-        ));
-    }
-    Ok(worst)
 }
 
 impl LipTract {
@@ -165,7 +101,8 @@ impl LipTract {
                 let n = airway.receipt().reflectance.n_fft;
                 let margin = admitted_margin(chain, gas, sample_rate_hz, n, |omega| {
                     one_pole_response(pole, omega, dt)
-                })?;
+                })
+                .map_err(|e| e.to_string())?;
                 (pole, Some(margin))
             }
         };

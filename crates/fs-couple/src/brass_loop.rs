@@ -427,9 +427,9 @@ impl BrassVoice {
     /// a tract is bit-identical to one built before this existed.
     ///
     /// # Errors
-    /// The reason, when the voice has advanced or already has a tract, carries the lip jet noise or the constriction noise
-    /// (their sources read the pressure drop of the ideal-source drive), or the tract is refused (the airway's own
-    /// refusals, a bad `tau`, a negative passivity margin).
+    /// The reason, when the voice has advanced or already has a tract, carries the lip jet noise (its bound reads the
+    /// pressure drop of the ideal-source drive; the constriction noise reads only the held pressure and joins the tract as a
+    /// series source), or the tract is refused (the airway's own refusals, a bad `tau`, a negative passivity margin).
     pub fn with_player_tract(
         mut self,
         chain: &crate::upstream_airway::AirwayChain,
@@ -440,8 +440,8 @@ impl BrassVoice {
         if self.block_index != 0 || self.player_tract.is_some() {
             return Err("a player tract needs a voice that has not advanced and has no tract yet".to_string());
         }
-        if self.jet_noise.is_some() || self.constriction_noise.is_some() {
-            return Err("a player tract is not combined with jet_noise or constriction_noise".to_string());
+        if self.jet_noise.is_some() {
+            return Err("a player tract is not combined with jet_noise".to_string());
         }
         self.player_tract = Some(LipTract::realize(chain, pressure, gas, self.rate_hz, self.dt, ladder)?);
         Ok(self)
@@ -726,13 +726,16 @@ impl BrassVoice {
             }
             // The opt-in player's tract (`player_tract`) is a Thevenin source in series with the aperture: this sample's port is
             // taken now, the lip force reads its open-circuit pressure against the previous sample's flow, and the flow solve
-            // below takes it in series. Without one `drive` is the ideal source it always was, bit for bit.
+            // below takes it in series. Without one `drive` is the ideal source it always was, bit for bit. A series source of
+            // the drive (the constriction noise, the only one a tract takes) rides on the tract's open-circuit pressure:
+            // `series_pa` is exactly zero without it, so a tract without noise is unchanged to the bit.
+            let series_pa = drive - self.blow_pa;
             let tract_port = match self.player_tract.as_mut() {
                 Some(tract) => Some(tract.port(self.blow_pa)?),
                 None => None,
             };
             let dp_lip = match (&tract_port, self.player_tract.as_ref()) {
-                (Some(port), Some(tract)) => tract.force_pressure_pa(*port) - self.p_bore_prev,
+                (Some(port), Some(tract)) => tract.force_pressure_pa(*port) + series_pa - self.p_bore_prev,
                 _ => drive - self.p_bore_prev,
             };
             let force = dp_lip * self.lip.face_area_m2;
@@ -764,7 +767,7 @@ impl BrassVoice {
                 // quadratic. Without one these are the original operands.
                 let (b, head) = match &tract_port {
                     None => (2.0 * wh * wh / (self.rho * a), drive - k_off),
-                    Some(port) => (2.0 * wh * wh * (1.0 / a + port.impedance) / self.rho, port.open_circuit_pa - k_off),
+                    Some(port) => (2.0 * wh * wh * (1.0 / a + port.impedance) / self.rho, port.open_circuit_pa + series_pa - k_off),
                 };
                 if head >= 0.0 {
                     let c = 2.0 * wh * wh * head / self.rho;
@@ -794,7 +797,7 @@ impl BrassVoice {
             // The tract takes the aperture flow (the flow the junction took) and reports the mouth pressure the work is done at.
             if let (Some(port), Some(tract)) = (tract_port, self.player_tract.as_mut()) {
                 let mouth_pa = tract.commit(port, flow)?;
-                blow_work += mouth_pa * flow * dt;
+                blow_work += (mouth_pa + series_pa) * flow * dt;
             }
             let _ = self.bank.push(p_plus)?;
             if let Some(trace) = outgoing.as_deref_mut() {

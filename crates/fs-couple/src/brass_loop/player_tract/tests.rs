@@ -2,9 +2,10 @@ use super::*;
 use crate::brass_loop::brass_loop_tests::{air, authored_lip, brass_combo, config};
 use crate::brass_loop::{BrassControl, BrassVoice};
 use crate::mm_line::MmLoad;
-use crate::turbulence_noise::JetNoiseCard;
+use crate::turbulence_noise::{ConstrictionNoiseCard, JetNoiseCard};
 use crate::upstream_airway::AirwaySection;
 use fs_duct::{LossModel, Termination};
+use fs_math::c64::C64;
 
 /// Kaburagi, Yamada, Fukui and Minamiya 2011 (JASA 130(1):536-545), Fig. 3, the LOW panel (a trumpeter at Eb4, 311 Hz), as
 /// digitized (+-0.032 cm2): the sectional area [cm2] of 40 equal sections from the lips to the glottis, each of
@@ -243,7 +244,8 @@ fn a_negative_passivity_margin_is_refused_by_name() {
     let chain = low_chain();
     let gas = air(293.15);
     let error = admitted_margin(&chain, &gas, 24_000, 4096, |_| C64::new(1.0e6, 0.0))
-        .expect_err("a response of 1e6 takes out far more than the tract holds");
+        .expect_err("a response of 1e6 takes out far more than the tract holds")
+        .to_string();
     assert!(
         error.contains("player tract refused") && error.contains("would be active"),
         "{error}"
@@ -261,5 +263,63 @@ fn a_negative_passivity_margin_is_refused_by_name() {
     assert!(
         (h0.re - 1.0).abs() < 1.0e-12 && h0.im.abs() < 1.0e-12,
         "H(0) = 1"
+    );
+}
+
+/// The constriction noise rides on the tract as a series source (it reads only the held pressure): the voice with both repeats bit
+/// for bit under one seed, differs under another, and is not the tract alone's.
+#[test]
+fn the_constriction_noise_rides_on_the_tract_seeded() {
+    let chain = low_chain();
+    let gas = air(293.15);
+    let build = |seed: u64| -> BrassVoice {
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut voice = BrassVoice::new(
+            &[brass_combo(0.0)],
+            &["open"],
+            &gas,
+            &load,
+            &config(),
+            lip,
+            1.5e-6,
+        )
+        .expect("voice")
+        .with_constriction_noise(ConstrictionNoiseCard {
+            seed,
+            duct_radius_m: 8.4e-3,
+        })
+        .expect("a usable card")
+        .with_player_tract(
+            &chain,
+            TractPressure::Mouth { tau_s: 0.02 },
+            &gas,
+            &LineLadder::default(),
+        )
+        .expect("a tract beside the constriction noise");
+        voice
+            .apply(BrassControl::SetLipTension(1.6))
+            .expect("tension");
+        voice
+    };
+    let seven = render(&mut build(7), 3000.0, 2400);
+    assert!(seven.iter().all(|p| p.is_finite()));
+    assert!(
+        same_bits(&seven, &render(&mut build(7), 3000.0, 2400)),
+        "a declared seed repeats bit for bit"
+    );
+    assert!(
+        !same_bits(&seven, &render(&mut build(8), 3000.0, 2400)),
+        "another seed gives another noise"
+    );
+    let alone = render(
+        &mut voice(Some((&chain, TractPressure::Mouth { tau_s: 0.02 }))).expect("voice"),
+        3000.0,
+        2400,
+    );
+    assert!(
+        !same_bits(&seven, &alone),
+        "the noise must reach the pressure through the tract"
     );
 }
