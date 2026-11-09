@@ -4553,3 +4553,61 @@ The prescribed `advance` path retains its held drive, and prescribed `advance_ad
 Original body, wall and surface work remain separate signed mechanical exchanges. Only the original resolved viscous loss enters caloric storage; source payloads cannot replace physical accounting. Endpoint-held feedback retains the existing first-order coupled composition, event/left-limit semantics, local state and transfer error indicators, original source/rate/support limits and independent energy gates. A source, budget, physical or cancellation refusal publishes no partial window. No actuator model, thermal expansion, changing mass or new constitutive fit is inferred.
 
 Four G1/G3/G4 regression groups are authored for an independent one-cell momentum/heat root with the original positive Arrhenius viscosity, transient refinement against continuous equations across a scheduled reversal, exact prescribed/feedback parity and callback counts, and late query-budget/source/cancellation rollback with retained source identity. Independent scalar reference calculations and pinned Rust 2024 parsing/format checks passed. The new Rust tests remain uncompiled and unexecuted because the prior bounded material/solver build setup was lost with the execution environment; no full-crate Cargo or runtime result is claimed.
+## Material enthalpy in original immersed-body convection
+
+`ThermalOpenField3::set_immersed_body_caloric` and the matching
+`BoussinesqOpenGrid3` method bind one newly installed independent immersed
+body to its original immutable `EquilibriumEnthalpyPhaseCurve`. Explicit
+fixed mass, enthalpy span, temperature origin/scale and fluid-cell capacity
+convert the SAME native thermal coordinate to SI. Binding must reproduce
+the installed initial temperature exactly; rebinding, post-exchange binding
+and any conducting body/voxel graph are refused before mutation.
+All caloric bodies bound to one field must share identical temperature
+origin/scale and reference fluid-cell capacity, preserving one physical
+interpretation of the shared native fluid traces and summed heat.
+
+The original body now retains one accepted `ImmersedCaloricState3`, including
+the actual material/phase identity. Its native temperature is a derived cache;
+the initial fixed capacity is inactive declaration data when this state is
+present. The retained Arc preserves the original curve and source receipts.
+The original material query supplies exact affine-Cp sensible calorics and
+isothermal latent plateaus without fitting, extrapolation, phase smoothing or
+an artificial apparent heat capacity. Fixed mass never follows chart density.
+
+The same post-collision interface traces enter one bounded backward-Euler
+balance in specific enthalpy. Safeguarded Newton/bisection uses the original
+T(h) derivative, including exactly zero on a latent plateau. Only the required
+side of the admitted source bracket is queried; a bulk-fluid temperature
+outside the solid material span does not demand an irrelevant material query.
+Actual reflected incoming-minus-outgoing heat and actual representable
+m*(h_new-h_old) independently pass the original local and joint fluid/solid
+balance checks, as well as the authored physical caloric tolerance. Source
+heat is counted once; no latent-heat source is added. Cancellation is polled
+at each bounded iteration/source bracket and the original streaming work.
+Native populations, clocks, caloric state and receipts publish together only
+after success. There is no per-step allocation or new thermal trajectory.
+
+This capability is for isothermal retained bodies with fixed geometry and
+fixed authored interface resistance, including a lumped phase-change store.
+It does not remove the obstacle when liquid fraction grows, model liquid
+motion, resolve internal gradients, update k(T), infer volume from density,
+or close expansion/pressure work. Those approximations require caller
+justification. Spatial nonlinear caloric voxel graphs and the developing
+channel Nusselt benchmark remain outside this delivery.
+
+Twenty-eight original immersed-owner tests passed in a bounded scalar source
+projection, including eight new groups: constant-capacity parity and actual
+original affine-Cp calorics against an independent quadratic, exact melting
+and freezing plateaus and phase crossings, SI/native energy closure,
+source-domain/work/representability refusal, and cancellation with exact retry.
+The projection compiled complete original fs-blake3, fs-obs, fs-math,
+fs-sparse, fs-qty, fs-evidence, fs-ivl and fs-matdb dependencies. The original
+material phase core, source ingress, source-receipt types, caloric derivatives
+and identity methods were retained, omitting only unrelated phase children.
+The exercised native scalar kernels, immersed owner, sparse paths and tests
+were original. The unused native buoyancy wrapper and tensor constructors
+were omitted; the retained unused tensor carrier/shape methods used the
+thermal-owner error alias and no tensor was constructed. Full Cargo and the
+public Boussinesq wrapper remain uncompiled in this environment. These tests
+establish local implementation behavior, not spatial convergence, empirical
+PCM validation or a complete multiphysics pressure-work account.
