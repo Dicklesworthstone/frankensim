@@ -413,7 +413,12 @@ fn prepare<'g, 'm, M: ?Sized>(
         wavenumber,
         characteristic_impedance,
         specific_impedance: characteristic_impedance.scale(section.area_m2),
-        shear_number: 0.5 * section.gap_m * det::sqrt(omega / transport.kinematic_viscosity_m2_s()),
+        // Circular axes use the physical radius; annuli retain half their gap.
+        shear_number: (if section.inner_m == 0.0 {
+            section.outer_m
+        } else {
+            0.5 * section.gap_m
+        }) * det::sqrt(omega / transport.kinematic_viscosity_m2_s()),
     };
     if ![
         mean,

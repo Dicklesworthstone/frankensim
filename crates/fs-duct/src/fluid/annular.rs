@@ -127,15 +127,17 @@ pub struct AnnularSection {
 struct RadialSolution {
     response: AnnularDiffusion,
     interior: Vec<C64>,
+    // First free radial coordinate: 1 at an annular inner wall, 0 at an axis.
+    first_node: usize,
     is_wall: bool,
 }
 
 impl RadialSolution {
     fn stored_node(&self, node: usize) -> C64 {
-        if node == 0 || node == self.interior.len() + 1 {
+        if node < self.first_node || node == self.interior.len() + self.first_node {
             if self.is_wall { C64::ONE } else { C64::ZERO }
         } else {
-            self.interior[node - 1]
+            self.interior[node - self.first_node]
         }
     }
 
@@ -210,6 +212,46 @@ impl AnnularSection {
             *value = det::expm1(log_ratio * index as f64 / elements as f64) / ratio;
         }
         fractions[elements] = 1.0;
+        Self::from_radial_mesh(inner_m, outer_m, area_m2, fractions, &mut cancelled)
+    }
+
+    // The circular owner has a genuine regular axis, never a tiny inner wall.
+    // Its uniform radial mesh uses the SAME weighted P1 element assembly.
+    pub(crate) fn circular_controlled(
+        radius_m: f64,
+        elements: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DuctError> {
+        poll(&mut cancelled, 0)?;
+        if !positive(radius_m) || !(2..=MAX_ANNULAR_ELEMENTS).contains(&elements) {
+            return Err(bad(
+                "circular section needs a positive radius and 2..=4096 cells",
+            ));
+        }
+        let area_m2 = core::f64::consts::PI * radius_m * radius_m;
+        if !positive(area_m2) {
+            return Err(bad("circular cross-section area is unrepresentable"));
+        }
+        let mut fractions = filled(elements + 1, 0.0)?;
+        for (index, value) in fractions.iter_mut().enumerate().skip(1) {
+            if index % 64 == 0 {
+                poll(&mut cancelled, index)?;
+            }
+            *value = index as f64 / elements as f64;
+        }
+        Self::from_radial_mesh(0.0, radius_m, area_m2, fractions, &mut cancelled)
+    }
+
+    fn from_radial_mesh(
+        inner_m: f64,
+        outer_m: f64,
+        area_m2: f64,
+        fractions: Vec<f64>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, DuctError> {
+        let gap_m = outer_m - inner_m;
+        let mean_radius = inner_m + 0.5 * gap_m;
+        let elements = fractions.len() - 1;
         let mut stiffness_edges = filled(elements, 0.0)?;
         let mut mass_edges = filled(elements, 0.0)?;
         let mut mass_diagonal = filled(elements - 1, 0.0)?;
@@ -218,16 +260,18 @@ impl AnnularSection {
         let mut maximum_cell_fraction = 0.0_f64;
         for i in 0..elements {
             if i % 64 == 0 {
-                poll(&mut cancelled, i)?;
+                poll(cancelled, i)?;
             }
             let dx = fractions[i + 1] - fractions[i];
             let left = inner_m / mean_radius + (gap_m / mean_radius) * fractions[i];
             let right = inner_m / mean_radius + (gap_m / mean_radius) * fractions[i + 1];
             let k = 0.5 * (left + right) / dx;
             let (diagonal, m) = radial_mass(dx, left, right);
-            if ![dx, left, right, k, m, diagonal[0], diagonal[1]]
+            if ![dx, right, k, m, diagonal[0], diagonal[1]]
                 .into_iter()
                 .all(positive)
+                || !left.is_finite()
+                || left < 0.0
             {
                 return Err(bad("annular radial mesh is unresolved or unrepresentable"));
             }
@@ -244,7 +288,7 @@ impl AnnularSection {
                 }
             }
         }
-        poll(&mut cancelled, elements)?;
+        poll(cancelled, elements)?;
         Ok(Self {
             inner_m,
             outer_m,
@@ -463,7 +507,11 @@ impl AnnularSection {
         } else {
             (1.0, argument)
         };
-        let n = self.load.len();
+        // Retain the axis as a free coordinate. Its r-weighted boundary
+        // measure is zero; regularity supplies the natural condition rather
+        // than the no-slip/isothermal Dirichlet condition of an inner wall.
+        let first_node = usize::from(self.inner_m > 0.0);
+        let n = self.elements() - first_node;
         let mut diagonal = filled(n, C64::ZERO)?;
         let mut off = filled(n - 1, C64::ZERO)?;
         let mut rhs = filled(n, C64::ZERO)?;
@@ -477,23 +525,37 @@ impl AnnularSection {
             if i % 64 == 0 {
                 poll(cancelled, i)?;
             }
-            diagonal[i] = C64::new(
-                k_scale * (self.stiffness_edges[i] + self.stiffness_edges[i + 1])
-                    + m_scale.re * self.mass_diagonal[i],
-                m_scale.im * self.mass_diagonal[i],
-            );
+            let node = i + first_node;
+            let (stiffness, mass) = if node == 0 {
+                (
+                    self.stiffness_edges[0],
+                    self.boundary_weights[0] - self.mass_edges[0],
+                )
+            } else {
+                (
+                    self.stiffness_edges[node - 1] + self.stiffness_edges[node],
+                    self.mass_diagonal[node - 1],
+                )
+            };
+            diagonal[i] = C64::new(k_scale * stiffness + m_scale.re * mass, m_scale.im * mass);
             if i + 1 < n {
                 off[i] = C64::new(
-                    -k_scale * self.stiffness_edges[i + 1] + m_scale.re * self.mass_edges[i + 1],
-                    m_scale.im * self.mass_edges[i + 1],
+                    -k_scale * self.stiffness_edges[node] + m_scale.re * self.mass_edges[node],
+                    m_scale.im * self.mass_edges[node],
                 );
             }
             if !solve_wall {
-                rhs[i] = m_scale.scale(self.load[i]);
+                rhs[i] = m_scale.scale(if node == 0 {
+                    self.boundary_weights[0]
+                } else {
+                    self.load[node - 1]
+                });
             }
         }
         if solve_wall {
-            rhs[0] = rhs[0] - boundary[0];
+            if first_node == 1 {
+                rhs[0] = rhs[0] - boundary[0];
+            }
             rhs[n - 1] = rhs[n - 1] - boundary[1];
         }
         if diagonal.iter().chain(&off).chain(&rhs).any(|&z| !finite(z)) {
@@ -512,14 +574,20 @@ impl AnnularSection {
             if !finite(rhs[i]) {
                 return Err(bad("annular diffusion solution is unrepresentable"));
             }
-            re = re + Dd::from_f64(self.load[i]) * Dd::from_f64(rhs[i].re);
-            im = im + Dd::from_f64(self.load[i]) * Dd::from_f64(rhs[i].im);
+            let node = i + first_node;
+            let load = if node == 0 {
+                self.boundary_weights[0]
+            } else {
+                self.load[node - 1]
+            };
+            re = re + Dd::from_f64(load) * Dd::from_f64(rhs[i].re);
+            im = im + Dd::from_f64(load) * Dd::from_f64(rhs[i].im);
             let mut drive = if solve_wall {
                 C64::ZERO
             } else {
-                m_scale.scale(self.load[i])
+                m_scale.scale(load)
             };
-            if solve_wall && i == 0 {
+            if solve_wall && i == 0 && first_node == 1 {
                 drive = drive - boundary[0];
             }
             if solve_wall && i == n - 1 {
@@ -535,13 +603,14 @@ impl AnnularSection {
                 residual = residual + off[i] * rhs[i + 1];
                 scale += off[i].abs() * rhs[i + 1].abs();
             }
-            relative_backward_residual =
-                relative_backward_residual.max(relative(residual.abs(), scale));
+            relative_backward_residual = relative_backward_residual
+                .max(relative(residual.abs(), scale.max(f64::MIN_POSITIVE)));
         }
         if solve_wall {
-            re = re
-                + Dd::from_f64(self.boundary_weights[0])
-                + Dd::from_f64(self.boundary_weights[1]);
+            if first_node == 1 {
+                re = re + Dd::from_f64(self.boundary_weights[0]);
+            }
+            re = re + Dd::from_f64(self.boundary_weights[1]);
         }
         let average = C64::new(re.to_f64(), im.to_f64());
         let complement = C64::new((Dd::from_f64(1.0) - re).to_f64(), -im.to_f64());
@@ -551,13 +620,21 @@ impl AnnularSection {
             (average, complement)
         };
         let boundary_value = if solve_wall { C64::ONE } else { C64::ZERO };
-        let mut previous = boundary_value;
+        let mut previous = if first_node == 0 {
+            rhs[0]
+        } else {
+            boundary_value
+        };
         let mut work = Dd::ZERO;
         for i in 0..self.elements() {
             if i % 64 == 0 {
                 poll(cancelled, i)?;
             }
-            let next = if i < n { rhs[i] } else { boundary_value };
+            let next = if i + 1 < n + first_node {
+                rhs[i + 1 - first_node]
+            } else {
+                boundary_value
+            };
             // Scale before squaring: weak diffusion work must not disappear
             // solely because the unscaled gradient square underflows.
             let scaled = (next - previous).scale(gradient_scale);
@@ -594,6 +671,7 @@ impl AnnularSection {
                 relative_work_defect,
             },
             interior: rhs,
+            first_node,
             is_wall: solve_wall,
         })
     }

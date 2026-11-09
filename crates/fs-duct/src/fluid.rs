@@ -48,6 +48,8 @@ pub mod bulk;
 pub mod rectangular;
 /// Concentric annular passages with both rigid walls and resolved radial diffusion.
 pub mod annular;
+/// Regular-axis circular fields with finite and source-bound layered thermal walls.
+pub mod circular;
 
 use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;
