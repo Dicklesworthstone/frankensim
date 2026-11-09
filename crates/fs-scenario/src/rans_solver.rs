@@ -161,7 +161,9 @@ impl RansSolver {
     /// Solve the coupled low-Re RANS and thermal transport system.
     ///
     /// # Errors
-    /// Returns [`RansTerminationReason::Diverged`] on NaN or failure to solve.
+    /// Returns [`RansTerminationReason::Diverged`] on invalid material/state
+    /// inputs or a nonfinite numerical update. Input admission precedes state
+    /// mutation; a failed iteration never publishes a nonfinite field value.
     pub fn solve(
         &self,
         grid: &RansChannelGrid,
@@ -173,7 +175,49 @@ impl RansSolver {
         max_iters: usize,
         tol: f64,
     ) -> Result<RansConvergenceReport, RansTerminationReason> {
-        let n = grid.num_cells + 1;
+        let n = grid
+            .num_cells
+            .checked_add(1)
+            .filter(|&n| n >= 3)
+            .ok_or(RansTerminationReason::Diverged)?;
+        // Density is the SAME physical mass storage in pressure acceleration
+        // and rho*cp thermal storage. Refuse invalid coefficients before an
+        // IEEE max reduction can silently hide their NaN consequences.
+        if [
+            self.rho,
+            self.nu_laminar,
+            self.cp,
+            self.k_thermal,
+            self.pr_turbulent,
+            tol,
+        ]
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.0)
+            || !self.coeffs.c_mu.is_finite()
+            || self.coeffs.c_mu < 0.0
+            || !dp_dx.is_finite()
+            || !wall_heat_flux_w_m2.is_finite()
+            || grid.y_nodes.len() != n
+            || grid.y_nodes.iter().any(|value| !value.is_finite())
+            || grid.y_nodes.windows(2).any(|pair| pair[0] >= pair[1])
+            || [&state.u, &state.k, &state.eps, &state.nu_t, &state.temp_k]
+                .into_iter()
+                .any(|values| values.len() != n || values.iter().any(|value| !value.is_finite()))
+            || [&state.k, &state.eps, &state.nu_t]
+                .into_iter()
+                .any(|values| values.iter().any(|value| *value < 0.0))
+            || state.temp_k.iter().any(|value| *value <= 0.0)
+        {
+            return Err(RansTerminationReason::Diverged);
+        }
+        let pressure_acceleration = -dp_dx / self.rho;
+        let thermal_diffusivity = (self.k_thermal / self.rho) / self.cp;
+        if !pressure_acceleration.is_finite()
+            || !thermal_diffusivity.is_finite()
+            || thermal_diffusivity <= 0.0
+        {
+            return Err(RansTerminationReason::Diverged);
+        }
         let mut iter = 0;
         let mut momentum_res = 1.0;
         let mut energy_res = 1.0;
@@ -186,8 +230,12 @@ impl RansSolver {
                 let y = grid.y_nodes[i];
                 let re_y = (state.k[i].sqrt() * y) / (self.nu_laminar + 1e-12);
                 let f_mu = (-3.4 / (1.0 + re_y / 50.0).powi(2)).exp();
-                state.nu_t[i] =
+                let nu_t =
                     self.coeffs.c_mu * f_mu * (state.k[i] * state.k[i]) / (state.eps[i] + 1e-12);
+                if !nu_t.is_finite() || nu_t < 0.0 {
+                    return Err(RansTerminationReason::Diverged);
+                }
+                state.nu_t[i] = nu_t;
             }
 
             // 2. Momentum equation with optional porous sink & buoyancy
@@ -201,7 +249,7 @@ impl RansSolver {
                 let d2u_dy2 =
                     (state.u[i + 1] - 2.0 * state.u[i] + state.u[i - 1]) / (dy_avg * dy_avg);
 
-                let mut source = -dp_dx / self.rho;
+                let mut source = pressure_acceleration;
 
                 // Porous sink: S_p = -(mu/kappa)*u - 0.5*C_F*rho*|u|*u
                 if let Some(p) = porous {
@@ -227,9 +275,17 @@ impl RansSolver {
                     }
                 }
 
-                let u_new = (nu_eff * d2u_dy2 + source).max(0.0);
+                let tendency = nu_eff * d2u_dy2 + source;
+                if !tendency.is_finite() {
+                    return Err(RansTerminationReason::Diverged);
+                }
+                let u_new = tendency.max(0.0);
                 let relaxed_u = 0.8 * state.u[i] + 0.2 * (state.u[i] + 0.001 * u_new);
-                max_u_delta = max_u_delta.max((relaxed_u - state.u[i]).abs());
+                let delta = (relaxed_u - state.u[i]).abs();
+                if !relaxed_u.is_finite() || !delta.is_finite() {
+                    return Err(RansTerminationReason::Diverged);
+                }
+                max_u_delta = max_u_delta.max(delta);
                 state.u[i] = relaxed_u;
             }
 
@@ -240,18 +296,24 @@ impl RansSolver {
             let mut max_t_delta: f64 = 0.0;
             // Wall boundary (Neumann q'' = -k dT/dy -> T_0 = T_1 + q'' * dy / k)
             let dy_0 = grid.y_nodes[1] - grid.y_nodes[0];
-            state.temp_k[0] = state.temp_k[1] + (wall_heat_flux_w_m2 * dy_0) / self.k_thermal;
+            let wall_temperature = state.temp_k[1] + (wall_heat_flux_w_m2 * dy_0) / self.k_thermal;
+            if !wall_temperature.is_finite() || wall_temperature <= 0.0 {
+                return Err(RansTerminationReason::Diverged);
+            }
+            state.temp_k[0] = wall_temperature;
 
             for i in 1..n - 1 {
                 let dy_m = grid.y_nodes[i] - grid.y_nodes[i - 1];
                 let dy_p = grid.y_nodes[i + 1] - grid.y_nodes[i];
                 let dy_avg = 0.5 * (dy_m + dy_p);
 
-                let alpha_eff =
-                    (self.k_thermal / (self.rho * self.cp)) + (state.nu_t[i] / self.pr_turbulent);
+                let alpha_eff = thermal_diffusivity + (state.nu_t[i] / self.pr_turbulent);
                 let d2t_dy2 = (state.temp_k[i + 1] - 2.0 * state.temp_k[i] + state.temp_k[i - 1])
                     / (dy_avg * dy_avg);
                 let t_new = state.temp_k[i] + 0.01 * alpha_eff * d2t_dy2;
+                if !t_new.is_finite() || t_new <= 0.0 {
+                    return Err(RansTerminationReason::Diverged);
+                }
                 max_t_delta = max_t_delta.max((t_new - state.temp_k[i]).abs());
                 state.temp_k[i] = t_new;
             }
@@ -260,7 +322,7 @@ impl RansSolver {
             momentum_res = max_u_delta;
             energy_res = max_t_delta;
 
-            if momentum_res.is_nan() || energy_res.is_nan() {
+            if !momentum_res.is_finite() || !energy_res.is_finite() {
                 return Err(RansTerminationReason::Diverged);
             }
         }

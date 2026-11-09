@@ -11,7 +11,9 @@
 #![cfg(feature = "rans-rung")]
 
 use fs_scenario::rans_card::{BoussinesqOption, PorousFinSink, RansCardDraft};
-use fs_scenario::rans_solver::{RansChannelGrid, RansFieldState, RansSolver};
+use fs_scenario::rans_solver::{
+    RansChannelGrid, RansFieldState, RansSolver, RansTerminationReason,
+};
 
 fn sample_card() -> fs_scenario::rans_card::RansModelCard {
     RansCardDraft::launder_sharma_channel("electronics-cooling/e10-rans")
@@ -108,4 +110,105 @@ fn boussinesq_buoyancy_modifies_momentum() {
 
     assert!(report.iterations > 0);
     assert!(state.temp_k[0] > 300.0);
+}
+
+#[test]
+fn invalid_density_refuses_before_changing_any_field() {
+    let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+    let initial = RansFieldState::new_initial(&grid, 0.0, 300.0);
+    for rho in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut solver = RansSolver::new(sample_card());
+        solver.rho = rho;
+        let mut state = initial.clone();
+        let result = solver.solve(&grid, &mut state, -2.0, 40.0, None, None, 1, 1e-8);
+        assert_eq!(result, Err(RansTerminationReason::Diverged), "rho={rho}");
+        assert_eq!(
+            state, initial,
+            "invalid density must leave all fields untouched"
+        );
+    }
+}
+
+#[test]
+fn invalid_material_storage_or_transport_cannot_report_convergence() {
+    let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+    let initial = RansFieldState::new_initial(&grid, 0.0, 300.0);
+    for property in 0..4 {
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut solver = RansSolver::new(sample_card());
+            match property {
+                0 => solver.nu_laminar = invalid,
+                1 => solver.cp = invalid,
+                2 => solver.k_thermal = invalid,
+                _ => solver.pr_turbulent = invalid,
+            }
+            let mut state = initial.clone();
+            assert_eq!(
+                solver.solve(&grid, &mut state, -2.0, 40.0, None, None, 1, 1e-8),
+                Err(RansTerminationReason::Diverged),
+            );
+            assert_eq!(state, initial);
+        }
+    }
+}
+
+#[test]
+fn density_weights_pressure_acceleration_and_thermal_storage_consistently() {
+    let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+    let pressure_gradient = -2.0;
+    let heat_flux = 40.0;
+    for rho in [0.5, 2.0, 8.0] {
+        let mut solver = RansSolver::new(sample_card());
+        solver.rho = rho;
+        solver.cp = 4.0;
+        solver.k_thermal = 0.5;
+        let mut state = RansFieldState::new_initial(&grid, 0.0, 300.0);
+        solver
+            .solve(
+                &grid,
+                &mut state,
+                pressure_gradient,
+                heat_flux,
+                None,
+                None,
+                1,
+                1e-8,
+            )
+            .unwrap();
+        // At the first interior site, the initial molecular/turbulent momentum
+        // diffusion is zero. The existing fixture's pseudo-step and relaxation
+        // are 0.001 and 0.2; physical pressure acceleration is -dp/dx / rho.
+        let expected_u = 0.2 * 0.001 * (-pressure_gradient / rho);
+        assert!((state.u[1] - expected_u).abs() < 1e-15);
+        // The same rho supplies thermal storage: the uniform first cell receives
+        // q''/(rho*cp*dy) K/s. This independently eliminates k using its Neumann BC.
+        let dy = grid.y_nodes[1];
+        let expected_temperature = 300.0 + 0.01 * heat_flux / (rho * solver.cp * dy);
+        assert!((state.temp_k[1] - expected_temperature).abs() < 1e-12);
+        assert_eq!(state.temp_k[0], 300.0 + heat_flux * dy / solver.k_thermal);
+    }
+}
+
+#[test]
+fn nonfinite_updates_are_refused_before_they_can_be_hidden_by_max() {
+    let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+    let solver = RansSolver::new(sample_card());
+    for overflow_eddy_viscosity in [true, false] {
+        let mut state = RansFieldState::new_initial(&grid, 0.0, 300.0);
+        let heat_flux = if overflow_eddy_viscosity {
+            // All input scalars are finite; the evaluated k² overflows.
+            state.k[1] = 1e200;
+            0.0
+        } else {
+            // The imposed wall temperature is outside the representable range.
+            f64::MAX
+        };
+        assert_eq!(
+            solver.solve(&grid, &mut state, -2.0, heat_flux, None, None, 1, 1e-8),
+            Err(RansTerminationReason::Diverged),
+        );
+        for field in [&state.u, &state.k, &state.eps, &state.nu_t, &state.temp_k] {
+            assert!(field.iter().all(|value| value.is_finite()));
+        }
+    }
 }

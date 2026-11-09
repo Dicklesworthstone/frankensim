@@ -1060,7 +1060,14 @@ control code renders BITWISE identical audio through the render API.
   on a mesh. Turbulence modelling was retired from v1 by owner decision
   2026-09-01 (bead frankensim-rc-root-q61wp.25); the promise is preserved in
   deferred epic frankensim-rc-root-q61wp.41 and un-parks only behind a consumer
-  journey.
+  journey. Its native solver admits positive finite density, viscosity, heat
+  capacity, conductivity and turbulent Prandtl number before changing state.
+  The same density supplies `-dp/dx / rho` and `k / (rho*cp)`; finite update
+  checks precede every residual maximum so NaN cannot masquerade as zero
+  residual or convergence. Unrepresentable field updates refuse before being
+  stored. `tests/rans_solver.rs` checks these refusals and independent pressure
+  acceleration/thermal-storage scaling in the existing single-iteration fixture;
+  this does not upgrade the rung's physical-fidelity claim.
 
 - **Acoustic assemblies are descriptions, not instruments**:
   `AcousticAssembly` can name a reed, bow, plate, and tone holes as data.
