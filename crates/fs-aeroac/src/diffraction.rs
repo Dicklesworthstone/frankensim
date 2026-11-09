@@ -44,7 +44,9 @@ mod spectrum;
 pub use point::{
     HalfPlaneForceDiagnostics, HalfPlaneForceLimits, HalfPlaneMonopoleDiagnostics,
     HalfPlaneMonopoleLimits, HalfPlaneQuadrupoleDiagnostics, HalfPlaneQuadrupoleLimits,
+    HalfPlaneTransientDiagnostics, HalfPlaneTransientField, HalfPlaneTransientLimits,
     PreparedHalfPlaneForce, PreparedHalfPlaneMonopole, PreparedHalfPlaneQuadrupole,
+    PreparedHalfPlaneTransient,
 };
 pub use spectrum::{
     HalfPlaneFace, HalfPlaneFrame, HalfPlaneIncidentWave, HalfPlaneReceiver,

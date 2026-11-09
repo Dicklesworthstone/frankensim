@@ -4280,3 +4280,99 @@ triangular dark leakage, real/proper statistics, retained source clocks and
 unequal-support array correlations with independent integration. Original
 ComplexSum, frequency, kernel and averaged-amplitude functions were executed.
 The full aeroac source/observer pipeline and workspace suite were not run.
+
+## Causal finite-source half-plane diffraction
+
+`diffraction::PreparedHalfPlaneTransient` prepares the actual real
+Biot--Tolstoy half-plane kernel for the original
+`curle3d::moving::TimedCompactSource` volume-flow clock. The stationary
+source and receiver share the existing placed `HalfPlaneFrame`,
+`HalfPlaneReceiver`, ideal rigid/pressure-release boundary and original
+`FluidAcousticState`. The original harmonic point owner and this time owner
+share one private geometric lowering, including the regular shadow-boundary
+coordinate and exact sheet-face semantics.
+
+The owner accepts original Q and dQ/dt at uniform physical knots. They define
+a C1 cubic Hermite source history; the first knot must declare Q=dQ/dt=0 and
+every original force/force-rate component must be exactly zero. No force
+input is silently dropped. The real retarded integral is analytically
+differentiated to obtain pressure and all three particle-velocity components.
+An integration-by-parts form remains regular at both shadow transitions;
+time-basis knots and narrow geometric transition widths split the adaptive
+integration. The eight real tap channels act on Q and dt*dQ/dt, retaining
+their actual physical units. They are not sampled harmonic transfers or a
+frequency-grid propagator.
+
+Preparation retains every causal tap required by the declared observation
+horizon (1..=65536 samples, including the zero start). No old source sample
+or physical edge tail is discarded within that window. Longer records
+refuse. Explicitly appended zero source knots observe the post-emission
+tail within the same horizon; there is no inferred terminal time or claim
+of indefinitely running finite memory. The complete record uses cached
+zero-padded linear convolution through the original `fs-fft::GeneralFft`.
+Its work is O(H log H) for the prepared horizon H, with eight cached
+coefficient spectra. `observe_at` evaluates one accepted index directly
+with double-double accumulation and no allocation. Complete-record
+observation allocates its declared scratch and result vectors.
+
+The source clock is checked against the original start plus i*dt with
+double-double arithmetic; adjacent timestamps must remain representable
+and strictly ordered. Causal-support comparisons use the prepared relative
+index/dt clock, so rounding a large absolute epoch cannot erase a physical
+first arrival. The mathematical convolution uses no later source knot. Known empty source prefixes retain exact zero fields up to the first
+possible physical arrival, including a delayed emission prefix; this
+does not truncate later edge memory or overwrite physical cancellation
+nodes. Remaining FFT and floating-point roundoff is not covered by the
+quadrature estimates.
+
+Returned fields contain real pressure, full velocity, instantaneous p*u
+without a phasor factor of one half, and the original perturbation energy
+p^2/(2K)+rho*|u|^2/2. Coherent fields must be summed before forming
+intensity or energy. Direct observations accumulate per-tap embedded
+quadrature estimates against the actual source magnitudes. Batch
+observations use the conservative sum of tap estimates times record-wide
+maxima of |Q| and |dt*dQ/dt|. These estimates exclude source interpolation,
+geometry, FFT and other floating-point error; source/time refinement is
+an independent accuracy axis.
+
+Preparation admits the original per-tap quadrature limits, a total
+integrand-evaluation ceiling of at most 16777216, checked FFT extents and
+an explicit conservative numerical-payload envelope. Caller-owned source
+records and allocator metadata are outside that envelope. Cancellation
+polls surround original synchronous FFT operations and occur throughout
+coefficient preparation and physical contractions. Invalid geometry,
+clock, material-independent source scope, work exhaustion, nonfinite
+physical fields and cancellation publish no partial prepared owner or
+record.
+
+Seven new native regression groups cover:
+- independent spherical pressure, full velocity and exact causal support
+  for cubic histories, including delayed emission, zero records and large
+  absolute epochs whose timestamp differences differ from the prepared dt;
+- an independently integrated, untransformed real Biot--Tolstoy reference
+  in light and shadow for both ideal boundary conditions;
+- temporal Hermite refinement for an independently prescribed quartic
+  history (observed relative errors 1.9174e-6, 1.4698e-7, 2.7287e-8);
+- both exact sheet-face conditions and narrow shadow transitions;
+- independently differenced momentum, continuity and instantaneous
+  energy-flux equations;
+- placed-frame rotation, original clock offset, linearity, independence
+  from later source samples, and a nonzero post-emission edge tail;
+- source, clock, horizon, payload, quadrature-work and cancellation
+  refusals with exact retry.
+
+The final focused native run passes these seven groups plus all 27
+existing point/flow/force/quadrupole diffraction regressions. It uses the
+actual existing diffraction/quadrature owners, original fs-math, original
+one-dimensional FFT algorithms and original scalar SIMD leaves. The
+narrow build omits unrelated executor/material-receipt integration and
+does not establish full Cargo/workspace compilation, ISA speed, or a
+measured performance ratio.
+
+Physical scope remains stationary, linear, homogeneous and lossless
+acoustics around one infinite ideal half-plane with an open-fluid volume
+source. This does not supply moving-source or convected time-domain
+diffraction, finite barriers, impedance edges, thermal/molecular
+absorption, stress-quadrupole time histories, structural feedback or an
+experimental SPL certificate. Those require their own original physical
+owners and evidence.

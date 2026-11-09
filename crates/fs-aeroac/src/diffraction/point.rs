@@ -31,9 +31,14 @@ use fs_math::{c64::C64, dd::Dd, det};
 mod flow;
 mod force;
 mod quadrupole;
+mod transient;
 pub use force::{HalfPlaneForceDiagnostics, HalfPlaneForceLimits, PreparedHalfPlaneForce};
 pub use quadrupole::{
     HalfPlaneQuadrupoleDiagnostics, HalfPlaneQuadrupoleLimits, PreparedHalfPlaneQuadrupole,
+};
+pub use transient::{
+    HalfPlaneTransientDiagnostics, HalfPlaneTransientField, HalfPlaneTransientLimits,
+    PreparedHalfPlaneTransient,
 };
 
 /// The same physical p/Q and u/Q tolerances and bounded adaptive work controls
@@ -293,6 +298,87 @@ impl PreparedHalfPlaneMonopole {
     }
 }
 
+/// Original source/receiver geometry shared by harmonic and causal point fields.
+struct PointGeometry {
+    distance: f64,
+    q: [f64; 2],
+    q_gradient: [[f64; 3]; 2],
+    edge_gradient: [f64; 3],
+    direct_delta: [[f64; 3]; 2],
+    direct_distance: [f64; 2],
+}
+impl PointGeometry {
+    fn new(source: [f64; 3], point: [f64; 3]) -> Result<Self, AeroacError> {
+        let [xs, ys, zs] = source;
+        let [x, y, z] = point;
+        let rs = det::hypot(xs, ys);
+        let r = det::hypot(x, y);
+        let dz = (Dd::from_f64(z) - Dd::from_f64(zs)).to_f64();
+        let radial_sum = r + rs;
+        let distance = det::hypot(radial_sum, dz);
+        if !r.is_finite()
+            || r <= 0.0
+            || !rs.is_finite()
+            || rs <= 0.0
+            || !distance.is_finite()
+            || distance <= 0.0
+        {
+            return Err(invalid(
+                "half-plane point source and receiver must resolve the edge",
+            ));
+        }
+        let [ct, st] = half_angle(x / r, y / r);
+        let [cs, ss] = half_angle(xs / rs, ys / rs);
+        let cosine = [ct * cs + st * ss, ct * cs - st * ss];
+        let sine = [st * cs - ct * ss, st * cs + ct * ss];
+        let root = det::sqrt(r) * det::sqrt(rs);
+        let q = cosine.map(|c| 2.0 * root * c);
+        let radial = [x / r, y / r, 0.0];
+        let tangential = [-y / r, x / r, 0.0];
+        let ratio = det::sqrt(rs) / det::sqrt(r);
+        let q_gradient = core::array::from_fn(|j| {
+            core::array::from_fn(|i| ratio * (cosine[j] * radial[i] - sine[j] * tangential[i]))
+        });
+        let edge_gradient = [
+            (radial_sum / distance) * radial[0],
+            (radial_sum / distance) * radial[1],
+            dz / distance,
+        ];
+        let mut direct_delta = [[0.0; 3]; 2];
+        let mut direct_distance = [0.0; 2];
+        for j in 0..2 {
+            let delta = [
+                (Dd::from_f64(x) - Dd::from_f64(xs)).to_f64(),
+                (Dd::from_f64(y) - Dd::from_f64(if j == 0 { ys } else { -ys })).to_f64(),
+                dz,
+            ];
+            let d = det::hypot(det::hypot(delta[0], delta[1]), delta[2]);
+            if !d.is_finite() || (q[j] > 0.0 && d <= 0.0) {
+                return Err(invalid(
+                    "half-plane receiver coincides with a visible point-source singularity",
+                ));
+            }
+            direct_delta[j] = delta;
+            direct_distance[j] = d;
+        }
+        if q.iter()
+            .chain(q_gradient.iter().flatten())
+            .chain(&edge_gradient)
+            .any(|v| !v.is_finite())
+        {
+            return Err(invalid("half-plane point geometry is unrepresentable"));
+        }
+        Ok(Self {
+            distance,
+            q,
+            q_gradient,
+            edge_gradient,
+            direct_delta,
+            direct_distance,
+        })
+    }
+}
+
 struct PointKernel {
     distance: f64,
     kappa: Dd,
@@ -322,24 +408,8 @@ impl PointKernel {
         axes: [[f64; 3]; 3],
         controls: QuadratureLimits,
     ) -> Result<Self, AeroacError> {
-        let [xs, ys, zs] = source;
-        let [x, y, z] = point;
-        let rs = det::hypot(xs, ys);
-        let r = det::hypot(x, y);
-        let dz = (Dd::from_f64(z) - Dd::from_f64(zs)).to_f64();
-        let radial_sum = r + rs;
-        let distance = det::hypot(radial_sum, dz);
-        if !r.is_finite()
-            || r <= 0.0
-            || !rs.is_finite()
-            || rs <= 0.0
-            || !distance.is_finite()
-            || distance <= 0.0
-        {
-            return Err(invalid(
-                "half-plane point source and receiver must resolve the edge",
-            ));
-        }
+        let geometry = PointGeometry::new(source, point)?;
+        let distance = geometry.distance;
         let kappa = Dd::from_f64(k) * Dd::from_f64(distance);
         let velocity_scale = (1.0 / distance) / distance / (4.0 * PI * PI);
         let pressure_scale = omega_rho / distance / (4.0 * PI * PI);
@@ -354,24 +424,10 @@ impl PointKernel {
                 "half-plane point-source transfer scale is unrepresentable",
             ));
         }
-        let [ct, st] = half_angle(x / r, y / r);
-        let [cs, ss] = half_angle(xs / rs, ys / rs);
-        let cosine = [ct * cs + st * ss, ct * cs - st * ss];
-        let sine = [st * cs - ct * ss, st * cs + ct * ss];
-        let root = det::sqrt(r) * det::sqrt(rs);
-        let q = cosine.map(|c| 2.0 * root * c);
+        let q = geometry.q;
         let eta = q.map(|q| q / distance);
-        let radial = [x / r, y / r, 0.0];
-        let tangential = [-y / r, x / r, 0.0];
-        let ratio = det::sqrt(rs) / det::sqrt(r);
-        let q_gradient = core::array::from_fn(|j| {
-            core::array::from_fn(|i| ratio * (cosine[j] * radial[i] - sine[j] * tangential[i]))
-        });
-        let edge_gradient = [
-            (radial_sum / distance) * radial[0],
-            (radial_sum / distance) * radial[1],
-            dz / distance,
-        ];
+        let q_gradient = geometry.q_gradient;
+        let edge_gradient = geometry.edge_gradient;
         let phase = cis(kappa);
         let edge = phase.scale(1.0 / distance);
         let edge_derivative = phase * C64::new(-1.0 / distance, k).scale(1.0 / distance);
@@ -380,17 +436,8 @@ impl PointKernel {
         let mut gradient = [C64::ZERO; 3];
         for j in 0..2 {
             let factor = if j == 0 { 1.0 } else { sign };
-            let delta = [
-                (Dd::from_f64(x) - Dd::from_f64(xs)).to_f64(),
-                (Dd::from_f64(y) - Dd::from_f64(if j == 0 { ys } else { -ys })).to_f64(),
-                dz,
-            ];
-            let d = det::hypot(det::hypot(delta[0], delta[1]), delta[2]);
-            if !d.is_finite() || (q[j] > 0.0 && d <= 0.0) {
-                return Err(invalid(
-                    "half-plane receiver coincides with a visible point-source singularity",
-                ));
-            }
+            let delta = geometry.direct_delta[j];
+            let d = geometry.direct_distance[j];
             // An occluded image may coincide with the receiver. Its Green
             // term is absent; the remaining diffraction field stays finite.
             let mut value = edge.scale(1.0 / (8.0 * PI));
