@@ -11,13 +11,15 @@
 //! history. A local source answer does not establish support between endpoints,
 //! morphology, a spatial phase front, or a calibrated crystallization model.
 
-use super::{CrystallizationCaloricPair, CrystallizationVolumeState};
+use super::CrystallizationVolumeState;
+use super::source::{CrystallizationSourceError, CrystallizationSourcePair};
 use crate::phase::PhaseStateError;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarPropertyRequirement, is_fixed_external_coordinate, resolve_material_state_point,
 };
 use crate::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
+use crate::thermal::transport::ThermalTransportError;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
@@ -45,6 +47,7 @@ pub enum CrystallizationPropertyError {
     Phase(PhaseStateError),
     Kinetic(CrystallizationError),
     Material(ThermalMaterialError),
+    Transport(ThermalTransportError),
 }
 impl core::fmt::Display for CrystallizationPropertyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -55,6 +58,14 @@ impl std::error::Error for CrystallizationPropertyError {}
 impl From<PhaseStateError> for CrystallizationPropertyError {
     fn from(error: PhaseStateError) -> Self {
         Self::Phase(error)
+    }
+}
+impl From<CrystallizationSourceError> for CrystallizationPropertyError {
+    fn from(error: CrystallizationSourceError) -> Self {
+        match error {
+            CrystallizationSourceError::Phase(error) => Self::Phase(error),
+            CrystallizationSourceError::Transport(error) => Self::Transport(error),
+        }
     }
 }
 impl From<CrystallizationError> for CrystallizationPropertyError {
@@ -126,7 +137,7 @@ impl CrystallizationPopulationPropertyState {
 #[derive(Clone)]
 pub struct CrystallizationPropertySource<'a> {
     material: &'a MaterialCard,
-    pair: CrystallizationCaloricPair<'a>,
+    pair: CrystallizationSourcePair<'a>,
     law: CrystallizationLaw<'a>,
     original: ResolvedMaterialStatePoint,
     temperature_axis: String,
@@ -144,7 +155,7 @@ impl<'a> CrystallizationPropertySource<'a> {
     /// strain/rate/field/history-dependent sources need their separate owner.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pair: CrystallizationCaloricPair<'a>,
+        pair: impl Into<CrystallizationSourcePair<'a>>,
         law: CrystallizationLaw<'a>,
         initial: CrystallizationState,
         point: CrystallizationMaterialPoint<'a>,
@@ -154,7 +165,7 @@ impl<'a> CrystallizationPropertySource<'a> {
     ) -> Result<Self, CrystallizationPropertyError> {
         law.validate_state(initial, solve)?;
         Self::new_at(
-            pair,
+            pair.into(),
             law,
             initial.temperature_k(),
             initial.crystalline_mass_fraction(),
@@ -170,7 +181,7 @@ impl<'a> CrystallizationPropertySource<'a> {
     /// to that population closure; this does not average individual conductivity
     /// or stiffness values, or infer a microstructure-dependent mixing rule.
     pub fn for_population(
-        pair: CrystallizationCaloricPair<'a>,
+        pair: impl Into<CrystallizationSourcePair<'a>>,
         initial: &CrystallizationPopulation<'a>,
         point: CrystallizationMaterialPoint<'a>,
         requirements: &[ScalarPropertyRequirement],
@@ -180,7 +191,7 @@ impl<'a> CrystallizationPropertySource<'a> {
     ) -> Result<Self, CrystallizationPropertyError> {
         initial.validate(solve, &mut cancelled)?;
         let source = Self::new_at(
-            pair,
+            pair.into(),
             *initial.law(),
             initial.temperature_k(),
             initial.crystalline_mass_fraction(),
@@ -197,7 +208,7 @@ impl<'a> CrystallizationPropertySource<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn new_at(
-        pair: CrystallizationCaloricPair<'a>,
+        pair: CrystallizationSourcePair<'a>,
         law: CrystallizationLaw<'a>,
         temperature_k: f64,
         crystalline_mass_fraction: f64,
@@ -206,9 +217,9 @@ impl<'a> CrystallizationPropertySource<'a> {
         selection: MaterialPropertySelection,
         solve: CrystallizationSolve,
     ) -> Result<Self, CrystallizationPropertyError> {
-        if point.material.content_hash() != pair.parent().curve().material_card_identity()
-            || law.parent_caloric_identity() != Some(*pair.parent().identity().as_bytes())
-            || law.crystalline_caloric_identity() != Some(*pair.crystal().identity().as_bytes())
+        if point.material.content_hash() != pair.material_card_identity()
+            || law.parent_caloric_identity() != Some(*pair.parent_identity().as_bytes())
+            || law.crystalline_caloric_identity() != Some(*pair.crystal_identity().as_bytes())
             || law.config().temperature_range_k != pair.temperature_range_k()
         {
             return Err(invalid(
@@ -216,6 +227,14 @@ impl<'a> CrystallizationPropertySource<'a> {
             ));
         }
         admit_axes(point)?;
+        pair.admit_property_context(
+            point.context,
+            point.temperature_axis,
+            [
+                point.crystalline_mass_fraction_axis,
+                point.crystalline_volume_fraction_axis,
+            ],
+        )?;
         let volume = pair.volume_state(temperature_k, crystalline_mass_fraction)?;
         let query = query_at(point, temperature_k, crystalline_mass_fraction, volume)?;
         let original =
@@ -226,7 +245,8 @@ impl<'a> CrystallizationPropertySource<'a> {
             temperature_axis: point.temperature_axis,
             liquid_fraction_axis: None,
         };
-        let axes: Vec<_> = [
+        let pressure_coordinate = pair.pressure_coordinate();
+        let mut axes: Vec<_> = [
             point.crystalline_mass_fraction_axis,
             point.crystalline_volume_fraction_axis,
         ]
@@ -234,6 +254,9 @@ impl<'a> CrystallizationPropertySource<'a> {
         .flatten()
         .map(|axis| (axis, QuantitySpec::dimensional(Dims::NONE)))
         .collect();
+        if let Some(pressure) = pressure_coordinate {
+            axes.push(pressure);
+        }
         for property in original.properties() {
             thermal.admit_static_with_axes(property, &axes)?;
             let claim = point
@@ -245,6 +268,7 @@ impl<'a> CrystallizationPropertySource<'a> {
                 axis != point.temperature_axis
                     && Some(axis.as_str()) != point.crystalline_mass_fraction_axis
                     && Some(axis.as_str()) != point.crystalline_volume_fraction_axis
+                    && Some(axis.as_str()) != pressure_coordinate.map(|(owned, _)| owned)
                     && !is_fixed_external_coordinate(
                         axis,
                         query.axis_quantities().get(axis).copied(),

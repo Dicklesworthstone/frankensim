@@ -8,17 +8,18 @@
 //! distances and interface pressure are not inferred from the free phase volume.
 //!
 //! No equilibrium phase state or liquid fraction is manufactured from kinetic X.
-//! The source must apply over the intended crystallization history without an
-//! additional phase coordinate. This preparation proves identity and supported
-//! queries, not that physical applicability. Source/geometry/history changes
+//! Optional crystalline mass/volume coordinates follow the original kinetic
+//! inventories through both growth and remelting. They are distinct from liquid
+//! fractions or relative Avrami conversion. This preparation proves identity and
+//! supported queries, not physical applicability. Source/geometry/history changes
 //! require a new preparation; no speculative callback changes physical history.
 
 use super::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ThermalInterfacePoint,
 };
-use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::crystallization::properties::CrystallizationPropertyError;
+use crate::phase::crystallization::source::CrystallizationSourcePair;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedInterfaceStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
@@ -38,6 +39,10 @@ use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
 
 mod conduction;
 pub use conduction::{CrystallizationBulkConduction, CrystallizationBulkConductionResponse};
+
+mod phase_axes;
+pub use phase_axes::CrystallizationInterfacePhaseAxes;
+use phase_axes::PhaseCoordinates;
 
 /// Identity/geometry admission, original source refusal, or shared thermal refusal.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +113,7 @@ pub struct CrystallizationInterfaceContact<'a> {
     bindings: [CaloricBinding; 2],
     area_m2: f64,
     bulk: Option<CrystallizationBulkConduction<'a>>,
+    phase_coordinates: Option<PhaseCoordinates<'a>>,
 }
 
 impl<'a> CrystallizationInterfaceContact<'a> {
@@ -124,9 +130,9 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     /// silently switch the resistance source. Zero R requires infinite G and
     /// explicitly refuses instead of introducing a numerical regularization.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<'source>(
         point: ThermalInterfacePoint<'a>,
-        pairs: [&CrystallizationCaloricPair<'_>; 2],
+        pairs: [impl Into<CrystallizationSourcePair<'source>>; 2],
         parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
         area_m2: f64,
         fixed_pressure_axis: Option<&str>,
@@ -135,12 +141,13 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     ) -> Result<Self, CrystallizationInterfaceError> {
         let contact = Self::prepare(
             point,
-            pairs,
+            pairs.map(Into::into),
             parcels,
             area_m2,
             fixed_pressure_axis,
             fixed_separation_axis,
             selection,
+            None,
         )?;
         conductance(area_m2, contact.source.properties()[0].value_si())?;
         Ok(contact)
@@ -158,9 +165,9 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     /// finite bulk layers close the total resistance. No small contact epsilon
     /// or arbitrary conductivity mixing rule is introduced.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_bulk_conduction(
+    pub fn new_with_bulk_conduction<'source>(
         point: ThermalInterfacePoint<'a>,
-        pairs: [&CrystallizationCaloricPair<'_>; 2],
+        pairs: [impl Into<CrystallizationSourcePair<'source>>; 2],
         parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
         area_m2: f64,
         fixed_pressure_axis: Option<&str>,
@@ -170,12 +177,13 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     ) -> Result<Self, CrystallizationInterfaceError> {
         let mut contact = Self::prepare(
             point,
-            pairs,
+            pairs.map(Into::into),
             parcels,
             area_m2,
             fixed_pressure_axis,
             fixed_separation_axis,
             selection,
+            None,
         )?;
         if contact.bindings != bulk.bindings {
             return Err(invalid(
@@ -190,26 +198,31 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         point: ThermalInterfacePoint<'a>,
-        pairs: [&CrystallizationCaloricPair<'_>; 2],
+        pairs: [CrystallizationSourcePair<'_>; 2],
         parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
         area_m2: f64,
         fixed_pressure_axis: Option<&str>,
         fixed_separation_axis: Option<&str>,
         selection: MaterialPropertySelection,
+        phase_coordinates: Option<PhaseCoordinates<'a>>,
     ) -> Result<Self, CrystallizationInterfaceError> {
         if !area_m2.is_finite() || area_m2 <= 0.0 {
             return Err(invalid(
                 "contact requires an explicitly supplied positive finite area",
             ));
         }
-        admit_axes(point, fixed_pressure_axis, fixed_separation_axis)?;
+        admit_axes(
+            point,
+            fixed_pressure_axis,
+            fixed_separation_axis,
+            phase_coordinates.as_ref(),
+        )?;
         let surfaces = [point.interface.surface_a(), point.interface.surface_b()];
         for side in 0..2 {
             let card = point.materials[side];
             let card_identity = card.content_hash();
             if &surfaces[side].material != card.id()
-                || pairs[side].parent().curve().material_card_identity() != card_identity
-                || pairs[side].crystal().curve().material_card_identity() != card_identity
+                || pairs[side].material_card_identity() != card_identity
             {
                 return Err(invalid(
                     "contact requires the original ordered surface and bulk material cards",
@@ -217,14 +230,15 @@ impl<'a> CrystallizationInterfaceContact<'a> {
             }
         }
         let bindings = [
-            CaloricBinding::new(pairs[0], parcels[0])?,
-            CaloricBinding::new(pairs[1], parcels[1])?,
+            CaloricBinding::new(&pairs[0], parcels[0])?,
+            CaloricBinding::new(&pairs[1], parcels[1])?,
         ];
         let query = endpoint_query(
             point.context.clone(),
             point.temperature_axes,
             point.mean_temperature_axis,
             parcels,
+            phase_coordinates.as_ref(),
         )?;
         let requirement = ScalarPropertyRequirement::try_new(
             AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
@@ -266,6 +280,7 @@ impl<'a> CrystallizationInterfaceContact<'a> {
             bindings,
             area_m2,
             bulk: None,
+            phase_coordinates,
         })
     }
 
@@ -301,6 +316,7 @@ impl<'a> CrystallizationInterfaceContact<'a> {
             self.temperature_axes.each_ref().map(String::as_str),
             self.mean_temperature_axis.as_deref(),
             parcels,
+            self.phase_coordinates.as_ref(),
         )?;
         let source = self.source.at_query_point(self.interface, &query)?;
         let resistance_m2_k_w = source.properties()[0].value_si();
@@ -412,12 +428,12 @@ struct CaloricBinding {
 }
 impl CaloricBinding {
     fn new(
-        pair: &CrystallizationCaloricPair<'_>,
+        pair: &CrystallizationSourcePair<'_>,
         parcel: &IsobaricCrystallizationParcel<'_, '_>,
     ) -> Result<Self, CrystallizationInterfaceError> {
         let binding = Self {
             pair_identity: pair.identity(),
-            branch_identities: [pair.parent().identity(), pair.crystal().identity()],
+            branch_identities: [pair.parent_identity(), pair.crystal_identity()],
             temperature_range_k: pair.temperature_range_k(),
             config: parcel.law().config(),
             pressure_pa: parcel.pressure_pa(),
@@ -426,6 +442,14 @@ impl CaloricBinding {
         if range[0] < binding.temperature_range_k[0] || range[1] > binding.temperature_range_k[1] {
             return Err(invalid(
                 "contact kinetic domain leaves its original caloric pair",
+            ));
+        }
+        if pair
+            .pressure_pa()
+            .is_some_and(|pressure| pressure != parcel.pressure_pa())
+        {
+            return Err(invalid(
+                "contact parcel pressure differs from the original exact-Cp source pressure",
             ));
         }
         binding.admit(parcel)?;
@@ -455,6 +479,7 @@ fn admit_axes(
     point: ThermalInterfacePoint<'_>,
     pressure: Option<&str>,
     separation: Option<&str>,
+    phase_coordinates: Option<&PhaseCoordinates<'_>>,
 ) -> Result<(), CrystallizationInterfaceError> {
     if point.liquid_fraction_axes != [None, None] {
         return Err(invalid(
@@ -467,6 +492,11 @@ fn admit_axes(
         .chain(point.mean_temperature_axis)
         .chain(pressure)
         .chain(separation)
+        .chain(
+            phase_coordinates
+                .into_iter()
+                .flat_map(PhaseCoordinates::names),
+        )
         .collect();
     if axes
         .iter()
@@ -519,6 +549,9 @@ fn admit_axes(
             ));
         }
     }
+    if let Some(phase) = phase_coordinates {
+        phase.admit(point.context)?;
+    }
     Ok(())
 }
 
@@ -527,6 +560,7 @@ fn endpoint_query(
     axes: [&str; 2],
     mean: Option<&str>,
     parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
+    phase_coordinates: Option<&PhaseCoordinates<'_>>,
 ) -> Result<QueryPoint, CrystallizationInterfaceError> {
     for (axis, parcel) in axes.into_iter().zip(parcels) {
         query = query
@@ -541,7 +575,10 @@ fn endpoint_query(
             )
             .map_err(|e| ThermalMaterialError::Coordinate(e.to_string()))?;
     }
-    Ok(query)
+    match phase_coordinates {
+        Some(phase) => phase.update(query, parcels),
+        None => Ok(query),
+    }
 }
 fn conductance(area: f64, resistance: f64) -> Result<f64, CrystallizationInterfaceError> {
     if resistance == 0.0 {

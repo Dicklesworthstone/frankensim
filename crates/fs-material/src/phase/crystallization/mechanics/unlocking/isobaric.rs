@@ -22,8 +22,8 @@
 //! state together; a refusal or cancellation publishes neither candidate.
 
 use super::{CrystallizationUnlock, CrystallizationUnlockEnergy, UnlockedCrystallization};
-use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::crystallization::mechanics::CrystallizationMechanicsError;
+use crate::phase::crystallization::source::CrystallizationSourcePair;
 use fs_thermal::crystallization::CrystallizationError;
 use fs_thermal::crystallization::pressure::parcel::IsobaricCrystallizationParcel;
 use fs_thermal::crystallization::pressure::{
@@ -97,9 +97,9 @@ impl CrystallizationUnlock {
     ///
     /// The caller must adopt both returned states in the same accepted-state
     /// transaction and credit any explicit nonthermal export to its own owner.
-    pub fn thermalize_isobaric<'law, 'source>(
+    pub fn thermalize_isobaric<'law, 'source, 'pair>(
         self,
-        pair: &CrystallizationCaloricPair<'_>,
+        pair: impl Into<CrystallizationSourcePair<'pair>>,
         parcel: &IsobaricCrystallizationParcel<'law, 'source>,
         controls: IsobaricCrystallizationControls,
         mut cancelled: impl FnMut() -> bool,
@@ -112,15 +112,25 @@ impl CrystallizationUnlock {
     > {
         checkpoint(&mut cancelled)?;
         controls.validate()?;
+        let pair = pair.into();
         let invalid = CrystallizationMechanicsError::Invalid;
         let current = parcel.state();
         let law = parcel.law();
         let release = self.state.release_volume_state();
         if pair.identity() != release.caloric_pair_identity
-            || law.parent_caloric_identity() != Some(*pair.parent().identity().as_bytes())
-            || law.crystalline_caloric_identity() != Some(*pair.crystal().identity().as_bytes())
+            || law.parent_caloric_identity() != Some(*pair.parent_identity().as_bytes())
+            || law.crystalline_caloric_identity() != Some(*pair.crystal_identity().as_bytes())
         {
             return Err(CrystallizationMechanicsError::PairMismatch.into());
+        }
+        if pair
+            .pressure_pa()
+            .is_some_and(|pressure| pressure != parcel.pressure_pa())
+        {
+            return Err(invalid(
+                "isobaric parcel pressure differs from the original exact-Cp source",
+            )
+            .into());
         }
         if release.temperature_k != current.temperature_k()
             || release.crystalline_mass_fraction != current.crystalline_mass_fraction()

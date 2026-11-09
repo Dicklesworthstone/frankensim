@@ -17,8 +17,8 @@
 //! source admission, energy closure or cancellation publishes neither candidate.
 
 use super::{CrystallizationUnlock, CrystallizationUnlockEnergy, UnlockedCrystallization};
-use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::crystallization::mechanics::CrystallizationMechanicsError;
+use crate::phase::crystallization::source::CrystallizationSourcePair;
 use fs_thermal::enthalpy::crystallization::{
     CrystallizationAudit, CrystallizationImpulseControls, CrystallizationSimulation,
     CrystallizationTimelineError,
@@ -94,9 +94,9 @@ impl CrystallizationUnlock {
     /// heat source. The caller separately owns any exported energy destination.
     /// Original phase-domain, event-order and cancellation refusals propagate.
     /// The caller must adopt both returned states in its existing transaction.
-    pub fn thermalize<'a>(
+    pub fn thermalize<'a, 'source>(
         self,
-        pair: &CrystallizationCaloricPair<'_>,
+        pair: impl Into<CrystallizationSourcePair<'source>>,
         thermal: &CrystallizationSimulation<'a>,
         cell_id: CellId,
         controls: CrystallizationImpulseControls,
@@ -110,6 +110,7 @@ impl CrystallizationUnlock {
     > {
         checkpoint()?;
         controls.validate()?;
+        let pair = pair.into();
         let invalid = CrystallizationMechanicsError::Invalid;
         let cell = thermal
             .cells()
@@ -124,8 +125,8 @@ impl CrystallizationUnlock {
         ))?;
         let release = self.state.release_volume_state();
         if pair.identity() != release.caloric_pair_identity
-            || law.parent_caloric_identity() != Some(*pair.parent().identity().as_bytes())
-            || law.crystalline_caloric_identity() != Some(*pair.crystal().identity().as_bytes())
+            || law.parent_caloric_identity() != Some(*pair.parent_identity().as_bytes())
+            || law.crystalline_caloric_identity() != Some(*pair.crystal_identity().as_bytes())
         {
             return Err(CrystallizationMechanicsError::PairMismatch.into());
         }

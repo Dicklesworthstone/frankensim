@@ -6,10 +6,10 @@
 //! bulk temperature profile or conductivity calibration is inferred here.
 
 use super::{CaloricBinding, CrystallizationInterfaceError, invalid};
-use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::crystallization::properties::{
     CrystallizationMaterialPoint, CrystallizationPropertySource, CrystallizationPropertyState,
 };
+use crate::phase::crystallization::source::CrystallizationSourcePair;
 use crate::state_point::{
     MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
@@ -55,12 +55,13 @@ impl<'a> CrystallizationBulkConduction<'a> {
     /// Later domain failures cannot select a different conductivity claim.
     pub fn new(
         points: [CrystallizationMaterialPoint<'a>; 2],
-        pairs: [CrystallizationCaloricPair<'a>; 2],
+        pairs: [impl Into<CrystallizationSourcePair<'a>>; 2],
         parcels: [&IsobaricCrystallizationParcel<'_, 'a>; 2],
         distances_m: [f64; 2],
         selections: [MaterialPropertySelection; 2],
         solves: [CrystallizationSolve; 2],
     ) -> Result<Self, CrystallizationInterfaceError> {
+        let pairs = pairs.map(Into::into);
         if distances_m.iter().any(|d| !d.is_finite() || *d <= 0.0) {
             return Err(invalid(
                 "bulk contact needs two explicit positive finite distances",

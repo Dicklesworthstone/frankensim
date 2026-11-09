@@ -1,8 +1,10 @@
 //! Original material cards and two-temperature interface claims, with authored
 //! analytic values. These fixtures establish source/model behavior, not data quality.
 mod conduction_tests;
+mod phase_axes_tests;
 
 use super::*;
+use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::{EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

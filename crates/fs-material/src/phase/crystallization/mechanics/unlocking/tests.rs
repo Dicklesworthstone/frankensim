@@ -1,4 +1,5 @@
 use super::*;
+use crate::phase::crystallization::CrystallizationCaloricPair;
 use crate::phase::{EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase};
 use fs_thermal::crystallization::CrystallizationSolve;
 

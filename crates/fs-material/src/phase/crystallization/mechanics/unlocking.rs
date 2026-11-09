@@ -18,7 +18,7 @@
 //! mechanism. Subsequent locking requires another explicit stress-free choice.
 
 use super::{
-    CrystallizationCaloricPair, CrystallizationLock, CrystallizationMechanicsError,
+    CrystallizationLock, CrystallizationMechanicsError, CrystallizationSourcePair,
     CrystallizationStrainLimits, CrystallizationVolumeState, FrozenCrystallizationElastic, within,
 };
 use crate::elastic::acoustic::ElasticAcousticState;
@@ -196,13 +196,14 @@ impl UnlockedCrystallization {
     /// Preparing a new elastic snapshot must independently admit its original
     /// elastic source at that temperature/fraction. Locking itself stores zero
     /// elastic energy at the selected total strain and creates no heat credit.
-    pub fn relock_at(
+    pub fn relock_at<'source>(
         &self,
-        pair: &CrystallizationCaloricPair<'_>,
+        pair: impl Into<CrystallizationSourcePair<'source>>,
         temperature_k: f64,
         crystalline_mass_fraction: f64,
         total_strain: Voigt,
     ) -> Result<CrystallizationLock, CrystallizationMechanicsError> {
+        let pair = pair.into();
         if pair.identity() != self.release_volume.caloric_pair_identity {
             return Err(CrystallizationMechanicsError::PairMismatch);
         }

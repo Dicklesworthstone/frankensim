@@ -19,8 +19,10 @@
 //! elastic/parameter work is NOT included in the thermal crystallization heat
 //! balance, and this adapter makes no closed coupled-energy claim.
 
-use super::{CrystallizationCaloricPair, CrystallizationVolumeState};
+use super::CrystallizationVolumeState;
+use super::source::{CrystallizationSourceError, CrystallizationSourcePair};
 use crate::phase::PhaseStateError;
+use crate::thermal::transport::ThermalTransportError;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
@@ -31,12 +33,21 @@ pub mod unlocking;
 #[derive(Clone, Debug, PartialEq)]
 pub enum CrystallizationMechanicsError {
     Phase(PhaseStateError),
+    Transport(ThermalTransportError),
     Invalid(&'static str),
     PairMismatch,
 }
 impl From<PhaseStateError> for CrystallizationMechanicsError {
     fn from(error: PhaseStateError) -> Self {
         Self::Phase(error)
+    }
+}
+impl From<CrystallizationSourceError> for CrystallizationMechanicsError {
+    fn from(error: CrystallizationSourceError) -> Self {
+        match error {
+            CrystallizationSourceError::Phase(error) => Self::Phase(error),
+            CrystallizationSourceError::Transport(error) => Self::Transport(error),
+        }
     }
 }
 impl core::fmt::Display for CrystallizationMechanicsError {
@@ -63,8 +74,8 @@ pub struct CrystallizationLock {
     total_strain: Voigt,
 }
 impl CrystallizationLock {
-    pub fn new(
-        pair: &CrystallizationCaloricPair<'_>,
+    pub fn new<'source>(
+        pair: impl Into<CrystallizationSourcePair<'source>>,
         temperature_k: f64,
         crystalline_mass_fraction: f64,
         total_strain: Voigt,
@@ -75,7 +86,9 @@ impl CrystallizationLock {
             ));
         }
         Ok(Self {
-            volume: pair.volume_state(temperature_k, crystalline_mass_fraction)?,
+            volume: pair
+                .into()
+                .volume_state(temperature_k, crystalline_mass_fraction)?,
             total_strain,
         })
     }
@@ -92,15 +105,16 @@ impl CrystallizationLock {
     /// Prepare one fixed thermal/kinetic mechanical snapshot. The borrowed law
     /// must be elastic, valid at the current state, and stress free at zero
     /// elastic strain. Existing prestress or thermal eigenstrain is refused.
-    pub fn freeze<'a, L: SmallStrainLaw<State = ()> + ?Sized>(
+    pub fn freeze<'a, 'source, L: SmallStrainLaw<State = ()> + ?Sized>(
         &self,
-        pair: &CrystallizationCaloricPair<'_>,
+        pair: impl Into<CrystallizationSourcePair<'source>>,
         temperature_k: f64,
         crystalline_mass_fraction: f64,
         elastic: &'a L,
         limits: CrystallizationStrainLimits,
     ) -> Result<FrozenCrystallizationElastic<'a, L>, CrystallizationMechanicsError> {
         let invalid = CrystallizationMechanicsError::Invalid;
+        let pair = pair.into();
         if pair.identity() != self.volume.caloric_pair_identity {
             return Err(CrystallizationMechanicsError::PairMismatch);
         }

@@ -21,6 +21,9 @@ pub mod kinetics;
 /// Original material properties evaluated on the accepted kinetic history.
 pub mod properties;
 
+/// Shared access to original chart or exact-Cp crystallization sources.
+pub mod source;
+
 /// Relative entropy and phase driving energy from the original caloric pair.
 pub mod entropy;
 
@@ -404,44 +407,13 @@ impl<'a> CrystallizationCaloricPair<'a> {
         crystalline_mass_fraction: f64,
     ) -> Result<CrystallizationVolumeState, PhaseStateError> {
         self.admit_temperature(temperature_k)?;
-        let x = crystalline_mass_fraction;
-        if !x.is_finite() || !(0.0..=1.0).contains(&x) {
-            return Err(invalid("crystalline mass fraction must be in [0, 1]"));
-        }
-        let parent_density_kg_m3 = self.parent.density_at_temperature(temperature_k)?;
-        let crystal_density_kg_m3 = self.crystal.density_at_temperature(temperature_k)?;
-        let vc = x / crystal_density_kg_m3;
-        let vp = (1.0 - x) / parent_density_kg_m3;
-        let specific_volume_m3_kg = vc + vp;
-        let bulk_density_kg_m3 = specific_volume_m3_kg.recip();
-        if !specific_volume_m3_kg.is_finite()
-            || specific_volume_m3_kg <= 0.0
-            || !bulk_density_kg_m3.is_finite()
-            || bulk_density_kg_m3 <= 0.0
-            || (x > 0.0 && vc == 0.0)
-            || (x < 1.0 && vp == 0.0)
-        {
-            return Err(invalid(
-                "crystallization phase volumes are not representable",
-            ));
-        }
-        let crystalline_volume_fraction = if x == 0.0 || x == 1.0 {
-            x
-        } else if vc <= vp {
-            vc / specific_volume_m3_kg
-        } else {
-            1.0 - vp / specific_volume_m3_kg
-        };
-        Ok(CrystallizationVolumeState {
-            caloric_pair_identity: self.identity,
+        CrystallizationVolumeState::from_densities(
+            self.identity,
             temperature_k,
-            crystalline_mass_fraction: x,
-            crystalline_volume_fraction,
-            parent_density_kg_m3,
-            crystal_density_kg_m3,
-            specific_volume_m3_kg,
-            bulk_density_kg_m3,
-        })
+            crystalline_mass_fraction,
+            self.parent.density_at_temperature(temperature_k)?,
+            self.crystal.density_at_temperature(temperature_k)?,
+        )
     }
 
     fn admit_temperature(&self, temperature_k: f64) -> Result<(), PhaseStateError> {
@@ -469,6 +441,63 @@ pub struct CrystallizationVolumeState {
     pub crystal_density_kg_m3: f64,
     pub specific_volume_m3_kg: f64,
     pub bulk_density_kg_m3: f64,
+}
+
+impl CrystallizationVolumeState {
+    // Both source representations use this same additive-specific-volume law.
+    // The source owner must admit T before supplying its original densities.
+    fn from_densities(
+        caloric_pair_identity: ContentHash,
+        temperature_k: f64,
+        crystalline_mass_fraction: f64,
+        parent_density_kg_m3: f64,
+        crystal_density_kg_m3: f64,
+    ) -> Result<Self, PhaseStateError> {
+        let x = crystalline_mass_fraction;
+        if !x.is_finite() || !(0.0..=1.0).contains(&x) {
+            return Err(invalid("crystalline mass fraction must be in [0, 1]"));
+        }
+        if [parent_density_kg_m3, crystal_density_kg_m3]
+            .into_iter()
+            .any(|density| !density.is_finite() || density <= 0.0)
+        {
+            return Err(invalid(
+                "both original phase densities must be finite and positive",
+            ));
+        }
+        let vc = x / crystal_density_kg_m3;
+        let vp = (1.0 - x) / parent_density_kg_m3;
+        let specific_volume_m3_kg = vc + vp;
+        let bulk_density_kg_m3 = specific_volume_m3_kg.recip();
+        if !specific_volume_m3_kg.is_finite()
+            || specific_volume_m3_kg <= 0.0
+            || !bulk_density_kg_m3.is_finite()
+            || bulk_density_kg_m3 <= 0.0
+            || (x > 0.0 && vc == 0.0)
+            || (x < 1.0 && vp == 0.0)
+        {
+            return Err(invalid(
+                "crystallization phase volumes are not representable",
+            ));
+        }
+        let crystalline_volume_fraction = if x == 0.0 || x == 1.0 {
+            x
+        } else if vc <= vp {
+            vc / specific_volume_m3_kg
+        } else {
+            1.0 - vp / specific_volume_m3_kg
+        };
+        Ok(Self {
+            caloric_pair_identity,
+            temperature_k,
+            crystalline_mass_fraction: x,
+            crystalline_volume_fraction,
+            parent_density_kg_m3,
+            crystal_density_kg_m3,
+            specific_volume_m3_kg,
+            bulk_density_kg_m3,
+        })
+    }
 }
 
 fn invalid(what: &'static str) -> PhaseStateError {

@@ -1765,6 +1765,21 @@ declared conductivity source within the existing implicit network residual.
 These manufactured cases test numerical integration, not material calibration,
 source support between endpoints, morphology or coupled mechanical work.
 
+`phase::crystallization::source::CrystallizationSourcePair` lets these same
+property, locking, shrinkage and unlocking adapters consume the original
+`IsobaricCrystallizationPair`. Its exact Cp integrals and phase-specific free
+expansion are borrowed directly; no sampled replacement chart is introduced.
+The common mass-to-volume conversion retains the pair and both density-source
+identities. Exact-Cp property queries must preserve the original temperature
+axis and fixed pressure/composition coordinates. A calorics-only pair refuses
+volume-dependent operations until both original phase densities are supplied.
+Isobaric elastic-release transfers additionally check the actual source pressure
+and retain the existing separate heat, internal-energy and pressure-work account.
+The `crystallization_exact_cp` regressions exercise analytic recalescence, live
+mass/volume properties, free/constrained shrinkage and conservative elastic
+release on manufactured affine-Cp and free-expansion sources. Continuous
+thermomechanical feedback and measured material validation remain separate work.
+
 ### Material properties of retained crystal populations
 
 The original thermal `CrystallizationPopulation` equilibrates incoming masses
@@ -1797,6 +1812,21 @@ These stationary isotropic layer laws do not infer moving geometry, spatial
 temperature profiles or material calibration. Focused regressions specify
 analytic heat/latent balances, distinct crystal coordinates, both resistances,
 insulation and transactional source refusal.
+
+`CrystallizationInterfaceContact::new_with_crystallinity` additionally refreshes
+separate optional crystalline mass and volume coordinates for both ordered
+interface sides before every pinned resistance query. Growth and partial
+remelting therefore change conductance at their actual candidate state, including
+on an isothermal melting plateau. Volume fractions use the original phase
+densities; neither relative Avrami conversion nor liquid fraction substitutes
+for crystalline mass fraction. Original chart and exact-Cp pairs share this
+path, including optional bulk conduction and the existing atomic heat/history/
+pressure-work transaction. Unsupported joint source domains refuse without
+switching claims or publishing either parcel. Applying each uniform bulk phase
+inventory to its interface is an explicitly admitted source assumption, not a
+prediction of surface enrichment or morphology. Manufactured regressions check
+independent remelting and growth heat balances, density-dependent coordinates,
+accepted receipts, unit/axis admission and transactional source refusal.
 
 ## Original mixed pressure dual without unused remainder tangents
 
