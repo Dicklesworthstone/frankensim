@@ -17,10 +17,15 @@ use super::{ElementCommit, Frame2d, SectionModel};
 use crate::SolidError;
 use crate::fiber::SectionState;
 use fs_exec::Cx;
+use fs_material::laminate::strength::PreparedLaminateStrength;
 use fs_material::laminate::thermal::LayerThermalStress;
 use fs_material::laminate::thermal::beam::PreparedLaminateBeam;
 use fs_material::laminate::thermal::source::{LaminateThermalSource, ResolvedLaminateThermal};
 use std::sync::Arc;
+
+/// Source-pinned maximum-stress indications at accepted native stations.
+pub mod strength;
+pub use strength::FrameLaminateStrengthAssessment;
 
 fn invalid(what: &str) -> SolidError {
     SolidError::MaterialRefused { what: what.into() }
@@ -43,6 +48,9 @@ pub(super) struct FrameLaminateBinding {
     width_m: f64,
     axis_offset_m: f64,
     linear_strain_limit: f64,
+    // Original per-station selections. Refresh evaluates these exact claims,
+    // even when another claim becomes usable at the new temperature.
+    strength: Option<Vec<Arc<PreparedLaminateStrength>>>,
 }
 
 /// Immutable current station with original material cards and reference paths.
@@ -51,6 +59,7 @@ pub struct FrameLaminateSection {
     binding: Arc<FrameLaminateBinding>,
     resolved: Arc<ResolvedLaminateThermal>,
     prepared: PreparedLaminateBeam,
+    strength: Option<Arc<PreparedLaminateStrength>>,
 }
 
 impl FrameLaminateSection {
@@ -64,6 +73,13 @@ impl FrameLaminateSection {
     #[must_use]
     pub const fn prepared(&self) -> &PreparedLaminateBeam {
         &self.prepared
+    }
+
+    /// Current strength sources bound to this exact mechanical snapshot.
+    /// Present only after [`Frame2d::with_laminate_strength`] succeeds.
+    #[must_use]
+    pub fn strength(&self) -> Option<&PreparedLaminateStrength> {
+        self.strength.as_deref()
     }
 
     /// Bound on total, free and elastic in-plane strain tensor norms.
@@ -146,12 +162,26 @@ fn prepare_stations(
     cx: &Cx<'_>,
 ) -> Result<Vec<SectionModel>, SolidError> {
     let mut sections = Vec::with_capacity(temperatures_k.len());
-    for temperatures in temperatures_k {
+    for (station, temperatures) in temperatures_k.iter().enumerate() {
         checkpoint(cx)?;
-        let resolved = binding
-            .source
-            .at_temperatures(temperatures, || cx.checkpoint().is_err())
-            .map_err(|error| source_error(error, cx))?;
+        let (resolved, strength) = if let Some(original) = &binding.strength {
+            let current = original[station]
+                .at_temperatures(temperatures, || cx.checkpoint().is_err())
+                .map_err(|error| source_error(error, cx))?;
+            // The strength owner refreshes mechanics and all original strength
+            // claims together. Clone its exact prepared Arc, not a separately
+            // queried equivalent section: temperature-dependent strength can
+            // change even when every mechanical coefficient remains equal.
+            (current.thermal().clone(), Some(Arc::new(current)))
+        } else {
+            (
+                binding
+                    .source
+                    .at_temperatures(temperatures, || cx.checkpoint().is_err())
+                    .map_err(|error| source_error(error, cx))?,
+                None,
+            )
+        };
         let prepared = PreparedLaminateBeam::try_new(
             Arc::clone(resolved.prepared()),
             binding.width_m,
@@ -163,6 +193,7 @@ fn prepare_stations(
             binding: Arc::clone(binding),
             resolved: Arc::new(resolved),
             prepared,
+            strength,
         };
         // Admit complete original thermal strain, including opposing strains
         // that would disappear in an averaged section resultant.
@@ -219,6 +250,7 @@ impl Frame2d {
             width_m,
             axis_offset_m,
             linear_strain_limit,
+            strength: None,
         });
         let sections = prepare_stations(&binding, temperatures_k, cx)?;
         let SectionModel::LaminateThermal(first) = &sections[0] else {
@@ -262,6 +294,8 @@ impl Frame2d {
     /// velocities and original inertia are preserved; native compatibility is
     /// solved at that pose before any candidate is returned. The caller then
     /// owns supported equilibrium or frozen-temperature time advancement.
+    /// Attached strength claims refresh at the same temperatures and remain
+    /// pinned; any unavailable strength refuses the complete thermal update.
     pub fn with_laminate_temperatures(
         &self,
         element: usize,

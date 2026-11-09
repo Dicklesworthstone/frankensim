@@ -22,6 +22,9 @@ use fs_solid::frame2d::FrameMassFormulation;
 use fs_solid::{Frame2d, Geometry, SolidError};
 use std::sync::Arc;
 
+#[path = "frame_laminate_thermal/strength.rs"]
+mod strength;
+
 #[derive(Clone, Copy)]
 struct Ply {
     h: f64,
