@@ -23,7 +23,7 @@ use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
 /// Hard species/work bound for the constitutive solve.
 pub const MAX_MAXWELL_STEFAN_SPECIES_V1: usize = 128;
 /// Fixed operation-tree version of the barycentric friction solve.
-pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 3;
+pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 4;
 
 /// Explicit checks on original constitutive equations and the mass frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,7 +207,11 @@ impl MaxwellStefanV1 {
     /// their entering fluxes still force the coupled positive-composition block.
     /// Its solve costs O(k³) for k positive fractions, while complete source-data
     /// validation and original-row checks remain O(n²). A binary mixture uses
-    /// its analytical two-species solution. No species or driving force is dropped.
+    /// its analytical two-species solution. Equal active pair diffusivities
+    /// likewise avoid the cubic solve: linear algebra in ordinary cases and
+    /// pairwise evaluation for cancellation-prone components. Complete
+    /// admission and original-row checks remain O(n²). Unequal pair data never
+    /// select that specialization. No species or driving force is dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate<'a>(
         &self,

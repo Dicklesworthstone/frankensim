@@ -3031,6 +3031,31 @@ The exact production module and its genuine fs-qty/fs-blake3 dependencies passed
 all 22 native leaf tests. This focused result is not a workspace/DSR result or
 experimental transport qualification.
 
+### Equal-pair diffusion without a cubic solve
+
+Evaluator version 4 specializes exactly equal active pair diffusivities.
+Unequal pairs retain the original coupled solve; absent/absent pairs retain
+their complete source admission without setting this physical coefficient.
+For the scaled response, the common friction matrix is S*I-x*1^T, S=sum(x).
+Its frame-constrained solution uses the linear formula
+z=(f-x*(w.f)/(w.x))/S, with the original omitted force row and frame weights.
+
+Near subtractive cancellation, that same numerator is evaluated through
+off-diagonal pairs w_j*(x_j*f_i-x_i*f_j). The self-pair cancels algebraically;
+balanced products retain representable trace responses under extreme molar-mass
+contrasts. The original frame closes the final component directly. No species,
+force or flux is clipped, and all published original-row/frame checks remain.
+
+Ordinary solution algebra is O(n), and the bounded pair evaluation is O(n^2)
+in the worst case. Complete admission and original-equation checks remain
+O(n^2); reusable heap storage and bounded stack scratch require no successful
+evaluation allocation. These are operation bounds, not a measured speedup.
+Two new G1 groups recover dense 3–128-species fluxes in both frames across
+240 orders of pair diffusivity, and retain extreme-mass and subnormal trace
+responses. All 24 native tests of the real module and its genuine fs-qty and
+fs-blake3 dependencies passed. This is a focused module result, not a full
+workspace/DSR result or experimental transport qualification.
+
 
 ## Source-bound dilute-gas collision transport
 

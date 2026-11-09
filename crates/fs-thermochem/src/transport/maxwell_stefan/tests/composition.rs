@@ -321,3 +321,121 @@ fn g0_invalid_absent_pair_data_still_refuses() {
         ));
     }
 }
+
+#[test]
+fn g1_common_pair_diffusion_recovers_dense_fluxes_in_both_frames() {
+    for n in [3, 8, 32, 128] {
+        let masses: Vec<f64> = (0..n).map(|i| 0.002 + 0.003 * (i % 17) as f64).collect();
+        let owner = model(&masses);
+        let x = vec![1.0 / n as f64; n];
+        let concentration = 2.5;
+        let mut work = owner.workspace().unwrap();
+        for mass_frame in [true, false] {
+            let mut primary: Vec<f64> = (0..n)
+                .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 } * (1 + i % 7) as f64 * 1e-9)
+                .collect();
+            primary[n - 1] = -sum(primary[..n - 1].iter().copied());
+            let molar: Vec<f64> = primary
+                .iter()
+                .zip(&masses)
+                .map(|(&value, &mass)| if mass_frame { value / mass } else { value })
+                .collect();
+            for coefficient in [1e-120, 1e-5, 1e120] {
+                let d = matrix(n, coefficient);
+                let forces = original_forces(&x, &molar, &d, concentration);
+                let actual = if mass_frame {
+                    owner
+                        .evaluate_driving_forces(
+                            &x,
+                            &forces,
+                            AmountConcentration::new(concentration),
+                            &d,
+                            MaxwellStefanSolveV1::default(),
+                            &mut work,
+                            || false,
+                        )
+                        .unwrap()
+                        .mass_fluxes()
+                        .to_vec()
+                } else {
+                    owner
+                        .evaluate_molar_driving_forces(
+                            &x,
+                            &forces,
+                            AmountConcentration::new(concentration),
+                            &d,
+                            MaxwellStefanMolarSolveV1::default(),
+                            &mut work,
+                            || false,
+                        )
+                        .unwrap()
+                        .molar_fluxes()
+                        .to_vec()
+                };
+                for (i, (&got, &expected)) in actual.iter().zip(&primary).enumerate() {
+                    assert!(
+                        (got - expected).abs() <= 3e-11 * expected.abs().max(1e-9),
+                        "n={n}, i={i}, mass_frame={mass_frame}, D={coefficient:e}, got={got:e}, expected={expected:e}",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_common_diffusion_preserves_tiny_mass_frame_and_trace_responses() {
+    for trace in [1e-100, 1e-200, 1e-300] {
+        let owner = model(&[trace, 1.0, trace]);
+        let mut work = owner.workspace().unwrap();
+        let d = matrix(3, 1.0);
+        let result = owner
+            .evaluate_driving_forces(
+                &[0.5, 0.25, 0.25],
+                &[0.1, -0.1, 0.0],
+                AmountConcentration::new(1.0),
+                &d,
+                MaxwellStefanSolveV1::default(),
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        // These limits follow from the full original friction equations.
+        // The heavy species has a representable O(trace) response even though
+        // a direct closed-form subtraction rounds its O(1) terms to equality.
+        for (&got, expected) in
+            result
+                .mass_fluxes()
+                .iter()
+                .zip([-0.3 * trace, 0.4 * trace, -0.1 * trace])
+        {
+            assert!(
+                (got / expected - 1.0).abs() < 3e-13,
+                "trace={trace:e}, got={got:e}, expected={expected:e}"
+            );
+        }
+
+        let owner = model(&[1.0; 3]);
+        let mut work = owner.workspace().unwrap();
+        let d = matrix(3, 1e-10);
+        let result = owner
+            .evaluate_molar_driving_forces(
+                &[1.0, trace, trace],
+                &[0.0, trace, -trace],
+                AmountConcentration::new(1.0),
+                &d,
+                MaxwellStefanMolarSolveV1::default(),
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(result.molar_fluxes()[0], 0.0);
+        for (&got, expected) in result.molar_fluxes()[1..]
+            .iter()
+            .zip([-1e-10 * trace, 1e-10 * trace])
+        {
+            assert_ne!(got, 0.0, "a representable trace flux must survive");
+            assert!((got / expected - 1.0).abs() < 2e-12);
+        }
+    }
+}
