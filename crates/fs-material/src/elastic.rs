@@ -114,6 +114,12 @@ fn validate_strain_limit(strain_limit: f64) -> Result<(), MaterialError> {
     }
 }
 
+fn admits_elastic_strain(strain: &Voigt, limit: f64) -> bool {
+    // The tensor Frobenius norm includes BOTH shear entries. Avoid squaring
+    // the limit: calibrated tiny or large finite bounds must not under/overflow.
+    limit.is_finite() && limit > 0.0 && crate::tensor::frobenius_norm(strain) <= limit
+}
+
 fn apply(c: &Tangent6, strain: &Voigt) -> Voigt {
     let mut s = [0.0f64; 6];
     for (row, out) in c.iter().zip(s.iter_mut()) {
@@ -173,6 +179,10 @@ impl SmallStrainLaw for IsotropicElastic {
     }
 
     fn update_state(&self, _strain: &Voigt, (): &Self::State) {}
+
+    fn admits_strain(&self, strain: &Voigt) -> bool {
+        admits_elastic_strain(strain, self.strain_limit)
+    }
 
     fn admissibility(&self) -> MaterialAdmissibility {
         MaterialAdmissibility {
@@ -354,6 +364,10 @@ impl SmallStrainLaw for OrthotropicElastic {
     }
 
     fn update_state(&self, _strain: &Voigt, (): &Self::State) {}
+
+    fn admits_strain(&self, strain: &Voigt) -> bool {
+        admits_elastic_strain(strain, self.strain_limit)
+    }
 
     fn admissibility(&self) -> MaterialAdmissibility {
         MaterialAdmissibility {

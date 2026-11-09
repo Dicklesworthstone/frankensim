@@ -207,6 +207,17 @@ pub trait SmallStrainLaw {
     /// Commit the state update for `strain`.
     fn update_state(&self, strain: &Voigt, state: &Self::State) -> Self::State;
 
+    /// Cheap admission of the law's original strain domain before a checked
+    /// consumer evaluates stress, tangent or a history update. This does not
+    /// change the raw kernels' extrapolation semantics. The default admits
+    /// finite strain only; laws with calibrated strain bounds override it.
+    /// History, temperature and other source conditions remain with their
+    /// original checked constitutive owner. A true result is not a general
+    /// material-validity or small-rotation certificate.
+    fn admits_strain(&self, strain: &Voigt) -> bool {
+        strain.iter().all(|value| value.is_finite())
+    }
+
     /// The law's thermodynamic declarations.
     fn admissibility(&self) -> MaterialAdmissibility;
 
@@ -231,6 +242,9 @@ impl<L: SmallStrainLaw + ?Sized> SmallStrainLaw for &L {
     }
     fn update_state(&self, strain: &Voigt, state: &Self::State) -> Self::State {
         (**self).update_state(strain, state)
+    }
+    fn admits_strain(&self, strain: &Voigt) -> bool {
+        (**self).admits_strain(strain)
     }
     fn admissibility(&self) -> MaterialAdmissibility {
         (**self).admissibility()

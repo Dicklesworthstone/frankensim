@@ -131,6 +131,45 @@ fn axial_return(strain: f64, plastic: &mut f64, alpha: &mut f64, viscosity: f64)
 }
 
 #[test]
+fn elastic_hex_material_bounds_retain_compatible_and_pointwise_strain() {
+    let (nodes, cells) = mesh([1, 1, 1], |s, t, v| [s, t, v]);
+    let law = IsotropicElastic::new(E, NU, 0.001).unwrap();
+    let mut p = problem(&nodes, &cells, &law, &[], &[1.0]);
+    let old = vec![(); 8];
+    let inside: Vec<_> = nodes
+        .iter()
+        .flat_map(|x| [0.0005 * x[0], 0.0, 0.0])
+        .collect();
+    let outside: Vec<_> = nodes
+        .iter()
+        .flat_map(|x| [0.0015 * x[0], 0.0, 0.0])
+        .collect();
+    with_cx(|cx| {
+        assert!(p.internal_force(&inside, &old, cx).is_ok());
+        assert!(p.tangent_matrix(&inside, &old, cx).is_ok());
+        assert!(p.internal_force(&outside, &old, cx).is_err());
+        assert!(p.tangent_matrix(&outside, &old, cx).is_err());
+    });
+    let high = 0.5 + 0.5 / 3.0_f64.sqrt();
+    let amplitude = 0.001075;
+    assert!(amplitude * high * 1.5_f64.sqrt() > law.strain_limit);
+    assert!(amplitude * ((7.0 / 6.0) * high * high + 1.0 / 12.0).sqrt() < law.strain_limit);
+    let hidden: Vec<_> = nodes
+        .iter()
+        .flat_map(|x| [amplitude * x[0] * x[1], 0.0, 0.0])
+        .collect();
+    assert!(with_cx(|cx| p.internal_force(&hidden, &old, cx)).is_err());
+    assert!(with_cx(|cx| p.tangent_matrix(&hidden, &old, cx)).is_err());
+    let mut point_laws = vec![IsotropicElastic::new(E, NU, 0.02).unwrap(); 8];
+    point_laws[7] = law.clone();
+    let groups = [point_laws.as_slice()];
+    p.laws = SmallStrainLawField::PerQuadrature(&groups);
+    assert!(with_cx(|cx| p.internal_force(&outside, &old, cx)).is_err());
+    assert!(with_cx(|cx| p.tangent_matrix(&outside, &old, cx)).is_err());
+    assert_eq!(old, vec![(); 8]);
+}
+
+#[test]
 fn hex8_geometry_and_cyclic_plastic_patch_preserve_transverse_flow_and_permanent_set() {
     use fs_solid::linear3::hex::{HEX27_REFERENCE_NODES, hex8_shapes};
     for (a, reference) in HEX27_REFERENCE_NODES[..8].iter().enumerate() {

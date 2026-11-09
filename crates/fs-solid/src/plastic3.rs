@@ -559,7 +559,13 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                 checkpoint(cx)?;
             }
             let strain = Self::strain(element, u);
-            let sigma = self.laws.at(index).stress(&strain, &states[index]);
+            let law = self.laws.at(index);
+            if !law.admits_strain(&strain) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: format!("element {index} strain exceeds its material domain"),
+                });
+            }
+            let sigma = law.stress(&strain, &states[index]);
             if strain.iter().chain(&sigma).any(|v| !v.is_finite()) {
                 return Err(SmallStrainTetError::InvalidInput {
                     what: format!("element {index} has non-finite strain or constitutive stress"),
@@ -620,6 +626,11 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             }
             let law = self.laws.at(index);
             let strain = Self::strain(element, u);
+            if !law.admits_strain(&strain) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: format!("element {index} strain exceeds its material domain"),
+                });
+            }
             let mut c: Tangent6 = law.tangent(&strain, &states[index]);
             if c.iter().flatten().any(|v| !v.is_finite()) {
                 let Some(fallback) = fallback else {
@@ -940,6 +951,11 @@ impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L>
             }
             let strain = SmallStrainTetProblem::<L>::strain(element, u);
             let law = self.problem.laws.at(index);
+            if !law.admits_strain(&strain) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: format!("element {index} endpoint strain exceeds its material domain"),
+                });
+            }
             if let Some(stresses) = &mut final_stress {
                 stresses.push(law.stress(&strain, &states[index]));
             }

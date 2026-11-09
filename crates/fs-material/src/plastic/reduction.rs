@@ -395,8 +395,9 @@ pub struct ReductionConfig {
     pub max_iterations: usize,
     /// Maximum absolute constrained stress component [Pa].
     pub stress_tolerance_pa: f64,
-    /// Maximum full tensor Frobenius strain norm, in (0, 0.05]. The caller must
-    /// choose a bound no larger than the underlying material's admitted domain.
+    /// Maximum full tensor Frobenius strain norm, in (0, 0.05]. The original
+    /// law's `admits_strain` bound also applies; this numerical allowance
+    /// cannot extend a calibrated material domain.
     pub strain_limit: f64,
 }
 
@@ -473,7 +474,8 @@ impl PlaneStressWorkspace {
 /// returns C_aa-C_ab C_bb^-1 C_ba. Stress, tangent and commit all use the SAME
 /// converged strain and incoming history, including for Perzyna kinetics. This
 /// wrapper neither alters the constitutive law nor adds elapsed physical time.
-/// The generic caller remains responsible for the underlying law/state domain.
+/// Every trial retains the original law's strain admission. History and other
+/// source conditions remain with the underlying constitutive owner.
 /// Reference: Simo and Taylor, plane-stress elastoplastic return mapping,
 /// https://escholarship.org/uc/item/9919000n .
 #[derive(Clone, Debug, PartialEq)]
@@ -533,7 +535,15 @@ impl<L: SmallStrainLaw> PlaneStressReduction<L> {
         old: &ReducedState<L::State>,
         workspace: &mut PlaneStressWorkspace,
     ) -> Result<PlaneStressResponse<L::State>, ReductionError> {
-        if !self.admitted_strain(&old.strain) || in_plane.iter().any(|v| !v.is_finite()) {
+        // This retained strain is a transverse Newton warm start, possibly
+        // from a previous source/temperature law. Its numerical envelope still
+        // applies; only actual current trials use the new law's strain domain.
+        // History admission remains the original constitutive owner's job.
+        let old_magnitude = crate::tensor::frobenius_norm(&old.strain);
+        if !old_magnitude.is_finite()
+            || old_magnitude > self.config.strain_limit
+            || in_plane.iter().any(|v| !v.is_finite())
+        {
             return Err(ReductionError::Invalid(
                 "nonfinite or out-of-domain incoming strain",
             ));
@@ -641,9 +651,8 @@ impl<L: SmallStrainLaw> PlaneStressReduction<L> {
     }
 
     fn admitted_strain(&self, strain: &Voigt) -> bool {
-        strain.iter().all(|v| v.is_finite())
-            && crate::tensor::contract(strain, strain)
-                <= self.config.strain_limit * self.config.strain_limit
+        crate::tensor::frobenius_norm(strain) <= self.config.strain_limit
+            && self.law.admits_strain(strain)
     }
 }
 

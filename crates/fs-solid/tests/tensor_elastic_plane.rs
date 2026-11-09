@@ -250,6 +250,11 @@ fn g1_rotated_anisotropic_tensor_drives_native_p1_q1_plane_stress_and_strain() {
 #[test]
 fn g0_original_tensor_strain_domain_survives_the_native_law_adapter() {
     let law = material(1e-3);
+    // Keep the original Mandel-component BOX, not the model card's smaller
+    // inscribed Frobenius ball. Tensor shear still converts to Mandel first.
+    assert!(law.admits_strain(&[0.001, 0.001, 0.001, 0.0, 0.0, 0.0]));
+    assert!(!law.admits_strain(&[0.0, 0.0, 0.0, 0.0008, 0.0, 0.0]));
+    assert!(!law.admits_strain(&[0.002, 0.0, 0.0, 0.0, 0.0, 0.0]));
     assert!(
         law.strain_response([0.002, 0.0, 0.0, 0.0, 0.0, 0.0])
             .is_err()

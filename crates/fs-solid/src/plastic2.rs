@@ -499,6 +499,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                         let mut full = [strain[0], strain[1], 0.0, strain[2], 0.0, 0.0];
                         if !tensor_norm(&full).is_finite()
                             || tensor_norm(&full) > self.reduction.strain_limit
+                            || !law.admits_strain(&full)
                         {
                             return Err(invalid(format!(
                                 "element {e} point {q} exceeds the small-strain domain"
@@ -519,6 +520,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                             }
                             if !tensor_norm(&full).is_finite()
                                 || tensor_norm(&full) > self.reduction.strain_limit
+                                || !law.admits_strain(&full)
                             {
                                 return Err(invalid(format!(
                                     "element {e} point {q} projected strain exceeds the domain"

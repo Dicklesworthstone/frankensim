@@ -1,5 +1,22 @@
 # fs-material — CONTRACT
 
+## Original strain domains in checked solid consumers
+
+`SmallStrainLaw::admits_strain` retains each original law's nonallocating
+strain admission. Native plane-stress reduction and P1/plane/HEX8
+force, tangent and endpoint consumers enforce it before constitutive work.
+Isotropic/orthotropic elastic laws retain their calibrated tensor Frobenius
+limits; source tensor and frozen thermal laws retain their original Mandel
+and total/elastic bounds. B-bar checks compatible and assumed strains.
+
+Numerical allowances cannot extend a material domain. Retained plane-stress
+strains remain numerical warm starts; the material admits the current
+constitutive strains, not an inferred history. Raw constitutive and evidence
+extrapolation semantics remain available. This adds no finite-rotation or
+general material-history admission. Focused material and native solid
+regressions cover calibration, transverse relaxation, heterogeneous points,
+source bounds and B-bar projection.
+
 ## Native progressive axial ductility
 
 `ductile::uniaxial::UniaxialDuctileJ2` shares immutable native J2,

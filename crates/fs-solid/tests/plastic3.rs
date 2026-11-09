@@ -100,6 +100,45 @@ fn j2() -> J2Plasticity {
 }
 
 #[test]
+fn elastic_tet_force_tangent_and_solve_retain_each_material_strain_domain() {
+    let (nodes, tets) = box_mesh([1, 1, 1], [1.0; 3]);
+    let wide = IsotropicElastic::new(E, NU, 0.02).unwrap();
+    let mut laws = vec![wide.clone(); tets.len()];
+    laws[1].strain_limit = 0.001;
+    let outside: Vec<_> = nodes
+        .iter()
+        .flat_map(|p| [0.0015 * p[0], 0.0, 0.0])
+        .collect();
+    let prescribed: Vec<_> = outside.iter().copied().enumerate().collect();
+    let p = SmallStrainTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        laws: SmallStrainLawField::PerElement(&laws),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &[],
+        load_path: &[1.0],
+        budget: TetAssemblyBudget::standard(),
+        settings: IncrementSettings::default(),
+    };
+    let old = vec![(); tets.len()];
+    with_cx(|cx| {
+        let inside: Vec<_> = outside.iter().map(|u| u / 3.0).collect();
+        assert!(p.internal_force(&inside, &old, cx).is_ok());
+        assert!(p.tangent_matrix(&inside, &old, cx).is_ok());
+        assert!(p.internal_force(&outside, &old, cx).is_err());
+        assert!(p.tangent_matrix(&outside, &old, cx).is_err());
+        assert!(p.solve(cx).is_err()); // Also catches fully prescribed endpoints.
+        let unrestricted = SmallStrainTetProblem {
+            laws: SmallStrainLawField::Uniform(&wide),
+            ..p
+        };
+        assert!(unrestricted.internal_force(&outside, &old, cx).is_ok());
+        assert!(unrestricted.solve(cx).is_ok());
+        assert_eq!(old, vec![(); tets.len()]);
+    });
+}
+
+#[test]
 fn uniaxial_hardening_path_and_unloading_match_closed_form() {
     let size = [2.0, 1.0, 1.0];
     let (nodes, tets) = box_mesh([4, 2, 2], size);

@@ -393,6 +393,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
             || rotation > self.rotation_limit_rad
             || !raw_norm.is_finite()
             || raw_norm > self.strain_limit
+            || !self.laws.at_point(e, q).admits_strain(&strain)
         {
             return Err(invalid(format!(
                 "hex {e} point {q} exceeds raw small-strain/rotation domain"
@@ -411,7 +412,10 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
                 *value += correction;
             }
             let projected_norm = tensor_norm(&strain);
-            if !projected_norm.is_finite() || projected_norm > self.strain_limit {
+            if !projected_norm.is_finite()
+                || projected_norm > self.strain_limit
+                || !self.laws.at_point(e, q).admits_strain(&strain)
+            {
                 return Err(invalid(format!(
                     "hex {e} point {q} exceeds assumed small-strain domain"
                 )));

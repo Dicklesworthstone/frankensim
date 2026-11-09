@@ -104,6 +104,10 @@ impl SmallStrainLaw for ElasticAcousticState {
 
     fn update_state(&self, _strain: &Voigt, (): &Self::State) {}
 
+    fn admits_strain(&self, strain: &Voigt) -> bool {
+        self.admits_mandel_strain(&to_mandel(strain))
+    }
+
     fn admissibility(&self) -> MaterialAdmissibility {
         MaterialAdmissibility {
             has_stored_energy: true,

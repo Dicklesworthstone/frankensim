@@ -159,6 +159,7 @@ fn g1_frozen_mechanics_retains_original_thermal_potential_and_tangent() {
             let law = source.try_mechanical_law().unwrap();
             assert!(std::ptr::eq(law.source(), &source));
             let e = [0.002, -0.0007, 0.0004, 0.0003, -0.0002, 0.0001];
+            assert!(law.admits_strain(&e));
             let state = source.state(tensor::to_mandel(&e), 1.0).unwrap();
             let s = law.stress(&e, &());
             let c = law.tangent(&e, &());
@@ -185,11 +186,13 @@ fn g1_frozen_mechanics_retains_original_thermal_potential_and_tangent() {
     let potential = potential(true, false);
     let hot = potential.at_temperature(360.0).unwrap();
     let law = hot.try_mechanical_law().unwrap();
+    assert!(law.admits_strain(&[0.018, 0.018, 0.018, 0.0, 0.0, 0.0]));
     for bad in [
         [0.021, 0.0, 0.0, 0.0, 0.0, 0.0],
         [-0.0195, 0.0, 0.0, 0.0, 0.0, 0.0],
     ] {
         assert!(hot.state(tensor::to_mandel(&bad), 1.0).is_err());
+        assert!(!law.admits_strain(&bad));
         assert!(law.stress(&bad, &()).iter().all(|s| s.is_nan()));
         assert!(law.tangent(&bad, &()).iter().flatten().all(|s| s.is_nan()));
     }

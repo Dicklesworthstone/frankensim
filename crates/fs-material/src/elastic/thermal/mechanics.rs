@@ -107,6 +107,10 @@ impl SmallStrainLaw for FrozenThermoelasticLaw<'_> {
 
     fn update_state(&self, _total: &Voigt, (): &Self::State) {}
 
+    fn admits_strain(&self, total: &Voigt) -> bool {
+        self.elastic_strain(total).is_some()
+    }
+
     fn admissibility(&self) -> MaterialAdmissibility {
         MaterialAdmissibility {
             has_stored_energy: true,

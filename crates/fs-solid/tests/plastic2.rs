@@ -102,6 +102,89 @@ fn axial_return(strain: f64, plastic: &mut f64, alpha: &mut f64, viscosity_modul
 }
 
 #[test]
+fn elastic_plane_material_bounds_survive_reduction_and_bbar_projection() {
+    let law = IsotropicElastic::new(E, NU, 0.001).unwrap();
+    for mesh in [
+        Mesh2::triangles(1.0, 1.0, 1, 1),
+        Mesh2::quads(1.0, 1.0, 1, 1),
+    ] {
+        let states = vec![
+            ReducedState {
+                strain: [0.0; 6],
+                history: ()
+            };
+            mesh.elems.iter().map(Vec::len).sum()
+        ];
+        let mut p = problem(&mesh, &law, &[], &[1.0]);
+        for plane in [PlaneKind::Stress, PlaneKind::Strain] {
+            p.plane = plane;
+            let inside: Vec<_> = mesh
+                .nodes
+                .iter()
+                .flat_map(|x| [0.0003 * x[0], 0.0003 * x[1]])
+                .collect();
+            let outside: Vec<_> = mesh
+                .nodes
+                .iter()
+                .flat_map(|x| [0.0015 * x[0], 0.0])
+                .collect();
+            with_cx(|cx| {
+                assert!(p.internal_force(&inside, &states, cx).is_ok());
+                assert!(p.tangent_matrix(&inside, &states, cx).is_ok());
+                let mut warm = states.clone();
+                for point in &mut warm {
+                    point.strain = [0.002, 0.0, 0.002, 0.0, 0.0, 0.0];
+                }
+                assert!(p.internal_force(&inside, &warm, cx).is_ok());
+                assert!(p.internal_force(&outside, &states, cx).is_err());
+                assert!(p.tangent_matrix(&outside, &states, cx).is_err());
+            });
+        }
+        p.plane = PlaneKind::Stress;
+        let thickness_exit: Vec<_> = mesh
+            .nodes
+            .iter()
+            .flat_map(|x| [0.00065 * x[0], 0.00065 * x[1]])
+            .collect();
+        assert!(with_cx(|cx| p.internal_force(&thickness_exit, &states, cx)).is_err());
+    }
+    let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+    let states = vec![
+        ReducedState {
+            strain: [0.0; 6],
+            history: ()
+        };
+        4
+    ];
+    let mut p = problem(&mesh, &law, &[], &[1.0]);
+    p.plane = PlaneKind::Strain;
+    p.formulation = Formulation::BBar;
+    let high = 0.5 + 0.5 / 3.0_f64.sqrt();
+    let amplitude = 0.001075;
+    assert!(amplitude * high * 1.5_f64.sqrt() > law.strain_limit);
+    assert!(amplitude * ((7.0 / 6.0) * high * high + 1.0 / 12.0).sqrt() < law.strain_limit);
+    let hidden: Vec<_> = mesh
+        .nodes
+        .iter()
+        .flat_map(|x| [amplitude * x[0] * x[1], 0.0])
+        .collect();
+    assert!(with_cx(|cx| p.internal_force(&hidden, &states, cx)).is_err());
+    assert!(with_cx(|cx| p.tangent_matrix(&hidden, &states, cx)).is_err());
+
+    let mut point_laws = vec![IsotropicElastic::new(E, NU, 0.02).unwrap(); 4];
+    point_laws[3] = law.clone();
+    let groups = [point_laws.as_slice()];
+    p.laws = SmallStrainLawField::PerQuadrature(&groups);
+    let uniform: Vec<_> = mesh
+        .nodes
+        .iter()
+        .flat_map(|x| [0.0015 * x[0], 0.0])
+        .collect();
+    assert!(with_cx(|cx| p.internal_force(&uniform, &states, cx)).is_err());
+    assert_eq!(states[3].strain, [0.0; 6]);
+}
+
+#[test]
 fn plane_stress_p1_and_q1_follow_cyclic_yield_and_keep_permanent_deformation() {
     let law = metal();
     for mesh in [
