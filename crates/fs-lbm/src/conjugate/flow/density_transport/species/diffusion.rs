@@ -77,6 +77,42 @@ pub struct SpeciesDiffusionStep<const N: usize> {
     pub report: SpeciesDiffusionReport<N>,
 }
 
+/// Automatic refinement of the existing positive, conservative face sweeps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveSpeciesDiffusionControls<const N: usize> {
+    /// Original physical budgets. `substeps` is the initial coarse resolution;
+    /// the pair-update limit covers ALL coarse and fine solves, including
+    /// rejected resolutions. Storage includes the retained comparison state.
+    pub solver: SpeciesDiffusionControls<N>,
+    /// Positive absolute mass-fraction tolerance for EACH constituent. A trace
+    /// species does not inherit the dominant species' absolute allowance.
+    pub absolute_mass_fraction_tolerance: [f64; N],
+    /// Nonnegative relative allowance on max(initial, fine) mass fraction.
+    pub relative_tolerance: f64,
+    /// Maximum fine solves. Each doubles the previous coarse substep count.
+    pub maximum_refinements: usize,
+}
+
+/// Complete diffusion interval accepted by a temporal refinement estimate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveSpeciesDiffusionStep<const N: usize> {
+    /// Original fine-grid-in-time inventories and independent physical account.
+    /// No Richardson extrapolation, clipping or renormalization is applied.
+    pub step: SpeciesDiffusionStep<N>,
+    /// Per-species maximum over cells of |Y_fine - Y_coarse| / 3. This is a
+    /// second-order temporal estimate, not a certified global error bound.
+    pub estimated_mass_fraction_error: [f64; N],
+    /// Largest estimate divided by its absolute-plus-relative allowance.
+    pub maximum_error_ratio: f64,
+    /// Fine solves performed, including resolutions that were not accepted.
+    /// Zero when there are no conducting faces.
+    pub refinements: usize,
+    /// Aggregate geometric pair work, including the initial coarse solve.
+    pub total_pair_updates: usize,
+    /// Aggregate constituent pair work, including discarded coarse solutions.
+    pub total_component_updates: usize,
+}
+
 /// Original binary Fick controls, with unchanged geometric work semantics.
 pub type BinarySpeciesDiffusionControls = SpeciesDiffusionControls<2>;
 /// Original binary Fick mass and partition account.
@@ -223,6 +259,146 @@ impl MaterialAdvectionStep {
             gate,
             |_| poll(gate),
         )
+    }
+
+    /// Resolve frozen-coefficient diffusion with automatic temporal refinement.
+    ///
+    /// Compare the complete interval at n and 2n physical substeps, retaining
+    /// the finer conservative solution. A rejected fine solution becomes the
+    /// next coarse comparison; it is not recomputed. Acceptance requires every
+    /// cell and constituent to satisfy
+    /// `|Y_fine-Y_coarse|/3 <= atol[k] + rtol*max(Y_initial,Y_fine)`.
+    /// All solves start from the SAME supplied original inventories, so this
+    /// comparison measures error over the requested interval, not an
+    /// accumulated sum of unrelated local tolerances.
+    ///
+    /// The factor three follows the second-order symmetric face composition
+    /// in its asymptotic regime. This is an estimate, not a rigorous bound;
+    /// spatial, constitutive and advection-splitting errors are not estimated.
+    /// Physical mass/partition budgets still apply independently to every
+    /// candidate. Work limits include rejected refinements, and peak payload
+    /// includes the simultaneously retained coarse result. Failure or
+    /// cancellation publishes nothing and changes no input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffuse_species_adaptive<const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        diffusivity_m2_s: &[f64],
+        duration_s: f64,
+        controls: AdaptiveSpeciesDiffusionControls<N>,
+        gate: &CancelGate,
+    ) -> Result<AdaptiveSpeciesDiffusionStep<N>, ChtError> {
+        self.diffuse_species_adaptive_checked(
+            domain, species_mass_kg, diffusivity_m2_s, duration_s, controls, gate,
+            |_| poll(gate),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn diffuse_species_adaptive_checked<const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        diffusivity_m2_s: &[f64],
+        duration_s: f64,
+        controls: AdaptiveSpeciesDiffusionControls<N>,
+        gate: &CancelGate,
+        mut checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
+    ) -> Result<AdaptiveSpeciesDiffusionStep<N>, ChtError> {
+        poll(gate)?;
+        if N == 0 || N > MAX_MATERIAL_SPECIES || controls.maximum_refinements == 0 {
+            return Err(refuse("adaptive diffusion component or refinement count is invalid"));
+        }
+        nonnegative(controls.relative_tolerance)?;
+        for tolerance in controls.absolute_mass_fraction_tolerance {
+            positive(tolerance)?;
+        }
+        // The original solver already budgets its own scratch, output, faces
+        // and fixed arrays. Add the retained coarse output and this controller's
+        // fixed result/estimate state before admitting either solve.
+        let retained_bytes = domain.cell_count()
+            .checked_mul(core::mem::size_of::<[f64; N]>())
+            .and_then(|n| n.checked_add(core::mem::size_of::<SpeciesDiffusionStep<N>>()))
+            .and_then(|n| n.checked_add(core::mem::size_of::<AdaptiveSpeciesDiffusionStep<N>>()))
+            .and_then(|n| n.checked_add(4 * core::mem::size_of::<[f64; N]>() + 512))
+            .ok_or_else(|| refuse("adaptive diffusion storage extent overflows"))?;
+        let solver_bytes = controls.solver.maximum_storage_bytes.checked_sub(retained_bytes)
+            .ok_or_else(|| refuse("adaptive diffusion comparison storage budget exhausted"))?;
+        let mut solver = SpeciesDiffusionControls {
+            maximum_storage_bytes: solver_bytes,
+            ..controls.solver
+        };
+        let mut coarse = self.diffuse_species(
+            domain, species_mass_kg, diffusivity_m2_s, duration_s, solver, gate,
+        )?;
+        let mut total_pair_updates = coarse.report.pair_updates;
+        if coarse.report.diffusive_faces == 0 {
+            poll(gate)?;
+            return Ok(AdaptiveSpeciesDiffusionStep {
+                step: coarse,
+                estimated_mass_fraction_error: [0.0; N],
+                maximum_error_ratio: 0.0,
+                refinements: 0,
+                total_pair_updates,
+                total_component_updates: 0,
+            });
+        }
+        for refinement in 1..=controls.maximum_refinements {
+            checkpoint(refinement)?;
+            solver.substeps = solver.substeps.checked_mul(2)
+                .ok_or_else(|| refuse("adaptive diffusion substep extent overflows"))?;
+            solver.maximum_pair_updates = controls.solver.maximum_pair_updates
+                .checked_sub(total_pair_updates)
+                .ok_or_else(|| refuse("adaptive diffusion cumulative work budget exhausted"))?;
+            let fine_pairs = coarse.report.diffusive_faces.checked_mul(2)
+                .and_then(|n| n.checked_mul(solver.substeps))
+                .ok_or_else(|| refuse("adaptive diffusion work extent overflows"))?;
+            let next_total_pairs = total_pair_updates.checked_add(fine_pairs)
+                .ok_or_else(|| refuse("adaptive diffusion cumulative work extent overflows"))?;
+            let total_component_updates = next_total_pairs.checked_mul(N)
+                .ok_or_else(|| refuse("adaptive diffusion component work extent overflows"))?;
+            let fine = self.diffuse_species(
+                domain, species_mass_kg, diffusivity_m2_s, duration_s, solver, gate,
+            )?;
+            total_pair_updates = next_total_pairs;
+            let mut estimated_mass_fraction_error = [0.0_f64; N];
+            let mut maximum_error_ratio = 0.0_f64;
+            for c in 0..domain.cell_count() {
+                poll_every(gate, c)?;
+                if !domain.is_fluid(c) {
+                    continue;
+                }
+                for (k, estimate) in estimated_mass_fraction_error.iter_mut().enumerate() {
+                    // Subtract original masses first: dividing separately can
+                    // erase a small but representable concentration change.
+                    let error = (fine.species_mass_kg[c][k] - coarse.species_mass_kg[c][k])
+                        .abs() / self.mass_kg[c] / 3.0;
+                    let scale = ratio(species_mass_kg[c][k], self.mass_kg[c])?
+                        .max(ratio(fine.species_mass_kg[c][k], self.mass_kg[c])?);
+                    let tolerance = positive(controls.absolute_mass_fraction_tolerance[k]
+                        + controls.relative_tolerance * scale)?;
+                    nonnegative(error)?;
+                    *estimate = estimate.max(error);
+                    // An overflowing ratio is a valid rejection, never a
+                    // reason to publish an insufficiently resolved state.
+                    maximum_error_ratio = maximum_error_ratio.max(error / tolerance);
+                }
+            }
+            if maximum_error_ratio <= 1.0 {
+                poll(gate)?;
+                return Ok(AdaptiveSpeciesDiffusionStep {
+                    step: fine,
+                    estimated_mass_fraction_error,
+                    maximum_error_ratio,
+                    refinements: refinement,
+                    total_pair_updates,
+                    total_component_updates,
+                });
+            }
+            coarse = fine;
+        }
+        Err(refuse("adaptive diffusion temporal tolerance is unresolved at its refinement limit"))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

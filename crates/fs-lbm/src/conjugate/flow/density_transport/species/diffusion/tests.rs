@@ -662,3 +662,168 @@ fn common_mixing_admits_component_bounds_and_charges_component_storage() {
     assert_eq!(error, ChtError::Cancelled);
     assert_eq!(state, before);
 }
+
+fn adaptive_controls<const N: usize>(tolerance: [f64; N]) -> AdaptiveSpeciesDiffusionControls<N> {
+    AdaptiveSpeciesDiffusionControls {
+        solver: common_controls(1),
+        absolute_mass_fraction_tolerance: tolerance,
+        relative_tolerance: 0.0,
+        maximum_refinements: 20,
+    }
+}
+
+#[test]
+fn adaptive_diffusion_resolves_a_stable_but_inaccurate_multiface_step() {
+    let cells = 8;
+    let h = 1.0 / cells as f64;
+    let duration = 2.0;
+    let d = 0.1;
+    let domain = VoxelDomain::graded([vec![h; cells], vec![1.0], vec![1.0]]).unwrap();
+    let state = carrier(&domain, &vec![h; cells]);
+    let initial: Vec<_> = (0..cells).map(|c| {
+        let y = 0.5 + 0.4 * (core::f64::consts::PI * (c as f64 + 0.5) * h).cos();
+        [h * y, h * (1.0 - y)]
+    }).collect();
+    // Independent eigenmode of the cell-centred Neumann diffusion matrix.
+    let decay = (-4.0 * d / h.powi(2)
+        * (0.5 * core::f64::consts::PI * h).sin().powi(2) * duration).exp();
+    let error = |values: &[[f64; 2]]| -> f64 {
+        values.iter().zip(&initial).map(|(actual, original)| {
+            (actual[0] / h - (0.5 + (original[0] / h - 0.5) * decay)).abs()
+        }).fold(0.0, f64::max)
+    };
+    let gate = CancelGate::new_clock_free();
+    let unresolved = state.diffuse_binary_species(
+        &domain, &initial, &vec![d; cells], duration, controls(1), &gate,
+    ).unwrap();
+    assert!(error(&unresolved.species_mass_kg) > 0.2);
+    assert!(unresolved.species_mass_kg.iter().flatten().all(|&m| m >= 0.0));
+    let result = state.diffuse_species_adaptive(
+        &domain, &initial, &vec![d; cells], duration, adaptive_controls([2e-7; 2]), &gate,
+    ).unwrap();
+    assert!(result.refinements > 1);
+    assert!(result.maximum_error_ratio <= 1.0);
+    assert!(error(&result.step.species_mass_kg) < 3e-7);
+    let fine_steps = result.step.report.substeps;
+    // Reuse the previous fine solution as coarse: no repeated coarse solve.
+    assert_eq!(result.total_pair_updates, 2 * (cells - 1) * (2 * fine_steps - 1));
+    assert_eq!(result.total_component_updates, 2 * result.total_pair_updates);
+    for m in &result.step.species_mass_kg {
+        assert!(m.iter().all(|&value| value >= 0.0 && value <= h));
+        near(m[0] + m[1], h, 2e-15);
+    }
+    for k in 0..2 {
+        near(result.step.report.mass_before_kg[k], result.step.report.mass_after_kg[k], 1e-14);
+    }
+}
+
+#[test]
+fn adaptive_diffusion_resolves_trace_species_with_its_own_tolerance() {
+    let cells = 6;
+    let h = 1.0 / cells as f64;
+    let domain = VoxelDomain::graded([vec![h; cells], vec![1.0], vec![1.0]]).unwrap();
+    let state = carrier(&domain, &vec![h; cells]);
+    let mode = |c: usize| (core::f64::consts::PI * (c as f64 + 0.5) * h).cos();
+    let initial: Vec<_> = (0..cells).map(|c| {
+        [0.6 * h, 0.4 * h, h * 1e-200 * (1.0 + 0.4 * mode(c))]
+    }).collect();
+    let mut ctl = adaptive_controls([1e-3, 1e-3, 1e-206]);
+    ctl.solver.maximum_mass_defect_kg[2] = 1e-212;
+    let gate = CancelGate::new_clock_free();
+    let result = state.diffuse_species_adaptive(
+        &domain, &initial, &vec![0.1; cells], 0.5, ctl, &gate,
+    ).unwrap();
+    assert!(result.refinements > 1);
+    let decay = (-0.4 / h.powi(2)
+        * (0.5 * core::f64::consts::PI * h).sin().powi(2) * 0.5).exp();
+    for c in 0..cells {
+        near(result.step.species_mass_kg[c][2] / h,
+            1e-200 * (1.0 + 0.4 * decay * mode(c)), 2e-206);
+    }
+    near(result.step.report.mass_after_kg[2], 1e-200, 1e-212);
+    let permutation = [2, 0, 1];
+    let permuted: Vec<_> = initial.iter().map(|m| permutation.map(|k| m[k])).collect();
+    ctl.absolute_mass_fraction_tolerance = permutation.map(|k| ctl.absolute_mass_fraction_tolerance[k]);
+    ctl.solver.maximum_mass_defect_kg = permutation.map(|k| ctl.solver.maximum_mass_defect_kg[k]);
+    let other = state.diffuse_species_adaptive(
+        &domain, &permuted, &vec![0.1; cells], 0.5, ctl, &gate,
+    ).unwrap();
+    assert_eq!(other.refinements, result.refinements);
+    for c in 0..cells {
+        assert_eq!(other.step.species_mass_kg[c], permutation.map(|k| result.step.species_mass_kg[c][k]));
+    }
+}
+
+#[test]
+fn adaptive_diffusion_budgets_include_discarded_solves_and_live_comparisons() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let initial = [[1.0, 0.0], [0.0, 1.0]];
+    let gate = CancelGate::new_clock_free();
+    let mut ctl = adaptive_controls([1e-6; 2]);
+    ctl.solver.maximum_pair_updates = 5;
+    // The fine solve needs only four pair updates, but its coarse comparison
+    // has already consumed two. A five-update aggregate budget must refuse.
+    assert!(state.diffuse_species_adaptive(
+        &domain, &initial, &[0.1; 2], 1.0, ctl, &gate,
+    ).is_err());
+    ctl.solver.maximum_pair_updates = 6;
+    let accepted = state.diffuse_species_adaptive(
+        &domain, &initial, &[0.1; 2], 1.0, ctl, &gate,
+    ).unwrap();
+    assert_eq!(accepted.refinements, 1);
+    assert_eq!(accepted.total_pair_updates, 6);
+    assert_eq!(accepted.total_component_updates, 12);
+    ctl.solver.maximum_storage_bytes = 3000;
+    assert!(state.diffuse_binary_species(
+        &domain, &initial, &[0.1; 2], 1.0, ctl.solver, &gate,
+    ).is_ok());
+    assert!(state.diffuse_species_adaptive(
+        &domain, &initial, &[0.1; 2], 1.0, ctl, &gate,
+    ).is_err());
+}
+
+#[test]
+fn adaptive_diffusion_refinement_refusal_and_cancellation_publish_nothing() {
+    let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 3]);
+    let before = state.clone();
+    let initial = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+    let gate = CancelGate::new_clock_free();
+    let mut ctl = adaptive_controls([1e-12; 2]);
+    ctl.maximum_refinements = 1;
+    assert!(state.diffuse_species_adaptive(
+        &domain, &initial, &[0.3; 3], 1.0, ctl, &gate,
+    ).is_err());
+    ctl.maximum_refinements = 8;
+    let error = state.diffuse_species_adaptive_checked(
+        &domain, &initial, &[0.3; 3], 1.0, ctl, &gate,
+        |refinement| if refinement == 2 { Err(ChtError::Cancelled) } else { Ok(()) },
+    ).unwrap_err();
+    assert_eq!(error, ChtError::Cancelled);
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        ctl.absolute_mass_fraction_tolerance[1] = invalid;
+        assert!(state.diffuse_species_adaptive(
+            &domain, &initial, &[0.3; 3], 1.0, ctl, &gate,
+        ).is_err());
+    }
+    assert_eq!(state, before);
+    assert_eq!(initial, [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]);
+}
+
+#[test]
+fn adaptive_diffusion_preserves_the_zero_coefficient_identity_without_refinement() {
+    let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 3]);
+    let initial = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+    let mut ctl = adaptive_controls([1e-12; 2]);
+    ctl.solver.substeps = 1_000_000;
+    ctl.solver.maximum_pair_updates = 0;
+    let result = state.diffuse_species_adaptive(
+        &domain, &initial, &[0.0; 3], 1.0, ctl, &CancelGate::new_clock_free(),
+    ).unwrap();
+    assert_eq!(result.step.species_mass_kg, initial);
+    assert_eq!(result.refinements, 0);
+    assert_eq!(result.total_pair_updates, 0);
+    assert_eq!(result.estimated_mass_fraction_error, [0.0; 2]);
+}

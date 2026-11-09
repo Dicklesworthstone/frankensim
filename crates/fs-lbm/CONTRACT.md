@@ -1062,6 +1062,21 @@ refinement. The original donor advection followed by diffusion remains an
 operator split with first-order overall accuracy; second order refers only
 to the frozen diffusion sweep composition.
 
+`MaterialAdvectionStep::diffuse_species_adaptive::<N>` adds automatic uniform
+temporal refinement of that original operator. It compares complete n- and
+2n-substep solutions from the same original inventories, accepts the finer
+positive conservative state, and reuses a rejected fine state as the next
+coarse comparison. Each constituent has its own absolute mass-fraction
+tolerance; relative scaling uses the local initial/fine concentration, so
+trace species do not inherit a bulk absolute allowance. The per-cell estimate
+is `|Y_fine - Y_coarse| / 3`, from the second-order asymptotic regime. This is
+not a certified global error bound and does not measure spatial, material or
+advection-splitting errors. No Richardson extrapolation alters physical masses.
+Aggregate work includes every discarded resolution; storage admission includes
+the live coarse comparison alongside the original solver. Refusal or
+cancellation returns no partial interval. Independent original constituent and
+carrier-partition budgets remain mandatory at every resolution.
+
 ### Conservative multicomponent turbulent mixing
 
 `MaterialAdvectionStep::diffuse_species::<N>` extends the same accepted-carrier

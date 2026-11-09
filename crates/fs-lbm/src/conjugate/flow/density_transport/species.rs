@@ -13,6 +13,7 @@ use fs_sparse::precond::{IluControlledError, ilu0_controlled};
 
 mod diffusion;
 pub use diffusion::{
+    AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
 };

@@ -32,6 +32,7 @@ pub use density_projection::{
 };
 mod density_transport;
 pub use density_transport::{
+    AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,

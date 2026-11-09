@@ -109,6 +109,7 @@ mod flow;
 pub(crate) use flow::scale_rows;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use flow::{
+    AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     ImplicitConductiveResistiveThermalVolumeMomentumStep,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
