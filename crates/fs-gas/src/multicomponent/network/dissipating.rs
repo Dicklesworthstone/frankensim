@@ -15,11 +15,12 @@ use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationRepo
 use super::valve::{SplitNetworkValveReport, ValveError};
 use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::{
-    MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
+    MixtureNetwork1d, NetworkBodyForces, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
 };
 use fs_qty::{Length, Time};
 
 mod adaptive;
+mod forcing;
 mod stabilized;
 mod step;
 pub use super::coupled::molecular::{SplitAdaptiveNetworkDissipationReport, SplitStabilizedNetworkDissipationReport};
@@ -99,7 +100,7 @@ pub struct DissipatingNetworkReport {
     pub elapsed: Time,
     /// Complete compositions restarted from accepted fields.
     pub coupling_retries: usize,
-    /// Intermediate advection-only report between the molecular half steps.
+    /// Intermediate advection/body-source report between the molecular halves.
     pub transport: NetworkStepReport,
     /// Accepted original-source molecular intervals before and after transport.
     pub molecular: SplitNetworkDissipationReport,
@@ -115,7 +116,8 @@ pub struct DissipatingNetworkReport {
     /// Add finite-wall storage to close gas-plus-wall energy. Internal valve
     /// transfers are excluded; they cannot create an external energy supply.
     pub boundary_change: NetworkTotals,
-    /// After minus before minus external exchange, per species and energy gauge.
+    /// After minus before minus external exchange and transport.body_force_work_j,
+    /// per species and original energy gauge. Body sources change energy only.
     pub conservation_residual: NetworkTotals,
     /// Total mass residual from the retained species balances [kg].
     pub mass_residual_kg: f64,

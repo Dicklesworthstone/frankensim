@@ -25,8 +25,24 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
         &mut self,
         maximum_duration: Time,
         controls: DissipatingStepControl,
+        sources: NetworkSources<'_, '_>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        molecular_method: MolecularMethod<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(DissipatingNetworkReport, MolecularDiagnostics), DissipatingNetworkError> {
+        self.step_forcing_method(
+            maximum_duration, controls, sources, reservoirs, None, molecular_method, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_forcing_method(
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
         mut sources: NetworkSources<'_, '_>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        forces: Option<NetworkBodyForces<'_>>,
         mut molecular_method: MolecularMethod<'_>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
@@ -42,6 +58,10 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
             || controls.transport.maximum_halvings > 32
         { return Err(DissipatingNetworkError::Invalid("molecular network duration, CFL or retry controls")); }
         sources.validate()?;
+        let forces = match forces {
+            Some(forces) if self.trial.admit_body_forces(forces, &mut cancelled)? => Some(forces),
+            _ => None,
+        };
         let before = checked_totals(&self.accepted, &mut cancelled)?;
         let mut duration = initial_duration(&self.accepted, &mut self.trial,
             maximum_duration.value(), controls.transport.cfl, &mut cancelled)?;
@@ -62,12 +82,17 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                     poll(&mut cancelled)?;
                     *destination = *source;
                 }
-                let transport = match reservoirs {
+                let transport = if let Some(forces) = forces {
+                    self.trial.step_with_body_forces_and_boundaries(
+                        Time::new(duration), controls.transport, forces, reservoirs, None,
+                        &mut cancelled,
+                    )?
+                } else { match reservoirs {
                     Some(reservoirs) => self.trial.step_with_reservoirs(
                         Time::new(duration), controls.transport, reservoirs, &mut cancelled)?,
                     None => self.trial.step(
                         Time::new(duration), controls.transport, &mut cancelled)?,
-                };
+                }};
                 if transport.elapsed.value() != duration { return Ok((transport, None)); }
                 let second = molecular_method.advance(&mut self.molecular, &mut self.trial,
                     half, reservoirs, false, &mut cancelled)?;
@@ -107,7 +132,8 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                     // Valve energy and species transfers are internal. Actual
                     // storage defects remain in the whole-step residual below.
                     let mut residual = NetworkTotals { species_masses: [0.0; MAX_SPECIES], species_count: n,
-                        energy: after.energy - before.energy - boundary_change.energy };
+                        energy: after.energy - before.energy - boundary_change.energy
+                            - transport.body_force_work_j };
                     for k in 0..n {
                         boundary_change.species_masses[k] = sum([molecular.first.boundary_change.species_masses[k],
                             transport.boundary_change.species_masses[k], molecular.second.boundary_change.species_masses[k]]);

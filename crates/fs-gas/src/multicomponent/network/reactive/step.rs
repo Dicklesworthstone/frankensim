@@ -39,6 +39,26 @@ impl ReactingNetwork1d {
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         entropy: Option<&mut entropy::CoupledEntropy>,
         cancelled: impl FnMut() -> bool,
+    ) -> Result<(ReactiveNetworkReport, MolecularDiagnostics), ReactiveNetworkError> {
+        self.step_forcing_method(
+            maximum_duration, controls, operator, molecular_method, sources,
+            volume_rates, reservoirs, None, entropy, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_forcing_method<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        operator: Option<&mut NetworkDissipationOperator<L>>,
+        molecular_method: MolecularMethod<'_>,
+        sources: NetworkSources<'_, '_>,
+        volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        forces: Option<NetworkBodyForces<'_>>,
+        entropy: Option<&mut entropy::CoupledEntropy>,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<
         (
             ReactiveNetworkReport,
@@ -54,6 +74,7 @@ impl ReactingNetwork1d {
             sources,
             volume_rates,
             reservoirs,
+            forces,
             entropy,
             cancelled,
         );
@@ -76,6 +97,7 @@ impl ReactingNetwork1d {
         mut sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        forces: Option<NetworkBodyForces<'_>>,
         mut entropy: Option<&mut entropy::CoupledEntropy>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
@@ -90,9 +112,13 @@ impl ReactingNetwork1d {
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
             || controls.transport.maximum_halvings > 32
         { return Err(ReactiveNetworkError::Invalid("reacting network duration, CFL or retry controls")); }
-        if entropy.is_some() && (volume_rates.is_some() || !sources.is_empty()) {
+        let forces = match forces {
+            Some(forces) if self.trial.admit_body_forces(forces, &mut cancelled)? => Some(forces),
+            _ => None,
+        };
+        if entropy.is_some() && (volume_rates.is_some() || !sources.is_empty() || forces.is_some()) {
             return Err(ReactiveNetworkError::Invalid(
-                "reacting entropy excludes prescribed motion and additional wall/valve sources",
+                "reacting entropy excludes prescribed motion and additional body/wall/valve sources",
             ));
         }
         let volume_rates = match volume_rates {
@@ -177,6 +203,11 @@ impl ReactingNetwork1d {
                     half.value(), &mut chemistry, entropy.as_deref_mut(), &mut cancelled)?;
                 let transport = if let Some(account) = entropy.as_deref_mut() {
                     account.advance_transport(&mut self.trial, Time::new(duration), controls.transport, reservoirs, &mut cancelled)?
+                } else if let Some(forces) = forces {
+                    self.trial.step_with_body_forces_and_boundaries(
+                        Time::new(duration), controls.transport, forces,
+                        reservoirs, volume_rates, &mut cancelled,
+                    )?
                 } else { match (volume_rates, reservoirs) {
                     (Some(rates), Some(reservoirs)) => self.trial.step_with_reservoirs_and_volume_rates(
                         Time::new(duration), controls.transport, reservoirs, rates, &mut cancelled)?,
@@ -273,7 +304,8 @@ impl ReactingNetwork1d {
                     // here would count internal donor enthalpy as external heat.
                     let mut residual = NetworkTotals { species_masses: [0.0; MAX_SPECIES], species_count: n,
                         energy: after.energy - before.energy - boundary_change.energy
-                            - transport.boundary_work_on_gas_j - chemistry.referenced_energy_change_j };
+                            - transport.boundary_work_on_gas_j - transport.body_force_work_j
+                            - chemistry.referenced_energy_change_j };
                     for k in 0..n {
                         residual.species_masses[k] = after.species_masses[k] - before.species_masses[k]
                             - boundary_change.species_masses[k] - chemistry.species_change_kg[k];
@@ -281,7 +313,8 @@ impl ReactingNetwork1d {
                     let mass_residual_kg = sum((0..n).map(|k| after.species_masses[k]
                         - before.species_masses[k] - boundary_change.species_masses[k]));
                     let absolute_energy_residual_j = sum(core::iter::once(after.energy - before.energy
-                        - boundary_change.energy - transport.boundary_work_on_gas_j)
+                        - boundary_change.energy - transport.boundary_work_on_gas_j
+                        - transport.body_force_work_j)
                         .chain((0..n).map(|k| (after.species_masses[k] - before.species_masses[k]
                             - boundary_change.species_masses[k]) * self.gas().energy_references()[k])));
                     if !residual.energy.is_finite() || !residual.species_masses[..n].iter().all(|x| x.is_finite())

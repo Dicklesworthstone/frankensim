@@ -4,6 +4,7 @@ use super::*;
 use crate::multicomponent::{Boundaries, Boundary, Conserved};
 
 mod stabilized;
+mod forcing;
 
 fn walls() -> Boundaries {
     Boundaries::Ends {

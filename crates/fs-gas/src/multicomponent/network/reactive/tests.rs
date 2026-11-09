@@ -1,5 +1,6 @@
 //! Independent coupled chemistry, physical-energy and network-owner checks.
 mod molecular;
+mod forcing;
 mod entropy;
 mod moving;
 mod stabilized;

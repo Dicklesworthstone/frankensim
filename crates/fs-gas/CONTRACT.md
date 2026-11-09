@@ -1,3 +1,40 @@
+## Acceleration through reacting and molecular network compositions
+
+The native `ReactingNetwork1d` and `DissipatingNetwork1d` owners now
+accept `NetworkBodyForces` through their original complete-duration retry
+loops. Chemistry, diffusion, heat conduction, viscosity and finite-port
+transport retain their original state and constitutive laws. Distributed
+acceleration acts inside the transport interval at the actual common clock;
+if it shortens the acoustic step, all enclosing chemical/molecular/wall/valve
+halves restart from accepted fields and finite-plenum inventories.
+
+The explicit molecular entries and original RKL2 entries share this same
+transaction. RKL2's RHS work allowance spans both halves and discarded
+attempts; body-force histories never use its artificial stage index as time.
+The existing reservoirs, finite walls and valves remain available. The
+reacting composition also retains prescribed plenum volume rates and their
+separate pressure work. No extra source model, duplicate gas owner or
+source/chemistry energy correction is introduced.
+
+`transport.body_force_work_j` is removed exactly once from the complete
+referenced and physical energy residuals. Chemical formation-reference
+changes, external species enthalpy, plenum pressure work and wall heat/work
+keep distinct accounts. The final accepted chemical/molecular state and
+every source report publish together. All-zero body forcing returns to the
+corresponding original numerical path. Source Mach admission applies at the
+mechanical source endpoints/extrema; the original chemical/molecular
+temperature and constitutive domains still govern those separate stages.
+These APIs do not combine the explicit global entropy gates or adaptive
+molecular error controller with nonzero body forcing. RKL2 extends diffusion
+stability, not acoustic limits or a global accuracy/positivity certificate.
+
+Five focused regressions cover force-history/chemical replay after a shortened
+interval, physical energy in accelerated reacting molecular networks with
+baths and compression, shared RKL2 work-limit/late-cancellation refusal,
+explicit/RKL2 molecular source work and exact inactive-path replay after
+active forcing. Native compilation/execution was unavailable during this
+implementation; these regressions are not claimed passed.
+
 ## Distributed acceleration in the native multicomponent network
 
 `MixtureNetwork1d::step_with_body_forces` and

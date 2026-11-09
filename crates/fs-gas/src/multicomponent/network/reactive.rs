@@ -22,7 +22,7 @@ use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationRepo
 use super::valve::{SplitNetworkValveReport, ValveError};
 use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::{
-    MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumBoundaryWork,
+    MixtureNetwork1d, NetworkBodyForces, NetworkStepReport, NetworkTotals, Plenum, PlenumBoundaryWork,
     PlenumConnection, PortExchange,
 };
 use crate::chemistry::{IsochoricKineticsError, IsochoricKineticsSolve, IsochoricReactor};
@@ -30,6 +30,7 @@ use fs_qty::{Amount, Time};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod adaptive;
+mod forcing;
 mod entropy;
 mod stabilized;
 mod step;
@@ -108,7 +109,8 @@ pub struct ReactiveNetworkReport {
     pub elapsed: Time,
     /// Complete compositions restarted from the accepted network.
     pub coupling_retries: usize,
-    /// Intermediate transport-only balance, not the final post-source state.
+    /// Intermediate transport/source balance, not the final post-chemistry state.
+    /// Distributed body impulse/work remains in these native branch/network accounts.
     pub transport: NetworkStepReport,
     /// Accepted chemistry in all branch cells and finite plenums.
     pub chemistry: ChemistryReport,
@@ -126,13 +128,16 @@ pub struct ReactiveNetworkReport {
     /// Add the reported finite-wall storage to close gas-plus-wall energy.
     /// Inter-plenum valve transfers are deliberately excluded from this account.
     pub boundary_change: NetworkTotals,
-    /// Mechanical work on the gas [J], distinct from heat and chemical reference changes.
+    /// Prescribed plenum pressure work on the gas [J]. Distributed body work
+    /// remains in transport.body_force_work_j, separate from heat and chemistry.
     pub boundary_work_on_gas_j: f64,
-    /// Species/gauge-energy residual after external transport, pressure work and chemistry changes.
+    /// Species/gauge-energy residual after external transport, pressure work,
+    /// distributed body work and chemical reference changes.
     pub conservation_residual: NetworkTotals,
     /// Total mass change minus external transport [kg].
     pub mass_residual_kg: f64,
-    /// Physical chemical-total-energy change minus external exchange and pressure work [J],
+    /// Physical chemical-total-energy change minus external exchange,
+    /// pressure work and distributed body work [J],
     /// evaluated from differences rather than large absolute energy totals.
     pub absolute_energy_residual_j: f64,
 }
