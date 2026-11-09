@@ -20,7 +20,9 @@
 
 use std::sync::Arc;
 
-use super::{BurnupDecayEmission, DecayEmissionCoverage, PreparedDecayEmission, visit};
+use super::{
+    BurnupDecayEmission, DecayEmissionCoverage, DecayEmissionLimits, PreparedDecayEmission, visit,
+};
 use crate::burnup::BurnupModel;
 use crate::diffusion::burnup::DiffusionBurnupError;
 use crate::diffusion::burnup::decay::BurnupDecayNeutronEmission;
@@ -266,75 +268,6 @@ impl PreparedDecayEmission {
                     nuclide: self.assembly.nuclides()[parent],
                 });
             }
-            let mut row = vec![Accumulator::new(0.0); groups];
-            let mut original_count = PositiveIntegral::new();
-            let mut original_energy = PositiveIntegral::new();
-            for (source_group, (&count, &energy)) in self
-                .particles_per_decay(parent)
-                .unwrap()
-                .iter()
-                .zip(self.energy_per_decay_j(parent).unwrap())
-                .enumerate()
-            {
-                visit(&mut work, self.limits, &mut checkpoint)?;
-                if count == 0.0 {
-                    continue;
-                }
-                if count.is_subnormal() || energy.is_subnormal() {
-                    return Err(FissionError::Arithmetic.into());
-                }
-                original_count.add_product(1.0, count, 1.0, 1.0)?;
-                original_energy.add_product(1.0, energy, 1.0, 1.0)?;
-                let mean = energy / count;
-                if !mean.is_finite() || mean < energies[0] || mean > energies[groups - 1] {
-                    return Err(DecayNeutronBindingError::OutsideRepresentativeEnergies {
-                        parent,
-                        source_group,
-                        mean_j: mean,
-                    });
-                }
-                let upper = energies.partition_point(|&value| value < mean);
-                if energies[upper] == mean {
-                    row[upper].add(count)?;
-                } else {
-                    let lower = upper - 1;
-                    let span = energies[upper] - energies[lower];
-                    let low = count * ((energies[upper] - mean) / span);
-                    let high = count * ((mean - energies[lower]) / span);
-                    if !(low >= f64::MIN_POSITIVE && high >= f64::MIN_POSITIVE)
-                        || !low.is_finite()
-                        || !high.is_finite()
-                    {
-                        return Err(FissionError::Arithmetic.into());
-                    }
-                    row[lower].add(low)?;
-                    row[upper].add(high)?;
-                }
-            }
-            let original_count = original_count.value()?;
-            let original_energy = original_energy.value()?;
-            let row: Vec<_> = row.into_iter().map(Accumulator::value).collect();
-            let mut actual_count = PositiveIntegral::new();
-            let mut actual_energy = PositiveIntegral::new();
-            for (&count, &energy) in row.iter().zip(energies) {
-                visit(&mut work, self.limits, &mut checkpoint)?;
-                actual_count.add_product(1.0, count, 1.0, 1.0)?;
-                actual_energy.add_product(1.0, count, energy, 1.0)?;
-            }
-            let actual_energy = actual_energy.value()?;
-            let number_residual = sum(&[actual_count.value()?, -original_count]);
-            let energy_residual = sum(&[actual_energy, -original_energy]);
-            if !nonnegative(number_residual.abs())
-                || !nonnegative(energy_residual.abs())
-                || number_residual.abs() > 256.0 * f64::EPSILON * original_count
-                || energy_residual.abs() > 256.0 * f64::EPSILON * original_energy
-            {
-                return Err(DecayNeutronBindingError::Projection {
-                    parent,
-                    particles: number_residual,
-                    energy_j: energy_residual,
-                });
-            }
             // Full spectral moments are transferred. The original caller must
             // already have reserved that energy in the heavy-particle outward
             // channel; gamma radiation and local heat are not substitute credit.
@@ -350,20 +283,18 @@ impl PreparedDecayEmission {
                 1.0,
             )?;
             let available = available.value()?;
-            if original_energy > available || actual_energy > available {
-                return Err(DecayNeutronBindingError::RadiationBudget {
-                    parent,
-                    kinetic_energy_j: original_energy.max(actual_energy),
-                    available_energy_j: available,
-                });
-            }
+            let (row, moments) = project_group_moments(
+                parent,
+                self.particles_per_decay(parent).unwrap(),
+                self.energy_per_decay_j(parent).unwrap(),
+                energies,
+                available,
+                self.limits,
+                &mut work,
+                &mut checkpoint,
+            )?;
             yields.push(row);
-            projection.push(DecayNeutronProjection {
-                particles_per_decay: original_count,
-                kinetic_energy_j_per_decay: original_energy,
-                particle_projection_residual: number_residual,
-                energy_projection_residual_j: energy_residual,
-            });
+            projection.push(moments);
         }
         checkpoint()?;
         let emission = Arc::new(DecayNeutronEmission::new(
@@ -381,6 +312,116 @@ impl PreparedDecayEmission {
             projection: projection.into(),
         })
     }
+}
+
+/// Shared moment-preserving preparation for MF8 and MF1/MF5 source adapters.
+/// Inputs are already integrated physical source bins, never midpoint samples.
+pub(in crate::endf) fn project_group_moments(
+    parent: usize,
+    particles: &[f64],
+    energy_j: &[f64],
+    representative_energies_j: &[f64],
+    available_energy_j: f64,
+    limits: DecayEmissionLimits,
+    work: &mut usize,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<(Vec<f64>, DecayNeutronProjection), DecayNeutronBindingError> {
+    if particles.len() != energy_j.len()
+        || representative_energies_j.is_empty()
+        || !nonnegative(available_energy_j)
+    {
+        return Err(DecayNeutronBindingError::Invalid(
+            "matching source moments, kinetic groups and finite radiation allowance required",
+        ));
+    }
+    let groups = representative_energies_j.len();
+    let energies = representative_energies_j;
+    let mut row = vec![Accumulator::new(0.0); groups];
+    let mut original_count = PositiveIntegral::new();
+    let mut original_energy = PositiveIntegral::new();
+    for (source_group, (&count, &energy)) in particles.iter().zip(energy_j).enumerate() {
+        visit(work, limits, checkpoint)?;
+        if count == 0.0 {
+            if energy != 0.0 {
+                return Err(FissionError::Arithmetic.into());
+            }
+            continue;
+        }
+        if !nonnegative(count)
+            || !nonnegative(energy)
+            || count.is_subnormal()
+            || energy.is_subnormal()
+        {
+            return Err(FissionError::Arithmetic.into());
+        }
+        original_count.add_product(1.0, count, 1.0, 1.0)?;
+        original_energy.add_product(1.0, energy, 1.0, 1.0)?;
+        let mean = energy / count;
+        if !mean.is_finite() || mean < energies[0] || mean > energies[groups - 1] {
+            return Err(DecayNeutronBindingError::OutsideRepresentativeEnergies {
+                parent,
+                source_group,
+                mean_j: mean,
+            });
+        }
+        let upper = energies.partition_point(|&value| value < mean);
+        if energies[upper] == mean {
+            row[upper].add(count)?;
+        } else {
+            let lower = upper - 1;
+            let span = energies[upper] - energies[lower];
+            let low = count * ((energies[upper] - mean) / span);
+            let high = count * ((mean - energies[lower]) / span);
+            if !(low >= f64::MIN_POSITIVE && high >= f64::MIN_POSITIVE)
+                || !low.is_finite()
+                || !high.is_finite()
+            {
+                return Err(FissionError::Arithmetic.into());
+            }
+            row[lower].add(low)?;
+            row[upper].add(high)?;
+        }
+    }
+    let original_count = original_count.value()?;
+    let original_energy = original_energy.value()?;
+    let row: Vec<_> = row.into_iter().map(Accumulator::value).collect();
+    let mut actual_count = PositiveIntegral::new();
+    let mut actual_energy = PositiveIntegral::new();
+    for (&count, &energy) in row.iter().zip(energies) {
+        visit(work, limits, checkpoint)?;
+        actual_count.add_product(1.0, count, 1.0, 1.0)?;
+        actual_energy.add_product(1.0, count, energy, 1.0)?;
+    }
+    let actual_energy = actual_energy.value()?;
+    let number_residual = sum(&[actual_count.value()?, -original_count]);
+    let energy_residual = sum(&[actual_energy, -original_energy]);
+    if !nonnegative(number_residual.abs())
+        || !nonnegative(energy_residual.abs())
+        || number_residual.abs() > 256.0 * f64::EPSILON * original_count
+        || energy_residual.abs() > 256.0 * f64::EPSILON * original_energy
+    {
+        return Err(DecayNeutronBindingError::Projection {
+            parent,
+            particles: number_residual,
+            energy_j: energy_residual,
+        });
+    }
+    if original_energy > available_energy_j || actual_energy > available_energy_j {
+        return Err(DecayNeutronBindingError::RadiationBudget {
+            parent,
+            kinetic_energy_j: original_energy.max(actual_energy),
+            available_energy_j,
+        });
+    }
+    Ok((
+        row,
+        DecayNeutronProjection {
+            particles_per_decay: original_count,
+            kinetic_energy_j_per_decay: original_energy,
+            particle_projection_residual: number_residual,
+            energy_projection_residual_j: energy_residual,
+        },
+    ))
 }
 
 #[cfg(test)]

@@ -34,6 +34,9 @@ mod decay_tests;
 #[path = "fission_tests.rs"]
 mod fission_tests;
 
+#[path = "evaluated_sf_tests.rs"]
+mod evaluated_sf_tests;
+
 fn activation_budget() -> FusionNeutronActivationBudget {
     FusionNeutronActivationBudget {
         spatial: DiffusionBurnupBudget {

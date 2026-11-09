@@ -3552,3 +3552,63 @@ with `thermal` enabled and no compiler diagnostics. The source selection uses
 the original fs-la decay/prepared-LU and thermal timeline/advection owners.
 It is not a full Cargo/constellation gate; the seven pinned sibling checkouts
 and DSR/RCH executors remain unavailable in this workspace.
+
+## Evaluated SF neutrons, radioactive fragments and material heat
+
+`endf::decay::model::burnup::neutrons::EvaluatedBurnupNeutrons` prepares
+original MF1/MF5 prompt sources and ordinary MF8 neutron emissions against one
+`EvaluatedBurnupDecayAssembly` and an explicit `NeutronKineticModel`. Each
+positive SF parent requires a matched prompt multiplicity and spectrum;
+total or delayed multiplicities cannot substitute. Source Arcs and exact
+MF1/MF5 metadata remain attached, and the original MF8 parent isotope/isomer,
+MAT and atomic weight must agree. Compatibility checks do not certify the
+physical consistency of separately supplied evaluations.
+
+Every original component integral, component-probability sum and weighted
+distribution integral must lie within the caller's explicit normalization
+allowance. Admitted discrepancies are retained: diagnostics expose original
+nu, integrated particles per fission, their signed difference, component
+integrals and both original branch sums. Native decay-event counts include all
+admitted parent branches, so the SF coefficient uses B_SF/B_all to produce nu
+times the original native SF event count. This conversion neither changes
+source probabilities nor applies another factor to independent product yields.
+Ordinary MF8 spectra remain per parent transformation without a second branch
+factor. Missing ordinary-neutron spectra and contradictory zero declarations
+refuse; empty SF average-only STYP=5 markers do not establish spectral coverage.
+Positive MF8 spectra on a mixed SF parent must identify disjoint supplied
+ordinary decay modes. Aggregate delayed SF sources are never added over
+explicit radioactive-fragment neutron emission.
+
+MF5 and MF8 share the original analytical continuum moments and conservative
+representative-energy projection. Preparation is bounded and cancellable;
+mixed-mode attribution uses a prepared RTYP set rather than rescanning every
+decay mode for each spectral record. The native projection retains particle
+count and first energy moment, reports signed rounding residuals, and refuses
+unsupported energy coverage. Only the original routed heavy-particle outward
+energy can fund neutron kinetic energy. The same accepted reaction trajectory
+transfers it once from radioactive radiation into transported neutrons.
+Local heat, electromagnetic radiation and escape are not additional funding.
+
+`bind_burnup` keeps the exact original nuclide order, laws, decay channels,
+products and energy routes while admitting reordered channels and appended
+neutron reactions. It returns the original `BurnupDecayNeutronEmission` for
+the same finite inventory; no extra inventory, time solver, precursor history
+or thermal ledger is introduced. Existing spatial transport, activation and
+material heating consume that emission through their shared accepted step.
+Fragment births can decay and emit neutrons during their birth interval;
+capture acts on the evolving neutron population, with its deposited energy
+reaching the original material calorics. Existing diffusion, group-condensation,
+finite-inventory closure and native propagation limits still apply.
+
+Seven new binding regressions and one material regression passed with the
+preceding 170 tests and 15 original emission/interpolation regressions: 193
+native tests, zero failures, with `thermal` enabled and no compiler diagnostics.
+The manufactured mixed-mode chain checks same-interval prompt SF and daughter
+neutron births against independent closed-form inventory and capture histories,
+the actual native SF counts, disjoint energy transfer, complete material heat,
+temperature and mass, split continuation and late cancellation/retry. Refusal
+cases cover missing/overlapping sources, total-versus-prompt identity, original
+heavy-energy limits, normalization discrepancies, nearly closed branching,
+changed decay data and preparation bounds. This is original-source numerical
+and integration validation, not empirical isotope calibration or a full
+Cargo/constellation gate.

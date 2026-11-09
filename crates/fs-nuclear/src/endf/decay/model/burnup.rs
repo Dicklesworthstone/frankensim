@@ -36,6 +36,9 @@ use crate::endf::fission_yields::spontaneous::SpontaneousFissionYieldEvaluation;
 use crate::irradiation::{NeutronGroups, NuclideId};
 use crate::{Accumulator, FissionError, nonnegative, sum};
 
+/// Evaluated prompt-fission and ordinary decay neutrons on the native inventory.
+pub mod neutrons;
+
 /// Independent products for one original spontaneously fissioning parent.
 /// Every positive source yield is represented or explicitly exported. Export
 /// means outside this inventory model; it does not make a product stable or

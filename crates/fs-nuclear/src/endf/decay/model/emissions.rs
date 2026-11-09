@@ -33,7 +33,9 @@ use super::EvaluatedDecayAssembly;
 use crate::burnup::transport::BurnupTransportStep;
 use crate::burnup::{BurnupModel, BurnupRate, BurnupStep};
 use crate::decay::{DecayModel, DecayStep};
-use crate::endf::decay::spectra::{DecayRadiation, DecaySpectrum, DecaySpectrumPoint};
+use crate::endf::decay::spectra::{
+    DecayInterpolation, DecayRadiation, DecaySpectrum, DecaySpectrumPoint,
+};
 use crate::endf::spectrum::PositiveIntegral;
 use crate::endf::{EndfError, budget, convex};
 use crate::irradiation::NuclideId;
@@ -492,7 +494,7 @@ impl BurnupDecayEmission {
     }
 }
 
-fn integrate_spectrum(
+pub(in crate::endf) fn integrate_spectrum(
     spectrum: &DecaySpectrum,
     edges: &[f64],
     counts: &mut [PositiveIntegral],
@@ -542,18 +544,58 @@ fn integrate_spectrum(
         .continuum
         .as_ref()
         .ok_or_else(|| invalid("positive continuum normalization requires a retained spectrum"))?;
+    integrate_continuum(
+        spectrum.radiation,
+        &continuum.points,
+        &continuum.interpolation,
+        fc,
+        edges,
+        counts,
+        energies,
+        work,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Shared analytical moments for source-admitted MF8 and MF5 continua. The
+/// original readers admit point/interpolation shapes and the caller admits
+/// matching output arrays and an ascending energy grid before this kernel.
+/// `normalization` retains the source's physical multiplicity; this operation
+/// never repairs a probability integral or invents missing spectral support.
+pub(in crate::endf) fn integrate_continuum(
+    radiation: DecayRadiation,
+    points: &[DecaySpectrumPoint],
+    interpolation: &[DecayInterpolation],
+    normalization: f64,
+    edges: &[f64],
+    counts: &mut [PositiveIntegral],
+    energies: &mut [PositiveIntegral],
+    work: &mut usize,
+    limits: DecayEmissionLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<(), EndfError> {
+    if !nonnegative(normalization) {
+        return Err(invalid(
+            "finite nonnegative spectral normalization required",
+        ));
+    }
+    if normalization == 0.0 {
+        return Ok(());
+    }
+    let fc = normalization;
     let mut region = 0;
     let mut group = 0;
-    for (index, points) in continuum.points.windows(2).enumerate() {
+    for (index, points) in points.windows(2).enumerate() {
         visit(work, limits, checkpoint)?;
         let [a, b] = [points[0], points[1]];
         if a.energy_j == b.energy_j {
             continue;
         }
-        while continuum.interpolation[region].end_point < index + 2 {
+        while interpolation[region].end_point < index + 2 {
             region += 1;
         }
-        let law = continuum.interpolation[region].law;
+        let law = interpolation[region].law;
         let logarithmic = match law {
             1 | 2 => None,
             3..=5 => Some(self::continuum::LogSegment::new(a, b, law)?),
@@ -563,7 +605,7 @@ fn integrate_spectrum(
                 ));
             }
         };
-        if spectrum.radiation == DecayRadiation::ElectronCapturePositron
+        if radiation == DecayRadiation::ElectronCapturePositron
             && (a.density_per_j > 0.0 || (law != 1 && b.density_per_j > 0.0))
         {
             return Err(EndfError::Unsupported(
@@ -574,7 +616,7 @@ fn integrate_spectrum(
             continue;
         }
         if matches!(
-            spectrum.radiation,
+            radiation,
             DecayRadiation::FissionFragment | DecayRadiation::Other(_)
         ) {
             return Err(EndfError::Unsupported(
@@ -656,7 +698,7 @@ fn check_values(rows: usize, groups: usize, limits: DecayEmissionLimits) -> Resu
     }
 }
 
-fn visit(
+pub(in crate::endf) fn visit(
     work: &mut usize,
     limits: DecayEmissionLimits,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
