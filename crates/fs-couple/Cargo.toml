@@ -149,6 +149,10 @@ required-features = ["cavitation"]
 name = "cavitating_water_piston"
 required-features = ["cavitation"]
 
+[[example]]
+name = "vapor_cavitation"
+required-features = ["cavitation"]
+
 [[test]]
 name = "cavitation"
 required-features = ["cavitation"]
@@ -156,6 +160,10 @@ required-features = ["cavitation"]
 [[test]]
 name = "caloric_bubble"
 required-features = ["caloric-cavitation"]
+
+[[test]]
+name = "vapor_bubble"
+required-features = ["cavitation"]
 
 [[test]]
 name = "stokes_motion"

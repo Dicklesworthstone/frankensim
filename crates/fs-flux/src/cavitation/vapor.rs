@@ -24,8 +24,11 @@
 //!
 //! The bulk liquid, explicit surface tension and external heat reservoir remain
 //! frozen. Actual original-water density, viscosity and sound-speed variation
-//! is checked at every interface temperature. Vapor pressure is homogeneous;
-//! vapor flow/phase-flux Mach and pressure-relaxation time scales are bounded.
+//! is checked at every interface temperature. Vapor pressure AND temperature
+//! are spatially uniform. Vapor flow/phase-flux Mach and pressure-relaxation
+//! time scales are bounded, but those checks do not establish thermal mixing,
+//! local phase equilibration or continuum validity; these remain caller
+//! applicability conditions for the actual radius and forcing history.
 //! No noncondensable gas, kinetic phase resistance, finite liquid inventory,
 //! resolved liquid heat equation, Kelvin equilibrium, liquid compressibility,
 //! shock, jet or erosion law is claimed. In particular this is not a

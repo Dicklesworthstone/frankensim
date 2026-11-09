@@ -5,9 +5,14 @@
 //! observation are admitted. The selected equation owns its liquid response:
 //! Rayleigh--Plesset is incompressible, while Keller--Miksis includes the
 //! first-order compressibility correction. The passive observer removes no
-//! additional energy from either trajectory. Vapor pressure and liquid
-//! temperature stay frozen; no latent heat is manufactured from the total
-//! volume of a bubble that also contains noncondensable gas.
+//! additional energy from either trajectory. The polytropic adapters below
+//! retain frozen vapor pressure and liquid temperature; no latent heat is
+//! inferred from total bubble volume containing noncondensable gas. The
+//! separate [`vapor`] adapter carries an explicit saturated-water phase model
+//! and its distinct displaced-liquid acoustic source.
+
+/// Phase-changing saturated water vapor and its displaced-liquid sound source.
+pub mod vapor;
 
 /// Original finite gas calorics on the same radial and acoustic trajectory.
 #[cfg(feature = "caloric-cavitation")]
@@ -296,9 +301,18 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
 fn compact_source_from_observation(
     observation: &BubbleObservation,
 ) -> Result<TimedCompactSource, AeroacError> {
-    let source_time_s = observation.state.time_s();
-    let volume_flow_m3_s = observation.volume_rate_m3_s;
-    let volume_flow_rate_m3_s2 = observation.volume_acceleration_m3_s2;
+    compact_source_from_flow(
+        observation.state.time_s(),
+        observation.volume_rate_m3_s,
+        observation.volume_acceleration_m3_s2,
+    )
+}
+
+fn compact_source_from_flow(
+    source_time_s: f64,
+    volume_flow_m3_s: f64,
+    volume_flow_rate_m3_s2: f64,
+) -> Result<TimedCompactSource, AeroacError> {
     if !source_time_s.is_finite()
         || !volume_flow_m3_s.is_finite()
         || !volume_flow_rate_m3_s2.is_finite()

@@ -9874,3 +9874,14 @@ Three focused regressions exercise real nozzle arrivals and local phase/heat
 feedback, independently reconstructed whole-system mass/species/energy, final
 pressure reversal with atomic retry, empty-path equivalence and cancellation.
 They are added but unexecuted under the existing dependency/resource build block.
+
+
+## Vapor phase dynamics and displaced-liquid acoustic observation
+
+`cavitation::bubble::vapor::MaterialVaporBubble` binds the original saturated-water source and native phase-changing radial owner to the existing compact acoustic observer. Evaporation and condensation make the geometric interface speed differ from liquid velocity. The adapter therefore transmits `4 pi R^2 U_l` and its native analytic derivative as the monopole source. It does not substitute geometric bubble-volume rate. Density, sound speed and causal propagation delay come from the same retained bulk-water source.
+
+Native mass, temperature, radius, liquid velocity and their accepted clock remain a single history. Compact-source and microphone admission occur while the complete native advance is still a borrowing proposal. A wrong acoustic medium, late compactness/pressure refusal or final cancellation preserves the entire original physical state. The common compact-source formatter is shared by the existing gas-bubble adapters; observation adds neither radiation damping nor a second evolution of the vapor inventory.
+
+Five new integration tests passed for identical direct/coupled phase trajectories, actual liquid displacement during evaporation, heat-driven mass/acoustic feedback, receiver-medium and late-observer rejection, and cancellation after source admission. Existing gas caloric and conducting-bubble integration tests remain passing. The complete focused source run passed 146 selected tests across material, native cavitation and coupled owners; it was not a full-workspace build.
+
+The `vapor_cavitation` example compares zero heat with an explicitly authored smooth 1 mW pulse under the same pressure cycle, emitting 320 samples of interface/liquid velocities, vapor mass transfer, source flow, causal receiver pressure, heat and independently reconstructed cumulative balances. Both cases include evaporation and condensation. The heat pulse is an external thermal port, not a liquid-conduction correlation. Applicability remains the native incompressible, spherical, locally saturated pure-vapor model plus the original compact-observer limits. Uniform vapor temperature, continuum behavior and rapid phase equilibration remain caller assumptions; the mechanical Mach checks alone do not establish them.
