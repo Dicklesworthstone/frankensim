@@ -9922,3 +9922,19 @@ not make the mechanics core a material-regime or force-bandwidth authority.
 The focused affine regressions include a positive interior maximum between
 two zero-slip endpoints, gravity cancellation, zero/tiny resistance, and
 large common translation.
+
+## Native angular history after a material-temperature update
+
+Both rolling and torsion event states expose `continue_at_temperature` for the
+original sealed source lifecycle continuation. Exact predecessor comparison
+includes attached spring memory and all accumulated event/loss accounts. The
+native state's original body-pair geometry, inertia binding and contact frame
+are retained. Source and returned native state must be published together;
+ordinary subsequent native advances continue to enforce held geometry.
+
+This held-coordinate continuation changes no body momentum, pose, mechanical
+clock or thermal store. The original source report supplies signed parameter
+work. Cancellation is checked before and after constructing the immutable
+successor; foreign predecessor history refuses. Validation in this increment
+was source review, pinned formatting and recursive parsing, not an executed
+cross-crate native test or a finite-rotation/thermoelastic validation.

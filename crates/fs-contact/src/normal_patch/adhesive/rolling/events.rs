@@ -19,11 +19,14 @@ use crate::normal_patch::adhesive::{
 use fs_blake3::ContentHash;
 use fs_math::dd::Dd;
 
+/// Original temperature continuation of the complete attached lifecycle.
+pub mod temperature;
+
 /// One original normal source and calibration shared by all junction lifetimes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceJkrRollingEvents {
-    // A zero-shift seed at the original attachment threshold. Refreshing it
-    // reuses the original kernels and shares immutable source receipts.
+    // An admitted seed supplies unstrained initial memory at later junctions;
+    // immutable original source receipts stay shared across radius changes.
     seed: SourceJkrRollingContact,
 }
 

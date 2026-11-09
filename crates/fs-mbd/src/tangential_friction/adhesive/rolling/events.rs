@@ -23,6 +23,8 @@ use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use fs_tribo::partial_slip::TangentFrame;
 
+pub mod temperature;
+
 /// Original source and the physical pair; longitudinal is the rolling axis.
 #[derive(Clone, Copy, Debug)]
 pub struct RigidAdhesiveRollingEventContact<'a> {

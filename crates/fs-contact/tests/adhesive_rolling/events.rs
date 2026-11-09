@@ -1,5 +1,8 @@
 //! G1/G3/G4: original normal events, retained spring release and fresh junctions.
 use super::*;
+
+#[path = "events/temperature.rs"]
+mod temperature;
 use fs_contact::normal_patch::adhesive::rolling::events::*;
 use fs_contact::normal_patch::adhesive::{JkrBranch, JkrJumpKind};
 

@@ -24,6 +24,8 @@ use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use fs_tribo::partial_slip::TangentFrame;
 
+pub mod temperature;
+
 /// Original physical pair and source; the contact normal is the twist axis.
 #[derive(Clone, Copy, Debug)]
 pub struct RigidAdhesiveTorsionEventContact<'a> {

@@ -4642,3 +4642,21 @@ and renewed rolling/torsion applicability refusal. Formatting/parser checks
 passed; these new cross-crate cases were not compiled or executed in the
 resource-constrained session. This is attached-endpoint continuation, not a
 thermal-path stability, reciprocal mixed-mode or caloric entropy model.
+
+## Complete angular lifecycle histories through temperature continuation
+
+The rolling and torsion `events::temperature` owners carry an attached lifecycle
+through the original sealed held-coordinate material refresh. All accumulated
+normal snap, released angular spring and plastic angular loss accounts retain
+their exact compensated values. The original attached law preserves full spring
+and angle history and supplies the signed normal/angular parameter-work report.
+No completed event is repriced and no storage change is relabelled as loss.
+
+The admitted refreshed contact seeds subsequent unstrained junctions; it is not
+re-admitted at an unrelated zero-indentation operating point. Ordinary normal
+separation and recontact retain their original owners and use the refreshed
+material response. Detached temperature updates refuse because this endpoint
+operation cannot choose a thermal branch event. Four new focused integration
+cases cover prior separation/recontact and yielding, continued loaded release,
+fresh junctions and atomic foreign/control/detached refusal. Parser and format
+checks passed; cross-crate execution remains unverified in this session.

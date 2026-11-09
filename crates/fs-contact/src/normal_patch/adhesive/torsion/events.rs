@@ -21,11 +21,14 @@ use crate::normal_patch::adhesive::{
 use fs_blake3::ContentHash;
 use fs_math::dd::Dd;
 
+/// Original temperature continuation of the complete attached lifecycle.
+pub mod temperature;
+
 /// One original normal source and calibrated torsional law across junctions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceJkrTorsionEvents {
-    // A zero-twist seed at attachment shares the immutable original material
-    // receipts when a fresh or continuing junction changes its radius.
+    // An admitted seed supplies unstrained initial memory at later junctions;
+    // immutable original source receipts stay shared across radius changes.
     seed: SourceJkrTorsionContact,
 }
 
