@@ -9,6 +9,8 @@
 /// Temperature-dependent buoyancy with retained native force history.
 pub mod buoyancy;
 
+mod forced;
+
 use super::{
     EquilibriumLattice3, Face3, FaceBoundary3, GridError3, OpenBoundaryGrid3,
     OpenBoundaryMomentumTransport3, macro_cell,

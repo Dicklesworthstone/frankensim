@@ -212,6 +212,29 @@ Every velocity/pressure face requires explicit reservoir temperature, including 
 
 The conserved scalar uses fixed reference volumetric heat capacity. This is passive low-Mach temperature transport, not compressible mass-specific enthalpy or automatic buoyancy feedback. Its heat receipt must not be replaced by the momentum reservoir mass receipt times temperature. The scalar component velocity envelope is additional to native Mach admission. No nonreflecting-outlet or general coupled time-order claim is made.
 
+### Prescribed spatial and evolving force in native convection
+
+`ForcedOpenBoundaryGrid3::prepare_thermal_field`, `step_serial_with_thermal`
+and `advance_serial_with_thermal` carry the same original D3Q7 thermal owner
+alongside native spatial force epochs. Initial thermal equilibrium and heat
+advection use each cell's accepted physical velocity, including its local
+half-force correction. Collision retains the opening force; reservoir
+reconstruction and the final source half-kick use the actual endpoint force.
+The tensor-diffusion variants retain the original full SPD diffusion kernel.
+
+The final publication advances momentum, force, temperature, finite walls,
+flux history, exterior-wall momentum/work receipts and counters together.
+An accepted changing-force step exchanges the caller's endpoint buffer with
+the old force buffer for reuse; refusal or cancellation preserves accepted
+states, the last wall receipt and the caller's buffer. There is no per-step
+adapter allocation, extra force reframe, inferred body-work heat or duplicate
+thermal source. Reference heat capacity and the original opening-velocity
+thermal split remain unchanged; no new coupled time-order claim is made.
+Focused G1/G3 regressions cover analytic affine acceleration and source moments
+on both native lattices, spatial heat-packet displacement, independent combined
+fluid/wall heat closure, late refusal with exact retry, equivalent tensor and
+held-force representations, and moving-wall receipt publication/cancellation.
+
 ## Finite immersed bodies in native convection
 
 `ThermalOpenField3::set_immersed_thermal_bodies` groups explicitly selected
