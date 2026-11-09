@@ -403,3 +403,5 @@ fn g0_wrong_sources_thicknesses_buried_faces_and_invalid_inputs_refuse() {
         .is_err()
     );
 }
+
+mod depth;

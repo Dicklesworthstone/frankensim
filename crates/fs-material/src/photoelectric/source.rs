@@ -28,6 +28,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 
+/// Conditional electron escape resolved against absorption depth.
+pub mod depth;
+
 /// Bounded source table; each wavelength consumes two original property roles.
 pub const MAX_PHOTOELECTRIC_KNOTS: usize = 16;
 

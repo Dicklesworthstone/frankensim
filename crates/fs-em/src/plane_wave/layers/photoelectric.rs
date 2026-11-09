@@ -33,6 +33,9 @@ use fs_material::photoelectric::source::{PhotoelectricMaterial, PhotoelectricSou
 use fs_material::photoelectric::{PhotoelectricError, PhotoelectricLaw, PhotoelectricResponse};
 use fs_math::c64::C64;
 
+/// Conditional electron escape resolved against absorption depth.
+pub mod depth;
+
 /// Explicit declaration of which external face emits into vacuum. The selected
 /// source yield describes escape through this face, not the sum of both faces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
