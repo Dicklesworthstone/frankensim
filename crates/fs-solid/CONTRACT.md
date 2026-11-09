@@ -13583,7 +13583,7 @@ claim.
 ## Retained finite inelasticity on mixed P2/P1 tetrahedra
 
 `hyper3::mixed::plastic::MixedPlasticTetSolid` advances isothermal,
-quasistatic finite inelastic loading on the existing quadratic-displacement,
+finite inelastic loading on the existing quadratic-displacement,
 continuous-linear-pressure tetrahedra. Uniform, per-element and per-quadrature
 `MixedFiniteInelasticMaterial` bindings borrow the original law. The blanket
 `FiniteJ2Material` implementation retains existing native/source-resolved J2
@@ -13622,6 +13622,25 @@ fields. `inelastic_dissipation_j()` sums only the two physical heat channels.
 The native sole-Norton convention reports its creep heat in the historically
 plastic-named channel, consistently with the existing displacement owner.
 
+`dynamics::MixedPlasticTetMotion` binds an accepted solid to explicit original
+reference density and nodal velocity. Its consistent P2 mass is assembled once
+from the same admitted quadrature and shared by successors. Signed quadratic
+mass couplings are retained; deformation never changes the mass inventory.
+The existing mixed endpoint solver receives the native backward-Euler inertia
+only in its displacement block, preserving the pressure equation and frozen
+complete material histories. Rate-dependent material intervals must equal the
+momentum interval exactly. Source ownership, pressure, displacement, history,
+velocity and original mass are returned together only after all gates pass.
+
+Dynamic reactions include inertia. Independent kinetic change, inertial work,
+nonnegative numerical kinetic loss, physical inelastic heat and signed material
+endpoint error remain distinct. The combined work identity is gated, as is the
+caller-specified numerical kinetic-loss allowance. Accepted-endpoint weak volume
+admission is inherited from the mixed solve; it does not assert an instantaneous
+volume-rate constraint or time accuracy without refinement. Original-mass
+acceleration loads, kinetic energy and current-geometry momentum use the shared
+mass owner without another constitutive update.
+
 `tests/mixed_plastic.rs` checks coaxial finite loading, free unloading, reverse
 yielding, permanent deformation and pressure against independent scalar
 Hencky/J2 equations at moderate and very high bulk modulus and at exact
@@ -13630,10 +13649,13 @@ refusal/cancellation/replay. `tests/mixed_plastic/bending.rs` adds a bounded
 non-affine two-mesh plastic cantilever diagnostic and compares high finite bulk
 response to exact incompressibility. `tests/mixed_inelastic.rs` adds finite-time
 relaxation against independent scalar kinetic equations, complete recovery
-memory, shared-clock admission and rejected-step/retry cases. These manufactured cases are numerical
+memory, shared-clock admission and rejected-step/retry cases.
+`tests/mixed_inelastic_dynamics.rs` covers free translation, consistent mass
+acceleration, finite inelastic work accounts, kinetic clocks and transactional
+motion acceptance. These manufactured cases are numerical
 evidence, not material calibration, a universal inf-sup theorem, continuum
 convergence, or an injectivity certificate between quadrature points. This
-adapter does not yet add inertia, thermal evolution, porous/ductile
+adapter does not yet add thermal evolution, porous/ductile
 damage, contact, or follower loads to mixed plasticity; their existing owners
 remain separate.
 

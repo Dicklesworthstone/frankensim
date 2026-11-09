@@ -13,11 +13,12 @@
 //! restore a displacement penalty and change this mixed formulation. Explicit
 //! exact incompressibility has no bulk storage. Flow potential, physical
 //! inelastic heat, pressure-constraint work and endpoint quadrature error remain
-//! separate. This is an isothermal quasistatic path for rate-independent J2,
+//! separate. This is an isothermal path for rate-independent J2,
 //! Perzyna overstress, Norton creep and their native combined/recovering laws.
 //! All kinetic points share one original physical interval. The original
 //! finite-history limits and local convex bulk branch remain enforced. Mesh
 //! stability, locking accuracy and injectivity require their own evidence.
+//! [`dynamics`] adds consistent reference inertia to this same mixed solve.
 
 use std::sync::Arc;
 
@@ -34,7 +35,12 @@ use super::{
 use crate::hyper3::plastic::FinitePlasticStepControls;
 use crate::linear3::TetAssemblyBudget;
 
+/// Retained velocity and consistent P2 inertia with native inelastic history.
+pub mod dynamics;
+
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
 /// Original laws without property averaging or replacement of their sources.
 #[derive(Debug)]
@@ -99,7 +105,9 @@ pub struct MixedPlasticTetEnergy {
     pub dead_load_endpoint_work_j: f64,
     /// Endpoint support reaction dotted with its prescribed displacement change.
     pub support_endpoint_work_j: f64,
-    /// External endpoint work minus internal endpoint work, J.
+    /// Native inertial endpoint work, J; zero for quasistatic advancement.
+    pub inertial_endpoint_work_j: f64,
+    /// External endpoint work minus material and inertial endpoint work, J.
     pub equilibrium_work_residual_j: f64,
     /// Internal endpoint work minus storage change and total physical heat, J.
     /// Signed first-order quadrature defect; never added to material heat.
@@ -390,7 +398,7 @@ impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
     /// Solve one physical loading endpoint from the immutable accepted history.
     /// `settings.load_steps` must be one: physical substeps belong to the caller,
     /// so numerical Newton iterations never silently advance the plastic history.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
         prescribed_m: &[(usize, f64)],
@@ -401,6 +409,35 @@ impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<MixedPlasticTetStep<'a, L>, MixedPlasticTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure_gauge,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn advance_loaded(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_gauge: Option<(usize, f64)>,
+        settings: MixedUpSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(MixedPlasticTetStep<'a, L>, Option<AcceptedMotion>), MixedPlasticTetError> {
         checkpoint(cx)?;
         if settings.load_steps != 1
             || ![
@@ -454,12 +491,23 @@ impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
             settings,
         };
         let prepared = problem.prepare_with_mesh(Arc::clone(&self.mesh), cx)?;
-        let equilibrium = prepared.solve_from(&self.displacement_m, &self.pressure_pa, cx)?;
+        let equilibrium =
+            prepared.solve_loaded_from(&self.displacement_m, &self.pressure_pa, inertia, cx)?;
         let u = &equilibrium.displacement_m;
+        let motion = inertia
+            .map(|owner| {
+                owner
+                    .motion(u.as_flattened(), cx)
+                    .map_err(super::inertia_error)
+            })
+            .transpose()?;
         let mut energy = MixedPlasticTetEnergy {
             remainder_before_j: self.remainder_energy_j,
             bulk_before_j: self.bulk_energy_j,
             stored_before_j: self.stored_energy_j(),
+            inertial_endpoint_work_j: motion
+                .as_ref()
+                .map_or(0.0, |(_, account)| account.inertial_work_j),
             ..Default::default()
         };
         let mut states = Vec::with_capacity(self.states.len());
@@ -541,7 +589,8 @@ impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
             });
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
-            - energy.internal_endpoint_work_j;
+            - energy.internal_endpoint_work_j
+            - energy.inertial_endpoint_work_j;
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
             - energy.inelastic_dissipation_j();
@@ -599,10 +648,13 @@ impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
             remainder_energy_j: energy.remainder_after_j,
             bulk_energy_j: energy.bulk_after_j,
         };
-        Ok(MixedPlasticTetStep {
-            solid,
-            equilibrium,
-            energy,
-        })
+        Ok((
+            MixedPlasticTetStep {
+                solid,
+                equilibrium,
+                energy,
+            },
+            motion,
+        ))
     }
 }
