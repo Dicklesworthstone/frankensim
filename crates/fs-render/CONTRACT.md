@@ -11843,8 +11843,12 @@ The original scalar or material-bound constitutive rates are resolved at the
 actual thermal temperature. Rates are fixed over each accepted thermal interval;
 step refinement assesses this feedback approximation. Intrinsic lifetimes do
 not force lifetime-sized thermal timesteps. Immutable prepared propagators are
-reused per emitter when duration, rates and pump remain unchanged. A bounded
-pump window splits native steps at both pulse edges. Initial excitation enters
+reused per emitter and across consecutive matching cells when the model,
+duration, pump hazards and both photon energies agree. A pass-local,
+constant-memory temperature cache also avoids repeated constitutive queries
+for consecutive cells at the same physical temperature. Each cell retains its
+own population, thermal lookup and cancellation checkpoint. A bounded pump
+window splits native steps at both pulse edges. Initial excitation enters
 the conservation account explicitly. Failed or retried thermal steps publish
 neither tentative populations nor their accumulated heat/light channels.
 

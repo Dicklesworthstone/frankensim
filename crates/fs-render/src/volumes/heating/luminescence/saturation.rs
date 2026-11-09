@@ -228,10 +228,11 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         let mut initial = CheckedSum::default();
         let mut emitters = Vec::with_capacity(ordered.len());
         let mut emission_w = Vec::with_capacity(ordered.len());
+        let mut cached_model = None;
         for binding in ordered.into_values() {
             checkpoint()?;
             let temperature = thermal.temperature_k(binding.thermal_cell)?;
-            let model = triplet.model_at_temperature(&singlet, temperature)?;
+            let model = resolve_model(&singlet, &triplet, temperature, &mut cached_model)?;
             for (i, spectrum) in [singlet.fluorescence(), triplet.triplet().fluorescence()]
                 .into_iter()
                 .enumerate()
@@ -386,11 +387,14 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         if match_clock && self.time_s != thermal.time_s() {
             return Err(invalid("finite-population and thermal clocks differ"));
         }
+        let mut cached_model = None;
         for emitter in &self.emitters {
             checkpoint()?;
-            self.triplet.model_at_temperature(
+            resolve_model(
                 &self.singlet,
+                &self.triplet,
                 thermal.temperature_k(emitter.binding.thermal_cell)?,
+                &mut cached_model,
             )?;
         }
         if let Some(environment) = &self.environment {
@@ -465,38 +469,50 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         let mut populations = Vec::with_capacity(self.emitters.len());
         let mut mean_emission_w = Vec::with_capacity(self.emitters.len());
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
+        let mut cached_model = None;
+        let mut previous_plan: Option<Arc<SaturableSingletTripletPlan>> = None;
         for emitter in &mut self.emitters {
             checkpoint()?;
             let binding = emitter.binding;
-            let model = self.triplet.model_at_temperature(
+            let model = resolve_model(
                 &self.singlet,
+                &self.triplet,
                 thermal.temperature_k(binding.thermal_cell)?,
+                &mut cached_model,
             )?;
             let rates = if pumped {
                 binding.pump.rates_s
             } else {
                 [0.0; 2]
             };
-            if emitter.prepared.as_ref().is_none_or(|plan| {
-                *plan.model() != model
-                    || plan.duration_s() != duration_s
-                    || plan.pump_rates_s() != rates
-            }) {
-                emitter.prepared = Some(Arc::new(preserve_checkpoint(checkpoint, |cancelled| {
-                    SaturableSingletTripletPlan::prepare(
-                        model,
-                        rates,
-                        binding.pump.energies_j,
-                        duration_s,
-                        self.triplet.evolution_limits(),
-                        cancelled,
-                    )
-                })?));
+            let matches = |plan: &SaturableSingletTripletPlan| {
+                *plan.model() == model
+                    && plan.duration_s() == duration_s
+                    && plan.pump_rates_s() == rates
+                    && plan.pump_energies_j() == binding.pump.energies_j
+            };
+            if emitter.prepared.as_ref().is_none_or(|plan| !matches(plan)) {
+                if let Some(plan) = previous_plan.as_ref().filter(|plan| matches(plan)) {
+                    emitter.prepared = Some(Arc::clone(plan));
+                } else {
+                    emitter.prepared =
+                        Some(Arc::new(preserve_checkpoint(checkpoint, |cancelled| {
+                            SaturableSingletTripletPlan::prepare(
+                                model,
+                                rates,
+                                binding.pump.energies_j,
+                                duration_s,
+                                self.triplet.evolution_limits(),
+                                cancelled,
+                            )
+                        })?));
+                }
             }
             let plan = emitter
                 .prepared
                 .as_ref()
                 .expect("prepared finite emitter interval");
+            previous_plan = Some(Arc::clone(plan));
             let step = preserve_checkpoint(checkpoint, |cancelled| {
                 plan.advance_with_cancel(emitter.populations, cancelled)
             })?;
@@ -620,11 +636,14 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         }
         let mut stored = CheckedSum::default();
         let mut emission_w = Vec::with_capacity(self.emitters.len());
+        let mut cached_model = None;
         for (emitter, &populations) in self.emitters.iter().zip(&pending.populations) {
             checkpoint()?;
-            let model = self.triplet.model_at_temperature(
+            let model = resolve_model(
                 &self.singlet,
+                &self.triplet,
                 thermal.temperature_k(emitter.binding.thermal_cell)?,
+                &mut cached_model,
             )?;
             for (i, energy) in model.excitation_energies_j().into_iter().enumerate() {
                 stored.add(finite(populations[i + 1] * energy)?)?;
@@ -656,6 +675,26 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         self.time_s = thermal.time_s();
         Ok(())
     }
+}
+
+// Consecutive cells commonly share a physical temperature. Keep this cache
+// local to one pass: its memory is constant, no stale thermal state survives,
+// and every original cell still performs its own cancellation/state lookup.
+fn resolve_model<const M: usize>(
+    singlet: &LuminescenceSource<M>,
+    triplet: &SingletTripletSource<M>,
+    temperature_k: f64,
+    cached: &mut Option<(u64, SingletTripletDecay)>,
+) -> Result<SingletTripletDecay, OpticalHeatingError> {
+    let key = temperature_k.to_bits();
+    if let Some((previous, model)) = cached
+        && *previous == key
+    {
+        return Ok(*model);
+    }
+    let model = triplet.model_at_temperature(singlet, temperature_k)?;
+    *cached = Some((key, model));
+    Ok(model)
 }
 
 fn endpoint_emission<const M: usize>(
