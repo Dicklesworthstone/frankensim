@@ -3,6 +3,7 @@ use super::*;
 use crate::modal_acoustic_time::ModalAcousticState;
 
 mod felt;
+mod memory;
 
 fn config(dt_s: f64) -> ImpactConfig {
     ImpactConfig {

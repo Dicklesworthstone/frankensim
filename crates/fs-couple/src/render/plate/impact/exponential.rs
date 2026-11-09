@@ -8,22 +8,26 @@
 //!
 //! Nonlinear/contact accuracy still requires time and modal refinement. Only
 //! the quadratic held-input limit is exact. Nonlinear drag,
-//! shell/support potentials and subsequently attached memory are not admitted by
-//! this entry point. The felt entry retains the original WoolFelt potential,
+//! shell/support potentials and nonlinear mapped-strain memory are not admitted
+//! by this entry point. Cold linear Maxwell and passive radiation attachments
+//! retain their complete original storage and interconnection. The felt entry
+//! retains the original WoolFelt potential,
 //! accepted compaction history and complete Kelvin memory in this same solve.
 //! Nonlinear/contact transients and conditioning still need time refinement.
 
 use super::{
     BodyPotential, ImpactBody, ImpactConfig, ImpactError, ImpactFrame, ImpactSystem,
     MAX_IMPACT_MODES, MechanicalStorage, VolumeSpring, audio::ImpactSource, damping::ViscousDamper,
-    felt::FeltPad, invalid, string::StringPotential, tangent,
+    felt::FeltPad, invalid, string::StringPotential,
 };
 use fs_dcontact::Obstacle;
+
+mod memory;
 use fs_exec::CancelGate;
 use fs_material::fiber::WoolFeltState;
 use fs_math::dd::Dd;
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedNonlinearZoh, QuadraticPart};
-use fs_phs::{PortHamiltonian, PreparedStepError, QuadraticStorage, Storage};
+use fs_phs::{PreparedStepError, QuadraticStorage, Storage};
 use std::{ops::Deref, rc::Rc};
 
 fn owner(error: fs_phs::PhsError) -> ImpactError {
@@ -280,22 +284,29 @@ impl ExponentialImpactSystem {
         let inner = ImpactSystem::assemble_with_dampers(
             bodies, contacts, pads, volumes, dampers, config, false,
         )?;
-        // Only accepted conditioning updates the shared original histories.
-        // The prepared numerical owner borrows the SAME live storage allocation;
-        // its quadratic block is independent of every conditioning history.
-        let (j, r, g) = inner.system.structure();
-        let system = PortHamiltonian::new(
-            states,
-            modes,
-            j.to_vec(),
-            r.to_vec(),
-            g.to_vec(),
-            Box::new(tangent::SharedStorage(Rc::clone(&inner.contact))),
-        )
-        .map_err(owner)?;
+        Self::prepare_inner(inner, gate)
+    }
+
+    // Reprepare the COMPLETE original composition after cold attachment.
+    // Both the native acceptance owner and exact propagator share that same
+    // storage allocation; no contact-only reconstruction can omit a memory.
+    fn prepare_inner(mut inner: ImpactSystem, gate: &CancelGate) -> Result<Self, ImpactError> {
+        if gate.is_requested() {
+            return Err(ImpactError::Cancelled);
+        }
+        let (states, modes) = (inner.x.len(), inner.modes);
+        if states != inner.system.state_dim()
+            || modes != inner.system.port_dim()
+            || !PreparedNonlinearZoh::fits_reference_capacity(states, modes)
+        {
+            return Err(invalid(
+                "complete exponential impact state exceeds its original owner dimensions or capacity",
+            ));
+        }
+        let propagation = inner.system.share_storage();
         let flow = PreparedNonlinearZoh::new_owned(
-            system,
-            config.dt_s,
+            propagation,
+            inner.config.dt_s,
             LinearSplitBudget {
                 max_modes: states,
                 max_omega_dt: 0.9 * core::f64::consts::PI,

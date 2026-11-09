@@ -11277,7 +11277,7 @@ Geometry, material domains and source parameters remain authoritative. The
 opt-in exact linear block removes midpoint decay/phase error from original
 linear modes and Kelvin recovery; nonlinear contact and conditioning still
 require temporal refinement. This route does not yet admit nonlinear contact
-drag, shell/support potentials, later attached memories, or thermal feedback.
+drag, shell/support potentials, nonlinear mapped-strain memory, or thermal feedback.
 It does not certify a rendered waveform or measured felt calibration.
 
 Seven focused native source tests passed with pinned nightly-2026-07-06:
@@ -11978,3 +11978,46 @@ closed-enclosure energy gates remain authoritative. Reports retain the accepted
 source sample, native thermal/nonlinear accounts and external heat with internal
 radiative net removed once. The existing first-order numerical-Jacobian method
 remains subject to independent temporal refinement.
+
+## Complete material and acoustic memory in exponential impact
+
+`ExponentialImpactSystem::with_relaxation_branches` and
+`with_radiation_load` cold-compose the existing ImpactSystem material and
+passive acoustic owners before the first accepted step. The complete assembled
+pHS system is prepared through its native `share_storage` seam, so acceptance
+and propagation retain the same original storage callbacks, stable nonlinear
+remainder, structural matrices and physical resistance witness.
+
+Each Maxwell arm keeps its original signed displacement projection,
+`H=(sqrt(k)*projection.x-z)^2/2`, and `R_zz=1/tau`. Initial relaxed or
+unrelaxed history is explicit. Radiation keeps the existing complete signed
+mode mapping, passive pole model, original port interconnection and initial
+rest state. Material and acoustic memory may be appended in either order;
+their native positional metadata still observes the correct physical states.
+No modes, off-diagonal terms, poles or histories are dropped, and no source
+parameter is fitted or interpreted as another damping ratio.
+
+The entire coupled quadratic block is propagated by the same existing exact
+linear owner while nonlinear contact and WoolFelt remain in its implicit
+discrete-gradient solve. The original positive loss calculation, conditioning
+acceptance, source-domain checks, rollback and accepted clock remain shared.
+Every material/acoustic coordinate counts against the unchanged complete
+exponential capacity, and its combined instantaneous spectrum must pass the
+original sampled-band gate. Original radiation coupling/clock limits still
+apply. Empty branches and admitted zero-coupling loads preserve the prepared
+image. This is cold composition; live material replacement and its parameter
+work are not supplied.
+
+Four focused regression groups specify a manufactured Maxwell eigenmode with
+independent positive heat, full cross-mode Maxwell/acoustic response and work
+against an independent ODE in both attachment orders, joint nonlinear felt
+conditioning with refusal/retry, and complete-state/source/clock/lifecycle
+admission. Pinned Rust parsing and formatting passed. Full fs-couple execution
+of these four groups remains outstanding; no numerical or replacement-host
+substitute is claimed as runtime verification.
+
+Nonlinear mapped-strain memory, shell/support body potentials, nonlinear
+contact drag and thermal feedback remain outside this entry. A passive
+authored acoustic pole model still requires separate geometry validation.
+Exact linear propagation does not remove nonlinear contact, source/model,
+modal-truncation or temporal-refinement obligations.
