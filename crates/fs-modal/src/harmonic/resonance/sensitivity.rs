@@ -361,14 +361,14 @@ fn original_budget<E>(error: ResonanceError<E>, maximum_evaluations: usize) -> R
 // Constant scratch, no allocation. Cancellation beyond the retained precision
 // remains a conditioning limitation, not a relative-accuracy certificate.
 #[derive(Clone, Copy)]
-struct Products {
+pub(super) struct Products {
     fraction: Dd,
     envelope: Dd,
     exponent: i32,
 }
 
 impl Products {
-    fn sum(terms: &[(f64, f64, i32)]) -> Self {
+    pub(super) fn sum(terms: &[(f64, f64, i32)]) -> Self {
         let exponent = terms
             .iter()
             .filter(|(a, b, _)| *a != 0.0 && *b != 0.0)
@@ -407,7 +407,7 @@ impl Products {
         }
     }
 
-    fn ratio<E>(self, denominator: Self) -> Result<f64, ResonanceError<E>> {
+    pub(super) fn ratio<E>(self, denominator: Self) -> Result<f64, ResonanceError<E>> {
         if denominator.fraction.hi == 0.0 {
             return Err(ResonanceError::Invalid(
                 "zero implicit parameter derivative denominator",
@@ -437,7 +437,7 @@ impl Products {
         )
     }
 
-    fn value<E>(self) -> Result<f64, ResonanceError<E>> {
+    pub(super) fn value<E>(self) -> Result<f64, ResonanceError<E>> {
         representable(self.fraction.to_f64(), self.exponent)
     }
 }

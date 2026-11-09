@@ -456,6 +456,44 @@ cancellation are checked. These APIs resolve individual simple extrema of one
 continuous physical branch; they do not infer power linewidths, global feature
 completeness, evaluator forward-error bounds or constitutive heat/storage splits.
 
+### `harmonic::resonance`: actual physical-power bandwidth and Q
+
+`refine_power_bandwidth` and its parameter-derivative entry resolve both actual
+half-height crossings of one positive signed-power maximum. The numerical
+level is P-P_peak/2, normalized before subtraction; the observed work channel,
+material law, source and units remain those of the peak. The caller separately
+isolates each continuous flank. Neither a symmetric/Lorentzian line shape nor
+an amplitude-square proxy is introduced.
+
+The existing shared sign-search owner retains strict crossing orientation,
+original evaluator errors and cancellation. Both final crossing brackets must
+be disjoint, and both original power slopes must be nonzero and oriented toward
+the same peak. A shared peak endpoint is evaluated once. One cap covers both
+flanks, and the value-only entry requires no final curvature/parameter solve.
+The returned Q is the actual peak frequency divided by measured width.
+
+Parameter queries reserve exactly two final edge jets before refinement and
+include them in the same total evaluation ceiling. Each reproduces its original
+P/P_omega sample without a unity floor. Edge continuation uses
+`omega_theta=(P_peak_total_theta/2-P_theta)/P_omega`, retaining motion of the
+physical peak height. Width and Q then retain both edge and peak motion.
+Existing binary-normalized double-double contractions form all differences and
+ratios; no perturbed models, finite differences or new numerical root owner
+are introduced. Only P, P_omega and P_theta are consumed at an edge.
+
+Independent native tests verify input, viscous and port-power crossings and Q
+against original loaded-oscillator formulas, including complete mechanics,
+attachment, material and source directions. A Maxwell-memory model is checked
+against its original cleared real cubic, an exact sqrt(2) power maximum and
+independent 90-digit asymmetric half-height roots; six physical directions
+include material relaxation. Its flow-amplitude slope is nonzero at the power
+maximum. Source gain/phase invariance, power scaling through 2^+/-700 and paired
+power/frequency scaling through 2^+/-600 exercise the normalized ratios.
+Unresolved narrow widths, malformed or inconsistent data, exact evaluation
+budgets and cancellation refuse atomically. This remains local continuation
+of one selected positive peak and its isolated crossings; it does not infer
+a free-pole decay rate, constitutive loss factor or global feature completeness.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.

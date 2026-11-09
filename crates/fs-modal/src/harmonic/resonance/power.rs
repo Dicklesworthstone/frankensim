@@ -13,6 +13,13 @@ use super::{ResonanceControls, ResonanceError};
 use fs_exec::Cx;
 use fs_math::c64::C64;
 
+mod bandwidth;
+pub use bandwidth::{
+    refine_power_bandwidth, refine_power_bandwidth_with_cancel,
+    refine_power_bandwidth_with_parameter_derivative,
+    refine_power_bandwidth_with_parameter_derivative_with_cancel,
+};
+
 /// Actual signed cycle-mean power and its complete fixed-parameter slope.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicPowerSample {
