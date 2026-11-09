@@ -27,6 +27,7 @@ pub use adjoint::{ForcedObjectiveGradient, PreparedForcedAdjoint};
 mod objective;
 pub use objective::{ForcedMeanObjective, ForcedMeanObjectiveControls};
 mod backbone;
+mod split;
 use backbone::{AmplitudeClosure, SensitivityFactor};
 pub use backbone::{
     BackboneSensitivityAnchor, BackboneSensitivityDirection, PreparedBackboneSensitivity,

@@ -188,6 +188,37 @@ impl PreparedForcedSensitivity {
 }
 
 impl PreparedForcedAdjoint<'_> {
+    /// Complete objective derivative combining a fixed-phase local-island
+    /// partial with an original linear frequency-port partial. The callbacks
+    /// have exactly the contract of PreparedForcedSensitivity::solve_split_direction.
+    /// A changing forcing clock is admitted only through these authored total
+    /// partials. Explicit objective clock dependence belongs in explicit_derivative.
+    /// Reuses cached trajectories, the original centered projection and dual;
+    /// no parameter-direction linear solve or baseline tangent evaluation occurs.
+    pub fn gradient_split_direction(
+        &mut self,
+        direction: ForcedSensitivityDirection,
+        explicit_derivative: f64,
+        mut island_direction: impl FnMut(f64, &[f64], &mut [f64]) -> bool,
+        mut port_direction: impl FnMut(ForcedParameterPoint<'_>, &mut [f64]) -> bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedObjectiveGradient> {
+        admit_objective_direction(direction, explicit_derivative, &mut cancelled)?;
+        let [coarse, fine] = self.prepared.project_split_direction(
+            direction,
+            &mut island_direction,
+            &mut port_direction,
+            &mut cancelled,
+        )?;
+        self.contract(
+            direction,
+            explicit_derivative,
+            &coarse,
+            &fine,
+            &mut cancelled,
+        )
+    }
+
     /// Original objective/equation weights, in canonical real residual order.
     /// No extra complex-conjugation or harmonic multiplicity applies when
     /// contracting these weights with a packed real residual direction.

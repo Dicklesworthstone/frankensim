@@ -9,6 +9,9 @@ use fs_orbit::{
 };
 use std::cell::Cell;
 
+#[path = "forced_sensitivity/split.rs"]
+mod split;
+
 fn controls(samples: usize) -> ForcedSensitivityControls {
     ForcedSensitivityControls {
         samples_per_period: samples,

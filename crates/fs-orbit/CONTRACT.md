@@ -1236,3 +1236,27 @@ on independently known nonisochronous cycles, including changing period and
 independent state, equation, time, parameter and objective units. They also
 check phase shifts, exact Parseval covectors, callback counts, frequency-only
 aliasing refusal, complete declarations, cancellation and deterministic reuse.
+
+
+### Combined local-source and frequency-port sensitivities
+
+`PreparedForcedSensitivity::solve_split_direction` composes a complete original
+fixed-phase island partial with a complete packed linear frequency-port partial.
+The cached original trajectories and centered AFT owner project the island;
+the authored port column includes its coefficient, descriptor and clock changes.
+A changing prescribed frequency is admitted without repeating baseline source
+or tangent evaluation. A time-local source must include its fixed-phase clock
+chain; no generic source-frequency law is inferred. Every port row must be
+explicit and finite on both grids. The existing coupled factor and independent
+physical residual checks admit the combined direction.
+
+`PreparedForcedAdjoint::gradient_split_direction` shares that projection and
+contracts the complete combined column with the original objective dual, without
+a per-parameter waveform solve. Direct objective clock dependence remains in
+the explicit objective partial. Existing numerical scratch/work bounds cover
+the additional linear column; source callback work and storage keep their
+existing exclusions. Cancellation/refusal preserves the cached base and reuse.
+The split regression checks unchanged source/tangent call counts, agreement
+with original island-only derivatives, incomplete and grid-inconsistent port
+refusal, adjoint contraction and cancellation recovery. These remain local
+finite-order derivatives, not stability or harmonic-tail convergence evidence.
