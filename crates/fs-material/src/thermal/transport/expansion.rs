@@ -21,7 +21,8 @@ pub mod surface;
 use super::{ThermalTransportError, admit_temperature_point, positive, source_line, source_value};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, PropertyLineSlice, QueryPoint,
+    ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, PropertyLineSlice, PropertyValue,
+    QueryPoint,
 };
 use fs_qty::{Dims, QuantitySpec};
 
@@ -152,6 +153,9 @@ pub struct PreparedFreeExpansion {
     sources: Vec<PropertyLineSlice>,
     reference_lengths: [f64; 3],
     knots: Vec<StrainKnot>,
+    // Differentiate the original source cells, never rounded endpoint samples.
+    // A geometry-only path can remain valid when its tangent is unrepresentable.
+    strain_derivatives_per_k: Vec<Result<[f64; 3], &'static str>>,
     identity: ContentHash,
 }
 
@@ -246,6 +250,19 @@ impl PreparedFreeExpansion {
                 "free expansion source union exceeds its breakpoint budget",
             ));
         }
+        let source_derivatives: Vec<_> = sources
+            .iter()
+            .map(|source| native_strain_derivatives(card, source, query.lower, &temperatures))
+            .collect();
+        let strain_derivatives_per_k = (0..temperatures.len() - 1)
+            .map(|segment| {
+                Ok([
+                    source_derivatives[0][segment]?,
+                    source_derivatives[1 % sources.len()][segment]?,
+                    source_derivatives[2 % sources.len()][segment]?,
+                ])
+            })
+            .collect();
         let material_card = card.content_hash();
         let mut identity = identity_prefix(
             "org.frankensim.fs-material.prepared-free-expansion.v1",
@@ -275,6 +292,7 @@ impl PreparedFreeExpansion {
             sources,
             reference_lengths,
             knots,
+            strain_derivatives_per_k,
             identity,
         })
     }
@@ -295,8 +313,8 @@ impl PreparedFreeExpansion {
 
     /// Derive geometry and its thermal tangent in one binary search, without
     /// allocation or source queries. Interior knots use the right interval;
-    /// the final endpoint uses the left interval. The normalized source-strain
-    /// slope, rather than an inferred expansion coefficient, supplies `ds/dT`.
+    /// the final endpoint uses the left interval. The normalized native source
+    /// slope supplies `ds/dT`, even when clipped endpoint strains round equal.
     /// An unrepresentable derivative refuses even if geometry alone is valid.
     pub fn at_temperature_with_tangent(
         &self,
@@ -355,17 +373,16 @@ impl PreparedFreeExpansion {
         geometry: FreeExpansionGeometrySample,
         segment: usize,
     ) -> Result<FreeExpansionGeometryTangent, ThermalTransportError> {
-        let [left, right] = [self.knots[segment], self.knots[segment + 1]];
-        let width = right.temperature - left.temperature;
+        let slopes =
+            self.strain_derivatives_per_k[segment].map_err(ThermalTransportError::Invalid)?;
         let mut derivatives = [0.0; 3];
         let mut relative = [0.0; 3];
         for i in 0..3 {
-            let change = right.strains[i] - left.strains[i];
-            derivatives[i] = (change / width) / self.reference_lengths[i];
+            derivatives[i] = slopes[i] / self.reference_lengths[i];
             relative[i] = derivatives[i] / geometry.principal_stretches[i];
             if !derivatives[i].is_finite()
                 || !relative[i].is_finite()
-                || (change != 0.0 && (derivatives[i] == 0.0 || relative[i] == 0.0))
+                || (slopes[i] != 0.0 && (derivatives[i] == 0.0 || relative[i] == 0.0))
             {
                 return Err(ThermalTransportError::Invalid(
                     "free expansion stretch derivative is unrepresentable",
@@ -459,6 +476,71 @@ impl PreparedFreeExpansion {
     pub fn temperatures_k(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.knots.iter().map(|knot| knot.temperature)
     }
+}
+
+// Preserve the derivative of the original engineering-length interpolation.
+// Clipping a source interval, inserting its reference temperature or merging
+// principal-axis knots must not manufacture a different expansion coefficient.
+fn native_strain_derivatives(
+    card: &MaterialCard,
+    source: &PropertyLineSlice,
+    context: &QueryPoint,
+    temperatures: &[f64],
+) -> Vec<Result<f64, &'static str>> {
+    let claim = card
+        .claims()
+        .claim(source.knots[0].1.receipt.selected)
+        .expect("canonical source line selected an existing claim");
+    let surface = match &claim.value {
+        PropertyValue::Surface2D { axes, .. } if axes.contains(&source.axis) => {
+            Some(claim.value.prepare_surface_response())
+        }
+        _ => None,
+    };
+    temperatures
+        .windows(2)
+        .map(|span| match &claim.value {
+            PropertyValue::Curve {
+                abscissa, knots, ..
+            } if abscissa == &source.axis => {
+                let upper = knots.partition_point(|(t, _)| *t <= span[0]);
+                if upper == 0 || upper == knots.len() || span[1] > knots[upper].0 {
+                    return Err("free expansion interval crosses a native source segment");
+                }
+                let change = knots[upper].1 - knots[upper - 1].1;
+                let width = knots[upper].0 - knots[upper - 1].0;
+                let slope = change / width;
+                if !change.is_finite()
+                    || !width.is_finite()
+                    || width <= 0.0
+                    || !slope.is_finite()
+                    || (change != 0.0 && slope == 0.0)
+                {
+                    Err("native free expansion source derivative is unrepresentable")
+                } else {
+                    Ok(slope)
+                }
+            }
+            PropertyValue::Surface2D { axes, .. } if axes.contains(&source.axis) => {
+                let surface = surface
+                    .as_ref()
+                    .expect("temperature-dependent surface prepared")
+                    .as_ref()
+                    .map_err(|_| "native free expansion surface derivative is unrepresentable")?;
+                let axis = usize::from(axes[0] != source.axis);
+                let mut point = axes.each_ref().map(|name| context.axes()[name]);
+                point[axis] = span[0];
+                // Use the exact local source tangent cone, even when no
+                // floating-point interior exists between adjacent temperatures.
+                surface
+                    .inward_axis_derivative(point, axis, [false, true])
+                    .map_err(|_| "free expansion surface lacks an inward source derivative")
+            }
+            // Only an explicitly admitted temperature-independent source can
+            // supply zero. Missing source data never takes this branch.
+            _ => Ok(0.0),
+        })
+        .collect()
 }
 
 /// Constant-mass density composed with the original free geometry.

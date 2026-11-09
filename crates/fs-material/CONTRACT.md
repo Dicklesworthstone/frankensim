@@ -12605,6 +12605,16 @@ principal stretches, their exact piecewise temperature derivatives and the
 volume derivative from original source segments. It uses the right interval
 at interior knots and the left interval at the final endpoint, with one binary
 search and no runtime allocation or source query for this geometric evaluation.
+Preparation differentiates the native curve segments or the original surface
+cells; it never differences clipped or merged endpoint values. Consequently a
+nonzero expansion tangent survives equal rounded endpoint lengths, and an
+inserted reference or another principal direction's knot creates no artificial
+corner. Surface derivatives use the canonical inward tangent-cone owner even
+when adjacent temperatures have no representable interior. An unrepresentable
+tangent refuses its derivative request without invalidating geometry-only
+evaluation. The narrow-span, signed-principal and source-surface regressions in
+`tests/expansion_surface.rs` exercise these cases through the existing geometry
+and exposed-area consumers.
 
 `MaterialOhmicNode::with_free_expansion` requires the exact original material
 card, reference query, full temperature interval and an explicit current axis.
