@@ -3736,6 +3736,31 @@ tails, source replay and bounded refusal. Native thermal integration tests
 cover actual enthalpy/temperature rise, many-to-one uncertainty admission,
 pure scattering without heat, accepted-time error propagation and rollback.
 
+`ScatteringGrid::deposit_continuous_absorption_power` and the corresponding
+`CellScatteringGrid` methods provide continuous absorption weighting for scalar
+heat. Scattering alone determines the sampled free flight. Each crossed native
+cell contributes positive analytic Beer absorption along the portion actually
+traversed, before the surviving radiation samples the cell's original phase.
+No absorption/albedo debit is applied again at the scattering event. A single
+DDA pass per flight retains the residual scattering optical depth across cell
+boundaries; it needs no temporary cell list or copied medium. Compensated
+cumulative absorption depth preserves weak losses over many cells and flights.
+This estimator follows Hayakawa et al., JOSA A 31 (2014), 301-311,
+DOI:10.1364/JOSAA.31.000301.
+
+The report retains `AbsorptionEstimator::{Collision, Continuous}` independently
+of the physical medium identity. Exact absorption-only lanes, source streams,
+history-level covariance, work limits and atomic refusal share the original
+reducer. Surviving power at the last admitted scattering event remains
+unresolved; truncation is not credited as heat. The same native
+`ScatteringHeating` consumer admits either report. Collision weighting remains
+available, and force/polarized queries retain that estimator. Continuous
+weighting can reduce heat noise in thin absorbers; no universal variance or
+runtime improvement is claimed. Focused regressions cover the exact
+absorption-only limit, layered first-scatter integrals, an independent analog
+cube reference, native-cell subdivision/replay, prepared cell sources,
+budget/cancellation refusal and accepted native enthalpy input.
+
 ### Cell-dependent absorption, scattering and phase
 
 `scattering::CellScatteringGrid` borrows the original density/geometry and fixed

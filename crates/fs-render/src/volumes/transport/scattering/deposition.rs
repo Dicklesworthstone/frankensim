@@ -1,11 +1,13 @@
 //! Spatial incident-power absorption after multiple scattering.
 //!
-//! A history samples the existing exact extinction free flight. At a collision
-//! it deposits `P * kappa_a / (kappa_a + kappa_s)` in that original cell and
+//! The collision estimator samples the existing exact extinction free flight.
+//! At a collision it deposits `P * kappa_a / (kappa_a + kappa_s)` in that original cell and
 //! continues `P * kappa_s / (kappa_a + kappa_s)` through the native phase law.
 //! This is implicit capture: scattering changes the next path, never creates
 //! heat. Each wavelength has independent monochromatic histories, avoiding
 //! spectral mixture weights that can exceed the source's physical power.
+//! A continuous-absorption alternative integrates Beer heat along scattering-only
+//! free flights, sharing the same physical medium and history-level reducer.
 //!
 //! This open, index-one grid has no reflecting surfaces. The source is a narrow
 //! collimated beam with already quadrature-weighted watts per lane. LTE emission
@@ -26,6 +28,7 @@ use fs_math::det;
 use fs_rand::StreamKey;
 use std::collections::HashMap;
 
+mod continuous;
 mod momentum;
 pub use momentum::{
     AngularMomentumRateEstimate, CellRadiationForce, CellRadiationTorque, MomentumRateEstimate,
@@ -67,12 +70,21 @@ impl DepositionPhase for ScalarPhase {
     }
 }
 
+/// How each sampled history scores absorbed power.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbsorptionEstimator {
+    /// Sample extinction events and capture their absorption fraction.
+    Collision,
+    /// Sample scattering events and integrate Beer absorption along each flight.
+    Continuous,
+}
+
 /// Caller-owned sampling, work and retained spatial-output limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScatteringDepositionConfig {
     /// Independent histories per positive, scattering spectral lane; at least 2.
     pub histories_per_lane: u32,
-    /// Capture at most this many collisions; retain the remaining power as
+    /// Admit at most this many collisions; retain the remaining power as
     /// unresolved radiation. No Russian roulette or unreported cutoff is used.
     pub max_collisions_per_history: u32,
     /// Hard limit on all sampled free flights plus deterministic lane traversals.
@@ -121,6 +133,8 @@ pub struct CellAbsorbedPower<const N: usize> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScatteringPowerDeposition<const N: usize> {
     pub medium_identity: ContentHash,
+    /// The scoring law, retained independently of the physical medium identity.
+    pub absorption_estimator: AbsorptionEstimator,
     pub wavelength_bounds_nm: (f64, f64),
     pub wavelengths_nm: [f64; N],
     pub incident_power_w: [f64; N],
@@ -136,7 +150,8 @@ pub struct ScatteringPowerDeposition<const N: usize> {
     pub cells: Vec<CellAbsorbedPower<N>>,
     /// Zero means exact deterministic absorption-only transport in that lane.
     pub sampled_histories: [u32; N],
-    /// Histories retained unresolved because a positive split underflowed.
+    /// Histories retained unresolved because positive absorption or a collision
+    /// split fell below representable watts.
     pub precision_limited_histories: [u32; N],
     pub traced_segments: u64,
     pub config: ScatteringDepositionConfig,
@@ -250,7 +265,7 @@ fn deposit_prepared_observed<const N: usize>(
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     deposit_prepared_sampled(
         medium, check, origin, unit_direction, incident_power_w, config,
-        momentum, &[ScalarPhase; N],
+        momentum, &[ScalarPhase; N], AbsorptionEstimator::Collision,
     )
 }
 
@@ -264,10 +279,14 @@ fn deposit_prepared_sampled<const N: usize>(
     config: ScatteringDepositionConfig,
     mut momentum: Option<&mut MomentumTallies<N>>,
     phases: &[impl DepositionPhase; N],
+    absorption_estimator: AbsorptionEstimator,
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     let wavelengths_nm = medium.wavelengths();
     check()?;
     validate_ray(origin, unit_direction, f64::INFINITY)?;
+    if N == 0 || (absorption_estimator == AbsorptionEstimator::Continuous && momentum.is_some()) {
+        return Err(VolumeTransportError::Sample);
+    }
     if config.histories_per_lane < 2 || config.max_collisions_per_history == 0 {
         return Err(VolumeTransportError::Budget);
     }
@@ -278,6 +297,7 @@ fn deposit_prepared_sampled<const N: usize>(
     }
     let mut result = ScatteringPowerDeposition {
         medium_identity: medium.identity(),
+        absorption_estimator,
         wavelength_bounds_nm: medium.bounds(),
         wavelengths_nm: *wavelengths_nm,
         incident_power_w: *incident_power_w,
@@ -350,17 +370,29 @@ fn deposit_prepared_sampled<const N: usize>(
             let mut history_momentum = momentum
                 .as_deref_mut()
                 .map(|tallies| HistoryMomentum::new(tallies, lane, history));
-            let history_result = trace_history_sampled(
-                &monochromatic,
-                check,
-                (origin, unit_direction, source_w),
-                (config.max_collisions_per_history, config.max_total_segments),
-                &mut result.traced_segments,
-                &mut || random.next_f64(),
-                &mut |cell, heat| spatial.cell(cell)?.lanes[lane][0].capture(history, heat),
-                history_momentum.as_mut(),
-                &mut phases[lane].clone(),
-            )?;
+            let mut capture = |cell, heat| spatial.capture(cell, lane, history, heat);
+            let history_result = match absorption_estimator {
+                AbsorptionEstimator::Collision => trace_history_sampled(
+                    &monochromatic,
+                    check,
+                    (origin, unit_direction, source_w),
+                    (config.max_collisions_per_history, config.max_total_segments),
+                    &mut result.traced_segments,
+                    &mut || random.next_f64(),
+                    &mut capture,
+                    history_momentum.as_mut(),
+                    &mut phases[lane].clone(),
+                ),
+                AbsorptionEstimator::Continuous => continuous::trace_history(
+                    &monochromatic,
+                    check,
+                    (origin, unit_direction, source_w),
+                    (config.max_collisions_per_history, config.max_total_segments),
+                    &mut result.traced_segments,
+                    &mut || random.next_f64(),
+                    &mut capture,
+                ),
+            }?;
             if let Some(tally) = history_momentum {
                 tally.finish()?;
             }

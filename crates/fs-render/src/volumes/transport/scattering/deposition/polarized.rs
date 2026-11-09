@@ -147,6 +147,7 @@ impl ScatteringGrid<'_> {
                 config.transport,
                 momentum,
                 &phases,
+                AbsorptionEstimator::Collision,
             )?);
         }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
@@ -166,6 +167,7 @@ impl ScatteringGrid<'_> {
             config.transport,
             momentum,
             &phases,
+            AbsorptionEstimator::Collision,
         )?)
     }
 }

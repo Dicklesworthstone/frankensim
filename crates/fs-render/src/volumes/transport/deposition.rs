@@ -177,13 +177,17 @@ pub(crate) fn absorb_beam(power: f64, density: f64, length: f64, coefficient: f6
 /// to one. The correction also keeps small depths after strongly absorbing
 /// layers; power is always scaled from the beginning of this linear segment.
 #[derive(Clone, Copy, Default)]
-struct BeamOpticalDepth {
+pub(in crate::volumes::transport) struct BeamOpticalDepth {
     sum: f64,
     correction: f64,
 }
 
 impl BeamOpticalDepth {
-    fn transmit(&mut self, incident_power_w: f64, cell_depth: f64) -> f64 {
+    pub(in crate::volumes::transport) fn transmit(
+        &mut self,
+        incident_power_w: f64,
+        cell_depth: f64,
+    ) -> f64 {
         let next = self.sum + cell_depth;
         if next.is_finite() {
             self.correction += if self.sum >= cell_depth {

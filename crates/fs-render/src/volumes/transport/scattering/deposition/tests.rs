@@ -68,7 +68,7 @@ pub(super) fn palette<T>(cx: &Cx<'_>, values: Vec<T>, cells: &[u32]) -> CellPale
     CellPalette::try_new(cx, values, Arc::from(cells), budget).unwrap()
 }
 
-fn indexed_medium<'a>(
+pub(super) fn indexed_medium<'a>(
     cx: &Cx<'_>,
     density: &'a [f64],
     absorption: CellPalette<MassAbsorptionSpectrum>,
@@ -428,7 +428,7 @@ fn source_backed_infrared_transport_uses_the_same_scattering_and_heat_owner() {
 /// ray/box distances, standard-library transcendentals, a separate RNG stream,
 /// an absorption Bernoulli draw, and a separately derived HG frame/inverse CDF.
 /// It shares no production DDA, implicit-capture, phase or tally implementation.
-fn analog_absorption(a: f64, s: f64, g: f64, histories: u32) -> (f64, f64) {
+pub(super) fn analog_absorption(a: f64, s: f64, g: f64, histories: u32) -> (f64, f64) {
     let mut rng = StreamKey {
         seed: 82719,
         kernel: 71,
