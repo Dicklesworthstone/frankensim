@@ -13266,6 +13266,24 @@ environment integration probe. Full Cargo/DSR/RCH remain unavailable.
 
 ### Full Smith rough-glass finite-area illumination
 
+The full-glass finite-area raster now adds calibrated multi-channel QE energy
+and photoelectron-rate measurements, with constant or spectral analyzers,
+through both ordinary and complete sequential cameras. Spectral-analyzer CIE
+views complete the same six additional detector routes as point fixtures.
+All channels reuse each original wavelength's full source/facet path, native
+logical streams and caller-owned area workspace. Original source-side selection,
+endpoint ownership, receiving index ratios and per-lane work arrays survive.
+
+The complete detector/analyzer band is admitted before tracing, including an
+entirely clipped lens packet. A spectral analyzer precedes the coated lens once;
+steady optics request no group clock. Pupil and QE/photon weights are applied
+once, with original quarter packet mass and zero source work for clipped lanes.
+One native fixture group covers both source sides, nonconstant QE and detector
+units, native replay/receipt parity, channel-count independence, original
+receiver emission, coated-lens order, work exhaustion, clipping and refusal.
+It was parsed and independently source/API reviewed, not executed here.
+
+
 `SmithDielectricAreaLightCameraScene` borrows the admitted native area camera
 and reuses its original direct-source solver, face/side selection, spectral
 radiance, polarization-channel replay, Beer attenuation and work accounting.
@@ -13308,6 +13326,23 @@ Three native full-scene regression groups are authored but unrun. Full workspace
 Cargo, resolved geometry runtime and remote DSR/RCH checks were unavailable.
 
 ### Full Smith rough-glass environment connections
+
+The full-glass environment raster adds the same six ordinary/resolved-lens
+QE/photon and spectral-analyzer CIE/QE routes. Each wavelength retains its
+complete original environment receipt, texel polarization and deterministic
+complementary endpoint partition. Detector channels share source/facet work;
+no replacement directional proposal, stochastic-response MIS density or
+wavelength resampling is introduced. Typed source failures retain their lane.
+
+Spectral analyzers are admitted over the complete detector band and applied
+before the native coated lens. Steady optics need no group clock; original
+geometry and detector weights occur once. Clipped lanes retain quarter proposal
+mass and no source receipt. One native fixture group covers rotated polarized
+environment texels, independent QE/photon arithmetic, original seeded replay and
+receipts, receiver emission, channel-count independence, full-lens weighting,
+work exhaustion, clipping and band/cancellation refusal. It was parsed and
+independently source/API reviewed, not executed here.
+
 
 `SmithDielectricEnvironmentCameraScene` borrows the original environment camera
 and extends the existing full opaque Smith transport with two-sided rough

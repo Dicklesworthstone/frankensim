@@ -6,6 +6,8 @@ use super::super::environment::sampling::{
 use super::microsurface::dielectric::{lighting_path, lighting_seed};
 use super::*;
 
+mod detector;
+
 /// Preserve the complete native environment receipt in each live wavelength.
 /// Lens-clipped lanes are `None`, with zero contribution and original mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -154,3 +156,6 @@ fn environment_pixel<P, L>(
         lanes,
     })
 }
+
+#[cfg(test)]
+mod tests;
