@@ -12,6 +12,9 @@ use fs_flux::OpenBoundaryPolicy;
 mod mechanics;
 pub use mechanics::LaminarMechanicalWork;
 
+mod scheduled;
+pub use scheduled::LaminarScheduledCandidate;
+
 /// Absolute endpoint time and authored continuous segment. A closing event
 /// belongs to its preceding segment; no floating-time perturbation is needed.
 #[derive(Clone, Copy, Debug, PartialEq)]

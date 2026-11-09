@@ -125,17 +125,27 @@ pub(super) fn compare<G, T, E>(
         .into_iter()
         .zip(terms(first.report()).into_iter().zip(terms(fine.report())))
     {
-        let fine_total = Dd::from_f64(b) + Dd::from_f64(c);
-        let difference = (fine_total - Dd::from_f64(a)).to_f64().abs();
-        let change = a.abs().max(fine_total.to_f64().abs());
-        result.maximum_transfer_difference_j = result.maximum_transfer_difference_j.max(difference);
-        result.transfer_error_ratio = result.transfer_error_ratio.max(ratio(
-            difference,
-            change,
-            controls.transfer_absolute_tolerance_j,
-            controls.relative_tolerance,
-            correction,
-        )?);
+        // Check both signed transfer and its resolved magnitude. Reversal
+        // between fine intervals must not conceal work behind cancellation.
+        for (coarse, fine) in [
+            (Dd::from_f64(a), Dd::from_f64(b) + Dd::from_f64(c)),
+            (
+                Dd::from_f64(a.abs()),
+                Dd::from_f64(b.abs()) + Dd::from_f64(c.abs()),
+            ),
+        ] {
+            let difference = (fine - coarse).to_f64().abs();
+            let change = coarse.to_f64().abs().max(fine.to_f64().abs());
+            result.maximum_transfer_difference_j =
+                result.maximum_transfer_difference_j.max(difference);
+            result.transfer_error_ratio = result.transfer_error_ratio.max(ratio(
+                difference,
+                change,
+                controls.transfer_absolute_tolerance_j,
+                controls.relative_tolerance,
+                correction,
+            )?);
+        }
     }
     Ok(result)
 }
@@ -188,23 +198,33 @@ fn ratio<E>(
     }
 }
 
-fn terms<T>(report: &LaminarEnthalpyReport<T>) -> [f64; 5] {
+fn terms<T>(report: &LaminarEnthalpyReport<T>) -> [f64; 8] {
+    let mechanical = report.mechanical;
     [
         report.bulk_viscous_heat_j,
         report.slip_heat_j,
         report.external_stream_enthalpy_j,
         report.other_external_heat_j,
         report.buoyancy.as_ref().map_or(0.0, |b| b.endpoint_work_j),
+        mechanical.map_or(0.0, |m| m.body_work_j),
+        mechanical.map_or(0.0, |m| m.imposed_traction_work_j),
+        mechanical.map_or(0.0, |m| m.outward_kinetic_energy_j),
     ]
 }
 
 pub(super) struct Account {
-    terms: [Dd; 5],
+    terms: [Dd; 11],
+    mechanical_seen: bool,
+    velocity_work_known: bool,
+    backflow_work_known: bool,
 }
 impl Default for Account {
     fn default() -> Self {
         Self {
-            terms: [Dd::from_f64(0.0); 5],
+            terms: [Dd::from_f64(0.0); 11],
+            mechanical_seen: false,
+            velocity_work_known: true,
+            backflow_work_known: true,
         }
     }
 }
@@ -222,6 +242,27 @@ impl Account {
                 return Err(DepositionError::Arithmetic.into());
             }
         }
+        if let Some(mechanical) = report.mechanical {
+            self.mechanical_seen = true;
+            self.velocity_work_known &= mechanical.velocity_boundary_work_j.is_some();
+            self.backflow_work_known &= mechanical.backflow_resistance_work_j.is_some();
+            for (slot, value) in [
+                mechanical.boundary_upwind_loss_j,
+                mechanical.velocity_boundary_work_j.unwrap_or(0.0),
+                mechanical.backflow_resistance_work_j.unwrap_or(0.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if !value.is_finite() {
+                    return Err(DepositionError::Arithmetic.into());
+                }
+                self.terms[8 + slot] = self.terms[8 + slot] + Dd::from_f64(value);
+                if !self.terms[8 + slot].to_f64().is_finite() {
+                    return Err(DepositionError::Arithmetic.into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -231,7 +272,7 @@ impl Account {
         initial: &DepositionSimulation<'_>,
         final_state: &DepositionSimulation<'_>,
         allowance_j: f64,
-    ) -> Result<[f64; 7], LaminarEnthalpyError<E>> {
+    ) -> Result<([f64; 7], Option<drive::LaminarMechanicalWork>), LaminarEnthalpyError<E>> {
         if initial.cells().len() != final_state.cells().len() {
             return Err(LaminarEnthalpyError::Invalid(
                 "window changed original inventory",
@@ -271,14 +312,25 @@ impl Account {
         if residual.abs() > tolerance {
             return Err(DepositionError::EnergyBalance(residual).into());
         }
-        Ok([
-            stored.to_f64(),
-            self.terms[0].to_f64(),
-            self.terms[1].to_f64(),
-            self.terms[2].to_f64(),
-            self.terms[3].to_f64(),
-            self.terms[4].to_f64(),
-            residual,
-        ])
+        let mechanical = self.mechanical_seen.then(|| drive::LaminarMechanicalWork {
+            body_work_j: self.terms[5].to_f64(),
+            imposed_traction_work_j: self.terms[6].to_f64(),
+            outward_kinetic_energy_j: self.terms[7].to_f64(),
+            boundary_upwind_loss_j: self.terms[8].to_f64(),
+            velocity_boundary_work_j: self.velocity_work_known.then(|| self.terms[9].to_f64()),
+            backflow_resistance_work_j: self.backflow_work_known.then(|| self.terms[10].to_f64()),
+        });
+        Ok((
+            [
+                stored.to_f64(),
+                self.terms[0].to_f64(),
+                self.terms[1].to_f64(),
+                self.terms[2].to_f64(),
+                self.terms[3].to_f64(),
+                self.terms[4].to_f64(),
+                residual,
+            ],
+            mechanical,
+        ))
     }
 }

@@ -6,11 +6,13 @@
 //! Boussinesq entry points use the same controller and physical acceptance.
 //! These are LOCAL error estimates, not a global trajectory-error certificate.
 //!
-//! Force, boundary and slip data remain held over the window. Source/exchange
-//! callbacks must be pure, smooth on this window and valid on all original
-//! nonlinear probes. An original inventory event inside the window refuses;
-//! events exactly at its target remain pending for explicit caller handling.
+//! Existing held-input entries keep their original force/boundary semantics.
+//! Source-driven entries share this controller with exact mechanical-event
+//! stops. Callbacks must be pure, smooth within authored segments and valid on
+//! original nonlinear probes. Original thermal inventory events inside either
+//! window still refuse; target events remain pending for explicit handling.
 
+use super::drive::LaminarDriveQuery;
 use super::*;
 use fs_thermal::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
 
@@ -41,8 +43,10 @@ pub struct LaminarAdaptiveControls {
     pub temperature_absolute_tolerance_k: f64,
     /// Euclidean physical BDM velocity error at every cell vertex [m/s].
     pub velocity_absolute_tolerance_m_s: f64,
-    /// Applied separately to integrated bulk/slip/stream/other heat and
-    /// buoyancy work. Opposing physical accounts cannot hide behind net heat.
+    /// Applied separately to integrated bulk/slip/stream/other heat, buoyancy
+    /// work, and reported body/open-traction/carried-kinetic exchanges.
+    /// Signed and resolved-magnitude defects are checked independently, so
+    /// opposing accounts or reversals cannot hide behind net heat/work.
     pub transfer_absolute_tolerance_j: f64,
     /// Scales changes from each accepted start, never formation h, Kelvin or
     /// absolute translation velocity. Must be in [0,1).
@@ -96,6 +100,10 @@ pub struct LaminarAdaptiveReport<T> {
     pub steps: Vec<LaminarAdaptiveStep<T>>,
     pub estimates: Vec<LaminarTimeEstimate>,
     pub work: LaminarAdaptiveWork,
+    /// Authored mechanical events reached, including one exactly at the target.
+    pub events_reached: usize,
+    /// Accepted-only selected mechanical exchanges; numerical loss stays separate.
+    pub mechanical: Option<drive::LaminarMechanicalWork>,
     /// Controller proposal for a subsequent window's initial comparison span.
     /// It remains subject to new admission and is not an error guarantee.
     pub suggested_step_s: f64,
@@ -193,12 +201,13 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             thermal,
             target_s,
             input.history,
+            &[],
             controls,
-            |old, end, history, step, guess| {
+            |old, query, history, step, guess| {
                 self.advance(
                     cx,
                     old,
-                    end,
+                    query.time_s,
                     LaminarEnthalpyInput { history, ..input },
                     step,
                     guess,
@@ -235,12 +244,13 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             thermal,
             target_s,
             input.history,
+            &[],
             controls,
-            |old, end, history, step, guess| {
+            |old, query, history, step, guess| {
                 self.advance_boussinesq(
                     cx,
                     old,
-                    end,
+                    query.time_s,
                     LaminarEnthalpyInput { history, ..input },
                     config,
                     step,
@@ -253,16 +263,17 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
     }
 
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    fn advance_adaptive_native<'m, G, T, E>(
+    pub(super) fn advance_adaptive_native<'m, G, T, E>(
         &self,
         cx: &Cx<'_>,
         initial: &DepositionSimulation<'m>,
         target_s: f64,
         history: LaminarEnthalpyHistory<'_>,
+        event_times_s: &[f64],
         controls: LaminarAdaptiveControls,
         native: impl Fn(
             &DepositionSimulation<'m>,
-            f64,
+            LaminarDriveQuery,
             LaminarEnthalpyHistory<'_>,
             LaminarEnthalpyControls,
             &[f64],
@@ -287,6 +298,20 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 work,
             ));
         }
+        for (index, &event) in event_times_s.iter().enumerate() {
+            if index % 128 == 0 {
+                checkpoint(cx).map_err(wrap)?;
+            }
+            if !event.is_finite() || event < 0.0 || (index > 0 && event <= event_times_s[index - 1])
+            {
+                return Err(failed(
+                    LaminarAdaptiveFailure::Invalid(
+                        "mechanical events must be finite, nonnegative and strictly increasing",
+                    ),
+                    work,
+                ));
+            }
+        }
         self.binding.check(cx, self.system, initial).map_err(wrap)?;
         // Original inventory/event admission for the ENTIRE window. This is
         // not a coarse solve and does not consume or activate any event.
@@ -303,6 +328,8 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         let mut estimates = Vec::new();
         let mut account = Account::default();
         let mut proposal = controls.initial_step_s;
+        let mut segment = event_times_s.partition_point(|&time| time <= initial.time_s());
+        let mut events_reached = 0usize;
         let order = ConductionTimeOrder::First;
         while current.time_s() < target_s {
             checkpoint(cx).map_err(|error| failed_native(error, 0, work))?;
@@ -312,17 +339,19 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 return Err(failed(LaminarAdaptiveFailure::WorkBudget, work));
             }
             let start_s = current.time_s();
-            let remaining = target_s - start_s;
+            let event = event_times_s.get(segment).copied();
+            let stop = event.map_or(target_s, |time| time.min(target_s));
+            let remaining = stop - start_s;
+            let unclipped_proposal = proposal;
             let mut end_s = if proposal >= remaining {
-                target_s
+                stop
             } else {
-                (start_s + proposal).min(target_s)
+                (start_s + proposal).min(stop)
             };
-            // Decimal caps can leave exactly one ULP before the target.
-            // Use the representable target, never create a fictitious tail
-            // or apply a broad epsilon that could swallow physical time.
-            if end_s < target_s && end_s.next_up() == target_s {
-                end_s = target_s;
+            // Preserve the exact event/target, including a one-ULP decimal
+            // tail. Every original solve still uses its actual time span.
+            if end_s < stop && end_s.next_up() == stop {
+                end_s = stop;
             }
             let middle_s = f64::midpoint(start_s, end_s);
             if !(start_s < middle_s && middle_s < end_s) {
@@ -335,14 +364,30 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 velocity_m_s: &velocity,
                 time_s: start_s,
             };
-            let coarse = native_step(&native, &current, end_s, old, controls, &guess, &mut work)?;
+            let end_query = LaminarDriveQuery {
+                time_s: end_s,
+                segment,
+            };
+            let middle_query = LaminarDriveQuery {
+                time_s: middle_s,
+                segment,
+            };
+            let coarse = native_step(
+                &native, &current, end_query, old, controls, &guess, &mut work,
+            )?;
             let first = native_step(
-                &native, &current, middle_s, old, controls, &guess, &mut work,
+                &native,
+                &current,
+                middle_query,
+                old,
+                controls,
+                &guess,
+                &mut work,
             )?;
             let fine = native_step(
                 &native,
                 first.thermal(),
-                end_s,
+                end_query,
                 LaminarEnthalpyHistory {
                     velocity_m_s: first.flow().step.solution.velocity_dofs(),
                     time_s: middle_s,
@@ -414,8 +459,17 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 .ok_or_else(|| failed(LaminarAdaptiveFailure::UnrepresentableTime, work))?;
             proposal = ((end_s - start_s).min(controls.maximum_step_s / growth) * growth)
                 .clamp(controls.minimum_step_s, controls.maximum_step_s);
+            if event == Some(end_s) {
+                segment += 1;
+                events_reached += 1;
+                // A short exact event interval must not shrink the nominal
+                // step for the following authored continuous segment.
+                proposal = proposal
+                    .max(unclipped_proposal)
+                    .min(controls.maximum_step_s);
+            }
         }
-        let values = account
+        let (values, mechanical) = account
             .finish(cx, initial, &current, controls.window_tolerance_j)
             .map_err(|error| failed_native(error, 0, work))?;
         checkpoint(cx).map_err(|error| failed_native(error, 0, work))?;
@@ -432,6 +486,8 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 steps,
                 estimates,
                 work,
+                events_reached,
+                mechanical,
                 suggested_step_s: proposal,
                 stored_energy_change_j: values[0],
                 bulk_viscous_heat_j: values[1],
@@ -473,13 +529,13 @@ fn valid_controls(c: LaminarAdaptiveControls) -> bool {
 fn native_step<'m, G, T, E>(
     native: &impl Fn(
         &DepositionSimulation<'m>,
-        f64,
+        LaminarDriveQuery,
         LaminarEnthalpyHistory<'_>,
         LaminarEnthalpyControls,
         &[f64],
     ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
     thermal: &DepositionSimulation<'m>,
-    target_s: f64,
+    query: LaminarDriveQuery,
     history: LaminarEnthalpyHistory<'_>,
     controls: LaminarAdaptiveControls,
     guess: &[f64],
@@ -492,7 +548,7 @@ fn native_step<'m, G, T, E>(
     let mut step = controls.step;
     step.maximum_endpoint_evaluations = step.maximum_endpoint_evaluations.min(remaining);
     work.native_steps += 1;
-    let solved = native(thermal, target_s, history, step, guess)
+    let solved = native(thermal, query, history, step, guess)
         .map_err(|error| failed_native(error, step.maximum_endpoint_evaluations, *work))?;
     let used = solved.report().endpoint_evaluations;
     if used > step.maximum_endpoint_evaluations {

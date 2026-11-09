@@ -14389,3 +14389,59 @@ resource, invalid-force, cancellation, deterministic retry and zero-drive
 limits. All five groups pass. The native slice replaces only Cx arena/RNG
 construction in these new tests and omits unrelated dependency construction
 surfaces/modules; full Cargo/workspace compilation remains unexecuted.
+
+
+### Scheduled mechanical events in coupled laminar evolution
+
+`LaminarEnthalpy::advance_scheduled` and
+`advance_boussinesq_scheduled` drive the existing joint BDF1 momentum/enthalpy
+step-doubling controller with the original `LaminarMechanicalDrive` snapshot.
+Every coarse and fine thermal endpoint, including nonlinear probes, resolves
+its own source against the actual candidate thermal inventory. The resulting
+native force, velocity/slip/open boundary callbacks, source rheology and heat
+exchange all see that same owned snapshot. The accepted report retains the
+actual snapshot, query and original thermal payload; equal endpoint times do
+not authorize reusing a snapshot from a different candidate.
+
+A caller-authored finite, nonnegative, strictly increasing mechanical event
+list clips comparisons at the exact event. The interval closing an event
+uses its preceding segment, and the next interval uses the following segment.
+Past/future events may remain in the list when resuming from accepted native
+histories. Smooth data and fixed boundary kinds within each authored segment
+are a source contract; discontinuities and kind changes require explicit
+events. One-ULP event/target tails snap only to that exact stop, while all native
+steps, work and error corrections use the actual represented durations.
+An event-clipped short interval does not permanently collapse the next
+controller proposal. Original thermal inventory events remain subject to
+their independent native admission: mechanical events do not activate,
+consume or reinterpret thermal events.
+
+The shared physical comparison now checks selected mechanical body work,
+supplied traction work and signed carried kinetic energy separately from the
+existing bulk/slip/stream/other heat and buoyancy channels. Each channel checks
+both the signed coarse/fine defect and the defect between coarse magnitude and
+the sum of fine magnitudes, so opposing accounts or reversals cannot hide
+unresolved transfer behind net cancellation. Only accepted fine reports enter
+compensated totals. Numerical upwind loss remains a separate observation;
+unavailable generalized velocity-wall or dissipative backflow work remains
+explicitly unclaimed, and none of these mechanical/numerical accounts is
+deposited as heat. Final thermal storage is independently reconciled against
+the accepted original heat and stream exchanges.
+
+All coarse, fine, rejected and terminal native calls share the original work
+ceilings. Material/drive/heat refusal, native physical failure and cancellation
+are terminal rather than invitations to retry invalid physics with a smaller
+step. Failure publishes no accepted prefix and never mutates either input
+history. Existing held-drive adaptive APIs use the same owner with an empty
+mechanical schedule and preserve their force/boundary semantics.
+
+Focused regressions exercise steady velocity/temperature with opposing
+time-dependent body/pressure work that still demands temporal refinement;
+exact decimal-time velocity reversals and original two-cell enthalpy
+recurrences, including resumed-window parity; a temperature-driven actuator
+with original-density buoyancy and independent BDF kinetic-work accounting;
+and source refusal, cancellation and global work exhaustion after accepted
+internal prefixes. The six changed Rust sources passed the pinned parser,
+formatter and `rustfmt --check`. These new native FEM/thermal integration
+tests remain unexecuted; parsing and static API/oracle review are not runtime
+validation.
