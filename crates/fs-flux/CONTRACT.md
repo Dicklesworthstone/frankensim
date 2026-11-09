@@ -10907,3 +10907,46 @@ complete native artifact or test execution was not obtained because unrelated
 local module dependencies were missing/stale; these new tests remain unexecuted.
 The executor then became unavailable; final formatter checks and corrected
 native integration execution remain pending.
+
+## Passive scalar and constant-Cp thermal transport with planar SGS
+
+`FluxSystem::prepare_scalar_transport` prepares a conservative P1
+discontinuous-Galerkin scalar equation on the original BDM mesh. Its volume
+velocity and sign-split upwind faces retain both directions of an affine
+reversing trace. Symmetric interior-penalty diffusion uses actual triangle
+gradients and harmonic diffusivity/normal-height weights, without assuming
+orthogonal centroid connectors. Both interface weights are formed directly
+so a small finite contribution survives large diffusivity contrast.
+
+`PlanarSgs::prepare_scalar_transport` binds the same supplied velocity to the
+existing Smagorinsky, WALE or Vreman field and adds `nu_t/ratio` to explicitly
+authored molecular scalar diffusivity. Temperature callers supply turbulent
+Prandtl numbers; passive-species callers supply Schmidt numbers. The returned
+native transport advances the scalar with BDF1 or the original unequal-step
+BDF2 history owner, including exact BDF1 startup and the existing step-growth
+bound. Prepared velocity, diffusivity and boundary traces belong to the
+supplied endpoint and must be refreshed when they change. Sparse CSR,
+controlled ILU(0), FGMRES and independently checked original/equilibrated
+residuals remain the numerical owners.
+
+Value boundaries use consistent weak diffusion and explicit incoming values;
+flux boundaries require a donor wherever any incoming stream exists,
+including zero-net counterflow. Each accepted result reports separate outward
+advective/diffusive numerical boundary rates, the actual BDF storage
+derivative, source rate and unrepaired global balance defect. Rates are per
+out-of-plane depth; constant-density, constant-Cp temperature budgets become
+energy after multiplication by rho Cp and physical depth. Neither molecular
+nor modeled momentum dissipation is silently deposited as heat.
+
+Five focused native integration groups and one private high-contrast
+physical-interface regression passed. Coverage includes all-model accelerated
+thermal-pulse mixing versus molecular-only transport, no spurious heating of
+a uniform field, exact unequal-step histories, skew-mesh diffusion refinement,
+closed inventory, independent reversing-face flux integrals, material
+contrast, disabled-SGS bitwise identity, cancellation and immutable refusal.
+The interface oracle retains both one-sided contributions at contrast 1e18.
+These focused builds used the original numerical kernels without numerical
+stubs; full Cargo/runtime integration was not run. This is passive transport
+with fixed storage properties, without variable-Cp enthalpy, phase change,
+buoyancy/thermal feedback, scalar positivity enforcement or three-dimensional
+LES qualification.

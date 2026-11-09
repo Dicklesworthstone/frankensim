@@ -6,6 +6,8 @@ use super::{FluxSystem, convection_edge_quadrature};
 pub mod density;
 /// Locally conservative H(div) mass flux for native momentum convection.
 pub mod mass_flux;
+/// Conservative P1 DG advection and diffusion of a passive scalar.
+pub mod scalar;
 
 /// Integrated volume rates per unit depth on one original mesh edge.
 ///

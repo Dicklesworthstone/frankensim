@@ -19,6 +19,9 @@ mod flow_control;
 #[path = "incompressible_sgs/newton.rs"]
 mod newton;
 
+#[path = "incompressible_sgs/scalar.rs"]
+mod scalar;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::with_capacity(2 * mesh.edges.len());
     for edge in &mesh.edges {

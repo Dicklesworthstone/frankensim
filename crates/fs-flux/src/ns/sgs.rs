@@ -40,6 +40,10 @@ use std::cell::RefCell;
 mod newton;
 pub use newton::{PlanarSgsMixedNewtonStep, PlanarSgsNewtonStep};
 
+#[path = "sgs/scalar.rs"]
+mod scalar;
+pub use scalar::{PlanarSgsScalarError, PlanarSgsScalarTransport};
+
 /// Admission, arithmetic or native nonlinear-solve refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanarSgsError {
