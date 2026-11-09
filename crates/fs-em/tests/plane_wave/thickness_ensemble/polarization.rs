@@ -366,3 +366,6 @@ fn joint_budget_cancellation_replay_and_polarization_admission() {
     assert!(out.reflected_coherency[0][0].re.is_finite());
     assert!(out.reflected_coherency[1][1].re > 0.0);
 }
+
+#[path = "polarization/transmission.rs"]
+mod transmission;

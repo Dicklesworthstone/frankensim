@@ -8359,3 +8359,36 @@ odd/Nyquist cells, carrier-aware time/space quadrature, cancellation and precise
 DD epochs. The real 1ps null retains its documented DD cancellation limit;
 no null-relative certificate is asserted. Formatting and a bounded adapter
 signature probe passed; full material/reconstruction/FFT execution remains unrun.
+
+## Common-plane transmitted polarization from thickness ensembles
+
+`PreparedLayerThicknessEnsemble::evaluate_polarized_at_plane` evaluates the
+original paired TE/TM responses once per illuminated joint geometry and
+propagates each transmitted field to an explicit shared downstream z plane.
+The plane is measured from the common entrance and must lie beyond every
+authored exit, including zero-probability rows. Compensated summed thicknesses
+and propagation phase retain sub-ulp exit-position differences at distant
+planes; no backwards continuation through an absorbing exit is performed.
+
+Transmitted amplitudes retain tangential-E phase and positive normal-power
+normalization. The better-conditioned original E/H chart supplies phase
+without forming a singular admittance magnitude ratio. Total, coherent and
+fluctuating Jones-response moments use compensated online central covariance;
+direct coherency and Mueller queries repeat no film or material solve. Both
+polarizations share each authored geometry. Incident statistics must remain
+independent of that geometry.
+
+Positive physical absorption in the exit medium between each exit face and
+the common plane is reported separately from finite-film heat and polarization
+covariance. Reflected power + plane transmission + finite-film absorption +
+exit-segment absorption closes the original incident power. Evanescent and
+critical exit channels carry zero normal-power coherency, not a claim of zero
+near-field electric fields. The independent-column/time model supplies no
+lateral diffraction, coherence-length inference, or transient material law.
+Work retains the explicit two-polarization layer-realization bound, bounded
+geometry admission, no query allocation and transactional cancellation.
+
+Five G1/G3 groups specify common-plane homogeneous propagation (including
+distant carriers), rowwise lossy Airy/Jones optics and plane translation,
+unequal-port flux/TIR, tiny covariance and subdivision invariance, plus work,
+dark-row geometry, input admission, replay and cancellation.

@@ -19,12 +19,20 @@
 //! The incident polarization statistics must be independent of the authored
 //! thickness realization. The coherent/fluctuating split describes the
 //! response operator at the common entrance plane, not inferred source
-//! coherence. No transmitted cross moment is inferred across different exit
-//! planes; only transmitted normal power is retained.
+//! coherence. Transmission statistics require an explicit common downstream
+//! plane; each realization propagates through its own remaining exit-medium
+//! distance before any coherent average or covariance is formed.
 
 use super::{Moments, PreparedLayerThicknessEnsemble, ThicknessEnsembleReflection, bad, poll};
 use crate::plane_wave::{Polarization, ReflectionError};
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod transmission;
+use transmission::TransmissionMoments;
+pub use transmission::{
+    PolarizedThicknessEnsembleScattering, ThicknessEnsembleTransmission,
+    ThicknessEnsembleTransmittedPower,
+};
 
 /// Joint polarization response, retaining the original scalar power statistics.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,8 +72,24 @@ impl<'r, 's, 'm> PreparedLayerThicknessEnsemble<'r, 's, 'm> {
         &self,
         incidence_cosine: f64,
         maximum_layer_realizations: usize,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PolarizedThicknessEnsembleReflection, ReflectionError> {
+        self.evaluate_polarized_impl(
+            incidence_cosine,
+            None,
+            maximum_layer_realizations,
+            cancelled,
+        )
+        .map(|(reflected, _)| reflected)
+    }
+
+    fn evaluate_polarized_impl(
+        &self,
+        incidence_cosine: f64,
+        reference_plane_m: Option<f64>,
+        maximum_layer_realizations: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(PolarizedThicknessEnsembleReflection, TransmissionMoments), ReflectionError> {
         poll(&mut cancelled)?;
         let work = self
             .layer_realization_work
@@ -74,6 +98,10 @@ impl<'r, 's, 'm> PreparedLayerThicknessEnsemble<'r, 's, 'm> {
         if work > maximum_layer_realizations {
             return Err(bad("polarized thickness ensemble exceeds its work budget"));
         }
+        let transmitted_plane = reference_plane_m
+            .map(|plane| transmission::admit_plane(self, incidence_cosine, plane, &mut cancelled))
+            .transpose()?;
+        let mut transmitted = TransmissionMoments::new();
         let mut te = Moments::new();
         let mut tm = Moments::new();
         let mut covariance = [Dd::ZERO; 2];
@@ -106,6 +134,9 @@ impl<'r, 's, 'm> PreparedLayerThicknessEnsemble<'r, 's, 'm> {
             ];
             covariance[0] = covariance[0] + central_weight * (ds[0] * dp[0] + ds[1] * dp[1]);
             covariance[1] = covariance[1] + central_weight * (ds[1] * dp[0] - ds[0] * dp[1]);
+            if let Some(plane) = &transmitted_plane {
+                transmitted.push(plane, row, [s, p])?;
+            }
             te.push(row.probability, s);
             tm.push(row.probability, p);
         }
@@ -132,7 +163,7 @@ impl<'r, 's, 'm> PreparedLayerThicknessEnsemble<'r, 's, 'm> {
         ] {
             validate_coherency(moment)?;
         }
-        Ok(result)
+        Ok((result, transmitted))
     }
 }
 

@@ -11,8 +11,9 @@
 //! component at the common entrance plane; E[|r-E[r]|²] retains the remainder
 //! without reclassifying it as heat. This independent-column/time model does
 //! not solve lateral coupling, diffraction or generic rough-surface scattering.
-//! Transmitted power is measured at each realization's own exit face: no
-//! coherent transmitted field at a common downstream plane is inferred.
+//! Ordinary transmitted power is measured at each realization's own exit face.
+//! Polarized transmission can instead be evaluated at an explicitly authored
+//! common downstream plane, retaining the actual exit-medium propagation.
 //!
 //! Coherent films and their absorption use the original Maxwell operator.
 //! The uniform round-trip-phase limit follows the intensity sums in
@@ -24,7 +25,11 @@ use super::{LayeredReflection, PlanarDielectricLayers, Polarization, ReflectionE
 use fs_math::{c64::C64, dd::Dd};
 
 mod polarization;
-pub use polarization::{PolarizedThicknessEnsembleReflection, ThicknessEnsemblePolarizedPower};
+pub use polarization::{
+    PolarizedThicknessEnsembleReflection, PolarizedThicknessEnsembleScattering,
+    ThicknessEnsemblePolarizedPower, ThicknessEnsembleTransmission,
+    ThicknessEnsembleTransmittedPower,
+};
 
 /// One joint realization, in the original stack's physical layer order.
 #[derive(Clone, Copy, Debug)]
