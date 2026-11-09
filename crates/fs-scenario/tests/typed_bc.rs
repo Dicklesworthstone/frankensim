@@ -9,7 +9,7 @@ use fs_scenario::payload::{
     CharacteristicComponent, CharacteristicDirection, CharacteristicState, OrientationParity,
     OutsideDomainPolicy, Payload, PayloadId, PayloadKind, PayloadMeta, QuantityContract,
     ReferenceSemantics, SampleSource, ScalarPayload, SpeciesBundle, SpeciesValue,
-    TableInterpolation, VectorPayload,
+    TableInterpolation, TensorPayload, VectorPayload,
 };
 use fs_scenario::{
     BcKind, BcValue, BoundaryCondition, Compat, Environment, FrameId, IrSourceSpan, LoadCase,
@@ -489,7 +489,7 @@ fn g0_velocity_adds_an_explicit_vector_without_reinterpreting_legacy_rows() {
     );
     assert_eq!(
         expectation(Physics::Elasticity, BcKind::Traction),
-        Expectation::Value(PRESSURE)
+        Expectation::ValueOrVectorOrTensor(PRESSURE)
     );
 }
 
@@ -876,4 +876,69 @@ fn g0_semantic_plan_charges_typed_payload_scalars_and_identities() {
         Err(ValidationError::WorkExceeded { requested, limit })
             if requested == plan.planned_work && limit + 1 == requested
     ));
+}
+
+#[test]
+fn g3_traction_vectors_and_tensors_keep_their_semantics_through_canonical_ir() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    let meta = PayloadMeta::new(
+        QuantityContract::Semantic(SemanticType::new(QuantityKind::Stress, ValueForm::Instantaneous)),
+        id("basis/world-cartesian"), FrameId(0), OrientationParity::Even,
+        ReferenceSemantics::Continuous,
+    ).unwrap();
+    let vector = Payload::Vector(VectorPayload::new(meta.clone(), SampleSource::fixed(
+        [1.0, 2.0, 3.0].map(|v| QtyAny::new(v, PRESSURE)).to_vec(),
+    )).unwrap());
+    let tensor = Payload::Tensor(TensorPayload::new(meta, 3, 3, SampleSource::table(
+        [0.0, 1.0].map(|t| QtyAny::new(t, TIME)).to_vec(),
+        [1.0, 2.0].map(|scale| (0..9).map(|i| QtyAny::new(
+            if i / 3 == i % 3 { scale } else { 0.0 }, PRESSURE,
+        )).collect()).to_vec(),
+        TableInterpolation::StepLeft, OutsideDomainPolicy::Refuse,
+    ).unwrap()).unwrap());
+    for payload in [vector, tensor] {
+        let row = typed_bc(Physics::Elasticity, BcKind::Traction, payload);
+        let mut scenario = Scenario::new("prescribed-traction", 17, Environment::earth_lab());
+        scenario.base_bcs.push(row);
+        assert!(scenario.validate().is_empty());
+        let canonical = write_ir(&scenario);
+        let decoded = parse_ir(&canonical).unwrap();
+        assert_eq!(decoded.scenario(), &scenario);
+        let mut findings = Vec::new();
+        check_round_trip(&scenario, &mut findings);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+}
+
+#[test]
+fn g0_traction_admission_checks_rank_frames_parity_and_physical_quantity() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    let tensor = |meta: PayloadMeta, side: usize| {
+        let dims = meta.contract().dims().unwrap();
+        Payload::Tensor(TensorPayload::new(meta, side, side,
+            SampleSource::fixed(vec![QtyAny::new(1.0, dims); side * side])).unwrap())
+    };
+    let pressure = PayloadMeta::new(
+        QuantityContract::Semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Instantaneous)),
+        id("basis/world-cartesian"), FrameId(0), OrientationParity::Even,
+        ReferenceSemantics::Continuous,
+    ).unwrap();
+    let odd = PayloadMeta::new(QuantityContract::Dimensions(PRESSURE),
+        id("basis/world-cartesian"), FrameId(0), OrientationParity::Odd,
+        ReferenceSemantics::Continuous).unwrap();
+    for (payload, code) in [
+        (scalar_payload(PRESSURE, 0), "bc-traction-payload"),
+        (tensor(dimensional_meta(PRESSURE, 0), 2), "bc-traction-components"),
+        (tensor(dimensional_meta(VELOCITY, 0), 3), "bc-payload-dims"),
+        (tensor(dimensional_meta(PRESSURE, 7), 3), "bc-payload-frame"),
+        (tensor(pressure, 3), "bc-traction-semantics"),
+        (tensor(odd, 3), "bc-traction-parity"),
+        (Payload::Vector(VectorPayload::new(dimensional_meta(PRESSURE, 0),
+            SampleSource::fixed(vec![QtyAny::new(1.0, PRESSURE); 2])).unwrap()), "bc-traction-components"),
+    ] {
+        let row = typed_bc(Physics::Elasticity, BcKind::Traction, payload);
+        let mut findings = Vec::new();
+        row.check(&mut findings);
+        assert!(codes(&findings).contains(&code), "{code}: {findings:?}");
+    }
 }

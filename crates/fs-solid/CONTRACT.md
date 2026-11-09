@@ -14177,3 +14177,23 @@ moving-support von Mises reference: 40 derivative comparisons, a 140-step
 limit-point crossing, exact 70+70 resume, and cancellation passed. The complete
 HyperProblem integration regressions remain unexecuted in the dependency-
 blocked workspace; no large-system performance claim is made.
+
+## Scenario traction rows reach the native stress load owner
+
+`SurfaceHistory3::scenario_traction` now binds an Elasticity/Traction vector or
+3-by-3 stress tensor to explicitly selected native exterior faces. The existing
+Elasticity/Neumann vector path remains available. Both declared Stress vectors
+and tensors use the same quantity-admission function as scenario validation;
+volume force and acceleration contracts retain their original dimensions.
+Canonical tensors therefore reach the existing two-index frame transform,
+reference-normal traction integral, static/reaction solve, transient histories
+and event schedule without a second load assembler. Legacy scalar traction
+rows still require an explicit physical interpretation outside this adapter.
+
+The independent affine-equilibrium regression now round-trips a complete
+scenario tensor row before native assembly and solution. The manual-force
+comparison now enters through a semantic Stress vector boundary. These changes
+retain the small-strain reference-surface scope and original cancellation and
+publication behavior. Source review is complete; compilation and executable
+regressions were unavailable after the runtime-dependency build disconnected
+from the execution environment.

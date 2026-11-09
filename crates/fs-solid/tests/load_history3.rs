@@ -58,13 +58,22 @@ fn g1_tensor_stress_reaches_native_affine_equilibrium_and_balanced_boundary_work
     let frames = FrameTree::new();
     let sigma = [[10.0, 0.0, 0.0], [0.0; 3], [0.0; 3]];
     let value = stress_source(WORLD, sigma, sigma, QuantityKind::Stress);
+    let row = BoundaryCondition { region: "exterior".into(), physics: Physics::Elasticity,
+        kind: BcKind::Traction, value: Some(BcValue::Typed(Payload::Tensor(value))),
+        compatibility: None, frame: WORLD.0 };
+    let mut scenario = fs_scenario::Scenario::new("uniform-stress", 17, fs_scenario::Environment::earth_lab());
+    scenario.base_bcs.push(row);
+    assert!(scenario.validate().is_empty());
+    let ir = fs_scenario::ir::write_ir(&scenario);
+    let decoded = fs_scenario::ir::parse_ir(&ir).unwrap();
+    assert_eq!(decoded.scenario(), &scenario);
     // Remove only rigid modes; the remaining DOFs admit exact Poisson contraction.
     let problem = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
         materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[0, 1, 2, 4, 5, 8], budget: Default::default() };
     with_cx(|cx| {
         let geometry = TetLoadGeometry3::new(&nodes, &tets, problem.budget, 4, cx).unwrap();
         let faces: Vec<_> = (0..geometry.faces().len()).collect();
-        let surfaces = [SurfaceHistory3::Stress { faces: &faces, value: &value }];
+        let surfaces = [SurfaceHistory3::scenario_traction(&faces, &decoded.scenario().base_bcs[0]).unwrap()];
         let history = TetLoadHistory3 { surfaces: &surfaces, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
             nodal_forces_n: &[], frames: &frames };
         let load = history.at(&geometry, &problem, 0.5, cx).unwrap();
@@ -156,6 +165,13 @@ fn g1_scheduled_traction_pressure_and_body_force_match_manual_native_endpoints()
     let fixed: Vec<_> = mesh.nodes.iter().enumerate().filter(|(_, p)| p[0] == 0.0).flat_map(|(i, _)| [3*i, 3*i+1, 3*i+2]).collect();
     let p = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets, materials: TetMaterialField::Uniform(&mat), fixed_dofs: &fixed, budget: Default::default() };
     let traction = vector_source(TRACTION_DIMS, WORLD, [10.0, 2.0, 0.0], [30.0, 6.0, 8.0], OutsideDomainPolicy::Refuse);
+    let traction = VectorPayload::new(PayloadMeta::new(
+        QuantityContract::Semantic(SemanticType::new(QuantityKind::Stress, ValueForm::Instantaneous)),
+        PayloadId::new("basis/world-cartesian").unwrap(), WORLD, OrientationParity::Even,
+        ReferenceSemantics::Continuous).unwrap(), traction.source().clone()).unwrap();
+    let row = BoundaryCondition { region: "right".into(), physics: Physics::Elasticity,
+        kind: BcKind::Traction, value: Some(BcValue::Typed(Payload::Vector(traction))),
+        compatibility: None, frame: WORLD.0 };
     let body = vector_source(FORCE_DENSITY_DIMS, WORLD, [0.0, 0.0, -2.0], [0.0, 0.0, -4.0], OutsideDomainPolicy::Refuse);
     let pressure = TimeSignal::Ramp { t_start: 0.0, t_end: 1.0, from: QtyAny::new(4.0, TRACTION_DIMS), to: QtyAny::new(12.0, TRACTION_DIMS) };
     let thermal = thermal();
@@ -163,7 +179,7 @@ fn g1_scheduled_traction_pressure_and_body_force_match_manual_native_endpoints()
         let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, p.budget, 100, cx).unwrap();
         let right: Vec<_> = g.faces().iter().enumerate().filter_map(|(i, f)| (f.outward_normal[0] > 0.99).then_some(i)).collect();
         let top: Vec<_> = g.faces().iter().enumerate().filter_map(|(i, f)| (f.outward_normal[2] > 0.99).then_some(i)).collect();
-        let rows = [SurfaceHistory3::Traction { faces: &right, value: &traction }, SurfaceHistory3::Pressure { faces: &top, value: &pressure }];
+        let rows = [SurfaceHistory3::scenario_traction(&right, &row).unwrap(), SurfaceHistory3::Pressure { faces: &top, value: &pressure }];
         let history = TetLoadHistory3 { surfaces: &rows, volume: VolumeHistory3::ForceDensity(&body), nodal_forces_n: &[(0, 5.0)], frames: &frames };
         for t in [0.0, 0.25, 0.5, 1.0] {
             let sampled = history.at(&g, &p, t, cx).unwrap();
@@ -200,12 +216,16 @@ fn g0_acceleration_uses_the_actual_uniform_and_per_element_material_mass() {
 }
 
 #[test]
-fn g0_typed_neumann_row_remains_distinct_from_scalar_traction() {
+fn g0_typed_traction_rows_remain_distinct_from_scalar_magnitudes() {
     let value = vector_source(TRACTION_DIMS, WORLD, [1.0, 2.0, 3.0], [2.0, 3.0, 4.0], OutsideDomainPolicy::Refuse);
     let mut row = BoundaryCondition { region: "loaded-face".into(), physics: Physics::Elasticity, kind: BcKind::Neumann,
         value: Some(BcValue::Typed(Payload::Vector(value))), compatibility: None, frame: 0 };
     assert!(SurfaceHistory3::scenario_traction(&[0], &row).is_ok());
-    row.kind = BcKind::Traction; assert!(SurfaceHistory3::scenario_traction(&[0], &row).is_err());
+    row.kind = BcKind::Traction; assert!(SurfaceHistory3::scenario_traction(&[0], &row).is_ok());
+    let typed = row.value.clone();
+    row.value = Some(BcValue::Uniform(QtyAny::new(1.0, TRACTION_DIMS)));
+    assert!(SurfaceHistory3::scenario_traction(&[0], &row).is_err());
+    row.value = typed;
     row.kind = BcKind::Neumann; row.frame = 7; assert!(SurfaceHistory3::scenario_traction(&[0], &row).is_err());
 }
 

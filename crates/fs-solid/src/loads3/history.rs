@@ -12,10 +12,9 @@
 use super::*;
 use super::fields::AccelerationField3;
 use fs_qty::Dims;
-use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, TimeSignal};
 use fs_scenario::payload::{OrientationParity, Payload, QuantityContract, TensorPayload, VectorPayload};
-use fs_scenario::tensor::TensorEvaluationError;
+use fs_scenario::tensor::{TensorEvaluationError, stress_contract};
 use fs_scenario::vector::VectorEvaluationError;
 use std::ops::ControlFlow;
 
@@ -34,19 +33,22 @@ pub enum SurfaceHistory3<'a> {
     Stress { faces: &'a [usize], value: &'a TensorPayload },
 }
 impl<'a> SurfaceHistory3<'a> {
-    /// Consume the existing Elasticity/Neumann vector row, on explicitly
-    /// resolved exterior faces. Scalar legacy Traction rows are not pressures
-    /// or vectors by implication; they retain their existing IR semantics.
+    /// Consume an Elasticity/Neumann vector or an Elasticity/Traction vector
+    /// or stress tensor on explicitly resolved exterior faces. A tensor uses
+    /// each native reference normal, after both indices rotate into WORLD.
+    /// Scalar legacy Traction rows retain their existing IR semantics and
+    /// cannot acquire an inferred pressure sign or vector direction.
     pub fn scenario_traction(faces: &'a [usize], row: &'a BoundaryCondition)
         -> Result<Self, LoadHistoryError3> {
         let mut violations = Vec::new(); row.check(&mut violations);
         if let Some(first) = violations.first() { return Err(LoadHistoryError3::Scenario(first.what.clone())); }
-        if row.physics != Physics::Elasticity || row.kind != BcKind::Neumann {
-            return Err(LoadHistoryError3::Invalid("only an Elasticity/Neumann vector row is admitted"));
+        if row.physics != Physics::Elasticity || !matches!(row.kind, BcKind::Neumann | BcKind::Traction) {
+            return Err(LoadHistoryError3::Invalid("an Elasticity/Neumann or Elasticity/Traction row is required"));
         }
         match &row.value {
             Some(BcValue::Typed(Payload::Vector(value))) => Ok(Self::Traction { faces, value }),
-            _ => Err(LoadHistoryError3::Invalid("typed vector traction required")),
+            Some(BcValue::Typed(Payload::Tensor(value))) => Ok(Self::Stress { faces, value }),
+            _ => Err(LoadHistoryError3::Invalid("typed vector traction or tensor stress required")),
         }
     }
 }
@@ -86,7 +88,9 @@ impl From<LoadError3> for LoadHistoryError3 {
 }
 fn sample(value: &VectorPayload, dims: Dims, frames: &FrameTree, time_s: f64, cx: &Cx<'_>)
     -> Result<[f64; 3], LoadHistoryError3> {
-    if value.meta().contract() != QuantityContract::Dimensions(dims) {
+    let admitted = if dims == TRACTION_DIMS { stress_contract(value.meta().contract()) }
+        else { value.meta().contract() == QuantityContract::Dimensions(dims) };
+    if !admitted {
         return Err(LoadHistoryError3::Quantity { expected: dims, found: value.meta().contract() });
     }
     if value.meta().orientation() != OrientationParity::Even {
@@ -200,13 +204,7 @@ impl TetLoadHistory3<'_> {
                 }
                 SurfaceHistory3::Stress { faces, value } => {
                     let contract = value.meta().contract();
-                    let admitted = match contract {
-                        QuantityContract::Dimensions(dims) => dims == TRACTION_DIMS,
-                        QuantityContract::Semantic(kind) => kind.kind() == QuantityKind::Stress
-                            && matches!(kind.form(), ValueForm::Static | ValueForm::Instantaneous),
-                        QuantityContract::Heterogeneous => false,
-                    };
-                    if !admitted {
+                    if !stress_contract(contract) {
                         return Err(LoadHistoryError3::Quantity { expected: TRACTION_DIMS, found: contract });
                     }
                     if value.meta().orientation() != OrientationParity::Even {

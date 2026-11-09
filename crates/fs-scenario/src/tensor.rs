@@ -8,6 +8,8 @@
 use crate::frame::{FrameTree, WORLD};
 use crate::payload::{OrientationParity, QuantityContract, ReferenceSemantics, TensorPayload};
 use fs_ga::{Quat, Vec3};
+use fs_qty::Pressure;
+use fs_qty::semantic::{QuantityKind, ValueForm};
 use std::ops::ControlFlow;
 
 pub use crate::sample::PayloadEvaluationError as TensorEvaluationError;
@@ -18,6 +20,19 @@ pub struct WorldTensor3 {
     pub values: [[f64; 3]; 3],
     pub contract: QuantityContract,
     pub orientation: OrientationParity,
+}
+
+/// Quantity admission shared by prescribed traction rows and native stress
+/// loaders. Pa dimensions or static/instantaneous Stress are supported;
+/// Pressure semantics and acoustic amplitudes describe different quantities.
+#[must_use]
+pub fn stress_contract(contract: QuantityContract) -> bool {
+    match contract {
+        QuantityContract::Dimensions(dims) => dims == Pressure::DIMS,
+        QuantityContract::Semantic(kind) => kind.kind() == QuantityKind::Stress
+            && matches!(kind.form(), ValueForm::Static | ValueForm::Instantaneous),
+        QuantityContract::Heterogeneous => false,
+    }
 }
 
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), TensorEvaluationError> {

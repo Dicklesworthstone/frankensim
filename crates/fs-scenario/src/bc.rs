@@ -151,6 +151,10 @@ pub enum Expectation {
     /// not acquire an inferred direction. Executable vector consumers require
     /// the typed form.
     ValueOrVector(Dims),
+    /// A legacy value, an explicit three-component traction vector, or a
+    /// 3-by-3 stress tensor. The native surface owner contracts a tensor with
+    /// its own outward normal; scalar values acquire no inferred direction.
+    ValueOrVectorOrTensor(Dims),
     /// A versioned payload with an exact structural kind and, when present,
     /// exact homogeneous dimensions.
     Typed {
@@ -186,7 +190,8 @@ mod dims {
 /// The dimensional contract of every supported (physics, kind) pair.
 #[must_use]
 pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
-    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrScalar, ValueOrVector};
+    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrScalar, ValueOrVector,
+        ValueOrVectorOrTensor};
     match (physics, kind) {
         (Physics::IncompressibleFlow, BcKind::Dirichlet) => ValueOrVector(dims::VELOCITY),
         (Physics::IncompressibleFlow, BcKind::Neumann) => Typed {
@@ -205,7 +210,7 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
             kind: PayloadKind::Vector,
             dims: Some(dims::PRESSURE),
         },
-        (Physics::Elasticity, BcKind::Traction) => Value(dims::PRESSURE),
+        (Physics::Elasticity, BcKind::Traction) => ValueOrVectorOrTensor(dims::PRESSURE),
         (Physics::Magnetics, BcKind::MagneticVectorPotential) => Typed {
             kind: PayloadKind::Vector,
             dims: Some(dims::MAGNETIC_VECTOR_POTENTIAL),
@@ -306,7 +311,8 @@ impl BoundaryCondition {
             }
             Expectation::Value(expected)
             | Expectation::ValueOrScalar(expected)
-            | Expectation::ValueOrVector(expected) => match &self.value {
+            | Expectation::ValueOrVector(expected)
+            | Expectation::ValueOrVectorOrTensor(expected) => match &self.value {
                 None => out.push(Violation {
                     code: "bc-value-missing",
                     what: format!("{ctx}: no value supplied"),
@@ -315,6 +321,12 @@ impl BoundaryCondition {
                         expected.0
                     ),
                 }),
+                Some(BcValue::Typed(payload))
+                    if matches!(expectation(self.physics, self.kind),
+                        Expectation::ValueOrVectorOrTensor(_)) =>
+                {
+                    self.check_traction_payload(payload, expected, ctx, out);
+                }
                 Some(BcValue::Typed(payload))
                     if matches!(expectation(self.physics, self.kind), Expectation::ValueOrScalar(_)) =>
                 {
@@ -458,6 +470,49 @@ impl BoundaryCondition {
             });
         }
         Ok(())
+    }
+
+    fn check_traction_payload(
+        &self,
+        payload: &Payload,
+        expected_dims: Dims,
+        ctx: BoundaryDiagnosticContext<'_>,
+        out: &mut Vec<Violation>,
+    ) {
+        let (kind, shape_ok) = match payload {
+            Payload::Vector(value) => (PayloadKind::Vector, value.components() == 3),
+            Payload::Tensor(value) => (PayloadKind::Tensor, value.rows() == 3 && value.columns() == 3),
+            _ => {
+                out.push(Violation {
+                    code: "bc-traction-payload",
+                    what: format!("{ctx}: traction requires a Cartesian vector or stress tensor"),
+                    fix: "supply three traction components or a 3-by-3 stress tensor".to_string(),
+                });
+                return;
+            }
+        };
+        self.check_typed_payload(payload, kind, Some(expected_dims), ctx, out);
+        if !shape_ok {
+            out.push(Violation {
+                code: "bc-traction-components",
+                what: format!("{ctx}: traction requires three vector or 3-by-3 tensor components"),
+                fix: "supply the complete Cartesian traction vector or stress tensor".to_string(),
+            });
+        }
+        if !crate::tensor::stress_contract(payload.meta().contract()) {
+            out.push(Violation {
+                code: "bc-traction-semantics",
+                what: format!("{ctx}: traction requires Pa or static/instantaneous Stress semantics"),
+                fix: "declare Stress rather than Pressure or an acoustic amplitude".to_string(),
+            });
+        }
+        if payload.meta().orientation() != OrientationParity::Even {
+            out.push(Violation {
+                code: "bc-traction-parity",
+                what: format!("{ctx}: ordinary traction and stress require even parity"),
+                fix: "declare OrientationParity::Even".to_string(),
+            });
+        }
     }
 
     fn check_typed_payload(

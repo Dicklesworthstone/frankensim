@@ -1795,3 +1795,22 @@ cancellation; native-fluid regressions specify legacy-source equivalence over
 actual steps and refusal/retry preservation. These new tests have not run:
 Cargo typechecking and execution remain blocked by the unavailable build
 environment, following dependency preparation failure.
+
+## Canonical prescribed traction vectors and stress tensors
+
+The existing Elasticity/Traction row admits an explicit Cartesian traction
+vector or 3-by-3 stress tensor as well as its existing legacy scalar carriers.
+Canonical payload encoding and row tokens are unchanged. Typed admission
+checks shape, row/payload frame agreement, even parity and the same
+`tensor::stress_contract` used by the native solid loader: dimension-only Pa or
+static/instantaneous Stress. Semantic Pressure and amplitude quantities do not
+become stress because they share dimensions. The receiving surface owner
+resolves normals and checks sampled tensor symmetry; no scalar direction or
+pressure sign is inferred.
+
+The typed boundary tests specify rank, quantity, parity and frame refusals plus
+canonical vector/tensor replay. Native affine-equilibrium and manual-force
+regressions now enter through decoded tensor and declared vector boundary
+rows. This extension received source review only: the execution environment
+became unavailable during runtime-dependency compilation before these changes
+could be compiled or tested.
