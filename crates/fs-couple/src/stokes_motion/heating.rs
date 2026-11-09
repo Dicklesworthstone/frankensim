@@ -271,7 +271,7 @@ pub struct PlanarStokesHeatStep {
 }
 
 // Shared thermal failures retain each motion owner's original public error.
-pub(super) enum StokesHeatFailure {
+pub(crate) enum StokesHeatFailure {
     Binding(&'static str),
     Flow(MaterialFluxError),
     Thermal(DepositionError),
@@ -309,11 +309,11 @@ impl From<StokesHeatFailure> for PlanarStokesHeatError {
 }
 
 /// Frozen geometry, transport and start clock, without a mutable physical owner.
-pub(super) struct StokesHeatBinding<'m> {
-    pub(super) mesh: &'m TriMesh,
-    pub(super) density_kg_m3: f64,
-    pub(super) depth_m: f64,
-    pub(super) time_s: f64,
+pub(crate) struct StokesHeatBinding<'m> {
+    pub(crate) mesh: &'m TriMesh,
+    pub(crate) density_kg_m3: f64,
+    pub(crate) depth_m: f64,
+    pub(crate) time_s: f64,
 }
 
 impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
@@ -661,7 +661,7 @@ impl StokesHeatBinding<'_> {
         Ok((candidate, accepted_observer, audit, source.heat_j))
     }
 
-    pub(super) fn check_slip_heat_routes(
+    pub(crate) fn check_slip_heat_routes(
         &self,
         thermal: &DepositionSimulation<'_>,
         cells: StokesThermalCells<'_>,
@@ -713,7 +713,7 @@ impl StokesHeatBinding<'_> {
         Ok(admitted)
     }
 
-    pub(super) fn check_thermal_cells(
+    pub(crate) fn check_thermal_cells(
         &self,
         thermal: &DepositionSimulation<'_>,
         cells: StokesThermalCells<'_>,

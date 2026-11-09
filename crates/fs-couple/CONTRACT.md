@@ -10794,6 +10794,63 @@ Their full Cargo execution remains unrun; pinned formatting and source/API
 review do not substitute for that execution. This is a sampled harmonic modal
 composition, without a causal time realization or continuum error certificate.
 
+## Coupled resolved laminar momentum and native finite enthalpy
+
+The `laminar-enthalpy` feature exposes `LaminarEnthalpy`: one original
+fixed-mesh incompressible BDM continuum and native finite-cell enthalpy timeline.
+Every implicit thermal trial resolves the original material BDF1 convection and
+rheology equations from the SAME accepted velocity and held physical boundary
+data. Each original constitutive source receives the actual trial caloric
+temperature and native objective shear. Its thermal and momentum transport views
+must agree and retain the original constant density; the exact source object and
+accepted endpoint state are returned. No transport heat-capacity sample is
+converted into a caloric law. Original identity-bearing enthalpy materials,
+triangle-prism geometry and finite masses remain authoritative.
+
+The actual sign-split affine BDM normal trace supplies two directed mass streams
+per face when needed, including zero-net counterflow. Rates are original volume
+flux times the declared extrusion depth and density. Native upwind enthalpy
+transport uses each local donor's original enthalpy; every actually incoming
+boundary portion needs an explicit external material and specific enthalpy.
+One interior transfer is shared by its two inventories. Original fixed-mass
+continuity and caloric-datum admission remain active, with no mass-flux repair.
+Temperature-dependent physical surface/link conductances remain supplied by the
+original heat callback at that same coupled endpoint.
+
+Original physical bulk strain heating is integrated over each triangle prism.
+Every Navier-slip edge needs an explicit original wall receiver and fluid heat
+fraction; pressure-invariant native slip loss is partitioned once between the
+two receivers. SIP, upwind, open-boundary stabilization and BDF numerical losses
+are not deposited as material heat. Original authored heat and external thermal
+exchange are measured independently before this composition adds dissipation
+and advected enthalpy. Acceptance requires native momentum convergence,
+local/global original cell-energy residuals, and the independently evaluated
+identity `delta H = bulk heat + slip heat + net stream enthalpy + other heat`.
+No residual is reclassified as heat.
+
+The existing fallible finite-difference and Newton--Krylov owners perform bounded
+thermal iteration; callers choose a directional difference scale in joules and
+an inexact linear forcing floor appropriate to that numerical action (for
+example `forcing_minimum = 1e-4`). This does not relax final physical thermal
+tolerances. Source/domain, stream, work-budget, nonlinear, thermal-balance or
+cancellation refusal returns neither replacement history. Both clocks and all
+original inventories remain unchanged. Callbacks must be pure across nonlinear
+probes; cancellation is checked at composition and source boundaries. Native
+sparse-loop interruption is not added.
+
+This is first-order endpoint coupling at fixed density and geometry, with native
+mixed velocity, slip and explicit open-pressure conditions. It does not infer
+thermal expansion, whole-system mechanical/thermal passivity, within-step flow
+reversal times or a temporal-error certificate. Five authored native regression
+groups specify bidirectional face transport; independently derived two-cell
+throughflow heating under reversal and shifted enthalpy datums; original
+thermal-Carreau viscosity, convection, strain heat and storage; physical slip
+partitioning; and transactional source, density, exchange, inflow, budget and
+cancellation failures. These full native FEM/thermal tests remain unexecuted in
+this session. Rustfmt parsing, focused whitespace checks and bounded independent
+source/API review passed; earlier isolated material/thermal checks do not
+substitute for this pending integration execution.
+
 ## Coherent field heat over accepted thermal intervals
 
 `SpatialInterferenceHeating::advance_to_with_field_heat` explicitly reconstructs

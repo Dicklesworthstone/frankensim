@@ -172,8 +172,11 @@ pub mod spatial_induction;
 /// Source-bound mean and twice-frequency induction forcing of native linear solids.
 pub mod spatial_induction_vibration;
 /// Implicit guided-body motion driven by original material Stokes reactions.
-#[cfg(feature = "experimental-stokes-motion")]
+#[cfg(any(feature = "experimental-stokes-motion", feature = "laminar-enthalpy"))]
 pub mod stokes_motion;
+/// Original BDM laminar momentum and source rheology on native finite enthalpy cells.
+#[cfg(feature = "laminar-enthalpy")]
+pub mod laminar_enthalpy;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.
 pub mod liquid_gas;
 /// Exact reciprocal drag sources on native liquid and finite rigid momenta.

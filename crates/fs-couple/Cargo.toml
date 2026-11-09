@@ -113,6 +113,8 @@ harmonic-winding-heating = ["fs-em/harmonic-exposure"]
 superfluid = ["fs-duct/superfluid"]
 # Fixed-reference Stokes or native translating/rotating ALE fluid/body mechanics.
 experimental-stokes-motion = ["dep:fs-flux", "fs-flux/continuum"]
+# Original resolved incompressible momentum, thermal rheology and enthalpy advection.
+laminar-enthalpy = ["dep:fs-flux", "fs-flux/continuum"]
 # Coherent finite-film absorption on the original spatial thermal timeline.
 layered-wave-heating = ["fs-em/plane-wave"]
 # Original magnetized carrier absorption on finite electron/heavy gas storage.
