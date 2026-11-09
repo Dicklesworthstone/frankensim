@@ -1,8 +1,8 @@
 //! Neutral finite-rate crystals on the original solvent-frame diffusion path.
 //!
-//! The kinetic material's ideal particle pressure and the exactly zero-virial
-//! diffusion view are the SAME thermodynamics. Nonzero interactions would
-//! change saturation through activities and are therefore refused, not ignored.
+//! Ideal phase owners require an exactly zero-virial diffusion view. Nonzero
+//! interactions require each original kinetic material to be explicitly bound
+//! to that same nonideal model, so activities change its conditional saturation.
 //! Crystal stocks stay local; original phase half-stages surround transport of
 //! dissolved species. Their solid chemical reference closes the whole-window
 //! free energy without treating dissolution as a source of component mass.
@@ -13,7 +13,6 @@ use super::{
     prepare_solution_diffusion,
 };
 use fs_material::osmosis::nonideal::VirialSolutionModel;
-use fs_qty::{Amount, Temperature, Volume};
 use std::sync::Arc;
 
 impl OsmoticNetwork {
@@ -23,10 +22,13 @@ impl OsmoticNetwork {
     /// their original material compartments. The native full/two-half timeline
     /// controls the complete first-order phase/transport splitting error.
     ///
-    /// The explicitly supplied common thermodynamic model MUST have exactly
-    /// zero virial interactions and the same temperature, solvent molar volume
-    /// and solute ordering as the original phase owners. Its concentration box
-    /// remains binding. All kinetic cells retain the SAME original ordered
+    /// The explicitly supplied common thermodynamic model must have the same
+    /// temperature, solvent molar volume and solute ordering as the original
+    /// phase owners. An ideal phase owner requires exactly zero virial entries;
+    /// nonzero entries require every kinetic owner to have explicitly admitted
+    /// this same model through `with_nonideal_thermodynamics`. Its conditional
+    /// activity equilibrium and concentration box remain binding. All kinetic
+    /// cells retain the SAME original ordered
     /// solubility laws and pure-solid reference, while rate coefficients,
     /// particle geometry and growth policies can differ. Ordinary ideal cells
     /// can share this network. At least one kinetic compartment is required.
@@ -41,8 +43,8 @@ impl OsmoticNetwork {
     ///
     /// The closed free-energy report includes the solid-relative Gibbs datum
     /// from each original solubility law; it is not a thermal energy account.
-    /// Instantaneous equilibrium solids, ionic assignments, nonideal saturation,
-    /// coupled water exchange, nucleation and crystal transport remain outside
+    /// Instantaneous equilibrium solids, ionic assignments, coupled water
+    /// exchange, nucleation and crystal transport remain outside
     /// this constructor. Refusal/cancellation publishes no state or time.
     pub fn with_kinetic_solution_diffusion(
         species: Vec<String>,
@@ -52,49 +54,7 @@ impl OsmoticNetwork {
         controls: SolutionDiffusionControls,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, OsmoticNetworkError> {
-        if thermodynamics.species_count() != species.len()
-            || thermodynamics
-                .interaction_matrix_m3_mol()
-                .iter()
-                .any(|&entry| entry != 0.0)
-            || cells.iter().any(|cell| cell.solubility.is_some())
-        {
-            return Err(OsmoticNetworkError::Invalid(
-                "kinetic molecular diffusion requires neutral finite-rate stocks and exactly zero virial interactions",
-            ));
-        }
-        let reference = cells
-            .iter()
-            .find_map(|cell| cell.kinetic_solubility.as_ref())
-            .ok_or(OsmoticNetworkError::Invalid(
-                "kinetic molecular diffusion requires an original kinetic material owner",
-            ))?;
-        if links.iter().any(|link| {
-            link.electrical.is_some() || link.material().solvent() != reference.solvent()
-        }) {
-            return Err(OsmoticNetworkError::Invalid(
-                "neutral diffusion faces must retain the original phase solvent identity",
-            ));
-        }
-        for cell in &mut cells {
-            if cell.solution.temperature_k().to_bits() != thermodynamics.temperature_k().to_bits()
-                || cell.solution.solvent_molar_volume_m3_mol().to_bits()
-                    != thermodynamics.solvent_molar_volume_m3_mol().to_bits()
-                || (!cell.solution.is_ideal()
-                    && cell.solution.nonideal_model() != Some(thermodynamics.as_ref()))
-            {
-                return Err(OsmoticNetworkError::Invalid(
-                    "kinetic diffusion must retain the original ideal temperature and solvent convention",
-                ));
-            }
-            // This view changes neither physical amounts nor the phase owner.
-            // Preparation allocates once; all subsequent updates reuse it.
-            cell.solution = AqueousSolution::nonideal(
-                Arc::clone(&thermodynamics),
-                cell.solution.solvent_volume_m3(),
-                cell.solution.solute_moles().to_vec(),
-            )?;
-        }
+        prepare_kinetic_thermodynamics(&species, &mut cells, &links, &thermodynamics)?;
         let required = prepare_solution_diffusion(
             &species,
             &cells,
@@ -114,6 +74,71 @@ impl OsmoticNetwork {
         network.diffusion_controls = Some(controls);
         Ok(network)
     }
+}
+
+/// Shared phase/diffusion admission for fixed-volume and coupled-water
+/// networks. Only the aqueous view changes representation; the original phase
+/// owners, actual stocks and source/model identities remain intact.
+pub(in crate::osmosis) fn prepare_kinetic_thermodynamics(
+    species: &[String],
+    cells: &mut [OsmoticCompartment],
+    links: &[SolutionDiffusionLink],
+    thermodynamics: &Arc<VirialSolutionModel>,
+) -> Result<(), OsmoticNetworkError> {
+    if thermodynamics.species_count() != species.len()
+        || cells.iter().any(|cell| cell.solubility.is_some())
+    {
+        return Err(OsmoticNetworkError::Invalid(
+            "kinetic molecular diffusion requires neutral finite-rate stocks and the declared species count",
+        ));
+    }
+    let interacting = thermodynamics
+        .interaction_matrix_m3_mol()
+        .iter()
+        .any(|&entry| entry != 0.0);
+    if interacting
+        && cells
+            .iter()
+            .filter_map(|cell| cell.kinetic_solubility.as_ref())
+            .any(|phases| phases.solution().nonideal_model() != Some(thermodynamics.as_ref()))
+    {
+        return Err(OsmoticNetworkError::Invalid(
+            "nonideal molecular diffusion requires every original kinetic owner to admit the same activity model",
+        ));
+    }
+    let reference = cells
+        .iter()
+        .find_map(|cell| cell.kinetic_solubility.as_ref())
+        .ok_or(OsmoticNetworkError::Invalid(
+            "kinetic molecular diffusion requires an original kinetic material owner",
+        ))?;
+    if links
+        .iter()
+        .any(|link| link.electrical.is_some() || link.material().solvent() != reference.solvent())
+    {
+        return Err(OsmoticNetworkError::Invalid(
+            "neutral diffusion faces must retain the original phase solvent identity",
+        ));
+    }
+    for cell in cells {
+        if cell.solution.temperature_k().to_bits() != thermodynamics.temperature_k().to_bits()
+            || cell.solution.solvent_molar_volume_m3_mol().to_bits()
+                != thermodynamics.solvent_molar_volume_m3_mol().to_bits()
+            || (!cell.solution.is_ideal()
+                && cell.solution.nonideal_model() != Some(thermodynamics.as_ref()))
+        {
+            return Err(OsmoticNetworkError::Invalid(
+                "kinetic diffusion must retain the original temperature, solvent convention and activity model",
+            ));
+        }
+        // Preparation allocates once; subsequent updates reuse this view.
+        cell.solution = AqueousSolution::nonideal(
+            Arc::clone(thermodynamics),
+            cell.solution.solvent_volume_m3(),
+            cell.solution.solute_moles().to_vec(),
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn free_energy_change(
@@ -139,28 +164,16 @@ pub(super) fn free_energy_change(
                 "closed kinetic diffusion changed its solvent volume or original thermodynamics",
             ));
         }
-        for ((model, &old), &next) in phases
-            .models()
-            .iter()
-            .zip(before.solute_moles())
-            .zip(after.solute_moles())
-        {
-            // Subtract the SAME pure-solid chemical potential from every
-            // dissolved and solid mole. Its linear reference cancels because
-            // complete component inventories are conserved across this window.
-            // The remaining solid contribution is exactly zero by that datum,
-            // not an omitted phase energy or an assumption of fixed crystals.
-            let change = model
-                .law()
-                .solid_relative_free_energy_change_j(
-                    Temperature::new(before.temperature_k()),
-                    Volume::new(before.solvent_volume_m3()),
-                    Amount::new(old),
-                    Amount::new(next),
-                )
-                .map_err(|error| OsmoticNetworkError::Solubility(error.into()))?;
-            compensated_add(&mut sum, &mut correction, finite(change)?);
-        }
+        // The original phase owner retains the same pure-solid reference and,
+        // when explicitly selected, its calibrated nonideal excess potential.
+        // Its linear reference cancels only for the conserved COMPLETE stocks.
+        let change = phases.solid_relative_inventory_free_energy_change_j(
+            before.solvent_volume_m3(),
+            before.solute_moles(),
+            after.solvent_volume_m3(),
+            after.solute_moles(),
+        )?;
+        compensated_add(&mut sum, &mut correction, finite(change)?);
     }
     finite(sum)
 }

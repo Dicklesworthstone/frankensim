@@ -21,7 +21,7 @@ mod implicit_electroneutral;
 mod implicit_salt;
 mod ionic_coordinates;
 mod multicomponent;
-mod solubility;
+pub(super) mod solubility;
 pub(crate) use electroneutral::ElectroneutralDiffusion;
 pub use electroneutral::{
     ElectroneutralDiffusionControls, ElectroneutralDiffusionReport, IonicDiffusionConnection,

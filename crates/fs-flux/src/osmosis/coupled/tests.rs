@@ -1,4 +1,6 @@
 //! Independent coupled water/species dynamics and actual mechanical-work gates.
+mod solubility;
+
 use super::*;
 use crate::osmosis::{OsmoticPressureVolume, coupled::CoupledSolutionControls};
 use fs_evidence::ValidityDomain;

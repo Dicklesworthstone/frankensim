@@ -12,6 +12,11 @@
 //! Phi=F_mix+sum(Psi), not F_mix alone. Prescribed pressures contribute load
 //! work through their exact primitive. No heat reservoir, caloric energy,
 //! fluid inertia or pressure-dependent liquid kinetics is supplied here.
+//! The explicit kinetic-solubility constructor also evolves retained neutral
+//! crystals. Its common pure-solid chemical reference is included in the same
+//! variable-volume potential, while the actual dissolved stock drives water.
+
+mod solubility;
 
 use super::{
     MAX_MEMBRANES, MembraneBoundary, OsmoticCompartment, OsmoticMembrane, OsmoticNetwork,
@@ -20,6 +25,7 @@ use super::{
     exchange, poll, positive,
 };
 use fs_material::osmosis::OsmosisError;
+use fs_material::osmosis::solubility::kinetics::KineticSolubilitySolution;
 
 /// One set of physical whole-window budgets, separate from temporal accuracy.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +44,9 @@ pub struct CoupledSolutionControls {
 /// energy allowances. This report is not a caloric energy/heat balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoupledPotentialChange {
+    /// Original solution chemical work. For kinetic neutral phases this is
+    /// solid-relative free energy, including dissolution and precipitation;
+    /// its linear pure-solid reference cancels across conserved total stocks.
     pub mixing_free_energy_change_j: f64,
     /// Exact pressure primitive, including prescribed pressure-load work.
     /// Its negative is mechanical work delivered to the modeled solutions.
@@ -67,10 +76,31 @@ impl OsmoticNetwork {
     pub fn with_coupled_solution_transport(
         species: Vec<String>,
         cells: Vec<OsmoticCompartment>,
+        membranes: Vec<OsmoticMembrane>,
+        links: Vec<SolutionDiffusionLink>,
+        controls: CoupledSolutionControls,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, OsmoticNetworkError> {
+        Self::prepare_coupled_solution_transport(
+            species,
+            cells,
+            membranes,
+            links,
+            controls,
+            maximum_workspace_bytes,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_coupled_solution_transport(
+        species: Vec<String>,
+        cells: Vec<OsmoticCompartment>,
         mut membranes: Vec<OsmoticMembrane>,
         mut links: Vec<SolutionDiffusionLink>,
         controls: CoupledSolutionControls,
         maximum_workspace_bytes: usize,
+        kinetic_phases: bool,
     ) -> Result<Self, OsmoticNetworkError> {
         if !positive(controls.water_balance_tolerance_m3)
             || membranes.len().saturating_add(links.len()) > MAX_MEMBRANES
@@ -112,7 +142,7 @@ impl OsmoticNetwork {
             &mut links,
             controls.diffusion,
             maximum_workspace_bytes,
-            false,
+            kinetic_phases,
         )?;
         let mut network = Self::new(species, cells, membranes, maximum_workspace_bytes - bytes)?;
         network.workspace_bytes += bytes;
@@ -154,6 +184,9 @@ pub(super) fn sweep(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     let pressure_reference = cells[0].pressure.reference_pressure_pa;
+    let phase_reference = cells
+        .iter()
+        .position(|cell| cell.kinetic_solubility.is_some());
     for membrane in membranes {
         poll(cancelled)?;
         let (left, right) = (&cells[membrane.left], &cells[membrane.right]);
@@ -169,7 +202,9 @@ pub(super) fn sweep(
             (left, endpoint.volumes[0], &endpoint.left[..n]),
             (right, endpoint.volumes[1], &endpoint.right[..n]),
         ] {
-            let (mixing, mechanical) = cell_change(old, volume, amounts, pressure_reference)?;
+            let reference = phase_reference.and_then(|i| cells[i].kinetic_solubility.as_ref());
+            let (mixing, mechanical) =
+                cell_change(old, volume, amounts, pressure_reference, reference)?;
             compensated_add(&mut change, &mut correction, mixing);
             compensated_add(&mut change, &mut correction, mechanical);
         }
@@ -181,12 +216,11 @@ pub(super) fn sweep(
             });
         }
         poll(cancelled)?;
-        cells[membrane.left]
-            .solution
-            .replace_inventories(endpoint.volumes[0], &endpoint.left[..n])?;
-        cells[membrane.right]
-            .solution
-            .replace_inventories(endpoint.volumes[1], &endpoint.right[..n])?;
+        // Water changes the solvent volume owned by each retained crystal bath.
+        // Publish through the existing compartment handoff so its original
+        // phase model sees that volume during the following kinetic half-stage.
+        cells[membrane.left].replace_inventories(endpoint.volumes[0], &endpoint.left[..n])?;
+        cells[membrane.right].replace_inventories(endpoint.volumes[1], &endpoint.right[..n])?;
     }
     // Dilution/concentration from water motion changes the actual coefficient
     // coordinates even when a solute amount was retained exactly.
@@ -211,6 +245,7 @@ fn cell_change(
     after_volume: f64,
     after_amounts: &[f64],
     pressure_reference: f64,
+    phase_reference: Option<&KineticSolubilitySolution>,
 ) -> Result<(f64, f64), OsmoticNetworkError> {
     let law = before
         .solution
@@ -218,14 +253,19 @@ fn cell_change(
         .ok_or(OsmoticNetworkError::Invalid(
             "coupled potential needs the original virial solution model",
         ))?;
-    let mixing = law
-        .reference_cancelled_inventory_free_energy_change_j(
-            before.solution.solvent_volume_m3(),
-            before.solution.solute_moles(),
-            after_volume,
-            after_amounts,
-        )
-        .map_err(OsmosisError::from)?;
+    let mixing = match phase_reference {
+        Some(reference) => {
+            solubility::chemical_change(reference, &before.solution, after_volume, after_amounts)?
+        }
+        None => law
+            .reference_cancelled_inventory_free_energy_change_j(
+                before.solution.solvent_volume_m3(),
+                before.solution.solute_moles(),
+                after_volume,
+                after_amounts,
+            )
+            .map_err(OsmosisError::from)?,
+    };
     let mechanical = before.pressure.reference_cancelled_potential_change_j(
         before.solution.solvent_volume_m3(),
         after_volume,
@@ -242,6 +282,9 @@ pub(super) fn potential_change(
     let mut values = [0.0; 3];
     let mut corrections = [0.0; 3];
     let pressure_reference = original[0].pressure.reference_pressure_pa;
+    let phase_reference = original
+        .iter()
+        .find_map(|cell| cell.kinetic_solubility.as_ref());
     for (before, after) in original.iter().zip(candidate) {
         poll(cancelled)?;
         if before.solution.nonideal_model() != after.solution.nonideal_model() {
@@ -254,6 +297,7 @@ pub(super) fn potential_change(
             after.solution.solvent_volume_m3(),
             after.solution.solute_moles(),
             pressure_reference,
+            phase_reference,
         )?;
         compensated_add(&mut values[0], &mut corrections[0], mixing);
         compensated_add(&mut values[1], &mut corrections[1], mechanical);

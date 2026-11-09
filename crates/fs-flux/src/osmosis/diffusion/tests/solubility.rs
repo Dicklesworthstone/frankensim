@@ -321,7 +321,7 @@ fn cancelled_or_exhausted_work_keeps_both_phase_stocks_and_clock_atomic() {
 }
 
 #[test]
-fn nonideal_saturation_incompatible_references_and_ionic_or_water_modes_refuse() {
+fn unbound_nonideal_saturation_incompatible_references_and_ionic_or_water_modes_refuse() {
     let interacting = source(1.0, vec![0.001], vec![300.0]);
     assert!(
         OsmoticNetwork::with_kinetic_solution_diffusion(
@@ -403,4 +403,86 @@ fn nonideal_saturation_incompatible_references_and_ionic_or_water_modes_refuse()
         )
         .is_err()
     );
+}
+
+#[test]
+fn explicitly_bound_nonideal_phases_share_molecular_forces_and_solid_reference() {
+    let model = source(1.0, vec![0.002, 0.003, 0.003, 0.001], vec![300.0; 2]);
+    let bound_phases = kinetic_cell(
+        &[10.0, 40.0],
+        &[200.0, 0.0],
+        &[50.0, 20.0],
+        &[0.1, 0.0],
+        true,
+    )
+    .kinetic_solubility_snapshot()
+    .unwrap()
+    .with_nonideal_thermodynamics(model.clone())
+    .unwrap();
+    let left = OsmoticCompartment::with_kinetic_solubility(
+        bound_phases,
+        OsmoticPressureVolume::new(VOLUME, 1e5, 1e8).unwrap(),
+        0.1 * VOLUME,
+    )
+    .unwrap();
+    let initial = [vec![10.0, 40.0], vec![1.0, 10.0]];
+    let energy = |c: &[f64]| {
+        let ideal = c
+            .iter()
+            .zip([50.0, 20.0])
+            .zip([0.002, 0.001])
+            .map(|((&c, saturation), diagonal)| {
+                c * ((c / saturation).ln() - 1.0 - diagonal * saturation)
+            })
+            .sum::<f64>();
+        R * T
+            * VOLUME
+            * (ideal
+                + 0.5 * (0.002 * c[0] * c[0] + 2.0 * 0.003 * c[0] * c[1] + 0.001 * c[1] * c[1]))
+    };
+    for implicit in [false, true] {
+        let system = OsmoticNetwork::with_kinetic_solution_diffusion(
+            vec!["solute-0".into(), "solute-1".into()],
+            vec![left.clone(), cell(&model, &initial[1])],
+            vec![SolutionDiffusionLink::new(0, 1, 0.01, 0.001, law(&model)).unwrap()],
+            model.clone(),
+            physical(),
+            1 << 24,
+        )
+        .unwrap();
+        let mut system = if implicit {
+            system
+                .with_implicit_multicomponent_diffusion(
+                    ImplicitMulticomponentDiffusionControls::default(),
+                    1 << 24,
+                )
+                .unwrap()
+        } else {
+            system
+        };
+        let report = system.advance(1.0, numerical(1e-4), || false).unwrap();
+        let retained = phases(&system);
+        assert_eq!(retained.solution().nonideal_model(), Some(model.as_ref()));
+        assert_eq!(retained.last_steps()[1].state().solid().value(), 0.0);
+        assert!(retained.last_steps()[0].state().solid().value() < 200.0 * VOLUME);
+        for (i, total) in [211.0, 50.0].into_iter().enumerate() {
+            let actual = retained.last_steps()[i].state().solid().value()
+                + retained.last_steps()[i].state().dissolved().value()
+                + system.compartments()[1].solution().solute_moles()[i];
+            assert!((actual / VOLUME - total).abs() < 1e-8);
+            assert!(
+                report.solute_balance_residual_mol[i].abs()
+                    <= physical().amount_balance_tolerance_mol
+            );
+        }
+        let actual: [Vec<f64>; 2] = core::array::from_fn(|cell| {
+            (0..2)
+                .map(|species| concentration(&system, cell, species))
+                .collect()
+        });
+        let expected =
+            energy(&actual[0]) + energy(&actual[1]) - energy(&initial[0]) - energy(&initial[1]);
+        assert!(expected < 0.0);
+        assert!((report.diffusion_free_energy_change_j.unwrap() - expected).abs() < 2e-12);
+    }
 }

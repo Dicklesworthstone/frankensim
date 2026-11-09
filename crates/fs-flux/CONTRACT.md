@@ -5385,32 +5385,75 @@ explicit, implicit binary and implicit multisolute engines remain available.
 Every kinetic compartment must share identical original ordered solubility
 laws and pure-solid reference, with the same solvent, temperature and molar
 volume. Rate coefficients, particle reference stocks and growth policies may
-differ. The explicit common virial model must have exactly zero interactions,
-so its transport chemical potentials match the admitted ideal saturation law.
-Its concentration support remains binding. Ordinary dissolved-only cells may
-join the same network; isolated reacting cells are also supported. Original
+differ. Ideal phase owners require exactly zero virial interactions. Nonzero
+interactions require every original kinetic owner to have explicitly bound
+that identical virial model through `with_nonideal_thermodynamics`, so its
+conditional saturation and molecular forces share the same potential. An ideal
+phase source cannot silently acquire nonideal saturation through its aqueous
+view. The original concentration support remains binding. Ordinary
+dissolved-only cells may join the same network; isolated reacting cells are
+also supported. Original
 material-backed molecular faces requalify their endpoint sources after phase
 exchange. No saturation coefficient is substituted for molecular diffusivity.
 
 Whole-window conservation sums dissolved AND solid changes. The free-energy
-report uses the original thermochemical solid-relative potential, retaining the
-saturation reference through phase conversion. An increase beyond the original
+report uses the original material owner's calibrated solid-relative chemical
+work, retaining the saturation reference and any explicitly bound virial excess
+through phase conversion. An increase beyond the original
 absolute physical budget refuses before publishing inventories or time. This
 is an isothermal chemical-work account, not dissolution heat or a caloric
-temperature trajectory. No water exchange, ionic/electrical constraint,
-instantaneous-equilibrium solid projection, nonideal saturation, nucleation or
-crystal transport is admitted. Constant-source explicit and specialized binary
+temperature trajectory. This fixed-volume constructor supplies no water exchange,
+ionic/electrical constraint, instantaneous-equilibrium solid projection,
+nucleation or crystal transport. Constant-source explicit and specialized binary
 advances reuse prepared storage; implicit multisolute/source-query allocation
 costs retain their existing separate accounting.
 
 Focused cases compare coupled trajectories with an independent continuous
 three-stock RK4 oracle, check phase conservation and actual osmotic particles,
 exercise implicit multisolute transport, and check free-energy decrease and
-atomic cancellation. `examples/crystal_diffusion.rs` connects independently
+atomic cancellation. Nonideal cases reuse explicit and implicit multicomponent
+stages, with an independently evaluated calibrated virial potential.
+`examples/crystal_diffusion.rs` connects independently
 selected saturation/particle source models to two finite baths and reports
 their concentration, crystal stock, evolving conductance and chemical work.
-Its coefficients are explicitly authored demonstration data.
+Its coefficients are explicitly authored demonstration data. `--nonideal`
+selects an explicit virial binding while preserving the original pure-pair
+saturation source.
 
+### Water movement, molecular diffusion and local crystals
+
+`OsmoticNetwork::with_kinetic_coupled_solution_transport` combines original
+finite-rate neutral phase owners, bare fully retaining water membranes and
+independent stationary-solvent Maxwell--Stefan links at one fixed temperature.
+It preserves the original solvent, species ordering and thermodynamic binding
+described above. Original phase half-stages surround the existing
+water-then-molecular sweep, and the shared full/two-half controller measures the
+complete splitting error. Water publishes through the compartment inventory
+handoff, keeping the actual phase-owner volume synchronized before subsequent
+dissolution or precipitation. Only dissolved molecules cross molecular links;
+particle reference geometry and local crystals remain in their compartment.
+
+The coupled account uses the same original material owner's calibrated
+solid-relative chemical work, including nonideal excess and variable-volume
+contributions, plus the exact pressure primitive and prescribed load work.
+The pure-solid calibration is linear in component moles and adds no pressure
+term at fixed amounts; water therefore uses the same original virial osmotic
+pressure. Complete solvent and dissolved-plus-solid component balances remain
+independent absolute gates. Pressure-driven water removal may increase chemical
+free energy while mechanical potential falls; acceptance uses the complete sum.
+Late source-domain, work or cancellation refusal publishes neither partial
+phase inventories nor elapsed time. This isothermal potential account is not
+a heat balance. Ionic precipitation, caloric coupling, nucleation, crystal
+transport and solvent-drag solute transport require their own constitutive laws.
+
+Focused regression sources compare water/molecular/particle trajectories with
+an independent four-state continuous RK4 solution and temporal refinement,
+check pressure-driven crystal growth and load work, retain concentration-reference
+invariance, reuse implicit transport, and exercise complete rollback. A
+two-solute nonideal case independently evaluates calibrated chemical plus
+mechanical potential while water moves and local components dissolve and grow
+in opposed directions. `examples/crystal_diffusion.rs --water` selects this
+coupled path; combining it with `--nonideal` binds virial activities throughout.
 
 ## Nonideal solution diffusion in finite stationary-solvent networks
 

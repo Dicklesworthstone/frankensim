@@ -645,7 +645,8 @@ pub struct OsmoticStepReport {
     /// not silently dropped from a mixed mechanical/chemical energy account.
     pub diffusion_free_energy_change_j: Option<f64>,
     /// Closed coupled-window source mixing and pressure-primitive changes.
-    /// Present only for `with_coupled_solution_transport`; no heat balance.
+    /// Present for ordinary and finite-rate crystal coupled transport;
+    /// no heat balance. Crystal networks retain their common solid reference.
     pub coupled_potential_change: Option<coupled::CoupledPotentialChange>,
     /// Global electrical solves, including discarded adaptive probes. Present
     /// only for the deliberately selected electroneutral network closure.
@@ -1311,7 +1312,11 @@ fn sweep_all(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     if let Some(coupled) = coupled {
-        return coupled::sweep(
+        let kinetic_phases = cells.iter().any(|cell| cell.kinetic_solubility.is_some());
+        if kinetic_phases {
+            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+        }
+        coupled::sweep(
             cells,
             membranes,
             links,
@@ -1325,7 +1330,12 @@ fn sweep_all(
             controls,
             evaluations,
             cancelled,
-        );
+        )?;
+        if kinetic_phases {
+            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+            diffusion::qualify_sources(cells, links, cancelled)?;
+        }
+        return Ok(());
     }
     match physical {
         Some(physical) => {
