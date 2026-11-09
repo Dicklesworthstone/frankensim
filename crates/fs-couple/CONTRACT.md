@@ -13340,3 +13340,30 @@ pure-vapor tests remain present.
 Fresh focused original-source validation passed: material 33/33, native cavitation 105/105, coupled conducting 10/10 (including four new mixed groups and two existing source-parser tests), and coupled vapor 5/5, for 153 freshly executed tests. The native/coupled `cavitation`-only configuration also compiled with the mixed feature disabled. DSR, RCH and the documented DSR fallback are absent; these local one-job Cargo lanes use retained facades for the actual product sources and original numerical dependencies. No full-workspace or release-gate pass is claimed.
 
 The actual `gas_vapor_cavitation` example completed 200 samples with `mixture-a.tsv`, authored wet-mixture conductivity lower bound 0.02 W/(m K), and diffusivity lower bound 2e-5 m2/s. It recorded 100 evaporation and 100 condensation samples; radius 8.48781..14.29779 micrometres; vapor mass 7.52400e-16..3.59147e-15 kg; and exactly unchanged dry mass 2.0853512985751484e-15 kg. Peak sampled receiver pressure at 0.1 m was 1.40411e-4 Pa. Maximum cumulative residuals were 7.25308e-20 J for combined thermal energy, 1.45545e-28 kg for vapor mass, and 7.23157e-24 J for original-source gas energy. These are numerical conservation results within the admitted common-temperature, rapid-mixing model using explicitly synthetic gas and authored mixture transport; they are not empirical water/air calibration or a spatial/time-convergence claim.
+
+## Axisymmetric nonlinear current through complete heat assemblies
+
+`conduction::axisymmetric::response::step_axisymmetric_conduction_response_candidate`
+closes original meridional bulk/interface laws, their swept Joule work and any
+complete `HeatAssembly` at one finite-enthalpy endpoint. Original thermal
+contacts, integrated conduction layers, radiation and finite coolant links can
+therefore feed back into the actual field. The returned candidate retains the
+assembly's complete sample and typed failure; its default sample preserves the
+existing material-network entry points through the same numerical driver.
+
+Voltage, current-density, total-current, regulated-power and grouped
+voltage/current/mixed electrodes retain their native nonlinear solve and work
+account. Every actual field solve consumes the outer trial budget. Original
+bulk and contact operating axes enter thermal boundary admission; graph
+electrical bindings cannot disappear. Swept volume routes, source pins, phase
+charts and contact heat partitions retain their existing admission. Joule loss
+enters its receiving cells once, and reciprocal finite links and enclosure
+radiation remain internal exchange.
+
+A focused manufactured regression couples original nonlinear cylinder
+transport to a sourced thermal interface, compares two accepted intervals
+against independently eliminated body balances, and exercises boundary and
+grouped-terminal drive. Source failures and exhausted/cancelled trials retain
+both input histories. This composition adds no moving-interface, field-dependent
+caloric or reversible electrical-storage law; independent time, field and
+contact-quadrature refinement remains required.

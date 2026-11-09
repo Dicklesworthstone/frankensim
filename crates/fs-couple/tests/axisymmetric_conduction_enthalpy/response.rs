@@ -1,6 +1,9 @@
 //! G1/G3/G4: actual meridional E/J laws, thermal feedback and swept work.
 //! Manufactured material laws; these fixtures make no empirical-data claim.
 
+#[path = "response/heat.rs"]
+mod heat;
+
 #[path = "response/terminals.rs"]
 mod terminals;
 

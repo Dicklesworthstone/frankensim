@@ -5,14 +5,20 @@
 //! enthalpy residual once; constitutive iteration error is never heat.
 //! Geometry, source pins and caloric charts remain with their original owners.
 
+mod heat;
+pub use heat::{
+    AxisymmetricConductionResponseDrive, step_axisymmetric_conduction_response_candidate,
+};
+
 use super::super::{
-    ConductionDrive, ConductionThermalNetwork, Error, check, contacts, invalid, material,
+    ConductionDrive, ConductionThermalError, ConductionThermalNetwork, Error, check, contacts,
+    invalid, map_conduction_error, material,
     response::{ConductionResponseThermalStep, terminals::Drive},
     same_material,
 };
 use crate::circuit_enthalpy::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
-    DriverAccount, ThermalDriver, cell_driver_candidate, finite,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients, DriverAccount, ThermalDriver, cell_driver_candidate, finite,
     material::{MaterialNetwork, MaterialNetworkSample},
 };
 use fs_em::conduction::{
@@ -53,12 +59,12 @@ impl ThermalDriver for ResponseCandidate {
 
 /// Jointly accepted finite enthalpy and nonlinear meridional electrical state.
 /// Consume both together to continue; rejected trials publish neither owner.
-pub struct AxisymmetricConductionResponseEnthalpyCandidate<'t> {
+pub struct AxisymmetricConductionResponseEnthalpyCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     problem: AxisymmetricConductionResponse,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep>,
+    report: CircuitEnthalpyReport<S, ConductionResponseThermalStep>,
 }
-impl<'t> AxisymmetricConductionResponseEnthalpyCandidate<'t> {
+impl<'t, S> AxisymmetricConductionResponseEnthalpyCandidate<'t, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -67,9 +73,7 @@ impl<'t> AxisymmetricConductionResponseEnthalpyCandidate<'t> {
         &self.problem
     }
 
-    pub fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, ConductionResponseThermalStep> {
         &self.report
     }
 
@@ -78,7 +82,7 @@ impl<'t> AxisymmetricConductionResponseEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         AxisymmetricConductionResponse,
-        CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep>,
+        CircuitEnthalpyReport<S, ConductionResponseThermalStep>,
     ) {
         (self.thermal, self.problem, self.report)
     }
@@ -227,22 +231,6 @@ impl ConductionThermalNetwork<'_> {
     ) -> Result<AxisymmetricConductionResponseEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
-        // Admit the authored cap before restricting it by the outer budget.
-        if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations) {
-            return Err(invalid(
-                "invalid bounded axisymmetric response iteration limit",
-            ));
-        }
-        let dt = self.admit_mesh_step(
-            thermal,
-            target_s,
-            problem.mesh(),
-            assembly,
-            controls,
-            initial_energy_increments_j,
-        )?;
-        let routes = self.admit_mesh_routes(thermal, problem.mesh(), &cancel)?;
-        self.admit_response_caloric_sources(problem.sources(), &cancel)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -251,12 +239,86 @@ impl ConductionThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        let resolve = |state: &DepositionSimulation<'_>| {
-            let coefficients = prepared
-                .resolve(state, || (*cancel.borrow_mut())())
-                .map_err(material)?;
-            self.admit_response_heat(&coefficients.source, &cancel)?;
-            Ok::<_, Error>(coefficients)
+        self.step_axisymmetric_response_resolved_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            contact_bindings,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    // The original numerical driver accepts a complete thermal resolver; all
+    // mechanisms see one proposed enthalpy state and retain their source type.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy::conduction) fn step_axisymmetric_response_resolved_candidate<
+        't,
+        S,
+        E: From<ConductionThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &AxisymmetricConductionResponse,
+        drive: Drive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'t>,
+        )
+            -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<AxisymmetricConductionResponseEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>>
+    {
+        check(cancel).map_err(map_conduction_error)?;
+        // Admit the authored cap before restricting it by the outer budget.
+        if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations) {
+            return Err(map_conduction_error(invalid(
+                "invalid bounded axisymmetric response iteration limit",
+            )));
+        }
+        let dt = self
+            .admit_mesh_step(
+                thermal,
+                target_s,
+                problem.mesh(),
+                assembly,
+                controls,
+                initial_energy_increments_j,
+            )
+            .map_err(map_conduction_error)?;
+        let routes = self
+            .admit_mesh_routes(thermal, problem.mesh(), cancel)
+            .map_err(map_conduction_error)?;
+        self.admit_response_caloric_sources(problem.sources(), cancel)
+            .map_err(map_conduction_error)?;
+        let resolve = |state: &DepositionSimulation<'t>| {
+            let coefficients = resolve_sources(state)?;
+            if !coefficients.resistors.is_empty() {
+                return Err(map_conduction_error(invalid(
+                    "axisymmetric response cannot omit graph electrical work",
+                )));
+            }
+            self.admit_response_heat(sample(&coefficients.source), cancel)
+                .map_err(map_conduction_error)?;
+            Ok::<_, CircuitEnthalpyError<E>>(coefficients)
         };
         let accepted = resolve(thermal)?;
         let contact_axes = contacts::response_axes(problem.contact_response_sources());
@@ -267,26 +329,28 @@ impl ConductionThermalNetwork<'_> {
             problem.contact_liquid_mass_fraction_axes(),
             contact_bindings,
             &routes,
-            &accepted.source,
+            sample(&accepted.source),
             &contact_axes,
-            &cancel,
-        )?;
+            cancel,
+        )
+        .map_err(map_conduction_error)?;
         let materials_at = |sample: &MaterialNetworkSample| {
             self.response_materials_from(
                 problem.conductors(),
                 problem.sources(),
                 sample,
                 &routes,
-                &cancel,
+                cancel,
             )
+            .map_err(map_conduction_error)
         };
-        let initial = materials_at(&accepted.source)?;
+        let initial = materials_at(sample(&accepted.source))?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
         }) {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "accepted axisymmetric response sources must match the actual thermal state",
-            ));
+            )));
         }
         let (thermal, problem, report) = cell_driver_candidate(
             thermal,
@@ -294,11 +358,15 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, remaining| {
-                check(&cancel)?;
+                check(cancel).map_err(map_conduction_error)?;
+                if remaining == 0 {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
                 let coefficients = resolve(state)?;
-                let sources = materials_at(&coefficients.source)?;
-                let contact_sources =
-                    contacts.refresh_contacts(problem.contacts(), &coefficients.source, &cancel)?;
+                let sources = materials_at(sample(&coefficients.source))?;
+                let contact_sources = contacts
+                    .refresh_contacts(problem.contacts(), sample(&coefficients.source), cancel)
+                    .map_err(map_conduction_error)?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
@@ -381,21 +449,26 @@ impl ConductionThermalNetwork<'_> {
                     {
                         CircuitEnthalpyError::CircuitBudget
                     }
-                    other => Error::from(other),
+                    other => map_conduction_error(Error::from(other)),
                 })?;
                 let (next, field) = candidate.into_parts();
                 let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j =
-                    finite(dt * drive.supplied_power_w(&field, terminals.as_ref())?)?;
+                let supplied_work_j = finite(
+                    dt * drive
+                        .supplied_power_w(&field, terminals.as_ref())
+                        .map_err(map_conduction_error)?,
+                )?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
-                    return Err(invalid(
+                    return Err(map_conduction_error(invalid(
                         "axisymmetric nonlinear Joule heat and terminal source work do not close",
-                    ));
+                    )));
                 }
                 let circuit_trials = field.field_solves;
-                let contact_heat = contacts.heat(&field.contact_response)?;
+                let contact_heat = contacts
+                    .heat(&field.contact_response)
+                    .map_err(map_conduction_error)?;
                 Ok(DrivenCoefficients {
                     circuit: ResponseCandidate {
                         problem: next,
@@ -416,14 +489,16 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                let mut powers =
-                    self.deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)?;
-                contacts::deposit(&candidate.step.contacts, &mut powers, checkpoint)?;
+                let mut powers = self
+                    .deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)
+                    .map_err(map_conduction_error)?;
+                contacts::deposit(&candidate.step.contacts, &mut powers, checkpoint)
+                    .map_err(map_conduction_error)?;
                 Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(map_conduction_error)?;
         Ok(AxisymmetricConductionResponseEnthalpyCandidate {
             thermal,
             problem,
