@@ -211,3 +211,248 @@ fn exact_yields_work_limits_and_late_cancellation_remain_mandatory() {
         }),
     ));
 }
+
+fn passive_edges(p: f64, q: f64) -> [ReactionEdge; 2] {
+    [
+        ReactionEdge {
+            parent: 0,
+            daughter: 1,
+            yield_per_removal: p,
+        },
+        ReactionEdge {
+            parent: 1,
+            daughter: 0,
+            yield_per_removal: q,
+        },
+    ]
+}
+
+#[test]
+fn damped_pair_matches_independent_augmented_matrix_exponential() {
+    // References were rounded from a 90-decimal-digit exponential of the
+    // six-state block matrix [A,0,I; diag(rates),0,0; 0,0,0]. Its four
+    // blocks independently produce P, C, Fbar and Gbar, without using the
+    // eigenprojectors or scalar moments implemented in the production path.
+    let cases = [
+        (
+            [1e9, 0.4],
+            [0.75, 0.4],
+            0.5,
+            [
+                [
+                    1.0432298829551144e-10,
+                    1.3909731768840133e-10,
+                    0.6520186766643813,
+                    0.8693582353090881,
+                ],
+                [
+                    1.0559893274713208,
+                    0.07465243676752495,
+                    0.13997331893910928,
+                    0.18663109226655566,
+                ],
+                [
+                    2.1119786549426415e-9,
+                    1.493048735350499e-10,
+                    0.6998665946955464,
+                    0.9331554613327783,
+                ],
+                [
+                    1.0286476571568612,
+                    0.03819687902511972,
+                    0.07161914817209948,
+                    0.09549219793606149,
+                ],
+            ],
+        ),
+        (
+            [12.0, 2.0],
+            [0.4, 0.7],
+            0.25,
+            [
+                [
+                    0.07998436328875706,
+                    0.08300581706491703,
+                    0.2845913727940012,
+                    0.6728830566095929,
+                ],
+                [
+                    1.001113438549225,
+                    0.2027445045949554,
+                    0.11585400262568882,
+                    0.4082147452283892,
+                ],
+                [
+                    0.33370447951640836,
+                    0.06758150153165181,
+                    0.23170800525137764,
+                    0.8164294904567784,
+                ],
+                [
+                    0.7001387733439268,
+                    0.08460813215083791,
+                    0.048347504086193094,
+                    0.21741376240355675,
+                ],
+            ],
+        ),
+    ];
+    for (rates, yields, duration, expected) in cases {
+        for swapped in [false, true] {
+            let rates = if swapped { [rates[1], rates[0]] } else { rates };
+            let yields = if swapped {
+                [yields[1], yields[0]]
+            } else {
+                yields
+            };
+            let limits = DecayLimits {
+                maximum_squarings: 0,
+                maximum_series_terms: 1,
+                maximum_work: 2_000,
+                ..DecayLimits::default()
+            };
+            let plan = ReactionSourcePlan::prepare_with_population_integrals(
+                &rates,
+                &passive_edges(yields[0], yields[1]),
+                duration,
+                limits,
+                || false,
+            )
+            .unwrap();
+            let homogeneous = plan.homogeneous_plan();
+            let actual = [
+                homogeneous.transition_matrix(),
+                homogeneous.integrated_removal_matrix(),
+                plan.source_population_matrix(),
+                plan.source_removal_matrix(),
+            ];
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                for i in 0..4 {
+                    near(actual[i], expected[if swapped { 3 - i } else { i }], 3e-14);
+                }
+            }
+            for i in 0..4 {
+                near(
+                    plan.population_integral_matrix().unwrap()[i] * rates[i / 2],
+                    homogeneous.integrated_removal_matrix()[i],
+                    3e-14,
+                );
+                near(
+                    plan.source_population_integral_matrix().unwrap()[i] * rates[i / 2],
+                    plan.source_removal_matrix()[i],
+                    3e-14,
+                );
+            }
+            assert_eq!(homogeneous.squarings(), 0);
+            assert_eq!(homogeneous.series_terms(), 0);
+        }
+    }
+}
+
+#[test]
+fn damped_pair_retains_tiny_authored_sinks_over_long_histories() {
+    let p = 1.0 - 2.0_f64.powi(-27);
+    let q = 1.0 - 2.0_f64.powi(-28);
+    let plan = ReactionPlan::prepare(
+        &[1e9, 0.4],
+        &passive_edges(p, q),
+        1e8,
+        DecayLimits::default(),
+        || false,
+    )
+    .unwrap();
+    let answer = plan.apply(&[0.0, 1.0]).unwrap();
+    // Independent 90-digit block-exponential reference at the exact binary64
+    // input values. Forming 1-p*q would lose the small product of the two
+    // authored sinks and visibly change this long-time survival probability.
+    near(answer.populations[0], 2.5580865112618294e-10, 3e-14);
+    near(answer.populations[1], 0.639521630197861, 3e-14);
+    near(answer.removals[0], 3.225505846238208e7, 3e-14);
+    near(answer.removals[1], 3.2255058582541537e7, 3e-14);
+    let lost = (1.0 - p) * answer.removals[0] + (1.0 - q) * answer.removals[1];
+    near(lost, 0.36047836954633034, 3e-14);
+    near(answer.populations.iter().sum::<f64>() + lost, 1.0, 3e-15);
+    assert!(answer.population_balance_residual.abs() < 3e-15);
+}
+
+#[test]
+fn damped_source_and_residence_obey_interval_composition() {
+    for rates in [[1e9, 0.4], [0.4, 1e9], [12.0, 2.0]] {
+        for time in [1e-9, 0.5, 3.0] {
+            let prepare = |duration| {
+                ReactionSourcePlan::prepare_with_population_integrals(
+                    &rates,
+                    &passive_edges(0.75, 0.4),
+                    duration,
+                    DecayLimits::default(),
+                    || false,
+                )
+                .unwrap()
+            };
+            let whole = prepare(time);
+            let half = prepare(time / 2.0);
+            let initial = [10.0, 4.0];
+            let injection = [3.0, 2.0];
+            let half_injection = [1.5, 1.0];
+            let answer = whole.apply(&initial, &injection).unwrap();
+            let first = half.apply(&initial, &half_injection).unwrap();
+            let second = half.apply(&first.populations, &half_injection).unwrap();
+            let residence = whole.integrate_populations(&initial, &injection).unwrap();
+            let residence1 = half
+                .integrate_populations(&initial, &half_injection)
+                .unwrap();
+            let residence2 = half
+                .integrate_populations(&first.populations, &half_injection)
+                .unwrap();
+            for i in 0..2 {
+                near(answer.populations[i], second.populations[i], 3e-13);
+                near(
+                    answer.removals[i],
+                    first.removals[i] + second.removals[i],
+                    3e-13,
+                );
+                near(residence[i], residence1[i] + residence2[i], 3e-13);
+                near(residence[i] * rates[i], answer.removals[i], 3e-13);
+            }
+            assert!(answer.population_balance_residual.abs() < 5e-14);
+        }
+    }
+}
+
+#[test]
+fn damped_pair_preserves_budgets_and_late_cancellation() {
+    let rates = [1e9, 0.4];
+    let edges = passive_edges(0.75, 0.4);
+    assert!(matches!(
+        ReactionPlan::prepare(
+            &rates,
+            &edges,
+            0.5,
+            DecayLimits {
+                maximum_work: 100,
+                ..DecayLimits::default()
+            },
+            || false,
+        ),
+        Err(DecayError::Budget {
+            quantity: "preparation work",
+            ..
+        }),
+    ));
+    let mut polls = 0;
+    ReactionPlan::prepare(&rates, &edges, 0.5, DecayLimits::default(), || {
+        polls += 1;
+        false
+    })
+    .unwrap();
+    let cancel_at = polls - 1;
+    polls = 0;
+    assert_eq!(
+        ReactionPlan::prepare(&rates, &edges, 0.5, DecayLimits::default(), || {
+            polls += 1;
+            polls == cancel_at
+        })
+        .unwrap_err(),
+        DecayError::Cancelled,
+    );
+}

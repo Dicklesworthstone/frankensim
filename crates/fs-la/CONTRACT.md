@@ -1116,7 +1116,7 @@ self-products, sinks or yield normalization. Positive forward and reverse rates
 give the exact stationary projector and exponentially decaying transient.
 Preparation uses fixed bounded scalar work, independent of the number of
 exchange lifetimes, while preserving the original population and event maps.
-Arbitrary cycles and nonconservative reactions retain their existing algorithm.
+Other cycles retain the general algorithm except for the passive pair below.
 
 The same decomposition supplies uniform-production populations and removals,
 initial residence and source-aged residence. Independently evaluated small
@@ -1130,6 +1130,19 @@ unequal rates, tiny intervals, overflowing rate sums, subnormal rates and
 source/residence semigroup composition. Work limits, exact-yield admission and
 late cancellation remain mandatory. These are numerical tests of the admitted
 two-state model, not physical calibration or a certified forward-error bound.
+
+Passive two-state cycles with sinks also use positive analytic projectors when
+the removal rates differ by at least a factor of two and the interval spans at
+least one lifetime of the faster removal rate. The slow decay rate retains both
+authored sink fractions; it is never obtained by subtracting nearly equal
+eigenvalues or normalizing the yields. The same scalar moments supply endpoint,
+event, uniform-source and residence maps, preserving nanosecond singlet return
+beside slow triplet annihilation without stepping every fast lifetime. All map
+coefficients must remain positive and finite; otherwise the original general
+owner retains its existing admission and tail rules. Fixed work charges,
+cancellation and both original basis-column balance audits remain mandatory.
+Independent high-precision block-exponential references, reversed state labels,
+tiny sinks and interval-composition regressions exercise this admitted path.
 
 ## Representable late reaction survivors
 

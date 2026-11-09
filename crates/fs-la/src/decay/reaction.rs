@@ -354,6 +354,9 @@ impl ReactionPlan {
                 &mut cancelled,
             );
         }
+        if let Some(pair) = exchange::damped_pair(&mut plan, limits, &mut cancelled)? {
+            return pair.finish(plan, with_source, with_source_integrals, &mut cancelled);
+        }
         let mut production = vec![0.0; n * n];
         let mut maximum_production = 0.0_f64;
         for j in 0..n {

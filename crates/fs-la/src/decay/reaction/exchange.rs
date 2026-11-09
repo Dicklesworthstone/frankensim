@@ -1,4 +1,4 @@
-//! Exact conservative two-state exchange, including integrated event histories.
+//! Exact two-state exchange, including sinks and integrated event histories.
 //!
 //! For rates a:0->1 and b:1->0, P=S I+(1-S) Pi, where S=exp(-(a+b)t)
 //! and each column of Pi is [b,a]/(a+b). The first and second normalized
@@ -99,6 +99,156 @@ pub(super) fn prepare(
     }
     poll(cancelled)?;
     Ok((plan, maps))
+}
+
+/// Positive, independently integrated maps for a passive pair with separated
+/// removal rates. Every coefficient is representable before replacing the
+/// general owner; exhausted tails and exceptional scales retain its admission.
+pub(super) struct DampedPair {
+    transition: [f64; 4],
+    integrated: [f64; 4],
+    population: [f64; 4],
+    removals: [f64; 4],
+    residence: [f64; 4],
+}
+
+pub(super) fn damped_pair(
+    plan: &mut ReactionPlan,
+    limits: DecayLimits,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<DampedPair>, DecayError> {
+    if plan.nodes != 2 || plan.yields[0] != 0.0 || plan.yields[3] != 0.0 {
+        return Ok(None);
+    }
+    let [a, b] = [plan.rates[0], plan.rates[1]];
+    let [p, q] = [plan.yields[2], plan.yields[1]];
+    if a == 0.0 || b == 0.0 || p <= 0.0 || q <= 0.0 || p > 1.0 || q > 1.0 {
+        return Ok(None);
+    }
+    let scale = a.max(b);
+    let small = a.min(b);
+    let ratio = small / scale;
+    let exposure = scale * plan.duration_s;
+    // With separated rates and at least one fast lifetime, the two scalar
+    // moment differences below are well conditioned. Near-degenerate modes
+    // and tiny exposures continue through the original positive series.
+    if ratio > 0.5 || exposure < 1.0 || !exposure.is_finite() {
+        return Ok(None);
+    }
+    charge(&mut plan.work, 768, limits.maximum_work)?;
+    poll(cancelled)?;
+    let d = 1.0 - ratio;
+    let discriminant = det::sqrt(d * d + 4.0 * ratio * p * q);
+    // Rationalize the small root correction instead of subtracting two
+    // nearly equal quantities. Neither a+b nor a*b needs to be representable.
+    let correction = (2.0 * ratio * p * q) / (discriminant + d);
+    let mut sink = Sum::default();
+    sink.add(1.0 - p);
+    sink.add(p * (1.0 - q));
+    let slow = ((small * plan.duration_s) * sink.total()) / (1.0 + correction);
+    let fast = exposure * (1.0 + correction);
+    let gap = exposure * discriminant;
+    if !fast.is_finite() || !gap.is_finite() {
+        return Ok(None);
+    }
+    let slow_weight = correction / discriminant;
+    let fast_weight = (d + correction) / discriminant;
+    let (wa, wb) = if a >= b {
+        (slow_weight, fast_weight)
+    } else {
+        (fast_weight, slow_weight)
+    };
+    let backward = ((b / scale) * q) / discriminant;
+    let forward = ((a / scale) * p) / discriminant;
+    let es = det::exp(-slow);
+    let ef = det::exp(-fast);
+    let difference = es * -det::expm1(-gap);
+    let (first_s, _, second_s, _) = moments(slow, 1.0, 1.0, 1.0);
+    let (first_f, _, second_f, _) = moments(fast, 1.0, 1.0, 1.0);
+    let transition = [
+        wa * es + wb * ef,
+        backward * difference,
+        forward * difference,
+        wb * es + wa * ef,
+    ];
+    let population = [
+        wa * first_s + wb * first_f,
+        backward * (first_s - first_f),
+        forward * (first_s - first_f),
+        wb * first_s + wa * first_f,
+    ];
+    let residence = [
+        wa * second_s + wb * second_f,
+        backward * (second_s - second_f),
+        forward * (second_s - second_f),
+        wb * second_s + wa * second_f,
+    ];
+    let mut integrated = [0.0; 4];
+    let mut removals = [0.0; 4];
+    for i in 0..2 {
+        let exposure = plan.rates[i] * plan.duration_s;
+        for j in 0..2 {
+            integrated[2 * i + j] = exposure * population[2 * i + j];
+            removals[2 * i + j] = exposure * residence[2 * i + j];
+        }
+    }
+    // This fast path never grants an underflow exemption or manufactures a
+    // zero response. The general owner retains its existing tail accounting.
+    if !transition
+        .iter()
+        .chain(&integrated)
+        .chain(&population)
+        .chain(&removals)
+        .chain(&residence)
+        .all(|&value| value.is_finite() && value > 0.0)
+    {
+        return Ok(None);
+    }
+    poll(cancelled)?;
+    Ok(Some(DampedPair {
+        transition,
+        integrated,
+        population,
+        removals,
+        residence,
+    }))
+}
+
+impl DampedPair {
+    pub(super) fn finish(
+        self,
+        mut plan: ReactionPlan,
+        with_source: bool,
+        with_residence: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ReactionPlan, Option<source::SourceMaps>), DecayError> {
+        plan.transition = self.transition.to_vec();
+        plan.integrated = self.integrated.to_vec();
+        plan.reachable.fill(true);
+        let maps = with_source.then(|| {
+            let mut maps = source::SourceMaps::identity(2, with_residence);
+            maps.population = self.population.to_vec();
+            maps.removals = self.removals.to_vec();
+            if let Some(residence) = &mut maps.residence {
+                residence.population = self.residence.to_vec();
+            }
+            maps
+        });
+        for column in 0..2 {
+            poll(cancelled)?;
+            let initial = if column == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
+            let endpoint = [plan.transition[column], plan.transition[2 + column]];
+            let removals = [plan.integrated[column], plan.integrated[2 + column]];
+            plan.check_balance(&initial, None, &endpoint, &removals, column)?;
+            if let Some(maps) = &maps {
+                let endpoint = [maps.population[column], maps.population[2 + column]];
+                let removals = [maps.removals[column], maps.removals[2 + column]];
+                plan.check_balance(&initial, None, &endpoint, &removals, column)?;
+            }
+        }
+        poll(cancelled)?;
+        Ok((plan, maps))
+    }
 }
 
 // phi1=integral_0^1 exp(-x*s)ds; phi2=integral_0^1 (1-s)exp(-x*s)ds.
