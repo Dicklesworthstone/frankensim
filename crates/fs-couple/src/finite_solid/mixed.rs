@@ -19,7 +19,6 @@
 use super::FiniteSolidMaterial;
 use super::thermal::ThermalReference;
 use fs_material::MaterialError;
-use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::mixed::{
     MixedFiniteStrainPotential, MixedPointResponse, MixedPointState, PressurePotential,
     RemainderResponse,
@@ -77,8 +76,8 @@ fn pullback_state(
 }
 
 impl MixedFiniteStrainPotential for FiniteSolidMaterial {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        self.law.law()
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        self.law.validate_mixed()
     }
 
     fn remainder_stress_and_potential(

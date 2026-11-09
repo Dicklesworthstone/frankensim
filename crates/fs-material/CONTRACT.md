@@ -1,5 +1,34 @@
 # fs-material — CONTRACT
 
+## Mixed multiplicative J2 plasticity
+
+`plastic::finite::mixed::FrozenFiniteJ2Remainder` borrows the original
+rate-independent `FiniteJ2` and accepted plastic metric. Linear, Voce and
+tabulated hardening use the same native radial return, history, physical yield
+heat and consistent logarithmic tangent. The bulk-free stress, tangent and
+stored/incremental energy omit the original bulk contribution at assembly;
+they do not subtract a large penalty or replace its modulus.
+
+The generic `MixedFiniteStrainPotential` boundary requires native parameter/
+history validation and an original pressure dual, without requiring an unrelated
+`Hyperelastic` owner. Existing hyperelastic, viscous and thermal-reference
+implementations preserve their prior arithmetic. The J2 adapter uses the
+original log-squared volume law on its locally convex `log(J)<1` branch, or
+explicit exact incompressibility without evaluating the unused bulk penalty.
+Both actual deformation and pressure-reconstructed volume retain the original
+Jacobian and elastic-strain domain checks. Spatial pressure equations impose
+volume weakly; physical bulk storage is `U(J(p))`, not a second `U(det F)`.
+
+`remainder_response`, `stored_remainder_energy` and
+`validate_remainder_committed` expose candidate history, physical remainder
+storage and independent accepted-state admission to native mixed solid owners.
+Newton trials never mutate accepted history. No rate, thermal, porous, ductile,
+spatial locking-convergence or experimental-validation claim is added.
+Focused G0/G1/G3 cases in `tests/plastic_finite_mixed.rs` compare the full native
+return and pressure condensation, independently difference every mixed tangent
+block, continue reverse plastic loading, and test an unused overflowing bulk
+penalty plus unchanged-history refusals.
+
 ## Source-bound Johnson--Cook ductile initiation
 
 `ductile::source::resolve_johnson_cook_initiation` admits one explicitly pinned

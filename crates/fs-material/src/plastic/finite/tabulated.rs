@@ -72,6 +72,7 @@ impl FiniteJ2 {
         trial: ElasticEndpoint,
         q_trial: f64,
         kinetics: Option<&FiniteOverstressJ2>,
+        include_bulk: bool,
     ) -> Result<ReturnMap, FiniteJ2Error> {
         let table = self.table.as_ref().expect("selected tabulated return");
         let radius_old = table
@@ -140,7 +141,7 @@ impl FiniteJ2 {
             radial.plastic_dissipation = radial.primary_potential + viscous_work;
             radial.rate_potential = potential_fraction * viscous_work;
         }
-        self.finish_return(f, old, trial, q_trial, radial)
+        self.finish_return_selected(f, old, trial, q_trial, radial, include_bulk)
     }
 
     /// Safeguarded scalar solve including the original Perzyna inverse rate.

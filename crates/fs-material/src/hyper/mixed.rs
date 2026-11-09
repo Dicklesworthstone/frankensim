@@ -355,7 +355,7 @@ pub(crate) fn cofactor(f: &[f64; 9]) -> [f64; 9] {
     ]
 }
 
-fn combine_state(
+pub(crate) fn combine_state(
     f: &[f64; 9],
     p: f64,
     remainder: ([f64; 9], f64),
@@ -380,18 +380,14 @@ fn combine_state(
     })
 }
 
-/// Bulk-free finite-strain energy owner, including a frozen viscous value
+/// Bulk-free finite-strain energy owner, including a frozen inelastic value
 /// function when selected. `validate_mixed` admits parameters/history once at
 /// spatial preparation; each point still checks original deformation domains.
+/// The pressure dual belongs to the original constitutive owner; a plastic
+/// material does not need to impersonate a hyperelastic law to use this seam.
 pub trait MixedFiniteStrainPotential {
-    /// Original immutable equilibrium law, owning the selected bulk energy.
-    fn equilibrium_law(&self) -> &Hyperelastic;
-    /// Validate the original public material parameters and mixed split.
-    fn validate_mixed(&self) -> Result<(), MaterialError> {
-        let law = self.equilibrium_law();
-        Hyperelastic::new(law.model.clone(), law.stretch_limit)?;
-        original_volume(law).map(|_| ())
-    }
+    /// Validate the original material parameters, retained history and mixed split.
+    fn validate_mixed(&self) -> Result<(), MaterialError>;
     /// Bulk-free remainder gradient and value, without its Hessian.
     fn remainder_stress_and_potential(
         &self,
@@ -408,10 +404,7 @@ pub trait MixedFiniteStrainPotential {
         f: &[f64; 9],
         pressure_pa: f64,
         treatment: VolumetricTreatment,
-    ) -> Result<PressurePotential, MaterialError> {
-        check_split_state(self.equilibrium_law(), f)?;
-        pressure_data(self.equilibrium_law(), f, pressure_pa, treatment)
-    }
+    ) -> Result<PressurePotential, MaterialError>;
     /// Mixed potential and residuals for a spatial residual line search.
     fn mixed_state(
         &self,
@@ -432,35 +425,46 @@ pub trait MixedFiniteStrainPotential {
     ) -> Result<MixedPointResponse, MaterialError> {
         let remainder = self.remainder_response(f)?;
         let bulk = self.mixed_pressure_potential(f, pressure_pa, treatment)?;
-        let state = combine_state(
-            f,
-            pressure_pa,
-            (remainder.first_piola_pa, remainder.potential_pa),
-            bulk,
-        )?;
-        let mut tangent = remainder.tangent_pa;
-        // d²J/dF_iJ dF_kL = eps_ikm eps_JLN F_mN. Only distinct
-        // rows and columns survive; no determinant Hessian AD is necessary.
-        for (a, row) in tangent.iter_mut().enumerate() {
-            for (b, value) in row.iter_mut().enumerate() {
-                let (i, j, k, l) = (a / 3, a % 3, b / 3, b % 3);
-                if i != k && j != l {
-                    let sign_i = if (i + 1) % 3 == k { 1.0 } else { -1.0 };
-                    let sign_j = if (j + 1) % 3 == l { 1.0 } else { -1.0 };
-                    *value += pressure_pa * sign_i * sign_j * f[3 * (3 - i - k) + (3 - j - l)];
-                }
+        combine_response(f, pressure_pa, remainder, bulk)
+    }
+}
+
+/// Common pressure block completion, also used by material owners that reuse
+/// one expensive return preparation for the remainder and its domain checks.
+pub(crate) fn combine_response(
+    f: &[f64; 9],
+    pressure_pa: f64,
+    remainder: RemainderResponse,
+    bulk: PressurePotential,
+) -> Result<MixedPointResponse, MaterialError> {
+    let state = combine_state(
+        f,
+        pressure_pa,
+        (remainder.first_piola_pa, remainder.potential_pa),
+        bulk,
+    )?;
+    let mut tangent = remainder.tangent_pa;
+    // d²J/dF_iJ dF_kL = eps_ikm eps_JLN F_mN. Only distinct
+    // rows and columns survive; no determinant Hessian AD is necessary.
+    for (a, row) in tangent.iter_mut().enumerate() {
+        for (b, value) in row.iter_mut().enumerate() {
+            let (i, j, k, l) = (a / 3, a % 3, b / 3, b % 3);
+            if i != k && j != l {
+                let sign_i = if (i + 1) % 3 == k { 1.0 } else { -1.0 };
+                let sign_j = if (j + 1) % 3 == l { 1.0 } else { -1.0 };
+                *value += pressure_pa * sign_i * sign_j * f[3 * (3 - i - k) + (3 - j - l)];
             }
         }
-        if tangent.iter().flatten().any(|v| !v.is_finite()) {
-            return Err(state_error("nonfinite mixed tangent"));
-        }
-        Ok(MixedPointResponse {
-            state,
-            tangent_pa: tangent,
-            pressure_coupling: cofactor(f),
-            pressure_tangent_per_pa: -bulk.compliance_per_pa,
-        })
     }
+    if tangent.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(state_error("nonfinite mixed tangent"));
+    }
+    Ok(MixedPointResponse {
+        state,
+        tangent_pa: tangent,
+        pressure_coupling: cofactor(f),
+        pressure_tangent_per_pa: -bulk.compliance_per_pa,
+    })
 }
 
 pub(crate) fn check_split_state(law: &Hyperelastic, f: &[f64; 9]) -> Result<(), MaterialError> {
@@ -511,8 +515,18 @@ pub(crate) fn response_from_energy(
 }
 
 impl MixedFiniteStrainPotential for Hyperelastic {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        self
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        Hyperelastic::new(self.model.clone(), self.stretch_limit)?;
+        original_volume(self).map(|_| ())
+    }
+    fn mixed_pressure_potential(
+        &self,
+        f: &[f64; 9],
+        pressure_pa: f64,
+        treatment: VolumetricTreatment,
+    ) -> Result<PressurePotential, MaterialError> {
+        check_split_state(self, f)?;
+        pressure_data(self, f, pressure_pa, treatment)
     }
     fn remainder_stress_and_potential(
         &self,
@@ -532,8 +546,16 @@ impl MixedFiniteStrainPotential for Hyperelastic {
 // mixed consumers. Only the original native remainder is delegated; its split
 // and deformation-domain gates remain unchanged.
 impl MixedFiniteStrainPotential for super::cards::ResolvedHyperelastic {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        self.law()
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        self.law().validate_mixed()
+    }
+    fn mixed_pressure_potential(
+        &self,
+        f: &[f64; 9],
+        pressure_pa: f64,
+        treatment: VolumetricTreatment,
+    ) -> Result<PressurePotential, MaterialError> {
+        self.law().mixed_pressure_potential(f, pressure_pa, treatment)
     }
     fn remainder_stress_and_potential(
         &self,

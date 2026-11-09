@@ -176,6 +176,7 @@ impl FiniteJ2 {
         trial: ElasticEndpoint,
         q_trial: f64,
         kinetics: Option<&FiniteOverstressJ2>,
+        include_bulk: bool,
     ) -> Result<ReturnMap, FiniteJ2Error> {
         let voce = self
             .voce
@@ -230,7 +231,7 @@ impl FiniteJ2 {
             radial.plastic_dissipation = radial.primary_potential + viscous_work;
             radial.rate_potential = potential_fraction * viscous_work;
         }
-        self.finish_return(f, old, trial, q_trial, radial)
+        self.finish_return_selected(f, old, trial, q_trial, radial, include_bulk)
     }
 
     // The hardening increment is evaluated directly, not by subtracting two

@@ -316,10 +316,6 @@ impl crate::hyper::cards::FiniteStrainPotential for FrozenViscoHyperelastic<'_> 
 }
 
 impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic<'_> {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        &self.law.equilibrium
-    }
-
     fn validate_mixed(&self) -> Result<(), MaterialError> {
         crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.law.equilibrium)?;
         self.law.check_inputs(
@@ -359,10 +355,6 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic
 }
 
 impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoRemainder<'_> {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        &self.law.equilibrium
-    }
-
     fn validate_mixed(&self) -> Result<(), MaterialError> {
         crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.law.equilibrium)?;
         self.accepted.check_ledger()?;

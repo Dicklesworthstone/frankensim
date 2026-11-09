@@ -389,8 +389,16 @@ struct OriginalOwner<'a> {
     gate: Option<&'a CancelGate>,
 }
 impl MixedFiniteStrainPotential for OriginalOwner<'_> {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        self.law
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        self.law.validate_mixed()
+    }
+    fn mixed_pressure_potential(
+        &self,
+        f: &[f64; 9],
+        pressure_pa: f64,
+        treatment: VolumetricTreatment,
+    ) -> Result<fs_material::hyper::mixed::PressurePotential, MaterialError> {
+        self.law.mixed_pressure_potential(f, pressure_pa, treatment)
     }
     fn remainder_stress_and_potential(
         &self,

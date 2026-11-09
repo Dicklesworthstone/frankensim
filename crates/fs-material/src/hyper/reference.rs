@@ -498,10 +498,6 @@ impl<L: HyperelasticMaterial + ?Sized> HyperelasticMaterial for ReferencedHypere
 impl<L: HyperelasticMaterial + MixedFiniteStrainPotential + ?Sized> MixedFiniteStrainPotential
     for ReferencedHyperelastic<'_, L>
 {
-    fn equilibrium_law(&self) -> &Hyperelastic {
-        self.material.equilibrium_law()
-    }
-
     fn validate_mixed(&self) -> Result<(), MaterialError> {
         self.material.validate_mixed()
     }

@@ -37,6 +37,8 @@ pub mod ductile;
 mod inelastic;
 /// Complete typed finite history and frozen physical interval for spatial solves.
 pub use inelastic::FiniteInelasticMaterial;
+/// Original bulk-free return and independent pressure for mixed solid elements.
+pub mod mixed;
 /// Traction-free thickness/shear relaxation of the original finite return map.
 pub mod plane_stress;
 /// Pressure-sensitive finite deformation with retained plastic volume.
@@ -443,6 +445,16 @@ impl FiniteJ2 {
         state: &FiniteJ2State,
         yield_tolerance_pa: f64,
     ) -> Result<(), FiniteJ2Error> {
+        self.validate_committed_selected(f, state, yield_tolerance_pa, true)
+    }
+
+    fn validate_committed_selected(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+        include_bulk: bool,
+    ) -> Result<(), FiniteJ2Error> {
         if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
             return Err(FiniteJ2Error::Parameters(
                 "yield tolerance must be finite and nonnegative",
@@ -450,7 +462,11 @@ impl FiniteJ2 {
         }
         let endpoint = self.elastic_endpoint(f, state)?;
         self.check_elastic_domain(endpoint.log_j, &endpoint.deviator)?;
-        self.energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
+        if include_bulk {
+            self.energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
+        } else {
+            self.remainder_energy(&endpoint.deviator, state.alpha)?;
+        }
         let q = det::sqrt(6.0) * self.parameters.shear_modulus_pa * norm(&endpoint.deviator);
         let residual = q - self.yield_radius(state.alpha);
         if !residual.is_finite() {
@@ -524,6 +540,18 @@ impl FiniteJ2 {
         old: &FiniteJ2State,
         kinetics: Option<&rate::FiniteOverstressJ2>,
     ) -> Result<ReturnMap, FiniteJ2Error> {
+        self.return_map_selected(f, old, kinetics, true)
+    }
+
+    /// Select the original volumetric contribution without changing any
+    /// material coefficient, history update, return radius or physical limit.
+    fn return_map_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        kinetics: Option<&rate::FiniteOverstressJ2>,
+        include_bulk: bool,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
         if self.maximum_creep_alpha.is_some() {
             return Err(FiniteJ2Error::Parameters(
                 "combined creep history requires its simultaneous Norton/J2 return",
@@ -539,10 +567,10 @@ impl FiniteJ2 {
             ));
         }
         if self.table.is_some() {
-            return self.return_map_tabulated(f, old, trial, q_trial, kinetics);
+            return self.return_map_tabulated(f, old, trial, q_trial, kinetics, include_bulk);
         }
         if self.voce.is_some() {
-            return self.return_map_voce(f, old, trial, q_trial, kinetics);
+            return self.return_map_voce(f, old, trial, q_trial, kinetics, include_bulk);
         }
         let radius_old = self.yield_radius(old.alpha);
         let excess = q_trial - radius_old;
@@ -621,7 +649,7 @@ impl FiniteJ2 {
         } else {
             -(3.0 * p.shear_modulus_pa / denominator) * (radius_old / q_trial)
         };
-        self.finish_return(
+        self.finish_return_selected(
             f,
             old,
             trial,
@@ -636,6 +664,7 @@ impl FiniteJ2 {
                 primary_potential: yield_dissipation,
                 rate_potential,
             },
+            include_bulk,
         )
     }
 
@@ -647,6 +676,18 @@ impl FiniteJ2 {
         trial: ElasticEndpoint,
         q_trial: f64,
         radial: RadialReturn,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
+        self.finish_return_selected(f, old, trial, q_trial, radial, true)
+    }
+
+    fn finish_return_selected(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        trial: ElasticEndpoint,
+        q_trial: f64,
+        radial: RadialReturn,
+        include_bulk: bool,
     ) -> Result<ReturnMap, FiniteJ2Error> {
         let p = &self.parameters;
         let alpha = old.alpha + radial.plastic_increment;
@@ -678,8 +719,10 @@ impl FiniteJ2 {
         self.check_elastic_domain(trial.log_j, &returned_deviator)?;
         let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
         let mut tau = trial_stress.map(|x| scale * x);
-        for i in [0, 4, 8] {
-            tau[i] += p.bulk_modulus_pa * trial.log_j;
+        if include_bulk {
+            for i in [0, 4, 8] {
+                tau[i] += p.bulk_modulus_pa * trial.log_j;
+            }
         }
         let inverse = inverse(f, trial.jacobian)?;
         let inverse_transpose = transpose(&inverse);
@@ -707,7 +750,11 @@ impl FiniteJ2 {
         } else {
             old.clone()
         };
-        let stored = self.energy(trial.log_j, &returned_deviator, alpha)?;
+        let stored = if include_bulk {
+            self.energy(trial.log_j, &returned_deviator, alpha)?
+        } else {
+            self.remainder_energy(&returned_deviator, alpha)?
+        };
         let potential = stored + radial.primary_potential + radial.rate_potential;
         let flow_potential = radial.primary_potential + radial.rate_potential;
         let dissipation = radial.plastic_dissipation;
@@ -744,6 +791,7 @@ impl FiniteJ2 {
             potential,
             flow_potential,
             tangent_correction: radial.tangent_correction,
+            include_bulk,
         })
     }
 
@@ -805,8 +853,10 @@ impl FiniteJ2 {
                     }
                 }
             }
-            for i in [0, 4, 8] {
-                dtau[i] += p.bulk_modulus_pa * inverse_transpose[column];
+            if returned.include_bulk {
+                for i in [0, 4, 8] {
+                    dtau[i] += p.bulk_modulus_pa * inverse_transpose[column];
+                }
             }
             if let Some(sensitivity) = sensitivities.as_deref_mut() {
                 for ij in 0..9 {
@@ -866,6 +916,14 @@ impl FiniteJ2 {
             + self.hardening_energy(alpha);
         if !energy.is_finite() {
             return Err(FiniteJ2Error::Numerical("stored energy is not finite"));
+        }
+        Ok(energy)
+    }
+
+    fn remainder_energy(&self, dev: &[f64; 9], alpha: f64) -> Result<f64, FiniteJ2Error> {
+        let energy = self.parameters.shear_modulus_pa * dot(dev, dev) + self.hardening_energy(alpha);
+        if !energy.is_finite() {
+            return Err(FiniteJ2Error::Numerical("stored remainder energy is not finite"));
         }
         Ok(energy)
     }
@@ -958,6 +1016,8 @@ struct ReturnMap {
     potential: f64,
     flow_potential: f64,
     tangent_correction: f64,
+    /// False only for the exact native bulk-free mixed remainder.
+    include_bulk: bool,
 }
 
 /// Optional fixed-size derivatives from the original tensor/logarithm owner.
