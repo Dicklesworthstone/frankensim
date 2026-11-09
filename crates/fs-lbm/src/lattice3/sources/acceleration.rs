@@ -1,6 +1,6 @@
 //! Prescribed acceleration on the original native collision/transport owner.
 
-use super::{ForcedGrid3, ForcedLattice3, admit_forces};
+use super::{CoriolisEndpoint3, ForcedGrid3, ForcedLattice3, admit_forces};
 use crate::lattice3::moving_walls::{MovingWallMomentum3, WallMotion3};
 use crate::lattice3::wall_loads::WallMomentumProbe3;
 use crate::lattice3::{EquilibriumLattice3, Grid3, GridError3};
@@ -9,6 +9,7 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 pub(super) enum EndpointForcing<'a> {
     Density(&'a [[f64; 3]]),
     Acceleration(&'a mut [[f64; 3]]),
+    Coriolis(&'a mut [[f64; 3]], CoriolisEndpoint3),
 }
 
 impl<'a> EndpointForcing<'a> {
@@ -16,13 +17,54 @@ impl<'a> EndpointForcing<'a> {
         match self {
             Self::Density(values) => values,
             Self::Acceleration(values) => values,
+            Self::Coriolis(values, _) => values,
         }
     }
 
-    pub(super) fn split(self) -> (Option<&'a [[f64; 3]]>, Option<&'a mut [[f64; 3]]>) {
+    pub(super) fn with_coriolis(
+        values: &'a mut [[f64; 3]],
+        rotation: crate::d3q19::Coriolis3,
+    ) -> Result<Self, &'static str> {
+        Ok(match CoriolisEndpoint3::new(rotation)? {
+            Some(law) => Self::Coriolis(values, law),
+            None => Self::Acceleration(values),
+        })
+    }
+
+    pub(super) fn admit<L: ForcedLattice3<Q>, const Q: usize>(
+        &self,
+        grid: &Grid3<L, Q>,
+        collisions: &[L::Collision],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(), GridError3<L::Error>> {
+        admit_forces(grid, self.values(), Some(collisions), poll)?;
+        if matches!(self, Self::Coriolis(..)) {
+            for (cell, &collision) in collisions.iter().enumerate() {
+                if cell % 64 == 0 {
+                    poll()?;
+                }
+                if !grid.solid[cell] && !L::supports_body_force(collision) {
+                    return Err(GridError3::MaterialField {
+                        cell,
+                        reason: "Coriolis endpoint requires a forcing-compatible collision",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn split(
+        self,
+    ) -> (
+        Option<&'a [[f64; 3]]>,
+        Option<&'a mut [[f64; 3]]>,
+        Option<CoriolisEndpoint3>,
+    ) {
         match self {
-            Self::Density(values) => (Some(values), None),
-            Self::Acceleration(values) => (None, Some(values)),
+            Self::Density(values) => (Some(values), None, None),
+            Self::Acceleration(values) => (None, Some(values), None),
+            Self::Coriolis(values, law) => (None, Some(values), Some(law)),
         }
     }
 }

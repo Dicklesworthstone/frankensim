@@ -1,3 +1,26 @@
+## Native implicit Coriolis evolution
+
+`ForcedGrid3::try_new_with_coriolis_preserving_velocity` attaches the local
+rotating-flow source without an initial half kick. Serial/pooled
+`advance_*_with_coriolis` and moving-wall variants retain the accepted collision
+force and resolve `F_next = rho_next*(a_next - 2*Omega cross u_next)` from the
+actual native stream. The original analytic skew inverse solves physical
+velocity and its half-force correction together. A constitutive readback check
+refuses unresolved cancellation; native collision and final Mach limits remain.
+The supplied acceleration vector becomes force storage in place, with no new
+population buffer, force iteration or transport pass.
+
+For fixed spin, isolated constant-density motion has Cayley angle
+`-2*atan(|Omega|)` and zero Coriolis source work to roundoff; geostrophic balance
+uses the same endpoint law. This is local rotating flow, without a frame-axis
+remap or a transported fluid energy equation. Complete accelerating-frame
+kinematics require the corresponding Euler/centrifugal/translational source.
+Wall impulse, moment and work retain their native ownership. Source history,
+populations and clock publish together after final admission/cancellation.
+Zero spin retains existing acceleration arithmetic. Focused regressions cover
+native D3Q19/D3Q27 families, inertial/geostrophic evolution, transported density,
+moving-wall work, executor replay and refusal/retry.
+
 ## Acceleration endpoints during native sparse rigid-wall motion
 
 `FreeSurface3::planar_rigid_wall_motion_with_body_acceleration_candidate` and

@@ -783,6 +783,7 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         acceleration: &mut [[f64; 3]],
         base: usize,
         maximum_mach: fn(L::Collision) -> f64,
+        coriolis: Option<sources::CoriolisEndpoint3>,
     ) -> Result<(), GridError3<L::Error>> {
         for (offset, (pop, value)) in populations.iter().zip(acceleration).enumerate() {
             let cell = base + offset;
@@ -790,7 +791,15 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                 continue;
             }
             let (rho, momentum) = raw_moments_cell::<L, Q>(pop, cell)?;
-            *value = value.map(|a| rho * a);
+            *value = match coriolis {
+                None => value.map(|a| rho * a),
+                Some(law) => law.force(rho, momentum, *value).ok_or(
+                    GridError3::MaterialField {
+                        cell,
+                        reason: "Coriolis endpoint force is not representable in its physical velocity frame",
+                    },
+                )?,
+            };
             let velocity: [f64; 3] = core::array::from_fn(|a| (momentum[a] + 0.5 * value[a]) / rho);
             let collision = self.collisions.map_or(self.collision, |field| field[cell]);
             let maximum = self.budget.maximum_mach.min(maximum_mach(collision));
@@ -908,6 +917,7 @@ struct StepKernel<'a, 'b, L: Lattice3<Q>, const Q: usize> {
     stream: bool,
     motion: Option<&'a moving_walls::WallMotion3<'a, L, Q>>,
     acceleration_maximum_mach: Option<fn(L::Collision) -> f64>,
+    coriolis: Option<sources::CoriolisEndpoint3>,
 }
 impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
     type Out = FirstError<L::Error>;
@@ -957,7 +967,9 @@ impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
                         (acceleration, self.acceleration_maximum_mach)
                     {
                         self.data
-                            .resolve_acceleration(chunk, values, tile as usize * 64, maximum)
+                            .resolve_acceleration(
+                                chunk, values, tile as usize * 64, maximum, self.coriolis,
+                            )
                     } else {
                         Ok(())
                     }
@@ -999,20 +1011,26 @@ fn run_pass_with_endpoint_acceleration<L: Lattice3<Q>, const Q: usize, P: Kernel
     pool: &P,
     gate: &CancelGate,
     motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
-    acceleration: Option<(&mut [[f64; 3]], fn(L::Collision) -> f64)>,
+    acceleration: Option<(
+        &mut [[f64; 3]],
+        fn(L::Collision) -> f64,
+        Option<sources::CoriolisEndpoint3>,
+    )>,
 ) -> Result<(), GridError3<L::Error>> {
-    let (chunks, acceleration_maximum_mach) = match acceleration {
-        Some((values, maximum)) => (
+    let (chunks, acceleration_maximum_mach, coriolis) = match acceleration {
+        Some((values, maximum, coriolis)) => (
             dst.chunks_mut(64)
                 .zip(values.chunks_mut(64))
                 .map(|(pop, a)| Mutex::new((pop, Some(a))))
                 .collect(),
             Some(maximum),
+            coriolis,
         ),
         None => (
             dst.chunks_mut(64)
                 .map(|pop| Mutex::new((pop, None)))
                 .collect(),
+            None,
             None,
         ),
     };
@@ -1023,6 +1041,7 @@ fn run_pass_with_endpoint_acceleration<L: Lattice3<Q>, const Q: usize, P: Kernel
         stream,
         motion,
         acceleration_maximum_mach,
+        coriolis,
     };
     match pool.run_with_gate(&kernel, gate).0 {
         Ok(FirstError(None)) => Ok(()),
