@@ -2,6 +2,7 @@ use super::*;
 
 mod driving;
 mod inertia;
+mod inertial_walls;
 #[cfg(feature = "experimental-sgs")]
 mod lagrangian;
 mod navier_slip;

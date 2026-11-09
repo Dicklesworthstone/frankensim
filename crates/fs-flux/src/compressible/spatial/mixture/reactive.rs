@@ -33,6 +33,11 @@ use fs_qty::{Time, Volume};
 mod moving;
 mod timed;
 pub use moving::MovingReactiveStepReport3d;
+mod inertial_walls;
+pub use inertial_walls::{
+    InertialWallLoad, InertialWallsControl, Piston, PistonError, ReactiveInertialWallsError,
+    ReactiveInertialWallsStep,
+};
 
 /// Bounded whole-interval restarts and original wave controls.
 #[derive(Clone, Copy, Debug, PartialEq)]

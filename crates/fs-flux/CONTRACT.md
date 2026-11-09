@@ -11478,3 +11478,61 @@ all three deformation axes with stress/heat/source balance, energy-reference
 invariance, source rebinding and early/late cancellation. An independent
 bimolecular logistic solution checks concentration-dependent conversion on both
 actual volumes under compression and expansion on every axis.
+
+
+### Finite guided pistons driven by reacting spatial mixtures
+
+`spatial::mixture::reactive::ReactingEuler3d::step_with_inertial_walls`
+composes the original cell reactor and conservative ALE field with the shared
+simultaneous two-piston mechanical solve. Every held midpoint-speed proposal
+restarts the same accepted gas and executes C(dt/2), ALE(dt), C(dt/2), with
+each chemistry half using its actual old or new physical cell volume. The
+reactor fixes all three cell momenta; chemical conversion changes the original
+calorics and pressure that subsequently drive finite piston acceleration.
+There is no separate combustion force, duplicate heat-release source, or new
+mechanical solver.
+
+`step_with_dissipation_and_inertial_walls` adds the original molecular half
+intervals around that reacting split. Maxwell--Stefan diffusion, partial
+enthalpies, Fourier heat and full compatible Newtonian stress retain their
+original source owners. Actual pressure and viscous face impulses drive both
+finite masses with their conjugate mechanical work. Direct Fourier/Navier heat
+remains external thermal exchange and is not inferred by subtracting large
+mechanical-work values from total energy.
+
+`ReactiveInertialWallsStep` reuses the existing generic guided-piston receipt.
+Fixed transverse walls can absorb axial viscous momentum; that support impulse
+is explicitly removed from the combined axial mechanical residual. Translation
+and orientation guides carry the actual transverse and angular impulses from
+all accepted end-plane faces and do no work. Both the actual chemical-plus-
+kinetic gas energy and its stored referenced-energy equation must pass the
+authored mechanical tolerance. Physical energy uses differences of species
+mass before multiplying their individual source references. The independent
+referenced gate subtracts `chemistry.referenced_energy_change_j` exactly once.
+
+A shorter ALE interval or a source/mechanical refusal restarts the complete
+physical interval. The prepared reactor, field and molecular buffers are
+reused across proposals. Accepted cells, geometry, time, combined reports and
+loads, external molecular binding/report/loads, and both finite piston states
+publish only after the final cancellation checkpoint. The molecular variant's
+explicit byte budget covers both complete reacting and molecular owners.
+
+The selected axis has two reflecting ends; other directions are periodic or
+stationary reflecting supports. Authored tangential wall velocities are zero.
+Original moving-source restrictions remain, including refusal of unsupported
+exterior/finite reservoirs, SGS histories and finite tangential wall inertia.
+This is a bounded engineering composition with the original chemistry and
+shock-capturing limitations. It does not establish general FSI stability,
+global entropy stability, resolved flame/detonation thickness, or experimental
+combustion accuracy. Mechanical energy tolerance must accommodate the authored
+cell-reactor accuracy over the whole accepted interval.
+
+Six focused native regressions pass on the default thread stack. They cover
+reaction-driven piston acceleration against thermoneutral gas; compression
+and expansion on all three axes; identical physical dynamics under unequal
+species reference-chart changes with large formation energies and nonzero
+conversion; molecular heat, side supports and guide loads; cancellation and
+root-exhaustion rollback of both accepted owners; and whole-interval replay
+after reaction-induced wave shortening. These use manufactured mechanisms
+and original source solvers; they establish numerical composition behavior,
+not experimental reaction-rate or combustion validation.
