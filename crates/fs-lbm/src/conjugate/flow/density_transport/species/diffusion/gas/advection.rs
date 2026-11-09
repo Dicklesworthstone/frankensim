@@ -54,6 +54,11 @@ impl<const N: usize> GasSpeciesAdvectionInlet<'_, N> {
 pub enum GasSpeciesVolumeSource<'a, const N: usize> {
     #[default]
     None,
+    /// Authored signed volume rate [m³/s], positive outward and negative inward.
+    /// This changes the native pressure constraint without any local gas mass,
+    /// species or enthalpy exchange. Actual face transfers retain their native
+    /// donors. It neither infers thermal expansion nor imposes EOS consistency.
+    Dilatation { volume_rate_m3_s: f64 },
     Inflow {
         volume_rate_m3_s: f64,
         inlet: GasSpeciesAdvectionInlet<'a, N>,
@@ -275,6 +280,8 @@ impl FlowField {
     /// local extraction and boundary outflow use the native implicit donor.
     /// Material transport runs once, then species use its retained mass routes
     /// and operator. The final source inversion sees those SAME inventories.
+    /// Authored Dilatation enters the volume constraint without any local
+    /// material/species source; it still drives actual conservative face fluxes.
     ///
     /// No reaction, Fourier heat, diffusion, latent/formation deposit or pressure
     /// heating is inferred. Stream h already contains pressure-flow work; native
@@ -387,6 +394,10 @@ impl FlowField {
             match *entry {
                 GasSpeciesVolumeSource::None => {
                     volume_sources.push(MaterialVolumeSource::None);
+                    source_fractions.push(None);
+                }
+                GasSpeciesVolumeSource::Dilatation { volume_rate_m3_s } => {
+                    volume_sources.push(MaterialVolumeSource::Dilatation { volume_rate_m3_s });
                     source_fractions.push(None);
                 }
                 GasSpeciesVolumeSource::Outflow { volume_rate_m3_s } => {

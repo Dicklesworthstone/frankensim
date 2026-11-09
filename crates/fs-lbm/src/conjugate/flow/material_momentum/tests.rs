@@ -703,3 +703,77 @@ fn hydrostatic_reservoir_profile_preserves_stratified_material_rest() {
     );
     assert_eq!(field, FlowField::quiescent(&domain));
 }
+
+#[test]
+fn signed_dilatation_keeps_pressure_impulse_without_injected_mass_or_momentum() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let before = field.clone();
+    let mass = [2.0, 4.0];
+    let enthalpy = [10.0, 50.0];
+    let zero = [[0.0; 3]; 2];
+    let sources = [
+        MaterialVolumeSource::Dilatation {
+            volume_rate_m3_s: 1.0,
+        },
+        MaterialVolumeSource::Dilatation {
+            volume_rate_m3_s: -1.0,
+        },
+    ];
+    let input = MaterialMomentumAdvanceInput {
+        material: MaterialAdvectionInput {
+            mass_kg: &mass,
+            specific_enthalpy_j_kg: &enthalpy,
+            volume_sources: &sources,
+            boundary_inflow: [None; 6],
+        },
+        momentum_kg_m_s: &zero,
+        acceleration_m_s2: [0.0; 3],
+        force_density_n_m3: &zero,
+        source_velocity_m_s: &[None; 2],
+        boundary_velocity_m_s: [None; 6],
+    };
+    let mut controls = controls();
+    controls.material.max_connections = 1;
+    let result = field
+        .advance_material_momentum(
+            &domain,
+            [FlowFace::Wall; 6],
+            input,
+            controls,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+
+    // The original pressure solve has Q01=1 and dual mass3, hence total
+    // pressure impulse3 and cell impulses[1,2]. Dilatation adds no other impulse.
+    close(result.transport.projection.field.flux_x(1, 0, 0), 1.0);
+    close(result.force_projection.pressure_impulse_kg_m_s[0], 3.0);
+    close(result.feedback.cell_momentum_change_kg_m_s[0], 3.0);
+    assert_eq!(result.transport.report.mass_routes, 1);
+    assert_eq!(result.transport.report.incoming_mass_kg, 0.0);
+    assert_eq!(result.transport.report.outgoing_mass_kg, 0.0);
+    close(result.transport.mass_kg[0], 4.0 / 3.0);
+    close(result.transport.mass_kg[1], 14.0 / 3.0);
+    close(result.transport.specific_enthalpy_j_kg[0], 10.0);
+    close(result.transport.specific_enthalpy_j_kg[1], 310.0 / 7.0);
+    close(result.transport.report.enthalpy_change_j, 0.0);
+    assert_eq!(result.transport.report.carried_enthalpy_j, 0.0);
+    // Only 2/3 kg crosses the internal face:
+    // (4/3+2/3)*u0=1; (14/3)*u1=2+(2/3)*u0.
+    close(result.momentum.momentum_kg_m_s[0][0], 2.0 / 3.0);
+    close(result.momentum.momentum_kg_m_s[1][0], 7.0 / 3.0);
+    for cell in 0..2 {
+        close(result.momentum.velocity_m_s[cell][0], 0.5);
+        for axis in 1..3 {
+            assert_eq!(result.momentum.momentum_kg_m_s[cell][axis], 0.0);
+        }
+    }
+    close(result.momentum.report.momentum_after_kg_m_s[0], 3.0);
+    assert_eq!(result.momentum.report.carried_momentum_kg_m_s, [0.0; 3]);
+    assert_eq!(result.momentum.report.represented_impulse_kg_m_s, [0.0; 3]);
+    assert_eq!(field, before);
+    assert_eq!(mass, [2.0, 4.0]);
+    assert_eq!(enthalpy, [10.0, 50.0]);
+    assert_eq!(zero, [[0.0; 3]; 2]);
+}

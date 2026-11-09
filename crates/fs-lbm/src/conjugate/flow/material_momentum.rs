@@ -90,6 +90,8 @@ impl FlowField {
     /// donor-transport losses remain separate numerical accounts and never heat
     /// the material. This bounded composition is not a full Navier-Stokes step.
     ///
+    /// Authored Dilatation supplies only the pressure constraint. It needs no
+    /// source velocity and adds no local mass, enthalpy or momentum route.
     /// For another step, supply the returned cell mass, enthalpy and momentum.
     /// The transport-stage field may supply the next held boundary values, but
     /// its interior/free velocities are not reused as endpoint momentum.
@@ -220,6 +222,10 @@ impl FlowField {
             }
             *target = match input.material.volume_sources[c] {
                 MaterialVolumeSource::None => 0.0,
+                MaterialVolumeSource::Dilatation { volume_rate_m3_s } => {
+                    finite("flow.advance_dilatation_volume_rate", volume_rate_m3_s)?;
+                    volume_rate_m3_s
+                }
                 MaterialVolumeSource::Inflow {
                     volume_rate_m3_s, ..
                 } => {

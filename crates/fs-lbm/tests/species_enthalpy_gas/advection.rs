@@ -448,3 +448,267 @@ fn g3_closed_quiescent_source_keeps_absent_species_and_solid_entries() {
     assert!(result.state.transport(2).is_none());
     assert_eq!(result.report.source_evaluations, 4);
 }
+
+#[test]
+fn g1_signed_dilatation_redistributes_original_gas_without_local_material_sources() {
+    // Unequal volumes distinguish integrated m3/s from a per-volume strain rate.
+    let domain = VoxelDomain::graded([vec![1.0, 2.0], vec![1.0], vec![1.0]]).unwrap();
+    let faces = [FlowFace::Wall; 6];
+    let flow = FlowField::quiescent(&domain);
+    let before = flow.clone();
+    let mass = [2.0, 8.0];
+    let constituents = [[1.5, 0.5], [2.0, 6.0]];
+    let bank = source::moist_model(0.5, -4000.0);
+    let names = ids();
+    let context = source::point(400.0, 100_000.0);
+    let diffusivity = [0.0; 2];
+    let gate = CancelGate::new_clock_free();
+    let gas = GasSpeciesEnthalpySource::new(&bank, &names, &context, &diffusivity, energy(), &gate)
+        .unwrap();
+    let h = [
+        enthalpy(&bank, constituents[0], 320.0),
+        enthalpy(&bank, constituents[1], 480.0),
+    ];
+    let sources = [
+        GasSpeciesVolumeSource::Dilatation {
+            volume_rate_m3_s: 1.0,
+        },
+        GasSpeciesVolumeSource::Dilatation {
+            volume_rate_m3_s: -1.0,
+        },
+    ];
+    let input = GasSpeciesAdvectionInput {
+        mass_kg: &mass,
+        species_mass_kg: &constituents,
+        specific_enthalpy_j_kg: &h,
+        volume_sources: &sources,
+        boundary_inflow: [None; 6],
+    };
+    let mut controls = advection_controls(0.5);
+    controls.material.max_connections = 1;
+    controls.maximum_source_evaluations = 4;
+    let result = flow
+        .project_and_advect_thermochemical_species(&domain, faces, input, &gas, controls, &gate)
+        .unwrap();
+
+    // q=dt*Q=.5 m3 moves donor material. No local rho*Q source or sink exists:
+    // M0_new=M0/(1+q/V0), transfer=q*M0_new/V0, M1_new=M1+transfer.
+    let q = 0.5;
+    let donor_mass = mass[0] / (1.0 + q / domain.volume(0));
+    let transferred = q * donor_mass / domain.volume(0);
+    let expected_mass = [donor_mass, mass[1] + transferred];
+    let expected_species = [
+        constituents[0].map(|m| m / mass[0] * donor_mass),
+        core::array::from_fn(|k| constituents[1][k] + transferred * constituents[0][k] / mass[0]),
+    ];
+    let expected_h = [
+        h[0],
+        (mass[1] * h[1] + transferred * h[0]) / expected_mass[1],
+    ];
+    near(result.carrier.projection.field.flux_x(1, 0, 0), 1.0, 1e-12);
+    assert_eq!(result.carrier.report.mass_routes, 1);
+    for c in 0..2 {
+        near(result.carrier.mass_kg[c], expected_mass[c], 1e-11);
+        near(
+            result.carrier.specific_enthalpy_j_kg[c],
+            expected_h[c],
+            1e-6,
+        );
+        for k in 0..2 {
+            near(
+                result.species.species_mass_kg[c][k],
+                expected_species[c][k],
+                1e-11,
+            );
+        }
+        near(
+            result.state.temperatures_k()[c],
+            temperature(
+                expected_mass[c] * expected_h[c],
+                expected_species[c],
+                -4000.0,
+            ),
+            1e-8,
+        );
+    }
+    near(
+        result.carrier.mass_kg.iter().sum(),
+        mass.iter().sum(),
+        1e-11,
+    );
+    near(
+        result
+            .carrier
+            .mass_kg
+            .iter()
+            .zip(&result.carrier.specific_enthalpy_j_kg)
+            .map(|(m, h)| m * h)
+            .sum(),
+        mass.iter().zip(h).map(|(m, h)| m * h).sum(),
+        ENERGY_BUDGET,
+    );
+    assert_eq!(result.carrier.report.incoming_mass_kg, 0.0);
+    assert_eq!(result.carrier.report.outgoing_mass_kg, 0.0);
+    near(result.carrier.report.enthalpy_change_j, 0.0, 1e-6);
+    assert_eq!(result.carrier.report.carried_enthalpy_j, 0.0);
+    assert_eq!(result.species.report.source_incoming_mass_kg, [0.0; 2]);
+    assert_eq!(result.species.report.boundary_incoming_mass_kg, [0.0; 2]);
+    assert_eq!(result.species.report.outgoing_mass_kg, [0.0; 2]);
+    for k in 0..2 {
+        near(
+            result.species.report.mass_after_kg[k],
+            result.species.report.mass_before_kg[k],
+            1e-11,
+        );
+    }
+    assert_eq!(result.report.source_evaluations, 4);
+    assert!(result.report.absolute_enthalpy_defect_j <= ENERGY_BUDGET);
+
+    // A sealed component cannot silently remove the incompatible mean volume.
+    for rate in [1.0, -1.0] {
+        let incompatible = [
+            GasSpeciesVolumeSource::Dilatation {
+                volume_rate_m3_s: rate,
+            },
+            GasSpeciesVolumeSource::None,
+        ];
+        assert!(
+            flow.project_and_advect_thermochemical_species(
+                &domain,
+                faces,
+                GasSpeciesAdvectionInput {
+                    volume_sources: &incompatible,
+                    ..input
+                },
+                &gas,
+                controls,
+                &gate,
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(flow, before);
+    assert_eq!(mass, [2.0, 8.0]);
+    assert_eq!(constituents, [[1.5, 0.5], [2.0, 6.0]]);
+    assert_eq!(input.specific_enthalpy_j_kg, h);
+}
+
+#[test]
+fn g1_open_dilatation_moves_only_real_boundary_material_in_both_directions() {
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let mut faces = [FlowFace::Wall; 6];
+    faces[1] = FlowFace::Free;
+    let flow = FlowField::quiescent(&domain);
+    let before = flow.clone();
+    let mass = [2.0];
+    let constituents = [[1.5, 0.5]];
+    let bank = source::moist_model(0.5, -4000.0);
+    let names = ids();
+    let context = source::point(400.0, 100_000.0);
+    let diffusivity = [0.0];
+    let gate = CancelGate::new_clock_free();
+    let gas = GasSpeciesEnthalpySource::new(&bank, &names, &context, &diffusivity, energy(), &gate)
+        .unwrap();
+    let h = [enthalpy(&bank, constituents[0], 350.0)];
+    for rate in [0.4_f64, -0.4] {
+        let sources = [GasSpeciesVolumeSource::Dilatation {
+            volume_rate_m3_s: rate,
+        }];
+        let mut input = GasSpeciesAdvectionInput {
+            mass_kg: &mass,
+            species_mass_kg: &constituents,
+            specific_enthalpy_j_kg: &h,
+            volume_sources: &sources,
+            boundary_inflow: [None; 6],
+        };
+        let mut controls = advection_controls(0.25);
+        controls.material.max_connections = 1;
+        controls.maximum_source_evaluations = 2;
+        if rate < 0.0 {
+            assert!(matches!(
+                flow.project_and_advect_thermochemical_species(
+                    &domain, faces, input, &gas, controls, &gate,
+                ),
+                Err(ChtError::InvalidInput {
+                    field: "flow.material_advection",
+                    ..
+                })
+            ));
+            input.boundary_inflow[1] = Some(gas.advection_inlet([0.0, 1.0], 500.0, &gate).unwrap());
+        }
+        let result = flow
+            .project_and_advect_thermochemical_species(&domain, faces, input, &gas, controls, &gate)
+            .unwrap();
+        let q = 0.25 * rate.abs();
+        let (expected_species, total_h, incoming_mass, outgoing_mass) = if rate > 0.0 {
+            // Expansion exports endpoint donor density and h, with no injection.
+            let denominator = 1.0 + q / domain.volume(0);
+            let species = constituents[0].map(|m| m / denominator);
+            let remaining = mass[0] / denominator;
+            (species, remaining * h[0], 0.0, mass[0] - remaining)
+        } else {
+            // Contraction draws the explicitly authored source-bound water inlet.
+            let incoming = q * 100_000.0 * MOLAR_MASS[1] / (R * 500.0);
+            (
+                [constituents[0][0], constituents[0][1] + incoming],
+                mass[0] * h[0] + incoming * partial_h(500.0, -4000.0)[1],
+                incoming,
+                0.0,
+            )
+        };
+        let expected_mass = expected_species.iter().sum::<f64>();
+        near(result.carrier.projection.field.flux_x(1, 0, 0), rate, 1e-12);
+        near(result.carrier.mass_kg[0], expected_mass, 1e-12);
+        near(
+            result.carrier.specific_enthalpy_j_kg[0],
+            total_h / expected_mass,
+            1e-6,
+        );
+        for k in 0..2 {
+            near(
+                result.species.species_mass_kg[0][k],
+                expected_species[k],
+                1e-12,
+            );
+            near(
+                result.species.report.outgoing_mass_kg[k],
+                outgoing_mass * constituents[0][k] / mass[0],
+                1e-12,
+            );
+        }
+        near(
+            result.state.temperatures_k()[0],
+            temperature(total_h, expected_species, -4000.0),
+            1e-8,
+        );
+        near(result.carrier.report.incoming_mass_kg, incoming_mass, 1e-12);
+        near(result.carrier.report.outgoing_mass_kg, outgoing_mass, 1e-12);
+        near(
+            result.carrier.report.enthalpy_change_j,
+            total_h - mass[0] * h[0],
+            1e-6,
+        );
+        near(
+            result.carrier.report.carried_enthalpy_j,
+            total_h - mass[0] * h[0],
+            1e-6,
+        );
+        assert_eq!(result.carrier.report.mass_routes, 1);
+        assert_eq!(result.species.report.source_incoming_mass_kg, [0.0; 2]);
+        near(
+            result.species.report.boundary_incoming_mass_kg[0],
+            0.0,
+            1e-12,
+        );
+        near(
+            result.species.report.boundary_incoming_mass_kg[1],
+            incoming_mass,
+            1e-12,
+        );
+        assert_eq!(result.report.source_evaluations, 2);
+        assert!(result.report.absolute_enthalpy_defect_j <= ENERGY_BUDGET);
+    }
+    assert_eq!(flow, before);
+    assert_eq!(mass, [2.0]);
+    assert_eq!(constituents, [[1.5, 0.5]]);
+}

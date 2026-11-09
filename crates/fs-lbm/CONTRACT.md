@@ -4209,3 +4209,33 @@ The homogeneous-direction filtering and independent momentum/scalar
 contractions follow this framework; the nine-cell box and volume-width
 ratio are explicit discretization choices, not a reproduction of its
 spectral filter or empirical validation results.
+
+## Authored mass-free dilatation in material and gas transport
+
+`MaterialVolumeSource::Dilatation` and
+`GasSpeciesVolumeSource::Dilatation` carry a finite signed integrated volume
+rate in m³/s per fluid cell. Positive values require net outward volume flow;
+negative values require inward flow. The original pressure projection admits
+that constraint, including its closed-domain compatibility and mechanical
+work account.
+
+The generic material, force/momentum, resistive momentum and thermochemical
+species paths lower the same rate into that existing projection. Dilatation
+creates no local transported-mass route, source velocity, source species,
+enthalpy injection or additional route-budget charge. Actual corrected
+internal and boundary face fluxes retain the original implicit donor mass,
+species, momentum and mass-times-enthalpy transport. Boundary inflow still
+requires its original incoming physical state; boundary outflow removes
+actual donor inventory. Solid cells continue to require `None`.
+
+This is an explicitly authored volume constraint, not an inferred density
+change or a new EOS closure. The existing phase-volume owner remains the
+authority for its coupled constitutive expansion and volume-admission model.
+No projection work or expansion rate is deposited as additional heat.
+The original first-order donor and operator-splitting limitations remain.
+
+Focused native regressions cover conservative redistribution under sealed
+equal-and-opposite dilatation, actual open-boundary expansion/contraction,
+species transport, momentum transport and incompatible sealed net expansion.
+These tests are authored and syntax-parsed; native compilation and execution
+are unavailable in this environment.

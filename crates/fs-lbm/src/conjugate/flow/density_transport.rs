@@ -56,12 +56,18 @@ pub struct AdvectedMaterial {
     pub specific_enthalpy_j_kg: f64,
 }
 
-/// Explicit material accompanying a pressure projection's volume source.
+/// Explicit material exchange or mass-free volume dilatation for projection.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum MaterialVolumeSource {
-    /// No local material source.
+    /// No local volume or material source.
     #[default]
     None,
+    /// Authored signed volume rate [m³/s], positive outward and negative inward.
+    /// This changes the pressure constraint without injecting or removing local
+    /// mass, enthalpy or momentum. Actual internal/boundary fluxes still carry
+    /// their native donor inventories. The caller owns the constitutive source;
+    /// this rate is not inferred from density, and does not impose an EOS.
+    Dilatation { volume_rate_m3_s: f64 },
     /// Positive supplied volume rate [m³/s] with an authored incoming state.
     Inflow {
         volume_rate_m3_s: f64,
@@ -194,8 +200,11 @@ impl MaterialAdvectionStep {
 
 impl FlowField {
     /// Project volume continuity and advect actual mass and mass*h on the SAME
-    /// native face fluxes. Positive volume sources inject their declared rho/h;
+    /// native face fluxes. Inflow sources inject their declared rho/h;
     /// extraction and boundary outflow carry the accepted implicit donor state.
+    /// Signed Dilatation instead supplies only the volume constraint: it adds
+    /// no local material route. Its projected face fluxes transport the same
+    /// conserved inventories, including any physical boundary inflow/outflow.
     ///
     /// Density uses backward-Euler upwinding with cell volumes as storage.
     /// Its solved donor densities define transferred masses once. Paired
@@ -231,6 +240,7 @@ impl FlowField {
             .iter()
             .map(|s| match s {
                 MaterialVolumeSource::None => 0.0,
+                MaterialVolumeSource::Dilatation { volume_rate_m3_s } => *volume_rate_m3_s,
                 MaterialVolumeSource::Inflow {
                     volume_rate_m3_s, ..
                 } => *volume_rate_m3_s,
@@ -302,6 +312,9 @@ pub(super) fn admit(
         finite_positive("flow.inventory_density", density[c])?;
         match input.volume_sources[c] {
             MaterialVolumeSource::None => {}
+            MaterialVolumeSource::Dilatation { volume_rate_m3_s } => {
+                finite("flow.dilatation_volume_rate", volume_rate_m3_s)?;
+            }
             MaterialVolumeSource::Inflow {
                 volume_rate_m3_s,
                 material: value,
@@ -444,7 +457,9 @@ pub(super) fn advect_projected_material(
             }
         }
         match input.volume_sources[c] {
-            MaterialVolumeSource::None => {}
+            // Dilatation constrains face volume fluxes; it creates no local
+            // transported-mass connection and consumes no extra route slot.
+            MaterialVolumeSource::None | MaterialVolumeSource::Dilatation { .. } => {}
             MaterialVolumeSource::Inflow {
                 volume_rate_m3_s,
                 material,

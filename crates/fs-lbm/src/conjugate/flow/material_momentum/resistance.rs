@@ -49,6 +49,8 @@ impl FlowField {
     /// evolution remains with the existing material owner.
     ///
     /// Source and boundary material/velocity are explicit, including backflow.
+    /// Dilatation supplies only the volume constraint, with no injected
+    /// material, source velocity or extra heat deposit.
     /// Every stage retains its original budget and cancellation contract; any
     /// failure returns no candidate and leaves all supplied state unchanged.
     ///
@@ -155,6 +157,10 @@ impl FlowField {
             }
             *target = match input.material.volume_sources[c] {
                 MaterialVolumeSource::None => 0.0,
+                MaterialVolumeSource::Dilatation { volume_rate_m3_s } => {
+                    finite("flow.resistance_dilatation_volume_rate", volume_rate_m3_s)?;
+                    volume_rate_m3_s
+                }
                 MaterialVolumeSource::Inflow {
                     volume_rate_m3_s, ..
                 } => {
