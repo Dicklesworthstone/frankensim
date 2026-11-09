@@ -782,6 +782,28 @@ population positivity nor full coupled-flow stability. Native wall and outlet
 approximations retain their original scope; spatial/time refinement remains
 the caller's responsibility.
 
+### Tensor diffusion with native Boussinesq feedback
+
+`BoussinesqOpenGrid3::step_serial_with_tensor_diffusion` carries the same
+borrowed full thermal tensor into the original native temperature/force/flow
+transaction. The transported temperature, including the final source half-kick,
+drives the actual endpoint Boussinesq force. Off-diagonal conduction therefore
+changes buoyant motion through the existing force owner and consistency audit.
+
+Accepted and candidate force epochs, trapezoidal body impulse, reservoir heat,
+finite-wall storage and wall conduction retain their existing accounting.
+Temperature, momentum, walls, force history and time publish jointly; a rejected
+or cancelled attempt retains the complete accepted state. The scalar entry
+point retains its original arithmetic and no tensor persists into later calls.
+
+Three regression definitions compare the isotropic limit on both native
+momentum lattices, verify anisotropy changes endpoint force while closing the
+fluid-plus-wall heat balance, and cancel at the final publication checkpoint
+before an exact retry. This keeps the existing opening-velocity split and
+small-density-departure Boussinesq assumptions. Frozen tensor coefficients and
+a common reference heat capacity do not supply variable-storage enthalpy,
+total-energy evolution, or a new temporal-order guarantee.
+
 ### Native open 3D local SGS momentum and heat
 
 `lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman

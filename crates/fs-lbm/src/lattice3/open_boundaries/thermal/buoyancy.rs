@@ -23,6 +23,7 @@ use crate::thermal::boundary::conduction::{WallConductionControls, WallConductio
 pub use crate::thermal::open::buoyancy::{BoussinesqLaw3, BoussinesqLawError3};
 use crate::thermal::open::immersed::ImmersedThermalBody3;
 use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3};
+use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
@@ -349,11 +350,65 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         )
     }
 
+    /// Advance heat and buoyant flow with a full SPD thermal diffusivity tensor.
+    ///
+    /// The borrowed field is expressed in the fixed Cartesian lattice axes and
+    /// is held for this interval. Off-diagonal conduction changes the actual
+    /// transported temperature used by the endpoint buoyancy force; no scalar
+    /// surrogate or second heat solve is used. Uniform fields share one
+    /// prepared tensor and per-cell fields cover the original grid, including
+    /// solid entries. The thermal carrier's original tau still relaxes even
+    /// kinetic moments, and its reference heat capacity remains fixed.
+    ///
+    /// This retains the existing opening-velocity thermal split, source kicks,
+    /// force consistency and reservoir/wall accounts. The complete temperature,
+    /// flow, finite walls and force history publish together or remain unchanged
+    /// on refusal or cancellation. Tensor stability and time/spatial refinement
+    /// remain caller responsibilities; this is not a variable-storage or total-
+    /// energy model. A subsequent scalar step uses its own original coefficients.
+    pub fn step_serial_with_tensor_diffusion(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        diffusion: DiffusivityField<'_, 3>,
+        origin: [f64; 3],
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        self.step_with_diffusion_poll(
+            collisions,
+            heat_per_step,
+            None,
+            Some(diffusion),
+            origin,
+            &mut || cx.checkpoint().map_err(|_| GridError3::Cancelled),
+        )
+    }
+
     pub(super) fn step_with_poll(
         &mut self,
         collisions: Option<&[L::Collision]>,
         heat_per_step: &[f64],
         thermal_relaxation: Option<&[f64]>,
+        origin: [f64; 3],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        self.step_with_diffusion_poll(
+            collisions,
+            heat_per_step,
+            thermal_relaxation,
+            None,
+            origin,
+            poll,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_diffusion_poll(
+        &mut self,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
@@ -369,11 +424,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
                 self.flow.macroscopic(cell)?.1
             };
         }
-        let candidate = self.thermal.begin_step::<BoussinesqOpenError3<L::Error>>(
-            heat_per_step,
-            thermal_relaxation,
-            || poll().map_err(Into::into),
-        )?;
+        let candidate = if let Some(diffusion) = diffusion {
+            self.thermal
+                .begin_step_tensor::<BoussinesqOpenError3<L::Error>>(
+                    heat_per_step,
+                    diffusion,
+                    || poll().map_err(Into::into),
+                )?
+        } else {
+            self.thermal.begin_step::<BoussinesqOpenError3<L::Error>>(
+                heat_per_step,
+                thermal_relaxation,
+                || poll().map_err(Into::into),
+            )?
+        };
         // These are actual fluid traces, including outflow and implicit wall
         // conduction. A finite solid's bulk temperature is a separate model.
         admit_boundary_traces(self.law, candidate)?;

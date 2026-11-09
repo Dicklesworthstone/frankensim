@@ -5,6 +5,7 @@ use crate::lattice3::{D3q19, Grid3, GridBudget3};
 use crate::thermal::boundary::FiniteThermalWall;
 use crate::thermal::boundary::conduction::WallCell;
 use crate::thermal::open::ThermalOpenLimits3;
+use crate::thermal::tensor::DiffusivityTensor;
 
 const RHO: f64 = 1.2;
 const REFERENCE_RHO: f64 = 1.7;
@@ -449,4 +450,197 @@ fn law_rejects_a_wall_trace_even_when_every_mixed_cell_temperature_is_admissible
         assert!(coupled.law.sample(temperature, BACKGROUND).is_ok());
     }
     assert_eq!(accepted(&coupled), before);
+}
+
+fn tensor_advance<L: EquilibriumLattice3<Q>, const Q: usize>(
+    coupled: &mut BoussinesqOpenGrid3<L, Q>,
+    heat: &[f64],
+    diffusion: DiffusivityField<'_, 3>,
+) -> BoussinesqOpenStep3 {
+    coupled
+        .step_with_diffusion_poll(None, heat, None, Some(diffusion), [0.0; 3], &mut || Ok(()))
+        .unwrap()
+}
+
+fn check_isotropic_tensor<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collision) {
+    let mut scalar = periodic::<L, Q>(collision, 0.5);
+    let mut tensor = periodic::<L, Q>(collision, 0.5);
+    let cells = scalar.flow().populations().len();
+    let alpha = 0.25 * (0.83 - 0.5);
+    let coefficient =
+        DiffusivityTensor::from_lattice([[alpha, 0.0, 0.0], [0.0, alpha, 0.0], [0.0, 0.0, alpha]])
+            .unwrap();
+    let field = vec![coefficient; cells];
+    let heat: Vec<_> = (0..cells).map(|i| 0.001 * (1 + i % 4) as f64).collect();
+    for step in 0..12 {
+        let expected = advance(&mut scalar, &heat);
+        let actual = tensor_advance(
+            &mut tensor,
+            &heat,
+            if step % 2 == 0 {
+                DiffusivityField::Uniform(&coefficient)
+            } else {
+                DiffusivityField::PerCell(&field)
+            },
+        );
+        near(actual.heat.combined_defect, 0.0, 2e-12);
+        for axis in 0..3 {
+            near(
+                actual.body_impulse[axis],
+                expected.body_impulse[axis],
+                5e-13,
+            );
+        }
+    }
+    // A tensor field is borrowed for its own step; it cannot persist into a
+    // subsequent scalar step or detach the accepted force/temperature history.
+    advance(&mut scalar, &heat);
+    advance(&mut tensor, &heat);
+    for cell in 0..cells {
+        for (&actual, &expected) in tensor.flow().populations()[cell]
+            .iter()
+            .zip(&scalar.flow().populations()[cell])
+        {
+            near(actual, expected, 5e-13);
+        }
+        near(
+            tensor.thermal().temperature(cell).unwrap(),
+            scalar.thermal().temperature(cell).unwrap(),
+            5e-13,
+        );
+        for axis in 0..3 {
+            near(
+                tensor.flow().forces()[cell][axis],
+                scalar.flow().forces()[cell][axis],
+                5e-13,
+            );
+        }
+    }
+}
+
+#[test]
+fn boussinesq_tensor_isotropic_limit_matches_both_native_lattices() {
+    check_isotropic_tensor::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.9 });
+    check_isotropic_tensor::<D3q27, 27>(CollisionConfig27 {
+        model: CollisionModel27::Bgk {
+            tau: 0.9,
+            equilibrium: Equilibrium27::Factorized,
+        },
+        maximum_mach: 0.2,
+    });
+}
+
+#[test]
+fn boussinesq_tensor_rotated_conduction_changes_buoyancy_and_closes_open_wall_energy() {
+    let mut oblique = channel(BETA);
+    let mut diagonal = channel(BETA);
+    let rotated =
+        DiffusivityTensor::from_lattice([[0.09, 0.035, 0.0], [0.035, 0.08, 0.0], [0.0, 0.0, 0.06]])
+            .unwrap();
+    let axis_aligned =
+        DiffusivityTensor::from_lattice([[0.09, 0.0, 0.0], [0.0, 0.08, 0.0], [0.0, 0.0, 0.06]])
+            .unwrap();
+    let heat: Vec<_> = (0..72).map(|cell| 0.0002 * (1 + cell % 5) as f64).collect();
+    for _ in 0..12 {
+        for (coupled, coefficient) in [(&mut oblique, &rotated), (&mut diagonal, &axis_aligned)] {
+            let energy_before = total_energy(coupled);
+            let report = tensor_advance(coupled, &heat, DiffusivityField::Uniform(coefficient));
+            let reservoir_heat: f64 = report.heat.reservoirs.iter().map(|r| r.heat_in).sum();
+            near(
+                total_energy(coupled) - energy_before,
+                heat.iter().sum::<f64>() + reservoir_heat,
+                2e-11,
+            );
+            near(report.heat.combined_defect, 0.0, 2e-12);
+            for cell in 0..72 {
+                let temperature = coupled.thermal().temperature(cell).unwrap();
+                // Independent affine constitutive law, using the transported
+                // endpoint rather than an initial or scalar-only temperature.
+                for axis in 0..3 {
+                    let expected = BACKGROUND[axis]
+                        - REFERENCE_RHO * BETA * (temperature - 0.5) * GRAVITY[axis];
+                    near(coupled.flow().forces()[cell][axis], expected, 2e-15);
+                }
+            }
+        }
+    }
+    let largest_temperature_change = (0..72)
+        .map(|cell| {
+            (oblique.thermal().temperature(cell).unwrap()
+                - diagonal.thermal().temperature(cell).unwrap())
+            .abs()
+        })
+        .fold(0.0_f64, f64::max);
+    let largest_force_change = (0..72)
+        .map(|cell| (oblique.flow().forces()[cell][1] - diagonal.flow().forces()[cell][1]).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        largest_temperature_change > 1e-5,
+        "{largest_temperature_change:e}"
+    );
+    assert!(largest_force_change > 1e-8, "{largest_force_change:e}");
+}
+
+#[test]
+fn boussinesq_tensor_refusal_and_late_cancellation_preserve_force_wall_and_heat_epoch() {
+    let mut actual = channel(BETA);
+    let mut reference = channel(BETA);
+    let coefficient =
+        DiffusivityTensor::from_lattice([[0.09, 0.035, 0.0], [0.035, 0.08, 0.0], [0.0, 0.0, 0.06]])
+            .unwrap();
+    let field = vec![coefficient; 72];
+    let heat = vec![0.0004; 72];
+    let before = accepted(&actual);
+    let refused = actual.step_with_diffusion_poll(
+        None,
+        &heat,
+        None,
+        Some(DiffusivityField::PerCell(&field[..71])),
+        [0.0; 3],
+        &mut || Ok(()),
+    );
+    assert!(matches!(
+        refused,
+        Err(BoussinesqOpenError3::Thermal(ThermalOpenError3::Invalid(_)))
+    ));
+    assert_eq!(accepted(&actual), before);
+    let mut polls = 0;
+    let expected = reference
+        .step_with_diffusion_poll(
+            None,
+            &heat,
+            None,
+            Some(DiffusivityField::PerCell(&field)),
+            [0.0; 3],
+            &mut || {
+                polls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let mut calls = 0;
+    let refused = actual.step_with_diffusion_poll(
+        None,
+        &heat,
+        None,
+        Some(DiffusivityField::PerCell(&field)),
+        [0.0; 3],
+        &mut || {
+            calls += 1;
+            if calls == polls {
+                Err(GridError3::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(matches!(
+        refused,
+        Err(BoussinesqOpenError3::Flow(GridError3::Cancelled))
+    ));
+    assert_eq!(calls, polls);
+    assert_eq!(accepted(&actual), before);
+    let retried = tensor_advance(&mut actual, &heat, DiffusivityField::PerCell(&field));
+    assert_eq!(retried, expected);
+    assert_eq!(accepted(&actual), accepted(&reference));
 }
