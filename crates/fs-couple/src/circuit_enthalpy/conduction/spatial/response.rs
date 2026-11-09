@@ -93,8 +93,10 @@ impl SpatialConductionThermalNetwork<'_> {
     /// and continuation without weakening actual-field/current/power gates.
     ///
     /// Boundary voltage/current density and mixed equipotential electrodes keep
-    /// the native meanings. Every N-1 terminal basis solve in every constitutive
-    /// iteration consumes the original `maximum_circuit_trials` allowance.
+    /// the native meanings. Direct `Terminals` drives charge one actual-state
+    /// field solve per constitutive iteration; matrix-based mixed drives charge
+    /// their N-1 basis solves. Every solve consumes the original
+    /// `maximum_circuit_trials` allowance.
     /// Caloric and thermal transport sources must be independent of electrical
     /// response/applicability; this path supplies no reversible field storage.
     /// Fixed geometry and confined phase-chart limits still apply. This bounded
@@ -239,6 +241,9 @@ impl SpatialConductionThermalNetwork<'_> {
             .map_err(map_conduction_error)?;
         let drive = drive.into();
         let work_drive = match drive {
+            SpatialConductionResponseDrive::Terminals(drive) => {
+                SpatialConductionDrive::Terminals(drive)
+            }
             SpatialConductionResponseDrive::Power {
                 positive_faces,
                 negative_faces,
@@ -398,11 +403,13 @@ impl SpatialConductionThermalNetwork<'_> {
                     })?;
                 let (next, field) = candidate.into_parts();
                 let heat_j = finite(dt * field.field.power_w)?;
-                let supplied_work_j = finite(
-                    dt * work_drive
+                let supplied_power_w = match &field.terminals {
+                    Some(terminals) => terminals.supplied_power_w,
+                    None => work_drive
                         .supplied_power_w(next.mesh(), &field.field, cancel)
                         .map_err(map_conduction_error)?,
-                )?;
+                };
+                let supplied_work_j = finite(dt * supplied_power_w)?;
                 if (field.field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {

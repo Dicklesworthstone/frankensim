@@ -1,7 +1,12 @@
 //! A total-current electrode lets the local current redistribute with R(T).
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::ConductionThermalError;
-use fs_em::conduction::ConductionPowerSource;
+use fs_em::conduction::{
+    ConductionPowerSource,
+    response::terminals::{
+        ConductionTerminalControl, ConductionTerminalDrive, ConductionTerminalLimits,
+    },
+};
 use std::collections::BTreeSet;
 
 #[test]
@@ -160,6 +165,59 @@ fn multiterminal_currents_close_source_feedback_and_charge_each_native_basis_sol
             near(report.total_energy_residual_j, 0.0);
             assert!(report.circuit_trials >= 2);
             assert_eq!(report.circuit_trials % 2, 0);
+            let direct_drive = ConductionTerminalDrive {
+                terminals: &terminals,
+                control: ConductionTerminalControl::Currents(&currents),
+                limits: ConductionTerminalLimits {
+                    maximum_terminals: 3,
+                    maximum_workspace_values: 20_000,
+                },
+            };
+            let direct = network
+                .step_candidate(
+                    &thermal,
+                    0.5,
+                    &problem,
+                    direct_drive,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let observed = direct.report().electrical.terminals.as_ref().unwrap();
+            for i in 0..3 {
+                near(observed.voltage_v[i], sign * endpoint_voltage[i]);
+                near(observed.current_a[i], currents[i]);
+            }
+            for (i, cell) in [CellId(30), CellId(10)].into_iter().enumerate() {
+                near(
+                    direct.thermal().temperature_k(cell).unwrap(),
+                    300.0 + theta[i],
+                );
+            }
+            near(direct.report().electrical.heat_j, heat);
+            near(direct.report().electrical.supplied_work_j, heat);
+            near(direct.thermal().energy_j() - thermal.energy_j(), heat);
+            near(observed.power_residual_w, 0.0);
+            assert!(report.electrical.terminals.is_none());
+            let mut direct_budget = config();
+            direct_budget.maximum_circuit_trials = direct.report().circuit_trials - 1;
+            assert!(matches!(
+                network.step_candidate(
+                    &thermal,
+                    0.5,
+                    &problem,
+                    direct_drive,
+                    limits(),
+                    field_controls(),
+                    direct_budget,
+                    &[0.0; 2],
+                    || false,
+                ),
+                Err(CircuitEnthalpyError::CircuitBudget)
+            ));
             let mut bounded = config();
             bounded.maximum_circuit_trials = 1;
             assert!(matches!(

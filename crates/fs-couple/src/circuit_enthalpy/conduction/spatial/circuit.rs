@@ -669,6 +669,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             start_s: self.time_s,
             end_s: target_s,
             field,
+            terminals: None,
             contacts: contact_heat,
             heat_j: spatial_heat_j,
             supplied_work_j: terminal_work,

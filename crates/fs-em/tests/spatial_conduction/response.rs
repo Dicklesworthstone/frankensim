@@ -1,10 +1,12 @@
 //! Actual 3D source response against independent one-dimensional field algebra.
 #[path = "response/adaptive.rs"]
 mod adaptive;
-#[path = "response/power.rs"]
-mod power;
 #[path = "response/contact_response.rs"]
 mod contact_response;
+#[path = "response/direct_terminals.rs"]
+mod direct_terminals;
+#[path = "response/power.rs"]
+mod power;
 use super::contacts::{contacts as contact_faces, interface};
 use super::*;
 use fs_em::spatial::conduction::response::*;
@@ -294,138 +296,188 @@ fn mixed_nonlinear_electrodes_and_contacts_close_actual_fields_and_local_power()
         maximum_response_values: 100,
         maximum_dense_work: 100,
     };
-    for voltage in [2.0_f64, 5.0] {
-        for injection in [0.0, 0.5] {
-            // A: J_A=E_A(1+.2 E_A), unit length/area plus R_contact=1.
-            // B: J_B=E_B, unit length/area. Middle injection J_A-J_B=s.
-            // V=E_A+J_A+J_B gives .4 E_A²+3 E_A=V+s.
-            let e =
-                2.0 * (voltage + injection) / (3.0 + (9.0 + 1.6 * (voltage + injection)).sqrt());
-            let ja = e * (1.0 + 0.2 * e);
-            let jb = ja - injection;
-            let middle = e + ja;
-            let power = ja * e + ja * ja + jb * jb;
-            for sign in [-1.0, 1.0] {
-                let voltages = [1e10, 1e10 + sign * voltage];
-                let currents = [sign * injection];
-                let drive = SpatialConductionResponseDrive::MixedTerminals {
-                    terminals: &terminals,
-                    current_terminals: &[1],
-                    voltages_v: &voltages,
-                    currents_a: &currents,
-                    response: matrix,
-                    mixed,
-                };
-                let mut polls = 0;
-                let candidate = problem
-                    .solve_candidate(
-                        drive,
-                        limits(),
-                        controls(),
-                        response_controls(),
-                        &mut || {
-                            polls += 1;
-                            false
-                        },
-                    )
-                    .unwrap();
-                let report = candidate.report();
-                let field = &report.field;
-                for ((terminal, expected_v), expected_i) in terminals
-                    .iter()
-                    .zip([0.0, sign * middle, sign * voltage])
-                    .zip([-sign * ja, sign * injection, sign * jb])
-                {
-                    let vertices = terminal
-                        .iter()
-                        .flat_map(|&face| problem.mesh().faces[face])
-                        .collect::<BTreeSet<_>>();
-                    near(
-                        vertices
-                            .iter()
-                            .map(|&v| field.nodal_boundary_current_a[v as usize].unwrap())
-                            .sum(),
-                        expected_i,
-                    );
-                    for v in vertices {
-                        near(field.voltage_v[v as usize], expected_v);
-                    }
-                }
-                for (i, (field_e, field_j)) in field
-                    .electric_field_v_m
-                    .iter()
-                    .zip(&field.current_density_a_m2)
-                    .enumerate()
-                {
-                    near(field_e[0], 0.0);
-                    near(field_e[1], 0.0);
-                    near(field_e[2], -sign * if i < 12 { e } else { jb });
-                    near(field_j[2], -sign * if i < 12 { ja } else { jb });
-                }
-                near(field.cell_power_w[..12].iter().sum(), ja * e);
-                near(field.cell_power_w[12..].iter().sum(), jb * jb);
-                near(field.contacts.iter().map(|c| c.power_w).sum(), ja * ja);
-                near(field.power_w, power);
-                near(field.supplied_power_w, voltage * jb + middle * injection);
-                near(field.power_w, field.supplied_power_w);
-                near(
-                    report.evaluated[0].conductor.material().query().axes()["operating"],
-                    e,
-                );
-                near(
-                    candidate.problem().conductors()[0].resistivity_ohm_m(),
-                    1.0 / (1.0 + 0.2 * e),
-                );
-                assert!(report.iterations > 1);
-                assert_eq!(report.field_solves, 2 * report.iterations);
-                assert_eq!(report.source_evaluations, 24 * report.iterations);
-                assert!(
-                    report
-                        .evaluated
-                        .iter()
-                        .map(|s| s.power_defect_w.abs())
-                        .sum::<f64>()
-                        <= controls().power_tolerance_w
-                );
-
-                if voltage == 2.0 && injection == 0.5 && sign == 1.0 {
-                    let bounded = SpatialConductionResponseControls {
-                        maximum_field_solves: 3,
-                        ..response_controls()
-                    };
-                    assert!(matches!(
-                        problem
-                            .solve_candidate(drive, limits(), controls(), bounded, &mut || false),
-                        Err(SpatialConductionResponseError::FieldSolveBudget {
-                            completed: 2,
-                            required: 2,
-                            limit: 3
+    for direct in [false, true] {
+        for voltage in [2.0_f64, 5.0] {
+            for injection in [0.0, 0.5] {
+                // A: J_A=E_A(1+.2 E_A), unit length/area plus R_contact=1.
+                // B: J_B=E_B, unit length/area. Middle injection J_A-J_B=s.
+                // V=E_A+J_A+J_B gives .4 E_A²+3 E_A=V+s.
+                let e = 2.0 * (voltage + injection)
+                    / (3.0 + (9.0 + 1.6 * (voltage + injection)).sqrt());
+                let ja = e * (1.0 + 0.2 * e);
+                let jb = ja - injection;
+                let middle = e + ja;
+                let power = ja * e + ja * ja + jb * jb;
+                for sign in [-1.0, 1.0] {
+                    let voltages = [1e10, 1e10 + sign * voltage];
+                    let currents = [sign * injection];
+                    let drive = if direct {
+                        SpatialConductionResponseDrive::Terminals(ConductionTerminalDrive {
+                            terminals: &terminals,
+                            control: ConductionTerminalControl::Mixed {
+                                current_terminals: &[1],
+                                voltages_v: &voltages,
+                                currents_a: &currents,
+                            },
+                            limits: direct_terminals::terminal_limits(),
                         })
-                    ));
-                    let mut count = 0;
-                    assert!(matches!(
-                        problem.solve_candidate(
-                            drive,
-                            limits(),
-                            controls(),
-                            response_controls(),
-                            &mut || {
-                                count += 1;
-                                count == polls
-                            }
-                        ),
-                        Err(SpatialConductionResponseError::Cancelled)
-                    ));
-                    let retry = problem
+                    } else {
+                        SpatialConductionResponseDrive::MixedTerminals {
+                            terminals: &terminals,
+                            current_terminals: &[1],
+                            voltages_v: &voltages,
+                            currents_a: &currents,
+                            response: matrix,
+                            mixed,
+                        }
+                    };
+                    let mut polls = 0;
+                    let candidate = problem
                         .solve_candidate(
                             drive,
                             limits(),
                             controls(),
                             response_controls(),
-                            &mut || false,
+                            &mut || {
+                                polls += 1;
+                                false
+                            },
                         )
                         .unwrap();
-                    assert_eq!(retry.report().field.voltage_v, field.voltage_v);
+                    let report = candidate.report();
+                    let field = &report.field;
+                    for ((terminal, expected_v), expected_i) in terminals
+                        .iter()
+                        .zip([0.0, sign * middle, sign * voltage])
+                        .zip([-sign * ja, sign * injection, sign * jb])
+                    {
+                        let vertices = terminal
+                            .iter()
+                            .flat_map(|&face| problem.mesh().faces[face])
+                            .collect::<BTreeSet<_>>();
+                        near(
+                            vertices
+                                .iter()
+                                .map(|&v| field.nodal_boundary_current_a[v as usize].unwrap())
+                                .sum(),
+                            expected_i,
+                        );
+                        for v in vertices {
+                            if direct {
+                                // Absolute display values can round at the common bias;
+                                // the retained terminal drops are checked separately below.
+                                assert!(
+                                    (field.voltage_v[v as usize] - (voltages[0] + expected_v))
+                                        .abs()
+                                        <= 4.0 * f64::EPSILON * voltages[0].abs()
+                                );
+                            } else {
+                                near(field.voltage_v[v as usize], expected_v);
+                            }
+                        }
+                    }
+                    for (i, (field_e, field_j)) in field
+                        .electric_field_v_m
+                        .iter()
+                        .zip(&field.current_density_a_m2)
+                        .enumerate()
+                    {
+                        near(field_e[0], 0.0);
+                        near(field_e[1], 0.0);
+                        near(field_e[2], -sign * if i < 12 { e } else { jb });
+                        near(field_j[2], -sign * if i < 12 { ja } else { jb });
+                    }
+                    near(field.cell_power_w[..12].iter().sum(), ja * e);
+                    near(field.cell_power_w[12..].iter().sum(), jb * jb);
+                    near(field.contacts.iter().map(|c| c.power_w).sum(), ja * ja);
+                    near(field.power_w, power);
+                    near(field.supplied_power_w, voltage * jb + middle * injection);
+                    near(field.power_w, field.supplied_power_w);
+                    near(
+                        report.evaluated[0].conductor.material().query().axes()["operating"],
+                        e,
+                    );
+                    near(
+                        candidate.problem().conductors()[0].resistivity_ohm_m(),
+                        1.0 / (1.0 + 0.2 * e),
+                    );
+                    assert!(report.iterations > 1);
+                    let solves_per_iteration = if direct { 1 } else { 2 };
+                    assert_eq!(
+                        report.field_solves,
+                        solves_per_iteration * report.iterations
+                    );
+                    assert_eq!(report.terminals.is_some(), direct);
+                    if let Some(terminals) = &report.terminals {
+                        for ((&v, &i), (expected_v, expected_i)) in
+                            terminals.voltage_v.iter().zip(&terminals.current_a).zip([
+                                (0.0, -sign * ja),
+                                (sign * middle, sign * injection),
+                                (sign * voltage, sign * jb),
+                            ])
+                        {
+                            near(v, expected_v);
+                            near(i, expected_i);
+                        }
+                        near(
+                            terminals.supplied_power_w,
+                            voltage * jb + middle * injection,
+                        );
+                        assert!(
+                            terminals.maximum_current_residual_a <= controls().current_tolerance_a
+                        );
+                        assert!(terminals.power_residual_w.abs() <= controls().power_tolerance_w);
+                    }
+                    assert_eq!(report.source_evaluations, 24 * report.iterations);
+                    assert!(
+                        report
+                            .evaluated
+                            .iter()
+                            .map(|s| s.power_defect_w.abs())
+                            .sum::<f64>()
+                            <= controls().power_tolerance_w
+                    );
+
+                    if voltage == 2.0 && injection == 0.5 && sign == 1.0 {
+                        let bounded = SpatialConductionResponseControls {
+                            maximum_field_solves: 3,
+                            ..response_controls()
+                        };
+                        assert!(matches!(
+                            problem
+                                .solve_candidate(drive, limits(), controls(), bounded, &mut || false),
+                            Err(SpatialConductionResponseError::FieldSolveBudget {
+                                completed,
+                                required,
+                                limit: 3
+                            }) if completed == (3 / solves_per_iteration) * solves_per_iteration
+                                && required == solves_per_iteration
+                        ));
+                        let mut count = 0;
+                        assert!(matches!(
+                            problem.solve_candidate(
+                                drive,
+                                limits(),
+                                controls(),
+                                response_controls(),
+                                &mut || {
+                                    count += 1;
+                                    count == polls
+                                }
+                            ),
+                            Err(SpatialConductionResponseError::Cancelled)
+                        ));
+                        let retry = problem
+                            .solve_candidate(
+                                drive,
+                                limits(),
+                                controls(),
+                                response_controls(),
+                                &mut || false,
+                            )
+                            .unwrap();
+                        assert_eq!(retry.report().field.voltage_v, field.voltage_v);
+                    }
                 }
             }
         }

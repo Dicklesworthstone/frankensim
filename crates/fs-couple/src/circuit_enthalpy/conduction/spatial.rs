@@ -28,7 +28,10 @@ use super::{
 };
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_em::{
-    conduction::{ConductionControls, ConductionPowerSource},
+    conduction::{
+        ConductionControls, ConductionPowerSource, response::terminals::ConductionTerminalDrive,
+        terminals::ConductionTerminalReport,
+    },
     spatial::conduction::{
         SpatialConductanceControls, SpatialConduction, SpatialConductionBoundary,
         SpatialConductionContact, SpatialConductionContactResponse, SpatialConductionError,
@@ -62,6 +65,10 @@ pub struct SpatialConductionRegion {
 #[derive(Clone, Copy, Debug)]
 pub enum SpatialConductionDrive<'a> {
     Boundary(&'a SpatialConductionBoundary),
+    /// One actual-amplitude sparse solve for voltage, total-current or mixed
+    /// electrodes, with explicit sparse workspace limits. No response probes or
+    /// dense terminal factor are built; zero-current electrodes float.
+    Terminals(ConductionTerminalDrive<'a>),
     /// Signed amperes entering `positive_faces`; `negative_faces` is grounded.
     /// Both sets contain complete exterior triangles and must be disjoint and
     /// electrically connected under the native terminal admission rules.
@@ -171,6 +178,11 @@ impl<'a> SpatialConductionDrive<'a> {
         };
         let power = match self {
             Self::Boundary(_) => boundary_power_w,
+            Self::Terminals(_) => {
+                return Err(invalid(
+                    "direct terminal work requires its retained native terminal report",
+                ));
+            }
             Self::Power { source, .. } => source.power_w,
             Self::TotalCurrent {
                 positive_faces,
@@ -264,6 +276,12 @@ impl<'a> From<&'a SpatialConductionBoundary> for SpatialConductionDrive<'a> {
     }
 }
 
+impl<'a> From<ConductionTerminalDrive<'a>> for SpatialConductionDrive<'a> {
+    fn from(drive: ConductionTerminalDrive<'a>) -> Self {
+        Self::Terminals(drive)
+    }
+}
+
 /// Every original tetrahedron has exactly one finite thermal receiver. Several
 /// tets may cover one receiver; their volumes must cover that cell completely.
 pub struct SpatialConductionThermalNetwork<'a> {
@@ -278,6 +296,9 @@ pub struct SpatialConductionThermalStep {
     pub start_s: f64,
     pub end_s: f64,
     pub field: SpatialConductionField,
+    /// Retained physical voltage differences and authored source work from a
+    /// direct sparse electrode solve. Matrix/boundary drives leave this absent.
+    pub terminals: Option<ConductionTerminalReport>,
     /// Exact triangular contact response and the explicit A/B heat partition.
     /// Its heat is already included in the finite cells and `heat_j` once.
     pub contacts: Vec<SpatialConductionContactHeat>,
@@ -640,7 +661,20 @@ impl SpatialConductionThermalNetwork<'_> {
                 // Controlled current/power changes the terminal voltage at
                 // every thermal trial. Refresh the native bulk/contact field
                 // before computing the same endpoint's local Joule heat.
+                let mut terminal_report = None;
                 let field = match drive {
+                    SpatialConductionDrive::Terminals(drive) => next
+                        .solve_terminals(
+                            drive.terminals,
+                            drive.control,
+                            drive.limits,
+                            field_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map(|(field, report)| {
+                            terminal_report = Some(report);
+                            field
+                        }),
                     SpatialConductionDrive::Boundary(boundary) => {
                         next.solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
                     }
@@ -720,11 +754,16 @@ impl SpatialConductionThermalNetwork<'_> {
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j = finite(
-                    dt * drive
+                // The direct report retains small physical voltage differences
+                // even under a huge common bias. Reconstructing its work from
+                // rounded public nodal potentials would lose those differences.
+                let supplied_power_w = match &terminal_report {
+                    Some(report) => report.supplied_power_w,
+                    None => drive
                         .supplied_power_w(next.mesh(), &field, cancel)
                         .map_err(map_conduction_error)?,
-                )?;
+                };
+                let supplied_work_j = finite(dt * supplied_power_w)?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
@@ -742,6 +781,7 @@ impl SpatialConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            terminals: terminal_report,
                             contacts,
                             heat_j,
                             supplied_work_j,

@@ -247,6 +247,11 @@ impl SpatialConductionThermalNetwork<'_> {
         // one motional-source solve. Charge all of them on every thermal trial,
         // including the zero-current case; the latter still has a real field.
         let field_solves = match drive {
+            SpatialConductionDrive::Terminals(_) => {
+                return Err(map_conduction_error(invalid(
+                    "direct sparse electrodes with prescribed motional EMF are not admitted",
+                )));
+            }
             SpatialConductionDrive::Boundary(_) => 1,
             SpatialConductionDrive::TotalCurrent { .. } => 2,
             SpatialConductionDrive::TerminalCurrents { terminals, .. }
@@ -295,6 +300,11 @@ impl SpatialConductionThermalNetwork<'_> {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
                 let field = match drive {
+                    SpatialConductionDrive::Terminals(_) => {
+                        return Err(map_conduction_error(invalid(
+                            "direct sparse electrodes with prescribed motional EMF are not admitted",
+                        )));
+                    }
                     SpatialConductionDrive::Boundary(boundary) => {
                         next.solve_with_motion(boundary, motion, field_controls, &mut || {
                             (*cancel.borrow_mut())()

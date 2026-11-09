@@ -11826,3 +11826,28 @@ Original relative thermal audits and independently checked contact-transfer defe
 This is a prescribed-normal, frozen-source split with interval-average plastic power. The original homogeneous torsion law and mode-III applicability ceiling remain in force. Temporal refinement is required for within-step dynamics; reciprocal mixed-mode stability, resolved within-step twist and temperature feedback are separate physics.
 
 Three focused integration cases compare against independent discrete conduction/cooling modes, verify original normal and fold spring release before a scheduled cooling change, and exercise transport/caloric/cancellation/stale-clock rollback with exact retry. Pinned formatting and recursive Rust syntax/module-path checks passed. Integration compilation and execution remain unavailable under this session's runner and memory/disk limits.
+
+## Direct sparse tetrahedral electrodes in finite thermal feedback
+
+`SpatialConductionDrive::Terminals` and
+`SpatialConductionResponseDrive::Terminals` accept the shared explicit
+`ConductionTerminalDrive`. Every trial refreshes original bulk/contact sources
+and closes held voltage/total-current/floating controls with one native sparse
+field solve per constitutive evaluation. Existing matrix drives retain their
+explicit N-1 response/budget semantics. Sparse workspace limits remain separate
+from the common field-trial budget.
+
+The retained terminal report owns physical voltage differences and independently
+authored source work, including under large common bias; work is never rebuilt
+from rounded absolute potentials or inferred from heat. Native volume/contact
+work is deposited once through original receivers and contact partitions.
+Existing caloric/thermal field-independence gates, phase/history ownership, late
+cancellation and transactional publication remain binding. Direct sparse
+electrodes with prescribed motional EMF are explicitly refused; existing
+matrix/motional paths remain available.
+
+Focused regressions extend the analytic current/thermal and nonlinear
+finite-contact oracles and add bounded-current material support, floating
+electrodes, large common bias, two-step continuation, exact field-solve
+accounting and rejection paths. They are manufactured numerical checks, not
+measured material validation or mesh/time convergence claims.

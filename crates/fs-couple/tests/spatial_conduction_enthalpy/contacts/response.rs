@@ -5,7 +5,10 @@ use fs_couple::circuit_enthalpy::conduction::spatial::response::{
     SpatialConductionResponseEnthalpyCandidate, step_spatial_conduction_response_candidate,
 };
 use fs_em::{
-    conduction::response::contact::ContactResponseControls,
+    conduction::response::{
+        contact::ContactResponseControls,
+        terminals::{ConductionTerminalControl, ConductionTerminalDrive, ConductionTerminalLimits},
+    },
     spatial::conduction::response::SpatialConductionResponse,
 };
 use fs_material::{
@@ -236,6 +239,49 @@ fn current_dependent_contact_heats_both_bodies_and_complete_sourced_heat_feedbac
         )
         .unwrap();
     let theta = assert_response(&first, &initial, [0.0; 2], 1.0);
+    let electrodes = [0.0, 2.0].map(|x| {
+        original
+            .exterior_faces()
+            .filter(|&face| {
+                original.mesh().faces[face].map(|v| original.positions_m()[v as usize][0]) == [x; 3]
+            })
+            .collect::<Vec<_>>()
+    });
+    let terminals = electrodes.each_ref().map(Vec::as_slice);
+    let direct = layout
+        .step_response_contact_candidate(
+            &initial,
+            0.5,
+            &original,
+            ConductionTerminalDrive {
+                terminals: &terminals,
+                control: ConductionTerminalControl::Currents(&[-2.0, 2.0]),
+                limits: ConductionTerminalLimits {
+                    maximum_terminals: 2,
+                    maximum_workspace_values: 20_000,
+                },
+            },
+            &surface,
+            limits(),
+            field_controls(),
+            controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    assert_response(&direct, &initial, [0.0; 2], 1.0);
+    let actual = direct.report().electrical.field.terminals.as_ref().unwrap();
+    near(actual.current_a[0], -2.0);
+    near(actual.current_a[1], 2.0);
+    near(
+        0.5 * actual.supplied_power_w,
+        direct.report().electrical.heat_j,
+    );
+    assert_eq!(
+        direct.report().electrical.field.field_solves,
+        direct.report().electrical.field.iterations,
+    );
     let continued = layout
         .step_response_contact_candidate(
             first.thermal(),

@@ -8583,3 +8583,20 @@ stationary fixed-geometry DC; it does not add motion, induction or a nonlinear
 terminal matrix. Three native regression groups in
 `tests/spatial_conduction/direct_terminals.rs` cover analytic contact/floating
 networks, rotated tensor sources, gauge invariance, bounds and cancellation.
+
+## Direct tetrahedral terminal controls in nonlinear material response
+
+`SpatialConductionResponseDrive::Terminals` accepts the shared explicit
+`ConductionTerminalDrive` and closes original scalar bulk/contact laws at the
+actual constrained field with one sparse field solve per constitutive iteration.
+Its sparse workspace admission is separate from the existing
+`MixedTerminals` dense response budgets, whose meanings are unchanged.
+The accepted `SpatialConductionResponseReport::terminals` retains ordered native
+reactions, physical voltage differences and independently authored source work.
+Original source queries, relaxation, local current/power defects, cancellation
+and field-solve budgets remain in the same constitutive loop. This adds neither
+a cached nonlinear conductance matrix nor arbitrary nonuniform nonlinear contact
+laws. Native absolute field observations and the terminal-relative report keep
+their distinct meanings under a large common bias. Regression definitions cover
+narrow actual E/J source support, mixed/floating finite-contact loads, both signs,
+work, iteration counts and rollback under source/workspace/budget refusal.

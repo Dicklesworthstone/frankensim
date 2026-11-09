@@ -3,6 +3,8 @@
 mod circuit;
 #[path = "response/power.rs"]
 mod power;
+#[path = "response/terminals.rs"]
+mod terminals;
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::ConductionThermalError;
 use fs_em::spatial::conduction::response::{
