@@ -49,6 +49,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         let FaceBoundary3::Pressure { density } = self.plan.boundaries.face(face) else {
             return Err(BoundaryProfileError3::NotPressureFace);
         };
+        if self.characteristic_outlets[face as usize].is_some() {
+            return Err(BoundaryProfileError3::ConflictingControl);
+        }
         let plane_len = self.grid.f.len() / self.grid.dims[face as usize / 2];
         let index = face as usize;
         let had_profile = self.pressure_profiles[index].is_some();

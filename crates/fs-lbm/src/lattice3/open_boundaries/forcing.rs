@@ -13,8 +13,8 @@
 //! the complete native candidate and reservoir account have passed admission.
 
 use super::{
-    BoundarySpec3, EquilibriumLattice3, Face3, GridError3, OpenBoundaryGrid3,
-    OpenBoundaryMomentumTransport3, initial, macro_cell,
+    BoundarySpec3, CharacteristicOutlet3, EquilibriumLattice3, Face3, GridError3,
+    OpenBoundaryGrid3, OpenBoundaryMomentumTransport3, initial, macro_cell,
 };
 use crate::d3q19::{
     BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
@@ -182,6 +182,22 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
     }
     pub fn pressure_profile(&self, face: Face3) -> Option<&[f64]> {
         self.inner.pressure_profile(face)
+    }
+
+    /// Attach the native acoustic outlet without rebinding accepted forces.
+    pub fn set_characteristic_outlet(
+        &mut self,
+        face: Face3,
+        control: CharacteristicOutlet3,
+        gate: &CancelGate,
+    ) -> Result<(), GridError3<L::Error>> {
+        self.inner.set_characteristic_outlet(face, control, gate)
+    }
+    pub fn clear_characteristic_outlet(&mut self, face: Face3) {
+        self.inner.clear_characteristic_outlet(face);
+    }
+    pub fn characteristic_outlet(&self, face: Face3) -> Option<CharacteristicOutlet3> {
+        self.inner.characteristic_outlet(face)
     }
 
     /// Hold a resolved velocity trace on the same force-aware native owner.

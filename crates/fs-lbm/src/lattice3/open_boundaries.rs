@@ -13,7 +13,8 @@
 //! Pressure and velocity profiles are held on their native face planes;
 //! geometry and the uniform body force remain fixed. Tangential wall motion uses the
 //! native moving reflection and a separate wall impulse/work account.
-//! Characteristic outlets remain separate.
+//! An optional linear isothermal characteristic outlet leaves pressure and
+//! normal velocity free to carry the outgoing acoustic wave together.
 
 use super::{
     EquilibriumLattice3, FirstError, Grid3, GridError3, Lattice3, StepData, coordinates, initial,
@@ -27,8 +28,10 @@ use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, TileKernel, TilePlan};
 use fs_math::dd::Dd;
 use std::sync::Mutex;
 
+mod characteristic;
 /// Spatial force epochs on the same native reservoir and population owner.
 pub mod forcing;
+pub use characteristic::CharacteristicOutlet3;
 mod moving_walls;
 mod pressure;
 mod rheology;
@@ -38,6 +41,7 @@ pub mod sgs;
 pub mod thermal;
 mod velocity;
 
+use characteristic::PreparedOutlet3;
 use pressure::PressureProfile3;
 use velocity::VelocityProfile3;
 
@@ -48,6 +52,7 @@ pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     plan: FacePlan,
     pressure_profiles: [Option<PressureProfile3>; 6],
     velocity_profiles: [Option<VelocityProfile3>; 6],
+    characteristic_outlets: [Option<PreparedOutlet3>; 6],
     wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
     pending_wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
 }
@@ -94,6 +99,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: core::array::from_fn(|_| None),
             velocity_profiles: core::array::from_fn(|_| None),
+            characteristic_outlets: [None; 6],
             wall_exchange: None,
             pending_wall_exchange: None,
         })
@@ -176,6 +182,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             {
                 return Err(GridError3::Input(
                     "clear or update the velocity profile before changing its uniform target",
+                ));
+            }
+            if self.plan.boundaries.face(face) != boundaries.face(face)
+                && self.characteristic_outlets[face as usize].is_some()
+            {
+                return Err(GridError3::Input(
+                    "clear the characteristic outlet before changing its reference density",
                 ));
             }
         }
@@ -311,6 +324,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
+            characteristic_outlets: &self.characteristic_outlets,
             acceleration,
         };
         for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
@@ -424,6 +438,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
+            characteristic_outlets: &self.characteristic_outlets,
             acceleration,
         };
         {
@@ -664,6 +679,7 @@ struct OpenStep<'a, L: EquilibriumLattice3<Q>, const Q: usize> {
     plan: FacePlan,
     pressure_profiles: &'a [Option<PressureProfile3>; 6],
     velocity_profiles: &'a [Option<VelocityProfile3>; 6],
+    characteristic_outlets: &'a [Option<PreparedOutlet3>; 6],
     acceleration: Option<&'a [[f64; 3]]>,
 }
 
@@ -775,14 +791,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
                         profile.values[self.plan.plane_index(cell)]
                     }),
             ),
-            FaceBoundary3::Pressure { density } => (
-                self.pressure_profiles[face as usize]
-                    .as_ref()
-                    .map_or(density, |profile| {
-                        profile.values[self.plan.plane_index(cell)]
-                    }),
-                velocity_source,
-            ),
+            FaceBoundary3::Pressure { density } => {
+                if let Some(outlet) = self.characteristic_outlets[face as usize] {
+                    outlet.trace(face, density, rho_source, velocity_source, cell)?
+                } else {
+                    (
+                        self.pressure_profiles[face as usize]
+                            .as_ref()
+                            .map_or(density, |profile| {
+                                profile.values[self.plan.plane_index(cell)]
+                            }),
+                        velocity_source,
+                    )
+                }
+            }
             _ => unreachable!("only open faces have a reservoir reconstruction"),
         };
         let law = self

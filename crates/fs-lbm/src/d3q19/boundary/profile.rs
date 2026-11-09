@@ -29,6 +29,8 @@ pub enum BoundaryProfileError3 {
     NotVelocityFace,
     /// The requested face is not a declared pressure boundary.
     NotPressureFace,
+    /// Another held control owns this face; clear it before attaching a profile.
+    ConflictingControl,
     /// No fluid open nodes are available on this face.
     EmptyFace,
     /// Mean-normal control is undefined at partially reconstructed wall seams.

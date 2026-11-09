@@ -17,7 +17,7 @@ fn check(gate: &CancelGate) -> Result<(), BoundaryProfileError3> {
 }
 
 // Only the requested plane, in x-fast order with its fixed axis omitted.
-fn plane_cells(dims: [usize; 3], face: Face3) -> impl Iterator<Item = usize> {
+pub(super) fn plane_cells(dims: [usize; 3], face: Face3) -> impl Iterator<Item = usize> {
     let axis = face as usize / 2;
     let stride = dims[..axis].iter().product::<usize>();
     let block = stride * dims[axis];

@@ -2746,6 +2746,44 @@ refinement refusal publish no partial physical result. The caller continues
 to own external reservoir storage, the supplied physical interface temperature
 and any pressure/volume evolution.
 
+## Linear characteristic outlets on native D3Q19/D3Q27 flow
+
+`OpenBoundaryGrid3::set_characteristic_outlet` attaches one held incoming
+isothermal acoustic characteristic to an existing pressure face. Its uniform
+density is the fixed reference; `c = sqrt(L::CS2)` remains lattice-native.
+For the outward normal, `J± = (u_n-u_ref) ± c*(rho-rho_ref)/rho_ref`.
+The original streamed donor supplies J+ and both tangential velocities;
+the control supplies J-. Density and normal velocity can therefore carry an
+outgoing pulse together instead of fixing pressure independently of velocity.
+Reference, donor and resulting normal speeds must be strictly outward and
+subsonic. The caller also bounds relative density departure from the reference.
+
+The same native regularized stress reconstruction, force-density/actual-density
+acceleration endpoints, population source frame and measured reservoir exchange
+remain authoritative. Serial and pooled paths share the trace map. Material
+rheology and SGS use the actual one-sided velocity gradient at these outlets;
+ordinary pressure faces retain their zero-normal-gradient condition. Existing
+coupled thermal steps consume the resulting candidate physical velocity and
+retain their final joint publication point. The outlet adds no step allocation,
+callback or retained physical history.
+
+Pressure profiles and characteristic controls are mutually exclusive. Clear
+the control before changing its uniform reference density; unrelated inlet or
+wall control updates retain it. Mixed wall/open nodes are refused because their
+separate population ownership cannot impose both acoustic moments. Backflow,
+sonic flow, exceeded density/Mach bounds and cancellation preserve accepted
+populations, source epochs, controls and time. Clearing the control restores the
+original pressure operator. This is linear, local plane-normal acoustics, not
+nonlinear NSCBC, oblique transparency or a compressible caloric gas boundary.
+See Poinsot and Lele, [JCP 101 (1992), 104–129](https://doi.org/10.1016/0021-9991(92)90046-2),
+for the characteristic framework; no general reflection bound is claimed.
+
+Focused native cases exercise all face normals and collision families, physical
+force/stress moments, actual-density acceleration and atomic refusal, reference
+equilibrium, and the shared gradient. A traveling acoustic pulse compares the
+returning characteristic against the original fixed-pressure termination on
+both stencils and outward-normal signs.
+
 ### Native source-resolved molecular and SGS convection
 
 `BoussinesqOpenGrid3::{step_serial_with_material_transport_and_sgs,advance_serial_with_material_transport_and_sgs}` compose the original material and local SGS owners in one native transaction. Each accepted opening temperature resolves the original source once; its bounded density/Cp projection and retained SI scaling produce fresh molecular viscosity/conductivity rates. The existing Smagorinsky/WALE/Vreman preparation interprets the opening populations with their own accepted spatial total force, adds local eddy viscosity and `alpha_t=nu_t/Pr_t`, and retains the original collision family, higher-mode rates and TRT wall-placement rule. The material workspace remains molecular; repeated steps never recycle augmented SGS fields as molecular input. The separate SGS workspace carries the actual effective fields.

@@ -15,6 +15,9 @@ mod moving_walls;
 #[path = "lattice3_open_boundaries/velocity_profiles.rs"]
 mod velocity_profiles;
 
+#[path = "lattice3_open_boundaries/characteristic.rs"]
+mod characteristic;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -436,9 +439,7 @@ fn invalid_topology_targets_and_late_cell_mach_refusal_are_atomic() {
         assert_eq!(grid.boundaries(), spec);
         assert_eq!(bits(&grid), before);
         let mut both = [FaceBoundary3::Periodic; 6];
-        both[4] = FaceBoundary3::Velocity {
-            velocity: [0.0; 3],
-        };
+        both[4] = FaceBoundary3::Velocity { velocity: [0.0; 3] };
         both[5] = both[4];
         let mut late =
             OpenBoundaryGrid3::try_new(make([8, 8, 5], None), cx, BoundarySpec3::new(both))
@@ -446,7 +447,9 @@ fn invalid_topology_targets_and_late_cell_mach_refusal_are_atomic() {
         let mut laws = vec![bgk(); 320];
         laws[319].maximum_mach = 0.01; // Rest collision passes; the final face target does not.
         let previous_targets = late.boundaries();
-        both[4] = FaceBoundary3::Velocity { velocity: [0.0, 0.0, 0.03] };
+        both[4] = FaceBoundary3::Velocity {
+            velocity: [0.0, 0.0, 0.03],
+        };
         both[5] = both[4];
         let targets = BoundarySpec3::new(both);
         let late_before = bits(&late);
@@ -457,7 +460,8 @@ fn invalid_topology_targets_and_late_cell_mach_refusal_are_atomic() {
         assert_eq!(bits(&late), late_before);
         assert_eq!(late.completed_steps(), 0);
         assert_eq!(late.boundaries(), previous_targets);
-        late.step_serial_with_open_boundaries(cx, targets, None, [0.0; 3]).unwrap();
+        late.step_serial_with_open_boundaries(cx, targets, None, [0.0; 3])
+            .unwrap();
         assert_eq!(late.completed_steps(), 1);
         assert_eq!(late.boundaries(), targets);
         let cancelled = CancelGate::new_clock_free();

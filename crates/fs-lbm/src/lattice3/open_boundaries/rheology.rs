@@ -16,7 +16,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     // Preserve the closed-grid interior/periodic and halfway-wall stencil,
     // replacing ONLY the derivative normal to an actual open face. Otherwise
     // nonzero inlet velocity would be mistaken for wall shear. Pressure faces
-    // inherit this owner's zero-normal-velocity-gradient donor condition.
+    // inherit this owner's zero-normal-velocity-gradient donor condition,
+    // except characteristic outlets whose normal velocity carries a wave.
     pub(super) fn rheology_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
         let mut gradient =
             self.grid
@@ -30,7 +31,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         if matches!(
             self.plan.boundaries.face(face),
             FaceBoundary3::Pressure { .. }
-        ) {
+        ) && self.characteristic_outlets[face as usize].is_none()
+        {
             for row in &mut gradient {
                 row[axis] = 0.0;
             }
@@ -77,7 +79,8 @@ impl<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize> OpenBoundar
     /// exterior wall's actual prescribed velocity and stationary solid voxels.
     /// Velocity faces use an on-site quadratic one-sided slope, falling back
     /// to linear only when the second interior donor is solid. Pressure faces
-    /// use the reservoir's zero-normal-velocity-gradient condition. At seams,
+    /// use the reservoir's zero-normal-velocity-gradient condition; attached
+    /// characteristic outlets use the actual one-sided velocity slope. At seams,
     /// tangential derivatives still retain the native halfway-wall model.
     ///
     /// Sources are queried once per fluid cell at sqrt(2 dev(D):dev(D))/dt.
