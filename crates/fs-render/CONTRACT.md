@@ -13149,3 +13149,45 @@ face/side support, source channels, equal-index no-draw fallback, intervening
 delta reset, admission, cancellation/refusal, replay and analyzed entry points.
 Three native full-scene regression groups are authored but unrun. Full workspace
 Cargo, resolved geometry runtime and remote DSR/RCH checks were unavailable.
+
+### Full Smith rough-glass environment connections
+
+`SmithDielectricEnvironmentCameraScene` borrows the original environment camera
+and extends the existing full opaque Smith transport with two-sided rough
+dielectric continuation and full fixed-direction source responses. The original
+source spectrum/polarization, native contact visibility, adjacent medium IDs,
+surface/LTE emission, real-lens/analyzer launch and single camera-prefix index
+conversion are retained. Separate Philox domains and caller callbacks index
+ordinary surfaces, environment directions, opaque continuation/connections and
+dielectric continuation/connections by zero-based surface/facet ordinals.
+
+The original polarization-independent single-facet dielectric proposal is used
+only as a deterministic angular guide q, with environment map density p:
+source weight p²/(p²+q²), escaped-camera weight q²/(p²+q²). This is a matching
+partition of the full optical integrand, not a claim that q is the complete
+Smith outgoing marginal PDF. The stochastic evaluated response enters only
+linearly. No hidden path density or sampled Fresnel/BSDF response enters the
+weights. A later contact retires the anchor; delta chains, primary environment
+and unrepresented angular laws retain their original endpoint. Emission already
+encountered along the camera path is never scaled by this endpoint weight.
+
+The connection supports rough distinct-index dielectrics. Equal-index rough
+glass, including coated mixed straight-through/continuous laws, retains the
+complete path-only Smith walk with endpoint weight one; no legacy single-facet
+NEE is substituted. Both adjacent media are checked before an environment draw.
+After a direction is chosen, its own medium is checked before connection-facet
+sampling. Infinity connections retain the original homogeneous, nonabsorbing
+medium requirement; GRIN/absorbing infinity legs are not approximated as clear.
+A facet, visibility-work or cancellation refusal discards the complete sample.
+
+Focused verification: seven scoped integration groups passed (three existing
+opaque/ordinary regressions and four glass groups), compiling the actual whole
+sampling owner, old/new wrapper modules, source/weight arithmetic and shared
+native receiver modules. Scene propagation, visibility and Smith optical
+responses were explicit fixtures; these checks prove dispatch, source-side
+admission, deterministic complementary weights, independent streams, emission
+ownership, resets, replay and complete refusal. Three full native scene groups
+were authored for both-side glass/eta composition, equal-index bare/coated
+path-only measures and per-side infinity admission, but were not run because
+the sibling workspace dependencies and DSR/RCH were unavailable. They do not
+constitute full native geometry, optics, GRIN or workspace validation.

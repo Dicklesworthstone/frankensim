@@ -35,7 +35,7 @@ pub mod participating;
 use visibility::{clear_to_environment, supports_segment};
 use weights::{positive_product, power_weight};
 
-pub use microsurface::SmithEnvironmentCameraScene;
+pub use microsurface::{SmithDielectricEnvironmentCameraScene, SmithEnvironmentCameraScene};
 
 /// A fixed-direction physical response and deterministic comparison density.
 /// For ordinary surfaces the latter is their exact proposal. The Smith view

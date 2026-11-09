@@ -21,6 +21,9 @@ use crate::polarization::dielectric::scene::curved::{CurvedTransportEvent, Smith
 use crate::polarization::dielectric::scene::smith_draw;
 use crate::polarization::dielectric::transport::microsurface::SmithWalkSettings;
 
+mod dielectric;
+pub use dielectric::SmithDielectricEnvironmentCameraScene;
+
 /// Borrowed opt-in view: opaque rough and brushed receivers use complete
 /// Smith reflection for both continuation and source connections. Other
 /// materials keep the original native law and its original exact-PDF MIS.
@@ -35,6 +38,7 @@ enum EndpointPartition {
     Original,
     Ordinary(f64),
     Smith(SurfaceReceiver),
+    Dielectric(SurfaceReceiver),
 }
 
 impl EndpointPartition {
@@ -48,6 +52,9 @@ impl EndpointPartition {
             Self::Ordinary(pdf) => pdf,
             Self::Smith(receiver) => {
                 receiver.smith_first_reflection_density(source.camera, path.beam().ray().dir)?
+            }
+            Self::Dielectric(receiver) => {
+                dielectric::angular_guide(receiver, source.camera, path.beam().ray().dir)?
             }
         };
         let environment = source
@@ -241,9 +248,37 @@ impl<'v, 'a, 's, 'm> SmithEnvironmentCameraScene<'v, 'a, 's, 'm> {
         initial_medium: usize,
         settings: EnvironmentCameraSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        environment_samples: impl FnMut(u32) -> [f64; 2],
+        facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+        connection_samples: impl FnMut(u32, u32) -> [f64; 3],
+    ) -> Result<EnvironmentCameraSample, EnvironmentCameraError> {
+        self.sample_launched_with_microsurfaces(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            environment_samples,
+            facet_samples,
+            connection_samples,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_with_microsurfaces(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: EnvironmentCameraSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut environment_samples: impl FnMut(u32) -> [f64; 2],
         mut facet_samples: impl FnMut(u32, u32) -> [f64; 3],
         mut connection_samples: impl FnMut(u32, u32) -> [f64; 3],
+        mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
+        mut dielectric_connection_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
     ) -> Result<EnvironmentCameraSample, EnvironmentCameraError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -255,6 +290,7 @@ impl<'v, 'a, 's, 'm> SmithEnvironmentCameraScene<'v, 'a, 's, 'm> {
         let mut receiver = None;
         let mut partition = EndpointPartition::Original;
         let mut source_error = None;
+        let include_dielectric = dielectric_samples.is_some();
         let active = self.source.environment.scale_w_m2_sr_nm > 0.0
             && !self.source.environment.map.is_black();
         let result = camera
@@ -278,7 +314,85 @@ impl<'v, 'a, 's, 'm> SmithEnvironmentCameraScene<'v, 'a, 's, 'm> {
                                 receiver =
                                     SurfaceReceiver::at_arrival(camera, path)?.filter(|_| active);
                                 if let Some(receiving) = receiver {
-                                    let value = if receiving.uses_smith(camera)? {
+                                    let value = if include_dielectric
+                                        && receiving.uses_smith_dielectric(camera)?
+                                    {
+                                        // A rough equal-index interface can mix a
+                                        // straight-through atom and a continuous
+                                        // reflected law. Keep its complete native
+                                        // walk and endpoint, without a mismatched
+                                        // legacy single-scatter source estimate.
+                                        if !receiving
+                                            .supports_smith_dielectric_connections(camera)?
+                                            || !dielectric::any_supported_medium(
+                                                receiving,
+                                                camera,
+                                                path.beam().wavelength_nm(),
+                                            )?
+                                        {
+                                            return Ok(());
+                                        }
+                                        self.source.add_surface_with_response(
+                                            cx,
+                                            path,
+                                            initial_index,
+                                            settings,
+                                            &mut work,
+                                            &mut environment_samples,
+                                            |source| {
+                                                let medium = receiving.directional_source_medium(
+                                                    camera,
+                                                    source.frame.direction(),
+                                                )?;
+                                                if !supports_segment(
+                                                    camera.scene,
+                                                    medium,
+                                                    path.beam().wavelength_nm(),
+                                                )? {
+                                                    return Ok(EnvironmentConnection {
+                                                        normal: source.direction,
+                                                        factor_per_sr: 0.0,
+                                                        medium,
+                                                        comparison_density: 0.0,
+                                                    });
+                                                }
+                                                let guide = dielectric::angular_guide(
+                                                    receiving,
+                                                    camera,
+                                                    source.direction,
+                                                )?;
+                                                let ordinal =
+                                                    path.surface_events().checked_sub(1).ok_or(
+                                                        EnvironmentCameraError::NumericalRange,
+                                                    )?;
+                                                let draws =
+                                                    dielectric_connection_samples.as_mut().ok_or(
+                                                        EnvironmentCameraError::NumericalRange,
+                                                    )?;
+                                                let (normal, factor_per_sr, actual_medium) =
+                                                    receiving
+                                                        .directional_smith_dielectric_response(
+                                                            cx,
+                                                            camera,
+                                                            source.frame,
+                                                            source.stokes,
+                                                            self.microsurface,
+                                                            |facet| draws(ordinal, facet),
+                                                        )?;
+                                                if actual_medium != medium {
+                                                    return Err(
+                                                        EnvironmentCameraError::NumericalRange,
+                                                    );
+                                                }
+                                                Ok(EnvironmentConnection {
+                                                    normal,
+                                                    factor_per_sr,
+                                                    medium,
+                                                    comparison_density: guide,
+                                                })
+                                            },
+                                        )?
+                                    } else if receiving.uses_smith(camera)? {
                                         // An opaque receiver's source leg has
                                         // this exact adjacent medium. Unsupported
                                         // angular maps stay continuation-owned
@@ -366,14 +480,23 @@ impl<'v, 'a, 's, 'm> SmithEnvironmentCameraScene<'v, 'a, 's, 'm> {
                             (|| {
                                 partition = EndpointPartition::Original;
                                 if let Some(receiving) = receiver {
-                                    if receiving.uses_smith(camera)?
-                                        && supports_segment(
-                                            camera.scene,
-                                            path.medium_index(),
-                                            path.beam().wavelength_nm(),
-                                        )?
-                                    {
-                                        partition = EndpointPartition::Smith(receiving);
+                                    if supports_segment(
+                                        camera.scene,
+                                        path.medium_index(),
+                                        path.beam().wavelength_nm(),
+                                    )? {
+                                        if include_dielectric
+                                            && receiving.uses_smith_dielectric(camera)?
+                                        {
+                                            if receiving
+                                                .supports_smith_dielectric_connections(camera)?
+                                            {
+                                                partition =
+                                                    EndpointPartition::Dielectric(receiving);
+                                            }
+                                        } else if receiving.uses_smith(camera)? {
+                                            partition = EndpointPartition::Smith(receiving);
+                                        }
                                     }
                                 }
                                 Ok(())
@@ -394,7 +517,9 @@ impl<'v, 'a, 's, 'm> SmithEnvironmentCameraScene<'v, 'a, 's, 'm> {
                 Some(SmithSurfaceSampler {
                     settings: self.microsurface,
                     samples: &mut facet_samples,
-                    dielectric_samples: None,
+                    dielectric_samples: dielectric_samples
+                        .as_mut()
+                        .map(|samples| &mut **samples as &mut dyn FnMut(u32, u32) -> [f64; 4]),
                 }),
             )
             .map(|(path, _)| path);

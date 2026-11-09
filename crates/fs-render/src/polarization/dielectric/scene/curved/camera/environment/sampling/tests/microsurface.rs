@@ -351,3 +351,5 @@ fn smith_environment_unsupported_absorbing_leg_keeps_continuation_without_light_
         assert!(observed.radiance_sample().radiance_w_m2_sr_nm() > 0.0);
     });
 }
+
+mod dielectric;
