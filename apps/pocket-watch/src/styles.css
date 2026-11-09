@@ -2133,8 +2133,8 @@ html.is-compact #stage-readouts {
   display: none;
 }
 
-/* View menu (floating button + popover) */
-html.is-compact .fab {
+/* View menu (floating button + popover): compact layouts and short landscape screens */
+:is(html.is-compact, html.is-short) .fab {
   display: inline-grid;
   position: absolute;
   z-index: 17;
@@ -2146,7 +2146,7 @@ html.is-compact .fab {
   color: var(--text);
 }
 
-html.is-compact #view-dock {
+:is(html.is-compact, html.is-short) #view-dock {
   z-index: 23;
   left: auto;
   right: calc(var(--safe-r) + var(--edge));
@@ -2166,41 +2166,55 @@ html.is-compact #view-dock {
   background: var(--panel-solid);
 }
 
-html.is-compact #app-shell.view-open #view-dock {
+:is(html.is-compact, html.is-short) #app-shell.view-open #view-dock {
   opacity: 1;
   visibility: visible;
   translate: 0 0;
 }
 
-html.is-compact .seg {
+:is(html.is-compact, html.is-short) .seg {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
 }
 
-html.is-compact .cam-btn {
+:is(html.is-compact, html.is-short) .cam-btn {
   height: 40px;
 }
 
-html.is-compact .dock-sep {
+:is(html.is-compact, html.is-short) .dock-sep {
   width: auto;
   height: 1px;
 }
 
-html.is-compact .field-row {
+:is(html.is-compact, html.is-short) .field-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;
 }
 
-html.is-compact .vec-btn {
+:is(html.is-compact, html.is-short) .vec-btn {
   width: auto;
   height: 42px;
   padding: 0 10px;
   justify-content: flex-start;
 }
 
-html.is-compact .vec-btn span {
+:is(html.is-compact, html.is-short) .vec-btn span {
   display: inline;
+}
+
+/* Short landscape keeps the side inspector, so the menu sits at the stage's right edge, not the screen's. */
+html.is-short .fab,
+html.is-short #view-dock {
+  right: calc(var(--stage-r, var(--edge)) + var(--safe-r));
+  transition-property: opacity, visibility, translate, right;
+}
+
+html.is-short #view-dock {
+  top: calc(var(--topbar-bottom) + 62px);
+  width: min(330px, calc(100vw - var(--stage-r, 0px) - var(--safe-r) - 80px));
+  max-height: calc(100dvh - var(--topbar-bottom) - 70px);
+  overflow-y: auto;
 }
 
 html.is-compact .stage-banner {

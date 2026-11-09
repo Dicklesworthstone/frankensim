@@ -19,6 +19,7 @@ import {
 
 /** Must match the html.is-compact rules in styles.css (short landscape screens stay "wide"). */
 const COMPACT_QUERY = "(max-width: 999px) and (min-height: 561px)";
+const SHORT_QUERY = "(max-height: 560px)";
 const STORE_COACH = "fs-pocket-watch.coach.v1";
 const STORE_QUALITY = "fs-pocket-watch.quality";
 const STORE_INSPECTOR = "fs-pocket-watch.inspector";
@@ -128,6 +129,10 @@ async function boot(): Promise<void> {
   const compactMq = window.matchMedia(COMPACT_QUERY);
   let isCompact = compactMq.matches;
   root.classList.toggle("is-compact", isCompact);
+  // Short landscape (phones on their side) keeps the wide layout but folds the view dock into a menu.
+  const shortMq = window.matchMedia(SHORT_QUERY);
+  let isShort = shortMq.matches;
+  root.classList.toggle("is-short", isShort);
 
   const detectedTier = detectQualityTier();
   const storedQuality = storeGet(STORE_QUALITY);
@@ -509,9 +514,11 @@ async function boot(): Promise<void> {
       insetsTarget.right = inspectorOpen && !theater ? inspector.offsetWidth + edge + 8 : 0;
       const dockH = viewDock.offsetHeight;
       root.style.setProperty("--dock-h", `${dockH}px`);
-      insetsTarget.bottom = theater ? 0 : dockH + 20;
+      // On short screens the dock is a popover menu, so it takes no room at the bottom.
+      insetsTarget.bottom = theater || isShort ? 0 : dockH + 20;
       const cx = insetsTarget.left + (W - insetsTarget.left - insetsTarget.right) / 2;
       root.style.setProperty("--stage-cx", `${Math.round(cx)}px`);
+      root.style.setProperty("--stage-r", `${Math.round(Math.max(insetsTarget.right, edge + 8))}px`);
     }
     // Never let the chrome squeeze the stage below a usable window.
     const minH = H * 0.32;
@@ -568,6 +575,14 @@ async function boot(): Promise<void> {
     layoutDirty = true;
     reframeOnLayout = true;
     updatePerturbationBannerAndBadges();
+  });
+  shortMq.addEventListener("change", () => {
+    isShort = shortMq.matches;
+    root.classList.toggle("is-short", isShort);
+    shell.classList.remove("view-open");
+    setAttr(btnViewMenu, "aria-expanded", "false");
+    layoutDirty = true;
+    reframeOnLayout = true;
   });
 
   const toggleTheaterMode = (): void => {
@@ -736,7 +751,7 @@ async function boot(): Promise<void> {
   };
   btnViewMenu.addEventListener("click", () => {
     const open = !shell.classList.contains("view-open");
-    if (open && sheetState !== "peek") setSheet("peek");
+    if (open && isCompact && sheetState !== "peek") setSheet("peek");
     setViewMenu(open);
   });
   canvasViewport.addEventListener("pointerdown", () => {

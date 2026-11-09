@@ -322,13 +322,17 @@ export class VirtualMicrophoneAudio {
     ctx.fillStyle = "rgba(226, 222, 212, 0.62)";
     ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
     ctx.textBaseline = "top";
-    ctx.fillText(
-      `${this.triggerAt >= 0 ? "TRIG BEAT" : "FREE RUN"} · 2.5 ms/div · mic (${micPosMm[0].toFixed(0)}, ${micPosMm[1].toFixed(0)}, ${micPosMm[2].toFixed(0)}) mm`,
-      8,
-      7,
-    );
+    // The right-hand state tag is drawn first; the left label then drops detail until both fit.
+    const tag = this.active ? (this.outputMode === "worklet" ? "LIVE · WORKLET" : "LIVE · FALLBACK") : "MUTED";
+    const tagW = ctx.measureText(tag).width;
+    const mode = this.triggerAt >= 0 ? "TRIG BEAT" : "FREE RUN";
+    const mic = `mic (${micPosMm[0].toFixed(0)}, ${micPosMm[1].toFixed(0)}, ${micPosMm[2].toFixed(0)}) mm`;
+    const room = W - 16 - tagW - 12;
+    const left =
+      [`${mode} · 2.5 ms/div · ${mic}`, `${mode} · 2.5 ms/div`, mode].find((s) => ctx.measureText(s).width <= room) ?? "";
+    if (left) ctx.fillText(left, 8, 7);
     ctx.textAlign = "right";
-    ctx.fillText(this.active ? (this.outputMode === "worklet" ? "LIVE · WORKLET" : "LIVE · FALLBACK") : "MUTED", W - 8, 7);
+    ctx.fillText(tag, W - 8, 7);
     ctx.textAlign = "left";
   }
 }
