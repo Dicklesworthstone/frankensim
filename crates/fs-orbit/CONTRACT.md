@@ -1032,3 +1032,49 @@ and fs-fft transform owners. Unrelated executor/provenance dependency surfaces
 are excluded, with no substituted numerical methods. This scoped execution
 does not replace a full Cargo/DSR workspace gate; the full dependency build was
 stopped when resource pressure made the execution environment unavailable.
+
+
+## Phase-fixed adaptive conservative QR points
+
+`solve_backbone_adaptive` combines the original conservative rectangular QR
+corrector with measured retained-order refinement. `BackboneRefinementControls`
+bounds Newton work, complete unknown count, payload, residual-grid evaluations
+and estimated conditioning. `AdaptiveBackboneOrbit` returns the final corrected
+physical point, every order's physical refinement check and aggregate
+evaluation/tangent counts.
+
+The supplied complete waveform fixes one normalized Parseval phase hyperplane.
+The selected original state pins `2*abs(X_1)` to its physical amplitude. That
+phase and amplitude stay fixed as orders grow by `min(2H+1,max_harmonics)`; new
+coefficients are zero-prolonged and then actually solved. All original balance
+rows remain. Column-equilibrated Householder QR admits rank/conditioning even at
+residual-zero seeds, without diagonal jitter, normal equations, removed balances
+or artificial damping. Existing phase-free adaptive APIs retain their behavior.
+
+Each candidate is assessed on independent grids using both projection through
+`2H+1` and the complete sampled original time-domain equation. Acceptance requires
+retained/omitted/full physical equation tolerances, sampling agreement, and
+waveform/frequency agreement between two actual solves in the same fixed phase.
+Per-row/state tolerances are absolute in original units; unrelated DC preload or
+amplitude cannot relax them. A retained-row failure refuses immediately.
+Nonlinear aliasing can prevent conservative Newton convergence before its
+ordinary acceptance gate: stalled or weakly decreasing iterates therefore
+request a finer-grid residual check. Only an independently measured sampling
+defect above tolerance promotes that same physical iterate, within the existing
+grid/Newton/global evaluation caps.
+
+Admission reserves correction and assessment payload at every possible order
+before numerical source callbacks. Caller convergence metadata is ignored
+without cloning its arbitrary trace. Declared tangent refusal, rank loss,
+resource exhaustion and cancellation publish no partial orbit. Finite numerical
+convergence does not establish an infinite-tail bound, continuous orbit
+existence, primitive period, branch identity or stability.
+
+Four new tests cover strongly nonlinear cubic/quintic generated harmonics
+against continuous energy-period quadrature and cycle energy; tiny motion under
+extreme state/equation unit changes and large unrelated static preload; global
+budgets/cancellation/source refusal and distinct retained versus omitted
+resolution failure; and rejection of exact-residual seeds with an extra neutral
+family. The 47 relevant existing continuation, coordinate, harmonic-balance,
+autonomous-phase and backbone-sensitivity tests also pass in the original-source
+bounded native lane; this is not a Cargo/workspace/DSR gate.

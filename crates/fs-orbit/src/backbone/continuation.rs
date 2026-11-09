@@ -4,6 +4,9 @@
 
 pub(crate) mod linear;
 
+mod refinement;
+pub use refinement::{AdaptiveBackboneOrbit, BackboneRefinementControls, solve_backbone_adaptive};
+
 use crate::{
     AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, IslandStateJacobian,
     MAX_AFT_REFINEMENTS, OrbitError, OrbitProblem, Packing, TAU, hb_residual, pack_orbit,
@@ -131,7 +134,7 @@ impl Chart {
     fn new(
         d: usize,
         coordinate: usize,
-        seeds: [(f64, &HbOrbit); 2],
+        seeds: &[(f64, &HbOrbit)],
         exact: bool,
         b: &BackboneContinuationBudget,
     ) -> Result<Self> {
@@ -161,13 +164,13 @@ impl Chart {
             || !b.maximum_condition_estimate.is_finite()
             || b.maximum_condition_estimate < 1.0
             || b.maximum_residual_evaluations == 0
-            || seeds[0].0 == seeds[1].0
+            || seeds.is_empty()
         {
             return Err(invalid(
                 "finite complete seeds, coordinate and continuation budgets required",
             ));
         }
-        for (amplitude, seed) in seeds {
+        for &(amplitude, seed) in seeds {
             if !positive(amplitude)
                 || !positive(0.5 * amplitude)
                 || !positive(seed.omega)
@@ -461,11 +464,24 @@ fn correct<P: OrbitProblem, F: FnMut() -> bool>(
     b: &BackboneContinuationBudget,
     step: f64,
 ) -> Result<(Vec<f64>, BackboneContinuationPoint)> {
+    let phase = eval.chart.phase(eval.problem, reference, b)?;
+    correct_with_phase(eval, predictor, constraint, b, step, &phase, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn correct_with_phase<P: OrbitProblem, F: FnMut() -> bool>(
+    eval: &mut Evaluation<'_, P, F>,
+    predictor: &[f64],
+    constraint: Constraint<'_>,
+    b: &BackboneContinuationBudget,
+    step: f64,
+    phase: &PhaseCondition,
+    refine_stalled_sampling: bool,
+) -> Result<(Vec<f64>, BackboneContinuationPoint)> {
     let chart = eval.chart;
     let nc = chart.pack.coeff_len();
     let nz = nc + 1;
     let nr = nc + 2;
-    let phase = chart.phase(eval.problem, reference, b)?;
     let mut z = predictor.to_vec();
     let mut aft = AftWorkspace::new(&chart.pack)?;
     let mut raw = vec![0.0; nc];
@@ -475,7 +491,7 @@ fn correct<P: OrbitProblem, F: FnMut() -> bool>(
     let mut trace = Vec::with_capacity(b.max_newton);
     for _ in 0..b.max_newton {
         eval.eval(&z, &mut aft, &mut raw)?;
-        let r = augmented(eval, &raw, &z, &phase, &constraint);
+        let r = augmented(eval, &raw, &z, phase, &constraint);
         let rn = length(&r);
         trace.push(length(&raw));
         if !rn.is_finite() {
@@ -521,7 +537,7 @@ fn correct<P: OrbitProblem, F: FnMut() -> bool>(
         if rn <= b.tolerance {
             let mut finer = aft.finer(&chart.pack)?;
             eval.eval(&z, &mut finer, &mut plus)?;
-            let checked = augmented(eval, &plus, &z, &phase, &constraint);
+            let checked = augmented(eval, &plus, &z, phase, &constraint);
             let defect = chart.units.difference_norm(&plus, &raw);
             let checked_norm = length(&checked);
             let raw_defect = crate::scaling::length(plus.iter().zip(&raw).map(|(a, b)| a - b));
@@ -580,13 +596,38 @@ fn correct<P: OrbitProblem, F: FnMut() -> bool>(
                 continue;
             }
             eval.eval(&trial, &mut aft, &mut plus)?;
-            if length(&augmented(eval, &plus, &trial, &phase, &constraint)) < rn {
-                accepted = Some(trial);
+            let trial_norm = length(&augmented(eval, &plus, &trial, phase, &constraint));
+            if trial_norm < rn {
+                accepted = Some((trial, trial_norm));
                 break;
             }
         }
+        // A short nonlinear AFT grid can destroy the conservative balance
+        // dependency before Newton reaches its stopping gate. Also inspect
+        // tiny accepted reductions: roundoff can otherwise keep a stalled
+        // coarse-grid iterate taking steps without changing its physical error.
+        // The adaptive point owner promotes only on a MEASURED sampling defect.
+        // Ordinary continuation retains its original decisions and arithmetic.
+        if refine_stalled_sampling
+            && accepted.as_ref().is_none_or(|(_, next)| *next > 0.9 * rn)
+        {
+            let mut finer = aft.finer(&chart.pack)?;
+            eval.eval(&z, &mut finer, &mut plus)?;
+            let defect = chart.units.difference_norm(&plus, &raw);
+            if defect > b.tolerance {
+                if finer.refinement >= MAX_AFT_REFINEMENTS {
+                    return Err(OrbitError::SamplingUnresolved {
+                        samples: finer.samples,
+                        residual: length(&plus),
+                        defect: crate::scaling::length(plus.iter().zip(&raw).map(|(a, b)| a - b)),
+                    }.into());
+                }
+                aft = finer;
+                continue;
+            }
+        }
         match accepted {
-            Some(trial) => z = trial,
+            Some((trial, _)) => z = trial,
             None => {
                 return Err(OrbitError::NewtonStalled {
                     residual: *trace.last().expect("current corrector"),
@@ -695,8 +736,11 @@ pub fn continue_backbone_branch<P: OrbitProblem>(
     if !problem.autonomous() {
         return Err(invalid("an autonomous problem is required"));
     }
+    if seeds[0].0 == seeds[1].0 {
+        return Err(invalid("finite complete seeds, coordinate and continuation budgets required"));
+    }
     let callback = problem.island_state_jacobian();
-    let chart = Chart::new(problem.dim(), coordinate, seeds, callback.is_some(), budget)?;
+    let chart = Chart::new(problem.dim(), coordinate, &seeds, callback.is_some(), budget)?;
     let seed0 = chart.seed(seeds[0].1)?;
     let mut seed1 = chart.seed(seeds[1].1)?;
     let mut eval = Evaluation {

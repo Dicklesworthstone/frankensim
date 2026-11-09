@@ -7,8 +7,9 @@
 
 pub(crate) mod continuation;
 pub use continuation::{
-    BackboneBranch, BackboneContinuationBudget, BackboneContinuationError,
-    BackboneContinuationPoint, continue_backbone_branch,
+    AdaptiveBackboneOrbit, BackboneBranch, BackboneContinuationBudget, BackboneContinuationError,
+    BackboneContinuationPoint, BackboneRefinementControls, continue_backbone_branch,
+    solve_backbone_adaptive,
 };
 
 use core::cell::RefCell;

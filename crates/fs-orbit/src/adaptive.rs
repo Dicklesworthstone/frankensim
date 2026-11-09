@@ -59,7 +59,7 @@ pub struct AdaptiveHbOrbit {
     pub refinement_trace: Vec<HbRefinementCheck>,
 }
 
-fn admit(
+pub(super) fn admit(
     d: usize,
     anchor: HbAnchor,
     hb: &HbBudget,
@@ -385,6 +385,17 @@ fn assess<P: OrbitProblem>(
     orbit: &HbOrbit,
     budget: &HbRefinementBudget,
 ) -> Result<HbRefinementCheck, OrbitError> {
+    assess_with(problem, orbit, budget, |_| Ok::<(), OrbitError>(()))
+}
+
+// The bounded conservative corrector uses the same physical assessment, with
+// its own cancellation and shared source-work allowance at each complete grid.
+pub(super) fn assess_with<P: OrbitProblem, E: From<OrbitError>>(
+    problem: &P,
+    orbit: &HbOrbit,
+    budget: &HbRefinementBudget,
+    mut before_grid: impl FnMut(usize) -> Result<(), E>,
+) -> Result<HbRefinementCheck, E> {
     let n = orbit.coeffs[0].len() - 1;
     let pack = Packing {
         d: orbit.coeffs.len(),
@@ -395,10 +406,12 @@ fn assess<P: OrbitProblem>(
     if aft.samples < orbit.aft_samples {
         aft = AftWorkspace::with_samples(&pack, orbit.aft_samples, 0)?;
     }
+    before_grid(aft.samples)?;
     let mut coarse =
         projected_residual(problem, orbit, &pack, &mut aft, &budget.residual_tolerances);
     loop {
         let mut finer = aft.finer(&pack)?;
+        before_grid(finer.samples)?;
         let fine = projected_residual(
             problem,
             orbit,
@@ -488,14 +501,14 @@ fn assess<P: OrbitProblem>(
                 samples: finer.samples,
                 residual: super::norm(&fine.coefficients).max(full_residual),
                 defect: super::norm(&difference).max(full_defect),
-            });
+            }.into());
         }
         aft = finer;
         coarse = fine;
     }
 }
 
-fn changes(
+pub(super) fn changes(
     old: &HbOrbit,
     new: &HbOrbit,
     anchor: HbAnchor,
