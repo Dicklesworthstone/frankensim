@@ -20,6 +20,7 @@
 
 pub mod absorption;
 pub mod phosphorescence;
+pub mod saturation;
 pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
 pub use phosphorescence::{
     PhosphorescenceAnnihilation, PhosphorescenceReceiver, SingletTripletLimits,
@@ -164,6 +165,9 @@ impl<const M: usize> LuminescenceSource<M> {
 pub struct LuminescenceEnergy<const M: usize> {
     /// Sum of accepted native interval durations, seconds.
     pub duration_s: f64,
+    /// Excitation energy present when this accepted history was initialized.
+    /// The original beam-pumped owner starts unexcited, so this is zero there.
+    pub initial_excitation_j: f64,
     /// Escaped joules in the supplied discrete emission-node order.
     pub escaped_j: [f64; M],
     /// Total radiation produced before propagation, including subsequently
@@ -194,7 +198,8 @@ pub struct LuminescenceEnergy<const M: usize> {
     /// Current total nonthermal excitation store, including both spin states
     /// when singlet/triplet coupling is explicitly bound, joules.
     pub stored_excitation_j: f64,
-    /// Absorbed pump minus escape, unresolved light, all heat and excitation.
+    /// Initial excitation plus absorbed pump minus escape, unresolved light,
+    /// all heat and final excitation.
     pub residual_j: f64,
     /// Sum of absolute local energy defects over the accepted history.
     pub absolute_roundoff_j: f64,
@@ -213,6 +218,7 @@ struct Cell<const N: usize> {
 
 #[derive(Clone, Debug)]
 struct Accounts<const N: usize, const M: usize> {
+    initial_excitation_j: f64,
     duration: CheckedSum,
     incident: [CheckedSum; N],
     transmitted: [CheckedSum; N],
@@ -235,6 +241,7 @@ struct Accounts<const N: usize, const M: usize> {
 impl<const N: usize, const M: usize> Default for Accounts<N, M> {
     fn default() -> Self {
         Self {
+            initial_excitation_j: 0.0,
             duration: CheckedSum::default(),
             incident: [CheckedSum::default(); N],
             transmitted: [CheckedSum::default(); N],
@@ -1013,6 +1020,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
     ) -> Result<(OpticalEnergyBudget<N>, LuminescenceEnergy<M>), OpticalHeatingError> {
         let mut energy = LuminescenceEnergy {
             duration_s: self.duration.value()?,
+            initial_excitation_j: self.initial_excitation_j,
             escaped_j: [0.0; M],
             emitted_j: [0.0; M],
             unresolved_radiation_j: [0.0; M],
@@ -1050,6 +1058,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             thermal_input_j: heat.value()?,
         };
         let mut balance = CheckedSum::default();
+        balance.add(self.initial_excitation_j)?;
         for lane in 0..N {
             pump.incident_j[lane] = self.incident[lane].value()?;
             pump.transmitted_j[lane] = self.transmitted[lane].value()?;

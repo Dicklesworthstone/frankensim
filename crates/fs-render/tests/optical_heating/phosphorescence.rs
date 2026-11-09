@@ -158,6 +158,30 @@ fn partition(heating: &Heating) {
 }
 
 #[test]
+fn g0_native_rates_preserve_quenching_below_the_radiative_yield_ulp() {
+    let quenching = ArrheniusQuenching::try_new(1e-18, 0.0).unwrap();
+    let singlet = singlet().with_quenching(quenching);
+    let triplet = source(600.0, 1.0, 1.0, [0.0, 1.0], 184).with_quenching(quenching);
+    for emitter in [&singlet, &triplet] {
+        let decay = emitter.decay_at_temperature(300.0).unwrap();
+        assert_eq!(decay.quantum_yield(), 1.0);
+        assert_eq!(decay.nonradiative_yield(), 1e-18);
+    }
+    let coupling = SingletTripletSource::try_new(
+        triplet,
+        0.0,
+        ArrheniusQuenching::try_new(0.0, 0.0).unwrap(),
+        SingletTripletLimits::default(),
+    )
+    .unwrap();
+    let native = coupling.model_at_temperature(&singlet, 300.0).unwrap();
+    assert_eq!(native.radiative_rates_s(), [1.0; 2]);
+    // Reconstructing these rates as 1 - quantum_yield would silently turn
+    // both positive heat channels into zero despite explicit quenching data.
+    assert_eq!(native.nonradiative_rates_s(), [1e-18; 2]);
+}
+
+#[test]
 fn g1_intersystem_crossing_uses_two_populations_and_the_physical_energy_gap() {
     with_cx(|cx| {
         let (thermal, heating) = setup(cx, singlet());
@@ -424,6 +448,8 @@ mod material_rates {
     use std::sync::Arc;
 
     const HC_J_NM: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
+
+    include!("saturation_material.rs");
 
     fn claims() -> Vec<PropertyClaim> {
         [
@@ -745,9 +771,11 @@ mod material_rates {
 #[test]
 fn g1_sub_ulp_quenching_reaches_the_phosphorescence_heat_account() {
     with_cx(|cx| {
-        let source = singlet()
-            .with_quenching(ArrheniusQuenching::try_new(1e-18, 0.0).unwrap());
-        assert_eq!(source.decay_at_temperature(300.0).unwrap().quantum_yield(), 1.0);
+        let source = singlet().with_quenching(ArrheniusQuenching::try_new(1e-18, 0.0).unwrap());
+        assert_eq!(
+            source.decay_at_temperature(300.0).unwrap().quantum_yield(),
+            1.0
+        );
         let (thermal, heating) = setup(cx, source);
         let heating = coupled(heating, &thermal, triplet(), [0.0; 2]);
         let (_, accepted, _) = thermal

@@ -223,3 +223,7 @@ required-features = ["chart-backends"]
 [[example]]
 name = "coherent_pupil"
 required-features = ["chart-backends"]
+
+[[example]]
+name = "saturable_afterglow"
+required-features = ["optical-heating"]

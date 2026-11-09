@@ -117,6 +117,96 @@ impl<const M: usize> SingletTripletSource<M> {
         }
     }
 
+    /// Numerical work and accuracy limits for the native excitation evolution.
+    pub const fn evolution_limits(&self) -> SingletTripletLimits {
+        self.limits
+    }
+
+    /// Identity of the authored crossing law or original material selection.
+    /// Spectral descriptors and intrinsic decay remain the caller's separate
+    /// source inputs; this identity alone does not confer measurement authority.
+    pub fn rate_source_identity(&self) -> ContentHash {
+        let mut hash = DomainHasher::new("org.frankensim.render.phosphorescence-rate-source.v1");
+        match &self.rates {
+            RateLaw::Intrinsic {
+                forward_crossing_s,
+                reverse_crossing,
+            } => {
+                hash.update(&[0]);
+                for value in [
+                    *forward_crossing_s,
+                    reverse_crossing.prefactor_rate_s(),
+                    reverse_crossing.activation_energy_j(),
+                ] {
+                    hash.update(&value.to_bits().to_le_bytes());
+                }
+            }
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(source) => {
+                hash.update(&[1]);
+                hash.update(source.identity.as_bytes());
+            }
+        }
+        hash.finalize()
+    }
+
+    /// Resolve the shared constitutive rates at an actual thermal temperature.
+    /// Both dilute pumping and finite-ground-population pumping use this same
+    /// source, including original material claims when explicitly bound.
+    /// This query changes no excitation history; coefficients are fixed over
+    /// the caller's accepted interval.
+    pub fn model_at_temperature(
+        &self,
+        singlet: &LuminescenceSource<M>,
+        temperature_k: f64,
+    ) -> Result<SingletTripletDecay, OpticalHeatingError> {
+        self.admit_singlet(singlet)?;
+        singlet.check_temperature(temperature_k)?;
+        self.triplet.check_temperature(temperature_k)?;
+        #[cfg(feature = "material-state")]
+        if let RateLaw::Material(source) = &self.rates {
+            return source.model_at_temperature(temperature_k);
+        }
+        let (forward_crossing_s, reverse_crossing) = match &self.rates {
+            RateLaw::Intrinsic {
+                forward_crossing_s,
+                reverse_crossing,
+            } => (*forward_crossing_s, *reverse_crossing),
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(_) => unreachable!("material rate dispatch returned above"),
+        };
+        let decays = [
+            singlet.decay_at_temperature(temperature_k)?,
+            self.triplet.decay_at_temperature(temperature_k)?,
+        ];
+        let mut radiative = [0.0; 2];
+        let mut nonradiative = [0.0; 2];
+        for (i, decay) in decays.iter().enumerate() {
+            radiative[i] = rate_power(1.0, decay.quantum_yield(), decay.lifetime_s())?;
+            nonradiative[i] = rate_power(1.0, decay.nonradiative_yield(), decay.lifetime_s())?;
+            if (decay.quantum_yield() > 0.0 && radiative[i] == 0.0)
+                || (decay.nonradiative_yield() > 0.0 && nonradiative[i] == 0.0)
+            {
+                return Err(invalid(
+                    "positive singlet/triplet removal rate is below representation",
+                ));
+            }
+        }
+        let reverse = reverse_crossing
+            .rate_at_temperature(temperature_k)
+            .map_err(|_| invalid("unrepresentable reverse intersystem crossing rate"))?;
+        SingletTripletDecay::try_new(
+            [
+                HC_J_NM / singlet.excitation_wavelength_nm(),
+                HC_J_NM / self.triplet.excitation_wavelength_nm(),
+            ],
+            radiative,
+            nonradiative,
+            [forward_crossing_s, reverse],
+        )
+        .map_err(|_| invalid("invalid singlet/triplet rates or energies"))
+    }
+
     fn admit_singlet(&self, singlet: &LuminescenceSource<M>) -> Result<(), OpticalHeatingError> {
         if let Some(expected) = &self.expected_singlet {
             if singlet != expected {
@@ -375,44 +465,7 @@ impl<const M: usize> SingletTripletFeedback<M> {
             cache.models.insert(key, model);
             return Ok(model);
         }
-        let (forward_crossing_s, reverse_crossing) = match &self.source.rates {
-            RateLaw::Intrinsic {
-                forward_crossing_s,
-                reverse_crossing,
-            } => (*forward_crossing_s, *reverse_crossing),
-            #[cfg(feature = "material-state")]
-            RateLaw::Material(_) => unreachable!("material rate dispatch returned above"),
-        };
-        let decays = [
-            singlet.decay_at_temperature(temperature_k)?,
-            self.source.triplet.decay_at_temperature(temperature_k)?,
-        ];
-        let mut radiative = [0.0; 2];
-        let mut nonradiative = [0.0; 2];
-        for (i, decay) in decays.iter().enumerate() {
-            radiative[i] = rate_power(1.0, decay.quantum_yield(), decay.lifetime_s())?;
-            nonradiative[i] = rate_power(1.0, decay.nonradiative_yield(), decay.lifetime_s())?;
-            if (decay.quantum_yield() > 0.0 && radiative[i] == 0.0)
-                || (decay.nonradiative_yield() > 0.0 && nonradiative[i] == 0.0)
-            {
-                return Err(invalid(
-                    "positive singlet/triplet removal rate is below representation",
-                ));
-            }
-        }
-        let reverse = reverse_crossing
-            .rate_at_temperature(temperature_k)
-            .map_err(|_| invalid("unrepresentable reverse intersystem crossing rate"))?;
-        SingletTripletDecay::try_new(
-            [
-                HC_J_NM / singlet.excitation_wavelength_nm(),
-                HC_J_NM / self.source.triplet.excitation_wavelength_nm(),
-            ],
-            radiative,
-            nonradiative,
-            [forward_crossing_s, reverse],
-        )
-        .map_err(|_| invalid("invalid singlet/triplet rates or energies"))
+        self.source.model_at_temperature(singlet, temperature_k)
     }
 
     pub(super) fn advance(
@@ -517,7 +570,7 @@ fn sum(values: [f64; 2]) -> Result<f64, OpticalHeatingError> {
     total.value()
 }
 
-fn preserve_checkpoint<T>(
+pub(super) fn preserve_checkpoint<T>(
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<T, SingletTripletError>,
 ) -> Result<T, OpticalHeatingError> {
