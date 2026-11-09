@@ -19,6 +19,8 @@ use crate::state_point::{
 use fs_math::det;
 use std::sync::Arc;
 
+/// Free-sided narrow-strip reduction with thermal curvature and layer recovery.
+pub mod beam;
 /// Thermal loading and recovery with explicitly admitted material history.
 pub mod history;
 /// Source-bound elastic snapshots at one admitted temperature per layer.
