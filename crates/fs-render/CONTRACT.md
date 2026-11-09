@@ -5070,6 +5070,17 @@ and absorption over the actual distance inside each glass. Cumulative Stokes
 transport retains interface-generated polarization when computing unpolarized
 direct-image transmission. It does not multiply independent Fresnel averages.
 
+`SequentialLens::paraxial_focus_at` evaluates the same reduced-angle matrix at
+any wavelength in the complete original lens band, returning sensor-side
+effective focal length and real object focus measured from the sensor.
+`reference_focus` delegates at the retained reference wavelength. Phase-index
+knots need no group derivative; chromatic queries do not refocus the camera.
+The result describes direct paraxial geometry; coating phase, finite-aperture
+aberrations and diffraction remain outside that diagnostic. Afocal/diverging
+and virtual-object results refuse. Focused regressions compare independent
+thick-lens formulas and exact near-axis Snell rays in vacuum and dispersive
+immersion media, plus spectral support and phase-only knot behavior.
+
 `LensSurface::with_coating` binds the existing coherent dielectric coating
 owner at each physical hit, with layers explicitly ordered sensor to scene.
 Its original Fresnel/Mueller response retains spectral interference, s/p phase

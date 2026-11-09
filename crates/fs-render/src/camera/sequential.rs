@@ -590,12 +590,39 @@ impl SequentialLens {
     /// Afocal/diverging systems or a virtual focus cannot attach to the
     /// current positive-focus camera, but remain usable through `trace_ray`.
     pub fn reference_focus(&self) -> Result<(f64, f64), CameraError> {
+        self.paraxial_focus_at(self.reference_wavelength_nm)
+    }
+
+    /// Sensor-side effective focal length and axial object focus, in metres,
+    /// at an explicitly admitted vacuum wavelength. The object focus is
+    /// measured from the sensor, not from the last vertex or a principal plane.
+    /// Differences between wavelengths expose longitudinal chromatic aberration
+    /// without changing the prescription's reference focus or tracing probe rays.
+    ///
+    /// This uses the original phase indices of every bulk medium, including
+    /// both exteriors, with the reduced-angle coordinates `(height, n*angle)`.
+    /// It needs no group index or spectral derivative, so an admitted tabulated
+    /// phase-index knot remains usable even when its derivative is undefined.
+    /// The complete lens wavelength band, including attached coatings, applies.
+    ///
+    /// This is the paraxial direct-image limit. Aperture clipping, finite-angle
+    /// aberrations, coating phase, ghosts and diffraction do not alter this
+    /// geometric focus. Afocal/diverging systems, virtual object focus and
+    /// unrepresentable results refuse with `SequentialLensOutsideModel`, as
+    /// they do for [`Self::reference_focus`]. Exact rays retain their own model.
+    pub fn paraxial_focus_at(&self, wavelength_nm: f64) -> Result<(f64, f64), CameraError> {
+        let (lo, hi) = self.wavelength_bounds_nm;
+        if !wavelength_nm.is_finite()
+            || wavelength_nm <= 0.0
+            || wavelength_nm < lo
+            || wavelength_nm > hi
+        {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
         let (mut a, mut b, mut c, mut d) = (1.0, 0.0, 0.0, 1.0);
         let sensor_index = self
             .sensor_medium
-            .map_or(Ok(1.0), |glass| {
-                glass.ior().eval(self.reference_wavelength_nm)
-            })
+            .map_or(Ok(1.0), |glass| glass.ior().eval(wavelength_nm))
             .map_err(|_| CameraError::SequentialLensOutsideModel)?;
         let (mut z, mut n) = (0.0, sensor_index);
         for surface in self.surfaces() {
@@ -604,9 +631,7 @@ impl SequentialLens {
             b += travel * d;
             let next = surface
                 .medium_after
-                .map_or(Ok(1.0), |glass| {
-                    glass.ior().eval(self.reference_wavelength_nm)
-                })
+                .map_or(Ok(1.0), |glass| glass.ior().eval(wavelength_nm))
                 .map_err(|_| CameraError::SequentialLensOutsideModel)?;
             let power = (n - next) * surface.curvature_per_m;
             c += power * a;

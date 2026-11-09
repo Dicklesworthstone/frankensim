@@ -400,3 +400,145 @@ fn group_derivatives_are_opt_in_and_final_exterior_transit_belongs_to_the_scene(
         );
     });
 }
+
+
+#[test]
+fn spectral_paraxial_focus_matches_independent_thick_lens_and_exact_rays() {
+    with_cx(|cx, _| {
+        for immersed in [false, true] {
+            let [sensor, interior, scene] = if immersed {
+                [[1.1, 0.003], [1.8, 0.01], [1.3, 0.002]]
+            } else {
+                [[1.0, 0.0], [1.48, 0.006], [1.0, 0.0]]
+            };
+            let lens = lens(
+                immersed.then(|| cauchy(sensor[0], sensor[1], 0.0)),
+                cauchy(interior[0], interior[1], 0.0),
+                immersed.then(|| cauchy(scene[0], scene[1], 0.0)),
+            );
+            let original = lens.reference_focus().unwrap();
+            assert_eq!(original, lens.paraxial_focus_at(550.0).unwrap());
+            let mut focuses = [0.0; 2];
+            for (i, wavelength) in [450.0_f64, 650.0].into_iter().enumerate() {
+                let inv_um2 = 1.0 / (wavelength * 1e-3).powi(2);
+                // Independent thick-lens formula in reduced-angle coordinates.
+                // All three original Cauchy laws vary at the same vacuum wavelength.
+                let ns = sensor[0] + sensor[1] * inv_um2;
+                let ng = interior[0] + interior[1] * inv_um2;
+                let nc = scene[0] + scene[1] * inv_um2;
+                let p1 = (ng - ns) * 20.0;
+                let p2 = (ng - nc) * 20.0;
+                let power = p1 + p2 - 0.01 * p1 * p2 / ng;
+                let b = (0.08 / ns) * (1.0 - 0.01 * p1 / ng) + 0.01 / ng;
+                let d = 1.0 - p1 * 0.08 / ns - p2 * b;
+                let predicted = lens.paraxial_focus_at(wavelength).unwrap();
+                near(predicted.0, ns / power, 3e-14);
+                near(predicted.1, 0.09 - nc * b / d, 3e-14);
+                // The native exact spherical intersections and Snell rays are
+                // independent of the paraxial matrix used by the new query.
+                let exact = |sensor_x, slope| {
+                    lens.trace_ray(
+                        cx,
+                        Ray {
+                            origin: Point3::new(sensor_x, 0.0, 0.0),
+                            dir: Vec3::new(slope, 0.0, 1.0),
+                        },
+                        wavelength,
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .ray
+                };
+                let axial = exact(0.0, 1e-7);
+                near(
+                    axial.origin.z - axial.origin.x * axial.dir.z / axial.dir.x,
+                    predicted.1,
+                    3e-9,
+                );
+                // A parallel off-axis input measures C=-power. Conversion to
+                // sensor-side EFL requires ns/nc, even in an immersed system.
+                let height = 1e-7;
+                let parallel = exact(height, 0.0);
+                near(
+                    -ns * height * parallel.dir.z / (nc * parallel.dir.x),
+                    predicted.0,
+                    3e-9,
+                );
+                focuses[i] = predicted.1;
+            }
+            assert!(focuses[0] < focuses[1] - 1e-3);
+            assert_eq!(lens.reference_focus().unwrap(), original);
+            assert_eq!(lens.reference_wavelength_nm(), 550.0);
+        }
+    });
+}
+
+#[test]
+fn spectral_paraxial_focus_admits_phase_knots_without_inventing_group_derivatives() {
+    let ior = TabulatedIor::try_new_in_band(
+        core::array::from_fn(|i| {
+            let nm = 450.0 + 25.0 * i as f64;
+            let index = 1.7 + 0.002 * i as f64 + if i == 4 { 0.01 } else { 0.0 };
+            DielectricIorSample::try_new_in_band(nm, index).unwrap()
+        }),
+        25.0,
+    )
+    .unwrap();
+    let material = DielectricGlass::new(
+        ior,
+        BeerLambertAbsorption::CLEAR,
+        GlassProvenance::Custom,
+    );
+    assert!(material.ior().group_index(550.0).is_err());
+    let lens = lens(None, material, None);
+    assert_eq!(lens.wavelength_bounds_nm(), (450.0, 650.0));
+    for wavelength in [450.0, 550.0, 650.0] {
+        let (focal, focus) = lens.paraxial_focus_at(wavelength).unwrap();
+        assert!(focal > 0.0 && focus > 0.09);
+    }
+    for wavelength in [
+        450.0_f64.next_down(),
+        650.0_f64.next_up(),
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+    ] {
+        assert_eq!(
+            lens.paraxial_focus_at(wavelength),
+            Err(CameraError::SequentialLensOutsideModel)
+        );
+    }
+}
+
+#[test]
+fn spectral_paraxial_focus_refuses_zero_power_and_virtual_objects() {
+    let stop = SequentialLens::try_new(550.0, &[surface(0.02, 0.0, None)]).unwrap();
+    // A planar window bends off-axis rays but has no finite focal length.
+    let window = SequentialLens::try_new(
+        550.0,
+        &[
+            surface(0.02, 0.0, Some(glass(1.5, 0.0))),
+            surface(0.03, 0.0, None),
+        ],
+    )
+    .unwrap();
+    // This converging element is too close to the sensor for a real object
+    // conjugate. It remains usable for direct exact rays, as before.
+    let virtual_object = SequentialLens::try_new(
+        550.0,
+        &[
+            surface(0.01, 20.0, Some(glass(1.5, 0.0))),
+            surface(0.02, -20.0, None),
+        ],
+    )
+    .unwrap();
+    for lens in [stop, window, virtual_object] {
+        for wavelength in [450.0, 550.0, 650.0] {
+            assert_eq!(
+                lens.paraxial_focus_at(wavelength),
+                Err(CameraError::SequentialLensOutsideModel)
+            );
+        }
+    }
+}
