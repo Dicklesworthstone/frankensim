@@ -11,6 +11,8 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::{Coo, Csr};
 
+pub(crate) mod poles;
+
 /// Dense admission counts every free pressure, wall displacement/velocity and
 /// Maxwell coordinate. Original sparse forms and lifted fields are additional.
 #[derive(Clone, Copy, Debug)]

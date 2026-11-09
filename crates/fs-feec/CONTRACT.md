@@ -2809,3 +2809,43 @@ heat-source, volume-source and two-fluid interface paths. Complete state/port
 admission refuses oversized models instead of truncating source material history.
 The source owner remains responsible for its original validity band and for
 excluding these branches from its instantaneous loss model.
+
+## Free damped cavity and mechanical-wall resonances
+
+`PreparedMechanicalHarmonic::resonance_pole` and `resonance_spectrum` query the
+same full physical pressure/wall/Maxwell polynomial used by native forced
+response: `T(s) = A0 + s*A1 + s^2*A2` under `exp(s*t)`. Original heterogeneous
+fluid mass/stiffness, real-Robin dissipation, consistent wall trace inertia,
+reciprocal pressure work, and every original Maxwell extension remain present.
+No wall impedance or material-memory denominator is inverted; an isolated
+material relaxation rate remains available when its original full state is a
+mode. The reference real frequency required to prepare the existing harmonic
+owner changes only fixed numerical equilibration, not these coefficients.
+
+Local refinement and contour discovery use only the existing shared `fs-la`
+Newton/Beyn owners. Physical seeds follow free pressure and then each wall's
+original displacement, velocity and Maxwell-extension blocks. Results lift
+pressure-release coordinates to exact zeros and retain displacement, velocity,
+original Maxwell memory and extension at one arbitrary common modal amplitude.
+Each original free equation passes an independently evaluated, coefficient-row
+backward residual using double-double sums. The returned signed rate is not
+clipped; pure real relaxation and modes invisible to a pressure observer are
+retained without assigning them a forced peak or a half-power Q.
+
+Shared solver limits cover numerical dimension, work and payload. Separate
+`MechanicalPoleLimits` bound sparse callback/audit evaluations and callback plus
+result payload, and set the original-row residual tolerance. Cancellation and
+any refused mode publish no partial spectrum or accepted-state mutation.
+
+These are numerical modes of the admitted finite spatial/material realization.
+Nested contour quadrature, count and rank agreement do not prove continuum
+completeness. Exact zero-rate pressure/gauge classification is excluded, and
+the requested contour must exclude zero. Repeated or defective roots may
+refuse through the common solver. This route neither extrapolates a measured
+material validity domain nor certifies experimental decay or receiver audibility.
+
+Focused G1/G3/G4 tests specify a manufactured coupled cavity/Maxwell decay,
+reference-frequency invariance, an exact unobservable equal-time memory pole,
+source-independent contour discovery, budgets and cancellation. The public FE
+adapter is checked against independent P1 tetrahedron volume and surface
+integrals with pressure-release constraints and material-dependent Robin decay.

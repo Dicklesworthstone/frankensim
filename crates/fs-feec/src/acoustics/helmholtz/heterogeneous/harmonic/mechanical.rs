@@ -22,6 +22,13 @@ pub use frequency::coupled::{
 use fs_phs::RelaxationBranch;
 use fs_phs::harmonic::resonance::{ResonanceSearchError, survey_resonances};
 
+mod poles;
+pub use poles::{
+    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
+    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions,
+};
+
 /// Original acoustic pressure together with every distributed causal wall state.
 #[derive(Clone, Debug)]
 pub struct MechanicalHarmonicField {

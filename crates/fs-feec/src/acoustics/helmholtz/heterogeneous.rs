@@ -40,6 +40,9 @@ use fs_sparse::{Coo, Csr};
 
 mod harmonic;
 pub use harmonic::{
+    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
+    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions,
     BoundaryAdmittance, BoundaryAdmittanceFrequencySample, HarmonicLimits,
     HeterogeneousFrequencyResponse, HeterogeneousPressureField, MAX_HARMONIC_DOFS,
     MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,

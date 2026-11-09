@@ -16,6 +16,9 @@ pub use dispersive::BoundaryAdmittanceFrequencySample;
 mod frequency;
 mod mechanical;
 pub use mechanical::{
+    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
+    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions,
     MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
     MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
     PreparedMechanicalHarmonic,
