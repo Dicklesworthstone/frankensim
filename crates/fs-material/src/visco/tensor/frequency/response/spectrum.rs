@@ -9,6 +9,9 @@ use crate::visco::prony_spectrum::PronySpectrumWeights;
 use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
 use fs_math::{c64::C64, dd::Dd};
 
+mod causal;
+pub use causal::{TensorPronyCausalHarmonicPoint, TensorPronyCausalSpectrumWindow};
+
 /// Bounded authored positive-frequency lines, including equal-frequency entries.
 pub const MAX_HARMONIC_MATERIAL_LINES: usize = MAX_SPECTRUM_LINES;
 

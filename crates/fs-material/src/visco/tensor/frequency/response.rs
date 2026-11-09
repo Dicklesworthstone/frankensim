@@ -9,7 +9,8 @@ mod window;
 pub use window::{TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint};
 mod spectrum;
 pub use spectrum::{
-    MAX_HARMONIC_MATERIAL_LINES, TensorPronyHarmonicSpectrum, TensorPronySpectrumWindow,
+    MAX_HARMONIC_MATERIAL_LINES, TensorPronyCausalHarmonicPoint, TensorPronyCausalSpectrumWindow,
+    TensorPronyHarmonicSpectrum, TensorPronySpectrumWindow,
 };
 
 fn invalid() -> ViscoError {

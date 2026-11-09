@@ -34,6 +34,20 @@ fn project_parts(row: &[f64; 6], strain: &StrainParts, spectrum: Spectrum) -> Ch
 
 impl HarmonicEnergySpectrum {
     pub(crate) fn new(frequencies: &[f64], window: HarmonicWindow) -> Result<Self, WindowError> {
+        Self::at_clock(frequencies, window, Dd::from_f64(window.start_s()))
+    }
+
+    pub(crate) fn new_at_clock(
+        frequencies: &[f64], start_s: Dd, duration_s: f64,
+    ) -> Result<Self, WindowError> {
+        if !start_s.hi.is_finite() || !start_s.lo.is_finite() {
+            return Err(WindowError::InvalidWindow);
+        }
+        let start_s = Dd::from_pair(start_s.hi, start_s.lo);
+        Self::at_clock(frequencies, HarmonicWindow::new(start_s.hi, duration_s)?, start_s)
+    }
+
+    fn at_clock(frequencies: &[f64], window: HarmonicWindow, start_s: Dd) -> Result<Self, WindowError> {
         if frequencies.len() > MAX_SPECTRUM_LINES {
             return Err(WindowError::Unrepresentable);
         }
@@ -43,7 +57,21 @@ impl HarmonicEnergySpectrum {
         let mut means = Vec::with_capacity(frequencies.len());
         for &omega in frequencies {
             // Same separated clock/width rotations as the single-tone owner.
-            let temporal = HarmonicEnergyWindow::new(omega, window)?;
+            let mut temporal = HarmonicEnergyWindow::new(omega, window)?;
+            if start_s.lo != 0.0 {
+                // The accepted state clock keeps a short previous interval in
+                // its low word. Reuse the original separated width rotations.
+                let w = Dd::from_f64(omega);
+                let half_width = if omega.abs() >= window.duration_s() {
+                    (w * Dd::from_f64(0.5)) * Dd::from_f64(window.duration_s())
+                } else {
+                    w * (Dd::from_f64(window.duration_s()) * Dd::from_f64(0.5))
+                };
+                let half = phase(half_width)?;
+                temporal.start = phase(w * start_s)?;
+                temporal.center = phase_product(temporal.start, half);
+                temporal.end = phase_product(temporal.center, half);
+            }
             start.push(temporal.start);
             center.push(temporal.center);
             end.push(temporal.end);

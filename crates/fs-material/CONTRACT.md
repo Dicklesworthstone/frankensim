@@ -23532,3 +23532,36 @@ density. Transport correlation validity remains with the caller. Focused
 regressions specify both phase directions, original-surface equivalence, exact
 stagnant parity, independent sealed heat and invalid-input atomicity. The
 session could review these sources but could not compile or execute the tests.
+
+## Original Maxwell history under coherent harmonic forcing
+
+`TensorPronyHarmonicSpectrum::prepare_causal_window` and its DD-clock variant
+drive an existing `TensorPronyState` over a uniform physical interval. The
+candidate preserves the original raw-Mandel Maxwell spring-strain inventory
+and cumulative ledgers, returning endpoint strain, stress and memory together
+with independently integrated original-tensor stress work, Gram-channel heat
+and direct stored-energy change. A nonzero constant strain does not erase or
+artificially relax supplied memory.
+
+Start strain must be continuous and cached initial storage must agree with
+the original constitutive energy within scale-aware roundoff. The original
+AC/DC applicability and complete coherent strain-envelope admission apply.
+Law, branch ordering, temperature and reference configuration remain fixed.
+The public material state does not establish source identity; its owner must
+retain the same law. This is prescribed full-tensor forcing, with no constrained
+plane-stress startup or band-limited transient claim.
+
+Shared causal moments retain normalized DD clocks, short-interval ODE
+coefficients and positive heat accumulation; unresolved positive energy is
+explicitly refused. The existing equilibrium/Kelvin temporal cache retains the
+same source clock. Prepared temporal payload and per-point work have explicit
+bounds, including fixed point scratch; endpoint history is transactional.
+Seven G1/G3/G4 regression tests specify anisotropic retained memory against
+independent real ODE integration, native time-domain continuation, tiny startup
+heat, free relaxation, settled parity, chained clocks, large constitutive
+scales and refusal atomicity. Original branch-state queries also contract
+stress work against original tensor columns, avoiding six redundant queries
+and an unused stress-square overflow per branch.
+The new causal source/tests were not native-compiled or executed because the
+execution environment became unavailable; earlier settled tests do not prove
+this new path.

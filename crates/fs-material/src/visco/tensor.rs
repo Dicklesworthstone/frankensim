@@ -30,6 +30,7 @@ pub(crate) use frequency::HarmonicWorkSum;
 pub use frequency::{
     MAX_HARMONIC_MATERIAL_LINES, NormalStressHarmonic, PlaneStressHarmonic,
     PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow,
+    TensorPronyCausalHarmonicPoint, TensorPronyCausalSpectrumWindow,
     TensorPronyFrequencyDerivative, TensorPronyHarmonic, TensorPronyHarmonicBranch,
     TensorPronyHarmonicPoint, TensorPronyHarmonicSpectrum, TensorPronyHarmonicWindow,
     TensorPronyHarmonicWindowPoint, TensorPronySpectrumWindow,

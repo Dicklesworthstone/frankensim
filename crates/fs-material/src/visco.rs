@@ -61,7 +61,8 @@ pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{
     MAX_HARMONIC_MATERIAL_LINES, Mandel6, NormalStressHarmonic, PlaneStressHarmonic,
     PlaneStressHarmonicSpectrum, PlaneStressSpectrumWindow, PronyBranch,
-    TensorProny, TensorPronyFrequencyDerivative, TensorPronyHarmonic, TensorPronyHarmonicBranch,
+    TensorProny, TensorPronyCausalHarmonicPoint, TensorPronyCausalSpectrumWindow,
+    TensorPronyFrequencyDerivative, TensorPronyHarmonic, TensorPronyHarmonicBranch,
     TensorPronyHarmonicPoint, TensorPronyHarmonicSpectrum, TensorPronyHarmonicWindow,
     TensorPronyHarmonicWindowPoint, TensorPronySpectrumWindow, TensorPronyState,
 };
