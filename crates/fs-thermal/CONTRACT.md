@@ -2918,6 +2918,20 @@ their original unclassified status; an opted-in advection entropy account keeps
 its own flow/mixing semantics. The adaptive step-doubling path does not accept
 observed source owners; original endpoint laws below remain supported.
 
+`advance_sdirk2_observed_to` on the chain and graph connects those same physical
+source owners to the original two-stage SDIRK solver. The complete fixed-cell
+boundary-event window is admitted before observer preparation. Each attempted
+interval supplies its accepted-start sources, conservative transfers and
+whole-interval mean heat to both native stages. Their positive quadrature
+weights account for that physical heat once. The intermediate stage never
+publishes observer history; the accepted endpoint invokes `step` once.
+Nonlinear retries reprepare the actual shorter interval without restarting
+the observer's work budget. Source CFL restrictions and exact transitions
+remain active alongside the native energy, entropy and cancellation gates.
+Holding state-dependent source or transfer feedback at the accepted start can
+reduce the coupled method to first order; this entry does not infer a source
+Jacobian, strong coupling or adaptive observer-history control.
+
 `ImplicitConductionChain::with_heat_sources` and the graph attachment admit
 immutable local `ImplicitHeatSourceLaw` objects bound to the original caloric
 owner of each selected cell. Each law supplies signed total cell power [W] and
