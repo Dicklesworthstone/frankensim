@@ -1,6 +1,7 @@
 //! Native time refinement of radial history and reversing thermal transport.
 
 mod drive;
+mod equipment;
 mod feedback;
 mod head_laws;
 

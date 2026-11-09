@@ -70,6 +70,7 @@ fn drive(original: &Arc<Equipment>, source: &TransientCarreauGraph) -> RegionalC
                 viscosity,
             },
         )))]),
+        branch_heat_destinations: None,
     }
 }
 fn heated(
@@ -342,6 +343,7 @@ fn g1_an_empty_equipment_roster_does_not_spend_an_equipment_budget() {
                     injections: vec![],
                     branch_heads: None,
                     branch_head_laws: Some(vec![None]),
+                    branch_heat_destinations: None,
                 })
             },
             |_, _, flow, _| Ok::<_, ()>(exchange(flow, 300.0)),
@@ -500,6 +502,7 @@ fn g4_original_native_thermal_substep_limit_applies_to_the_whole_requested_windo
                     injections: vec![],
                     branch_heads: None,
                     branch_head_laws: None,
+                    branch_heat_destinations: None,
                 })
             },
             |_, _, flow, _| Ok::<_, ()>(exchange(flow, 300.0)),

@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 
+use super::equipment::EquipmentHeatDestinations;
 use crate::graph::rheology::transient::head::FlowHeadSource;
 use fs_exec::Cx;
 use fs_qty::Pressure;
@@ -51,8 +52,9 @@ pub struct RegionalCarreauResolutionControls {
     pub relative_velocity_error: f64,
     pub absolute_flow_error_m3_s: f64,
     pub relative_flow_error: f64,
-    /// Separate per-branch viscous heat, held-head work and original equipment
-    /// work. Compare both signed transfer and total absolute half-step transfer
+    /// Separate per-branch viscous heat, held-head work, original equipment
+    /// hydraulic/input work, losses and each routed heat channel. Compare both
+    /// signed transfer and total absolute half-step transfer
     /// so opposed sources or work across time cannot hide by cancellation.
     pub absolute_transfer_error_j: f64,
     pub relative_transfer_error: f64,
@@ -105,6 +107,9 @@ pub struct RegionalCarreauDrive {
     /// They solve inside the original radial/pressure Jacobian; accepted
     /// reports retain these exact shared sources and actual head work.
     pub branch_head_laws: Option<Vec<Option<FlowHeadSource>>>,
+    /// Required recipients for positive original pump/drive routed fractions.
+    /// The owner deposits those losses; exchange callbacks supply other heat.
+    pub branch_heat_destinations: Option<Vec<EquipmentHeatDestinations>>,
 }
 
 /// The exact forcing used by one accepted native midpoint momentum interval.
@@ -222,6 +227,7 @@ pub fn advance_resolved<'m, T, E>(
         injections: injections.to_vec(),
         branch_heads: branch_heads.map(<[Pressure]>::to_vec),
         branch_head_laws: None,
+        branch_heat_destinations: None,
     };
     advance_resolved_with_drive(
         cx,
@@ -859,6 +865,26 @@ fn compare<T, E>(
             }),
             controls,
         )?;
+        let equipment = [&coarse.report, first, &fine.report].map(|report| {
+            report.equipment.branches[branch].map_or([0.0; 7], |energy| {
+                [
+                    energy.shaft_input_j,
+                    energy.electrical_input_j,
+                    energy.pump_loss_j,
+                    energy.drive_loss_j,
+                    energy.pump_heat_j,
+                    energy.drive_heat_j,
+                    energy.surroundings_heat_j,
+                ]
+            })
+        });
+        for channel in 0..7 {
+            transfer(
+                &mut estimate,
+                equipment.map(|energy| energy[channel]),
+                controls,
+            )?;
+        }
         let difference = (b.final_volume_flow_m3_s - a.final_volume_flow_m3_s).abs();
         let scale = controls.absolute_flow_error_m3_s
             + controls.relative_flow_error

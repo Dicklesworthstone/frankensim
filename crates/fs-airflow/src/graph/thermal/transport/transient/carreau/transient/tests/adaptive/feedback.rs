@@ -11,6 +11,7 @@ fn ports(t: f64, viscosity: f64, head_scale: f64) -> RegionalCarreauDrive {
         injections: Vec::new(),
         branch_heads: Some(vec![Pressure::new(head_scale * viscosity / 0.2)]),
         branch_head_laws: None,
+        branch_heat_destinations: None,
     }
 }
 
