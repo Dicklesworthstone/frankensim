@@ -59,12 +59,18 @@ fn lossless_compliance_retains_zero_resistance_near_dc() {
             assert_eq!(section.eval(-phase, 1.0), actual.conj());
         }
     }
-    let subnormal = f64::from_bits(1);
-    let section = Biquad {
-        b: [subnormal, subnormal, 0.0],
-        a: [-1.0, 0.0],
-    };
-    assert_eq!(section.eval(subnormal, 1.0), C64::new(0.0, -2.0));
+    // Odd subnormals round on halving even when the half remains nonzero.
+    // Include the largest odd subnormal and the last normal below twice the
+    // smallest normal. With gain=phase, the independent limit is exactly -2.
+    for bits in [1, 3, 5, 0x000f_ffff_ffff_ffff, 0x001f_ffff_ffff_ffff] {
+        let phase = f64::from_bits(bits);
+        let section = Biquad {
+            b: [phase, phase, 0.0],
+            a: [-1.0, 0.0],
+        };
+        assert_eq!(section.eval(phase, 1.0), C64::new(0.0, -2.0));
+        assert_eq!(section.eval(-phase, 1.0), C64::new(0.0, 2.0));
+    }
 }
 
 #[test]

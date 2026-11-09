@@ -71,9 +71,9 @@ impl Biquad {
                 return C64::ZERO;
             }
             let half_phase = 0.5 * phase;
-            let reactance = if half_phase == 0.0 && phase != 0.0 {
-                // The analytic limit also preserves a representable ratio
-                // when halving a subnormal nonzero phase underflows.
+            let reactance = if phase != 0.0 && phase.abs() < 2.0 * f64::MIN_POSITIVE {
+                // A subnormal half-angle can round even when it stays nonzero.
+                // The cotangent correction is below binary64 resolution here.
                 -2.0 * (self.b[0] / phase)
             } else {
                 -self.b[0] / det::tan(half_phase)
