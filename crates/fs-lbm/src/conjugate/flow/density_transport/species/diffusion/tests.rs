@@ -1027,3 +1027,404 @@ fn mass_product_roundoff_is_charged_to_the_enthalpy_budget() {
     assert_eq!(accepted.report.absolute_enthalpy_defect_j, 2.0);
     assert_eq!(state.mass_kg, [mass; 2]);
 }
+#[test]
+fn reservoir_cell_map_retains_binary_trace_and_full_positive_relaxation() {
+    let dm = boundary::reservoir_species_transfers([1.0, 1e-200], 1.0, [1.0, 3e-200], 0.5).unwrap();
+    assert_eq!(dm, [-1e-200, 1e-200]);
+    let full =
+        boundary::reservoir_species_transfers([0.8, 0.2, 0.0], 1.0, [0.0, 0.0, 1.0], 1.0).unwrap();
+    assert_eq!(full, [-0.8, -0.2, 1.0]);
+    assert_eq!(
+        boundary::reservoir_species_transfers([0.2, 0.3, 0.5], 1.0, [0.2, 0.3, 0.5], 0.9).unwrap(),
+        [0.0; 3]
+    );
+}
+
+#[test]
+fn reservoir_cell_map_is_a_convex_inventory_map_and_species_permutation() {
+    let current = [0.1, 0.3, 0.6, 0.0];
+    let bath = [0.7, 0.0, 0.2, 0.1];
+    let permutation = [3, 0, 2, 1];
+    for relaxation in [1e-12, 0.25, 0.9, 1.0] {
+        let delta = boundary::reservoir_species_transfers(current, 1.0, bath, relaxation).unwrap();
+        let other = boundary::reservoir_species_transfers(
+            permutation.map(|k| current[k]),
+            1.0,
+            permutation.map(|k| bath[k]),
+            relaxation,
+        )
+        .unwrap();
+        assert_eq!(other, permutation.map(|k| delta[k]));
+        for k in 0..4 {
+            let endpoint = current[k] + delta[k];
+            assert!(endpoint >= 0.0);
+            assert!(
+                (endpoint - ((1.0 - relaxation) * current[k] + relaxation * bath[k])).abs() < 2e-16
+            );
+        }
+        assert!(delta.iter().sum::<f64>().abs() < 2e-16);
+    }
+}
+
+#[test]
+fn reservoir_cell_map_refuses_unrepresentable_positive_transfer() {
+    let smallest = f64::from_bits(1);
+    assert!(boundary::reservoir_species_transfers([0.0, 1.0], 1.0, [smallest, 1.0], 0.25).is_err());
+    assert!(
+        boundary::reservoir_species_transfers([smallest, 0.0], smallest, [0.25, 0.75], 1.0)
+            .is_err()
+    );
+}
+
+#[test]
+fn reservoir_face_and_film_match_single_cell_exact_relaxation_on_every_axis() {
+    let domain = VoxelDomain::graded([vec![0.7], vec![1.2], vec![2.1]]).unwrap();
+    let mass = 4.0;
+    let state = carrier(&domain, &[mass]);
+    let before = state.clone();
+    let initial = [[2.8, 0.8, 0.4]];
+    let bath = [0.1, 0.3, 0.6];
+    for axis in 0..3 {
+        for resistance in [0.0, 3.0, 1e6] {
+            let boundary = SpeciesDiffusionBoundary {
+                cell: 0,
+                face: 2 * axis,
+                reservoir_mass_fractions: bath,
+                film_resistance_m2_s_kg: resistance,
+            };
+            let density = mass / domain.volume(0);
+            let conductance = domain.face_area(0, axis)
+                / (0.5 * domain.widths(0)[axis] / (density * 0.06) + resistance);
+            for duration in [1e-4, 0.7, 1e6] {
+                let result = state
+                    .diffuse_species_with_boundaries(
+                        &domain,
+                        &initial,
+                        &[0.06],
+                        &[boundary],
+                        duration,
+                        common_controls(1),
+                        &CancelGate::new_clock_free(),
+                    )
+                    .unwrap();
+                let transfer = &result.boundary.faces[0];
+                near(transfer.conductance_kg_s, conductance, 2e-15 * conductance);
+                let relaxation = -(-conductance * duration / mass).exp_m1();
+                for k in 0..3 {
+                    let dm = (mass * bath[k] - initial[0][k]) * relaxation;
+                    near(result.step.species_mass_kg[0][k], initial[0][k] + dm, 2e-14);
+                    near(transfer.mass_into_cell_kg[k], dm, 2e-14);
+                    near(transfer.incoming_mass_kg[k], dm.max(0.0), 2e-14);
+                    near(transfer.outgoing_mass_kg[k], (-dm).max(0.0), 2e-14);
+                    near(
+                        result.boundary.mass_into_domain_kg[k],
+                        result.step.report.mass_change_kg[k],
+                        2e-14,
+                    );
+                    assert!(result.step.report.absolute_mass_defect_kg[k] < 1e-12);
+                }
+                assert_eq!(result.step.report.diffusive_faces, 1);
+                assert_eq!(result.step.report.pair_updates, 2);
+                near(result.step.species_mass_kg[0].iter().sum(), mass, 2e-14);
+            }
+        }
+    }
+    assert_eq!(state, before);
+    assert_eq!(initial, [[2.8, 0.8, 0.4]]);
+}
+
+#[test]
+fn reservoir_dirichlet_slab_resolves_independent_mode_and_integrated_face_flux() {
+    let cells = 8;
+    let h = 1.0 / cells as f64;
+    let domain = VoxelDomain::graded([vec![h; cells], vec![1.0], vec![1.0]]).unwrap();
+    let state = carrier(&domain, &vec![h; cells]);
+    let mean = [0.4, 0.35, 0.25];
+    let amplitude = [0.15, -0.1, -0.05];
+    let initial: Vec<_> = (0..cells)
+        .map(|c| {
+            let mode = (core::f64::consts::PI * (c as f64 + 0.5) * h).sin();
+            core::array::from_fn(|k| h * (mean[k] + amplitude[k] * mode))
+        })
+        .collect();
+    let boundaries = [(0, 0), (cells - 1, 1)].map(|(cell, face)| SpeciesDiffusionBoundary {
+        cell,
+        face,
+        reservoir_mass_fractions: mean,
+        film_resistance_m2_s_kg: 0.0,
+    });
+    let diffusivity = 0.05;
+    let duration = 0.5;
+    let result = state
+        .diffuse_species_with_boundaries_adaptive(
+            &domain,
+            &initial,
+            &vec![diffusivity; cells],
+            &boundaries,
+            duration,
+            adaptive_controls([1e-7; 3]),
+            [1e-8; 3],
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    let lambda = 4.0 * diffusivity / (h * h) * (0.5 * core::f64::consts::PI * h).sin().powi(2);
+    let decay = (-lambda * duration).exp();
+    for c in 0..cells {
+        let mode = (core::f64::consts::PI * (c as f64 + 0.5) * h).sin();
+        for k in 0..3 {
+            near(
+                result.step.step.species_mass_kg[c][k] / h,
+                mean[k] + amplitude[k] * mode * decay,
+                4e-7,
+            );
+        }
+    }
+    for transfer in &result.boundary.faces {
+        for k in 0..3 {
+            let exact = -(2.0 * diffusivity / h)
+                * amplitude[k]
+                * (0.5 * core::f64::consts::PI * h).sin()
+                * (-(-lambda * duration).exp_m1())
+                / lambda;
+            near(transfer.mass_into_cell_kg[k], exact, 4e-8);
+        }
+    }
+    assert!(result.step.refinements > 1);
+    assert!(result.step.maximum_error_ratio <= 1.0);
+    for error in result.estimated_boundary_transfer_error_kg {
+        assert!(error <= 1e-8);
+    }
+    assert_eq!(result.step.step.report.diffusive_faces, cells + 1);
+    assert_eq!(
+        result.step.total_pair_updates,
+        2 * (cells + 1) * (2 * result.step.step.report.substeps - 1)
+    );
+}
+
+#[test]
+fn opposing_reservoirs_cannot_hide_transfer_error_in_zero_net_domain_change() {
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0]);
+    let initial = [[0.5, 0.5]];
+    let boundaries = [0, 1].map(|face| SpeciesDiffusionBoundary {
+        cell: 0,
+        face,
+        reservoir_mass_fractions: if face == 0 { [0.0, 1.0] } else { [1.0, 0.0] },
+        film_resistance_m2_s_kg: 0.0,
+    });
+    let result = state
+        .diffuse_species_with_boundaries_adaptive(
+            &domain,
+            &initial,
+            &[0.1],
+            &boundaries,
+            2.0,
+            adaptive_controls([1e-2; 2]),
+            [1e-7; 2],
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    // The exact one-cell ODE stays at Y=1/2 while BOTH reservoirs exchange mass.
+    near(result.step.step.species_mass_kg[0][0], 0.5, 4e-7);
+    near(result.boundary.faces[0].mass_into_cell_kg[0], -0.2, 4e-7);
+    near(result.boundary.faces[1].mass_into_cell_kg[0], 0.2, 4e-7);
+    assert!(result.step.refinements > 1);
+    assert!(result.estimated_boundary_transfer_error_kg[0] <= 1e-7);
+    assert_eq!(
+        result.step.total_pair_updates,
+        4 * (2 * result.step.step.report.substeps - 1)
+    );
+}
+
+#[test]
+fn explicit_solid_surface_reservoir_and_zero_diffusivity_have_distinct_physical_limits() {
+    let mut domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    domain.set(1, 0, 0, Voxel::Solid(0));
+    let state = carrier(&domain, &[1.0, 0.0]);
+    let initial = [[0.8, 0.2], [0.0; 2]];
+    let boundaries = [SpeciesDiffusionBoundary {
+        cell: 0,
+        face: 1,
+        reservoir_mass_fractions: [0.2, 0.8],
+        film_resistance_m2_s_kg: 0.0,
+    }];
+    let result = state
+        .diffuse_species_with_boundaries(
+            &domain,
+            &initial,
+            &[0.1, 0.0],
+            &boundaries,
+            1.0,
+            controls(1),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    near(
+        result.step.species_mass_kg[0][0],
+        0.2 + 0.6 * (-0.2_f64).exp(),
+        2e-14,
+    );
+    assert_eq!(result.step.species_mass_kg[1], [0.0; 2]);
+    let mut ctl = adaptive_controls([1e-12; 2]);
+    ctl.solver.maximum_pair_updates = 0;
+    ctl.solver.substeps = 1_000_000;
+    let blocked = state
+        .diffuse_species_with_boundaries_adaptive(
+            &domain,
+            &initial,
+            &[0.0; 2],
+            &boundaries,
+            1.0,
+            ctl,
+            [1e-12; 2],
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    assert_eq!(blocked.step.step.species_mass_kg, initial);
+    assert_eq!(blocked.step.total_pair_updates, 0);
+    assert_eq!(blocked.step.refinements, 0);
+    assert_eq!(blocked.boundary.faces[0].mass_into_cell_kg, [0.0; 2]);
+}
+
+#[test]
+fn reservoir_faces_refuse_wrong_ownership_bad_data_and_cumulative_budgets_atomically() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let before = state.clone();
+    let initial = [[0.8, 0.2], [0.2, 0.8]];
+    let boundary = SpeciesDiffusionBoundary {
+        cell: 0,
+        face: 0,
+        reservoir_mass_fractions: [0.2, 0.8],
+        film_resistance_m2_s_kg: 0.0,
+    };
+    let gate = CancelGate::new_clock_free();
+    for candidate in [
+        SpeciesDiffusionBoundary {
+            face: 1,
+            ..boundary
+        },
+        SpeciesDiffusionBoundary {
+            face: 6,
+            ..boundary
+        },
+        SpeciesDiffusionBoundary {
+            cell: 2,
+            ..boundary
+        },
+        SpeciesDiffusionBoundary {
+            reservoir_mass_fractions: [0.2, 0.2],
+            ..boundary
+        },
+        SpeciesDiffusionBoundary {
+            film_resistance_m2_s_kg: -1.0,
+            ..boundary
+        },
+        SpeciesDiffusionBoundary {
+            film_resistance_m2_s_kg: f64::NAN,
+            ..boundary
+        },
+    ] {
+        assert!(
+            state
+                .diffuse_species_with_boundaries(
+                    &domain,
+                    &initial,
+                    &[0.1; 2],
+                    &[candidate],
+                    1.0,
+                    controls(1),
+                    &gate,
+                )
+                .is_err()
+        );
+    }
+    for faces in [
+        vec![boundary, boundary],
+        vec![
+            SpeciesDiffusionBoundary {
+                cell: 1,
+                face: 1,
+                ..boundary
+            },
+            boundary,
+        ],
+    ] {
+        assert!(
+            state
+                .diffuse_species_with_boundaries(
+                    &domain,
+                    &initial,
+                    &[0.1; 2],
+                    &faces,
+                    1.0,
+                    controls(1),
+                    &gate,
+                )
+                .is_err()
+        );
+    }
+    let single = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let single_state = carrier(&single, &[1.0]);
+    let mut ctl = adaptive_controls([1e-6; 2]);
+    ctl.solver.maximum_pair_updates = 5;
+    assert!(
+        single_state
+            .diffuse_species_with_boundaries_adaptive(
+                &single,
+                &initial[..1],
+                &[0.1],
+                &[boundary],
+                1.0,
+                ctl,
+                [1e-6; 2],
+                &gate,
+            )
+            .is_err()
+    );
+    ctl.solver.maximum_pair_updates = 6;
+    let accepted = single_state
+        .diffuse_species_with_boundaries_adaptive(
+            &single,
+            &initial[..1],
+            &[0.1],
+            &[boundary],
+            1.0,
+            ctl,
+            [1e-6; 2],
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(accepted.step.total_pair_updates, 6);
+    ctl.solver.maximum_storage_bytes = 1;
+    assert!(
+        single_state
+            .diffuse_species_with_boundaries(
+                &single,
+                &initial[..1],
+                &[0.1],
+                &[boundary],
+                1.0,
+                ctl.solver,
+                &gate,
+            )
+            .is_err()
+    );
+    gate.request();
+    assert_eq!(
+        state
+            .diffuse_species_with_boundaries(
+                &domain,
+                &initial,
+                &[0.1; 2],
+                &[boundary],
+                1.0,
+                controls(1),
+                &gate,
+            )
+            .unwrap_err(),
+        ChtError::Cancelled
+    );
+    assert_eq!(state, before);
+    assert_eq!(initial, [[0.8, 0.2], [0.2, 0.8]]);
+}

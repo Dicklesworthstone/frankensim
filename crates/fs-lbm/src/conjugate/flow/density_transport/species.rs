@@ -14,6 +14,8 @@ use fs_sparse::precond::{IluControlledError, ilu0_controlled};
 mod diffusion;
 pub use diffusion::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
+    AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep,
+    SpeciesBoundaryDiffusionReport, SpeciesBoundaryTransfer, SpeciesDiffusionBoundary,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,

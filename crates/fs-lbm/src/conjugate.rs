@@ -153,6 +153,8 @@ pub use energy::{
 };
 pub use flow::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
+    AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep,
+    SpeciesBoundaryDiffusionReport, SpeciesBoundaryTransfer, SpeciesDiffusionBoundary,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,

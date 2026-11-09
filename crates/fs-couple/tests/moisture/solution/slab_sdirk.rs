@@ -2,6 +2,7 @@
 //! Sources and coefficients are authored verification fixtures, not calibration.
 use super::*;
 use fs_couple::moisture::adaptive::{MoistureAdvanceError, MoistureTimeControls};
+use fs_couple::moisture::atmosphere::DryBasisSorption;
 use fs_material::osmosis::solubility::kinetics::KineticSolubilitySolution;
 use fs_qty::VolumetricFlowRate;
 use fs_thermochem::{
@@ -24,7 +25,7 @@ fn nonlinear() -> MoistureNonlinearConfig {
 fn participant<'a>(
     id: u64,
     slab: &'a MoistureSlab,
-    faces: &'a [Option<atmosphere::DryBasisSorption>; 2],
+    faces: &'a [Option<DryBasisSorption>; 2],
 ) -> MoistureParticipant<'a> {
     MoistureParticipant {
         id,

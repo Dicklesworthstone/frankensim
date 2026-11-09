@@ -29,6 +29,11 @@ use super::{
 use crate::conjugate::VoxelDomain;
 use fs_math::det;
 
+mod boundary;
+pub use boundary::{
+    AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep, SpeciesBoundaryDiffusionReport,
+    SpeciesBoundaryTransfer, SpeciesDiffusionBoundary,
+};
 mod enthalpy;
 pub use enthalpy::{SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep};
 mod gas;
@@ -43,7 +48,8 @@ pub struct SpeciesDiffusionControls<const N: usize> {
     /// Equal physical substeps, each a forward/reverse pair of half sweeps.
     /// Positive; refine this count to resolve splitting error.
     pub substeps: usize,
-    /// Bound on two times the active face count times substeps. Each geometric
+    /// Bound on two times the active interior AND authored reservoir face count
+    /// times substeps. Each geometric
     /// pair update evolves N constituents, so component work is bounded by
     /// N times this value; N must be in 1..=MAX_MATERIAL_SPECIES.
     pub maximum_pair_updates: usize,
@@ -51,26 +57,29 @@ pub struct SpeciesDiffusionControls<const N: usize> {
     /// Existing carrier storage and allocator overhead are additional.
     pub maximum_storage_bytes: usize,
     /// Per-species local inventory-representation defects plus the absolute
-    /// closed-domain mass change [kg]. Trace species retain their own allowance.
+    /// mass-balance defect [kg], including authored reservoir transfers when
+    /// present. Trace species retain their own allowance.
     pub maximum_mass_defect_kg: [f64; N],
     /// Sum of absolute initial and final per-cell partition defects [kg],
-    /// measured against the SAME immutable accepted carrier mass.
+    /// measured against the SAME immutable accepted carrier mass. Boundary
+    /// entries also charge every map's absolute summed carrier transfer.
     pub maximum_partition_defect_kg: f64,
 }
 
-/// Physical readback of one complete closed-domain diffusion interval.
+/// Physical readback of one complete diffusion interval.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeciesDiffusionReport<const N: usize> {
     pub duration_s: f64,
     pub substeps: usize,
-    /// Fluid-fluid faces with positive conductance, including faces
-    /// whose advective mass flux is exactly zero.
+    /// Faces with positive conductance, including authored reservoir faces in
+    /// the boundary entries and faces with exactly zero advective mass flux.
     pub diffusive_faces: usize,
     pub pair_updates: usize,
     /// Checked N times pair_updates: constituent pair maps evaluated.
     pub component_updates: usize,
-    /// Largest 1-exp(-G*dt_half*(1/M_l+1/M_r)); this measures stiffness,
-    /// not the temporal error of a sweep.
+    /// Largest half-map relaxation: 1-exp(-G*dt_half*(1/M_l+1/M_r))
+    /// internally, or 1-exp(-G*dt_half/M) at a fixed reservoir. This measures
+    /// stiffness, not the temporal error of a sweep.
     pub maximum_pair_relaxation: f64,
     pub mass_before_kg: [f64; N],
     pub mass_after_kg: [f64; N],
@@ -148,6 +157,14 @@ trait DiffusionObserver<const N: usize> {
     fn prepare_storage(&mut self, _: usize, _: usize) {}
     fn prepare(&mut self, _: [usize; 2], _: usize) -> Result<(), ChtError> { Ok(()) }
     fn transferred(&mut self, _: usize, _: [f64; N]) -> Result<(), ChtError> { Ok(()) }
+    fn boundary_faces(&mut self, _: &CancelGate) -> Result<usize, ChtError> { Ok(0) }
+    fn prepare_boundaries(&mut self, _: f64, _: &CancelGate) -> Result<(), ChtError> { Ok(()) }
+    fn boundary_half_sweep(
+        &mut self, _: &mut [Inventory<N>], _: bool, _: &CancelGate,
+    ) -> Result<(), ChtError> { Ok(()) }
+    fn boundary_mass_transfer(&self) -> [f64; N] { [0.0; N] }
+    fn boundary_carrier_defect(&self) -> f64 { 0.0 }
+    fn maximum_boundary_relaxation(&self) -> f64 { 0.0 }
 }
 
 impl<const N: usize> DiffusionObserver<N> for () {}
@@ -323,8 +340,32 @@ impl MaterialAdvectionStep {
         duration_s: f64,
         controls: AdaptiveSpeciesDiffusionControls<N>,
         gate: &CancelGate,
-        mut checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
+        checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
     ) -> Result<AdaptiveSpeciesDiffusionStep<N>, ChtError> {
+        self.refine_species(
+            domain, species_mass_kg, controls, gate, checkpoint, 0,
+            |solver| Ok((self.diffuse_species(
+                domain, species_mass_kg, diffusivity_m2_s, duration_s, solver, gate,
+            )?, ())),
+            |_, _| Ok(0.0),
+        ).map(|(step, ())| step)
+    }
+
+    // Shared complete-interval refinement. Extra retained payload and transfer
+    // comparisons let boundary owners use the same acceptance/work semantics.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn refine_species<const N: usize, T>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        controls: AdaptiveSpeciesDiffusionControls<N>,
+        gate: &CancelGate,
+        mut checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
+        extra_retained_bytes: usize,
+        mut solve: impl FnMut(SpeciesDiffusionControls<N>)
+            -> Result<(SpeciesDiffusionStep<N>, T), ChtError>,
+        mut compare_transfers: impl FnMut(&T, &T) -> Result<f64, ChtError>,
+    ) -> Result<(AdaptiveSpeciesDiffusionStep<N>, T), ChtError> {
         poll(gate)?;
         if N == 0 || N > MAX_MATERIAL_SPECIES || controls.maximum_refinements == 0 {
             return Err(refuse("adaptive diffusion component or refinement count is invalid"));
@@ -341,6 +382,7 @@ impl MaterialAdvectionStep {
             .and_then(|n| n.checked_add(core::mem::size_of::<SpeciesDiffusionStep<N>>()))
             .and_then(|n| n.checked_add(core::mem::size_of::<AdaptiveSpeciesDiffusionStep<N>>()))
             .and_then(|n| n.checked_add(4 * core::mem::size_of::<[f64; N]>() + 512))
+            .and_then(|n| n.checked_add(extra_retained_bytes))
             .ok_or_else(|| refuse("adaptive diffusion storage extent overflows"))?;
         let solver_bytes = controls.solver.maximum_storage_bytes.checked_sub(retained_bytes)
             .ok_or_else(|| refuse("adaptive diffusion comparison storage budget exhausted"))?;
@@ -348,20 +390,18 @@ impl MaterialAdvectionStep {
             maximum_storage_bytes: solver_bytes,
             ..controls.solver
         };
-        let mut coarse = self.diffuse_species(
-            domain, species_mass_kg, diffusivity_m2_s, duration_s, solver, gate,
-        )?;
+        let (mut coarse, mut coarse_transfers) = solve(solver)?;
         let mut total_pair_updates = coarse.report.pair_updates;
         if coarse.report.diffusive_faces == 0 {
             poll(gate)?;
-            return Ok(AdaptiveSpeciesDiffusionStep {
+            return Ok((AdaptiveSpeciesDiffusionStep {
                 step: coarse,
                 estimated_mass_fraction_error: [0.0; N],
                 maximum_error_ratio: 0.0,
                 refinements: 0,
                 total_pair_updates,
                 total_component_updates: 0,
-            });
+            }, coarse_transfers));
         }
         for refinement in 1..=controls.maximum_refinements {
             checkpoint(refinement)?;
@@ -377,12 +417,10 @@ impl MaterialAdvectionStep {
                 .ok_or_else(|| refuse("adaptive diffusion cumulative work extent overflows"))?;
             let total_component_updates = next_total_pairs.checked_mul(N)
                 .ok_or_else(|| refuse("adaptive diffusion component work extent overflows"))?;
-            let fine = self.diffuse_species(
-                domain, species_mass_kg, diffusivity_m2_s, duration_s, solver, gate,
-            )?;
+            let (fine, fine_transfers) = solve(solver)?;
             total_pair_updates = next_total_pairs;
             let mut estimated_mass_fraction_error = [0.0_f64; N];
-            let mut maximum_error_ratio = 0.0_f64;
+            let mut maximum_error_ratio = compare_transfers(&coarse_transfers, &fine_transfers)?;
             for c in 0..domain.cell_count() {
                 poll_every(gate, c)?;
                 if !domain.is_fluid(c) {
@@ -406,16 +444,17 @@ impl MaterialAdvectionStep {
             }
             if maximum_error_ratio <= 1.0 {
                 poll(gate)?;
-                return Ok(AdaptiveSpeciesDiffusionStep {
+                return Ok((AdaptiveSpeciesDiffusionStep {
                     step: fine,
                     estimated_mass_fraction_error,
                     maximum_error_ratio,
                     refinements: refinement,
                     total_pair_updates,
                     total_component_updates,
-                });
+                }, fine_transfers));
             }
             coarse = fine;
+            coarse_transfers = fine_transfers;
         }
         Err(refuse("adaptive diffusion temporal tolerance is unresolved at its refinement limit"))
     }
@@ -520,7 +559,10 @@ impl MaterialAdvectionStep {
         if initial_partition.value > controls.maximum_partition_defect_kg {
             return Err(refuse("species do not partition the accepted carrier mass"));
         }
-        let pair_updates = face_count
+        let boundary_count = observer.boundary_faces(gate)?;
+        let all_face_count = face_count.checked_add(boundary_count)
+            .ok_or_else(|| refuse("diffusion boundary face extent overflows"))?;
+        let pair_updates = all_face_count
             .checked_mul(2)
             .and_then(|n| n.checked_mul(controls.substeps))
             .ok_or_else(|| refuse("diffusion work extent overflows"))?;
@@ -544,8 +586,9 @@ impl MaterialAdvectionStep {
             return Err(refuse("diffusion storage budget exhausted"));
         }
         observer.prepare_storage(count, face_count);
+        observer.prepare_boundaries(half_dt, gate)?;
         let mut faces = Vec::with_capacity(face_count);
-        let mut maximum_pair_relaxation: f64 = 0.0;
+        let mut maximum_pair_relaxation = observer.maximum_boundary_relaxation();
         for c in 0..count {
             poll_every(gate, c)?;
             if !domain.is_fluid(c) || diffusivity_m2_s[c] == 0.0 {
@@ -600,9 +643,10 @@ impl MaterialAdvectionStep {
         }
         // With no conducting faces, no repeated empty sweeps consume a huge
         // caller-specified substep count.
-        if !faces.is_empty() {
+        if all_face_count > 0 {
             for substep in 0..controls.substeps {
                 poll(gate)?;
+                observer.boundary_half_sweep(&mut inventories, false, gate)?;
                 for (index, face) in faces.iter().enumerate() {
                     poll_every(gate, index)?;
                     observer.transferred(index, exchange(face, &self.mass_kg, &mut inventories)?)?;
@@ -611,6 +655,7 @@ impl MaterialAdvectionStep {
                     poll_every(gate, index)?;
                     observer.transferred(index, exchange(face, &self.mass_kg, &mut inventories)?)?;
                 }
+                observer.boundary_half_sweep(&mut inventories, true, gate)?;
                 checkpoint(substep + 1)?;
             }
         }
@@ -637,8 +682,9 @@ impl MaterialAdvectionStep {
             endpoint_partition.add(partition.value.abs());
             result.push(endpoint);
         }
+        let boundary_mass = observer.boundary_mass_transfer();
         let absolute_mass_defect_kg =
-            core::array::from_fn(|k| defect[k].value + change[k].value.abs());
+            core::array::from_fn(|k| defect[k].value + (change[k].value - boundary_mass[k]).abs());
         for k in 0..N {
             for value in [before[k].value, after[k].value, absolute_mass_defect_kg[k]] {
                 nonnegative(value)?;
@@ -647,7 +693,8 @@ impl MaterialAdvectionStep {
                 return Err(refuse("diffusion exceeds its constituent-mass budget"));
             }
         }
-        let partition_defect = initial_partition.value + endpoint_partition.value;
+        let partition_defect = initial_partition.value + endpoint_partition.value
+            + observer.boundary_carrier_defect();
         nonnegative(partition_defect)?;
         if partition_defect > controls.maximum_partition_defect_kg {
             return Err(refuse(
@@ -660,7 +707,7 @@ impl MaterialAdvectionStep {
             report: SpeciesDiffusionReport {
                 duration_s,
                 substeps: controls.substeps,
-                diffusive_faces: face_count,
+                diffusive_faces: all_face_count,
                 pair_updates,
                 component_updates,
                 maximum_pair_relaxation,

@@ -1250,8 +1250,9 @@ The common face map preserves each species' global mass and the cell carrier
 partition to the caller's declared budgets. Uniform mass fractions are
 stationary at variable density. Zero eddy viscosity is an exact identity for
 the turbulent-only entries; molecular diffusion can remain active.
-Exterior and solid faces are impermeable to this diffusion component, while
-advective inlet/backflow composition remains with `advect_species`. Work is
+The default entries keep exterior and solid faces impermeable; explicitly
+authored surface reservoirs use the boundary entries below. Advective
+inlet/backflow composition remains with `advect_species`. Work is
 `O(N * (cells + faces * substeps))`, storage `O(N * cells + faces)`;
 the checked component-work count and temporary diffusivity buffer are included
 in the work/storage account. Cancellation or failed admission publishes no
@@ -1270,6 +1271,36 @@ scalar variance or a species wall function. Matching original physical grid
 widths, flow mask and the flow epoch remains the caller's responsibility. The
 original turbulence model's applicability and resolution limits remain in force.
 
+
+### Reservoir-driven species diffusion
+
+`MaterialAdvectionStep::diffuse_species_with_boundaries` adds explicitly
+authored fixed-composition reservoirs at exterior or fluid-solid faces.
+Each face supplies unit-sum mass fractions and a common finite nonnegative
+film resistance in m² s/kg. With the original accepted density and native
+half-cell width, `G = A / (w/(2 rho D) + R_film)` in kg/s. Zero film resistance
+prescribes composition at the actual face; zero cell D still blocks exchange.
+Boundary identities must be unique and ordered by `(cell, face)`; interior
+fluid-fluid faces cannot acquire a second transport owner. Unlisted faces
+remain impermeable. A solid-facing reservoir does not evolve solid storage.
+
+Exact positive cell/reservoir relaxation maps surround the original interior
+half sweeps in canonical forward/reverse order. Signed, gross inward and gross
+outward constituent transfers are retained at each face. Original constituent
+mass admission subtracts the actual signed external transfers; every boundary
+map's nonzero summed carrier transfer is charged to the partition budget.
+Both boundary and interior updates count toward work, and prepared coefficients,
+transfer accumulators and face readbacks count toward storage.
+
+`diffuse_species_with_boundaries_adaptive` reuses the original complete-interval
+coarse/fine refinement. Besides per-cell concentration tolerances, each species
+has an explicit integrated-transfer allowance in kg. The estimate sums, over
+faces, the largest signed/inward/outward transfer difference divided by three;
+opposing reservoirs cannot cancel unresolved transport. The retained fine
+inventories and transfer accounts are authoritative, without extrapolation.
+These are asymptotic temporal estimates, not certified spatial/model bounds.
+This is an isothermal common-D reservoir law, with no inferred selective
+membrane, sorption equilibrium, finite reservoir/solid storage or enthalpy flux.
 
 ### Native open 3D local SGS momentum and heat
 

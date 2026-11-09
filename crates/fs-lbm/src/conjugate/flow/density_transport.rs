@@ -10,6 +10,8 @@ use fs_sparse::{Coo, Csr};
 mod species;
 pub use species::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
+    AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep,
+    SpeciesBoundaryDiffusionReport, SpeciesBoundaryTransfer, SpeciesDiffusionBoundary,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
