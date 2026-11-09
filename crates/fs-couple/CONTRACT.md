@@ -10272,6 +10272,35 @@ four contraction controls. Full `fs-couple` Cargo integration tests were not run
 in the disk-constrained session; syntax/static checks and independent complex
 work-balance calculations are distinct from that missing execution.
 
+## Nonlinear multi-terminal electrothermal feedback
+
+`step_response_terminal_candidate` and
+`step_axisymmetric_response_terminal_candidate` place held voltage, conserved
+current and mixed electrode controls inside the original nonlinear electrical
+and finite enthalpy residual. Floating equipotential electrodes can transfer
+current locally while their total current remains zero. Each thermal trial
+refreshes the original bulk/contact temperature and declared phase context;
+every constitutive trial solves the actual grouped-electrode operating state
+once, retaining the original source laws, local fields and contact gates.
+
+`ConductionResponseThermalStep::terminals` retains the accepted ordered terminal
+potentials, reactions and independent source-work report. Current-source work
+uses authored currents; voltage-source work uses native reactions and retained
+physical voltage differences. Original swept/planar cell heat and explicitly
+partitioned contact heat enter the same enthalpy account once. Original Fourier
+links, fixed geometry and field-independent caloric/Fourier admission remain
+binding. Every native field solve consumes the existing circuit budget,
+including discarded constitutive trials and fresh final admission; failures
+publish neither accepted owner.
+
+Focused G1/G3/G4 regression definitions cover E/J/T-dependent materials in
+planar and axisymmetric bodies, floating-face current transfer,
+voltage/current/mixed controls, large common references, reordered continuation,
+exact solve budgets, late cancellation/retry, nonlinear contact heat partitions
+and latent-to-sensible phase continuation. Pinned syntax checks and independent
+reference balances were performed; these new native integration regressions
+remain unexecuted in the current dependency environment.
+
 ## Axisymmetric nonlinear electrothermal feedback
 
 `step_axisymmetric_response_candidate` and

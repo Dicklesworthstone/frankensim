@@ -7,7 +7,8 @@
 
 use super::super::{
     ConductionDrive, ConductionThermalNetwork, Error, check, contacts, invalid, material,
-    response::ConductionResponseThermalStep, same_material,
+    response::{ConductionResponseThermalStep, terminals::Drive},
+    same_material,
 };
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
@@ -17,7 +18,10 @@ use crate::circuit_enthalpy::{
 use fs_em::conduction::{
     ConductionControls,
     axisymmetric::response::AxisymmetricConductionResponse,
-    response::{ConductionResponseControls, ConductionResponseError, MAX_RESPONSE_ITERATIONS},
+    response::{
+        ConductionResponseControls, ConductionResponseError, MAX_RESPONSE_ITERATIONS,
+        terminals::ConductionTerminalDrive,
+    },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_thermal::enthalpy::DepositionSimulation;
@@ -150,6 +154,77 @@ impl ConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<AxisymmetricConductionResponseEnthalpyCandidate<'t>, Error> {
+        self.step_axisymmetric_response_driven_candidate(
+            thermal,
+            target_s,
+            problem,
+            Drive::Field(drive),
+            contact_bindings,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Advance ideal voltage/current/mixed electrodes, nonlinear bulk and
+    /// declared interface laws, and finite enthalpy to one common endpoint.
+    /// A floating equipotential electrode can transfer current between faces
+    /// while its total current remains zero. Original source pins, explicit
+    /// contact heat partitions, Fourier links and phase ownership remain bound.
+    ///
+    /// Every actual grouped-electrode field solve consumes the original
+    /// thermal circuit budget, including discarded nonlinear iterates and
+    /// final fresh admission. The accepted report retains the ordered terminal
+    /// operating point and independent source work. Failure publishes neither
+    /// owner; consume both accepted owners together to continue.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_axisymmetric_response_terminal_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &AxisymmetricConductionResponse,
+        drive: ConductionTerminalDrive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AxisymmetricConductionResponseEnthalpyCandidate<'t>, Error> {
+        self.step_axisymmetric_response_driven_candidate(
+            thermal,
+            target_s,
+            problem,
+            Drive::Terminals(drive),
+            contact_bindings,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_axisymmetric_response_driven_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &AxisymmetricConductionResponse,
+        drive: Drive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AxisymmetricConductionResponseEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         // Admit the authored cap before restricting it by the outer budget.
@@ -228,61 +303,79 @@ impl ConductionThermalNetwork<'_> {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
                 };
-                let candidate = match drive {
-                    ConductionDrive::Voltage(voltage) => problem
-                        .solve_with_materials_and_contacts_candidate(
+                let (candidate, terminals) = match drive {
+                    Drive::Field(field_drive) => (match field_drive {
+                        ConductionDrive::Voltage(voltage) => problem
+                            .solve_with_materials_and_contacts_candidate(
+                                sources,
+                                contact_sources,
+                                voltage,
+                                &[],
+                                assembly,
+                                field_controls,
+                                bounded,
+                                &mut || (*cancel.borrow_mut())(),
+                            ),
+                        ConductionDrive::CurrentDensity { voltage, currents } => problem
+                            .solve_with_materials_and_contacts_candidate(
+                                sources,
+                                contact_sources,
+                                voltage,
+                                currents,
+                                assembly,
+                                field_controls,
+                                bounded,
+                                &mut || (*cancel.borrow_mut())(),
+                            ),
+                        ConductionDrive::Current {
+                            positive,
+                            negative,
+                            current_a,
+                        } => problem.solve_current_with_materials_and_contacts_candidate(
                             sources,
                             contact_sources,
-                            voltage,
-                            &[],
+                            positive,
+                            negative,
+                            current_a,
                             assembly,
                             field_controls,
                             bounded,
                             &mut || (*cancel.borrow_mut())(),
                         ),
-                    ConductionDrive::CurrentDensity { voltage, currents } => problem
-                        .solve_with_materials_and_contacts_candidate(
+                        ConductionDrive::Power {
+                            positive,
+                            negative,
+                            source,
+                        } => problem.solve_power_with_materials_and_contacts_candidate(
                             sources,
                             contact_sources,
-                            voltage,
-                            currents,
+                            positive,
+                            negative,
+                            source,
                             assembly,
                             field_controls,
                             bounded,
                             &mut || (*cancel.borrow_mut())(),
                         ),
-                    ConductionDrive::Current {
-                        positive,
-                        negative,
-                        current_a,
-                    } => problem.solve_current_with_materials_and_contacts_candidate(
-                        sources,
-                        contact_sources,
-                        positive,
-                        negative,
-                        current_a,
-                        assembly,
-                        field_controls,
-                        bounded,
-                        &mut || (*cancel.borrow_mut())(),
-                    ),
-                    ConductionDrive::Power {
-                        positive,
-                        negative,
-                        source,
-                    } => problem.solve_power_with_materials_and_contacts_candidate(
-                        sources,
-                        contact_sources,
-                        positive,
-                        negative,
-                        source,
-                        assembly,
-                        field_controls,
-                        bounded,
-                        &mut || (*cancel.borrow_mut())(),
-                    ),
+                    })
+                    .map(|candidate| (candidate, None)),
+                    Drive::Terminals(terminal_drive) => problem
+                        .solve_terminals_with_materials_and_contacts_candidate(
+                            sources,
+                            contact_sources,
+                            terminal_drive,
+                            assembly,
+                            field_controls,
+                            bounded,
+                            remaining,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map(|(candidate, terminals)| (candidate, Some(terminals))),
                 }
                 .map_err(|error| match error {
+                    ConductionResponseError::FieldBudget { .. } => {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
                     ConductionResponseError::NotConverged { .. }
                         if bounded.maximum_iterations < response.maximum_iterations =>
                     {
@@ -292,13 +385,8 @@ impl ConductionThermalNetwork<'_> {
                 })?;
                 let (next, field) = candidate.into_parts();
                 let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j = finite(
-                    dt * drive.supplied_power_w(
-                        &field.voltage_v,
-                        field.power_w,
-                        field.power_balance_residual_w,
-                    )?,
-                )?;
+                let supplied_work_j =
+                    finite(dt * drive.supplied_power_w(&field, terminals.as_ref())?)?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
@@ -315,6 +403,7 @@ impl ConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            terminals,
                             contacts: contact_heat,
                             heat_j,
                             supplied_work_j,

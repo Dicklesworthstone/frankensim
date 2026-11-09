@@ -2,6 +2,8 @@
 //! Explicit manufactured data; no empirical metal or higher-dimensional fit.
 #[path = "response/axisymmetric.rs"]
 mod axisymmetric;
+#[path = "response/terminals.rs"]
+mod terminals;
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::response::ConductionResponseEnthalpyCandidate;
 use fs_em::conduction::{

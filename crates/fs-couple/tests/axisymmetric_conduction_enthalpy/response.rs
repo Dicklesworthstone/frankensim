@@ -1,6 +1,9 @@
 //! G1/G3/G4: actual meridional E/J laws, thermal feedback and swept work.
 //! Manufactured material laws; these fixtures make no empirical-data claim.
 
+#[path = "response/terminals.rs"]
+mod terminals;
+
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::ConductionThermalError;
 use fs_em::conduction::{
@@ -732,6 +735,63 @@ fn nonlinear_contact_jump_and_temperature_follow_the_same_two_body_enthalpy() {
                 source.resolved().properties()[0].answer().receipt.selected
             );
             assert_eq!(step.field.evaluated_contacts.len(), 1);
+            // The same nonlinear interface closes under actual mixed terminal
+            // control and a large common reference, with its original heat split.
+            let electrodes: [&[usize]; 2] = [&[0, 1], &[6, 7]];
+            let current = [j * area];
+            let terminal = layout
+                .step_axisymmetric_response_terminal_candidate(
+                    &thermal,
+                    dt,
+                    &original,
+                    terminals::terminal_drive(
+                        &electrodes,
+                        fs_em::conduction::terminals::ConductionTerminalControl::Mixed {
+                            current_terminals: &[1],
+                            currents_a: &current,
+                            voltages_v: &[1e250],
+                        },
+                    ),
+                    &bindings,
+                    limits(),
+                    field_controls(),
+                    response_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            for cell in [CellId(30), CellId(10)] {
+                near(
+                    terminal.thermal().temperature_k(cell).unwrap(),
+                    next.thermal().temperature_k(cell).unwrap(),
+                );
+            }
+            let terminal_step = &terminal.report().electrical;
+            let operating = terminal_step.terminals.as_ref().unwrap();
+            near(operating.voltage_v[1], voltage);
+            near(operating.current_a[0], -j * area);
+            near(operating.current_a[1], j * area);
+            near(terminal_step.supplied_work_j, step.supplied_work_j);
+            near(terminal_step.heat_j, step.heat_j);
+            near(
+                terminal_step.contacts[0].response.power_w,
+                step.contacts[0].response.power_w,
+            );
+            near(terminal_step.contacts[0].heat_fraction_to_first, fraction);
+            assert_eq!(terminal_step.contacts[0].cells, step.contacts[0].cells);
+            near(
+                terminal.problem().contacts()[0].source.resistance_ohm_m2(),
+                rc,
+            );
+            near(
+                terminal.problem().contacts()[0]
+                    .source
+                    .resolved()
+                    .state_coordinate("jump")
+                    .unwrap(),
+                j * rc,
+            );
             let continued = layout
                 .step_axisymmetric_response_contact_candidate(
                     next.thermal(),
