@@ -31,7 +31,7 @@ pub struct WallConvectionSample<S> {
     pub boundary_residual_j: f64,
     /// Wall proposals for the final gas/heat trial, at most iterations + 2.
     pub wall_trials: usize,
-    /// All wall proposals, including rejected outer gas/heat trials.
+    /// All wall proposals for this body, including rejected outer gas/heat trials.
     pub total_wall_trials: usize,
 }
 
@@ -83,111 +83,23 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
         cx: &Cx<'_>,
         input: UniformEnthalpyStepInput<'_>,
         wall: WallConvectionSolve,
-        mut resolve: impl FnMut(
-            &G::State,
-            f64,
-        ) -> Result<ConvectionCoefficient<S>, E>,
+        mut resolve: impl FnMut(&G::State, f64) -> Result<ConvectionCoefficient<S>, E>,
     ) -> Result<
         UniformEnthalpyStep<FiniteGasThermalReport<WallConvectionSample<S>, G>>,
         ConvectionError<WallConvectionError<E>>,
     > {
         let mut total_wall_trials = 0;
         let result = self.advance_with_convection_feedback(cx, input, |gas, _| {
-            let gas_temperature_k = gas.thermal_transport_state()
-                .map_err(|error| WallConvectionError::Thermal(gas_error(error.into())))?
-                .temperature_k();
-            feedback::solve_scalar(
-                wall.temperature_increment_bracket_k,
-                1.0,
-                wall.maximum_iterations,
-                |increment, wall_trials, _| {
-                    if !wall.temperature_tolerance_k.is_finite()
-                        || wall.temperature_tolerance_k <= 0.0
-                    {
-                        return Err(WallConvectionError::Invalid(
-                            "positive finite wall temperature tolerance required",
-                        ));
-                    }
-                    total_wall_trials += 1;
-                    let temperature_k = input.initial.temperature_k() + increment;
-                    if !temperature_k.is_finite() || temperature_k <= 0.0 {
-                        return Err(WallConvectionError::Invalid(
-                            "wall trial temperature must be positive and finite",
-                        ));
-                    }
-                    let coefficient =
-                        resolve(gas, temperature_k).map_err(WallConvectionError::Source)?;
-                    let mut environment = self.body.clone();
-                    environment.temperature_k = gas_temperature_k;
-                    environment.convection_w_per_m2_k = coefficient.coefficient_w_per_m2_k;
-                    let body = environment.advance(cx, input).map_err(|error| {
-                        if cx.checkpoint().is_err() {
-                            WallConvectionError::Cancelled
-                        } else {
-                            WallConvectionError::Thermal(Error::Interface(error))
-                        }
-                    })?;
-                    let endpoint_temperature_k = body.state.temperature_k();
-                    let endpoint = resolve(gas, endpoint_temperature_k)
-                        .map_err(WallConvectionError::Source)?;
-                    if !endpoint.coefficient_w_per_m2_k.is_finite()
-                        || endpoint.coefficient_w_per_m2_k < 0.0
-                    {
-                        return Err(WallConvectionError::Invalid(
-                            "endpoint convection coefficient must be finite and nonnegative",
-                        ));
-                    }
-                    let temperature_residual_k = temperature_k - endpoint_temperature_k;
-                    let boundary_residual_j = input.duration_s
-                        * input.surface_area_m2
-                        * (coefficient.coefficient_w_per_m2_k - endpoint.coefficient_w_per_m2_k)
-                        * (endpoint_temperature_k - gas_temperature_k);
-                    let scaled = (temperature_residual_k.abs() / wall.temperature_tolerance_k)
-                        .max(boundary_residual_j.abs() / self.exchange.source_tolerance_j);
-                    if !boundary_residual_j.is_finite()
-                        || !scaled.is_finite()
-                        || (temperature_residual_k == 0.0 && boundary_residual_j != 0.0)
-                    {
-                        return Err(WallConvectionError::Invalid(
-                            "nonfinite or nonrepeatable wall convection residual",
-                        ));
-                    }
-                    Ok((
-                        ConvectionCoefficient {
-                            coefficient_w_per_m2_k: coefficient.coefficient_w_per_m2_k,
-                            source: WallConvectionSample {
-                                source: coefficient.source,
-                                endpoint_source: endpoint.source,
-                                temperature_k,
-                                temperature_residual_k,
-                                boundary_residual_j,
-                                wall_trials,
-                                total_wall_trials,
-                            },
-                        },
-                        scaled.copysign(temperature_residual_k),
-                    ))
-                },
-                &mut || cx.checkpoint().is_err(),
+            resolve_wall_convection(
+                cx,
+                self.body,
+                input,
+                gas,
+                wall,
+                self.exchange.source_tolerance_j,
+                &mut total_wall_trials,
+                &mut resolve,
             )
-            .map_err(|error| match error {
-                feedback::ScalarError::Evaluation(error) => error,
-                feedback::ScalarError::Invalid(message) => WallConvectionError::Invalid(message),
-                feedback::ScalarError::Cancelled => WallConvectionError::Cancelled,
-                feedback::ScalarError::OutsideBracket { lower, upper } => {
-                    WallConvectionError::OutsideBracket {
-                        lower_scaled_residual: lower,
-                        upper_scaled_residual: upper,
-                    }
-                }
-                feedback::ScalarError::NotConverged {
-                    iterations,
-                    residual,
-                } => WallConvectionError::NotConverged {
-                    iterations,
-                    scaled_residual: residual,
-                },
-            })
         });
         match result {
             Err(ConvectionError::Convection(WallConvectionError::Cancelled)) => {
@@ -196,4 +108,117 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
             other => other,
         }
     }
+}
+
+// One physical wall root for both a single gas/body pair and multiple bodies
+// sharing a gas. This only resolves the boundary coefficient; the enclosing
+// original gas owner retains its single caloric inversion and exchange account.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_wall_convection<S, E, F: ThermalFluidTransport + ?Sized>(
+    cx: &Cx<'_>,
+    boundary: &LumpedThermalEnvironment,
+    input: UniformEnthalpyStepInput<'_>,
+    gas: &F,
+    wall: WallConvectionSolve,
+    source_tolerance_j: f64,
+    total_wall_trials: &mut usize,
+    mut resolve: impl FnMut(&F, f64) -> Result<ConvectionCoefficient<S>, E>,
+) -> Result<ConvectionCoefficient<WallConvectionSample<S>>, WallConvectionError<E>> {
+    if !source_tolerance_j.is_finite() || source_tolerance_j <= 0.0 {
+        return Err(WallConvectionError::Invalid(
+            "positive representable wall boundary energy tolerance required",
+        ));
+    }
+    let gas_temperature_k = gas
+        .thermal_transport_state()
+        .map_err(|error| WallConvectionError::Thermal(gas_error(error.into())))?
+        .temperature_k();
+    feedback::solve_scalar(
+        wall.temperature_increment_bracket_k,
+        1.0,
+        wall.maximum_iterations,
+        |increment, wall_trials, _| {
+            if !wall.temperature_tolerance_k.is_finite() || wall.temperature_tolerance_k <= 0.0 {
+                return Err(WallConvectionError::Invalid(
+                    "positive finite wall temperature tolerance required",
+                ));
+            }
+            *total_wall_trials += 1;
+            let temperature_k = input.initial.temperature_k() + increment;
+            if !temperature_k.is_finite() || temperature_k <= 0.0 {
+                return Err(WallConvectionError::Invalid(
+                    "wall trial temperature must be positive and finite",
+                ));
+            }
+            let coefficient = resolve(gas, temperature_k).map_err(WallConvectionError::Source)?;
+            let mut environment = boundary.clone();
+            environment.temperature_k = gas_temperature_k;
+            environment.convection_w_per_m2_k = coefficient.coefficient_w_per_m2_k;
+            let body = environment.advance(cx, input).map_err(|error| {
+                if cx.checkpoint().is_err() {
+                    WallConvectionError::Cancelled
+                } else {
+                    WallConvectionError::Thermal(Error::Interface(error))
+                }
+            })?;
+            let endpoint_temperature_k = body.state.temperature_k();
+            let endpoint =
+                resolve(gas, endpoint_temperature_k).map_err(WallConvectionError::Source)?;
+            if !endpoint.coefficient_w_per_m2_k.is_finite() || endpoint.coefficient_w_per_m2_k < 0.0
+            {
+                return Err(WallConvectionError::Invalid(
+                    "endpoint convection coefficient must be finite and nonnegative",
+                ));
+            }
+            let temperature_residual_k = temperature_k - endpoint_temperature_k;
+            let boundary_residual_j = input.duration_s
+                * input.surface_area_m2
+                * (coefficient.coefficient_w_per_m2_k - endpoint.coefficient_w_per_m2_k)
+                * (endpoint_temperature_k - gas_temperature_k);
+            let scaled = (temperature_residual_k.abs() / wall.temperature_tolerance_k)
+                .max(boundary_residual_j.abs() / source_tolerance_j);
+            if !boundary_residual_j.is_finite()
+                || !scaled.is_finite()
+                || (temperature_residual_k == 0.0 && boundary_residual_j != 0.0)
+            {
+                return Err(WallConvectionError::Invalid(
+                    "nonfinite or nonrepeatable wall convection residual",
+                ));
+            }
+            Ok((
+                ConvectionCoefficient {
+                    coefficient_w_per_m2_k: coefficient.coefficient_w_per_m2_k,
+                    source: WallConvectionSample {
+                        source: coefficient.source,
+                        endpoint_source: endpoint.source,
+                        temperature_k,
+                        temperature_residual_k,
+                        boundary_residual_j,
+                        wall_trials,
+                        total_wall_trials: *total_wall_trials,
+                    },
+                },
+                scaled.copysign(temperature_residual_k),
+            ))
+        },
+        &mut || cx.checkpoint().is_err(),
+    )
+    .map_err(|error| match error {
+        feedback::ScalarError::Evaluation(error) => error,
+        feedback::ScalarError::Invalid(message) => WallConvectionError::Invalid(message),
+        feedback::ScalarError::Cancelled => WallConvectionError::Cancelled,
+        feedback::ScalarError::OutsideBracket { lower, upper } => {
+            WallConvectionError::OutsideBracket {
+                lower_scaled_residual: lower,
+                upper_scaled_residual: upper,
+            }
+        }
+        feedback::ScalarError::NotConverged {
+            iterations,
+            residual,
+        } => WallConvectionError::NotConverged {
+            iterations,
+            scaled_residual: residual,
+        },
+    })
 }

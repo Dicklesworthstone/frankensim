@@ -82,6 +82,8 @@ pub struct FiniteGasBodiesReport {
     /// Body slot aggregates distinct bodies at their own temperatures; gas once.
     pub entropy: FiniteGasEntropyReport,
     pub exchange_trials: usize,
+    /// Final native body proposals for all gas trials. Additional wall-feedback
+    /// proposals, when selected, are retained in each body's convection sample.
     pub body_trials: usize,
 }
 
@@ -160,6 +162,66 @@ impl<G: IsochoricGasStorage> FiniteGasBodiesEnvironment<'_, G> {
         self.advance_with_convection(cx, bodies, |body, _| Ok(ConvectionCoefficient {
             coefficient_w_per_m2_k: body.environment.convection_w_per_m2_k, source: (),
         }))
+    }
+
+    /// Resolve every body's convection at its OWN wall endpoint and the SAME
+    /// finite gas endpoint. Film-temperature and natural-convection laws use
+    /// the original single-body wall feedback, without sequential gas updates.
+    ///
+    /// `resolve` receives the original body descriptor, the common candidate
+    /// gas and that body's proposed wall temperature [K]. It may query the
+    /// original gas source at a declared film temperature without changing the
+    /// physical bulk inventory. Source identities and both final wall-law
+    /// evaluations survive in each body's report. All callbacks must be
+    /// repeatable and leave external histories unchanged.
+    ///
+    /// Wall temperature controls apply independently to every original body.
+    /// The shared source-work tolerance is divided equally between bodies so
+    /// the sum of absolute wall-law mismatches stays within ONE allowance.
+    /// Only this numerical allowance is partitioned; no physical heat or
+    /// conductance is redistributed. Existing gas storage, body phase/Biot,
+    /// external radiation, energy/entropy and atomicity checks remain active.
+    ///
+    /// Each wall root takes at most `wall.maximum_iterations + 2` native body
+    /// proposals per gas trial, plus the original final body proposal. Arbitrary
+    /// material laws do not acquire a convergence or uniqueness guarantee.
+    pub fn advance_with_wall_convection<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        bodies: &[FiniteGasBody<'_>],
+        wall: WallConvectionSolve,
+        mut resolve: impl FnMut(
+            &FiniteGasBody<'_>,
+            &G::State,
+            f64,
+        ) -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<
+        FiniteGasBodiesCandidate<WallConvectionSample<S>, G>,
+        FiniteGasBodiesError<WallConvectionError<E>>,
+    > {
+        // The shared owner admits the bounded body set before invoking this
+        // callback. Allocate a counter only for each admitted physical body.
+        let mut wall_trials = std::collections::BTreeMap::new();
+        let source_tolerance_j = self.exchange.source_tolerance_j / bodies.len().max(1) as f64;
+        let result = self.advance_with_convection(cx, bodies, |body, gas| {
+            super::wall::resolve_wall_convection(
+                cx,
+                body.environment,
+                body.input,
+                gas,
+                wall,
+                source_tolerance_j,
+                wall_trials.entry(body.id).or_insert(0),
+                |gas, temperature_k| resolve(body, gas, temperature_k),
+            )
+        });
+        match result {
+            Err(FiniteGasBodiesError::Body {
+                error: ConvectionError::Convection(WallConvectionError::Cancelled),
+                ..
+            }) => Err(FiniteGasBodiesError::Cancelled),
+            other => other,
+        }
     }
 
     /// Resolve distinct whole-body convection laws at one shared gas endpoint.

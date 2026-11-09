@@ -9836,6 +9836,17 @@ transfers are never corrected or redistributed. Opposing transfers still solve
 every body when the gas has exactly zero net heat. Canonical physical body IDs
 make input ordering immaterial without imposing sequential reservoir updates.
 
+`advance_with_wall_convection` also resolves each body's own unknown wall
+temperature through the original single-body wall-feedback helper. Natural and
+film-temperature-dependent material laws see that wall and the same shared gas
+endpoint. Each body retains both queried and actual-endpoint source evaluations,
+its temperature and boundary-work residuals, and its complete wall trial count.
+The sum of absolute wall-law work mismatches is bounded by the shared source
+tolerance, divided numerically between bodies without changing any heat flow.
+No extra gas storage or sequential reservoir update is introduced. Focused
+regressions cover independently solved nonlinear heat equations, the existing
+single-body path, opposing latent transfers and late source/cancellation refusal.
+
 Original fixed-density gas internal-energy and entropy increments are counted
 once, including supported real-gas departures. Body storage uses each original
 enthalpy and relative entropy law, including latent plateaus. The shared entropy

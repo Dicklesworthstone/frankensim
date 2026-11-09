@@ -1,6 +1,7 @@
 //! Shared finite-gas energy with distinct native sensible/latent bodies.
 use super::*;
-use fs_couple::finite_gas_thermal::{ConvectionCoefficient,
+use fs_couple::finite_gas_thermal::{ConvectionCoefficient, ConvectionError,
+    WallConvectionError, WallConvectionSolve,
     bodies::{FiniteGasBodiesEnvironment, FiniteGasBodiesError, FiniteGasBody}};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
@@ -14,6 +15,14 @@ fn input(source: &Sources, temperature: f64, heat: f64) -> UniformEnthalpyStepIn
 fn shared(gas: &IsochoricGasParcel, heat: f64) -> FiniteGasBodiesEnvironment<'_> {
     FiniteGasBodiesEnvironment { gas, gas_heat_j: heat, gas_solve: gas_solve(),
         exchange: exchange(0.02), maximum_gas_temperature_increment_k: 20.0, maximum_bodies: 8 }
+}
+
+fn wall() -> WallConvectionSolve {
+    WallConvectionSolve {
+        temperature_increment_bracket_k: [-5.0, 5.0],
+        temperature_tolerance_k: 1e-9,
+        maximum_iterations: 128,
+    }
 }
 
 #[test]
@@ -121,6 +130,19 @@ fn zero_net_gas_heat_still_freezes_one_latent_body_and_melts_the_other() {
         assert!(entropy.convection_production_j_k > 0.0);
         close(entropy.temporal_defect_j_k[0], 0.0, 1e-14);
         close(entropy.balance_residual_j_k, 0.0, 1e-15);
+        let coupled = environment.advance_with_wall_convection(cx, &bodies, wall(),
+            |_, gas, wall_k| Ok::<_, Infallible>(ConvectionCoefficient {
+                coefficient_w_per_m2_k: 10.0 * (wall_k - gas.state().temperature).abs(),
+                source: wall_k,
+            })).unwrap();
+        assert_eq!(coupled.gas(), &gas);
+        assert_eq!(coupled.report().heat_into_gas_j, 0.0);
+        assert_eq!(coupled.report().exchange_trials, 1);
+        for (original, coupled) in result.bodies().iter().zip(coupled.bodies()) {
+            assert_eq!(original.state, coupled.state);
+            assert_eq!(original.report.solid_to_gas_heat_j, coupled.report.solid_to_gas_heat_j);
+            assert_eq!(coupled.report.convection.source.total_wall_trials, 1);
+        }
     });
 }
 
@@ -257,5 +279,142 @@ fn dense_gas_keeps_original_fixed_density_departure_energy_with_multiple_bodies(
         assert_eq!(result.gas().mass_kg(), gas.mass_kg());
         assert_eq!(result.gas().volume_m3(), gas.volume_m3());
         close(result.report().entropy.balance_residual_j_k, 0.0, 1e-15);
+    });
+}
+
+#[test]
+fn g1_wall_dependent_bodies_match_independent_simultaneous_heat_equations() {
+    scope(|cx, _| {
+        let sources = [sources(2.0, 1000.0, false, false),
+            sources(4.0, 1000.0, false, false), sources(6.0, 1000.0, false, false)];
+        let boundaries = sources.each_ref().map(|source| boundary(source, 0.0));
+        let mut inputs = [input(&sources[0], 320.0, 2e-4),
+            input(&sources[1], 290.0, 1e-4), input(&sources[2], 310.0, -2e-4)];
+        for input in &mut inputs { input.duration_s = 0.001; }
+        let bodies: Vec<_> = (0..3).map(|i| FiniteGasBody {
+            id: [30, 10, 20][i], environment: &boundaries[i], input: inputs[i],
+        }).collect();
+        let gas = gas(300.0, 1e-6);
+        let environment = shared(&gas, 1e-3);
+        let coefficient = |wall: f64, gas: f64| 80.0 + 2.0 * (wall - 300.0) + 0.2 * (gas - 300.0);
+        let resolve = |body: &FiniteGasBody<'_>, gas: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+            wall_k: f64| Ok::<_, Infallible>(ConvectionCoefficient {
+                coefficient_w_per_m2_k: coefficient(wall_k, gas.state().temperature),
+                source: (body.id, gas.state().temperature, wall_k),
+            });
+        let result = environment.advance_with_wall_convection(cx, &bodies, wall(), resolve).unwrap();
+        // The manufactured h is affine in the two temperatures. Solve each
+        // body's quadratic analytically, then independently bisect only the
+        // shared gas balance. Neither native thermal nor wall solver is reused.
+        let capacities = [2.0, 4.0, 6.0].map(|cp| cp * inputs[0].mass_kg);
+        let wall_at = |i: usize, gas_k: f64| {
+            let a = inputs[i].duration_s * inputs[i].surface_area_m2;
+            let isolated = inputs[i].initial.temperature_k() + inputs[i].internal_heat_j / capacities[i];
+            let b = capacities[i] + a * coefficient(gas_k, gas_k);
+            let drive = capacities[i] * (isolated - gas_k);
+            gas_k + 2.0 * drive / (b + (b * b + 8.0 * a * drive).sqrt())
+        };
+        let cg = 2.5 * 100000.0 * gas.volume_m3() / 300.0;
+        let (mut low, mut high) = (280.0, 320.0);
+        for _ in 0..100 {
+            let gas_k = f64::midpoint(low, high);
+            let heat: f64 = (0..3).map(|i| {
+                let t = wall_at(i, gas_k);
+                inputs[i].duration_s * inputs[i].surface_area_m2 * coefficient(t, gas_k) * (t - gas_k)
+            }).sum();
+            if cg * (gas_k - 300.0) - environment.gas_heat_j - heat < 0.0 {
+                low = gas_k;
+            } else { high = gas_k; }
+        }
+        let expected = f64::midpoint(low, high);
+        close(result.gas().state().state().temperature, expected, 2e-8);
+        let mut boundary_defect = 0.0;
+        for next in result.bodies() {
+            let i = [30, 10, 20].iter().position(|id| *id == next.report.id).unwrap();
+            close(next.state.temperature_k(), wall_at(i, expected), 2e-8);
+            let sample = &next.report.convection.source;
+            assert_eq!(sample.source.0, next.report.id);
+            assert_eq!(sample.endpoint_source.0, next.report.id);
+            assert_eq!(sample.endpoint_source.1, result.gas().state().state().temperature);
+            close(sample.endpoint_source.2, next.state.temperature_k(), 1e-12);
+            assert!(sample.temperature_residual_k.abs() <= wall().temperature_tolerance_k);
+            assert!(sample.boundary_residual_j.abs() <= environment.exchange.source_tolerance_j / 3.0);
+            assert!(sample.total_wall_trials >= sample.wall_trials);
+            assert!(sample.total_wall_trials <= result.report().exchange_trials * (wall().maximum_iterations + 2));
+            boundary_defect += sample.boundary_residual_j.abs();
+        }
+        assert!(boundary_defect <= environment.exchange.source_tolerance_j);
+        assert!(result.report().absolute_energy_defect_j <= environment.exchange.energy_tolerance_j);
+        close(result.report().entropy.balance_residual_j_k, 0.0, 1e-15);
+        let mut reversed = bodies.clone(); reversed.reverse();
+        assert_eq!(result, environment.advance_with_wall_convection(cx, &reversed, wall(), resolve).unwrap());
+        assert_eq!(gas.state().state().temperature, 300.0);
+    });
+}
+
+#[test]
+fn g3_shared_wall_feedback_preserves_the_single_body_owner() {
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let boundary = boundary(&source, 0.0);
+        let mut input = input(&source, 320.0, 2e-4);
+        input.duration_s = 0.001;
+        let gas = gas(300.0, 1e-6);
+        let shared = shared(&gas, 1e-3);
+        let pair = FiniteGasThermalEnvironment {
+            gas: &gas, body: &boundary, gas_heat_j: shared.gas_heat_j,
+            gas_solve: shared.gas_solve, exchange: shared.exchange,
+            maximum_gas_temperature_increment_k: shared.maximum_gas_temperature_increment_k,
+        };
+        let resolve = |_: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState, wall_k: f64|
+            Ok::<_, Infallible>(ConvectionCoefficient {
+                coefficient_w_per_m2_k: 80.0 + 2.0 * (wall_k - 300.0), source: wall_k,
+            });
+        let existing = pair.advance_with_wall_convection(cx, input, wall(), resolve).unwrap();
+        let multiple = shared.advance_with_wall_convection(cx,
+            &[FiniteGasBody { id: 17, environment: &boundary, input }], wall(),
+            |_, gas, wall_k| resolve(gas, wall_k)).unwrap();
+        close(multiple.gas().state().state().temperature, existing.report.next_gas.state().state().temperature, 1e-8);
+        close(multiple.bodies()[0].state.temperature_k(), existing.state.temperature_k(), 1e-8);
+        close(multiple.bodies()[0].report.solid_to_gas_heat_j, existing.report.solid_to_gas_heat_j, 1e-11);
+        assert_eq!(multiple.bodies()[0].report.convection, existing.report.convection);
+    });
+}
+
+#[test]
+fn g4_shared_wall_refusal_and_cancellation_preserve_all_original_histories() {
+    scope(|cx, gate| {
+        let source = sources(2.0, 1000.0, false, false);
+        let boundary = boundary(&source, 0.0);
+        let mut inputs = [input(&source, 320.0, 0.0), input(&source, 290.0, 0.0)];
+        for input in &mut inputs { input.duration_s = 0.001; }
+        let bodies = [FiniteGasBody { id: 1, environment: &boundary, input: inputs[0] },
+            FiniteGasBody { id: 2, environment: &boundary, input: inputs[1] }];
+        let gas = gas(300.0, 1e-6);
+        let saved = gas.clone();
+        let shared = shared(&gas, 0.0);
+        let mut first_body_queries = 0;
+        let refused = shared.advance_with_wall_convection(cx, &bodies, wall(), |body, _, wall_k| {
+            if body.id == 1 { first_body_queries += 1; }
+            if body.id == 2 && wall_k != body.input.initial.temperature_k() {
+                Err("second body's endpoint material refused")
+            } else { Ok(ConvectionCoefficient { coefficient_w_per_m2_k: 100.0, source: () }) }
+        });
+        assert!(first_body_queries > 1, "first body's wall was already solved");
+        assert!(matches!(refused, Err(FiniteGasBodiesError::Body { id: 2,
+            error: ConvectionError::Convection(WallConvectionError::Source("second body's endpoint material refused")) })));
+        let outside = shared.advance_with_wall_convection(cx, &bodies,
+            WallConvectionSolve { temperature_increment_bracket_k: [0.0, 0.0], ..wall() },
+            |_, _, _| Ok::<_, Infallible>(ConvectionCoefficient { coefficient_w_per_m2_k: 100.0, source: () }));
+        assert!(matches!(outside, Err(FiniteGasBodiesError::Body { id: 1,
+            error: ConvectionError::Convection(WallConvectionError::OutsideBracket { .. }) })));
+        let cancelled = shared.advance_with_wall_convection(cx, &bodies, wall(), |body, _, wall_k| {
+            if body.id == 2 && wall_k != body.input.initial.temperature_k() { gate.request(); }
+            Ok::<_, Infallible>(ConvectionCoefficient { coefficient_w_per_m2_k: 100.0, source: () })
+        });
+        assert!(matches!(cancelled, Err(FiniteGasBodiesError::Cancelled)));
+        assert_eq!(gas, saved);
+        assert_eq!(bodies[0].input.initial, inputs[0].initial);
+        assert_eq!(bodies[1].input.initial, inputs[1].initial);
     });
 }
