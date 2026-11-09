@@ -10,6 +10,8 @@ use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Point3;
 use fs_rand::philox::philox4x32_10;
 
+mod mixed;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
@@ -398,18 +400,20 @@ fn delta_mixed_measure_replay_cancellation_and_facet_refusals_are_explicit() {
         }
         let empty: [CoherentDielectricCoating; 0] = [];
         let stack = DielectricCoatingStack::try_new(&empty).unwrap();
-        let refused = input.evaluate_smith_stack_dielectric_connection(
-            cx,
-            normal,
-            glass(1.0),
-            rough,
-            stack,
-            source,
-            Stokes::unpolarized(1.0),
-            settings,
-            |_| panic!("unsupported measure drew a facet"),
-        );
-        assert_eq!(refused, Err(SmithDielectricError::UnsupportedMixedMeasure));
+        let empty_response = input
+            .evaluate_smith_stack_dielectric_connection(
+                cx,
+                normal,
+                glass(1.0),
+                rough,
+                stack,
+                source,
+                Stokes::unpolarized(1.0),
+                settings,
+                |_| panic!("empty index-matched stack drew a facet"),
+            )
+            .unwrap();
+        assert_eq!(empty_response.factor_per_sr(), 0.0);
         let run = || {
             input.evaluate_smith_dielectric_connection(
                 cx,
