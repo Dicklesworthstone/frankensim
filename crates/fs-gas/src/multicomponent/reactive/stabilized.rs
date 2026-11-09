@@ -117,6 +117,9 @@ pub struct StabilizedReactiveIntervalReport {
     pub right_boundary_change: Totals,
     /// Original accepted area-wall pressure impulses.
     pub area_momentum_impulse: f64,
+    /// Accepted interior mechanical impulse/work and representation error.
+    /// Boundary enthalpy and chemical formation energy remain separate.
+    pub source_change: ForceChange,
     /// Original field integrals.
     pub before: Totals,
     /// Final field integrals.
@@ -414,6 +417,26 @@ impl ReactingEuler1d {
         entropy: Option<&mut super::entropy::CoupledEntropy>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
+        self.stabilized_step_inner_forced(
+            operator, maximum_duration, controls, dissipation_controls, reservoirs,
+            evaluations, budget, entropy, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn stabilized_step_inner_forced<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        evaluations: &mut usize,
+        budget: Option<&mut CouplingBudget>,
+        entropy: Option<&mut super::entropy::CoupledEntropy>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
         let before = *evaluations;
         let molecular = if let Some(account) = entropy.as_ref() {
             MolecularMethod::EntropyStabilized {
@@ -427,7 +450,7 @@ impl ReactingEuler1d {
                 evaluations,
             }
         };
-        let (coupled, dissipation) = self.step_inner(
+        let (coupled, dissipation) = self.step_inner_forced(
             maximum_duration,
             controls,
             Some(operator),
@@ -435,6 +458,7 @@ impl ReactingEuler1d {
             reservoirs,
             budget,
             entropy,
+            forcing,
             cancelled,
         )?;
         Ok(StabilizedReactiveStepReport {
@@ -555,6 +579,22 @@ impl ReactingEuler1d {
         controls: StabilizedReactiveIntervalControl,
         reservoirs: [Option<Cell<'_>>; 2],
         entropy: Option<&mut super::entropy::IntervalEntropy>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_for_inner_forced(
+            operator, duration, controls, reservoirs, entropy, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_stabilized_for_inner_forced<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        duration: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        entropy: Option<&mut super::entropy::IntervalEntropy>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -569,12 +609,13 @@ impl ReactingEuler1d {
                 "reacting duration is not representable at this clock",
             ));
         }
-        self.advance_stabilized_to_inner(
+        self.advance_stabilized_to_inner_forced(
             operator,
             Time::new(target),
             controls,
             reservoirs,
             entropy,
+            forcing,
             cancelled,
         )
     }
@@ -621,7 +662,23 @@ impl ReactingEuler1d {
         target: Time,
         controls: StabilizedReactiveIntervalControl,
         reservoirs: [Option<Cell<'_>>; 2],
+        entropy: Option<&mut super::entropy::IntervalEntropy>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_to_inner_forced(
+            operator, target, controls, reservoirs, entropy, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_stabilized_to_inner_forced<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        target: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
         mut entropy: Option<&mut super::entropy::IntervalEntropy>,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -633,6 +690,17 @@ impl ReactingEuler1d {
             ));
         }
         reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<FlowError>()?;
+            if !force.admit::<FlowError>(self.accepted.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
+        if forcing.is_some() && entropy.is_some() {
+            return Err(ReactiveError::Invalid(
+                "reacting body forcing does not compose entropy accounting",
+            ));
+        }
         if self.interval_initial.len() != self.accepted.states.len() {
             self.interval_initial = allocated(self.accepted.states.len(), 0.0)?;
         }
@@ -694,7 +762,7 @@ impl ReactingEuler1d {
                     )?),
                     None => None,
                 };
-                let step = self.stabilized_step_inner(
+                let step = self.stabilized_step_inner_forced(
                     operator,
                     Time::new(remaining),
                     controls.step,
@@ -703,6 +771,7 @@ impl ReactingEuler1d {
                     &mut evaluations,
                     Some(&mut budget),
                     step_entropy.as_mut(),
+                    forcing,
                     &mut cancelled,
                 )?;
                 if !positive(step.coupled.elapsed.value())
@@ -806,6 +875,7 @@ struct IntervalLedger {
     chemistry_sources: Ledger,
     entropy: Sum,
     area_impulse: Sum,
+    mechanical_source: [Sum; 3],
     chemistry: ChemistryReport,
     maximum_stages: usize,
     maximum_scaled_parabolic: f64,
@@ -818,6 +888,7 @@ impl IntervalLedger {
             chemistry_sources: Ledger([Sum::default(); MAX_COMPONENTS]),
             entropy: Sum::default(),
             area_impulse: Sum::default(),
+            mechanical_source: [Sum::default(); 3],
             chemistry: ChemistryReport::default(),
             maximum_stages: 0,
             maximum_scaled_parabolic: 0.0,
@@ -831,6 +902,12 @@ impl IntervalLedger {
         self.boundaries[3].add(report.transport.right_boundary_change, n);
         self.area_impulse
             .add(report.transport.area_momentum_impulse);
+        let source = report.transport.source_change;
+        for (total, value) in self.mechanical_source.iter_mut().zip([
+            source.impulse, source.work, source.energy_residual,
+        ]) {
+            total.add(value);
+        }
         for half in [step.dissipation.first, step.dissipation.second] {
             self.boundaries[1].add(half.transport.boundary_change, n);
             self.boundaries[2].add(half.transport.left_boundary_change, n);
@@ -889,6 +966,14 @@ impl IntervalLedger {
         self.chemistry.species_change_kg = sources.species_masses;
         self.chemistry.referenced_energy_change_j = sources.energy;
         self.chemistry.entropy_change_j_k = self.entropy.value;
+        if self.mechanical_source.iter().any(|sum| !sum.value.is_finite()) {
+            return Err(ReactiveError::Invalid("non-finite reacting mechanical source account"));
+        }
+        let source_change = ForceChange {
+            impulse: self.mechanical_source[0].value,
+            work: self.mechanical_source[1].value,
+            energy_residual: self.mechanical_source[2].value,
+        };
         let (residual, mass_residual, energy_residual) = coupled_balance(
             gas,
             before,
@@ -896,7 +981,7 @@ impl IntervalLedger {
             advection,
             molecular,
             self.area_impulse.value,
-            ForceChange::default(),
+            source_change,
             &self.chemistry,
         )?;
         Ok(StabilizedReactiveIntervalReport {
@@ -914,6 +999,7 @@ impl IntervalLedger {
             left_boundary_change: left,
             right_boundary_change: right,
             area_momentum_impulse: self.area_impulse.value,
+            source_change,
             before,
             after,
             conservation_residual: residual,

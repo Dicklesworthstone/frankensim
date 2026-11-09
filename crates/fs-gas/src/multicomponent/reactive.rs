@@ -22,6 +22,7 @@ use fs_qty::{Amount, Time};
 pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
+mod forcing;
 pub use cell::CellChemistry;
 mod entropy;
 pub use entropy::{

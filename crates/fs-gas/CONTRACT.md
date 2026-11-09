@@ -9105,3 +9105,33 @@ reaction and diffusion, zero-source parity, stationary-bath admission and
 late cancellation/retry. This stationary prescribed-bath extension does not
 infer finite reservoir depletion, moving exterior momentum or entropy
 admission for the forced composition.
+
+## Acceleration through complete stabilized reacting intervals
+
+`step_with_stabilized_dissipation_and_body_force` and
+`advance_stabilized_with_body_force_for/to` compose the original interior
+mechanical source with chemistry, RKL2 molecular transport and optional
+stationary species-bearing baths. Native source stages use actual mixture
+density, and final chemistry-temperature and force-Mach admission follows
+the complete molecular/chemical composition. RKL2 retains its original
+nonlinear applicability and temporal-refinement requirements.
+
+The original interval owner carries one coupling-attempt budget and one
+molecular RHS budget through both halves and every rejected attempt. Accepted
+mechanical impulse, conjugate work and source representation error accumulate
+with compensation in `StabilizedReactiveIntervalReport::source_change`.
+Only the physical impulse/work enters the original-to-final momentum and
+absolute-energy balance. Representation error remains a diagnostic and
+cannot become heat or conceal a conservation defect.
+
+A zero source retains the original unforced numerical path. Zero-length calls
+still admit force shape/controls, baths and the original molecular operator.
+A late cancellation, source refusal, final-account failure or exhausted work
+restores the entire initial conserved field and clock, including after an
+accepted prefix. Existing reusable rollback/source storage suffices; the
+extension retains no per-step force trace or extra integration kernel.
+
+`reactive/tests/forcing/stabilized.rs` covers independently accelerated
+reaction-diffusion Fourier transport and refinement, complete source impulse
+and work, original zero-source identity, no-op admission, and whole-window
+rollback/retry with stationary baths and a global work refusal.

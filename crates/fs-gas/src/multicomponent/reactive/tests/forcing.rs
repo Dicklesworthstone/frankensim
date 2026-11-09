@@ -3,6 +3,7 @@
 use super::*;
 
 mod reservoir;
+mod stabilized;
 
 const FORCE_CONTROL: ForceControl = ForceControl { maximum_mach: 80.0 };
 
