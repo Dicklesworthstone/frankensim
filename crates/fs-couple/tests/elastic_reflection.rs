@@ -7,6 +7,9 @@ use fs_material::elastic::acoustic::interface::ElasticMode;
 use fs_math::c64::C64;
 use fs_phs::{WallPin, wall_specific_impedance};
 
+#[path = "elastic_reflection/oriented.rs"]
+mod oriented;
+
 fn solid(scale: f64) -> ElasticAcousticState {
     ElasticAcousticState::from_bulk_and_shear(
         2500.0 * scale,

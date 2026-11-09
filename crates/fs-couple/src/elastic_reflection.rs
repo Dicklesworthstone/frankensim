@@ -6,10 +6,16 @@
 //! mass, spring and dashpot act in parallel on the surface displacement, with
 //! `traction = -Z velocity` and `Z = r - i omega sigma + i K/omega`.
 //!
-//! This is a stationary, locally reacting, linear boundary. The tangential law
-//! is isotropic in the surface plane; there is no inferred coupling between
-//! its two axes. A pin is an explicitly authored reduced support, not a
+//! These are stationary, locally reacting, linear boundaries. The two-pin
+//! owner has isotropic tangential response; the oriented owner retains three
+//! independent principal supports and their original rotation. A pin is an
+//! explicitly authored reduced support, not a
 //! measured material claim, resolved layer, finite shell or transient history.
+
+mod oriented;
+pub use oriented::{
+    OrientedOscillatorSupport, OrientedOscillatorSupportedSurface, OrientedSupportedElasticResponse,
+};
 
 use fs_material::MaterialError;
 use fs_material::elastic::acoustic::ElasticAcousticState;
@@ -158,43 +164,66 @@ impl<'a> OscillatorSupportedSurface<'a> {
         incoming_velocity_m_s: [C64; 3],
     ) -> Result<SupportedElasticResponse, ElasticSupportError> {
         let reflection = self.reflection.drive(incoming_velocity_m_s)?;
-        let mut displacement = [C64::ZERO; 3];
-        let mut kinetic = [0.0; 3];
-        let mut elastic = [0.0; 3];
-        let mut stored = Dd::ZERO;
-        for axis in 0..3 {
-            let pin = if axis == 2 {
-                self.normal
-            } else {
-                self.tangential
-            };
-            let velocity = reflection.boundary_velocity_m_s[axis];
-            displacement[axis] = C64::new(
-                -velocity.im / self.omega_rad_s,
-                velocity.re / self.omega_rad_s,
-            );
-            if !displacement[axis].re.is_finite()
-                || !displacement[axis].im.is_finite()
-                || (velocity != C64::ZERO && displacement[axis] == C64::ZERO)
-            {
-                return Err(ElasticSupportError::NumericalRange);
-            }
-            kinetic[axis] = mean_energy(pin.surface_density, velocity.abs())?;
-            elastic[axis] = mean_energy(pin.stiffness_per_area, displacement[axis].abs())?;
-            stored = stored + Dd::from_f64(kinetic[axis]) + Dd::from_f64(elastic[axis]);
-        }
-        let mean_stored_energy_j_m2 = stored.to_f64();
-        if !mean_stored_energy_j_m2.is_finite() {
-            return Err(ElasticSupportError::NumericalRange);
-        }
+        let storage = support_storage(
+            [self.tangential, self.tangential, self.normal],
+            reflection.boundary_velocity_m_s,
+            self.omega_rad_s,
+        )?;
         Ok(SupportedElasticResponse {
             reflection,
-            support_displacement_m: displacement,
-            mean_kinetic_energy_j_m2: kinetic,
-            mean_elastic_energy_j_m2: elastic,
-            mean_stored_energy_j_m2,
+            support_displacement_m: storage.displacement,
+            mean_kinetic_energy_j_m2: storage.kinetic,
+            mean_elastic_energy_j_m2: storage.elastic,
+            mean_stored_energy_j_m2: storage.total,
         })
     }
+}
+
+struct SupportStorage {
+    displacement: [C64; 3],
+    kinetic: [f64; 3],
+    elastic: [f64; 3],
+    total: f64,
+}
+
+// Both surface owners use the original pin potentials in their physical axes.
+fn support_storage(
+    pins: [WallPin; 3],
+    velocity: [C64; 3],
+    omega: f64,
+) -> Result<SupportStorage, ElasticSupportError> {
+    let mut storage = SupportStorage {
+        displacement: [C64::ZERO; 3],
+        kinetic: [0.0; 3],
+        elastic: [0.0; 3],
+        total: 0.0,
+    };
+    let mut total = Dd::ZERO;
+    for axis in 0..3 {
+        storage.displacement[axis] = displacement(velocity[axis], omega)?;
+        storage.kinetic[axis] = mean_energy(pins[axis].surface_density, velocity[axis].abs())?;
+        storage.elastic[axis] = mean_energy(
+            pins[axis].stiffness_per_area,
+            storage.displacement[axis].abs(),
+        )?;
+        total = total + Dd::from_f64(storage.kinetic[axis]) + Dd::from_f64(storage.elastic[axis]);
+    }
+    storage.total = total.to_f64();
+    if !storage.total.is_finite() {
+        return Err(ElasticSupportError::NumericalRange);
+    }
+    Ok(storage)
+}
+
+fn displacement(velocity: C64, omega: f64) -> Result<C64, ElasticSupportError> {
+    let value = C64::new(-velocity.im / omega, velocity.re / omega);
+    if !value.re.is_finite()
+        || !value.im.is_finite()
+        || (velocity != C64::ZERO && value == C64::ZERO)
+    {
+        return Err(ElasticSupportError::NumericalRange);
+    }
+    Ok(value)
 }
 
 fn mean_energy(coefficient: f64, amplitude: f64) -> Result<f64, ElasticSupportError> {

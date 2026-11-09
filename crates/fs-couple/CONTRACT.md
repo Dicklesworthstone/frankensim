@@ -6765,6 +6765,27 @@ nonlocal shell response or a transient trajectory. G1/G3 regressions compare
 independent normal reflection, resonant absorption, reactive work/storage,
 coherent mode conversion, material contrast and support-mass changes.
 
+`OrientedOscillatorSupport` retains three original `WallPin` laws and an admitted
+`fs-ga::So3` principal-to-surface rotation. Its reciprocal impedance is
+`R diag(Z_i) R^T`, assembled with double-double product/reduction arithmetic.
+The original `R diag(sqrt(r_i))` dissipative channels are retained directly,
+so refactoring rounded Cartesian coefficients cannot invent principal loss.
+`OrientedOscillatorSupportedSurface` passes this tensor to the native material
+boundary, allowing direction-dependent reflection and SH/P/SV conversion from
+tilted supports. The prepared native velocity map is reused on every drive;
+no reflected-field subtraction or new factorization reconstructs wall motion.
+
+Principal velocities and displacements retain each pin's original kinetic and
+spring potentials through the same storage evaluator as the two-pin owner.
+Surface displacement remains in the material boundary frame. Native absorbed
+power is the sole dissipative account, including rank-deficient and lossless
+resonant supports; reactive storage is not heat. This is a common principal
+frame for the authored mass, stiffness and resistance, not resolved layers or
+independently oriented noncommuting mechanical tensors. Five focused regression
+definitions cover the original diagonal limit, analytic rotated shear and
+tilted longitudinal/shear conversion, coherent work and storage, and source
+domains/cancellation. Native execution status is reported separately.
+
 ## Compact outlet reaction from an impedance wall
 
 `compact_wall_radiation::PreparedCompactWallRadiation` closes original finite-pressure or prescribed-flow network sources against the complete exterior impedance of one or more unflanged compact circular outlets. Each diagonal retains `fs-duct`'s native unflanged radiation impedance, every off-diagonal retains the original 3D monopole mutual impedance, and every pair, including the finite diagonal self return, receives the original spherical impedance-wall response. These use the same fluid, frequency, peak phasor and physical volume-flow units. Reciprocal pairs are evaluated once; all reflected preparations share one aggregate work allowance and retain their native error diagnostics. Cancellation or refusal publishes no partial matrix.
