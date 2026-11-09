@@ -129,6 +129,46 @@ impl SphericalDropletGeometry {
         }
         Ok(coefficient)
     }
+
+    /// Convert an explicitly authored diameter-based Sherwood number to `k_m`.
+    ///
+    /// `D_AB` remains molecular diffusivity; it is never replaced with an
+    /// effective diffusivity. This geometric conversion supplies no correlation
+    /// or validity claim. The caller must admit the selected transport model.
+    /// `Sh=2` uses the original stagnant-sphere arithmetic exactly. A zero
+    /// molecular diffusivity seals mass transfer; Sherwood must be positive.
+    pub fn mass_transfer_coefficient_at_sherwood_m_s(
+        self,
+        binary_diffusivity_m2_s: f64,
+        sherwood_number: f64,
+    ) -> Result<f64, EvaporationError> {
+        if !positive(sherwood_number) || !nonnegative(binary_diffusivity_m2_s) {
+            return Err(EvaporationError::Invalid(
+                "positive finite Sherwood number and nonnegative molecular diffusivity required",
+            ));
+        }
+        if sherwood_number == 2.0 {
+            return self.mass_transfer_coefficient_m_s(binary_diffusivity_m2_s);
+        }
+        if binary_diffusivity_m2_s == 0.0 {
+            return Ok(0.0);
+        }
+        let diameter = self.diameter_m();
+        let coefficient = (binary_diffusivity_m2_s / diameter) * sherwood_number;
+        // A representable result can survive a different multiplication order
+        // even when the first positive intermediate overflowed/underflowed.
+        let coefficient = if positive(coefficient) {
+            coefficient
+        } else {
+            (binary_diffusivity_m2_s * sherwood_number) / diameter
+        };
+        if !positive(coefficient) {
+            return Err(EvaporationError::Unrepresentable(
+                "spherical Sherwood conductance",
+            ));
+        }
+        Ok(coefficient)
+    }
 }
 
 /// Prescribed far-field gas coordinates and molecular binary diffusivity.

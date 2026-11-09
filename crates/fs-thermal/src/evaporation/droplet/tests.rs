@@ -251,3 +251,31 @@ fn interface_sealing_inventory_refusal_and_cancellation_retain_the_original_seed
     ));
     assert_eq!(initial, droplet());
 }
+
+#[test]
+fn explicit_sherwood_preserves_stagnant_arithmetic_and_separate_molecular_diffusivity() {
+    let geometry = SphericalDropletGeometry::from_mass(1e-6, RHO).unwrap();
+    for diffusivity in [0.0, 1e-20, D, 1e20] {
+        assert_eq!(
+            geometry.mass_transfer_coefficient_at_sherwood_m_s(diffusivity, 2.0)
+                .unwrap().to_bits(),
+            geometry.mass_transfer_coefficient_m_s(diffusivity).unwrap().to_bits(),
+        );
+    }
+    for sherwood in [0.25, 8.0, 1000.0] {
+        let coefficient = geometry.mass_transfer_coefficient_at_sherwood_m_s(D, sherwood)
+            .unwrap();
+        let expected = sherwood * D / geometry.diameter_m();
+        assert!((coefficient - expected).abs() <= 4.0 * f64::EPSILON * expected);
+        assert_eq!(
+            geometry.mass_transfer_coefficient_at_sherwood_m_s(0.0, sherwood).unwrap(),
+            0.0,
+        );
+    }
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(geometry.mass_transfer_coefficient_at_sherwood_m_s(D, invalid).is_err());
+    }
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(geometry.mass_transfer_coefficient_at_sherwood_m_s(invalid, 8.0).is_err());
+    }
+}

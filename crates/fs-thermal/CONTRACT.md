@@ -4063,3 +4063,15 @@ These and all 64 preceding thermal
 luminescence tests passed against the actual production math and reaction
 sources with the pinned Rust toolchain. Renderer/material integration tests
 are separate from these 72 executed lower-owner tests.
+
+
+## Explicit spherical Sherwood conversion
+
+`SphericalDropletGeometry::mass_transfer_coefficient_at_sherwood_m_s` converts
+separate molecular diffusivity and diameter-based Sherwood to `Sh D_AB/d`.
+It supplies geometry only: correlation selection, source support and physical
+applicability remain with the transport caller. Positive finite Sh and
+nonnegative finite D are required; positive unrepresentable conductance refuses.
+Sh=2 delegates to the original D/r method exactly, and D=0 remains sealed.
+A focused regression specifies exact stagnant arithmetic, dimensional
+conversion and invalid inputs. This new test has not been executed.

@@ -294,3 +294,99 @@ fn excessive_withdrawal_invalid_diffusion_and_cancellation_leave_inputs_availabl
         .is_ok()
     );
 }
+
+#[test]
+fn explicit_sherwood_uses_original_surface_owner_and_retains_true_diffusivity() {
+    let source = catalog(0.0);
+    let binding = binding(0.0);
+    let state = initial();
+    for partial_pressure in [0.0, 5000.0] {
+        let original = gas(&source, 300.0, partial_pressure, 1e-4);
+        let saved = original.clone();
+        let geometry = state.geometry(&Phase, 300.0).unwrap();
+        let sherwood = 8.0;
+        let coefficient = sherwood * D / geometry.diameter_m();
+        let direct = advance_surface_with_gas(
+            &Phase,
+            &binding,
+            LiquidSurfaceState {
+                mass_kg: state.mass_kg,
+                specific_enthalpy_j_kg: state.specific_enthalpy_j_kg,
+                area_m2: geometry.area_m2(),
+            },
+            &original,
+            &source,
+            temperature,
+            coefficient,
+            0.1,
+            controls(),
+            || false,
+        ).unwrap();
+        let candidate = advance_droplet_with_gas_at_sherwood(
+            &Phase, &binding, state, &original, &source, temperature,
+            D, sherwood, 0.1, controls(), || false,
+        ).unwrap();
+        assert_eq!(candidate.report().binary_diffusivity_m2_s, D);
+        assert_eq!(candidate.report().sherwood_number, sherwood);
+        near(candidate.report().mass_transfer_coefficient_m_s, coefficient, 1e-16);
+        assert_eq!(candidate.gas(), direct.gas());
+        assert_eq!(candidate.droplet().mass_kg, direct.liquid().mass_kg);
+        assert_eq!(
+            candidate.droplet().specific_enthalpy_j_kg,
+            direct.liquid().specific_enthalpy_j_kg,
+        );
+        assert_eq!(candidate.step(), direct.step());
+        assert_eq!(candidate.step().transferred_mass_kg > 0.0, partial_pressure == 0.0);
+        near(candidate.step().energy_residual_j, 0.0, controls().gas.energy_tolerance_j);
+        assert_eq!(original, saved);
+
+        let stagnant = advance_droplet_with_gas(
+            &Phase, &binding, state, &original, &source, temperature,
+            D, 0.1, controls(), || false,
+        ).unwrap();
+        let explicit_two = advance_droplet_with_gas_at_sherwood(
+            &Phase, &binding, state, &original, &source, temperature,
+            D, 2.0, 0.1, controls(), || false,
+        ).unwrap();
+        assert_eq!(stagnant, explicit_two);
+        assert_eq!(
+            stagnant.report().mass_transfer_coefficient_m_s.to_bits(),
+            geometry.mass_transfer_coefficient_m_s(D).unwrap().to_bits(),
+        );
+        assert!(candidate.step().requested_transferred_mass_kg.abs()
+            > stagnant.step().requested_transferred_mass_kg.abs());
+    }
+}
+
+#[test]
+fn sherwood_heat_path_keeps_independent_sensible_heat_and_refuses_invalid_transport() {
+    let source = catalog(0.0);
+    let binding = binding(0.0);
+    let state = initial();
+    let original = gas(&source, 320.0, 0.0, 1e-4);
+    let saved = original.clone();
+    let baseline = advance_droplet_with_gas_and_heat(
+        &Phase, &binding, state, &original, &source, temperature,
+        0.0, 80.0, 0.1, controls(), heat_controls(), || false,
+    ).unwrap();
+    let forced = advance_droplet_with_gas_and_heat_at_sherwood(
+        &Phase, &binding, state, &original, &source, temperature,
+        0.0, 8.0, 80.0, 0.1, controls(), heat_controls(), || false,
+    ).unwrap();
+    assert_eq!(forced.droplet(), baseline.droplet());
+    assert_eq!(forced.gas(), baseline.gas());
+    assert_eq!(forced.step(), baseline.step());
+    assert_eq!(forced.heat(), baseline.heat());
+    assert_eq!(forced.droplet().mass_kg, state.mass_kg);
+    assert_eq!(forced.report().binary_diffusivity_m2_s, 0.0);
+    assert_eq!(forced.report().sherwood_number, 8.0);
+    assert_eq!(forced.report().mass_transfer_coefficient_m_s, 0.0);
+
+    for sherwood in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(advance_droplet_with_gas_at_sherwood(
+            &Phase, &binding, state, &original, &source, temperature,
+            D, sherwood, 0.1, controls(), || false,
+        ).is_err());
+    }
+    assert_eq!(original, saved);
+}

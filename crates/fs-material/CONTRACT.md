@@ -23452,3 +23452,23 @@ stepping groups these pass in an isolated actual-source harness using original
 WoolFelt, Maxwell, Cholesky, Jacobi and generalized-eigen functions and real
 fs-math/fs-evidence dependencies. Full fs-material integration remains unrun;
 the broader dependency build was killed while compiling asupersync.
+
+
+## Explicit Sherwood transport for original spherical evaporation
+
+`evaporation::gas::droplet` exposes phase and reciprocal-heat variants with
+separate molecular diffusivity and diameter-based Sherwood inputs. The common
+geometry owner converts them to `k_m = Sh D_AB / diameter`; the original phase,
+kinetic, inventory and gas/liquid caloric owners still perform the exchange.
+Reports retain true molecular D, explicit Sh and the actually used coefficient.
+No effective diffusivity, fitted correlation or inferred sensible heat is added.
+
+The existing stagnant APIs call the same owner with Sh=2 and retain the exact
+original D/r arithmetic. A finite positive Sh is required; D=0 seals mass
+transfer while independently authored sensible heat can still change density
+and radius. Area, coefficient and transport inputs remain frozen through one
+first-order interval, and final size follows actual mass and original material
+density. Transport correlation validity remains with the caller. Focused
+regressions specify both phase directions, original-surface equivalence, exact
+stagnant parity, independent sealed heat and invalid-input atomicity. The
+session could review these sources but could not compile or execute the tests.

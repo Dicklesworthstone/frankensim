@@ -2,7 +2,8 @@
 //!
 //! Every interval derives radius/area from its single mass/enthalpy inventory
 //! and the original liquid density, then uses the stagnant-sphere `D_AB/r`
-//! coefficient with the existing Stefan/kinetic phase owner. Accepted size is
+//! coefficient or an explicitly supplied diameter-based Sherwood number with
+//! the existing Stefan/kinetic phase owner. Accepted size is
 //! reconstructed from final mass AND final material density. No radius state,
 //! surrogate saturation source, constant-cp gas or latent heat source is added.
 //!
@@ -13,7 +14,8 @@
 //! from it and no sealed-vessel displacement or pressure-work model is implied.
 //! Positive seeds, original inventory limits and all source/conservation gates
 //! remain authoritative; complete dry-out, nucleation, deformation, droplet
-//! motion, breakup, forced convection and rarefied transport are not supplied.
+//! motion, breakup, a forced-convection correlation and rarefied transport are
+//! not supplied. Correlation selection/admission belongs to the transport owner.
 
 use super::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
@@ -29,7 +31,9 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, LiquidSurfaceSta
 pub struct GasDropletReport {
     pub geometry: [SphericalDropletGeometry; 2],
     pub binary_diffusivity_m2_s: f64,
-    /// Initial D/r used over this physical interval; refreshed on the next call.
+    /// Explicit diameter-based transfer ratio; 2 is the stagnant sphere.
+    pub sherwood_number: f64,
+    /// Initial Sh*D/diameter over this interval; refreshed on the next call.
     pub mass_transfer_coefficient_m_s: f64,
     /// Phase substep, after optional sensible heat.
     pub phase: GasEvaporationStep,
@@ -91,10 +95,12 @@ fn initial_surface<L: EvaporationLaw + ?Sized>(
     droplet: SphericalDropletState,
     temperature: &impl Fn(f64) -> Result<f64, EvaporationError>,
     binary_diffusivity_m2_s: f64,
+    sherwood_number: f64,
 ) -> Result<(LiquidSurfaceState, SphericalDropletGeometry, f64), GasEvaporationError> {
     let temperature_k = temperature(droplet.specific_enthalpy_j_kg)?;
     let geometry = droplet.geometry(law, temperature_k)?;
-    let coefficient = geometry.mass_transfer_coefficient_m_s(binary_diffusivity_m2_s)?;
+    let coefficient = geometry
+        .mass_transfer_coefficient_at_sherwood_m_s(binary_diffusivity_m2_s, sherwood_number)?;
     Ok((
         LiquidSurfaceState {
             mass_kg: droplet.mass_kg,
@@ -124,11 +130,46 @@ pub fn advance_droplet_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     binary_diffusivity_m2_s: f64,
     duration_s: f64,
     controls: GasEvaporationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasDropletCandidate<'catalog>, GasEvaporationError> {
+    advance_droplet_with_gas_at_sherwood(
+        law,
+        binding,
+        droplet,
+        gas,
+        catalog,
+        temperature,
+        binary_diffusivity_m2_s,
+        2.0,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Original finite-gas phase owner with explicit diameter-based transfer.
+///
+/// `k_m=Sh*D_AB/diameter`; molecular diffusivity and Sherwood retain separate
+/// receipts. The caller admits the correlation, representative properties and
+/// any dilute/blowing limits. No correlation is inferred here. `Sh=2` is the
+/// exact original stagnant path. Area and coefficient freeze for this interval.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_droplet_with_gas_at_sherwood<'catalog, L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    droplet: SphericalDropletState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    temperature: impl Fn(f64) -> Result<f64, EvaporationError>,
+    binary_diffusivity_m2_s: f64,
+    sherwood_number: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasDropletCandidate<'catalog>, GasEvaporationError> {
     poll(&mut cancelled)?;
     let (surface, geometry, coefficient) =
-        initial_surface(law, droplet, &temperature, binary_diffusivity_m2_s)?;
+        initial_surface(law, droplet, &temperature, binary_diffusivity_m2_s, sherwood_number)?;
     let candidate = advance_surface_with_gas(
         law,
         binding,
@@ -150,6 +191,7 @@ pub fn advance_droplet_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
         GasDropletReport {
             geometry: [geometry; 2],
             binary_diffusivity_m2_s,
+            sherwood_number,
             mass_transfer_coefficient_m_s: coefficient,
             phase: exchange.clone(),
             exchange,
@@ -178,11 +220,50 @@ pub fn advance_droplet_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
     duration_s: f64,
     controls: GasEvaporationSolve,
     heat_controls: GasFilmHeatSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasDropletCandidate<'catalog>, GasEvaporationError> {
+    advance_droplet_with_gas_and_heat_at_sherwood(
+        law,
+        binding,
+        droplet,
+        gas,
+        catalog,
+        temperature,
+        binary_diffusivity_m2_s,
+        2.0,
+        heat_transfer_coefficient_w_m2_k,
+        duration_s,
+        controls,
+        heat_controls,
+        cancelled,
+    )
+}
+
+/// Original heat-first/phase split with explicit molecular D and Sherwood.
+///
+/// The sensible heat coefficient is independent, excludes vapor/latent energy,
+/// and is never inferred from Sherwood. The same initially admitted area and
+/// `Sh*D_AB/diameter` are frozen across both original substeps. Transport-model
+/// validity remains caller authority; `Sh=2` preserves the original path.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_droplet_with_gas_and_heat_at_sherwood<'catalog, L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    droplet: SphericalDropletState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    temperature: impl Fn(f64) -> Result<f64, EvaporationError>,
+    binary_diffusivity_m2_s: f64,
+    sherwood_number: f64,
+    heat_transfer_coefficient_w_m2_k: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    heat_controls: GasFilmHeatSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasDropletCandidate<'catalog>, GasEvaporationError> {
     poll(&mut cancelled)?;
     let (surface, geometry, coefficient) =
-        initial_surface(law, droplet, &temperature, binary_diffusivity_m2_s)?;
+        initial_surface(law, droplet, &temperature, binary_diffusivity_m2_s, sherwood_number)?;
     let candidate = advance_surface_with_gas_and_heat(
         law,
         binding,
@@ -207,6 +288,7 @@ pub fn advance_droplet_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
         GasDropletReport {
             geometry: [geometry; 2],
             binary_diffusivity_m2_s,
+            sherwood_number,
             mass_transfer_coefficient_m_s: coefficient,
             phase,
             exchange,
