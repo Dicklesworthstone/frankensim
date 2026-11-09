@@ -10951,3 +10951,40 @@ route cases for local Debye/Lorentz refresh, precise epoch continuation,
 projection-budget refusal, caloric balance and late domain/cancellation refusal.
 Formatting, source/API checks and a native DD clock probe passed. The complete
 material/EM/thermal fixture graph was not compiled or executed in this session.
+
+## Rate-dependent felt in original exponential impact mechanics
+
+`FeltPad::from_material` binds the admitted intrinsic `RateFelt` envelope
+and up to eight original Kelvin arms to explicit contact area and thickness.
+The map `k=E*A/h`, `c=eta*A/h` preserves work, stored energy and dissipation.
+It supplies no material defaults, fitted loss curve or separate held-stress
+update. Existing raw pad descriptions and the zero-arm force/history arithmetic
+remain available through the original owner.
+
+`ExponentialImpactSystem::new_with_felt` retains all Kelvin storage coordinates
+in the existing complete quadratic block and their original resistance in the
+same pHS equation. The original nonlinear WoolFelt potential and contact force
+remain in the implicit discrete-gradient remainder. Its compaction histories
+are frozen during that solve and commit through the existing joint acceptance
+gate with mechanics, creep, positive loss and time. Every material coordinate
+counts against the unchanged dense propagation capacity; none is truncated.
+
+The felt remainder reuses fs-dcontact's original unilateral power primitive,
+splitting only at the original conditioning maximum. Compensated normalization
+retains small endpoint work that would otherwise contaminate a cubic remainder.
+Geometry, material domains and source parameters remain authoritative. The
+opt-in exact linear block removes midpoint decay/phase error from original
+linear modes and Kelvin recovery; nonlinear contact and conditioning still
+require temporal refinement. This route does not yet admit nonlinear contact
+drag, shell/support potentials, later attached memories, or thermal feedback.
+It does not certify a rendered waveform or measured felt calibration.
+
+Seven focused native source tests passed with pinned nightly-2026-07-06:
+three original felt checks plus four groups covering independent piecewise
+energy/work, small-increment cubic remainders, all-eight-arm physical geometry,
+and zero-rate bit preservation/refusals. The isolated harness used actual
+WoolFelt, RateFelt construction/accessors, FeltPad and shared power-remainder
+source with real fs-math/fs-evidence/fs-qty. Four full pHS integration groups
+specify analytic recovery/heat, original nonlinear ODE refinement, conditioning
+and rollback, and complete-state capacity. Those full fs-couple integration
+groups remain unrun under the existing dependency build resource constraint.

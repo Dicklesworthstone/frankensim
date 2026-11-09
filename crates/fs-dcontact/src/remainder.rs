@@ -5,14 +5,22 @@
 use super::{ContactStorage, det};
 use fs_math::eft::two_sum;
 
-/// `(b^beta-a^beta)/beta - midpoint^(beta-1)*(b-a)` for active a,b.
+/// Cancellation-stable midpoint remainder of the original unilateral power potential.
+///
+/// Returns `coefficient*((b_+^beta-a_+^beta)/beta - midpoint_+^alpha*(b-a))`,
+/// where `beta=alpha+1`. Inputs must be finite, `alpha>=1`, and
+/// `coefficient>=0`; the constitutive caller owns domain admission. The actual
+/// supplied midpoint may differ from the rounded endpoint midpoint.
+/// This evaluates an energy difference; it does not advance material history.
+///
+/// For active a,b:
 /// With c=(a+b)/2 and z=(b-a)/(2c), its centered remainder is
 /// `2*c^beta/beta * sum_{odd j>=3} binom(beta,j)*z^j`.
 /// For |beta*z|<=1/2 and beta>=2, |z|<=1/4 and EVERY successive
 /// term contracts by <=1/4. Terms through j=33 leave a tail <2^-63
 /// of the leading cubic term; this is roundoff-level evaluation of the
 /// power law, not a truncated constitutive model or fitted coefficient.
-fn power_remainder(a: f64, b: f64, midpoint: f64, alpha: f64, coefficient: f64) -> f64 {
+pub fn power_remainder(a: f64, b: f64, midpoint: f64, alpha: f64, coefficient: f64) -> f64 {
     let beta = alpha + 1.0;
     let increment = b - a;
     if a > 0.0 && b > 0.0 {

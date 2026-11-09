@@ -35,6 +35,7 @@ mod tangent;
 use fs_math::det;
 use fs_phs::Storage;
 pub use parameters::hunt_crossley_loss_from_restitution;
+pub use remainder::power_remainder as power_potential_midpoint_remainder;
 
 /// A distributed obstacle: collocation points with per-point gap,
 /// physical quadrature measure, and the shared power-law contact law. A point

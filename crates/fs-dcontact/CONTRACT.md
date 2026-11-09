@@ -272,3 +272,15 @@ typed parameter refusals.
   receipted card is proven PROVENANCE-ONLY (bitwise-identical
   2000-step trajectory, `contact_pack_migration_is_provenance_only`).
 - Obstacles are static (no moving frets/bridges) in v1.
+
+## Shared unilateral power-potential remainder
+
+`power_potential_midpoint_remainder` exposes the same cancellation-stable
+power-law numerator already used by ContactStorage. Callers supply admitted
+finite arguments, exponent at least one and nonnegative coefficient, and
+retain ownership of their physical domain and affine work map. It evaluates
+the original positive-part potential; it neither supplies a force law nor
+advances history. The existing contact implementation and arithmetic are
+unchanged. The original felt impact owner reuses this primitive for its
+conditioned and virgin power-law segments, with separate compensated affine
+normalization and original material history.
