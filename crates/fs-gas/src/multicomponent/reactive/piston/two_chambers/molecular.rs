@@ -1,11 +1,13 @@
 //! Both original molecular/source owners in one shared-piston speed solve.
 
 use super::initial_duration;
+use crate::body_force::{BodyForce, ForceControl};
 use crate::dynamics::piston::{
     MechanicalExchange, Piston, PistonControl, PistonLoad, PistonStep, PistonSuspension,
     SuspendedPistonStep, mechanical_report, solve, suspension, validate,
 };
 use crate::multicomponent::dissipation::{DissipationControl, DissipationOperator, TransportLaw};
+use crate::multicomponent::Error as FlowError;
 use crate::multicomponent::reactive::piston::molecular::MovingMolecularTrial;
 use crate::multicomponent::reactive::{
     ReactingEuler1d, ReactiveError, ReactiveStepControl, ReactiveStepReport, poll, positive, sum,
@@ -75,7 +77,43 @@ impl ReactingEuler1d {
     ) -> Result<PistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
         self.step_with_shared_piston_dissipation_suspension(
             right, left_operator, right_operator, piston, maximum_duration, controls,
-            dissipation_controls, external_force_n, None, piston_controls, cancelled,
+            dissipation_controls, external_force_n, None, piston_controls, [None; 2], cancelled,
+        ).map(|step| step.piston)
+    }
+
+    /// Advance two independently accelerated reacting molecular chambers.
+    ///
+    /// Each chamber keeps its own source field, material law and force controls.
+    /// Their original forced molecular trials share one midpoint piston speed
+    /// and accepted duration. The source arrays and controls are [left, right].
+    /// Only actual pressure and viscous traction exchange momentum with the
+    /// piston; the complete balance removes each external body impulse/work
+    /// once and retains both fixed outer support impulses.
+    ///
+    /// # Errors
+    /// Any source, Mach, geometry, balance or cancellation refusal preserves
+    /// both chambers, clocks, molecular bindings and the shared piston.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_piston_dissipation_and_body_force<L: TransportLaw, R: TransportLaw>(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        left_operator: &mut DissipationOperator<L>,
+        right_operator: &mut DissipationOperator<R>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: [DissipationControl; 2],
+        external_force_n: f64,
+        piston_controls: PistonControl,
+        forces: [BodyForce<'_>; 2],
+        force_controls: [ForceControl; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
+        self.step_with_shared_piston_dissipation_suspension(
+            right, left_operator, right_operator, piston, maximum_duration, controls,
+            dissipation_controls, external_force_n, None, piston_controls,
+            [Some((forces[0], force_controls[0])), Some((forces[1], force_controls[1]))],
+            cancelled,
         ).map(|step| step.piston)
     }
 
@@ -113,7 +151,45 @@ impl ReactingEuler1d {
     ) -> Result<SuspendedPistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
         self.step_with_shared_piston_dissipation_suspension(
             right, left_operator, right_operator, piston, maximum_duration, controls,
-            dissipation_controls, external_force_n, Some(suspension), piston_controls, cancelled,
+            dissipation_controls, external_force_n, Some(suspension), piston_controls,
+            [None; 2], cancelled,
+        )
+    }
+
+    /// Include the original finite spring storage and mechanical damper loss.
+    ///
+    /// The stationary suspension participates in the same shared speed root as
+    /// both forced molecular fields. Its heat export remains distinct from gas
+    /// viscous heating and body work. Direct piston weight belongs in the
+    /// supplied external force; it is not inferred from either gas source.
+    ///
+    /// # Errors
+    /// Source, suspension, balance, geometry or cancellation refusal preserves
+    /// every accepted owner and both geometry bindings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_suspended_piston_dissipation_and_body_force<
+        L: TransportLaw, R: TransportLaw,
+    >(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        left_operator: &mut DissipationOperator<L>,
+        right_operator: &mut DissipationOperator<R>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: [DissipationControl; 2],
+        external_force_n: f64,
+        suspension: PistonSuspension,
+        piston_controls: PistonControl,
+        forces: [BodyForce<'_>; 2],
+        force_controls: [ForceControl; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
+        self.step_with_shared_piston_dissipation_suspension(
+            right, left_operator, right_operator, piston, maximum_duration, controls,
+            dissipation_controls, external_force_n, Some(suspension), piston_controls,
+            [Some((forces[0], force_controls[0])), Some((forces[1], force_controls[1]))],
+            cancelled,
         )
     }
 
@@ -130,9 +206,27 @@ impl ReactingEuler1d {
         external_force_n: f64,
         suspension: Option<PistonSuspension>,
         piston_controls: PistonControl,
+        mut forcing: [Option<(BodyForce<'_>, ForceControl)>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
         poll(&mut cancelled)?;
+        for (side, flow) in [&self.accepted, &right.accepted].into_iter().enumerate() {
+            if let Some((force, force_controls)) = forcing[side] {
+                force_controls.admit::<FlowError>()?;
+                if force.admit::<FlowError>(flow.cell_count(), &mut cancelled)? {
+                    for i in 0..flow.cell_count() {
+                        let primitive = flow.gas().primitive(
+                            flow.cell(i).expect("admitted cell"), &mut cancelled,
+                        )?;
+                        force_controls.admit_velocity::<FlowError>(
+                            primitive.velocity, primitive.sound_speed,
+                        )?;
+                    }
+                } else {
+                    forcing[side] = None;
+                }
+            }
+        }
         let load = PistonLoad {
             exterior_pressure_pa: 0.0,
             external_force_n,
@@ -196,7 +290,7 @@ impl ReactingEuler1d {
                     dissipation_controls[0],
                     [0.0, speed],
                     retry,
-                    None,
+                    forcing[0],
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Complete(report) => report,
@@ -216,7 +310,7 @@ impl ReactingEuler1d {
                     dissipation_controls[1],
                     [speed, 0.0],
                     retry,
-                    None,
+                    forcing[1],
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Complete(report) => report,
@@ -237,12 +331,14 @@ impl ReactingEuler1d {
                 let exchange = MechanicalExchange {
                     duration_s: duration,
                     momentum_change: sum([
-                        left.after.momentum - before[0].momentum,
-                        right_report.after.momentum - before[1].momentum,
+                        left.after.momentum - before[0].momentum
+                            - left.flow.transport.source_change.impulse,
+                        right_report.after.momentum - before[1].momentum
+                            - right_report.flow.transport.source_change.impulse,
                     ]),
                     energy_change: sum([
-                        left.gas_energy_change_j,
-                        right_report.gas_energy_change_j,
+                        left.accounted_energy_change_j,
+                        right_report.accounted_energy_change_j,
                     ]),
                     // MechanicalExchange's left slot is the aggregate fixed
                     // support, and its right slot is the one shared piston.

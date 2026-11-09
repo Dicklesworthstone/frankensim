@@ -281,7 +281,41 @@ impl ReactingEuler1d {
             dissipation_controls,
             load,
             piston_controls,
+            None,
             cancelled,
+        )
+        .map(|report| report.map_gas(|gas| gas.flow))
+    }
+
+    /// Include a held distributed force in the original molecular piston root.
+    ///
+    /// The common moving-volume trial runs D/2-C/2-F/2-ALE-F/2-C/2-D/2.
+    /// Actual pressure and viscous stress drive the finite piston; body impulse
+    /// and work remain distinct external supplies to the gas. A direct piston
+    /// weight belongs in `load`, and the fixed end retains its native support
+    /// impulse. Shortening restarts every stage from the accepted owners.
+    ///
+    /// # Errors
+    /// Source, Mach, geometry, transport, balance and cancellation refusals
+    /// preserve gas, piston and the molecular geometry binding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_piston_dissipation_and_body_force<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        load: PistonLoad,
+        piston_controls: PistonControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonStep<ReactiveStepReport>, ReactiveError> {
+        self.step_with_piston_molecular(
+            operator, None, piston, maximum_duration, controls,
+            dissipation_controls, load, piston_controls,
+            Some((force, force_controls)), cancelled,
         )
         .map(|report| report.map_gas(|gas| gas.flow))
     }
@@ -298,9 +332,16 @@ impl ReactingEuler1d {
         dissipation_controls: DissipationControl,
         load: PistonLoad,
         piston_controls: PistonControl,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<MolecularPistonReport>, ReactiveError> {
         poll(&mut cancelled)?;
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<FlowError>()?;
+            if !force.admit::<FlowError>(self.accepted.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
         validate(
             *piston,
             maximum_duration,
@@ -336,6 +377,11 @@ impl ReactingEuler1d {
                 self.accepted.cell(i).expect("admitted cell index"),
                 &mut cancelled,
             )?;
+            if let Some((_, force_controls)) = forcing {
+                force_controls.admit_velocity::<FlowError>(
+                    primitive.velocity, primitive.sound_speed,
+                )?;
+            }
             let relative = primitive
                 .velocity
                 .abs()
@@ -382,7 +428,7 @@ impl ReactingEuler1d {
                     dissipation_controls,
                     [0.0, speed],
                     retry,
-                    None,
+                    forcing,
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Shorter(elapsed) => {
@@ -395,7 +441,8 @@ impl ReactingEuler1d {
                 };
                 let exchange = MechanicalExchange {
                     duration_s: duration,
-                    momentum_change: gas.after.momentum - gas.before.momentum,
+                    momentum_change: gas.after.momentum - gas.before.momentum
+                        - gas.flow.transport.source_change.impulse,
                     energy_change: gas.accounted_energy_change_j,
                     left_impulse: gas.boundary_impulse_n_s[0],
                     right_impulse: gas.boundary_impulse_n_s[1],

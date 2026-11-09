@@ -9498,3 +9498,36 @@ parabolic/acoustic budgets and source-domain restrictions. They do not claim
 general second order, hydrostatic well balancing, implicit FSI stability,
 entropy stability or a molecular gravitational-diffusion law.
 
+## Accelerated molecular gas in single and shared piston chambers
+
+The original reacting molecular piston owner now accepts a held body force
+through `step_with_piston_dissipation_and_body_force` and
+`step_with_piston_dissipation_heat_and_body_force`. The thermal entry retains
+the original finite end stores or prescribed heat reservoirs. Actual body
+impulse is distinct from the native fixed support and moving-wall reaction;
+physical chemical gas energy, finite thermal storage and piston kinetic
+energy balance against the original boundary loads, heat and body work.
+
+`step_with_shared_piston_dissipation_and_body_force` and
+`step_with_shared_suspended_piston_dissipation_and_body_force` allow separate
+uniform/cellwise acceleration or force density and Mach controls in each
+original chamber. Their material banks, reference energies, molecular laws
+and chemistry remain independent. The original common-speed root runs both
+complete forced molecular trials at one duration, with original old/new
+volumes and a single shared piston position. The mechanical balance removes
+both external body impulses/works exactly once. Each fixed outer support
+retains its native pressure/stress impulse. The suspension retains its
+original finite spring storage and separate mechanical damper loss; no such
+loss is added again as gas viscous heating.
+
+Zero source follows the original numerical path. A shortened trial restarts
+both fields and their common root; final admission and cancellation precede
+publication of either field, either molecular geometry binding or the piston.
+The single heated owner also commits thermal state atomically. Regressions
+cover physical energy/momentum with independent force-volume and
+spring/damper oracles, zero-source replay, adiabatic thermal/molecular
+equivalence, and cancellation of the two-field publication. These entries
+retain the original source, acoustic, parabolic, geometry and held-stage
+accuracy limitations; they add no hydrostatic equilibrium, entropy theorem
+or cross-piston heat inventory.
+

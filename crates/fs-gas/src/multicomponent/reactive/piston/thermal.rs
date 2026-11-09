@@ -351,6 +351,7 @@ impl ReactingEuler1d {
             dissipation_controls,
             load,
             piston_controls,
+            None,
             cancelled,
         )
         .map(|report| {
@@ -361,6 +362,50 @@ impl ReactingEuler1d {
                 heat: gas
                     .heat
                     .expect("thermal piston entry always supplies heat stages"),
+                gas_energy_change_j: gas.gas_energy_change_j,
+            })
+        })
+    }
+
+    /// Couple body acceleration to the original reacting, viscous, heated piston.
+    ///
+    /// Original end heat stages wrap the forced molecular moving-volume trial.
+    /// The complete energy balance distinguishes body work, prescribed heat,
+    /// finite thermal storage, chemical gas storage and piston kinetic energy.
+    /// Body impulse never substitutes for the fixed support or moving pressure
+    /// and viscous traction. The native source work uses the actual old/moved
+    /// volumes. Zero source preserves the original thermal path.
+    ///
+    /// # Errors
+    /// Invalid source/Mach, thermal, chemistry, geometry or mechanical data,
+    /// exhausted budgets and cancellation preserve all accepted owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_piston_dissipation_heat_and_body_force<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        thermal: &mut PistonThermalEnds<'_>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        thermal_controls: WallControl,
+        load: PistonLoad,
+        piston_controls: PistonControl,
+        force: crate::body_force::BodyForce<'_>,
+        force_controls: crate::body_force::ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonStep<ThermalReactiveStepReport>, ReactiveError> {
+        self.step_with_piston_molecular(
+            operator, Some((thermal, thermal_controls)), piston, maximum_duration,
+            controls, dissipation_controls, load, piston_controls,
+            Some((force, force_controls)), cancelled,
+        )
+        .map(|report| {
+            report.map_gas(|gas| ThermalReactiveStepReport {
+                reactive: gas.flow,
+                before: gas.before,
+                after: gas.after,
+                heat: gas.heat.expect("forced thermal piston trial supplies heat"),
                 gas_energy_change_j: gas.gas_energy_change_j,
             })
         })

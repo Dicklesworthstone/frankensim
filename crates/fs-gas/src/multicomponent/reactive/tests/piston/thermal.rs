@@ -11,6 +11,8 @@ use fs_thermal::enthalpy::{
     ThermalLaw, ThermalStorageBasis,
 };
 
+mod forcing;
+
 const ADIABATIC: WallContact = WallContact {
     drag: WallDrag::None,
     thermal: WallThermal::Adiabatic,
