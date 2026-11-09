@@ -987,6 +987,30 @@ have the period map diag(-1/2,-2). They also cover signed gyroscopic whirl,
 full-inertia pole/exponential agreement, volume contraction, coordinate congruence,
 cycle-origin invariance, free coordinates and unrepresentable/cancelled refusal.
 
+`rotordynamics::periodic::{periodic_maxwell_floquet, prepare_maxwell_cycle}`
+extends the homogeneous segmented cycle with EVERY original generalized Maxwell
+stress. The physical state is `[q, q_dot, sigma_0, ...]`; supplied K is relaxed,
+and branch stiffness must not also be added as an instantaneous spring. M, G,
+signed spin and the original branch strain/stiffness/time remain fixed. Full C/K
+may switch while displacement, velocity and stress remain continuous. All `2n+b`
+modes survive, including equal-rate dark combinations and zero-strain memories.
+
+One shared full-mass factor, common `[S q, T S v, T sigma/sqrt(k)]` coordinates,
+cached memory columns, native segment exponentials, chronological composition
+and native QR produce the full original monodromy and numerical spectrum.
+Independent DD reconstruction checks original mass and memory-force/constitutive
+rows. Full-state byte/work admission precedes dense allocation; cancellation
+publishes no partial result. Prepared warm advances carry each returned physical
+boundary into the next cached segment and audit original cycle increments.
+Zero/unrepresentable multipliers refuse; near-unit rounding is not classified.
+No forced orbit, heat/work ledger, eigenvalue enclosure, smooth-modulation error
+bound or nonlinear bearing stability claim is implied by this homogeneous path.
+
+Six focused native tests cover exact full-state eigenmotions, independently
+refined original-ODE RK4 modulation, parametric growth despite stable frozen
+poles, dark/uncoupled memories, full-mass/signed-gyro coordinate covariance, all
+66 original states beyond the mechanical-only ceiling, budgets and cancellation.
+
 `rotordynamics::periodic::prepare_forced_cycle` extends the SAME preparation
 owner with original generalized force/torque held over each declared segment.
 It retains full M/G/C/K and the common mass/time coordinates. A normalized

@@ -351,7 +351,7 @@ pub(super) fn apply_affine(
 
 // Original, rowwise increment equation. Keeping P-I and endpoint differences
 // in DD prevents the large unchanged state from setting a false residual scale.
-fn affine_residual(
+pub(super) fn affine_residual(
     matrix: &[f64],
     offset: &[f64],
     before: &[f64],

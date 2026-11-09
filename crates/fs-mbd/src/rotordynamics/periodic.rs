@@ -34,6 +34,11 @@ mod fourier;
 pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycle};
 /// Exact signed work and stiffness-modulation power on original forced cycles.
 pub mod power;
+mod relaxation;
+pub use relaxation::{
+    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellPeriodicTrajectory,
+    RotorMaxwellState, periodic_maxwell_floquet, prepare_maxwell_cycle,
+};
 
 #[derive(Clone, Copy)]
 enum CycleForcing<'a> {
@@ -131,6 +136,8 @@ pub struct RotorPeriodicSegment<'a> {
 ///
 /// The existing 32-coordinate rotor bound still applies. Dense bytes include
 /// all owner workspace and returned arrays, excluding the borrowed models.
+/// Maxwell cycles additionally count every original material state, up to
+/// 64 branches; larger valid models may require a larger explicit work budget.
 /// Work conservatively reserves 80 dense products per segment exponential,
 /// and additionally mass solves, chronological products and bounded complex QR.
 /// Fourier forcing reserves one held-source exponential plus one per tone.
@@ -165,6 +172,23 @@ impl RotorFloquetBudget {
         source_coordinates: usize,
         exponentials_per_segment: usize,
     ) -> Result<DenseExponentialBudget, RotorError> {
+        self.admit_states(
+            2 * n,
+            segments,
+            source_coordinates,
+            exponentials_per_segment,
+            source_coordinates != 0,
+        )
+    }
+
+    fn admit_states(
+        self,
+        d: usize,
+        segments: usize,
+        source_coordinates: usize,
+        exponentials_per_segment: usize,
+        retain_segments: bool,
+    ) -> Result<DenseExponentialBudget, RotorError> {
         if self.max_segments == 0
             || self.max_segments > MAX_ROTOR_PERIODIC_SEGMENTS
             || segments > self.max_segments
@@ -173,14 +197,13 @@ impl RotorFloquetBudget {
         {
             return Err(RotorError::PeriodicBudget("segment or QR sweep admission"));
         }
-        // n <= 32 and segments <= 256 were checked before these products.
+        // Original states <= 128 and segments <= 256 were checked before
+        // these products. Material states consume the same full-state budget.
         // Held/harmonic sources add one/two normalized coordinates to the shared
         // exponential, never physical modes. Forced plans retain each
         // segment map and reserve one complete boundary trajectory and solve.
-        let d = 2 * n;
-        let forced = source_coordinates != 0;
         let e = d + source_coordinates;
-        let retained = if forced {
+        let retained = if retain_segments {
             segments * (d * d + 3 * d + 16) + d * d + 16 * d
         } else {
             0
@@ -198,7 +221,8 @@ impl RotorFloquetBudget {
             (e as u64).pow(3) * 84 * segments as u64 * exponentials_per_segment as u64;
         let work = exponential_work
             + cube
-                * (64 * (self.max_qr_sweeps_per_window as u64 + 1) + if forced { 32 } else { 0 });
+                * (64 * (self.max_qr_sweeps_per_window as u64 + 1)
+                    + if retain_segments { 32 } else { 0 });
         if bytes > self.max_dense_bytes || work > self.max_multiply_terms {
             return Err(RotorError::PeriodicBudget(
                 "dense byte or whole-cycle work admission",
