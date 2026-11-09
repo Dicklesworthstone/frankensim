@@ -1,5 +1,8 @@
 //! Original oriented pin mechanics on source-bound anisotropic wave modes.
 
+mod coating;
+pub use coating::{NormalOscillatorBackedElasticCoating, NormalSupportedElasticCoatingResponse};
+
 use super::oriented::support_motion;
 use super::{ElasticSupportError, OrientedOscillatorSupport};
 use fs_material::elastic::acoustic::interface::normal::{

@@ -1,5 +1,8 @@
 //! Original anisotropic modes drive the same support storage and causal engine.
 
+#[path = "normal/coating.rs"]
+mod coating;
+
 use super::{close, solid};
 use fs_blake3::ContentHash;
 use fs_couple::elastic_reflection::{

@@ -12169,3 +12169,31 @@ Focused native tests combine the actual admitted source and modal owners with
 an independently cleared Maxwell memory equation, its asymmetric physical
 power curve and maximum at sqrt(2), coherent source-phase invariance,
 history/report retention and band/resource/cancellation refusals.
+
+## Original support mechanics behind anisotropic solid coatings
+
+`elastic_reflection::NormalOscillatorBackedElasticCoating` binds original
+incident and finite-coating `NormalElasticCharacteristic` owners to the same
+three principal `WallPin` laws and physical support rotation. Both original
+full tensors retain their native quasi-modes, material frames and strain
+domains. The material owner resolves normal-wave propagation, coherent
+conversion, interference and interior fields; the adapter supplies the same
+original support tensor at the same carrier frequency.
+
+Only actual rear motion feeds the shared principal-coordinate displacement
+and kinetic/spring storage evaluator. Incident-face motion is not used for
+support storage. Original positive backing work remains the sole dissipation
+in these two lossless solids; coating elastic energy is not counted as pin
+storage. Exactly zero thickness recovers direct anisotropic supported
+reflection. Modal and Cartesian drives reuse prepared maps without allocation,
+factorization or constitutive source queries.
+
+This is stationary harmonic reflection with normal wavevectors on homogeneous
+planes. Original anisotropic energy can walk laterally; finite-aperture
+transport, oblique anisotropic conversion, attenuation and transient layer
+history remain outside this owner. Five focused G1/G3/G4 regression definitions
+cover exact absence, an independent Cartesian continuum-transfer reference
+for two noncommuting tensors and an oriented support, parity with the original
+isotropic coating at normal incidence, reactive storage without heat, and
+original coating-domain/cancellation admission. Native execution status is
+reported separately.

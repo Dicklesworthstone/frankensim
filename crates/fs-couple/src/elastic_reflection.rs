@@ -20,7 +20,10 @@
 mod coating;
 pub use coating::{OscillatorBackedElasticCoating, SupportedElasticCoatingResponse};
 mod normal;
-pub use normal::{NormalOscillatorSupportedSurface, NormalSupportedElasticResponse};
+pub use normal::{
+    NormalOscillatorBackedElasticCoating, NormalOscillatorSupportedSurface,
+    NormalSupportedElasticCoatingResponse, NormalSupportedElasticResponse,
+};
 mod oriented;
 pub use oriented::{
     OrientedOscillatorSupport, OrientedOscillatorSupportedSurface, OrientedSupportedElasticResponse,
