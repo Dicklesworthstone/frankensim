@@ -3,6 +3,8 @@
 
 #[path = "history_field/sliding.rs"]
 mod sliding;
+#[path = "history_field/integration.rs"]
+mod integration;
 
 use std::sync::Arc;
 

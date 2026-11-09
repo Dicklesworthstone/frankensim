@@ -3745,8 +3745,22 @@ This is frozen external/preconditioning property transfer. The caller supplies
 original geometry and a field representative of each mapped material column
 through its declared recession bound. Residual stress, plastic displacements,
 new elastic kernels and bulk work are not transferred. Bulk and reduced surface
-indentation must not own the same deformation or work. One wear interval holds
-beginning pressure, k and mapped H; refine slip when pressure changes appreciably.
+indentation must not own the same deformation or work. `advance_wear` holds
+beginning pressure, k and mapped H over one interval; refine slip when pressure
+changes appreciably.
+
+`SourceHistoryHardnessWear::integrate_wear` advances a proportional prescribed
+unsigned-slip path with adaptive native pressure/recession feedback. Original
+mapped hardness, coefficients, point registration and bulk histories stay fixed.
+Full/two-half-step comparisons control each body's local recession, native
+plastic depth, approach and pressure; only fine physical candidates and their
+native work/volume accounts are accepted. The requested approach, maintained
+force or finite-spring boundary applies to every trial. Work limits, cancellation
+and unresolved arithmetic return no partial successor. Local error estimates are
+not global error bounds or a friction law. Regressions compare single-cell
+exponential pressure decay and heterogeneous two-cell redistribution with
+independent closed forms, tolerance convergence, separate inventories and spring
+work.
 Numerical regressions cover heterogeneous mapped caps and separate wear,
 external softening with retained dent/work, maintained force and spring storage,
 fixed counterfaces, and atomic source/mapping/history/control refusals.

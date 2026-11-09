@@ -15,6 +15,8 @@
 
 mod binding;
 mod wear;
+/// Adaptive pressure feedback along prescribed local sliding paths.
+pub mod integration;
 
 use std::sync::Arc;
 
