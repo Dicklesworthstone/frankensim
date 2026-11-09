@@ -554,7 +554,7 @@ fn g0_active_opacity_preserves_representable_opaque_cell_radiance() {
 }
 
 #[test]
-fn g4_active_opacity_refuses_invalid_bindings_and_inconsistent_scattering() {
+fn g4_active_opacity_refuses_invalid_bindings_and_mismatched_scattering() {
     with_cx(|cx, gate| {
         let density = [1.0, 1.0];
         let host = medium(cx, &density, 0.0, 0.3);
@@ -599,8 +599,17 @@ fn g4_active_opacity_refuses_invalid_bindings_and_inconsistent_scattering() {
             )
             .unwrap();
         close(observed.emitted_radiance_w_m2_sr[0], (-1.0_f64).exp());
+        let scattering = ScatteringLuminescenceGrid::try_new(cx, &active, &host).unwrap();
+        let passive = field();
+        assert_ne!(
+            scattering.content_identity(),
+            ScatteringLuminescenceGrid::try_new(cx, &passive, &host)
+                .unwrap()
+                .content_identity(),
+        );
+        let different = medium(cx, &[1.0, 2.0], 0.0, 0.3);
         assert!(matches!(
-            ScatteringLuminescenceGrid::try_new(cx, &active, &host),
+            ScatteringLuminescenceGrid::try_new(cx, &active, &different),
             Err(VolumeTransportError::SourceIdentity),
         ));
         let unbound = field();
@@ -609,5 +618,196 @@ fn g4_active_opacity_refuses_invalid_bindings_and_inconsistent_scattering() {
             unbound.with_additional_absorption(cx, identity, &[(0, [1.0])], 1),
             Err(VolumeTransportError::Cancelled),
         ));
+    });
+}
+
+#[test]
+fn g1_active_absorption_uses_total_linear_extinction_in_spectral_scattering() {
+    with_cx(|cx, _| {
+        let density = [2.0];
+        let host = ScatteringGrid::try_new(
+            cx,
+            AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::table(&[(380.0, 0.2), (780.0, 0.7)]).unwrap(),
+                None,
+                AbsorbingGridBudget {
+                    max_grid_cells: 1,
+                    max_steps_per_segment: 16,
+                },
+            )
+            .unwrap(),
+            MassScatteringSpectrum::table(&[(380.0, 0.3), (780.0, 0.1)]).unwrap(),
+            PhaseFunction::Isotropic,
+        )
+        .unwrap();
+        let field = LuminescenceGrid::try_new(
+            cx,
+            host.absorption_grid(),
+            SOURCE,
+            [380.0, 780.0],
+            &[(0, [1.25 * FOUR_PI, 2.0 * FOUR_PI])],
+            1,
+        )
+        .unwrap()
+        .with_additional_absorption(cx, ContentHash([188; 32]), &[(0, [0.4, 0.0])], 1)
+        .unwrap();
+        let scattering = ScatteringLuminescenceGrid::try_new(cx, &field, &host).unwrap();
+        let result = scattering
+            .sample_ray_with_samples(
+                cx,
+                Point3::new(0.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                budget(),
+                |event| {
+                    if event == 0 {
+                        [0.2, (-0.35_f64).exp(), 0.0, 0.0]
+                    } else {
+                        [0.2, 0.001, 0.5, 0.5]
+                    }
+                },
+            )
+            .unwrap();
+        // beta=rho*(kappa_a+kappa_s)+alpha; sigma=rho*kappa_s.
+        // Hero lane 0 places the vertex at x=.25. The full primary source
+        // integral and the reverse secondary ray use the same beta, while
+        // continuation uses the mixture over BOTH physical collision rates.
+        let beta = [1.4_f64, 1.6];
+        let sigma = [0.6, 0.2];
+        let proposal =
+            0.5 * (beta[0] * (-0.25 * beta[0]).exp() + beta[1] * (-0.25 * beta[1]).exp());
+        for lane in 0..2 {
+            let source = [1.25, 2.0][lane];
+            let primary = source * -(-beta[lane]).exp_m1() / beta[lane];
+            let secondary = source * -(-0.25 * beta[lane]).exp_m1() / beta[lane];
+            let continuation = sigma[lane] * (-0.25 * beta[lane]).exp() / proposal;
+            close(
+                result.radiance_w_m2_sr[lane],
+                primary + continuation * secondary,
+            );
+        }
+        assert_eq!(
+            (
+                result.scattering_events,
+                result.ray_segments,
+                result.cell_visits
+            ),
+            (1, 2, 2)
+        );
+    });
+}
+
+#[test]
+fn g1_active_absorber_in_zero_density_host_preserves_the_complete_source_ray() {
+    with_cx(|cx, _| {
+        let density = [0.0, 1.0];
+        let host = medium(cx, &density, 0.0, 1.0);
+        let field = LuminescenceGrid::try_new(
+            cx,
+            host.absorption_grid(),
+            SOURCE,
+            [550.0],
+            &[(1, [FOUR_PI])],
+            1,
+        )
+        .unwrap()
+        .with_additional_absorption(cx, ContentHash([188; 32]), &[(0, [0.7])], 1)
+        .unwrap();
+        let scattering = ScatteringLuminescenceGrid::try_new(cx, &field, &host).unwrap();
+        let allowance = LuminescenceScatteringBudget {
+            max_scattering_events: 0,
+            max_cell_visits: 2,
+        };
+        let origin = Point3::new(0.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        let result = scattering
+            .sample_ray_with_samples(cx, origin, direction, allowance, |_| {
+                [0.5, (-0.35_f64).exp(), 0.5, 0.5]
+            })
+            .unwrap();
+        // The sampled event at x=.5 is pure absorption: no phase event follows.
+        // The emitter lies beyond it, so stopping the full source ray there
+        // would incorrectly erase this independently integrated contribution.
+        close(
+            result.radiance_w_m2_sr[0],
+            (-0.7_f64).exp() * -(-1.0_f64).exp_m1(),
+        );
+        assert_eq!(
+            (
+                result.scattering_events,
+                result.ray_segments,
+                result.cell_visits
+            ),
+            (0, 1, 2)
+        );
+        assert_eq!(
+            scattering.sample_ray_with_samples(
+                cx,
+                origin,
+                direction,
+                LuminescenceScatteringBudget {
+                    max_cell_visits: 1,
+                    ..allowance
+                },
+                |_| [0.5, (-0.35_f64).exp(), 0.5, 0.5],
+            ),
+            Err(VolumeTransportError::Budget)
+        );
+    });
+}
+
+#[test]
+fn g3_active_opacity_with_zero_scattering_keeps_exact_source_without_variates() {
+    with_cx(|cx, _| {
+        let density = [0.0, 2.0];
+        let host = medium(cx, &density, 0.7, 0.0);
+        let field = LuminescenceGrid::try_new(
+            cx,
+            host.absorption_grid(),
+            SOURCE,
+            [510.0, 650.0],
+            &[(0, [FOUR_PI, 2.0 * FOUR_PI]), (1, [3.0 * FOUR_PI, FOUR_PI])],
+            2,
+        )
+        .unwrap()
+        .with_additional_absorption(
+            cx,
+            ContentHash([188; 32]),
+            &[(0, [0.5, 0.0]), (1, [1.0, 0.0])],
+            2,
+        )
+        .unwrap();
+        let scattering = ScatteringLuminescenceGrid::try_new(cx, &field, &host).unwrap();
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        let native = field
+            .transport(cx, origin, direction, f64::INFINITY)
+            .unwrap();
+        let observed = scattering
+            .sample_ray_with_samples(
+                cx,
+                origin,
+                direction,
+                LuminescenceScatteringBudget {
+                    max_scattering_events: 0,
+                    max_cell_visits: 2,
+                },
+                |_| panic!("zero scattering must consume no variates"),
+            )
+            .unwrap();
+        assert_eq!(observed.radiance_w_m2_sr, native.emitted_radiance_w_m2_sr);
+        close(
+            observed.radiance_w_m2_sr[0],
+            -(-0.5_f64).exp_m1() / 0.5 + (-0.5_f64).exp() * 3.0 * -(-2.4_f64).exp_m1() / 2.4,
+        );
+        assert_eq!(
+            (
+                observed.scattering_events,
+                observed.ray_segments,
+                observed.cell_visits
+            ),
+            (0, 1, 2)
+        );
     });
 }

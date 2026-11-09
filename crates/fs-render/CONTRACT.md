@@ -3392,9 +3392,10 @@ The binding validates original cells, nonnegative finite coefficients, a source
 identity and a preparation cap before publishing an immutable snapshot.
 Source powers and opacity must describe the same accepted physical state;
 separate interval means do not establish a time-integrated exposure when
-opacity changes. The observer evolves no populations or heat. The scattering
-adapter refuses additional opacity because its existing collision sampler
-does not yet include that contribution in its path measure.
+opacity changes. The observer evolves no populations or heat. The multiple-
+scattering adapter includes the same additional opacity in its flight density,
+spectral continuation weights and complete source integral; see the scattered
+nonthermal observation contract below.
 
 Three focused G0/G1/G4 regression groups cover exact layered attenuation,
 unchanged inactive spectral lanes, representable opaque-cell radiance,
@@ -12676,6 +12677,19 @@ bin-integrated W/(m² sr), with no wavelength width, absorptivity or LTE source
 applied to the authored emission. Logarithmic path weights and the existing
 logarithmic source fallback preserve representable weighted source radiance.
 
+Accepted sparse molecular absorption is included in the same flight proposal
+and complete source integral. In each original cell, the total linear
+extinction is `rho*(kappa_absorption+kappa_scattering)+alpha_active`;
+the scattering numerator remains `rho*kappa_scattering`. Additional
+absorption stays in inverse metres, including in zero-host-density cells.
+Spectral continuation divides by the full mixture collision density, so adding
+absorption cannot silently retain a host-only proposal. A sampled absorption
+event with no surviving continuation still completes the independent source
+ray, including emitters behind that event. Direct and scattered observers
+share logarithmic total-extinction arithmetic for representable opaque limits.
+The sparse snapshot is borrowed without a per-ray opacity-map allocation;
+original phase laws, cell identities, cancellation and work bounds remain.
+
 The pinhole/thin-lens image shares original raster/pupil sampling and returns
 spectral radiance. Zero scattering retains the original exact integral and draw
 order. Logical path IDs and seeds determine independent streams. Per-history
@@ -12690,8 +12704,19 @@ and kinetic/thermal updates remain outside this observer. Seven regression
 groups in `luminescence/scattered/tests.rs` cover zero-scattering and camera
 parity, independent two-lane one-scatter integrals, actual cell-selected phase,
 lossless boundary flux, source arithmetic range, deterministic replay and
-admission/cancellation/work limits. Native execution must be reported
-separately; a formatted source or completed image does not establish those gates.
+admission/cancellation/work limits. Three additional integration groups cover asymmetric spectral absorption,
+a zero-density absorbing foreground with a complete source ray, and exact
+zero-scattering parity without random draws; the identity fixture also checks
+accepted active opacity and rejects a different host snapshot.
+
+The exact production `scattering/extinction.rs` numerical leaf passed all three
+focused native tests in the existing actual-source harness: spectral mixture
+weights/event distances, independent absorption at zero host density, and
+representable distance/weight/source scale when the direct extinction product
+overflows. No test was ignored. This does not establish execution of the full
+adapter groups: the genuine renderer dependency build remains blocked by
+`asupersync` compilation being killed before renderer typechecking. Source
+formatting and interface review are reported separately from that native gate.
 
 ## Bounded opaque GGX reflection sampling
 

@@ -18,6 +18,7 @@
 
 use super::cells::{CellRay, validate_ray};
 use super::mixture::PositiveSum;
+use super::scattering::extinction::log_total_linear_extinction;
 use super::{AbsorbingGrid, VolumeTransportError, checkpoint, positive_product};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -178,7 +179,8 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
     /// invalid coefficients, cancellation or a preparation cap refuse before
     /// publishing the snapshot. Changing opacity during an exposure requires
     /// time-resolved observations; mean opacity and mean power are insufficient.
-    /// The multiple-scattering adapter does not yet admit this extra opacity.
+    /// The multiple-scattering adapter uses this same opacity in its flights,
+    /// spectral continuation weights and complete source integrals.
     pub fn with_additional_absorption(
         mut self,
         cx: &Cx<'_>,
@@ -356,17 +358,7 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
                             segment.length_m,
                             tau,
                             depth[lane],
-                            || {
-                                let host = if density == 0.0 || kappa[lane] == 0.0 {
-                                    f64::NEG_INFINITY
-                                } else {
-                                    det::ln(density) + det::ln(kappa[lane])
-                                };
-                                let active = det::ln(extra);
-                                let high = host.max(active);
-                                let low = host.min(active);
-                                -(high + det::ln(1.0 + det::exp(low - high)))
-                            },
+                            || -log_total_linear_extinction(density, kappa[lane], extra),
                         )
                     };
                     radiance[lane].add(value)?;

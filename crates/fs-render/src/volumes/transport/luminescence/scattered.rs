@@ -10,7 +10,8 @@ use super::super::{
     VolumeTransportError, cells::validate_ray, checkpoint, mixture::PositiveSum, positive_product,
     scattering::ScatteringGrid,
 };
-use super::{LuminescenceGrid, segment_emission};
+use super::{LuminescenceGrid, segment_emission, segment_emission_integral};
+use crate::volumes::transport::scattering::extinction::log_total_linear_extinction;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -60,18 +61,16 @@ impl<'s, 'm, 'g, const M: usize> ScatteringLuminescenceGrid<'s, 'm, 'g, M> {
     /// geometry and cell-selected absorption. A matching cell count alone is
     /// insufficient. Scattering may use independent cell-selected spectra and
     /// phase functions, but its wavelength domain must cover every source node.
-    /// Additional active opacity on the emission field is refused: the native
-    /// scattering flight sampler must own that same extinction before it can
-    /// sample the corresponding physical path measure.
+    /// Accepted additional absorption remains absolute inverse metres. It
+    /// enters the native flight density and source integral, including in
+    /// zero-host-density cells; scattering and phase functions remain original.
     pub fn try_new(
         cx: &Cx<'_>,
         field: &'s LuminescenceGrid<'m, 'g, M>,
         scattering: &'s ScatteringGrid<'g>,
     ) -> Result<Self, VolumeTransportError> {
         checkpoint(cx)?;
-        if field.medium.content_identity() != scattering.absorption_grid().content_identity()
-            || !field.additional_absorption.is_empty()
-        {
+        if field.medium.content_identity() != scattering.absorption_grid().content_identity() {
             return Err(VolumeTransportError::SourceIdentity);
         }
         let (minimum, maximum) = scattering.wavelength_bounds_nm();
@@ -202,8 +201,9 @@ impl<'s, 'm, 'g, const M: usize> ScatteringLuminescenceGrid<'s, 'm, 'g, M> {
                 direction,
                 self.field.wavelengths_nm(),
                 [draw[0], draw[1]],
+                &self.field.additional_absorption,
                 budget.max_cell_visits - cell_visits,
-                |cell, length, rho, extinction, depth| {
+                |cell, length, rho, extinction, additional, depth| {
                     if length == 0.0 {
                         return Ok(());
                     }
@@ -213,19 +213,39 @@ impl<'s, 'm, 'g, const M: usize> ScatteringLuminescenceGrid<'s, 'm, 'g, M> {
                             if log_weight[lane] == f64::NEG_INFINITY {
                                 continue;
                             }
-                            let tau = if rho == 0.0 || extinction[lane] == 0.0 {
+                            let host_tau = if rho == 0.0 || extinction[lane] == 0.0 {
                                 0.0
                             } else {
                                 positive_product(rho, extinction[lane], length)
                             };
-                            radiance[lane].add(segment_emission(
-                                source[lane],
-                                rho,
-                                extinction[lane],
-                                length,
-                                tau,
-                                depth[lane] - log_weight[lane],
-                            ))?;
+                            let foreground = depth[lane] - log_weight[lane];
+                            let contribution = if additional[lane] == 0.0 {
+                                segment_emission(
+                                    source[lane],
+                                    rho,
+                                    extinction[lane],
+                                    length,
+                                    host_tau,
+                                    foreground,
+                                )
+                            } else {
+                                let tau =
+                                    host_tau + positive_product(additional[lane], length, 1.0);
+                                segment_emission_integral(
+                                    source[lane],
+                                    length,
+                                    tau,
+                                    foreground,
+                                    || {
+                                        -log_total_linear_extinction(
+                                            rho,
+                                            extinction[lane],
+                                            additional[lane],
+                                        )
+                                    },
+                                )
+                            };
+                            radiance[lane].add(contribution)?;
                         }
                     }
                     Ok(())

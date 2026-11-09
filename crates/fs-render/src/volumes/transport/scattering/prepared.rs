@@ -3,6 +3,7 @@
 //! allocation-free renderer view caches the last native material pair.
 
 use super::super::{AbsorbingGrid, SegmentTransport, cells::CellRay, positive_product};
+use super::extinction::{collision_weights_with_additional, event_distance_with_additional};
 use super::{
     FreeFlightSample, PhaseFunction, ScatteringEvent, ScatteringGrid, VolumeTransportError,
     collision_weights, divide_product,
@@ -193,9 +194,10 @@ pub(super) fn sample_extinction<const N: usize>(
         u_lane,
         u_distance,
         include_emission,
+        &[],
         u32::MAX,
         false,
-        &mut |_, _, _, _, _| Ok(()),
+        &mut |_, _, _, _, _, _| Ok(()),
     )?
     .0)
 }
@@ -214,11 +216,24 @@ pub(super) fn sample_extinction_observed<const N: usize>(
     u_lane: f64,
     u_distance: f64,
     include_emission: bool,
+    additional_absorption: &[(usize, [f64; N])],
     max_cell_visits: u32,
     complete_source: bool,
-    source: &mut impl FnMut(usize, f64, f64, &[f64; N], &[f64; N]) -> Result<(), VolumeTransportError>,
+    source: &mut impl FnMut(
+        usize,
+        f64,
+        f64,
+        &[f64; N],
+        &[f64; N],
+        &[f64; N],
+    ) -> Result<(), VolumeTransportError>,
 ) -> Result<(FreeFlightSample<N>, u32), VolumeTransportError> {
     check()?;
+    // Additional molecular absorption belongs to the nonthermal observation.
+    // It must not manufacture an LTE source or use the host-only LTE ratio.
+    if include_emission && !additional_absorption.is_empty() {
+        return Err(VolumeTransportError::SourceIdentity);
+    }
     let wavelengths_nm = medium.wavelengths();
     let mut result = FreeFlightSample {
         event: None,
@@ -240,25 +255,63 @@ pub(super) fn sample_extinction_observed<const N: usize>(
     let mut remaining_tau = -det::ln(u_distance.max(f64::MIN_POSITIVE));
     let mut depth = [0.0; N];
     let mut source_cache = [(f64::NAN, 0.0); N];
+    let zero_absorption = [0.0; N];
     let mut cell_visits = 0_u32;
     while let Some(segment) = ray.next_with_checkpoint(check)? {
         cell_visits += 1;
         let rho = medium.geometry().grid.data[segment.cell];
-        if rho == 0.0 || segment.length_m == 0.0 {
-            source(segment.cell, segment.length_m, rho, &[0.0; N], &depth)?;
+        let additional = additional_absorption
+            .binary_search_by_key(&segment.cell, |(cell, _)| *cell)
+            .ok()
+            .map_or(&zero_absorption, |index| &additional_absorption[index].1);
+        let has_additional = additional.iter().any(|&value| value > 0.0);
+        if (rho == 0.0 && !has_additional) || segment.length_m == 0.0 {
+            source(
+                segment.cell,
+                segment.length_m,
+                rho,
+                &[0.0; N],
+                additional,
+                &depth,
+            )?;
             continue;
         }
         let (absorption, scattering, extinction) = medium.coefficients(segment.cell)?;
-        let tau = extinction.map(|k| {
-            if k == 0.0 {
+        let tau = std::array::from_fn(|lane| {
+            let host = if rho == 0.0 || extinction[lane] == 0.0 {
                 0.0
             } else {
-                positive_product(rho, k, segment.length_m)
+                positive_product(rho, extinction[lane], segment.length_m)
+            };
+            if additional[lane] == 0.0 {
+                host
+            } else {
+                host + positive_product(additional[lane], segment.length_m, 1.0)
             }
         });
-        source(segment.cell, segment.length_m, rho, &extinction, &depth)?;
-        if result.event.is_none() && extinction[hero] > 0.0 && remaining_tau < tau[hero] {
-            let local_m = divide_product(remaining_tau, rho, extinction[hero]);
+        source(
+            segment.cell,
+            segment.length_m,
+            rho,
+            &extinction,
+            additional,
+            &depth,
+        )?;
+        if result.event.is_none()
+            && ((rho > 0.0 && extinction[hero] > 0.0) || additional[hero] > 0.0)
+            && remaining_tau < tau[hero]
+        {
+            let local_m = if additional[hero] == 0.0 {
+                divide_product(remaining_tau, rho, extinction[hero])
+            } else {
+                event_distance_with_additional(
+                    remaining_tau,
+                    rho,
+                    extinction[hero],
+                    additional[hero],
+                )
+                .ok_or(VolumeTransportError::Unrepresentable)?
+            };
             let parameter = segment.start_m + local_m;
             if !parameter.is_finite()
                 || parameter < segment.start_m
@@ -269,14 +322,30 @@ pub(super) fn sample_extinction_observed<const N: usize>(
                 return Err(VolumeTransportError::Unrepresentable);
             }
             let event_depth = std::array::from_fn(|lane| {
-                depth[lane]
-                    + if extinction[lane] == 0.0 || local_m == 0.0 {
-                        0.0
-                    } else {
-                        positive_product(rho, extinction[lane], local_m)
-                    }
+                let host = if rho == 0.0 || extinction[lane] == 0.0 || local_m == 0.0 {
+                    0.0
+                } else {
+                    positive_product(rho, extinction[lane], local_m)
+                };
+                let local = if additional[lane] == 0.0 || local_m == 0.0 {
+                    host
+                } else {
+                    host + positive_product(additional[lane], local_m, 1.0)
+                };
+                depth[lane] + local
             });
-            result.weight = collision_weights(&event_depth, &extinction, &scattering)?;
+            result.weight = if has_additional {
+                collision_weights_with_additional(
+                    &event_depth,
+                    rho,
+                    &extinction,
+                    &scattering,
+                    additional,
+                )
+                .ok_or(VolumeTransportError::Unrepresentable)?
+            } else {
+                collision_weights(&event_depth, &extinction, &scattering)?
+            };
             let position = ray.position(parameter);
             let distance_m = ray.distance_from_origin(parameter);
             if !distance_m.is_finite() || (distance_m > 0.0 && position == origin) {

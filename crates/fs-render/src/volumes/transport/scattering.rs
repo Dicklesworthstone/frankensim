@@ -40,6 +40,7 @@ pub use phase::{
 pub mod deposition;
 /// Reciprocal thermal volume/bath exchange over the same physical histories.
 pub mod exchange;
+pub(in crate::volumes::transport) mod extinction;
 pub mod field;
 /// Directed transport of isotropic nonthermal volume emission.
 pub mod luminescence;
@@ -510,8 +511,10 @@ impl<'a> ScatteringGrid<'a> {
 
     /// Nonthermal source observations reuse the original exact free flight,
     /// with no evaluation of unrelated LTE sources. The callback integrates
-    /// every full segment using its original cell, length, density, extinction
-    /// and foreground depth. It never receives stochastic continuation weights.
+    /// every full segment using its original cell, length, density, host mass
+    /// extinction, additional absolute absorption and foreground depth. The
+    /// sparse extra coefficients have already been admitted by the source
+    /// snapshot. It never receives stochastic continuation weights.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::volumes::transport) fn sample_segment_observed_source<const N: usize>(
         &self,
@@ -520,11 +523,13 @@ impl<'a> ScatteringGrid<'a> {
         direction: Vec3,
         wavelengths_nm: &[f64; N],
         samples: [f64; 2],
+        additional_absorption: &[(usize, [f64; N])],
         max_cell_visits: u32,
         mut source: impl FnMut(
             usize,
             f64,
             f64,
+            &[f64; N],
             &[f64; N],
             &[f64; N],
         ) -> Result<(), VolumeTransportError>,
@@ -549,6 +554,7 @@ impl<'a> ScatteringGrid<'a> {
             samples[0],
             samples[1],
             false,
+            additional_absorption,
             max_cell_visits,
             true,
             &mut source,
@@ -631,28 +637,8 @@ fn collision_weights<const N: usize>(
     extinction: &[f64; N],
     scattering: &[f64; N],
 ) -> Result<[f64; N], VolumeTransportError> {
-    let log_density =
-        std::array::from_fn::<_, N, _>(|lane| det::ln(extinction[lane]) - depth[lane]);
-    let peak = log_density.into_iter().fold(f64::NEG_INFINITY, f64::max);
-    if !peak.is_finite() {
-        return Err(VolumeTransportError::Unrepresentable);
-    }
-    let sum: f64 = log_density
-        .iter()
-        .map(|value| det::exp(*value - peak))
-        .sum();
-    let weights = std::array::from_fn(|lane| {
-        if scattering[lane] == 0.0 {
-            0.0
-        } else {
-            det::exp(det::ln(scattering[lane]) - depth[lane] - peak) * (N as f64 / sum)
-        }
-    });
-    if weights.iter().all(|weight| weight.is_finite()) {
-        Ok(weights)
-    } else {
-        Err(VolumeTransportError::Unrepresentable)
-    }
+    extinction::collision_weights(depth, extinction, scattering)
+        .ok_or(VolumeTransportError::Unrepresentable)
 }
 
 fn divide_product(numerator: f64, a: f64, b: f64) -> f64 {
