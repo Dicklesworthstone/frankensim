@@ -22,6 +22,156 @@ pub struct FluxViscosityTangent {
     pub derivative: f64,
 }
 
+/// Cellwise viscosity and its derivative with respect to the FULL gradient.
+/// `gradient[i][j] = d u_i / d x_j`; no symmetry or strain-only dependence is
+/// assumed. External material fields and authored filter lengths stay fixed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluxViscosityGradientTangent {
+    /// Positive finite kinematic viscosity [m²/s].
+    pub nu: f64,
+    /// `derivative[i][j] = d nu / d gradient[i][j]` [m²]. Its contraction
+    /// with a gradient variation gives the corresponding viscosity variation.
+    /// At a nonsmooth constitutive state, the caller must document its chosen
+    /// generalized derivative; this type alone makes no smooth-adjoint claim.
+    pub derivative: [[f64; 2]; 2],
+}
+
+// Both constitutive forms share the ORIGINAL residual, sparse derivatives and
+// nonlinear owner. A BDM1 gradient is constant in a triangle, so the full-
+// gradient callback is prepared once per cell, not once per quadrature site.
+#[derive(Clone, Copy)]
+pub(super) enum ViscosityLaw<'a> {
+    Rate(&'a dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent),
+    Gradient(&'a dyn Fn(usize, [[f64; 2]; 2]) -> FluxViscosityGradientTangent),
+}
+
+pub(super) enum PreparedViscosityLaw<'a> {
+    Rate(&'a dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent),
+    Gradient(Vec<FluxViscosityGradientTangent>),
+}
+
+#[derive(Clone, Copy)]
+enum ViscosityDerivative {
+    Rate(f64),
+    Gradient([[f64; 2]; 2]),
+}
+
+impl ViscosityDerivative {
+    fn scaled(self, factor: f64) -> Self {
+        match self {
+            Self::Rate(value) => Self::Rate(factor * value),
+            Self::Gradient(values) => Self::Gradient(values.map(|row| row.map(|v| factor * v))),
+        }
+    }
+
+    fn add_scaled(&mut self, other: Self, weight: f64) {
+        match (self, other) {
+            (Self::Rate(value), Self::Rate(other)) => *value += weight * other,
+            (Self::Gradient(values), Self::Gradient(other)) => {
+                for i in 0..2 {
+                    for j in 0..2 {
+                        values[i][j] += weight * other[i][j];
+                    }
+                }
+            }
+            _ => unreachable!("a prepared law retains its derivative representation"),
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        match self {
+            Self::Rate(value) => value == 0.0,
+            Self::Gradient(values) => values.iter().flatten().all(|&v| v == 0.0),
+        }
+    }
+
+    fn apply(self, factor: f64, gradient: [[f64; 2]; 2], rate: f64) -> f64 {
+        match self {
+            // Preserve the scalar owner's original multiplication order.
+            Self::Rate(value) => factor * value * rate,
+            Self::Gradient(values) => {
+                factor
+                    * (values[0][0] * gradient[0][0]
+                        + values[0][1] * gradient[0][1]
+                        + values[1][0] * gradient[1][0]
+                        + values[1][1] * gradient[1][1])
+            }
+        }
+    }
+}
+
+pub(super) struct ConstitutiveSample {
+    pub(super) nu: f64,
+    derivative: ViscosityDerivative,
+}
+
+impl<'a> ViscosityLaw<'a> {
+    pub(super) fn prepare(
+        self,
+        gradients: &[[[f64; 2]; 2]],
+    ) -> Result<PreparedViscosityLaw<'a>, FluxLinearizationError> {
+        match self {
+            Self::Rate(law) => Ok(PreparedViscosityLaw::Rate(law)),
+            Self::Gradient(law) => {
+                let values = gradients
+                    .iter()
+                    .enumerate()
+                    .map(|(cell, &gradient)| {
+                        if gradient.iter().flatten().any(|v| !v.is_finite()) {
+                            return Err(FluxLinearizationError::Invalid(
+                                "nonfinite full velocity gradient",
+                            ));
+                        }
+                        let tangent = law(cell, gradient);
+                        if !tangent.nu.is_finite()
+                            || tangent.nu <= 0.0
+                            || tangent.derivative.iter().flatten().any(|v| !v.is_finite())
+                        {
+                            return Err(FluxLinearizationError::GradientConstitutive {
+                                cell,
+                                gradient,
+                                tangent,
+                            });
+                        }
+                        Ok(tangent)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(PreparedViscosityLaw::Gradient(values))
+            }
+        }
+    }
+}
+
+impl PreparedViscosityLaw<'_> {
+    pub(super) fn sample(
+        &self,
+        cell: usize,
+        point: [f64; 2],
+        rate: f64,
+    ) -> Result<ConstitutiveSample, FluxLinearizationError> {
+        Ok(match self {
+            Self::Rate(law) => {
+                let value = sample(*law, cell, point, rate)?;
+                ConstitutiveSample {
+                    nu: value.nu,
+                    derivative: ViscosityDerivative::Rate(value.derivative),
+                }
+            }
+            Self::Gradient(values) => ConstitutiveSample {
+                nu: values[cell].nu,
+                derivative: ViscosityDerivative::Gradient(values[cell].derivative),
+            },
+        })
+    }
+
+    fn zero_derivative(&self) -> ViscosityDerivative {
+        match self {
+            Self::Rate(_) => ViscosityDerivative::Rate(0.0),
+            Self::Gradient(_) => ViscosityDerivative::Gradient([[0.0; 2]; 2]),
+        }
+    }
+}
+
 /// Residual and its sparse velocity/pressure linearization at one exact state.
 pub struct FluxRheologyLinearization {
     /// `dR/dx`, with the same strong normal-velocity and pressure-datum rows.
@@ -58,6 +208,13 @@ pub enum FluxLinearizationError {
         /// Rejected value and derivative.
         tangent: FluxViscosityTangent,
     },
+    /// A full-gradient cell response contains nonfinite data or nonpositive
+    /// viscosity. Neither the supplied gradient nor its derivative is clipped.
+    GradientConstitutive {
+        cell: usize,
+        gradient: [[f64; 2]; 2],
+        tangent: FluxViscosityGradientTangent,
+    },
 }
 
 impl core::fmt::Display for FluxLinearizationError {
@@ -72,6 +229,14 @@ impl core::fmt::Display for FluxLinearizationError {
             } => write!(
                 f,
                 "flow linearization: invalid constitutive tangent {tangent:?} in cell {cell} at {point:?}, rate {shear_rate}"
+            ),
+            Self::GradientConstitutive {
+                cell,
+                gradient,
+                tangent,
+            } => write!(
+                f,
+                "flow linearization: invalid gradient tangent {tangent:?} in cell {cell}, gradient {gradient:?}"
             ),
         }
     }
@@ -201,6 +366,38 @@ impl FluxSystem<'_> {
         )
     }
 
+    /// Linearize the same steady/BDF1 equations with a cellwise viscosity that
+    /// depends on the full affine velocity gradient, including rotation.
+    /// The callback returns `nu` and analytic `d nu / d gradient` once per cell.
+    /// Cell stress, harmonic SIP, velocity-boundary loads and both convective
+    /// derivatives retain the original primal definitions. No finite difference
+    /// or scalar-strain approximation is introduced. The state, history and
+    /// upwind qualifications of [`Self::linearize_rheology`] apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_gradient_rheology(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [[f64; 2]; 2]) -> FluxViscosityGradientTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        state: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+    ) -> Result<FluxRheologyLinearization, FluxLinearizationError> {
+        self.linearize_constitutive_admitted(
+            params,
+            ViscosityLaw::Gradient(law),
+            force,
+            boundary,
+            state,
+            convection,
+            inverse_timestep,
+            previous_velocity,
+            None,
+        )
+    }
+
     // Mixed boundaries share every volume/interface derivative. Prescribed
     // total traction and Navier resistance do not depend on bulk viscosity;
     // only velocity-Dirichlet faces add constitutive boundary terms. Convective
@@ -210,6 +407,32 @@ impl FluxSystem<'_> {
         &self,
         params: FluxParams,
         law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        state: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+        admitted: Option<&AdmittedBoundary>,
+    ) -> Result<FluxRheologyLinearization, FluxLinearizationError> {
+        self.linearize_constitutive_admitted(
+            params,
+            ViscosityLaw::Rate(law),
+            force,
+            boundary,
+            state,
+            convection,
+            inverse_timestep,
+            previous_velocity,
+            admitted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn linearize_constitutive_admitted(
+        &self,
+        params: FluxParams,
+        law: ViscosityLaw<'_>,
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
         state: &[f64],
@@ -238,12 +461,14 @@ impl FluxSystem<'_> {
         if rates.iter().any(|rate| !rate.is_finite()) {
             return Err(FluxLinearizationError::Invalid("nonfinite strain rate"));
         }
+        let gradients = self.constitutive_gradients(state);
+        let law = law.prepare(&gradients)?;
         let failure = RefCell::new(None);
         let viscosity = |cell, point| {
             if failure.borrow().is_some() {
                 return 1.0;
             }
-            match sample(law, cell, point, rates[cell]) {
+            match law.sample(cell, point, rates[cell]) {
                 Ok(value) => value.nu,
                 Err(error) => {
                     *failure.borrow_mut() = Some(error);
@@ -298,19 +523,6 @@ impl FluxSystem<'_> {
                 constrained[2 * edge + 1] = true;
             }
         }
-        let gradients: Vec<[[f64; 2]; 2]> = (0..mesh.tris.len())
-            .map(|cell| {
-                let mut gradient = [[0.0; 2]; 2];
-                for i in 0..6 {
-                    for (r, row) in gradient.iter_mut().enumerate() {
-                        for (c, value) in row.iter_mut().enumerate() {
-                            *value += state[self.dof(cell, i)] * self.bases[cell].grad[i][r][c];
-                        }
-                    }
-                }
-                gradient
-            })
-            .collect();
         let rate_derivatives: Vec<[f64; 6]> = gradients
             .iter()
             .enumerate()
@@ -328,11 +540,12 @@ impl FluxSystem<'_> {
             .collect();
         for cell in 0..mesh.tris.len() {
             let triangle = core::array::from_fn(|k| mesh.verts[mesh.tris[cell][k]]);
-            let mut integrated_derivative = 0.0;
+            let mut integrated_derivative = law.zero_derivative();
             for (point, weight) in tri_quad(triangle, mesh.areas[cell]) {
-                integrated_derivative += weight * sample(law, cell, point, rates[cell])?.derivative;
+                integrated_derivative
+                    .add_scaled(law.sample(cell, point, rates[cell])?.derivative, weight);
             }
-            if integrated_derivative == 0.0 {
+            if integrated_derivative.is_zero() {
                 continue;
             }
             let g = gradients[cell];
@@ -349,7 +562,11 @@ impl FluxSystem<'_> {
                     jacobian.push(
                         row,
                         self.dof(cell, j),
-                        integrated_derivative * stress * rate_derivatives[cell][j],
+                        integrated_derivative.apply(
+                            stress,
+                            self.bases[cell].grad[j],
+                            rate_derivatives[cell][j],
+                        ),
                     );
                 }
             }
@@ -367,10 +584,10 @@ impl FluxSystem<'_> {
             let h0 = 2.0 * mesh.areas[c0] / edge.len;
             let tau0 = viscous_normal(gradients[c0], edge.normal, true);
             for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
-                let first = sample(law, c0, point, rates[c0])?;
+                let first = law.sample(c0, point, rates[c0])?;
                 let u0 = self.linearization_velocity(state, c0, point);
                 if c1 == usize::MAX {
-                    if first.derivative == 0.0 {
+                    if first.derivative.is_zero() {
                         continue;
                     }
                     let prescribed = admitted
@@ -396,14 +613,18 @@ impl FluxSystem<'_> {
                             jacobian.push(
                                 row,
                                 self.dof(c0, j),
-                                weight * factor * first.derivative * rate_derivatives[c0][j],
+                                first.derivative.apply(
+                                    weight * factor,
+                                    self.bases[c0].grad[j],
+                                    rate_derivatives[c0][j],
+                                ),
                             );
                         }
                     }
                     continue;
                 }
-                let second = sample(law, c1, point, rates[c1])?;
-                if first.derivative == 0.0 && second.derivative == 0.0 {
+                let second = law.sample(c1, point, rates[c1])?;
+                if first.derivative.is_zero() && second.derivative.is_zero() {
                     continue;
                 }
                 let h1 = 2.0 * mesh.areas[c1] / edge.len;
@@ -434,16 +655,20 @@ impl FluxSystem<'_> {
                         let factor = -sign * dot(traction, v) - heights[side] * dot(tv, jump)
                             + 2.0 * params.sigma * sign * dot(v, jump);
                         for (source, &other) in cells.iter().enumerate() {
-                            if derivatives[source] == 0.0 {
+                            if derivatives[source].is_zero() {
                                 continue;
                             }
-                            let dq = weights[source] * weights[source] / heights[source]
-                                * derivatives[source];
+                            let dq = derivatives[source]
+                                .scaled(weights[source] * weights[source] / heights[source]);
                             for j in 0..6 {
                                 jacobian.push(
                                     row,
                                     self.dof(other, j),
-                                    weight * factor * dq * rate_derivatives[other][j],
+                                    dq.apply(
+                                        weight * factor,
+                                        self.bases[other].grad[j],
+                                        rate_derivatives[other][j],
+                                    ),
                                 );
                             }
                         }
@@ -471,6 +696,22 @@ impl FluxSystem<'_> {
             scaled_relative_residual,
             nonsmooth_upwind_points,
         })
+    }
+
+    pub(super) fn constitutive_gradients(&self, state: &[f64]) -> Vec<[[f64; 2]; 2]> {
+        (0..self.mesh.tris.len())
+            .map(|cell| {
+                let mut gradient = [[0.0; 2]; 2];
+                for i in 0..6 {
+                    for (r, row) in gradient.iter_mut().enumerate() {
+                        for (c, value) in row.iter_mut().enumerate() {
+                            *value += state[self.dof(cell, i)] * self.bases[cell].grad[i][r][c];
+                        }
+                    }
+                }
+                gradient
+            })
+            .collect()
     }
 
     fn linearization_velocity(&self, state: &[f64], cell: usize, point: [f64; 2]) -> [f64; 2] {

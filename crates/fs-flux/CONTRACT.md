@@ -9967,15 +9967,17 @@ format/parsing and bounded static API review are distinct from runtime evidence.
 The original six scalar BDF/RCR model tests were previously executed; their
 unchanged leaf model does not establish new nonlinear integration test coverage.
 
-## Consistent Newton integration of planar Smagorinsky stress
+## Consistent Newton integration of planar SGS stress
 
 `PlanarSgs::{solve_steady_newton,bdf1_newton_step,bdf2_newton_variable_step}`
-connect the authored Smagorinsky closure to the original damped Newton owner.
-The constitutive tangent is `d(nu_eff)/d(gamma) = (Cs*Delta)^2`; the native
-Jacobian differentiates cell stress, harmonic SIP weights, penalties, boundary
-loads and convection. Filter widths and molecular viscosity remain the prepared
-cell fields. Neither an artificial steady mass nor a frozen eddy viscosity is
-introduced to obtain convergence.
+connect the authored Smagorinsky, WALE and Vreman closures to the original
+damped Newton owner. Smagorinsky retains the scalar constitutive tangent
+`d(nu_eff)/d(gamma) = (Cs*Delta)^2`; WALE and Vreman use the full velocity
+gradient response described below. The native Jacobian differentiates cell
+stress, harmonic SIP weights, penalties, boundary loads and convection.
+Filter widths and molecular viscosity remain the prepared cell fields.
+Neither an artificial steady mass nor a frozen eddy viscosity is introduced
+to obtain convergence.
 
 These entries prescribe velocity on every boundary. The BDF2 history carries
 its actual previous interval, admits a new/previous step ratio in (0,2], and
@@ -9983,21 +9985,23 @@ uses the real previous velocity as the Newton initial iterate. Missing older
 history is exactly BDF1 startup. Accepted SGS diagnostics belong to the same
 velocity endpoint and remain instantaneous modeled transfer, not added heat.
 
-At exactly zero strain, the tangent uses the zero generalized derivative of
+At exactly zero strain, Smagorinsky uses the zero generalized derivative of
 the strain norm. Viscosity-dependent DG penalties may still be nonsmooth when
-a tangential jump remains. WALE and Vreman require full-gradient tangents and
-are refused by these scalar-tangent entries; their original Picard paths remain.
-Original work bounds, Armijo backtracking, endpoint residual checks, and
-read-only history apply. No new cancellation mechanism or three-dimensional
-turbulence qualification is implied.
+a tangential jump remains. WALE and Vreman use their full-gradient tangents,
+including the shared kernels' explicit singular-state selections; their
+original Picard paths remain available. Original work bounds, Armijo
+backtracking, endpoint residual checks, and read-only history apply.
+No new cancellation mechanism or three-dimensional turbulence qualification
+is implied.
 
-Four focused regressions cover an independently reassembled stiff nonlinear
-momentum residual, unequal-step quadratic shear, exact zero-SGS native
-reduction, and unsupported-tangent/history/work refusals. They and twelve
-existing planar regressions pass under pinned-Rust validation with the original
-NS, Jacobian, sparse, Krylov and dense numerical owners. That focused build
-omits unrelated material/thermal/density adapters; it is not a full workspace
-or runtime integration qualification.
+The initial Smagorinsky regressions covered an independently reassembled
+stiff nonlinear momentum residual, unequal-step quadratic shear, exact
+zero-SGS native reduction, and tangent/history/work refusals. The original
+NS, Jacobian, sparse, Krylov and dense numerical owners passed the focused
+pinned-Rust validation. Current all-model validation is described under the
+full-gradient extension below. These focused builds omit unrelated
+material/thermal/density adapters; they are not full workspace or runtime
+integration qualifications.
 
 ## Original material rheology in convective dynamic-port solves
 
@@ -10262,10 +10266,10 @@ This is not a native FEM/material compilation or runtime validation claim.
 ## Consistent Newton SGS with mixed boundaries
 
 `PlanarSgs::solve_steady_mixed_newton`, `bdf1_mixed_newton_step`, and
-`bdf2_mixed_newton_variable_step` connect the Smagorinsky constitutive
-tangent to the existing bounded Newton/line-search owner with velocity,
-Navier-slip, open-traction and reservoir boundaries. The native
-`FluxSystem` methods also expose the same mixed-boundary Newton path for
+`bdf2_mixed_newton_variable_step` connect the Smagorinsky, WALE and Vreman
+constitutive responses to the existing bounded Newton/line-search owner
+with velocity, Navier-slip, open-traction and reservoir boundaries. The
+native `FluxSystem` methods retain the same mixed-boundary Newton path for
 general admitted scalar viscosity tangents.
 
 The Jacobian differentiates both transported and advecting velocity using
@@ -10281,14 +10285,15 @@ support requirement; physical transient mass can anchor all-open components.
 Unequal-step BDF2 uses the original history owner and actual intervals,
 admitting new/previous ratios in (0,2]. Neither history is modified.
 
-The Smagorinsky-only SGS tangent, zero-strain semismooth selection and
-`Estimated` planar qualifications remain. WALE/Vreman refuse the
-unsupported scalar Newton tangent. No additional cancellation context,
-wall model, generated turbulent fluctuations, heat deposition, global
-uniqueness or whole-solver backflow stability is implied.
+The shared closures retain their documented generalized derivatives at
+singular gradients; these do not establish classical differentiability.
+The `Estimated` planar qualifications remain. No additional cancellation
+context, wall model, generated turbulent fluctuations, heat deposition,
+global uniqueness or whole-solver backflow stability is implied.
 
-All 21 selected planar/steady/Newton regressions passed in a focused
-original-source Rust build. Five new groups check the directional
+The original Smagorinsky extension passed 21 selected planar/steady/Newton
+regressions in a focused original-source Rust build. Its five groups checked
+the directional
 Jacobian against the independent public primal assembly across twelve
 boundary/viscosity combinations, including face-flow reversal; fifteen
 analytic steady/BDF1/unequal-step BDF2 pressure/traction/virtual-work cases;
@@ -10358,3 +10363,42 @@ Cargo/workspace and DSR gates were not run. This owner does not resolve tank int
 neck inertia, heat transfer, volume motion or one shared tank across multiple
 sides. Evolving-species Cartesian finite tanks remain a separate integration;
 the source mixture plenum candidate API is already available.
+
+## Full-gradient WALE and Vreman Newton integration
+
+`PlanarSgs` supports Smagorinsky, WALE and Vreman through the existing
+steady, BDF1 and unequal-step BDF2 Newton entry points, including prescribed
+velocity and mixed velocity, Navier-slip, open-traction and reservoir
+boundaries. `FluxViscosityGradientTangent` represents a cellwise viscosity
+and its analytic derivative with respect to the full native `du_i/dx_j`
+tensor. The response is prepared once per triangle per assembly and
+contracted with the original BDM basis gradients. The same derivative owner
+includes cell stress, harmonic SIP weights and penalties, viscosity-dependent
+boundary loads, and both transported and advecting velocities. Existing
+scalar rheology APIs and their arithmetic remain available.
+
+WALE and Vreman use the shared `fs-lbm` analytic derivatives and original
+primal closure values, retaining rotational dependence and authored filter
+widths. No production finite differences, scalar-strain fit, viscosity
+clipping, separate nonlinear solver or additional physical timestep is
+introduced. Original source-validity checks remain authoritative through
+final reaction assembly. All histories remain immutable. Singular-gradient
+selections follow the shared kernels' generalized-derivative contract.
+The `Estimated` planar scope does not imply a three-dimensional cascade,
+turbulence qualification, new wall model, heat deposition, cancellation
+context or global convergence guarantee.
+
+All 24 selected planar/steady/Newton integration regressions and both
+current-main source-refusal unit regressions passed in a focused
+original-source native Rust build. Directional Jacobians matched independent
+original primal assemblies under general and pure-rotation perturbations,
+DG jumps, and reversing open flux across sixteen closure/boundary/convection
+combinations, with frozen-derivative negative controls. Further checks cover
+one response per triangle, analytic pressure/traction/virtual work, time
+histories, exact disabled-SGS reduction, and active modeled-stress endpoints.
+In the active-stress fixture, WALE converged in ten iterations with eight
+backtracks to residual 8.6354e-14; Vreman converged in six iterations with
+three backtracks to 1.13075e-13. These are fixture-specific numerical results,
+not general runtime or turbulence-validation claims. The original numerical
+kernels were compiled without numerical stubs; material-adapter integration
+and full Cargo/workspace validation were not run.

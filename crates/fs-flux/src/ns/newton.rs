@@ -7,7 +7,9 @@
 use std::cell::RefCell;
 
 use super::boundary::{AdmittedBoundary, StokesBoundary, StokesBoundaryError};
-use super::linearization::{FluxLinearizationError, FluxViscosityTangent, rheology_residual, sample};
+use super::linearization::{
+    FluxLinearizationError, FluxViscosityTangent, ViscosityLaw, rheology_residual,
+};
 use super::{FluxParams, FluxSolution, FluxSystem};
 
 mod mixed;
@@ -307,22 +309,46 @@ impl FluxSystem<'_> {
         controls: FluxNewtonControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<FluxNewtonStep, FluxNewtonError> {
-        if older_history.is_none() {
-            return self.bdf1_rheology_newton_step_checked(
-                params,
-                law,
-                force,
-                boundary,
-                previous_velocity,
-                timestep_s,
-                controls,
-                source_is_valid,
-            );
+        self.bdf2_constitutive_newton_variable_step_checked(
+            params,
+            ViscosityLaw::Rate(law),
+            force,
+            boundary,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bdf2_constitutive_newton_variable_step_checked(
+        &self,
+        params: FluxParams,
+        law: ViscosityLaw<'_>,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        if older_history.is_none()
+            && (!timestep_s.is_finite() || timestep_s <= 0.0 || !timestep_s.recip().is_finite())
+        {
+            return Err(FluxNewtonError::Invalid(
+                "finite positive timestep with representable reciprocal required",
+            ));
         }
-        let (history, effective_timestep) = self
-            .mixed_bdf2_history(previous_velocity, older_history, timestep_s)
-            .map_err(FluxNewtonError::History)?;
-        self.rheology_newton_solve_checked(
+        let (history, effective_timestep) = if older_history.is_some() {
+            self.mixed_bdf2_history(previous_velocity, older_history, timestep_s)
+                .map_err(FluxNewtonError::History)?
+        } else {
+            (None, timestep_s)
+        };
+        self.constitutive_newton_solve_admitted_checked(
             params,
             law,
             force,
@@ -333,6 +359,7 @@ impl FluxSystem<'_> {
             Some(history.as_deref().unwrap_or(previous_velocity)),
             controls,
             source_is_valid,
+            None,
         )
     }
 
@@ -417,6 +444,36 @@ impl FluxSystem<'_> {
         source_is_valid: &dyn Fn() -> bool,
         admitted: Option<&AdmittedBoundary>,
     ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.constitutive_newton_solve_admitted_checked(
+            params,
+            ViscosityLaw::Rate(law),
+            force,
+            boundary,
+            initial_velocity,
+            convection,
+            inverse_timestep,
+            previous_velocity,
+            controls,
+            source_is_valid,
+            admitted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn constitutive_newton_solve_admitted_checked(
+        &self,
+        params: FluxParams,
+        law: ViscosityLaw<'_>,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+        admitted: Option<&AdmittedBoundary>,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
         if self.mesh.tris.is_empty()
             || initial_velocity.len() != self.n_u
             || initial_velocity.iter().any(|v| !v.is_finite())
@@ -455,7 +512,7 @@ impl FluxSystem<'_> {
         let mut last_update = 0.0;
         let mut last_linear_iterations = 0;
         for iteration in 0..=controls.maximum_iterations {
-            let linearization = self.linearize_rheology_admitted(
+            let linearization = self.linearize_constitutive_admitted(
                 params,
                 law,
                 force,
@@ -587,7 +644,7 @@ impl FluxSystem<'_> {
     fn newton_trial(
         &self,
         params: FluxParams,
-        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        law: ViscosityLaw<'_>,
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
         state: &[f64],
@@ -603,12 +660,18 @@ impl FluxSystem<'_> {
         if rates.iter().any(|v| !v.is_finite()) {
             return Err(FluxLinearizationError::Invalid("nonfinite trial strain"));
         }
+        let gradients = if matches!(law, ViscosityLaw::Gradient(_)) {
+            self.constitutive_gradients(state)
+        } else {
+            Vec::new()
+        };
+        let law = law.prepare(&gradients)?;
         let failure = RefCell::new(None);
         let field = |cell, point| {
             if failure.borrow().is_some() {
                 return 1.0;
             }
-            match sample(law, cell, point, rates[cell]) {
+            match law.sample(cell, point, rates[cell]) {
                 Ok(value) => value.nu,
                 Err(error) => {
                     *failure.borrow_mut() = Some(error);

@@ -6,6 +6,9 @@ use fs_flux::ns::newton::{FluxNewtonControls, FluxNewtonError};
 #[path = "mixed_newton.rs"]
 mod mixed;
 
+#[path = "gradient_newton.rs"]
+mod gradient;
+
 #[test]
 fn consistent_sgs_tangent_resolves_stiff_flow_within_a_bounded_newton_budget() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));
@@ -163,12 +166,23 @@ fn smagorinsky_newton_respects_unequal_physical_intervals_and_endpoint_transfer(
 
 #[test]
 fn zero_newton_sgs_is_the_native_molecular_steady_bdf1_and_bdf2_owner() {
+    for closure in [
+        SgsModel::Smagorinsky { cs: 0.0 },
+        SgsModel::Wale { cw: 0.0 },
+        SgsModel::Vreman { cv: 0.0 },
+    ] {
+        zero_newton_sgs(closure);
+    }
+}
+
+fn zero_newton_sgs(closure: SgsModel) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let molecular: Vec<_> = (0..mesh.tris.len())
         .map(|cell| 0.2 + 0.01 * cell as f64)
         .collect();
-    let model = PlanarSgs::new(&system, 0.0, &vec![0.5; mesh.tris.len()], &molecular).unwrap();
+    let model =
+        PlanarSgs::with_model(&system, closure, &vec![0.5; mesh.tris.len()], &molecular).unwrap();
     let params = FluxParams {
         nu: f64::NAN,
         tol: 1e-12,
@@ -222,7 +236,7 @@ fn zero_newton_sgs_is_the_native_molecular_steady_bdf1_and_bdf2_owner() {
 }
 
 #[test]
-fn sgs_newton_refuses_unsupported_tangents_bad_history_and_exhausted_work_atomically() {
+fn sgs_newton_admits_zero_gradient_and_refuses_bad_history_or_exhausted_work_atomically() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let molecular = vec![0.01; mesh.tris.len()];
@@ -235,10 +249,18 @@ fn sgs_newton_refuses_unsupported_tangents_bad_history_and_exhausted_work_atomic
     let never = |_: [f64; 2]| panic!("refusal must precede external data queries");
     for closure in [SgsModel::Wale { cw: 0.5 }, SgsModel::Vreman { cv: 0.07 }] {
         let model = PlanarSgs::with_model(&system, closure, &widths, &molecular).unwrap();
-        assert!(matches!(
-            model.solve_steady_newton(params, &never, &never, &previous, controls),
-            Err(PlanarSgsError::InvalidInput(_))
-        ));
+        let solved = model
+            .solve_steady_newton(params, &zero, &zero, &previous, controls)
+            .unwrap();
+        assert_eq!(solved.step.iterations, 0);
+        assert_eq!(solved.step.solution.x, vec![0.0; system.n]);
+        assert!(
+            solved
+                .sgs
+                .cells
+                .iter()
+                .all(|cell| cell.eddy_viscosity_m2_s == 0.0)
+        );
     }
     // The law value can be finite at tiny strain even when its Newton tangent
     // is not representable. Refuse the tangent instead of silently freezing it.

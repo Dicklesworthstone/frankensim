@@ -3,7 +3,8 @@
 use super::{FluxNewtonControls, FluxNewtonError};
 use crate::ns::boundary::{NavierStokesBoundary, OpenBoundaryPolicy, StokesSolution};
 use crate::ns::linearization::{
-    FluxRheologyLinearization, FluxViscosityTangent, rheology_residual,
+    FluxRheologyLinearization, FluxViscosityGradientTangent, FluxViscosityTangent, ViscosityLaw,
+    rheology_residual,
 };
 use crate::ns::{FluxParams, FluxSystem};
 
@@ -21,6 +22,66 @@ pub struct FluxMixedNewtonStep {
     pub nonlinear_residual: f64,
     /// Actual stress policy on each original open edge, including reservoirs.
     pub open_boundary_policies: Vec<(usize, OpenBoundaryPolicy)>,
+}
+
+#[cfg(test)]
+mod source_refusal_tests {
+    use super::*;
+    use crate::TriMesh;
+    use fs_solid::Mesh2;
+    use std::cell::Cell;
+
+    #[test]
+    fn checked_mixed_newton_refuses_original_source_loss_during_final_reactions() {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, _)| NavierStokesBoundary::Open {
+                edge,
+                traction: &traction,
+                backflow: OpenBoundaryPolicy::NaturalTraction,
+            })
+            .collect();
+        let final_assembly = Cell::new(false);
+        let source_is_valid = Cell::new(true);
+        let law = |_: usize, _: [f64; 2], _: f64| {
+            if final_assembly.get() {
+                source_is_valid.set(false);
+            }
+            FluxViscosityTangent {
+                nu: 1.0,
+                derivative: 0.0,
+            }
+        };
+        // Zero flow solves the first nonlinear assembly. BDF mass, not an
+        // artificial velocity pin, anchors the all-open domain. Only the
+        // subsequent original reaction assembly loses source support.
+        let result = system.bdf2_navier_stokes_mixed_rheology_newton_variable_step_checked(
+            FluxParams::default(),
+            &law,
+            &|_| [0.0; 2],
+            &boundaries,
+            &vec![0.0; system.n_u],
+            None,
+            0.1,
+            FluxNewtonControls::default(),
+            &|| {
+                let valid = source_is_valid.get();
+                final_assembly.set(true);
+                valid
+            },
+        );
+        assert!(!source_is_valid.get(), "exercise final source refusal");
+        assert!(matches!(
+            result,
+            Err(FluxNewtonError::Invalid("constitutive source refused"))
+        ));
+    }
 }
 
 impl FluxSystem<'_> {
@@ -54,6 +115,39 @@ impl FluxSystem<'_> {
         self.linearize_rheology_admitted(
             params,
             law,
+            force,
+            &|_| [0.0; 2],
+            state,
+            true,
+            inverse_timestep,
+            mass_history,
+            Some(&admitted),
+        )
+        .map_err(FluxNewtonError::Linearization)
+    }
+
+    /// The same mixed Navier--Stokes residual with a cellwise full-gradient
+    /// viscosity tangent. Each cell is sampled once. Rotation, harmonic face
+    /// weights, stress loads and both convection derivatives are retained;
+    /// the callback documents any nonsmooth constitutive selection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_navier_stokes_mixed_gradient_rheology(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [[f64; 2]; 2]) -> FluxViscosityGradientTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        state: &[f64],
+        inverse_timestep: f64,
+        mass_history: Option<&[f64]>,
+    ) -> Result<FluxRheologyLinearization, FluxNewtonError> {
+        let anchors = vec![inverse_timestep > 0.0; self.pressure_roots.len()];
+        let admitted = self
+            .admit_navier_stokes_boundaries_with_velocity_anchors(params, boundaries, &anchors)
+            .map_err(FluxNewtonError::Boundary)?;
+        self.linearize_constitutive_admitted(
+            params,
+            ViscosityLaw::Gradient(law),
             force,
             &|_| [0.0; 2],
             state,
@@ -112,9 +206,9 @@ impl FluxSystem<'_> {
         controls: FluxNewtonControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<FluxMixedNewtonStep, FluxNewtonError> {
-        self.mixed_rheology_newton_endpoint(
+        self.mixed_constitutive_newton_endpoint(
             params,
-            law,
+            ViscosityLaw::Rate(law),
             force,
             boundaries,
             initial_velocity,
@@ -203,6 +297,32 @@ impl FluxSystem<'_> {
         controls: FluxNewtonControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<FluxMixedNewtonStep, FluxNewtonError> {
+        self.bdf2_mixed_constitutive_newton_variable_step(
+            params,
+            ViscosityLaw::Rate(law),
+            force,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::ns) fn bdf2_mixed_constitutive_newton_variable_step(
+        &self,
+        params: FluxParams,
+        law: ViscosityLaw<'_>,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxMixedNewtonStep, FluxNewtonError> {
         if previous_velocity.len() != self.n_u
             || previous_velocity.iter().any(|value| !value.is_finite())
             || !timestep_s.is_finite()
@@ -217,7 +337,7 @@ impl FluxSystem<'_> {
         let (history, effective_timestep) = self
             .mixed_bdf2_history(previous_velocity, older_history, timestep_s)
             .map_err(FluxNewtonError::History)?;
-        self.mixed_rheology_newton_endpoint(
+        self.mixed_constitutive_newton_endpoint(
             params,
             law,
             force,
@@ -231,10 +351,10 @@ impl FluxSystem<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mixed_rheology_newton_endpoint(
+    pub(in crate::ns) fn mixed_constitutive_newton_endpoint(
         &self,
         params: FluxParams,
-        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        law: ViscosityLaw<'_>,
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[NavierStokesBoundary<'_>],
         initial_velocity: &[f64],
@@ -247,7 +367,7 @@ impl FluxSystem<'_> {
         let admitted = self
             .admit_navier_stokes_boundaries_with_velocity_anchors(params, boundaries, &anchors)
             .map_err(FluxNewtonError::Boundary)?;
-        let mut step = self.rheology_newton_solve_admitted_checked(
+        let mut step = self.constitutive_newton_solve_admitted_checked(
             params,
             law,
             force,
@@ -261,11 +381,22 @@ impl FluxSystem<'_> {
             Some(&admitted),
         )?;
         let rates = self.shear_rates(&step.solution.x);
+        let gradients = if matches!(law, ViscosityLaw::Gradient(_)) {
+            self.constitutive_gradients(&step.solution.x)
+        } else {
+            Vec::new()
+        };
+        let law = law
+            .prepare(&gradients)
+            .map_err(FluxNewtonError::Linearization)?;
         // Reuse the ORIGINAL reaction and pressure-datum owner, including mass
         // history and open advective transport, at this same accepted endpoint.
         let endpoint = self.assemble_stokes_admitted_operator(
             params,
-            &|cell, point| law(cell, point, rates[cell]).nu,
+            &|cell, point| {
+                law.sample(cell, point, rates[cell])
+                    .map_or(f64::NAN, |value| value.nu)
+            },
             force,
             &admitted,
             None,
@@ -307,65 +438,5 @@ impl FluxSystem<'_> {
             nonlinear_residual: original.max(scaled),
             open_boundary_policies: policies,
         })
-    }
-}
-
-#[cfg(test)]
-mod source_refusal_tests {
-    use super::*;
-    use crate::TriMesh;
-    use fs_solid::Mesh2;
-    use std::cell::Cell;
-
-    #[test]
-    fn checked_mixed_newton_refuses_original_source_loss_during_final_reactions() {
-        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
-        let system = FluxSystem::new(&mesh);
-        let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
-        let boundaries: Vec<_> = mesh
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(edge, _)| mesh.is_boundary(*edge))
-            .map(|(edge, _)| NavierStokesBoundary::Open {
-                edge,
-                traction: &traction,
-                backflow: OpenBoundaryPolicy::NaturalTraction,
-            })
-            .collect();
-        let final_assembly = Cell::new(false);
-        let source_is_valid = Cell::new(true);
-        let law = |_: usize, _: [f64; 2], _: f64| {
-            if final_assembly.get() {
-                source_is_valid.set(false);
-            }
-            FluxViscosityTangent {
-                nu: 1.0,
-                derivative: 0.0,
-            }
-        };
-        // Zero flow solves the first nonlinear assembly. BDF mass, not an
-        // artificial velocity pin, anchors the all-open domain. Only the
-        // subsequent original reaction assembly loses source support.
-        let result = system.bdf2_navier_stokes_mixed_rheology_newton_variable_step_checked(
-            FluxParams::default(),
-            &law,
-            &|_| [0.0; 2],
-            &boundaries,
-            &vec![0.0; system.n_u],
-            None,
-            0.1,
-            FluxNewtonControls::default(),
-            &|| {
-                let valid = source_is_valid.get();
-                final_assembly.set(true);
-                valid
-            },
-        );
-        assert!(!source_is_valid.get(), "exercise final source refusal");
-        assert!(matches!(
-            result,
-            Err(FluxNewtonError::Invalid("constitutive source refused"))
-        ));
     }
 }

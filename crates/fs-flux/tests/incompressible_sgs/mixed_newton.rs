@@ -135,12 +135,22 @@ fn mixed_newton_jacobian_matches_original_fluxes_under_reversal() {
 
 #[test]
 fn mixed_sgs_newton_preserves_analytic_pressure_traction_and_actual_time_history() {
+    for closure in [
+        SgsModel::Smagorinsky { cs: 0.5 },
+        SgsModel::Wale { cw: 0.5 },
+        SgsModel::Vreman { cv: 0.2 },
+    ] {
+        analytic_mixed_newton(closure);
+    }
+}
+
+fn analytic_mixed_newton(closure: SgsModel) {
     use std::cell::Cell;
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
-    let model = PlanarSgs::new(
+    let model = PlanarSgs::with_model(
         &system,
-        0.5,
+        closure,
         &vec![0.7; mesh.tris.len()],
         &vec![0.3; mesh.tris.len()],
     )
@@ -186,7 +196,12 @@ fn mixed_sgs_newton_preserves_analytic_pressure_traction_and_actual_time_history
                 ]
             };
             let gamma = a * 0.4_f64.sqrt();
-            let eddy = (0.5_f64 * 0.7).powi(2) * gamma;
+            let eddy = fs_lbm::sgs3::eddy_viscosity(
+                closure,
+                0.7,
+                [[0.3 * a, 0.2 * a, 0.0], [0.0, -0.3 * a, 0.0], [0.0; 3]],
+            )
+            .unwrap();
             let nu = 0.3 + eddy;
             let physical_stress = |p: [f64; 2], n: [f64; 2]| {
                 let pressure = 5.0 + 2.0 * p[0] - 3.0 * p[1];
@@ -282,6 +297,41 @@ fn mixed_sgs_newton_preserves_analytic_pressure_traction_and_actual_time_history
                 ),
             }
             .unwrap();
+            if policy == 0 {
+                // The original all-velocity entry points consume the same
+                // active full-gradient closure at the actual time endpoint.
+                let closed = match scheme {
+                    0 => model.solve_steady_newton(
+                        params,
+                        &force,
+                        &target,
+                        &vec![0.0; system.n_u],
+                        controls,
+                    ),
+                    1 => model.bdf1_newton_step(params, &force, &target, &previous, dt, controls),
+                    _ => model.bdf2_newton_variable_step(
+                        params,
+                        &force,
+                        &target,
+                        &previous,
+                        Some((&older, previous_dt)),
+                        dt,
+                        controls,
+                    ),
+                }
+                .unwrap();
+                let (error, divergence) = system.velocity_error(&closed.step.solution.x, &target);
+                assert!(
+                    error < 2e-8 && divergence < 2e-8,
+                    "{closure:?}: {error:e}, {divergence:e}"
+                );
+                assert!(closed.sgs.integrated_dissipation_m4_s3 > 0.0);
+                close(
+                    closed.sgs.integrated_dissipation_m4_s3,
+                    eddy * gamma * gamma,
+                    8e-8,
+                );
+            }
             assert_eq!((previous, older), original);
             let (error, divergence) = system.velocity_error(&result.step.solution.field.x, &target);
             assert!(
@@ -346,12 +396,23 @@ fn mixed_sgs_newton_preserves_analytic_pressure_traction_and_actual_time_history
 
 #[test]
 fn mixed_newton_zero_sgs_matches_native_molecular_work_and_reactions() {
+    for closure in [
+        SgsModel::Smagorinsky { cs: 0.0 },
+        SgsModel::Wale { cw: 0.0 },
+        SgsModel::Vreman { cv: 0.0 },
+    ] {
+        zero_mixed_newton(closure);
+    }
+}
+
+fn zero_mixed_newton(closure: SgsModel) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let molecular: Vec<_> = (0..mesh.tris.len())
         .map(|i| 0.2 + 0.01 * i as f64)
         .collect();
-    let model = PlanarSgs::new(&system, 0.0, &vec![0.5; mesh.tris.len()], &molecular).unwrap();
+    let model =
+        PlanarSgs::with_model(&system, closure, &vec![0.5; mesh.tris.len()], &molecular).unwrap();
     let params = FluxParams {
         nu: f64::NAN,
         tol: 1e-12,
@@ -590,11 +651,21 @@ fn pressure_driven_sgs_newton_converges_with_original_open_stress() {
 
 #[test]
 fn mixed_newton_mass_anchor_and_refusals_preserve_original_histories() {
+    for closure in [
+        SgsModel::Smagorinsky { cs: 0.5 },
+        SgsModel::Wale { cw: 0.5 },
+        SgsModel::Vreman { cv: 0.07 },
+    ] {
+        mixed_admission(closure);
+    }
+}
+
+fn mixed_admission(closure: SgsModel) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let widths = vec![0.7; mesh.tris.len()];
     let molecular = vec![0.03; mesh.tris.len()];
-    let model = PlanarSgs::new(&system, 0.5, &widths, &molecular).unwrap();
+    let model = PlanarSgs::with_model(&system, closure, &widths, &molecular).unwrap();
     let params = FluxParams {
         nu: f64::NAN,
         tol: 1e-12,
@@ -634,13 +705,6 @@ fn mixed_newton_mass_anchor_and_refusals_preserve_original_histories() {
         ),
         Err(PlanarSgsError::Newton(FluxNewtonError::History(_)))
     ));
-    for closure in [SgsModel::Wale { cw: 0.5 }, SgsModel::Vreman { cv: 0.07 }] {
-        let other = PlanarSgs::with_model(&system, closure, &widths, &molecular).unwrap();
-        assert!(matches!(
-            other.bdf1_mixed_newton_step(params, &zero, &refused, &previous, 0.1, controls),
-            Err(PlanarSgsError::InvalidInput(_))
-        ));
-    }
     let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
     let boundaries: Vec<_> = mesh
         .edges

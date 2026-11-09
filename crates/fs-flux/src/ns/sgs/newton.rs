@@ -1,4 +1,4 @@
-//! Consistent Smagorinsky stress on the existing damped Newton owner.
+//! Consistent Smagorinsky, WALE and Vreman stress on the original Newton owner.
 //!
 //! For nu_eff = nu + (C_s Delta)^2 gamma, the positive-strain tangent is
 //! d(nu_eff)/d(gamma) = (C_s Delta)^2. The original residual/Jacobian owner
@@ -10,14 +10,17 @@
 //! norm. The modeled volume stress |D|D has zero derivative there; viscosity-
 //! dependent DG penalties can remain nonsmooth when a tangential jump is
 //! present. This is a semismooth selection, not a classical derivative claim
-//! at those states. WALE and Vreman depend on the full gradient and cannot use
-//! a scalar strain tangent; they retain their existing Picard entry points.
+//! at those states. WALE and Vreman use the shared analytic full-gradient
+//! derivative, including rotation, prepared once per triangle per assembly.
+//! Their zero-gradient and Vreman rank-one selections follow the shared kernel;
+//! they do not establish a classical derivative at nonsmooth states.
 
 use super::{PlanarSgs, PlanarSgsError, PlanarSgsField, SgsModel};
 use crate::ns::FluxParams;
 use crate::ns::boundary::NavierStokesBoundary;
-use crate::ns::linearization::FluxViscosityTangent;
+use crate::ns::linearization::{FluxViscosityGradientTangent, FluxViscosityTangent, ViscosityLaw};
 use crate::ns::newton::{FluxMixedNewtonStep, FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
+use fs_lbm::sgs3::eddy_viscosity_tangent;
 
 /// Accepted native Newton flow and SGS diagnostics at the same endpoint.
 pub struct PlanarSgsNewtonStep {
@@ -42,7 +45,7 @@ impl From<FluxNewtonError> for PlanarSgsError {
 }
 
 impl PlanarSgs<'_, '_> {
-    /// Solve true steady Smagorinsky Navier--Stokes flow with damped Newton.
+    /// Solve true steady algebraic SGS Navier--Stokes flow with damped Newton.
     ///
     /// Every boundary prescribes velocity. Initial velocity is only a nonlinear
     /// guess: no artificial timestep or mass is introduced. The existing sparse
@@ -50,15 +53,16 @@ impl PlanarSgs<'_, '_> {
     /// residual; both original and row-scaled residuals must converge. Params.nu
     /// is unused: the prepared molecular field remains authoritative.
     ///
-    /// The analytic Smagorinsky tangent includes the model's influence on SIP
-    /// fluxes and boundary loads. Zero strain uses the documented semismooth
-    /// selection. Force and boundary data must be pure and fixed during the
+    /// The analytic tangent includes the model's influence on SIP fluxes and
+    /// boundary loads. WALE/Vreman use the full velocity gradient, not a fitted
+    /// strain-only law. Degenerate states use the shared generalized selections.
+    /// Force and boundary data must be pure and fixed during the
     /// solve. This retains the Estimated planar screen's physical limitations;
     /// a better nonlinear solve does not establish a three-dimensional cascade.
     ///
     /// # Errors
-    /// Refuses WALE/Vreman (no scalar tangent), unrepresentable tangents,
-    /// invalid boundary/control data and the native Newton/endpoint failures.
+    /// Refuses unrepresentable tangents, invalid boundary/control data and
+    /// the native Newton/endpoint failures. All three local models are supported.
     pub fn solve_steady_newton(
         &self,
         params: FluxParams,
@@ -67,20 +71,25 @@ impl PlanarSgs<'_, '_> {
         initial_velocity: &[f64],
         controls: FluxNewtonControls,
     ) -> Result<PlanarSgsNewtonStep, PlanarSgsError> {
-        let tangents = self.smagorinsky_tangents()?;
-        let step = self.system.steady_rheology_newton(
-            params,
-            &|cell, _, rate| self.newton_response(&tangents, cell, rate),
-            force,
-            velocity_boundary,
-            initial_velocity,
-            true,
-            controls,
-        )?;
+        let step = self.with_newton_law(|law| {
+            self.system.constitutive_newton_solve_admitted_checked(
+                params,
+                law,
+                force,
+                velocity_boundary,
+                initial_velocity,
+                true,
+                0.0,
+                None,
+                controls,
+                &|| true,
+                None,
+            )
+        })?;
         self.newton_endpoint(step)
     }
 
-    /// Advance fully implicit Smagorinsky momentum with damped Newton BDF1.
+    /// Advance fully implicit local SGS momentum with damped Newton BDF1.
     ///
     /// Stress and convection belong to the accepted endpoint. Every boundary
     /// prescribes velocity; data describe the requested new time. The caller's
@@ -106,7 +115,7 @@ impl PlanarSgs<'_, '_> {
         )
     }
 
-    /// Advance fully implicit Smagorinsky momentum with unequal-step BDF2.
+    /// Advance fully implicit local SGS momentum with unequal-step BDF2.
     ///
     /// The older velocity is paired with its ACTUAL interval to the previous
     /// velocity [s]. The new/previous ratio must lie in (0,2]; an equal interval
@@ -117,7 +126,7 @@ impl PlanarSgs<'_, '_> {
     /// Smooth resolved motion retains second-order time accuracy when spatial
     /// and nonlinear errors are smaller. Endpoint modeled transfer remains an
     /// instantaneous rate, not BDF2's two-history energy or accumulated heat.
-    /// Prescribed-velocity boundaries and the Smagorinsky-only tangent scope
+    /// Prescribed-velocity boundaries and the constitutive tangent scope
     /// follow [`Self::solve_steady_newton`]; neither history is modified.
     #[allow(clippy::too_many_arguments)]
     pub fn bdf2_newton_variable_step(
@@ -130,27 +139,30 @@ impl PlanarSgs<'_, '_> {
         timestep_s: f64,
         controls: FluxNewtonControls,
     ) -> Result<PlanarSgsNewtonStep, PlanarSgsError> {
-        let tangents = self.smagorinsky_tangents()?;
-        let step = self.system.bdf2_rheology_newton_variable_step(
-            params,
-            &|cell, _, rate| self.newton_response(&tangents, cell, rate),
-            force,
-            velocity_boundary,
-            previous_velocity,
-            older_history,
-            timestep_s,
-            controls,
-        )?;
+        let step = self.with_newton_law(|law| {
+            self.system.bdf2_constitutive_newton_variable_step_checked(
+                params,
+                law,
+                force,
+                velocity_boundary,
+                previous_velocity,
+                older_history,
+                timestep_s,
+                controls,
+                &|| true,
+            )
+        })?;
         self.newton_endpoint(step)
     }
 
-    /// Resolve steady Smagorinsky flow with velocity, slip and open boundaries.
+    /// Resolve steady local SGS flow with velocity, slip and open boundaries.
     ///
     /// Reuses the SAME exact stress/convection Newton owner. Literal traction,
     /// dissipative backflow and reservoir inflow retain their original distinct
     /// meanings. Boundary reactions use accepted effective viscosity; no heat
-    /// source is introduced. The Smagorinsky-only tangent, zero-strain
-    /// semismooth selection and Estimated planar scope remain unchanged.
+    /// source is introduced. Full-gradient WALE/Vreman tangents retain the same
+    /// closure values and Estimated planar scope; generalized selections at
+    /// degenerate gradients do not imply a unique classical derivative.
     pub fn solve_steady_mixed_newton(
         &self,
         params: FluxParams,
@@ -159,19 +171,23 @@ impl PlanarSgs<'_, '_> {
         initial_velocity: &[f64],
         controls: FluxNewtonControls,
     ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
-        let tangents = self.smagorinsky_tangents()?;
-        let step = self.system.solve_navier_stokes_mixed_rheology_newton(
-            params,
-            &|cell, _, rate| self.newton_response(&tangents, cell, rate),
-            force,
-            boundaries,
-            initial_velocity,
-            controls,
-        )?;
+        let step = self.with_newton_law(|law| {
+            self.system.mixed_constitutive_newton_endpoint(
+                params,
+                law,
+                force,
+                boundaries,
+                initial_velocity,
+                0.0,
+                None,
+                controls,
+                &|| true,
+            )
+        })?;
         self.mixed_newton_endpoint(step)
     }
 
-    /// Fully implicit BDF1 Smagorinsky momentum on admitted mixed boundaries.
+    /// Fully implicit BDF1 local SGS momentum on admitted mixed boundaries.
     /// Previous velocity is immutable; all external data belong to the endpoint.
     pub fn bdf1_mixed_newton_step(
         &self,
@@ -193,7 +209,7 @@ impl PlanarSgs<'_, '_> {
         )
     }
 
-    /// Unequal-step BDF2 Smagorinsky momentum with original mixed-boundary work.
+    /// Unequal-step BDF2 local SGS momentum with original mixed-boundary work.
     ///
     /// The older velocity is paired with its actual previous interval. The
     /// native owner admits ratios in (0,2], and None is BDF1 startup. The mass
@@ -210,19 +226,19 @@ impl PlanarSgs<'_, '_> {
         timestep_s: f64,
         controls: FluxNewtonControls,
     ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
-        let tangents = self.smagorinsky_tangents()?;
-        let step = self
-            .system
-            .bdf2_navier_stokes_mixed_rheology_newton_variable_step(
+        let step = self.with_newton_law(|law| {
+            self.system.bdf2_mixed_constitutive_newton_variable_step(
                 params,
-                &|cell, _, rate| self.newton_response(&tangents, cell, rate),
+                law,
                 force,
                 boundaries,
                 previous_velocity,
                 older_history,
                 timestep_s,
                 controls,
-            )?;
+                &|| true,
+            )
+        })?;
         self.mixed_newton_endpoint(step)
     }
 
@@ -232,6 +248,48 @@ impl PlanarSgs<'_, '_> {
     ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
         let sgs = self.field(&step.solution.field.x[..self.system.n_u])?;
         Ok(PlanarSgsMixedNewtonStep { step, sgs })
+    }
+
+    fn with_newton_law<T>(
+        &self,
+        solve: impl FnOnce(ViscosityLaw<'_>) -> Result<T, FluxNewtonError>,
+    ) -> Result<T, PlanarSgsError> {
+        if matches!(self.model, SgsModel::Smagorinsky { .. }) {
+            let tangents = self.smagorinsky_tangents()?;
+            Ok(solve(ViscosityLaw::Rate(&|cell, _, rate| {
+                self.newton_response(&tangents, cell, rate)
+            }))?)
+        } else {
+            Ok(solve(ViscosityLaw::Gradient(&|cell, gradient| {
+                self.gradient_newton_response(cell, gradient)
+            }))?)
+        }
+    }
+
+    fn gradient_newton_response(
+        &self,
+        cell: usize,
+        gradient: [[f64; 2]; 2],
+    ) -> FluxViscosityGradientTangent {
+        let embedded = [
+            [gradient[0][0], gradient[0][1], 0.0],
+            [gradient[1][0], gradient[1][1], 0.0],
+            [0.0; 3],
+        ];
+        match eddy_viscosity_tangent(self.model, self.closure_lengths_m[cell], embedded) {
+            Ok(value) => FluxViscosityGradientTangent {
+                nu: self.molecular_viscosity_m2_s[cell] + value.viscosity,
+                derivative: core::array::from_fn(|i| {
+                    core::array::from_fn(|j| value.derivative[i][j])
+                }),
+            },
+            // Rejected trial arithmetic stays inside the original line search.
+            // No shared error latch may poison a later admissible damped trial.
+            Err(_) => FluxViscosityGradientTangent {
+                nu: f64::NAN,
+                derivative: [[f64::NAN; 2]; 2],
+            },
+        }
     }
 
     // Prepared once per solve, not recomputed at every DG quadrature point.
