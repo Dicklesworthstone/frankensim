@@ -136,3 +136,70 @@ pub fn density(voltage: f64, temperature: f64, beta: f64) -> f64 {
     let linear = 2.5 + 0.002 * (temperature - 300.);
     2. * voltage.abs() / (linear + (linear * linear + 4. * beta * voltage.abs()).sqrt())
 }
+
+/// Manufactured R''=|Delta V|, giving |J_n|=1 at every admitted local point.
+/// This is a bounded numerical model, not an empirical contact measurement.
+pub fn voltage_jump_law(
+    first: &ResolvedConductorState,
+    second: &ResolvedConductorState,
+) -> ScalarElectricalInterfaceResponse {
+    let coordinate = ElectricalInterfaceCoordinate::VoltageJumpMagnitude;
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                ELECTRICAL_CONTACT_RESISTANCE_PROPERTY,
+                ELECTRICAL_CONTACT_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Curve {
+                abscissa: "jump".into(),
+                abscissa_dims: coordinate.quantity().dims(),
+                knots: vec![(0.5, 0.5), (3.0, 3.0)],
+                dims: ELECTRICAL_CONTACT_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "jump",
+                coordinate.quantity(),
+                0.5,
+                3.0,
+            ),
+            interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured nonuniform interface; not empirical validation".into(),
+                license: "test-only".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let card = InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: first.material().material().clone(),
+            texture_frame: "first".into(),
+        },
+        SurfaceSpec {
+            material: second.material().material().clone(),
+            texture_frame: "second".into(),
+        },
+        SystemContext {
+            medium: "manufactured film".into(),
+            third_body: None,
+            environment: "explicit".into(),
+            history: "fixed".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let query = QueryPoint::new()
+        .with_quantity("jump", coordinate.quantity(), 1.5)
+        .unwrap();
+    let source = resolve_electrical_interface_state(
+        &card,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    ScalarElectricalInterfaceResponse::new(&card, source, &[("jump", coordinate)]).unwrap()
+}

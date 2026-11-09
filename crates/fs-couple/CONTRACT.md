@@ -12556,3 +12556,23 @@ One fixed window allowance bounds actual species/total mass closure, momentum co
 Caller attempt and accepted-interval limits, native source/body limits, cancellation checkpoints and two retained transactions per interval bound work/history. Only typed molecular gross-withdrawal refusal permits physical step-size retry. Source, phase, convection, inversion and conservation failures remain hard errors; late refusal publishes no gas or body endpoint. Convection callbacks must be repeatable, and their external side effects remain caller-owned.
 
 These are local temporal estimates, not certified global error or material-source uncertainty bounds. The original homogeneous fixed-volume reservoirs, finite stationary bodies, prescribed apertures and qualified heat-transfer laws remain the model. Container mechanics, wall pressure/drag, rotational transport, flight delay and spatial gas resolution remain outside its scope. Six focused regression groups cover independent two-capacity convergence, opposing heat and canonical ordering, latent-plateau refinement, entering species and exact native-history replay, whole-window prescribed heat, fixed budgets, withdrawal retry and atomic callback/cancellation refusal.
+
+## Nonuniform nonlinear contact heating through original finite thermal owners
+
+The planar/axisymmetric nonlinear contact quadrature policy composes with the
+existing original interface-temperature/phase/pressure refresh and explicit
+contact heat partitions. Every electrical trial closes each source sample on
+its refreshed external context; the accepted native integral enters original
+thermal receivers once. Constitutive residuals are not heat credits, and a
+representative contact seed is not used as a face-average nonlinear law.
+
+The manufactured regression in
+`tests/conduction_enthalpy/response/contacts/quadrature.rs` has an affine,
+continuum-consistent nonuniform first endpoint with bulk losses 2 W and 1 W
+and contact loss 1.5 W. The original interface has nonzero temperature response.
+It checks applied/evaluated point sources, independent finite-capacity storage
+and source work, the explicit heat partition, a second accepted thermal
+interval, work budgets and late cancellation. Original caloric support,
+phase/source ownership and transactional publication remain binding. These
+checks establish numerical model/accounting targets, not measured-material
+authority or a spatial/time/quadrature error certificate.

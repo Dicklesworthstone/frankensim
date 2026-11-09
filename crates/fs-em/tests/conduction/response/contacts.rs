@@ -1,6 +1,8 @@
 //! Original nonlinear bulk and surface conduction share one native field.
 #[path = "contacts/nonlinear.rs"]
 mod nonlinear;
+#[path = "contacts/quadrature.rs"]
+mod quadrature;
 use super::super::contacts::{binding, interface, mesh};
 use super::*;
 use fs_em::conduction::ConductionContact;

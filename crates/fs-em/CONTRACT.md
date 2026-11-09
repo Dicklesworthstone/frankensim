@@ -8666,3 +8666,31 @@ and refusal of moving/sliding resistive interfaces remain binding. Three
 regression groups in `tests/spatial_conduction/motion/direct_terminals.rs`
 cover open/short/generating/motoring states, floating shared electrodes,
 stationary contacts with remote motion, huge bias, bounds and cancellation.
+
+## Sampled nonlinear electrical contact laws on planar and revolved traces
+
+`PlanarConductionResponse::with_contact_quadrature` and the axisymmetric facade
+accept explicit `ContactResponseQuadrature` resolution and a total point budget.
+Positive composite Simpson points include both original trace endpoints. Native
+assembly, normal current and contact heat use those same source samples and
+physical surface weights, including the exact radial measure for revolution.
+The existing exact constant-coefficient stencil and default uniform-trace
+admission retain their separate behavior.
+
+Every sample closes the original interface law at its own actual voltage jump
+and normal current density. Applied/evaluated full source states, pointwise
+R/V/J defects and summed absolute constitutive-work defects remain observable.
+Adaptive and fixed relaxation requery every point's owned coordinates; all
+actual and damped source evaluations are counted. The point budget is admitted
+before sample allocation. Each memoryless solve restarts from its explicitly
+refreshed contact seed; that single contact source is a reference state, never
+a face-average nonlinear resistance. The complete quadrature policy travels
+with continuing frozen-source handoffs.
+
+Five unit tests of the shared production quadrature kernel cover constant-law
+planar/radial moments, positive degree-three triangular rules, nonlinear
+integration refinement, operator/work agreement and cancellation/refusal.
+Native regression definitions cover an analytic nonuniform continuum field,
+both signs, multiple resolutions, original source states, relaxation, budgets,
+domain refusal and continuation. Resolution remains caller-owned: a fixed
+quadrature rule is not an error certificate or empirical material validation.

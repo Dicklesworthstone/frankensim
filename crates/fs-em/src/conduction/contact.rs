@@ -4,11 +4,16 @@
 //! trace basis as the bulk FEEC operator. Duplicate, coincident vertices retain
 //! the physical voltage jump; a small fictitious conducting layer is unnecessary.
 
+use super::contact_quadrature::{
+    ConductionContactQuadraturePoint, ContactCoefficient, ContactQuadrature, QuadratureError,
+    edge_point_count, edge_rule,
+};
 use super::*;
 use crate::planar::{MagneticError, PlanarMagnetostatics};
 use fs_material::electrical_interface::{
     ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, ResolvedElectricalInterface,
 };
+use fs_math::dd::Dd;
 use fs_qty::{Dims, QuantitySpec};
 use fs_sparse::Coo;
 
@@ -24,14 +29,17 @@ pub struct ConductionContact {
 }
 
 /// Physical contact response, oriented from the first surface to the second.
-/// Current density and voltage jump vary linearly along the paired edge;
-/// current and irreversible heat are their exact surface integrals.
+/// Voltage jump is P1 along the paired edge. Uniform coefficients give P1
+/// current density and exact surface integrals. Source-sampled coefficients
+/// retain endpoint densities and their admitted quadrature observations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConductionContactResponse {
     pub voltage_jump_v: [f64; 2],
     pub current_density_a_m2: [f64; 2],
     pub current_a: f64,
     pub power_w: f64,
+    /// Actual source-sampled integration points, empty for the exact uniform law.
+    pub quadrature: Vec<ConductionContactQuadraturePoint<2>>,
 }
 
 // Cache the exact two-node surface moments once with the native stiffness.
@@ -40,12 +48,12 @@ pub struct ConductionContactResponse {
 // g/6 * [[1+w_0, 1], [1, 1+w_1]]. Row sums integrate current;
 // the positive-square quadratic form integrates irreversible heat.
 #[derive(Clone)]
-pub(super) struct ContactConductance {
+pub(super) struct UniformContactConductance {
     total_s: f64,
     endpoint_weights: [f64; 2],
 }
 
-impl ContactConductance {
+impl UniformContactConductance {
     fn matrix_entry(&self, i: usize, j: usize) -> f64 {
         (self.total_s / 6.0)
             * if i == j {
@@ -65,9 +73,29 @@ impl ContactConductance {
         let [d0, d1] = jump;
         let sum = d0 + d1;
         (self.total_s / 6.0)
-            * (self.endpoint_weights[0] * d0 * d0
-                + self.endpoint_weights[1] * d1 * d1
-                + sum * sum)
+            * (self.endpoint_weights[0] * d0 * d0 + self.endpoint_weights[1] * d1 * d1 + sum * sum)
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum ContactConductance {
+    Uniform(UniformContactConductance),
+    Sampled(ContactQuadrature<2>),
+}
+
+impl ContactConductance {
+    fn matrix_entry(&self, i: usize, j: usize) -> f64 {
+        match self {
+            Self::Uniform(exact) => exact.matrix_entry(i, j),
+            Self::Sampled(quadrature) => quadrature.matrix_entry(i, j),
+        }
+    }
+}
+
+fn quadrature_error(error: QuadratureError) -> ConductionError {
+    match error {
+        QuadratureError::Invalid(reason) => ConductionError::Invalid(reason),
+        QuadratureError::Cancelled => ConductionError::Cancelled,
     }
 }
 
@@ -265,6 +293,38 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             &[Option<String>; 2],
         ) -> Result<f64, ConductionError>,
     ) -> Result<Self, ConductionError> {
+        Self::assemble_metric_with_contact_coefficients(
+            mesh,
+            conductors,
+            contacts,
+            liquid_mass_fraction_axes,
+            limits,
+            cancelled,
+            admit,
+            |index, source, axes| {
+                admit_contact(index, source, axes).map(ContactCoefficient::Uniform)
+            },
+        )
+    }
+
+    // A nonlinear owner admits each original source sample before returning
+    // its coefficient. Geometry, positive quadrature, assembly and heat remain
+    // native; the exact fixed-coefficient constructor keeps its original path.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_metric_with_contact_coefficients(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+        admit_contact: impl Fn(
+            usize,
+            &ResolvedElectricalInterface,
+            &[Option<String>; 2],
+        ) -> Result<ContactCoefficient, ConductionError>,
+    ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
         if liquid_mass_fraction_axes.len() != contacts.len() {
             return Err(ConductionError::Invalid(
@@ -387,24 +447,49 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                         "contact source must match both ordered adjacent material states",
                     )
                 })?;
-            let resistance = admit_contact(contact_index, &contact.source, axes)?;
+            let coefficient = admit_contact(contact_index, &contact.source, axes)?;
             let area = problem.mesh.edge_measure(first_edge.global_edge).ok_or(
                 ConductionError::Invalid("contact trace lacks physical area"),
             )?;
-            let conductance = finite(area / resistance)?;
-            let sixth = conductance / 6.0;
-            if !positive(sixth) {
-                return Err(ConductionError::Invalid(
-                    "contact conductance is not representable",
-                ));
-            }
             let endpoint_weights = match problem.mesh.metric() {
                 Metric2::Planar { .. } => [1.0; 2],
                 Metric2::Axisymmetric { .. } => radial_contact_weights([a[0], b[0]]),
             };
-            let moments = ContactConductance {
-                total_s: conductance,
-                endpoint_weights,
+            let moments = match coefficient {
+                ContactCoefficient::Uniform(resistance) => {
+                    let conductance = finite(area / resistance)?;
+                    if !positive(conductance / 6.0) {
+                        return Err(ConductionError::Invalid(
+                            "contact conductance is not representable",
+                        ));
+                    }
+                    ContactConductance::Uniform(UniformContactConductance {
+                        total_s: conductance,
+                        endpoint_weights,
+                    })
+                }
+                ContactCoefficient::Sampled {
+                    subdivisions,
+                    resistance_ohm_m2,
+                } => {
+                    if resistance_ohm_m2.len()
+                        != edge_point_count(subdivisions).map_err(quadrature_error)?
+                    {
+                        return Err(ConductionError::Invalid(
+                            "complete sampled edge contact coefficients required",
+                        ));
+                    }
+                    ContactConductance::Sampled(
+                        ContactQuadrature::new(
+                            edge_rule(subdivisions, cancelled).map_err(quadrature_error)?,
+                            area,
+                            endpoint_weights,
+                            resistance_ohm_m2,
+                            cancelled,
+                        )
+                        .map_err(quadrature_error)?,
+                    )
+                }
             };
             for i in 0..2 {
                 for j in 0..2 {
@@ -540,8 +625,48 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             let [b0, b1] = contact.second_vertices;
             let d0 = finite(voltage[a0] - voltage[b0])?;
             let d1 = finite(voltage[a1] - voltage[b1])?;
-            let resistance = contact.source.resistance_ohm_m2();
-            let power = finite(moments.power_w([d0, d1]))?;
+            let (density, current, power, quadrature) = match moments {
+                ContactConductance::Uniform(exact) => {
+                    let resistance = contact.source.resistance_ohm_m2();
+                    (
+                        [finite(d0 / resistance)?, finite(d1 / resistance)?],
+                        finite(exact.current_a([d0, d1]))?,
+                        finite(exact.power_w([d0, d1]))?,
+                        Vec::new(),
+                    )
+                }
+                ContactConductance::Sampled(rule) => {
+                    let points = rule
+                        .response([d0, d1], cancelled)
+                        .map_err(quadrature_error)?;
+                    let first = points
+                        .first()
+                        .ok_or(ConductionError::Invalid("empty edge quadrature"))?;
+                    let last = points
+                        .last()
+                        .ok_or(ConductionError::Invalid("empty edge quadrature"))?;
+                    if first.basis != [1.0, 0.0] || last.basis != [0.0, 1.0] {
+                        return Err(ConductionError::Invalid(
+                            "edge quadrature lost original endpoints",
+                        ));
+                    }
+                    let density = [first.current_density_a_m2, last.current_density_a_m2];
+                    let (mut current, mut power) = (Dd::from_f64(0.0), Dd::from_f64(0.0));
+                    for point in &points {
+                        poll(cancelled)?;
+                        current = current
+                            + Dd::from_f64(point.area_weight_m2)
+                                * Dd::from_f64(point.current_density_a_m2);
+                        power = power + Dd::from_f64(point.power_w);
+                    }
+                    (
+                        density,
+                        finite(current.to_f64())?,
+                        finite(power.to_f64())?,
+                        points,
+                    )
+                }
+            };
             if power < 0.0 || ((d0 != 0.0 || d1 != 0.0) && power == 0.0) {
                 return Err(ConductionError::Invalid(
                     "contact Joule heat is not representably positive",
@@ -549,9 +674,10 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             }
             response.push(ConductionContactResponse {
                 voltage_jump_v: [d0, d1],
-                current_density_a_m2: [finite(d0 / resistance)?, finite(d1 / resistance)?],
-                current_a: finite(moments.current_a([d0, d1]))?,
+                current_density_a_m2: density,
+                current_a: current,
                 power_w: power,
+                quadrature,
             });
         }
         Ok(response)

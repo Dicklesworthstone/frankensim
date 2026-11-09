@@ -8,7 +8,7 @@
 //!
 //! Static/phase interfaces retain their full P1 surface response. Electrically
 //! varying interfaces require uniform endpoint jump and normal current density;
-//! nonuniform traces refuse rather than substituting a surface-average law.
+//! nonuniform traces require explicit `with_contact_quadrature` resolution.
 //! Source, algebraic, current and work residuals have the existing independent
 //! gates. Relaxed source coordinates never become an extra heat contribution.
 //!
@@ -23,7 +23,7 @@ use crate::conduction::{
     response::{
         AdaptiveConductionRelaxation, ConductionResponseCandidate, ConductionResponseControls,
         ConductionResponseError, ConductionResponseReport, PlanarConductionResponse,
-        contact::{ContactResponseControls, ContactResponseSources},
+        contact::{ContactResponseControls, ContactResponseQuadrature, ContactResponseSources},
         terminals::{ConductionTerminalDrive, ConductionTerminalReport},
     },
 };
@@ -150,6 +150,18 @@ impl AxisymmetricConductionResponse {
                 limits,
                 cancelled,
             )?,
+        })
+    }
+
+    /// Close nonuniform contact sources at the same positive quadrature points
+    /// used by the swept surface operator, including its original radial weight.
+    /// Resolution is explicit and caller-refined; no quadrature-error bound is inferred.
+    pub fn with_contact_quadrature(
+        self,
+        quadrature: ContactResponseQuadrature,
+    ) -> Result<Self, ConductionResponseError> {
+        Ok(Self {
+            core: self.core.with_contact_quadrature(quadrature)?,
         })
     }
 

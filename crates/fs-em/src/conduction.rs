@@ -20,6 +20,8 @@
 mod contact;
 pub(crate) use contact::admit_contact_source;
 pub use contact::{ConductionContact, ConductionContactResponse};
+pub(crate) mod contact_quadrature;
+pub use contact_quadrature::ConductionContactQuadraturePoint;
 /// Meridional current and Joule heat with the exact radial volume measure.
 pub mod axisymmetric;
 /// Reusable multi-electrode resistance with voltage, current and floating controls.

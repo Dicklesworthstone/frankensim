@@ -13,13 +13,14 @@ use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
 use fs_material::electrical_interface::response::ScalarElectricalInterfaceResponse;
 use std::sync::Arc;
 
-/// Original local contact source laws and uniform-trace response gates.
+/// Original local contact source laws and bounded trace/quadrature response.
 pub mod contact;
 mod power;
 /// Simultaneous original terminal controls inside the nonlinear source closure.
 pub mod terminals;
 use contact::{
-    ContactResponseControls, ContactResponseError, ContactResponseSample, ContactResponseSources,
+    ContactResponseControls, ContactResponseError, ContactResponseQuadrature,
+    ContactResponseSample, ContactResponseSources,
 };
 
 pub const MAX_RESPONSE_ITERATIONS: usize = 128;
@@ -120,7 +121,10 @@ impl From<ConductorError> for ConductionResponseError {
 }
 impl From<ContactResponseError> for ConductionResponseError {
     fn from(error: ContactResponseError) -> Self {
-        Self::Contact(error)
+        match error {
+            ContactResponseError::Cancelled => Self::Cancelled,
+            other => Self::Contact(other),
+        }
     }
 }
 
@@ -219,7 +223,8 @@ pub struct ConductionResponseReport {
     pub power_balance_residual_w: f64,
     pub linear: Option<SolveReport>,
     pub evaluated: Vec<ConductionResponseSample>,
-    /// Actual source queries and constitutive residuals for uniform contacts.
+    /// Applied/evaluated source states and residuals at every admitted contact
+    /// vertex or explicit quadrature point.
     pub evaluated_contacts: Vec<ContactResponseSample>,
     /// Every native spatial solve, including discarded constitutive trials.
     pub field_solves: usize,
@@ -441,6 +446,29 @@ impl PlanarConductionResponse {
             adaptive_relaxation: None,
             contact_sources,
         })
+    }
+
+    /// Close nonuniform interface laws on explicit positive composite-Simpson
+    /// quadrature, including both original edge endpoints.
+    ///
+    /// The same points supply contact assembly, local current, work and source
+    /// closure. Resolution bounds numerical work; it is not a quadrature-error
+    /// certificate. Every solve restarts point states from its refreshed contact
+    /// seed, then closes all points independently. This memoryless restart loses
+    /// warm-start acceleration, not constitutive history. `contacts().source`
+    /// is the first-point reference source, never an averaged interface law.
+    pub fn with_contact_quadrature(
+        mut self,
+        quadrature: ContactResponseQuadrature,
+    ) -> Result<Self, ConductionResponseError> {
+        let bindings = self
+            .contact_sources
+            .take()
+            .ok_or(ConductionResponseError::Invalid(
+                "contact quadrature requires original interface response laws",
+            ))?;
+        self.contact_sources = Some(bindings.with_quadrature(quadrature)?);
+        Ok(self)
     }
 
     /// Use a fixed coordinate-relaxation weight in `(0, 1]` for subsequent
@@ -901,6 +929,24 @@ impl PlanarConductionResponse {
         }
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
+        let quadrature = self
+            .contact_sources
+            .as_ref()
+            .and_then(|bindings| bindings.quadrature());
+        let mut applied_contact_samples = Vec::new();
+        if let Some(quadrature) = quadrature {
+            let points = quadrature
+                .edge_points(contacts.len())
+                .map_err(ConductionResponseError::from)?;
+            for contact in &contacts {
+                let mut states = Vec::with_capacity(points);
+                for _ in 0..points {
+                    poll(cancelled).map_err(ConductionResponseError::from)?;
+                    states.push(contact.source.clone());
+                }
+                applied_contact_samples.push(states);
+            }
+        }
         let mut adaptive = self
             .adaptive_relaxation
             .map(AdaptiveConductionRelaxation::prepare)
@@ -914,7 +960,17 @@ impl PlanarConductionResponse {
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
             poll(cancelled).map_err(ConductionResponseError::from)?;
-            let native = PlanarConduction::assemble_metric_with_admitted_contacts(
+            if let Some(bindings) = &self.contact_sources {
+                for (law, states) in bindings.laws().iter().zip(&applied_contact_samples) {
+                    for state in states {
+                        poll(cancelled).map_err(ConductionResponseError::from)?;
+                        law.admit(state)
+                            .map_err(ContactResponseError::from)
+                            .map_err(ConductionResponseError::from)?;
+                    }
+                }
+            }
+            let native = PlanarConduction::assemble_metric_with_contact_coefficients(
                 self.mesh().clone(),
                 applied,
                 applied_contacts,
@@ -923,7 +979,20 @@ impl PlanarConductionResponse {
                 cancelled,
                 |_| true,
                 |index, source, axes| {
-                    contact::admit_source(index, source, axes, self.contact_sources.as_ref())
+                    let resistance =
+                        contact::admit_source(index, source, axes, self.contact_sources.as_ref())?;
+                    Ok(match quadrature {
+                        Some(quadrature) => {
+                            super::contact_quadrature::ContactCoefficient::Sampled {
+                                subdivisions: quadrature.subdivisions,
+                                resistance_ohm_m2: applied_contact_samples[index]
+                                    .iter()
+                                    .map(|state| state.resistance_ohm_m2())
+                                    .collect(),
+                            }
+                        }
+                        None => super::contact_quadrature::ContactCoefficient::Uniform(resistance),
+                    })
                 },
             )
             .map_err(ConductionResponseError::from)?;
@@ -949,6 +1018,7 @@ impl PlanarConductionResponse {
             let mut next = Vec::with_capacity(seeds.len());
             let mut evaluated_contacts = Vec::new();
             let mut next_contacts = native.contacts().to_vec();
+            let mut next_contact_samples = Vec::with_capacity(applied_contact_samples.len());
             let mut converged = true;
             maximum_sigma = 0.0;
             maximum_current = 0.0;
@@ -1006,23 +1076,31 @@ impl PlanarConductionResponse {
                 for (index, law) in bindings.laws().iter().enumerate() {
                     poll(cancelled).map_err(ConductionResponseError::from)?;
                     let heat = &field.contact_response()[index];
-                    let (sample, contact_converged) = contact::evaluate(
-                        index,
-                        law,
-                        &contacts[index].source,
-                        &native.contacts()[index].source,
-                        heat.voltage_jump_v,
-                        heat.current_density_a_m2,
-                        heat.power_w,
-                        bindings.controls(),
-                    )
+                    let (sample, contact_converged) = match quadrature {
+                        Some(_) => contact::evaluate_sampled(
+                            index,
+                            law,
+                            &contacts[index].source,
+                            &applied_contact_samples[index],
+                            &heat.quadrature,
+                            bindings.controls(),
+                            cancelled,
+                        ),
+                        None => contact::evaluate(
+                            index,
+                            law,
+                            &contacts[index].source,
+                            &native.contacts()[index].source,
+                            heat.voltage_jump_v,
+                            heat.current_density_a_m2,
+                            heat.power_w,
+                            bindings.controls(),
+                        ),
+                    }
                     .map_err(ConductionResponseError::from)?;
-                    contact_queries =
-                        contact_queries
-                            .checked_add(2)
-                            .ok_or(ConductionResponseError::Invalid(
-                                "contact source query count overflows",
-                            ))?;
+                    contact_queries = contact_queries.checked_add(sample.evaluated.len()).ok_or(
+                        ConductionResponseError::Invalid("contact source query count overflows"),
+                    )?;
                     maximum_contact_resistance =
                         maximum_contact_resistance.max(sample.maximum_resistance_defect_ohm_m2);
                     maximum_contact_voltage =
@@ -1033,6 +1111,9 @@ impl PlanarConductionResponse {
                         .map_err(ConductionResponseError::from)?;
                     converged &= contact_converged;
                     next_contacts[index].source = sample.evaluated[0].clone();
+                    if quadrature.is_some() {
+                        next_contact_samples.push(sample.evaluated.clone());
+                    }
                     evaluated_contacts.push(sample);
                 }
             }
@@ -1100,22 +1181,30 @@ impl PlanarConductionResponse {
                     if let Some(bindings) = &self.contact_sources {
                         for (index, law) in bindings.laws().iter().enumerate() {
                             poll(cancelled).map_err(ConductionResponseError::from)?;
-                            for (axis, _) in law.axes() {
-                                operating_coordinates.push(
-                                    native.contacts()[index]
-                                        .source
-                                        .resolved()
-                                        .state_coordinate(axis)
-                                        .zip(
-                                            next_contacts[index]
-                                                .source
-                                                .resolved()
-                                                .state_coordinate(axis),
-                                        )
-                                        .ok_or(ConductionResponseError::Invalid(
-                                            "missing owned contact coordinate",
-                                        ))?,
-                                );
+                            let (current, following): (&[_], &[_]) = if quadrature.is_some() {
+                                (
+                                    &applied_contact_samples[index],
+                                    &next_contact_samples[index],
+                                )
+                            } else {
+                                (
+                                    std::slice::from_ref(&native.contacts()[index].source),
+                                    std::slice::from_ref(&next_contacts[index].source),
+                                )
+                            };
+                            for (current, following) in current.iter().zip(following) {
+                                poll(cancelled).map_err(ConductionResponseError::from)?;
+                                for (axis, _) in law.axes() {
+                                    operating_coordinates.push(
+                                        current
+                                            .resolved()
+                                            .state_coordinate(axis)
+                                            .zip(following.resolved().state_coordinate(axis))
+                                            .ok_or(ConductionResponseError::Invalid(
+                                                "missing owned contact coordinate",
+                                            ))?,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1148,25 +1237,40 @@ impl PlanarConductionResponse {
                     for (index, law) in bindings.laws().iter().enumerate() {
                         poll(cancelled).map_err(ConductionResponseError::from)?;
                         if !law.axes().is_empty() {
-                            next_contacts[index].source = law
-                                .relax_operating_point(
-                                    &native.contacts()[index].source,
-                                    &next_contacts[index].source,
-                                    relaxation,
+                            let (current, following): (&[_], &mut [_]) = if quadrature.is_some() {
+                                (
+                                    &applied_contact_samples[index],
+                                    &mut next_contact_samples[index],
                                 )
-                                .map_err(ContactResponseError::from)
-                                .map_err(ConductionResponseError::from)?;
-                            relaxation_queries = relaxation_queries.checked_add(1).ok_or(
-                                ConductionResponseError::Invalid(
-                                    "source evaluation count overflows",
-                                ),
-                            )?;
+                            } else {
+                                (
+                                    std::slice::from_ref(&native.contacts()[index].source),
+                                    std::slice::from_mut(&mut next_contacts[index].source),
+                                )
+                            };
+                            for (current, following) in current.iter().zip(following) {
+                                poll(cancelled).map_err(ConductionResponseError::from)?;
+                                *following = law
+                                    .relax_operating_point(current, following, relaxation)
+                                    .map_err(ContactResponseError::from)
+                                    .map_err(ConductionResponseError::from)?;
+                                relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                                    ConductionResponseError::Invalid(
+                                        "source evaluation count overflows",
+                                    ),
+                                )?;
+                            }
+                            if quadrature.is_some() {
+                                next_contacts[index].source =
+                                    next_contact_samples[index][0].clone();
+                            }
                         }
                     }
                 }
             }
             applied = next;
             applied_contacts = next_contacts;
+            applied_contact_samples = next_contact_samples;
         }
         Err(ConductionResponseError::NotConverged {
             iterations: controls.maximum_iterations,
