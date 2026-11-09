@@ -9699,3 +9699,23 @@ moving groups specify original loaded-pair parity, second-order positions with
 exact fixed-geometry graph rates, and complete-step refusal/retry. Pinned Rust
 formatting passed. The focused source run is not full workspace integration;
 full moving/thermal integration execution remains outstanding.
+
+
+### Ideal lock/gear equilibrium response
+
+`articulated::motion::spatial_loads::prescribed::equilibrium::constrained::linearized`
+re-admits original affine positions/rates, native row mobility and RNEA balance
+against actual A^T lambda. Cached equilibrium reports do not admit a root;
+the unconstrained response retains its no-reaction gate. Original Householder
+QR and shared fs-la subspace arithmetic form a complete physical lift dq=N z,
+independently checking original A N and scaled orthogonality. Only allowed
+directions enter native K/C stencils, with work-conjugate M/C/K projection.
+Gyroscopic nonsymmetry and negative stiffness remain in the existing modal
+owner. Fully locked/empty models return an empty pencil without multiplier
+modes or derivative probes. Explicit source work, cancellation and range gates
+refuse without changing original state. This path admits constant affine rows;
+nonlinear closures, changing ratios and contact transitions need their own
+complete tangents. Five analytical native integration regressions are authored
+but unexecuted here; shared subspace arithmetic passed eight original-source
+checks. Reconstructed integration bytes received source review after executor
+loss and do not claim a completed full-crate build or stability certificate.

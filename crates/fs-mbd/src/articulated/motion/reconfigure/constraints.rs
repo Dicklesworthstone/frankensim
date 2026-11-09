@@ -795,16 +795,14 @@ impl<'a> PreparedJointConstraints<'a> {
         }
         let mut base_delta = Twist::zero();
         let mut joint_delta = vec![0.0; self.joints];
-        let mut joint_effort = vec![0.0; self.joints];
-        for ((row, column), &multiplier) in self.rows.iter().zip(&self.columns).zip(&multipliers) {
+        let joint_effort = apply_transpose_rows(self.rows, &multipliers, self.joints, cancelled)?;
+        for (column, &multiplier) in self.columns.iter().zip(&multipliers) {
             poll(cancelled)?;
             base_delta = base_delta.plus(column.base.scale(multiplier));
             for index in 0..self.joints {
                 if index % 64 == 0 {
                     poll(cancelled)?;
                 }
-                joint_effort[index] =
-                    row.coefficients[index].mul_add(multiplier, joint_effort[index]);
                 joint_delta[index] = column.joint[index].mul_add(multiplier, joint_delta[index]);
             }
         }
@@ -819,6 +817,35 @@ impl<'a> PreparedJointConstraints<'a> {
             joint_delta,
         })
     }
+}
+
+/// Original work-conjugate row transpose in native deterministic FMA order.
+/// Shared by actual constrained motion, static reactions and local response.
+pub(in crate::articulated::motion) fn apply_transpose_rows(
+    rows: &[JointConstraint],
+    multipliers: &[f64],
+    joints: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>, ConstraintError> {
+    poll(cancelled)?;
+    if multipliers.len() != rows.len()
+        || multipliers.iter().any(|v| !v.is_finite())
+        || rows.iter().any(|row| row.coefficients.len() != joints
+            || row.coefficients.iter().any(|v| !v.is_finite()))
+    {
+        return Err(ConstraintError::Invalid("complete finite transpose rows required"));
+    }
+    let mut effort = vec![0.0; joints];
+    for (row, &multiplier) in rows.iter().zip(multipliers) {
+        poll(cancelled)?;
+        for (index, value) in effort.iter_mut().enumerate() {
+            if index % 64 == 0 { poll(cancelled)?; }
+            *value = finite(row.coefficients[index].mul_add(multiplier, *value),
+                "constraint.joint_effort")?;
+        }
+    }
+    poll(cancelled)?;
+    Ok(effort)
 }
 
 fn finite(value: f64, field: &'static str) -> Result<f64, ConstraintError> {

@@ -6,9 +6,11 @@
 //! unconstrained problem. Only the existing bounded row-mobility admission is
 //! dense; the augmented tangent remains matrix free.
 
+pub mod linearized;
+
 use super::*;
 use crate::articulated::motion::reconfigure::constraints::{
-    JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
+    JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows, apply_transpose_rows,
 };
 use fs_math::dd::Dd;
 
@@ -305,21 +307,15 @@ fn solve<B: BushingLaw>(
                 Ok(value)
             })
             .collect::<Result<Vec<_>, EquilibriumError>>()?;
-        let mut reaction = Vec::with_capacity(n);
+        let reaction = apply_transpose_rows(rows, &multipliers, n, &mut *cancel)?;
         let mut balance = Vec::with_capacity(n);
         let mut residual = Vec::with_capacity(dimension);
         for joint in 0..n {
             if joint % 64 == 0 {
                 poll(&mut *cancel)?;
             }
-            // Match the original constrained-motion owner's row order and FMA
-            // arithmetic. Admit the ACTUAL representable reaction that will be
-            // published/applied, not an unrounded hidden value.
-            let mut sum = 0.0;
-            for (row, &multiplier) in rows.iter().zip(&multipliers) {
-                sum = row.coefficients[joint].mul_add(multiplier, sum);
-            }
-            reaction.push(finite(sum)?);
+            // Admit the actual original transpose, in native FMA row order.
+            let sum = reaction[joint];
             let value = finite(
                 (Dd::from_f64(native.required[joint])
                     - Dd::from_f64(native.applied[joint])

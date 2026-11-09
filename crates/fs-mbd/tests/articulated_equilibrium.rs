@@ -9,6 +9,9 @@ mod linearized;
 #[path = "articulated_equilibrium/constrained.rs"]
 mod constrained;
 
+#[path = "articulated_equilibrium/constrained_linearized.rs"]
+mod constrained_linearized;
+
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::FreeFloatingMotionLoads;
 use fs_mbd::articulated::motion::prescribed::{

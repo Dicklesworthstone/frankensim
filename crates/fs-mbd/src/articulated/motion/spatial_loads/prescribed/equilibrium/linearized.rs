@@ -90,6 +90,9 @@ pub struct ArticulatedLinearization<'a> {
     difference: CentralDifferenceControls,
     maximum_stencil_distortion: f64,
     scaled_equilibrium_residual: f64,
+    // Only the independently admitted affine-constraint owner supplies this.
+    // Subtract its constant mean reaction before stencils to reduce cancellation.
+    reaction_effort: Option<Vec<f64>>,
 }
 
 /// Bind a stationary or uniformly rotating root to its original loads/materials.
@@ -107,9 +110,24 @@ pub fn prepare<'a>(
     controls: LinearizationControls<'_>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedLinearization<'a>, LinearizationError> {
+    prepare_with_reaction(model, state, loads, bushings, controls, None, &mut cancelled)
+}
+
+/// Internal common preparation. The constrained caller admits original rows and
+/// reconstructs their original transpose before supplying the mean reaction.
+/// The public unconstrained entry always passes None and retains its own gate.
+pub(super) fn prepare_with_reaction<'a>(
+    model: &'a ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    loads: SpatialMotionLoads<'a>,
+    bushings: EquilibriumBushings<'a>,
+    controls: LinearizationControls<'_>,
+    reaction: Option<&[f64]>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedLinearization<'a>, LinearizationError> {
     poll(&mut cancelled)?;
     let n = model.dof_count();
-    if n == 0 || model.link_count() > MAX_FREE_FLOATING_STEP_LINKS
+    if (n == 0 && reaction.is_none()) || model.link_count() > MAX_FREE_FLOATING_STEP_LINKS
         || !state.time_s.is_finite()
         || state.base.twist_body.linear != Twist::zero().linear
         || state.base.acceleration_body != Twist::zero()
@@ -121,6 +139,9 @@ pub fn prepare<'a>(
             .iter().any(|v| v.len()!=n || v.iter().any(|x| !x.is_finite() || *x<=0.0))
     {
         return Err(LinearizationError::Invalid("bounded equilibrium and complete positive physical scales required"));
+    }
+    if reaction.is_some_and(|r| r.len()!=n || r.iter().any(|v| !v.is_finite())) {
+        return Err(LinearizationError::Invalid("complete finite original reaction required"));
     }
     rotating::admit_frame(state, loads, &mut cancelled)?;
     validate_forward_dynamics_header(model, state.base.twist_body,
@@ -137,12 +158,15 @@ pub fn prepare<'a>(
         effort_scales: controls.effort_scales.to_vec(), difference: controls.difference,
         maximum_stencil_distortion: controls.maximum_stencil_distortion,
         scaled_equilibrium_residual: 0.0,
+        reaction_effort: reaction.map(|r| r.to_vec()),
     };
-    // Validate numerical controls on a zero direction without source work.
-    central::differentiate(&vec![0.0;n], n, controls.difference,
-        |_| Ok::<_, EquilibriumError>(vec![0.0;n]), || {
-            poll(&mut cancelled).map_err(EquilibriumError::from)
-        }).map_err(LinearizationError::Difference)?;
+    // A genuinely empty physical model has no numerical derivative to probe.
+    if n != 0 {
+        central::differentiate(&vec![0.0;n], n, controls.difference,
+            |_| Ok::<_, EquilibriumError>(vec![0.0;n]), || {
+                poll(&mut cancelled).map_err(EquilibriumError::from)
+            }).map_err(LinearizationError::Difference)?;
+    }
     let value = result.evaluate(state.clone(), &mut cancelled)?;
     let scaled = scaled_rows(&value.physical_residual, &result.effort_scales)?;
     let residual = fs_solver::norm2(&scaled);
@@ -162,12 +186,24 @@ impl ArticulatedLinearization<'_> {
 
     fn evaluate(&self, state: PrescribedBaseMotionState, cancelled: &mut impl FnMut() -> bool)
         -> Result<Evaluation, EquilibriumError> {
-        match self.bushings {
+        let mut value = match self.bushings {
             EquilibriumBushings::Diagonal(b) =>
                 evaluate_native(self.model, state, self.loads, b, None, cancelled),
             EquilibriumBushings::Coupled(b) =>
                 evaluate_native(self.model, state, self.loads, b, None, cancelled),
+        }?;
+        if let Some(reaction) = &self.reaction_effort {
+            for (i, &reaction) in reaction.iter().enumerate() {
+                if i % 64 == 0 { poll(cancelled)?; }
+                let residual = (Dd::from_f64(value.required[i])
+                    - Dd::from_f64(value.applied[i]) - Dd::from_f64(reaction)).to_f64();
+                if !residual.is_finite() {
+                    return Err(EquilibriumError::Invalid("unrepresentable reaction-adjusted balance"));
+                }
+                value.physical_residual[i] = residual;
+            }
         }
+        Ok(value)
     }
 
     /// Original recursive inertia action. No mass matrix or unit velocity is
@@ -201,7 +237,7 @@ impl ArticulatedLinearization<'_> {
         self.action(velocity, true, self.difference, cancelled)
     }
 
-    fn action(&self, direction: &[f64], rate: bool, controls: CentralDifferenceControls,
+    pub(super) fn action(&self, direction: &[f64], rate: bool, controls: CentralDifferenceControls,
         cancelled: impl FnMut() -> bool) -> Result<JointTangentAction, LinearizationError> {
         let n = self.model.dof_count();
         if direction.len()!=n || direction.iter().any(|v| !v.is_finite()) {
@@ -241,6 +277,22 @@ impl ArticulatedLinearization<'_> {
         physical_action(derivative, &self.effort_scales, distortion.get())
     }
 
+    /// The original composite-rigid-body joint mass block, shared by both
+    /// full and constrained response exports. Counts as one native mass query.
+    pub(super) fn mass_matrix(&self, mut cancelled: impl FnMut() -> bool)
+        -> Result<Vec<f64>, LinearizationError> {
+        poll(&mut cancelled)?;
+        let n = self.model.dof_count();
+        let native = free_floating_terms(self.model,
+            FreeFloatingBaseState {
+                world_from_base:self.state.base.world_from_base, twist_body:Twist::zero(),
+            }, &self.state.joint_position, &vec![0.0;n], &mut cancelled)?;
+        let mut mass = vec![0.0;n*n];
+        for i in 0..n { for j in 0..n { mass[i*n+j] = native.mass[6+i][6+j]; } }
+        poll(&mut cancelled)?;
+        Ok(mass)
+    }
+
     /// Export a bounded full pencil to the EXISTING fs-modal spectral owners.
     /// Matrix-free actions above remain available for larger trees. The original
     /// composite-rigid-body owner supplies its symmetric joint/joint mass block;
@@ -255,13 +307,8 @@ impl ArticulatedLinearization<'_> {
             || maximum_evaluations==0 || maximum_evaluations>16384 {
             return Err(LinearizationError::Invalid("explicit dense dimension and source-work bounds required"));
         }
-        let native = free_floating_terms(self.model,
-            FreeFloatingBaseState {
-                world_from_base:self.state.base.world_from_base, twist_body:Twist::zero(),
-            }, &self.state.joint_position, &vec![0.0;n], &mut cancelled)?;
+        let mass = self.mass_matrix(&mut cancelled)?;
         let mut used = 1;
-        let mut mass = vec![0.0;n*n];
-        for i in 0..n { for j in 0..n { mass[i*n+j] = native.mass[6+i][6+j]; } }
         let mut stiffness = vec![0.0;n*n];
         let mut velocity = vec![0.0;n*n];
         let mut stiffness_disagreement = vec![0.0;n*n];
