@@ -2,7 +2,7 @@
 use super::*;
 use fs_exec::CancelGate;
 use fs_lbm::core2::Cell;
-use fs_lbm::freesurface::{ContactModel, FreeSurfacePressureError2};
+use fs_lbm::freesurface::{ContactModel, FreeSurfacePressureError2, PlanarWall2};
 use fs_lbm::material::MaterialLbmError;
 use fs_lbm::material::free_surface::{MaterialFreeSurface2, MaterialFreeSurfaceDomain2};
 
@@ -108,6 +108,171 @@ fn pressure_domain(gravity_m_s2: [f64; 2]) -> MaterialFreeSurfaceDomain2 {
         contact: ContactModel::Neutral,
         max_cells: 144,
     }
+}
+
+#[test]
+fn g1_dense_hydrostatic_column_retains_full_layer_mass_and_rest_in_all_directions() {
+    let gate = CancelGate::new_clock_free();
+    let source = liquid(1000.0, 0.1, None);
+    let scaling = plan(&source).with_pressure_reference(100_000.0).unwrap();
+    for (wall, axis, sign) in [
+        (PlanarWall2::XMin, 0, -1.0),
+        (PlanarWall2::XMax, 0, 1.0),
+        (PlanarWall2::YMin, 1, -1.0),
+        (PlanarWall2::YMax, 1, 1.0),
+    ] {
+        for depth in [1, 5] {
+            let mut gravity = [0.0; 2];
+            gravity[axis] = sign * 0.5;
+            let domain = MaterialFreeSurfaceDomain2 {
+                cells: [9, 11],
+                max_cells: 99,
+                ..pressure_domain(gravity)
+            };
+            let mut flow = scaling
+                .free_surface2_hydrostatic(domain, wall, depth, 0.1, &gate)
+                .unwrap();
+            let h = 0.5 * 0.001 / (2.0 * CS2);
+            let density = |layer: usize| {
+                (1.0 + h).powi(layer as i32) / (1.0 - h).powi(layer as i32 + 1)
+            };
+            // Full interface inventory matters: half a boundary row would
+            // move the represented free surface away from the pressure face.
+            let expected_mass = (domain.cells[1 - axis] - 2) as f64 * 0.001
+                * (0..depth).map(density).sum::<f64>();
+            near(flow.ledger_mass_kg_per_m().unwrap(), expected_mass, 3e-13);
+            for _ in 0..32 {
+                let report = flow.step_with_momentum(&gate).unwrap();
+                assert_eq!(report.native.routes, 0);
+                let mut wet = 0;
+                for y in 1..domain.cells[1] - 1 {
+                    for x in 1..domain.cells[0] - 1 {
+                        let coordinate = [x, y][axis];
+                        let from_wall = if sign > 0.0 {
+                            domain.cells[axis] - 2 - coordinate
+                        } else {
+                            coordinate - 1
+                        };
+                        let sample = flow.sample_at_si(x, y).unwrap();
+                        if from_wall >= depth {
+                            assert!(sample.is_none());
+                            continue;
+                        }
+                        wet += 1;
+                        let sample = sample.unwrap();
+                        near(sample.fill_fraction, 1.0, 2e-11);
+                        near(sample.density_kg_m3, 1000.0 * density(depth - 1 - from_wall), 2e-11);
+                        assert!(sample.velocity_m_s.iter().all(|u| u.abs() < 5e-12),
+                            "{wall:?}, depth {depth}, ({x}, {y}): {sample:?}");
+                    }
+                }
+                assert_eq!(wet, (domain.cells[1 - axis] - 2) * depth);
+                near(flow.ledger_mass_kg_per_m().unwrap(), expected_mass, 2e-11);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_dense_hydrostatic_pressure_converges_to_the_incompressible_head() {
+    let gate = CancelGate::new_clock_free();
+    let source = liquid(1000.0, 0.1, None);
+    let gravity = 9.80665;
+    let domain = pressure_domain([0.0, -gravity]);
+    let expected = 1000.0 * gravity * 0.0045;
+    let mut errors = Vec::new();
+    for dt in [0.0005, 0.00025, 0.000125] {
+        let scaling = plan_free_surface_from_material(&source, 0.001, dt, 0.1)
+            .unwrap().with_pressure_reference(100_000.0).unwrap();
+        let mut flow = scaling
+            .free_surface2_hydrostatic(domain, PlanarWall2::YMin, 5, 0.1, &gate)
+            .unwrap();
+        for _ in 0..8 {
+            flow.step_with_momentum(&gate).unwrap();
+        }
+        // Support is at y=dx, free surface at y=6dx; the bottom cell centre
+        // is at y=1.5dx. This independent continuum head also checks wall-row
+        // offsets and the full interface's geometric interpretation.
+        let bottom = flow.sample_at_si(5, 1).unwrap().unwrap();
+        let error = bottom.pressure_perturbation_pa - expected;
+        assert!(error > 0.0);
+        errors.push(error);
+    }
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!((3.9..4.2).contains(&ratio), "expected dt² compression error: {errors:?}");
+    }
+    assert!(errors[2] / expected < 0.0011);
+}
+
+#[test]
+fn g3_dense_hydrostatic_datum_and_material_scaling_preserve_the_native_state() {
+    let gate = CancelGate::new_clock_free();
+    let light = liquid(500.0, 0.05, None);
+    let heavy = liquid(1000.0, 0.1, None);
+    for gravity in [0.0, -0.5] {
+        let make = |source, reference| {
+            plan(source).with_pressure_reference(reference).unwrap()
+                .free_surface2_hydrostatic(
+                    pressure_domain([0.0, gravity]), PlanarWall2::YMin, 5, 0.1, &gate,
+                ).unwrap()
+        };
+        let mut a = make(&light, 100_000.0);
+        let mut shifted = make(&light, 104_096.0);
+        let mut b = make(&heavy, 100_000.0);
+        for _ in 0..8 {
+            assert_eq!(a.lattice().grid.f, shifted.lattice().grid.f);
+            assert_eq!(a.lattice().mass, shifted.lattice().mass);
+            assert_eq!(a.lattice().grid.f, b.lattice().grid.f);
+            assert_eq!(a.lattice().mass, b.lattice().mass);
+            near(b.ledger_mass_kg_per_m().unwrap(), 2.0 * a.ledger_mass_kg_per_m().unwrap(), 1e-14);
+            if gravity == 0.0 {
+                near(a.ledger_mass_kg_per_m().unwrap(), 500.0 * 10.0 * 5.0 * 1e-6, 2e-13);
+            }
+            a.step_with_momentum(&gate).unwrap();
+            shifted.step_with_momentum(&gate).unwrap();
+            b.step_with_momentum(&gate).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g0_g4_dense_hydrostatic_initialization_rejects_incompatible_or_unresolved_states() {
+    let gate = CancelGate::new_clock_free();
+    let source = liquid(1000.0, 0.1, None);
+    let domain = pressure_domain([0.0, -0.5]);
+    let scaling = plan(&source).with_pressure_reference(100_000.0).unwrap();
+    assert!(plan(&source)
+        .free_surface2_hydrostatic(domain, PlanarWall2::YMin, 5, 0.1, &gate).is_err());
+    for bound in [0.0, -1.0, 1.0, f64::NAN, 0.0001] {
+        assert!(scaling
+            .free_surface2_hydrostatic(domain, PlanarWall2::YMin, 5, bound, &gate).is_err());
+    }
+    for depth in [0, 10, 12, usize::MAX] {
+        assert!(scaling
+            .free_surface2_hydrostatic(domain, PlanarWall2::YMin, depth, 0.1, &gate).is_err());
+    }
+    for gravity in [[0.0, 0.5], [0.1, -0.5], [0.0, f64::NAN], [0.0, -1000.0]] {
+        assert!(scaling.free_surface2_hydrostatic(
+            pressure_domain(gravity), PlanarWall2::YMin, 5, 0.1, &gate,
+        ).is_err());
+    }
+    for rejected in [
+        MaterialFreeSurfaceDomain2 { max_cells: 143, ..domain },
+        MaterialFreeSurfaceDomain2 { contact: ContactModel::Wetting, ..domain },
+        MaterialFreeSurfaceDomain2 { cells: [3, 12], ..domain },
+    ] {
+        assert!(scaling.free_surface2_hydrostatic(rejected, PlanarWall2::YMin, 5, 0.1, &gate).is_err());
+    }
+    let capillary = liquid(1000.0, 0.1, Some(0.01));
+    assert!(plan(&capillary).with_pressure_reference(100_000.0).unwrap()
+        .free_surface2_hydrostatic(domain, PlanarWall2::YMin, 5, 0.1, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        scaling.free_surface2_hydrostatic(domain, PlanarWall2::YMin, 5, 0.1, &cancelled),
+        Err(MaterialLbmError::FreeSurfacePressure2(FreeSurfacePressureError2::Cancelled))
+    ));
 }
 
 #[test]

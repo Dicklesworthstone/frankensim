@@ -8,6 +8,48 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), MaterialLbmError> {
         .map_err(|_| crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled.into())
 }
 
+/// Shared D2Q9/D3Q19 rest profile, ordered from the free surface into the liquid.
+/// The caller admits its domain, pressure datum and density-excursion bound.
+pub(in crate::material::free_surface) fn hydrostatic_density_layers(
+    scaling: &MaterialFreeSurfaceScaling<'_>,
+    acceleration_lattice: f64,
+    depth: usize,
+    maximum_density_excursion: f64,
+    mut checkpoint: impl FnMut() -> Result<(), MaterialLbmError>,
+) -> Result<Vec<f64>, MaterialLbmError> {
+    // For u=0, the original collision maps w*rho-S/2 to w*rho+S/2.
+    // Streaming one cell downwards therefore requires
+    // rho_next*(1-h) = rho_previous*(1+h). At a missing gas link,
+    // f_in = 2*w*rho_boundary - f_out instead gives
+    // rho_nearest*(1-h) = rho_boundary = 1. This is not sqrt(ratio).
+    let half_head = acceleration_lattice / (2.0 * CS2);
+    if !half_head.is_finite() || half_head >= 1.0 {
+        return Err(MaterialLbmError::Invalid(
+            "hydrostatic lattice acceleration cannot retain positive rest populations",
+        ));
+    }
+    let ratio = (1.0 + half_head) / (1.0 - half_head);
+    let mut density = 1.0 / (1.0 - half_head);
+    let mut layers = Vec::new();
+    layers.try_reserve_exact(depth).map_err(|_| {
+        MaterialLbmError::Invalid("hydrostatic density-profile allocation failed")
+    })?;
+    for layer in 0..depth {
+        checkpoint()?;
+        if !density.is_finite() || (density - 1.0).abs() > maximum_density_excursion {
+            return Err(MaterialLbmError::Invalid(
+                "hydrostatic profile exceeds its declared density-excursion bound",
+            ));
+        }
+        scaling.absolute_pressure_si(density)?;
+        layers.push(density);
+        if layer + 1 < depth {
+            density *= ratio;
+        }
+    }
+    Ok(layers)
+}
+
 impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// Initialize a planar liquid column at rest under its actual `rho * g` force.
     ///
@@ -122,36 +164,13 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             ));
         }
 
-        // For u=0, the original collision maps w*rho-S/2 to w*rho+S/2.
-        // Streaming one cell downwards therefore requires
-        // rho_next*(1-h) = rho_previous*(1+h). At a missing gas link,
-        // f_in = 2*w*rho_boundary - f_out instead gives
-        // rho_nearest*(1-h) = rho_boundary = 1. This is not sqrt(ratio).
-        let half_head = gravity[axis].abs() / (2.0 * CS2);
-        if !half_head.is_finite() || half_head >= 1.0 {
-            return Err(MaterialLbmError::Invalid(
-                "hydrostatic lattice acceleration cannot retain positive rest populations",
-            ));
-        }
-        let ratio = (1.0 + half_head) / (1.0 - half_head);
-        let mut density = 1.0 / (1.0 - half_head);
-        let mut layers = Vec::new();
-        layers.try_reserve_exact(liquid_depth_cells).map_err(|_| {
-            MaterialLbmError::Invalid("hydrostatic density-profile allocation failed")
-        })?;
-        for layer in 0..liquid_depth_cells {
-            checkpoint(cx)?;
-            if !density.is_finite() || (density - 1.0).abs() > maximum_density_excursion {
-                return Err(MaterialLbmError::Invalid(
-                    "hydrostatic profile exceeds its declared density-excursion bound",
-                ));
-            }
-            self.absolute_pressure_si(density)?;
-            layers.push(density);
-            if layer + 1 < liquid_depth_cells {
-                density *= ratio;
-            }
-        }
+        let layers = hydrostatic_density_layers(
+            &self,
+            gravity[axis].abs(),
+            liquid_depth_cells,
+            maximum_density_excursion,
+            || checkpoint(cx),
+        )?;
 
         // Resolve the one-dimensional profile once, then reuse it for every
         // cell in a layer. The original native constructor still owns sparse

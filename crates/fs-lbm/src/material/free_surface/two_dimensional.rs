@@ -81,6 +81,138 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         self.free_surface2_with_density(domain, fluid, None, |_| Ok(1.0))
     }
 
+    /// Initialize a full-depth planar column at rest under the native `rho*g`.
+    ///
+    /// `supporting_wall` selects the X/Y domain face toward which gravity
+    /// points. The liquid occupies `liquid_depth_cells` complete interior
+    /// layers; both wall rows are excluded, and at least one interior gas layer
+    /// must remain. The free surface is halfway between the last wet and first
+    /// gas cell centres, at `liquid_depth_cells * cell_size_m` from the halfway
+    /// supporting wall. Interface cells retain full mass, not the generic
+    /// classifier's half-cell initialization. Mass is reported per unit depth.
+    ///
+    /// Requires [`Self::with_pressure_reference`]: its positive absolute
+    /// pressure is the free-surface gas datum retained by ordinary `step()`.
+    /// Capillarity/wetting must be absent. For `h = |g|*dt²/(2*cs²*dx)`, the
+    /// nearest wet density is `1/(1-h)` and each deeper layer multiplies by
+    /// `(1+h)/(1-h)`, using the same profile as [`Self::free_surface3_hydrostatic`].
+    /// The original collision, streaming, pressure boundary and physical
+    /// zero-velocity Guo frame then balance to population roundoff. No settling
+    /// run, extra force or altered stepping operator is introduced.
+    ///
+    /// This is a weakly compressible numerical rest state, not a liquid EOS.
+    /// Every layer's density departure must fit the supplied bound in `(0,1)`;
+    /// initial mass includes that perturbation. Pressure approaches `rho*g*d`
+    /// as `dt/dx` decreases at fixed physical geometry. Spatial refinement
+    /// alone at fixed `dt/dx` does not remove the numerical compressibility.
+    ///
+    /// # Errors
+    /// Refuses incompatible gravity, missing datum, capillarity/wetting,
+    /// empty/full columns, cell or density bounds, unrepresentable physical
+    /// extents/pressure, ordinary material admission or cancellation. Zero
+    /// gravity is supported. Only a complete newly constructed flow is returned.
+    pub fn free_surface2_hydrostatic(
+        self,
+        domain: MaterialFreeSurfaceDomain2,
+        supporting_wall: PlanarWall2,
+        liquid_depth_cells: usize,
+        maximum_density_excursion: f64,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurface2<'a>, MaterialLbmError> {
+        check_initialization_cancel(Some(gate))?;
+        self.require_frozen_source()?;
+        let [nx, ny] = domain.cells;
+        super::super::admit_cells(nx, ny, domain.max_cells)?;
+        if nx < 4 || ny < 4 {
+            return Err(MaterialLbmError::Invalid(
+                "closed 2-D free surface needs at least two interior cells per axis",
+            ));
+        }
+        if self.reference_pressure_pa.is_none() {
+            return Err(MaterialLbmError::Invalid(
+                "hydrostatic initialization requires an explicit free-surface pressure reference",
+            ));
+        }
+        if self.surface_tension_lattice != 0.0
+            || self.planar_wetting.is_some()
+            || domain.contact != ContactModel::Neutral
+        {
+            return Err(MaterialLbmError::Invalid(
+                "planar hydrostatic initialization requires absent capillarity and neutral walls",
+            ));
+        }
+        if !maximum_density_excursion.is_finite()
+            || maximum_density_excursion <= 0.0
+            || maximum_density_excursion >= 1.0
+        {
+            return Err(MaterialLbmError::Invalid(
+                "hydrostatic density-excursion bound must be finite and in (0,1)",
+            ));
+        }
+        let (axis, upper) = match supporting_wall {
+            PlanarWall2::XMin => (0, false),
+            PlanarWall2::XMax => (0, true),
+            PlanarWall2::YMin => (1, false),
+            PlanarWall2::YMax => (1, true),
+        };
+        let extent = domain.cells[axis];
+        if liquid_depth_cells == 0 || liquid_depth_cells >= extent - 2 {
+            return Err(MaterialLbmError::Invalid(
+                "hydrostatic column needs positive liquid depth and at least one interior gas layer",
+            ));
+        }
+        for n in domain.cells {
+            positive(
+                n as f64 * self.cell_size_m,
+                "hydrostatic physical domain extent is unrepresentable",
+            )?;
+        }
+        let [gx, gy, _] = self.gravity_vector_lattice([
+            domain.gravity_m_s2[0], domain.gravity_m_s2[1], 0.0,
+        ])?;
+        let gravity = [gx, gy];
+        if gravity[1 - axis] != 0.0
+            || (upper && gravity[axis] < 0.0)
+            || (!upper && gravity[axis] > 0.0)
+        {
+            return Err(MaterialLbmError::Invalid(
+                "hydrostatic gravity must point toward its Cartesian supporting wall",
+            ));
+        }
+        let layers = super::initial::hydrostatic_density_layers(
+            &self,
+            gravity[axis].abs(),
+            liquid_depth_cells,
+            maximum_density_excursion,
+            || check_initialization_cancel(Some(gate)),
+        )?;
+        let from_wall = |coordinate: usize| {
+            if upper { extent - 2 - coordinate } else { coordinate - 1 }
+        };
+        let mut flow = self.free_surface2_with_density(
+            domain,
+            |x, y| from_wall([x, y][axis]) < liquid_depth_cells,
+            Some(gate),
+            |coordinates| Ok(layers[liquid_depth_cells - 1 - from_wall(coordinates[axis])]),
+        )?;
+        // The missing-link pressure lies on the face between wet and gas
+        // centres. Retain the whole interface cell's geometric volume, matching
+        // that location and the declared depth; no mass is added during stepping.
+        let surface_coordinate = if upper { extent - 1 - liquid_depth_cells } else { liquid_depth_cells };
+        for transverse in 1..domain.cells[1 - axis] - 1 {
+            check_initialization_cancel(Some(gate))?;
+            let [x, y] = if axis == 0 {
+                [surface_coordinate, transverse]
+            } else {
+                [transverse, surface_coordinate]
+            };
+            let i = flow.lattice.grid.idx(x, y);
+            flow.lattice.mass[i] = flow.lattice.grid.f[i].iter().sum();
+        }
+        check_initialization_cancel(Some(gate))?;
+        Ok(flow)
+    }
+
     /// Construct a liquid at physical rest with an absolute initial pressure [Pa].
     ///
     /// Requires [`Self::with_pressure_reference`]. The callback supplies positive
@@ -98,6 +230,8 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// it is not a physical EOS or a mass-preserving pressure projection. Source
     /// coefficients remain frozen. The caller owns pressure/geometry/traction
     /// compatibility and refinement.
+    /// For a full-depth planar column under gravity, use
+    /// [`Self::free_surface2_hydrostatic`] for the native balanced density profile.
     ///
     /// The original held-force transform initializes physical zero velocity
     /// using each cell's actual pressure-dependent density in `rho*g`. No

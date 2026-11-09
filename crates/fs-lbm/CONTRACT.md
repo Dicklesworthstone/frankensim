@@ -330,6 +330,14 @@ the original stationary solid tiles and at least one layer of gas. The caller
 supplies a positive absolute pressure reference and a density-excursion bound.
 Capillarity and wetting must be explicitly absent.
 
+`free_surface2_hydrostatic` applies the same original density recurrence to
+the dense D2Q9 owner. Its X/Y supporting wall is halfway between the wall row
+and first interior row; the declared depth counts only complete interior
+liquid layers, with at least one interior gas layer. Boundary interface cells
+retain full mass so their volume agrees with the native gas-pressure face.
+This explicit constructor does not change the generic classifier's half-filled
+interface convention. Observations and mass remain per unit out-of-plane depth.
+
 For lattice acceleration magnitude `a`, set `h = a/(2*cs^2)`. The nearest wet
 layer has `rho = 1/(1-h)`; successive deeper layers multiply by
 `(1+h)/(1-h)`. This surface factor follows the native missing-gas-link rule.
@@ -351,6 +359,13 @@ all six gravity directions, zero-gravity equality, pressure-datum invariance,
 actual reflected-link traction and torque with decreasing compressibility,
 mass retention and transactional refusal. The declared density, source-domain,
 geometry and cancellation bounds remain with the original owners.
+
+The dense `tests/material_free_surface/gas_pressure2.rs` cases exercise all
+four directions including a single wet layer, full-depth mass retention,
+ordinary native rest evolution, the `dt/dx` pressure convergence ladder,
+zero gravity, density/viscosity similarity, pressure-datum invariance and
+invalid/cancelled construction. Both dimensions use one temporary profile
+value per wet layer and add no work or retained storage to time stepping.
 
 ## Original-law shear-free Carreau film base
 

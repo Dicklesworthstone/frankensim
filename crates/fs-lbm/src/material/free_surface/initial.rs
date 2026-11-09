@@ -5,6 +5,7 @@ use crate::d3q19::freesurface3::FreeSurfaceInitialCell3;
 use fs_exec::Cx;
 
 mod hydrostatic;
+pub(super) use hydrostatic::hydrostatic_density_layers;
 
 /// One occupied cell of the same frozen pure liquid as the receiving solver.
 #[derive(Clone, Copy, Debug, PartialEq)]
