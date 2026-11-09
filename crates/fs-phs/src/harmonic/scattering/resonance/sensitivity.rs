@@ -8,14 +8,16 @@ use super::{ScatteringModel, ScatteringObservation};
 use crate::harmonic::resonance::antiresonance_parameter;
 use crate::harmonic::resonance::sensitivity::{
     ParameterObservationJet, admit_parameter_response, parameter_search_controls,
-    resolve_parameter_response, tangent_effort, tangent_output,
+    resolve_parameter_response,
 };
 use crate::harmonic::resonance::{
     AntiresonanceControls, DrivenAntiresonanceParameterResponse, DrivenResonanceError,
     DrivenResonanceParameterResponse, ResonanceControls, project,
 };
-use crate::harmonic::scattering::{ScatteringParameterResponse, parameter::add_parameter_source};
-use crate::harmonic::{HarmonicParameterDirection, finite, parameter, poll};
+use crate::harmonic::scattering::{
+    ScatteringComplexJet, ScatteringFrequencyParameterResponse, ScatteringParameterResponse,
+};
+use crate::harmonic::{HarmonicParameterDirection, finite, poll};
 use fs_math::c64::C64;
 
 impl ScatteringModel {
@@ -46,9 +48,10 @@ impl ScatteringModel {
     ///
     /// Each query reuses one closed LU for all original response tangents. In
     /// addition to the ordinary resonance-parameter admission, simultaneous
-    /// loaded observations require four constructor payload bounds plus
-    /// 256n+512m+256k bytes, and four constructor work scores plus
-    /// 32n(n+m)+128(m+k), where k counts selected ports. All caps are checked
+    /// loaded observations use the complete public wave-jet admission: six
+    /// constructor payload bounds plus 512(n+m+k) bytes, and six constructor
+    /// work scores plus 48n(n+m)+192(m+k), where k counts selected ports.
+    /// All caps are checked
     /// before search. Factors are released before another frequency is queried.
     /// No perturbed model, finite difference or extra dense matrix is used.
     #[allow(clippy::too_many_arguments)]
@@ -64,7 +67,10 @@ impl ScatteringModel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DrivenResonanceParameterResponse, DrivenResonanceError> {
         self.validate_resonance_parameter_inputs(
-            direction, input_derivative, reference_derivative, &mut cancelled,
+            direction,
+            input_derivative,
+            reference_derivative,
+            &mut cancelled,
         )?;
         let controls = parameter_search_controls(controls)?;
         self.admit_loaded_resonance_parameter_response()?;
@@ -74,8 +80,14 @@ impl ScatteringModel {
             resonance,
             |omega, second_order, cancelled| {
                 self.resonance_parameter_observation(
-                    input, observation, direction, input_derivative, reference_derivative,
-                    omega, second_order, cancelled,
+                    input,
+                    observation,
+                    direction,
+                    input_derivative,
+                    reference_derivative,
+                    omega,
+                    second_order,
+                    cancelled,
                 )
             },
             &mut cancelled,
@@ -123,18 +135,32 @@ impl ScatteringModel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DrivenAntiresonanceParameterResponse, DrivenResonanceError> {
         self.validate_resonance_parameter_inputs(
-            direction, input_derivative, reference_derivative, &mut cancelled,
+            direction,
+            input_derivative,
+            reference_derivative,
+            &mut cancelled,
         )?;
         let controls = antiresonance_parameter::parameter_controls(controls)?;
         self.admit_loaded_resonance_parameter_response()?;
-        let antiresonance =
-            self.driven_antiresonance(input, observation, interval_rad_s, controls, &mut cancelled)?;
+        let antiresonance = self.driven_antiresonance(
+            input,
+            observation,
+            interval_rad_s,
+            controls,
+            &mut cancelled,
+        )?;
         antiresonance_parameter::resolve_parameter_response(
             antiresonance,
             |omega, second_order, cancelled| {
                 self.resonance_parameter_observation(
-                    input, observation, direction, input_derivative, reference_derivative,
-                    omega, second_order, cancelled,
+                    input,
+                    observation,
+                    direction,
+                    input_derivative,
+                    reference_derivative,
+                    omega,
+                    second_order,
+                    cancelled,
                 )
             },
             &mut cancelled,
@@ -163,20 +189,12 @@ impl ScatteringModel {
     }
 
     fn admit_loaded_resonance_parameter_response(&self) -> Result<(), DrivenResonanceError> {
-        let model = &self.closed;
-        admit_parameter_response(model)?;
-        let (n, m, k) = (model.n as u128, model.m as u128, self.ports.len() as u128);
-        let bytes = 4 * (8 * n * k + 256 * k + 64 * m) + 256 * n + 512 * m + 256 * k;
-        let work =
-            4 * (2 * n * n * (k + 1) + n * m + k * k + 32 * m) + 32 * n * (n + m) + 128 * (m + k);
-        if bytes > self.budget.maximum_payload_bytes as u128
-            || work > self.budget.maximum_work as u128
-        {
-            return Err(DrivenResonanceError::Invalid(
+        admit_parameter_response(&self.closed)?;
+        self.admit_mixed_observation().map_err(|_| {
+            DrivenResonanceError::Invalid(
                 "insufficient simultaneous loaded resonance parameter payload or work budget",
-            ));
-        }
-        Ok(())
+            )
+        })
     }
 
     // One original loaded frequency/parameter/second/mixed observation owner
@@ -193,10 +211,21 @@ impl ScatteringModel {
         second_order: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ParameterObservationJet, DrivenResonanceError> {
-        let model = &self.closed;
         let factor = self.factor(omega, &mut *cancelled)?;
-        let frequency =
-            factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
+        if second_order {
+            let full = factor.response_with_frequency_parameter_derivative(
+                input,
+                direction,
+                None,
+                None,
+                input_derivative,
+                None,
+                reference_derivative,
+                &mut *cancelled,
+            )?;
+            return observation.full_parameter_jet(&full, cancelled);
+        }
+        let frequency = factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
         let parameter = factor.response_with_parameter_derivative(
             input,
             direction,
@@ -204,7 +233,7 @@ impl ScatteringModel {
             reference_derivative,
             &mut *cancelled,
         )?;
-        let mut jet = ParameterObservationJet {
+        let jet = ParameterObservationJet {
             value: observation.value(&frequency.response, cancelled)?,
             frequency: observation.derivative(&frequency, cancelled)?,
             parameter: observation.parameter_derivative(&parameter, cancelled)?,
@@ -218,129 +247,7 @@ impl ScatteringModel {
                 .max(parameter.response.physical.relative_residual)
                 .max(parameter.relative_derivative_residual),
         };
-        if !second_order {
-            return Ok(jet);
-        }
-
-        // A_closed x_omegaomega = 2 i E x_omega. The authored source
-        // law and boundary reference have zero frequency derivatives.
-        let mut rhs = vec![C64::ZERO; model.n];
-        for (target, &dx) in rhs[..model.n_diff]
-            .iter_mut()
-            .zip(&frequency.state_derivative)
-        {
-            *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
-        }
-        let (second, second_residual) = factor.factor.solve_rhs(&rhs, &mut *cancelled)?;
-        jet.second_frequency = self.observe_higher_tangent(
-            observation,
-            &second,
-            None,
-            None,
-            &frequency.effort_derivative,
-            &frequency.physical_input_derivative,
-            None,
-            cancelled,
-        )?;
-
-        // dL*x_omega + dG*u_omega + G*(-dY*x_omega-u_omega*dZ)/Z
-        // is the parameter action of the complete closed operator.
-        // The same source-action owner supplies both G appearances.
-        let action = parameter::generator_action(
-            model,
-            &direction,
-            &frequency.state_derivative,
-            &frequency.effort_derivative,
-            cancelled,
-        )?;
-        rhs = action.generator;
-        add_parameter_source(
-            self,
-            direction,
-            &frequency.effort_derivative,
-            &frequency.physical_input_derivative,
-            &action.storage,
-            None,
-            reference_derivative,
-            &mut rhs,
-            None,
-            cancelled,
-        )?;
-        for (target, &dx) in rhs[..model.n_diff]
-            .iter_mut()
-            .zip(&parameter.state_derivative)
-        {
-            *target = *target + C64::new(-dx.im, dx.re);
-        }
-        let (mixed, mixed_residual) = factor.factor.solve_rhs(&rhs, &mut *cancelled)?;
-        jet.mixed = self.observe_higher_tangent(
-            observation,
-            &mixed,
-            Some(&action.storage),
-            direction.ports,
-            &frequency.effort_derivative,
-            &frequency.physical_input_derivative,
-            reference_derivative,
-            cancelled,
-        )?;
-        jet.relative_residual = jet
-            .relative_residual
-            .max(second_residual)
-            .max(mixed_residual);
         Ok(jet)
-    }
-
-    // Selected original-coordinate second/mixed observation. The shared effort
-    // and output maps preserve full storage, algebraic reactions and dG^T e.
-    #[allow(clippy::too_many_arguments)]
-    fn observe_higher_tangent(
-        &self,
-        observation: ScatteringObservation<'_>,
-        state: &[C64],
-        additive_effort: Option<&[C64]>,
-        port_direction: Option<&[f64]>,
-        frequency_effort: &[C64],
-        frequency_input: &[C64],
-        reference_derivative: Option<&[f64]>,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<C64, DrivenResonanceError> {
-        if let ScatteringObservation::State(weights) = observation {
-            return project(weights, state.iter().copied(), cancelled);
-        }
-        let effort = tangent_effort(&self.closed, state, additive_effort, cancelled)?;
-        if let ScatteringObservation::Effort(weights) = observation {
-            return project(weights, effort, cancelled);
-        }
-        let output = tangent_output(
-            &self.closed,
-            &effort,
-            port_direction,
-            frequency_effort,
-            cancelled,
-        )?;
-        match observation {
-            ScatteringObservation::Output(weights) => project(weights, output, cancelled),
-            ScatteringObservation::Outgoing(weights) => {
-                // b=y-a, and the fixed source/parameter law has no mixed or
-                // second frequency derivative. Direct feedthrough is already
-                // retained in the primal and first parameter observation.
-                project(
-                    weights,
-                    self.ports.iter().map(|&(p, _)| output[p]),
-                    cancelled,
-                )
-            }
-            ScatteringObservation::Input(weights) => {
-                let mut input = vec![C64::ZERO; self.closed.m];
-                for (index, &(p, z)) in self.ports.iter().enumerate() {
-                    poll(cancelled)?;
-                    let dz = reference_derivative.map_or(0.0, |v| v[index]);
-                    input[p] = -output[p].scale(1.0 / z) - frequency_input[p].scale(dz / z);
-                }
-                project(weights, input, cancelled)
-            }
-            ScatteringObservation::State(_) | ScatteringObservation::Effort(_) => unreachable!(),
-        }
     }
 }
 
@@ -365,4 +272,101 @@ impl ScatteringObservation<'_> {
         };
         project(weights, values.iter().copied(), cancelled)
     }
+}
+
+impl ScatteringObservation<'_> {
+    fn full_parameter_jet(
+        self,
+        result: &ScatteringFrequencyParameterResponse,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ParameterObservationJet, DrivenResonanceError> {
+        let physical = &result.physical;
+        let curvature = &physical.frequency_response;
+        let frequency = &curvature.frequency_response;
+        let parameter = &physical.parameter_response;
+        let relative_residual = frequency
+            .response
+            .relative_residual
+            .max(frequency.relative_derivative_residual)
+            .max(curvature.relative_second_derivative_residual)
+            .max(parameter.relative_derivative_residual)
+            .max(physical.relative_mixed_derivative_residual);
+        let fields: [&[C64]; 5];
+        let weights = match self {
+            Self::State(w) => {
+                fields = [
+                    &frequency.response.state,
+                    &frequency.state_derivative,
+                    &curvature.state_second_derivative,
+                    &parameter.state_derivative,
+                    &physical.state_mixed_derivative,
+                ];
+                w
+            }
+            Self::Effort(w) => {
+                fields = [
+                    &frequency.response.effort,
+                    &frequency.effort_derivative,
+                    &curvature.effort_second_derivative,
+                    &parameter.effort_derivative,
+                    &physical.effort_mixed_derivative,
+                ];
+                w
+            }
+            Self::Output(w) => {
+                fields = [
+                    &frequency.response.output,
+                    &frequency.output_derivative,
+                    &curvature.output_second_derivative,
+                    &parameter.output_derivative,
+                    &physical.output_mixed_derivative,
+                ];
+                w
+            }
+            Self::Input(w) => {
+                return project_full_jet(
+                    w,
+                    result.physical_inputs.iter().copied(),
+                    relative_residual,
+                    cancelled,
+                );
+            }
+            Self::Outgoing(w) => {
+                return project_full_jet(
+                    w,
+                    result.waves.iter().map(|wave| wave.outgoing),
+                    relative_residual,
+                    cancelled,
+                );
+            }
+        };
+        Ok(ParameterObservationJet {
+            value: project(weights, fields[0].iter().copied(), cancelled)?,
+            frequency: project(weights, fields[1].iter().copied(), cancelled)?,
+            second_frequency: project(weights, fields[2].iter().copied(), cancelled)?,
+            parameter: project(weights, fields[3].iter().copied(), cancelled)?,
+            mixed: project(weights, fields[4].iter().copied(), cancelled)?,
+            relative_residual,
+        })
+    }
+}
+
+fn project_full_jet(
+    weights: &[f64],
+    values: impl Iterator<Item = ScatteringComplexJet> + Clone,
+    relative_residual: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ParameterObservationJet, DrivenResonanceError> {
+    Ok(ParameterObservationJet {
+        value: project(weights, values.clone().map(|v| v.value), cancelled)?,
+        frequency: project(weights, values.clone().map(|v| v.frequency), cancelled)?,
+        second_frequency: project(
+            weights,
+            values.clone().map(|v| v.second_frequency),
+            cancelled,
+        )?,
+        parameter: project(weights, values.clone().map(|v| v.parameter), cancelled)?,
+        mixed: project(weights, values.map(|v| v.mixed), cancelled)?,
+        relative_residual,
+    })
 }

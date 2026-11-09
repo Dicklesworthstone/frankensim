@@ -4116,3 +4116,36 @@ heat and signed work with a 40/80/160-step refinement ladder, opaque-map
 refusal, cancellation and retry. The retained finest-response gate is 3e-5;
 native execution exited zero. This bounded source run does not claim a full
 workspace or physical membrane-host test.
+
+### Complete loaded-wave frequency and parameter jets
+
+`ScatteringFactor::response_with_frequency_parameter_derivative` returns
+the original complete physical jet, actual conjugate inputs, selected incident
+and outgoing waves, and independently evaluated boundary flux through value,
+first/second frequency, parameter and mixed order. Sources author all four
+derivatives in original port order. Each positive reference Z is constant in
+frequency; its optional real parameter derivative is supplied in selected-port
+order. Dispersive boundary laws remain in original material/memory states.
+
+Five solves reuse the already closed LU. Both appearances of changing G,
+changing storage/output maps, every source derivative and dZ feedback remain.
+The actual input is `u=(2a-y)/Z` and the outgoing wave is `b=y-a`.
+Independent incident/outgoing flux and ordinary-port work reconcile with
+original R/T work; reference feedback never becomes material heat.
+Original unclosed descriptor rows are audited at all orders, including
+`2*i*E*x_omega` in curvature and the complete physical mixed action.
+The returned work derivatives are signed local slopes, including at a
+reflection zero; no phase/amplitude floor is introduced.
+
+Added observation admission uses six constructor payload bounds plus
+`512*(n+m+k)` bytes and six constructor work scores plus
+`48*n*(n+m)+192*(m+k)`, where k is the selected-port count.
+Input, direction and capacity checks precede response allocation. Cancellation
+and arithmetic/residual refusal preserve the reusable factor.
+
+Both ordinary and loaded peak/linewidth and coherent-notch parameter queries
+now consume the same full response jet for their final second-order observation.
+First-order edge queries and existing search/refusal semantics remain.
+Focused tests exercise analytic ODE and singular-descriptor oscillators,
+ordinary plus selected sources, Maxwell histories, changing source/coupling/
+reference, independent heat/storage/flux, exact reflected zeros and reuse.
