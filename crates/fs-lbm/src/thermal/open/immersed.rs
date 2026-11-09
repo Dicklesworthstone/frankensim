@@ -43,7 +43,13 @@ pub struct ImmersedThermalBody3<'a> {
 /// Accepted body state and its independently measured last heat account.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImmersedThermalBodyState3 {
+    /// Original storage, held source and common resistance declaration.
+    /// The resolved interface law uses `surface_resistance` below, which may
+    /// additionally include a direction-dependent solid half-cell path.
     pub solid: FiniteThermalWall,
+    /// Total bulk-to-surface resistance for x, y and z normal links, excluding
+    /// the fluid half cell. Uniform body declarations repeat `solid.resistance`.
+    pub surface_resistance: [f64; 3],
     pub interface_links: usize,
     /// `maximum_link_defect` holds this shared body's absolute storage defect;
     /// storage cannot be assigned independently to its individual links.
@@ -52,8 +58,14 @@ pub struct ImmersedThermalBodyState3 {
 
 struct Body {
     accepted: ImmersedThermalBodyState3,
+    // Sum of the actual exposed-link conductances, including their fluid
+    // half cells. No averaging of the solid conductivity enters this value.
     conductance: f64,
     trial_temperature: f64,
+    reference_population: usize,
+    trace_reference: f64,
+    // Weighted trace differences from one ORIGINAL exposed trace. A common
+    // fluid temperature is represented exactly, independent of rounded weights.
     mean_trace: Sum,
     heat: Sum,
     conducted: Sum,
@@ -64,6 +76,8 @@ struct Link {
     cell: usize,
     incoming: usize,
     body: usize,
+    conductance: f64,
+    trace_weight: f64,
 }
 
 pub(super) struct ImmersedBodies3 {
@@ -136,6 +150,21 @@ impl ThermalOpenField3 {
         maximum_storage_bytes: usize,
         allow_interior: bool,
     ) -> Result<ImmersedBodies3, ThermalOpenError3> {
+        self.prepare_immersed_bodies_with_surface_resistance(
+            declarations,
+            maximum_storage_bytes,
+            allow_interior,
+            |body| [declarations[body].solid.resistance; 3],
+        )
+    }
+
+    fn prepare_immersed_bodies_with_surface_resistance(
+        &self,
+        declarations: &[ImmersedThermalBody3<'_>],
+        maximum_storage_bytes: usize,
+        allow_interior: bool,
+        surface_resistance: impl Fn(usize) -> [f64; 3],
+    ) -> Result<ImmersedBodies3, ThermalOpenError3> {
         if declarations.is_empty() || declarations.len() > self.solid.len() {
             return Err(invalid(
                 "immersed bodies require a nonempty bounded declaration",
@@ -143,12 +172,20 @@ impl ThermalOpenField3 {
         }
         let mut cells = 0usize;
         let mut links = 0usize;
-        for declaration in declarations {
+        for (body, declaration) in declarations.iter().enumerate() {
             declaration
                 .solid
                 .validate()
                 .map_err(ThermalOpenError3::Wall)?;
             check_boundary_temperature(6, declaration.solid.temperature, self.limits)?;
+            if surface_resistance(body)
+                .iter()
+                .any(|r| !r.is_finite() || *r < 0.0)
+            {
+                return Err(invalid(
+                    "immersed surface resistance must be finite and nonnegative",
+                ));
+            }
             cells = cells
                 .checked_add(declaration.solid_cells.len())
                 .ok_or_else(|| invalid("immersed body cell count overflow"))?;
@@ -218,23 +255,53 @@ impl ThermalOpenField3 {
             .map_err(|_| ThermalOpenError3::Allocation)?;
         for (body, declaration) in declarations.iter().enumerate() {
             let start = prepared.links.len();
+            let resistance = surface_resistance(body);
+            let normal_conductance = resistance.map(|r| 1.0 / (r + 0.5 / D3Q7.weights[1]));
             for &cell in declaration.solid_cells {
                 visit_links(self, cell, |cell, incoming| {
                     prepared.links.push(Link {
                         cell,
                         incoming,
                         body,
+                        conductance: normal_conductance[(incoming - 1) / 2],
+                        trace_weight: 0.0,
                     });
                 });
             }
+            let exposed = &mut prepared.links[start..];
+            let conductance = if normal_conductance
+                .iter()
+                .all(|k| *k == normal_conductance[0])
+            {
+                normal_conductance[0] * exposed.len() as f64
+            } else {
+                let mut total = Sum::default();
+                for link in exposed.iter() {
+                    total.add(link.conductance);
+                }
+                total.total()
+            };
+            if !conductance.is_finite() || (!exposed.is_empty() && conductance <= 0.0) {
+                return Err(invalid("unrepresentable immersed interface conductance"));
+            }
+            for link in exposed.iter_mut() {
+                link.trace_weight = link.conductance / conductance;
+            }
+            let reference_population = exposed
+                .iter()
+                .min_by_key(|link| (link.cell, link.incoming))
+                .map_or(0, |link| 7 * link.cell + opposite(link.incoming));
             prepared.bodies.push(Body {
                 accepted: ImmersedThermalBodyState3 {
                     solid: declaration.solid,
+                    surface_resistance: resistance,
                     interface_links: prepared.links.len() - start,
                     last_exchange: None,
                 },
-                conductance: 1.0 / (declaration.solid.resistance + 0.5 / D3Q7.weights[1]),
+                conductance,
                 trial_temperature: declaration.solid.temperature,
+                reference_population,
+                trace_reference: 0.0,
                 mean_trace: Sum::default(),
                 heat: Sum::default(),
                 conducted: Sum::default(),
@@ -282,13 +349,17 @@ fn opposite(q: usize) -> usize {
 }
 
 impl Body {
-    fn reflect(&self, outgoing: f64) -> WallReflection {
+    fn mean_fluid_trace(&self) -> f64 {
+        self.trace_reference + self.mean_trace.total()
+    }
+
+    fn reflect(&self, outgoing: f64, conductance: f64) -> WallReflection {
         let trace = outgoing / D3Q7.weights[1];
         let difference = self.trial_temperature - trace;
         let heat = if difference.is_finite() {
-            self.conductance * difference
+            conductance * difference
         } else {
-            self.conductance * self.trial_temperature - self.conductance * trace
+            conductance * self.trial_temperature - conductance * trace
         };
         let incoming = outgoing + heat;
         WallReflection {
@@ -312,6 +383,11 @@ impl ImmersedBodies3 {
                 poll()?;
             }
             body.mean_trace = Sum::default();
+            body.trace_reference = if body.accepted.interface_links == 0 {
+                body.accepted.solid.temperature
+            } else {
+                post[body.reference_population] / D3Q7.weights[1]
+            };
             body.heat = Sum::default();
             body.conducted = Sum::default();
         }
@@ -324,9 +400,14 @@ impl ImmersedBodies3 {
             if !trace.is_finite() {
                 return Err(invalid("nonfinite immersed interface population").into());
             }
-            // Scale before summing to avoid overflowing a finite mean.
-            body.mean_trace
-                .add(trace / body.accepted.interface_links as f64);
+            // Center before weighting to preserve an exactly uniform trace.
+            // Scale first only when the unweighted difference overflows.
+            let difference = trace - body.trace_reference;
+            body.mean_trace.add(if difference.is_finite() {
+                link.trace_weight * difference
+            } else {
+                link.trace_weight * trace - link.trace_weight * body.trace_reference
+            });
         }
         if let Some(conduction) = &mut self.conduction {
             conduction.solve(&mut self.bodies, limits, &mut poll)?;
@@ -336,7 +417,7 @@ impl ImmersedBodies3 {
                     poll()?;
                 }
                 let solid = body.accepted.solid;
-                let conductance = body.conductance * body.accepted.interface_links as f64;
+                let conductance = body.conductance;
                 if !conductance.is_finite() || conductance <= 0.0 {
                     return Err(invalid("unrepresentable immersed interface conductance").into());
                 }
@@ -371,7 +452,7 @@ impl ImmersedBodies3 {
                     // overflows although Q/(C+sum K) remains representable.
                     (solid.heat_per_step * dominant_weight) / scale
                 };
-                let mean = body.mean_trace.total();
+                let mean = body.mean_fluid_trace();
                 let difference = mean - solid.temperature;
                 let retained = if difference.is_finite() {
                     if fluid_weight <= old_weight {
@@ -392,7 +473,7 @@ impl ImmersedBodies3 {
             }
             let body = &mut self.bodies[link.body];
             let outgoing = post[7 * link.cell + opposite(link.incoming)];
-            let response = body.reflect(outgoing);
+            let response = body.reflect(outgoing, link.conductance);
             check_wall_response(6, &response, limits)?;
             body.heat.add(response.incoming - outgoing);
         }
@@ -447,7 +528,7 @@ impl ImmersedBodies3 {
             return None;
         }
         *cursor += 1;
-        Some(self.bodies[link.body].reflect(outgoing))
+        Some(self.bodies[link.body].reflect(outgoing, link.conductance))
     }
     pub(super) fn link_count(&self) -> usize {
         self.links.len()

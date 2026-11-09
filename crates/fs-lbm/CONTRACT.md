@@ -4322,3 +4322,45 @@ escape and radiosity modes, and nonlinear single-phase cooling against an
 independent physical quartic balance. Independent scalar references and pinned
 Rust formatting/parsing passed. Native Cargo verification is pending; these
 results do not claim experimental material or radiation validation.
+
+
+## Grid-aligned orthotropic immersed solids in native convection
+
+`ThermalOpenField3::set_immersed_orthotropic_thermal_voxels` and the matching
+`BoussinesqOpenGrid3` entry retain the three diagonal conductivity components
+of each original solid voxel. A normal solid-solid path uses the harmonic
+conductance of the two corresponding half cells; a fluid interface uses that
+voxel's normal half-cell and authored normal contact resistance, followed once
+by the original D3Q7 reflected-pair resistance. No directional average replaces
+these physical paths. Opposing faces share their normal-axis contact value.
+
+The original immersed owner now retains each exposed link's conductance and
+weight and factors the same simultaneous sparse solid/fluid-trace operator
+once. Centering weighted traces on a canonical original interface preserves
+uniform equilibrium and declaration-order determinism. There are no per-step
+allocations, geometry searches, new inventories or separate heat advances.
+`ImmersedThermalBodyState3::surface_resistance` reports the actual three paths;
+`solid.resistance` remains the common scalar declaration (zero for a
+nonuniform directional declaration). Capacity, source, accepted temperatures,
+first-law accounts and final publication remain with the original owner.
+
+Isotropic voxels use the same preparation and retain exact parity with an
+equal-component orthotropic declaration. Original periodic parallel faces,
+interior-node connectivity, node/link/factor/storage limits and transactional
+installation remain active. This fixed-coefficient, cubic-grid model resolves
+diagonal tensors only. It does not infer material data, rotated off-diagonal
+transport, nonideal solid-solid contact, nonlinear caloric laws or geometric
+surface accuracy.
+
+Twenty original immersed-owner tests passed in the bounded scalar source
+projection, including four new directional groups: independently calculated
+per-face reflected heat, heterogeneous two-cell balances under all three axis
+rotations and periodic parallel faces, exact isotropic parity and extreme-
+capacity equilibrium, and data/budget/late-cancellation refusal with exact
+retry. The exercised streaming, boundary, interface, sparse factor and thermal
+transaction routines and their tests were original source. The projection
+omitted the unused buoyancy module and executor wrappers, and retained only
+the unused tensor carrier/shape interface with the thermal-owner error type;
+no tensor was constructed. Full Cargo and public Boussinesq integration remain
+unexecuted; these local balances do not establish spatial convergence or the
+developing-channel Nusselt benchmark.

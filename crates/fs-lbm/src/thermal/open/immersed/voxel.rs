@@ -33,6 +33,39 @@ pub struct ImmersedThermalVoxel3 {
     pub heat_per_step: f64,
 }
 
+/// Fixed grid-aligned orthotropic solid on one original cubic native voxel.
+///
+/// The diagonal conductivity tensor is `[k_x, k_y, k_z]` in the ORIGINAL grid
+/// frame, in the same lattice units as `ImmersedThermalVoxel3`. Both reciprocal
+/// solid conduction and the solid half-cell path to each fluid face use that
+/// face's normal component. No scalar average replaces the tensor.
+/// Rotated tensors with off-diagonal components require a different stencil.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrthotropicThermalVoxel3 {
+    pub cell: usize,
+    pub temperature: f64,
+    pub heat_capacity: f64,
+    /// Three positive finite principal conductivities aligned with x/y/z.
+    pub conductivity: [f64; 3],
+    /// Additional nonnegative bulk-to-fluid contact resistance by normal axis.
+    /// Opposing faces share a value; solid-to-solid contact remains ideal.
+    pub contact_resistance: [f64; 3],
+    pub heat_per_step: f64,
+}
+
+impl From<ImmersedThermalVoxel3> for OrthotropicThermalVoxel3 {
+    fn from(voxel: ImmersedThermalVoxel3) -> Self {
+        Self {
+            cell: voxel.cell,
+            temperature: voxel.temperature,
+            heat_capacity: voxel.heat_capacity,
+            conductivity: [voxel.conductivity; 3],
+            contact_resistance: [voxel.contact_resistance; 3],
+            heat_per_step: voxel.heat_per_step,
+        }
+    }
+}
+
 /// Separate bounds on temporary geometry, retained bodies, and sparse factors.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImmersedVoxelControls3 {
@@ -100,21 +133,42 @@ fn harmonic_conductance(a: f64, b: f64) -> f64 {
     small * (2.0 / (1.0 + small / large))
 }
 
-impl ImmersedThermalVoxel3 {
+impl OrthotropicThermalVoxel3 {
+    fn surface_resistance(self) -> [f64; 3] {
+        std::array::from_fn(|axis| 0.5 / self.conductivity[axis] + self.contact_resistance[axis])
+    }
+
     fn wall(self) -> Result<FiniteThermalWall, ThermalOpenError3> {
-        if !self.conductivity.is_finite()
-            || self.conductivity <= 0.0
-            || !self.contact_resistance.is_finite()
-            || self.contact_resistance < 0.0
+        if self
+            .conductivity
+            .iter()
+            .any(|k| !k.is_finite() || *k <= 0.0)
+            || self
+                .contact_resistance
+                .iter()
+                .any(|r| !r.is_finite() || *r < 0.0)
         {
             return Err(invalid(
                 "voxel conductivity must be positive and contact resistance nonnegative",
             ));
         }
+        let resistance = self.surface_resistance();
+        if resistance.iter().any(|r| !r.is_finite()) {
+            return Err(invalid(
+                "immersed voxel half-cell resistance is unrepresentable",
+            ));
+        }
         let solid = FiniteThermalWall {
             temperature: self.temperature,
             heat_capacity: self.heat_capacity,
-            resistance: 0.5 / self.conductivity + self.contact_resistance,
+            // For uniform faces preserve the original scalar declaration.
+            // Otherwise the node has no common path: its authoritative actual
+            // face paths are retained in the body's `surface_resistance`.
+            resistance: if resistance.iter().all(|r| *r == resistance[0]) {
+                resistance[0]
+            } else {
+                0.0
+            },
             heat_per_step: self.heat_per_step,
         };
         ThermalWall::FiniteSolid(solid)
@@ -145,13 +199,41 @@ impl ThermalOpenField3 {
         voxels: &[ImmersedThermalVoxel3],
         controls: ImmersedVoxelControls3,
     ) -> Result<ImmersedVoxelMap3, ThermalOpenError3> {
+        self.prepare_immersed_voxels(voxels.iter().copied().map(Into::into), controls)
+    }
+
+    /// Resolve grid-aligned orthotropic solid conduction and actual convective
+    /// interfaces on the ORIGINAL stationary voxel mask.
+    ///
+    /// For an axis-normal solid face the reciprocal conductance is
+    /// `1/(0.5/k_a,axis + 0.5/k_b,axis)`. The path to the fluid uses
+    /// `0.5/k_axis + R_contact,axis`, followed ONCE by the original D3Q7 fluid
+    /// half-cell resistance. Every exposed face retains its own conductance;
+    /// one simultaneous native solve advances the voxel's single inventory.
+    ///
+    /// Same topology, budgets, periodic-face handling and atomic replacement as
+    /// the isotropic entry. Fixed diagonal tensors only; no rotated anisotropy,
+    /// material-source inference, variable heat capacity or nonlinear k(T).
+    pub fn set_immersed_orthotropic_thermal_voxels(
+        &mut self,
+        voxels: &[OrthotropicThermalVoxel3],
+        controls: ImmersedVoxelControls3,
+    ) -> Result<ImmersedVoxelMap3, ThermalOpenError3> {
+        self.prepare_immersed_voxels(voxels.iter().copied(), controls)
+    }
+
+    fn prepare_immersed_voxels(
+        &mut self,
+        voxels: impl ExactSizeIterator<Item = OrthotropicThermalVoxel3>,
+        controls: ImmersedVoxelControls3,
+    ) -> Result<ImmersedVoxelMap3, ThermalOpenError3> {
         let n = voxels.len();
         if n == 0 || n > controls.conduction.max_nodes || n > self.solid.len() {
             return Err(invalid(
                 "immersed voxel count exceeds the admitted native/node bounds",
             ));
         }
-        let record_bytes = core::mem::size_of::<ImmersedThermalVoxel3>()
+        let record_bytes = core::mem::size_of::<OrthotropicThermalVoxel3>()
             + core::mem::size_of::<usize>()
             + core::mem::size_of::<ImmersedThermalBody3<'_>>();
         let base_bytes = n
@@ -160,17 +242,17 @@ impl ThermalOpenField3 {
         if base_bytes > controls.maximum_geometry_bytes {
             return Err(invalid("immersed voxel geometry storage budget exceeded"));
         }
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(n)
+            .map_err(|_| ThermalOpenError3::Allocation)?;
         for voxel in voxels {
             if voxel.cell >= self.solid.len() || !self.solid[voxel.cell] {
                 return Err(invalid("immersed voxel must name an original solid cell"));
             }
             voxel.wall()?;
+            ordered.push(voxel);
         }
-        let mut ordered = Vec::new();
-        ordered
-            .try_reserve_exact(n)
-            .map_err(|_| ThermalOpenError3::Allocation)?;
-        ordered.extend_from_slice(voxels);
         ordered.sort_unstable_by_key(|voxel| voxel.cell);
         if ordered.windows(2).any(|pair| pair[0].cell == pair[1].cell) {
             return Err(invalid(
@@ -209,8 +291,10 @@ impl ThermalOpenField3 {
                     && next != voxel.cell
                     && let Ok(b) = ordered.binary_search_by_key(&next, |other| other.cell)
                 {
-                    let conductance =
-                        harmonic_conductance(voxel.conductivity, ordered[b].conductivity);
+                    let conductance = harmonic_conductance(
+                        voxel.conductivity[axis],
+                        ordered[b].conductivity[axis],
+                    );
                     if !conductance.is_finite() || conductance <= 0.0 {
                         return Err(invalid("immersed voxel conductance is unrepresentable"));
                     }
@@ -258,12 +342,18 @@ impl ThermalOpenField3 {
                 solid: voxel.wall()?,
             });
         }
-        self.set_immersed_thermal_network(
+        let mut prepared = self.prepare_immersed_bodies_with_surface_resistance(
             &declarations,
-            &links,
             controls.maximum_body_storage_bytes,
-            controls.conduction,
+            true,
+            |node| ordered[node].surface_resistance(),
         )?;
+        prepared.conduction = Some(super::conduction::ImmersedConduction3::try_new(
+            &prepared.bodies,
+            &links,
+            controls.conduction,
+        )?);
+        self.immersed = Some(prepared);
         Ok(ImmersedVoxelMap3 {
             cells,
             conduction_links: distinct,

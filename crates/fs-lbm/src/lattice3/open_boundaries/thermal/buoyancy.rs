@@ -495,6 +495,17 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
         self.thermal.set_immersed_thermal_voxels(voxels, controls)
     }
 
+    /// Resolve grid-aligned orthotropic solid conduction and fluid interfaces
+    /// without detaching native buoyancy or thermal history.
+    pub fn set_immersed_orthotropic_thermal_voxels(
+        &mut self,
+        voxels: &[crate::thermal::open::immersed::voxel::OrthotropicThermalVoxel3],
+        controls: crate::thermal::open::immersed::voxel::ImmersedVoxelControls3,
+    ) -> Result<crate::thermal::open::immersed::voxel::ImmersedVoxelMap3, ThermalOpenError3> {
+        self.thermal
+            .set_immersed_orthotropic_thermal_voxels(voxels, controls)
+    }
+
     /// Change the heat supplied to one whole immersed body without detaching
     /// thermal, momentum or buoyancy history.
     pub fn set_immersed_body_heat(

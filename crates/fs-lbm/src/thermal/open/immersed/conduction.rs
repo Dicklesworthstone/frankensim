@@ -108,7 +108,7 @@ impl ThermalOpenField3 {
 }
 
 impl ImmersedConduction3 {
-    fn try_new(
+    pub(super) fn try_new(
         bodies: &[Body],
         links: &[ImmersedConductionLink3],
         controls: WallConductionControls,
@@ -194,11 +194,7 @@ impl ImmersedConduction3 {
         // overflow. No singular/ill-conditioned factor is silently repaired.
         let mut maximum = buffer::<f64>(n)?;
         for (i, body) in bodies.iter().enumerate() {
-            maximum[i] = body
-                .accepted
-                .solid
-                .heat_capacity
-                .max(body.conductance * body.accepted.interface_links as f64);
+            maximum[i] = body.accepted.solid.heat_capacity.max(body.conductance);
         }
         for edge in &edges {
             maximum[edge.a] = maximum[edge.a].max(edge.conductance);
@@ -207,7 +203,7 @@ impl ImmersedConduction3 {
         let mut diagonal = buffer::<Sum>(n)?;
         for (i, body) in bodies.iter().enumerate() {
             diagonal[i].add(body.accepted.solid.heat_capacity / maximum[i]);
-            diagonal[i].add((body.conductance * body.accepted.interface_links as f64) / maximum[i]);
+            diagonal[i].add(body.conductance / maximum[i]);
         }
         for edge in &edges {
             diagonal[edge.a].add(edge.conductance / maximum[edge.a]);
@@ -273,10 +269,10 @@ impl ImmersedConduction3 {
             body.conducted
                 .add(self.scale[i] * body.accepted.solid.heat_per_step);
             if body.accepted.interface_links != 0 {
-                let k = body.conductance * body.accepted.interface_links as f64;
+                let k = body.conductance;
                 body.conducted.add(difference(
                     k * self.scale[i],
-                    body.mean_trace.total(),
+                    body.mean_fluid_trace(),
                     body.accepted.solid.temperature,
                 ));
             }

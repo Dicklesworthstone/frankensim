@@ -1,6 +1,8 @@
 use super::*;
 use crate::thermal::open::{ThermalOpenBalance3, ThermalOpenBoundaries3, ThermalOpenLimits3};
 
+mod orthotropic;
+
 fn voxel(cell: usize, temperature: f64, capacity: f64, conductivity: f64) -> ImmersedThermalVoxel3 {
     ImmersedThermalVoxel3 {
         cell,
