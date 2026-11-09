@@ -14,6 +14,12 @@ use fs_bem::panel2d::solve;
 use fs_bem::wake2d::{WakeSim, WakeVortex};
 use fs_vpm::{VortexParticle, advect};
 
+/// Physical prescribed heave/pitch through the native coupled BEM wake.
+pub mod gait;
+pub use gait::{
+    GaitScreenControls, GaitScreenReport, GaitTransport, SectionGait, screen_section_gait,
+};
+
 /// Screen-stage panel count (smoke fixture).
 pub const PANELS: usize = 64;
 /// Effective aspect ratio of the smoke wing (drag proxy).

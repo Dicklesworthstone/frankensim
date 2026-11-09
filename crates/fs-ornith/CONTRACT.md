@@ -81,6 +81,38 @@ at every joint.
    no weight to zero-circulation tracers; an empty/zero-strength wake gives zero.
    This measures rearrangement, not centroid drift or an aircraft thrust force.
 
+## Physical sectional gait screen
+
+`screen::screen_section_gait` is an explicit physical alternative to the legacy
+circulation-gain `flap_metric`. `SectionGait` specifies heave/chord, pitch/radians,
+reduced frequency `k=omega*c/(2*U_ref)`, independent heave/pitch phases and a
+material chordwise pivot. The candidate supplies section thickness and mean
+incidence; its legacy gain genes and inlet proxy are not reinterpreted. The
+harmonic pose has analytic leading-edge velocity and angular rate, and the
+original moving-body BEM owner applies both to boundary/Kutta/Kelvin closure and
+wake advection in uniform world flow `[1,0]`. Every stage shares that owner's
+retained factorization; no previously shed circulation is rescaled.
+
+`GaitScreenControls` selects the original fixed or adaptive transport, a finite
+number of shedding intervals and a whole-screen coupled-solve cap that includes
+rejected adaptive work. Native panel/core/contact admissions remain. Cancellation
+reaches native stages and screen reductions; failures return no partial report.
+The report retains the actual `WakeSim`, accepted panel circulation/history and
+world wake export. Reference scales stay `c`, `U_ref`, `c/U_ref`, `U_ref*c`.
+
+The reported circulation-weighted streamwise speed is
+`sum |Gamma|*|Delta x_world| / sum |Gamma|*Delta t` over material packets present
+at both ends of each accepted interval. Newborn packets join the metric on the
+following interval; the consumer does not duplicate the native release model.
+It includes ambient convection, is zero without represented circulation-time,
+and does not imply thrust, signed momentum flux, efficiency or unsteady loads.
+This remains a 2-D inviscid attached-flow screen; transport refinement does not
+resolve panel/core/shedding error, 3-D flapping, separation or actuator work.
+`examples/prescribed_gait.rs` runs a complete candidate path. Focused regressions
+check analytic pivot/velocity kinematics, steady native equivalence, an independent
+transport-metric reconstruction, changed real circulation/wake, untouched legacy
+genes, fixed/adaptive convergence, whole-run work admission and cancellation.
+
 ## Error model
 
 Fixture-scale programmer errors still panic (`expect`/`assert`). The e-raced
