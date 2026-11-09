@@ -1470,6 +1470,24 @@ A final time remainder below the minimum step may be omitted only when its
 whole-motion estimate fits both phase-stock tolerances and the absolute extent
 tolerance. Its normalized bound remains in the reported maximum accepted error.
 
+Strong precipitation solves the implicit relation in the logarithm of the
+remaining dissolved formula stock when an extent subtraction would lose that
+stock. The residual is `ln(Omega(u))-ln(1+(u_start-u)/(h*K_A))`; both terms
+are evaluated without overflowing the rate product or saturation ratio. The
+original salt stoichiometry and terminal-anion charge balance, or the original
+hydrolysis charge balance, supply its monotone lower slope. Aqueous pH spread
+and floating-point logarithm margins contribute to numerical root-location
+estimates, with both relative trace accuracy and the caller's extent/amount
+tolerances enforced. These are numerical estimates, not interval certificates.
+
+The positive remaining donor is retained directly alongside the solid stock.
+A state close to saturation may remain unchanged when either its estimated
+maximum possible later relaxation or the motion over the whole remaining
+window fits the same tolerances. The time-limited allowance uses the remaining
+window rather than accumulating independently omitted small stages. Root and
+stationary allowances contribute to the existing temporal error comparison,
+so a small positive dissolved trace remains usable on subsequent advances.
+
 The `mineral_precipitation --kinetics` mode runs the same original USGS
 iron/goethite source selection with explicit initial dissolved/solid stocks and
 a separately supplied surface rate. Its equilibrium comparison is diagnostic;
