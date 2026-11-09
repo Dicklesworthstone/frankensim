@@ -277,6 +277,30 @@ its constant-enthalpy temperature treatment is documented in
 For ionic solids, IUPAC defines the solubility product in terms of ion
 activities: <https://goldbook.iupac.org/terms/view/S05742>.
 
+### Chemical work shared by phase exchange and molecular transport
+
+The same `IdealSolubilityV1` exposes the aqueous-minus-solid chemical potential
+`RT ln(c/c_sat)` and the solid-relative free energy
+`RT n_aqueous [ln(n_aqueous/(V*c_sat))-1]`. The absent-aqueous chemical potential
+is explicitly `None` (the negative-infinite ideal limit); the free energy has
+its finite zero-inventory limit. No concentration floor or fictitious nuclei
+are introduced. Fixed-volume changes retain the saturation reference term:
+dissolution changes aqueous moles, so cancelling that term as if only dissolved
+inventory were conserved gives the wrong energy for phase-bearing transport.
+
+`solid_relative_free_energy_change_j` integrates the chemical potential using
+relative logarithms and a compensated midpoint series for nearby inventories.
+It avoids subtracting large absolute energies, retains the quadratic minimum
+at saturation, and performs bounded allocation-free work. The common solid
+datum cancels only for a closed, isothermal system with identical original pair
+laws and separately conserved dissolved-plus-solid totals. These functions do
+not supply absolute Gibbs energy, open-system chemical reference fluxes,
+mechanical volume work, nonideal activities, or another heat-of-solution source.
+G0/G1 tests check the potential derivative, phase-equilibrium minimum, tiny
+saturation departures, fixed-area/particle dissipation, Gibbs--Helmholtz
+consistency, extensive scaling and domain refusals. No interval enclosure or
+universal relative floating-point error bound is claimed.
+
 ## Finite dissolution and precipitation in one thermal bath
 
 `solution::solubility::caloric::SolubilityCaloricModelV1` closes an isobaric

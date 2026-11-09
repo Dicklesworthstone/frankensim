@@ -25,10 +25,11 @@
 
 pub mod caloric;
 
-/// Fixed-area, finite-rate dissolution and explicitly seeded precipitation.
+/// Finite-rate dissolution and precipitation with fixed or evolving particle area.
 pub mod kinetics;
 
 mod heat_capacity;
+mod potential;
 
 use crate::solution::caloric::MolarHeatCapacityCurveV1;
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
