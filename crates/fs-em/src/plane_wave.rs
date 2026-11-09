@@ -572,7 +572,69 @@ fn interface_response(
     polarization: Polarization,
 ) -> Result<InterfaceReflection, ReflectionError> {
     let normal = medium.normal(cosine)?;
-    interface_response_from_normal(medium, wave_number, cosine, polarization, normal)
+    let mut response =
+        interface_response_from_normal(medium, wave_number, cosine, polarization, normal)?;
+    if response.reflected_power_fraction < 64.0 * f64::EPSILON {
+        // Near Brewster or impedance matching, subtracting the rounded
+        // square root from the other boundary coefficient can erase a finite
+        // reflected field, including its sign/phase. Rationalize with the
+        // original constitutive and angle data only in this cancellation
+        // neighbourhood. The ordinary reflection path is unchanged.
+        let reflected = near_zero_reflection(medium, cosine, polarization, normal)?;
+        response.reflected_tangential_e = reflected;
+        response.reflected_power_fraction = reflected.norm_sq();
+    }
+    Ok(response)
+}
+
+fn near_zero_reflection(
+    medium: WaveMedium,
+    cosine: f64,
+    polarization: Polarization,
+    normal: C64,
+) -> Result<C64, ReflectionError> {
+    if (medium.epsilon_ratio == C64::ONE && medium.mu_ratio == 1.0)
+        || (cosine == 1.0 && medium.epsilon_ratio == C64::from_re(medium.mu_ratio))
+    {
+        // Identical media are transparent at every angle. Equal impedances
+        // also match at normal incidence even when refractive indices differ.
+        return Ok(C64::ZERO);
+    }
+    let e = Dd::from_f64(medium.epsilon_ratio.re);
+    let f = Dd::from_f64(medium.epsilon_ratio.im);
+    let m = Dd::from_f64(medium.mu_ratio);
+    let c = Dd::from_f64(cosine);
+    let contrast = e * m - Dd::ONE;
+    // r=(a²-b²)/(a+b)², with the same tangential-E convention as the
+    // native Fresnel pair. These factorizations also keep identical media
+    // exactly reflection-free at arbitrarily small incidence cosines.
+    let (real, imaginary, a, b) = match polarization {
+        Polarization::Te => (
+            ((m - Dd::ONE) * c) * ((m + Dd::ONE) * c) - contrast,
+            -(f * m),
+            C64::from_re(medium.mu_ratio * cosine),
+            normal,
+        ),
+        Polarization::Tm => (
+            contrast - ((e - Dd::ONE) * c) * ((e + Dd::ONE) * c) + (f * c) * (f * c),
+            f * m - ((e * c) * (f * c)) * Dd::from_f64(2.0),
+            normal,
+            medium.epsilon_ratio.scale(cosine),
+        ),
+    };
+    let scale = Dd::from_f64(a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs()));
+    let numerator = C64::new(
+        ((real / scale) / scale).to_f64(),
+        ((imaginary / scale) / scale).to_f64(),
+    );
+    let (_, _, denominator, _) = normalized_interface_pair(a, b)?;
+    let reflected = (numerator / denominator) / denominator;
+    if !finite(reflected) {
+        return Err(ReflectionError::Invalid(
+            "near-zero reflected field is unrepresentable",
+        ));
+    }
+    Ok(reflected)
 }
 
 // Also used by a film expressed in a real numerical reference port. Its
@@ -627,3 +689,7 @@ fn interface_response_from_normal(
         transmitted_permittivity_f_m: medium.epsilon_f_m,
     })
 }
+
+#[cfg(test)]
+#[path = "plane_wave/reflection_tests.rs"]
+mod reflection_tests;

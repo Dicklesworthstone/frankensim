@@ -398,7 +398,18 @@ impl<'a> PlanarDielectricLayers<'a> {
                 }
             }
         }
-        let reflected = (states[0][0] - states[0][1]) / (states[0][0] + states[0][1]);
+        let reflected = if self
+            .layers
+            .iter()
+            .all(|layer| layer.source.thickness_m == 0.0)
+        {
+            // An empty/zero-thickness coating is the original interface.
+            // Reconstructing its reflection from rounded E/H would erase
+            // the compensated weak Brewster channel retained by that owner.
+            exit.reflected_tangential_e
+        } else {
+            (states[0][0] - states[0][1]) / (states[0][0] + states[0][1])
+        };
         let mut incoming = C64::ONE;
         let mut absorbed = 0.0;
         for i in 0..n {

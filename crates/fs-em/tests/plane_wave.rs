@@ -207,6 +207,40 @@ fn brewster_zero_and_lossless_poynting_flux_are_polarization_specific() {
 }
 
 #[test]
+fn absent_films_preserve_the_original_weak_brewster_reflection() {
+    use fs_em::plane_wave::layers::{DielectricLayer, PlanarDielectricLayers};
+    let incident = material(1.0, 1.0);
+    let glass = material(2.25, 1.0);
+    let interface =
+        PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&glass))
+            .unwrap();
+    let zero = [DielectricLayer {
+        response: DielectricResponse::Lossless(&glass),
+        thickness_m: 0.0,
+    }];
+    for cosine in [0.554_700_196_225_229, 0.554_700_196_225_229_1] {
+        let bare = interface.response(1.0, cosine, Polarization::Tm).unwrap();
+        assert_ne!(bare.reflected_tangential_e, C64::ZERO);
+        for films in [&[][..], &zero[..]] {
+            let stack = PlanarDielectricLayers::try_new(
+                &incident,
+                DielectricResponse::Lossless(&glass),
+                1.0,
+                films,
+            )
+            .unwrap();
+            let result = stack.response(cosine, Polarization::Tm).unwrap();
+            assert_eq!(result.reflected_tangential_e, bare.reflected_tangential_e);
+            assert_eq!(
+                result.reflected_power_fraction,
+                bare.reflected_power_fraction
+            );
+            assert_eq!(result.absorbed_power_fraction, 0.0);
+        }
+    }
+}
+
+#[test]
 fn total_internal_reflection_keeps_phase_and_a_decaying_evanescent_field() {
     let incident = material(4.0 * E, M);
     let transmitted = material(E, M);
