@@ -13,7 +13,7 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
 
 mod mixed;
-pub use mixed::MaterialNavierStokesNewtonStep;
+pub use mixed::{MaterialNavierStokesNewtonStep, MaterialNavierStokesSdirk2Step};
 #[path = "newton/sdirk2.rs"]
 mod sdirk2;
 pub use sdirk2::MaterialFluxSdirk2Step;

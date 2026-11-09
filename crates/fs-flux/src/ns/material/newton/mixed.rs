@@ -8,7 +8,8 @@ use crate::material::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, with_kinematic_boundaries,
 };
 use crate::ns::boundary::NavierStokesStep;
-use crate::ns::linearization::FluxViscosityTangent;
+use crate::ns::linearization::{FluxViscosityTangent, ViscosityLaw};
+use crate::ns::newton::{FluxSdirk2Error, FluxSdirk2Stage};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
 
@@ -30,6 +31,14 @@ impl<G> MaterialNavierStokesNewtonStep<G> {
     pub fn viscosity_derivatives_pa_s2(&self) -> &[f64] {
         &self.derivatives_pa_s2
     }
+}
+
+/// Accepted mixed-boundary SDIRK2 stages with their original material sources.
+pub struct MaterialNavierStokesSdirk2Step<G> {
+    /// Internal-stage flow, physical reactions and instantaneous molecular heat.
+    pub first_stage: MaterialNavierStokesNewtonStep<G>,
+    /// Stiffly accurate endpoint, including its own original material sources.
+    pub endpoint: MaterialNavierStokesNewtonStep<G>,
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
@@ -67,6 +76,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             force_density,
             boundaries,
             initial_velocity,
+            None,
             None,
             None,
             controls,
@@ -149,9 +159,101 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             previous_velocity,
             Some(timestep_s),
             older_history,
+            None,
             controls,
             resolve,
         )
+    }
+
+    /// Advance mixed-boundary Navier--Stokes with the original two-stage,
+    /// second-order, stiffly accurate SDIRK2 method and constitutive Newton
+    /// owner. No older interval or first-order startup step is required.
+    ///
+    /// The first boundary slice belongs to `t_n + gamma * timestep_s`, the
+    /// second to `t_n + timestep_s`, with `gamma = 1 - 1/sqrt(2)`. Each may
+    /// supply its own physical traction, reservoir velocity, wall velocity and
+    /// Navier resistance. Force and material callbacks receive the same stage.
+    /// All external fields must remain pure and fixed within each Newton solve.
+    /// Forces are N/m³, traction Pa, velocity m/s, resistance Pa s/m, time s,
+    /// and the viscosity derivative Pa s².
+    ///
+    /// Both stages use the same reference density, original material cache,
+    /// analytic constitutive/advection Jacobian, bounded line search and mixed
+    /// reaction owner. Finite stage mass anchors all-open components. Stage two
+    /// starts from the actual first-stage velocity; the SDIRK mass combination
+    /// enters only its inertial load and is never a constitutive initial state.
+    ///
+    /// Each accepted stage retains its own physical pressure, source owners,
+    /// tangents, reactions and `mu*gamma²` heating. Bulk molecular heat, Navier
+    /// loss, kinetic transport and upwind damping remain separate endpoint
+    /// rates. This adds no caloric evolution or integrated energy balance.
+    /// Temperature/composition may differ between stages but density remains
+    /// fixed. Work limits apply per stage; temporal order requires smooth stage
+    /// data and resolved spatial/nonlinear errors. Linear L-stability is not a
+    /// nonlinear positivity or passivity theorem.
+    ///
+    /// # Errors
+    /// Invalid history/timestep refuses before any stage callback. Errors retain
+    /// the failing stage and original material/numerical cause, including source
+    /// loss during a trial or final reaction assembly. A second-stage refusal
+    /// publishes no partial pair; caller history and accepted sources are never
+    /// modified. There is no hidden timestep clipping or fallback boundary law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sdirk2_navier_stokes_mixed_rheology_newton_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn(FluxSdirk2Stage, [f64; 2]) -> [f64; 2],
+        first_stage_boundaries: &[MaterialNavierStokesBoundary<'_>],
+        endpoint_boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        mut resolve: impl FnMut(
+            FluxSdirk2Stage,
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialNavierStokesSdirk2Step<G>, FluxSdirk2Error<MaterialFluxError>> {
+        let stage_dt = self
+            .system
+            .sdirk2_stage_timestep(previous_velocity, timestep_s)
+            .map_err(|error| FluxSdirk2Error {
+                stage: None,
+                error: MaterialFluxError::Newton(error),
+            })?;
+        let mut solve = |stage, initial: &[f64], history: &[f64]| {
+            let boundaries = match stage {
+                FluxSdirk2Stage::First => first_stage_boundaries,
+                FluxSdirk2Stage::Endpoint => endpoint_boundaries,
+            };
+            self.mixed_rheology_newton(
+                &|point| force_density(stage, point),
+                boundaries,
+                initial,
+                None,
+                None,
+                Some((stage_dt, history)),
+                controls,
+                |point, reference| resolve(stage, point, reference),
+            )
+            .map_err(|error| FluxSdirk2Error {
+                stage: Some(stage),
+                error,
+            })
+        };
+        let first_stage = solve(FluxSdirk2Stage::First, previous_velocity, previous_velocity)?;
+        let first_velocity = &first_stage.flow.step.solution.discrete().x[..self.system.n_u];
+        let history = self
+            .system
+            .sdirk2_mass_history(previous_velocity, first_velocity)
+            .map_err(|error| FluxSdirk2Error {
+                stage: Some(FluxSdirk2Stage::Endpoint),
+                error: MaterialFluxError::Newton(error),
+            })?;
+        let endpoint = solve(FluxSdirk2Stage::Endpoint, first_velocity, &history)?;
+        Ok(MaterialNavierStokesSdirk2Step {
+            first_stage,
+            endpoint,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -162,6 +264,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         initial_velocity: &[f64],
         timestep_s: Option<f64>,
         older_history: Option<(&[f64], f64)>,
+        stage_mass: Option<(f64, &[f64])>,
         controls: FluxNewtonControls,
         mut resolve: impl FnMut(
             MaterialFluxRheologyPoint,
@@ -193,7 +296,19 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 let physical = force_density(point);
                 [physical[0] / density, physical[1] / density]
             };
-            if let Some(timestep) = timestep_s {
+            if let Some((stage_timestep, history)) = stage_mass {
+                self.system.mixed_constitutive_newton_endpoint(
+                    self.params,
+                    ViscosityLaw::Rate(&tangent),
+                    &acceleration,
+                    primitive,
+                    initial_velocity,
+                    stage_timestep.recip(),
+                    Some(history),
+                    controls,
+                    &|| field.is_valid(),
+                )
+            } else if let Some(timestep) = timestep_s {
                 self.system
                     .bdf2_navier_stokes_mixed_rheology_newton_variable_step_checked(
                         self.params,

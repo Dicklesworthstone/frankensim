@@ -2619,6 +2619,52 @@ and these regressions remain **unexecuted** because the current workspace lacks
 its constellation dependencies and persistent storage capacity; parsing and
 independent manufactured algebra are not native numerical validation.
 
+## Original material SDIRK2 with mixed transient boundaries
+
+`MaterialFluxSystem::sdirk2_navier_stokes_mixed_rheology_newton_step` extends
+the source-owned mixed Newton flow to the existing two-stage, second-order,
+stiffly accurate SDIRK2 method, with `gamma = 1 - 1/sqrt(2)`. It needs only
+the actual previous velocity and current interval. The first stage and endpoint
+take separate borrowed boundary slices, allowing original total traction,
+reservoir velocity, normal wall velocity and finite Navier resistance to vary
+at their actual stage times. Force and material callbacks receive that same
+stage. No alternate stress, convection, boundary or nonlinear solver is added.
+
+The shared time owner validates history and representable stage mass before
+callbacks. The existing sparse mixed Newton owner evaluates stress, analytic
+rate derivatives, convection and reactions with the same immutable reference
+density. Its accepted first-stage velocity initializes the endpoint solve;
+the SDIRK history combination enters only the inertial load. Each stage has
+its own constitutive cache and retains its exact original sources and tangents.
+Finite stage mass anchors all-open components without artificial velocity pins.
+
+`MaterialNavierStokesSdirk2Step` returns both accepted stages only after the
+complete step succeeds. `FluxSdirk2Error` preserves the failing stage and
+original material/numerical error. Source refusals remain terminal during
+Newton trials and final reaction assembly; a failed endpoint changes no caller
+history and publishes no partial pair. Newton work limits apply separately
+to both stages. There is no hidden clipping, substepping or boundary fallback.
+
+Physical pressure, bulk molecular heat, Navier loss, advected kinetic power and
+upwind dissipation retain their existing separate owners. These are stage
+rates, not integrated heat deposition or a full discrete energy balance.
+Temperature/composition are fixed external fields within each stage and may
+differ between stages; density remains fixed. Smooth temporal data and resolved
+spatial/nonlinear errors are required for second order. Linear L-stability
+does not establish nonlinear positivity, passivity or global flow uniqueness.
+The existing synchronous solver and cancellation limits remain unchanged.
+
+Three regressions in `material_flow/newton/mixed_sdirk2.rs` cover a layered
+original thermal Carreau flow with live transverse convection, stage-specific
+slip/traction/reservoir data, pressure/density/heat and source identity; all-open
+cubic-in-time translation with second-order refinement; and terminal source,
+input/boundary refusal and clean retry. Independent scalar quadrature gives
+translation errors 2.426406871e-4, 6.066017178e-5 and 1.516504294e-5 for 4, 8
+and 16 intervals. All changed Rust files pass pinned rustfmt parsing. Native
+compilation and these new regressions remain **unexecuted** in the current
+workspace because constellation dependencies and persistent storage capacity
+are unavailable; the scalar oracle is not native PDE validation.
+
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 
 `FluxSystem::solve_stokes_mixed_rheology` closes steady Stokes viscosity on the
