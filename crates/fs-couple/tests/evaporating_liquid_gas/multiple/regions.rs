@@ -1,5 +1,8 @@
 //! Distinct finite gas regions retain their own humidity and caloric accounts.
 use super::*;
+
+#[path = "regions/pressure.rs"]
+mod pressure;
 use fs_couple::liquid_gas::evaporation::multiple::{
     LiquidGasHeatSurface,
     regions::{

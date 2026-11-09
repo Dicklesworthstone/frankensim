@@ -10152,3 +10152,33 @@ energy closure, and atomic caloric, history, stale-replay and final-callback
 cancellation refusal with deterministic retry. This remains a held-pose,
 prescribed-normal, frozen-source composition: mechanical duration does not
 advance the thermal clock or infer intervening transport or temperature feedback.
+
+
+## Regional evaporation and original native gas-link pressure
+
+`liquid_gas::evaporation::multiple::regions::pressure` adds regional pressure
+loading after the original phase and optional reciprocal sensible-heat solves.
+Every applied pressure comes from that finite parcel's actual post-exchange
+EOS state. All regional sources still enter one native mass/enthalpy transaction
+and exactly one original native flow step.
+
+`RegionalGasPressure` supplies an explicit integer gas-coordinate membership
+map and the original maximum lattice-density excursion. Every native D3Q19
+gas-facing link must be covered, including diagonals and interfaces without
+phase patches. Each authored phase face must agree with that map. Missing or
+contradictory membership refuses the private candidate; there is no ambient
+pressure fallback. The original fixed pressure reference, stationary solid
+geometry, gas-volume, source, native conservation and cancellation gates remain
+active. Receipts retain actual initial/applied pressures and native link counts,
+which are streaming characteristics rather than interfacial areas.
+
+The unpressurized APIs retain their original flow route. Regional pressure is
+mechanical boundary loading with prescribed membership and fixed external gas
+volumes. It does not infer gas momentum, moving gas-volume work, pressure heat,
+topology remapping or closure of total mechanical plus thermal energy. Phase
+and sensible heat enter the original caloric account once.
+
+Focused regressions cover local pressure response, post-phase/post-heat EOS
+loading, unpatched interfaces, complete native link coverage and atomic refusal.
+Runtime execution remains unavailable under the session's dependency/resource
+block and subsequent loss of its execution workspace.

@@ -6,6 +6,9 @@
 //! by one batched mass/enthalpy transaction and one native physical flow step.
 //! No intermediate liquid endpoint or averaged atmosphere is introduced.
 
+/// Regional post-exchange EOS pressure on the original native gas links.
+pub mod pressure;
+
 use super::{
     BTreeMap, CancelGate, ClosedGasParcel, DistributedLiquidGasSolve, Error,
     FreeSurfaceEnthalpyReport, FreeSurfaceMassExchangeReport, GasEvaporationError,
@@ -55,6 +58,9 @@ pub struct RegionalLiquidGasReport {
     pub regions: BTreeMap<u64, RegionalLiquidGasRegionReport>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
     pub flow: FreeSurfaceEnthalpyReport,
+    /// Actual regional EOS loads sampled by the original native flow owner.
+    /// Absent on the original unpressurized entry points.
+    pub pressure: Option<pressure::RegionalGasPressureReport>,
     pub native_liquid_enthalpy_change_j: f64,
     pub native_phase_caloric_defect_j: f64,
     pub mass_residual_kg: f64,
@@ -132,6 +138,7 @@ pub fn advance_liquid_regions_with_gas<'s, 'm, 'catalog>(
             .map(|row| (row.region_id, row.surface, None)),
         controls,
         None,
+        None,
         gate,
     )
 }
@@ -166,6 +173,7 @@ pub fn advance_liquid_regions_with_gas_and_heat<'s, 'm, 'catalog>(
         }),
         controls,
         Some(heat_controls),
+        None,
         gate,
     )
 }
@@ -184,9 +192,13 @@ fn advance_regions<'s, 'm, 'catalog, 'surface>(
     >,
     controls: DistributedLiquidGasSolve,
     heat_controls: Option<GasLiquidChamberHeatSolve>,
+    pressure_load: Option<pressure::RegionalGasPressure<'_>>,
     gate: &CancelGate,
 ) -> Result<RegionalLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
     poll(gate)?;
+    if let Some(load) = pressure_load {
+        pressure::admit(liquid, parcels, load, gate)?;
+    }
     if surfaces.len() == 0
         || surfaces.len() > controls.chamber.maximum_surfaces
         || [controls.mass_tolerance_kg, controls.energy_tolerance_j]
@@ -207,6 +219,9 @@ fn advance_regions<'s, 'm, 'catalog, 'surface>(
             return Err(Error::Invalid(
                 "native face names an absent finite gas region",
             ));
+        }
+        if let Some(load) = pressure_load {
+            pressure::admit_surface(load, id, &surface)?;
         }
         let common = *binding.get_or_insert(surface.binding);
         if surface.binding != common {
@@ -333,7 +348,13 @@ fn advance_regions<'s, 'm, 'catalog, 'surface>(
     }
 
     poll(gate)?;
-    let flow = next_liquid.step(gate)?;
+    let (flow, pressure) = if let Some(load) = pressure_load {
+        let (flow, report) =
+            pressure::advance_flow(&mut next_liquid, parcels, &next_parcels, load, gate)?;
+        (flow, Some(report))
+    } else {
+        (next_liquid.step(gate)?, None)
+    };
     let flow_mass = flow.mass_after_kg - flow.mass_before_kg;
     let native_mass = mass_exchange.mass_change_kg + flow_mass;
     let mass_residual_kg = native_mass + gas_mass_change.value();
@@ -370,6 +391,7 @@ fn advance_regions<'s, 'm, 'catalog, 'surface>(
             regions: reports,
             mass_exchange,
             flow,
+            pressure,
             native_liquid_enthalpy_change_j,
             native_phase_caloric_defect_j,
             mass_residual_kg,
