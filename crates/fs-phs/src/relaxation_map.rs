@@ -5,6 +5,8 @@ use super::{PhsError, PortHamiltonian};
 use fs_math::det;
 use std::rc::Rc;
 
+pub(super) mod constitutive;
+
 /// One scalar strain and its exact derivatives on the original state prefix.
 /// The map is immutable geometry, never an evolving constitutive history.
 /// Compatible units require `stiffness * strain^2` to be energy. Implementations
@@ -16,9 +18,15 @@ pub trait RelaxationStrainMap: core::fmt::Debug {
     fn strain(&self, state: &[f64]) -> f64;
     fn gradient(&self, state: &[f64], output: &mut [f64]);
     fn hessian_vector(&self, state: &[f64], direction: &[f64], output: &mut [f64]);
-    /// Explicit declaration of an at-most-quadratic STRAIN map. This does not
+    /// Explicit declaration of a globally at-most-quadratic STRAIN map. This does not
     /// make its Maxwell energy quadratic in the complete state. It permits a
-    /// cancellation-stable exact Gonzalez remainder using the same derivatives.
+    /// cancellation-stable exact remainder using the same derivatives. Within
+    /// the native dense state ceiling, an available finite symmetric derivative
+    /// image at the coordinate origin is cached for a componentwise Maxwell discrete gradient,
+    /// its analytic endpoint tangent, and allocation-free derivative evaluation.
+    /// The original strain callback still owns stored strain and domain checks.
+    /// An unavailable image retains the original callback path; declaring a
+    /// polynomial does not assert that zero lies in its physical source domain.
     fn is_quadratic_strain(&self) -> bool { false }
     /// Optional exact linear polynomial row of a zero-constant quadratic
     /// strain: epsilon(x) = b.x + quadratic(x), with epsilon(0)=0.
@@ -159,6 +167,19 @@ impl super::ContinuousStorageTangent for super::RelaxationStorage {
         for (arm, coupling) in self.couplings.iter().enumerate() {
             let memory = self.base_dim + arm;
             let mut change = -direction[memory];
+            if let Some(image) = &self.polynomial[arm] {
+                let x = &state[..self.base_dim];
+                let v = &direction[..self.base_dim];
+                let effort = coupling.strain(x) - state[memory];
+                for i in 0..self.base_dim {
+                    change += image.gradient(x, i) * v[i];
+                }
+                for i in 0..self.base_dim {
+                    out[i] += image.gradient(x, i) * change + effort * image.curvature(v, i);
+                }
+                out[memory] = -change;
+                continue;
+            }
             match coupling {
                 RelaxationCoupling::Linear(row) => {
                     for (&weight, &v) in row.iter().zip(&direction[..self.base_dim]) {
@@ -216,8 +237,12 @@ impl PortHamiltonian {
     /// `dt*e_z^2/tau`. The exponential owner instead integrates the SAME positive
     /// resistance along its accepted held-remainder trajectory. Only its linear
     /// propagation is exact; nonlinear accuracy still needs time refinement.
-    /// Mapped evaluation currently uses bounded temporary derivative vectors;
-    /// this reference nonlinear path does not claim allocation-free execution.
+    /// Declared globally quadratic strain maps within the native dense state
+    /// ceiling cache their analytic derivative image. Those native callbacks
+    /// allocate no warm derivative/remainder scratch, and the componentwise
+    /// discrete gradient preserves the base kinetic law and each branch's work.
+    /// General/larger maps retain the original temporary-vector fallback.
+    /// Allocation-free execution also requires allocation-free source callbacks.
     /// If the original storage declares a continuous tangent, the complete
     /// relaxed storage retains it. Its exact action includes the geometric
     /// curvature under stored stress and every mechanical/memory cross term.

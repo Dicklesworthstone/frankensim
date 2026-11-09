@@ -813,11 +813,16 @@ struct RelaxationStorage {
     base: Box<dyn Storage>,
     base_dim: usize,
     couplings: Vec<RelaxationCoupling>,
+    polynomial: Vec<Option<relaxation_map::constitutive::QuadraticStrainImage>>,
 }
 
 impl Storage for RelaxationStorage {
     fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
         self.base.continuous_tangent().map(|_| self as &dyn ContinuousStorageTangent)
+    }
+
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        self.has_constitutive_rule().then_some(self)
     }
 
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
@@ -833,6 +838,14 @@ impl Storage for RelaxationStorage {
         // erase the base's small nonlinear restoring force or energy change.
         // The second factor retains rounding of the represented midpoint.
         for (arm, coupling) in self.couplings.iter().enumerate() {
+            if let Some(image) = &self.polynomial[arm] {
+                let z = self.base_dim + arm;
+                remainder += image.remainder(
+                    &a[..self.base_dim], &b[..self.base_dim], &mid[..self.base_dim],
+                    a[z], b[z], mid[z], coupling.strain(&mid[..self.base_dim]),
+                );
+                continue;
+            }
             let RelaxationCoupling::Linear(row) = coupling else {
                 let z=self.base_dim+arm;
                 remainder+=coupling.mapped_remainder(&a[..self.base_dim],&b[..self.base_dim],
@@ -927,7 +940,13 @@ impl Storage for RelaxationStorage {
         for (k, coupling) in self.couplings.iter().enumerate() {
             let strain = coupling.strain(&x[..self.base_dim]);
             let effort = strain - x[self.base_dim + k];
-            coupling.add_gradient(&x[..self.base_dim], effort, &mut out[..self.base_dim]);
+            if let Some(image) = &self.polynomial[k] {
+                for (i, value) in out[..self.base_dim].iter_mut().enumerate() {
+                    *value += image.gradient(&x[..self.base_dim], i) * effort;
+                }
+            } else {
+                coupling.add_gradient(&x[..self.base_dim], effort, &mut out[..self.base_dim]);
+            }
             out[self.base_dim + k] = -effort;
         }
     }
@@ -998,6 +1017,14 @@ impl PortHamiltonian {
     fn with_relaxation_couplings(self, couplings: Vec<RelaxationCoupling>, rates: Vec<f64>)
         -> Result<Self, PhsError>
     {
+        // Cache only explicitly declared global quadratic strain derivatives.
+        // Unsupported larger/general maps retain their original callback path.
+        let polynomial = couplings.iter().map(|coupling| match coupling {
+            RelaxationCoupling::Mapped { strain, scale } => {
+                relaxation_map::constitutive::QuadraticStrainImage::prepare(strain.as_ref(), *scale)
+            }
+            RelaxationCoupling::Linear(_) => None,
+        }).collect();
         let error = || PhsError::Dimension { what: "relaxation branch state dimensions" };
         let dim = self.n.checked_add(couplings.len()).ok_or_else(error)?;
         let square = dim.checked_mul(dim).ok_or_else(error)?;
@@ -1028,6 +1055,7 @@ impl PortHamiltonian {
             base: self.storage,
             base_dim: self.n,
             couplings,
+            polynomial,
         };
         let mut system = Self::new(dim, self.m, j, r, g, Box::new(storage))?;
         system.resistance_witness = resistance_witness;
@@ -6314,4 +6342,5 @@ mod refusal_labels {
         assert!(super::modal_bank(&[1.0], &[0.0], &[1.0]).is_ok());
     }
 }
+
 

@@ -4330,3 +4330,45 @@ force/work; the three existing mapped exponential groups; and original
 linear-Q bit/energy/force parity. The actual fs-math, fs-la and pHS numerical
 owners ran under pinned nightly-2026-07-06, without a substitute solver.
 The shared physical support host was not part of that native closure.
+
+### Componentwise nonlinear Maxwell work and coherent material-memory forcing
+
+`RelaxationStorage` supplies a source-owned symmetric discrete-gradient rule
+for linear arms and admitted, explicitly globally quadratic strain maps. For
+each original arm `e=sqrt(k)*epsilon(x)-z`, the rule adds
+`mean(e)*mean(grad(sqrt(k)*epsilon))` to the base effort and `-mean(e)` to its
+memory effort. It contracts to the same original branch-energy change. The
+base component rule remains intact, so geometric material work does not alter
+an independent kinetic effort through a global correction. Its analytic
+endpoint action retains prestress curvature and mechanical/history cross terms
+when the base action is available. Both linear-inside-mapped and
+mapped-inside-linear nesting retain that capability.
+
+Cold preparation may materialize the original analytic gradient/Hessian image
+only from the map's explicit globally quadratic declaration, with at most 256
+base coordinates and a complete finite symmetric image. An unavailable image,
+including an origin outside the source's physical domain, declines the native
+cache/rule and preserves the original material callbacks and fallback. Cached
+mapped gradients, continuous tangent actions, midpoint remainders and component
+actions use bounded scalar contractions without warm scratch allocation; base
+and user strain callbacks retain their own allocation obligations. Original
+strain evaluation, stored energy, memory state, ports, resistance and the
+existing nonexact quadratic split remain authoritative. No polynomial
+declaration is inferred from samples. Quadratic strain does not make its
+Maxwell energy quadratic or establish convexity/passivity.
+
+The existing `PreparedNonlinearTones` owner consumes this constitutive rule
+with coherent constant and affine envelopes, full consistent mass and
+nonproportional damping, and independent physical total/channel heat. Its time
+integration remains an approximation requiring refinement. Six focused tests
+exercise original branch work and analytic endpoint actions, high prestress
+with unchanged kinetic effort, generated material overtones, three-level
+native refinement against an independent physical ODE including branch heat,
+fixed-geometry memory relaxation, duplicate-source cancellation, nested arms,
+domain fallback and atomic cancellation. The complete Maxwell dyad supplied
+by an explicit zero-constant linear strain row is preserved exactly once in
+the quadratic block; a merged-owner regression compares constant/affine state,
+output, work and physical heat with the original linear Maxwell owner over
+35 relaxation times. Three existing memory-limit tests
+preserve the linear and Kelvin-Voigt limits and their work/heat accounting.
+General nonquadratic mapped-strain split preparation remains unsupported.
