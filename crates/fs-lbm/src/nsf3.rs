@@ -47,7 +47,11 @@
 //! trace relaxation amplifies it. The energy-free equilibrium used here has |lambda| < 1 on the same scan.
 //!
 //! LEDGER SPLIT. `pressure_work_j = -integral(p div u) dV dt` is the reversible kinetic-to-internal exchange
-//! (trapezoid of the two time levels, fourth-order central divergence). `viscous_heating_j` is DEFINED as
+//! (trapezoid of the two time levels, divergence of a shared normal velocity at each face).
+//! Interior faces use the total-energy flux's fourth-order reconstruction, falling back to the
+//! two-cell mean when its wider stencil meets a wall; actual boundary traces close the divergence.
+//! Uniform pressure therefore contributes no net compression work in a closed fluid component,
+//! including across changes of stencil. `viscous_heating_j` is DEFINED as
 //! `internal change - wall heat - pressure work - source energy` for heat-only volume sources.
 //! With no volume source or moving wall, total-energy conservation makes it equal the kinetic energy loss net of pressure
 //! work TERM BY TERM to round-off. Manufactured mass/momentum sources also do mechanical work; without a
@@ -151,7 +155,10 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// trajectory and its arithmetic are unchanged.
 /// 10: optional spatial wall temperatures, heat fluxes and finite-film cooling;
 /// the original global wall condition retains its arithmetic.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 10;
+/// 11: pressure-work divergence uses single-valued face velocities through
+/// wall/solid stencil transitions and isolated reservoir-adjacent cells.
+/// This corrects the pressure/viscous ledger split, not the fluid trajectory.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 11;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -2218,7 +2225,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         Ok(ledger)
     }
 
-    /// `p div u` per fluid cell with the fourth-order central divergence (second order beside walls).
+    /// `p div u` per fluid cell from the same face reconstruction as total energy.
+    /// Choosing the stencil per face, rather than per cell, makes interior
+    /// volume fluxes cancel even where the fourth-order stencil meets a wall.
     fn pressure_work_density(
         &self,
         rho: &[f64],
@@ -2226,40 +2235,42 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         theta: &[f64],
         faces: Option<&OpenFaces>,
     ) -> Vec<f64> {
+        let face_velocity = |i: usize, a: usize, s: i64| -> f64 {
+            let x = self.at(i);
+            let Some(j) = self.fluid_at(x, a, s) else {
+                if let Some(face) = self.characteristic_face(faces, i, a, s) {
+                    return face.u[a];
+                }
+                if let Some(ghost) = self.open_at(i, a, s) {
+                    return 0.5 * (u[i][a] + ghost.u[a]);
+                }
+                // Both stationary and tangentially moving walls are impermeable.
+                return 0.0;
+            };
+            // Canonical +axis ordering gives both adjacent cells the same
+            // face value and arithmetic, including a periodic seam. No face
+            // field or additional grid-sized scratch is needed for this audit.
+            let (left, right) = if s > 0 { (i, j) } else { (j, i) };
+            match (
+                self.fluid_at(self.at(left), a, -1),
+                self.fluid_at(self.at(right), a, 1),
+            ) {
+                (Some(m), Some(p)) => {
+                    (7.0 / 12.0) * (u[left][a] + u[right][a])
+                        - (1.0 / 12.0) * (u[m][a] + u[p][a])
+                }
+                _ => 0.5 * (u[left][a] + u[right][a]),
+            }
+        };
         let mut out = vec![0.0; self.n];
         let solid = &self.solid;
         par_fill(&mut out, self.spec.workers, &|i| {
             if solid[i] {
                 return 0.0;
             }
-            let x = self.at(i);
             let mut div = 0.0;
             for a in 0..3 {
-                let (p1, m1) = (self.fluid_at(x, a, 1), self.fluid_at(x, a, -1));
-                div += match (m1, p1) {
-                    (Some(m), Some(p)) => match (
-                        self.fluid_at(self.at(m), a, -1),
-                        self.fluid_at(self.at(p), a, 1),
-                    ) {
-                        (Some(mm), Some(pp)) => {
-                            (8.0 * (u[p][a] - u[m][a]) - (u[pp][a] - u[mm][a])) / 12.0
-                        }
-                        _ => 0.5 * (u[p][a] - u[m][a]),
-                    },
-                    (None, Some(p)) => match self.characteristic_face(faces, i, a, -1) {
-                        Some(f) => 0.5 * (u[p][a] + u[i][a]) - f.u[a],
-                        None => self
-                            .open_at(i, a, -1)
-                            .map_or(0.5 * (u[p][a] + u[i][a]), |b| 0.5 * (u[p][a] - b.u[a])),
-                    },
-                    (Some(m), None) => match self.characteristic_face(faces, i, a, 1) {
-                        Some(f) => f.u[a] - 0.5 * (u[m][a] + u[i][a]),
-                        None => self
-                            .open_at(i, a, 1)
-                            .map_or(-0.5 * (u[m][a] + u[i][a]), |b| 0.5 * (b.u[a] - u[m][a])),
-                    },
-                    (None, None) => 0.0,
-                };
+                div += face_velocity(i, a, 1) - face_velocity(i, a, -1);
             }
             rho[i] * theta[i] * div
         });

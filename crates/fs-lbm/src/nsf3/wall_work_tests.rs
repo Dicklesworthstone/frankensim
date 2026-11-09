@@ -26,6 +26,217 @@ fn spec(axis: usize, wall: WallThermal) -> NsfSpec {
 }
 
 #[test]
+fn g0_uniform_pressure_work_telescopes_across_wall_and_solid_stencils() {
+    for axis in 0..3 {
+        for partitioned in [false, true] {
+            let mut setup = spec(axis, WallThermal::Adiabatic);
+            setup.dims[axis] = 11;
+            setup.maximum_cells = setup.dims.iter().product();
+            let mut grid = NsfGrid3::<D3q27>::new(
+                setup,
+                |x| partitioned && x[axis] == 5,
+                |_| (1.0, [0.0; 3], 293.15),
+            )
+            .unwrap();
+            let rho = vec![1.0; grid.n];
+            let theta = vec![THETA0; grid.n];
+            let u: Vec<_> = (0..grid.n)
+                .map(|i| {
+                    let x = (grid.at(i)[axis] + 1) as f64;
+                    let mut velocity = [0.0; 3];
+                    velocity[axis] = 1e-5 * x * x * x;
+                    velocity
+                })
+                .collect();
+            let work = grid.pressure_work_density(&rho, &u, &theta, None);
+            let regions = if partitioned { 2 } else { 1 };
+            for region in 0..regions {
+                let cells: Vec<_> = (0..grid.n)
+                    .filter(|&i| {
+                        !grid.solid[i]
+                            && (!partitioned || usize::from(grid.at(i)[axis] > 5) == region)
+                    })
+                    .collect();
+                let total: f64 = cells.iter().map(|&i| work[i]).sum();
+                let magnitude: f64 = cells.iter().map(|&i| work[i].abs()).sum();
+                assert!(magnitude > 0.0);
+                assert!(
+                    total.abs() < 64.0 * f64::EPSILON * magnitude,
+                    "axis={axis}, partitioned={partitioned}, region={region}: {total:e}"
+                );
+            }
+            assert!((0..grid.n).all(|i| !grid.solid[i] || work[i] == 0.0));
+            // Cell 1 shares its left two-cell face and its right four-cell
+            // face with their neighbors. For u=1e-5*(x+1)^3, those fluxes
+            // are 4.5e-5 and 15e-5. A per-cell switch gives 13e-5 instead.
+            let mut cell = [0; 3];
+            cell[axis] = 1;
+            assert!((work[grid.index(cell)] - THETA0 * 10.5e-5).abs() < 1e-18);
+            grid.spec.workers = 3;
+            assert_eq!(work, grid.pressure_work_density(&rho, &u, &theta, None));
+        }
+    }
+}
+
+#[test]
+fn g1_isolated_boundary_cells_retain_reservoir_compression_work() {
+    for axis in 0..3 {
+        let mut setup = spec(axis, WallThermal::Adiabatic);
+        setup.dims = [2; 3];
+        setup.dims[axis] = 3;
+        let mut grid = NsfGrid3::<D3q27>::new(
+            setup,
+            |x| x[axis] == 1,
+            |_| (1.0, [0.0; 3], 293.15),
+        )
+        .unwrap();
+        // Two admitted reservoirs separated by a solid layer: each wet
+        // boundary cell has no fluid neighbor along its open axis.
+        let ghost_speeds = [0.014, -0.006];
+        for (side, &speed) in ghost_speeds.iter().enumerate() {
+            let mut velocity_m_s = [0.0; 3];
+            velocity_m_s[axis] = speed * grid.law.dx_m / grid.law.dt_s;
+            grid.set_open_face(
+                axis,
+                side == 1,
+                Some(NsfOpenState {
+                    density_kg_m3: grid.law.rho_ref_kg_m3,
+                    velocity_m_s,
+                    temperature_k: 293.15,
+                }),
+            )
+            .unwrap();
+        }
+        let rho = vec![1.0; grid.n];
+        let theta = vec![THETA0; grid.n];
+        let mut velocity = [0.0; 3];
+        velocity[axis] = 0.004;
+        let work = grid.pressure_work_density(&rho, &vec![velocity; grid.n], &theta, None);
+        for (i, &actual) in work.iter().enumerate() {
+            let coordinate = grid.at(i)[axis];
+            let expected = match coordinate {
+                0 => -THETA0 * 0.5 * (velocity[axis] + ghost_speeds[0]),
+                2 => THETA0 * 0.5 * (velocity[axis] + ghost_speeds[1]),
+                _ => 0.0,
+            };
+            assert!(
+                (actual - expected).abs() < 1e-17,
+                "axis={axis}, cell={i}"
+            );
+        }
+        assert!(work.iter().sum::<f64>() < 0.0, "both chambers compress");
+    }
+}
+
+#[test]
+fn g1_pressure_work_integrates_the_actual_characteristic_face_velocity() {
+    for axis in 0..3 {
+        let mut setup = spec(axis, WallThermal::Adiabatic);
+        setup.dims = [2; 3];
+        setup.dims[axis] = 7;
+        let face = NsfCharacteristicBoundary {
+            reference_pressure_pa: setup.pressure_pa,
+            reference_temperature_k: setup.temperature_k,
+            reference_velocity_m_s: [0.0; 3],
+            incoming_characteristic_m_s: 1.0,
+        };
+        let grid = NsfGrid3::<D3q27>::new(
+            setup,
+            |_| false,
+            |x| {
+                let mut velocity = [0.0; 3];
+                velocity[axis] = 0.0001 * ((x[axis] + 1) as f64).powi(2);
+                (1.0, velocity, 293.15)
+            },
+        )
+        .unwrap()
+        .with_characteristic_axis(NsfCharacteristicAxis {
+            axis,
+            faces: [face; 2],
+            maximum_relative_perturbation: 0.05,
+        })
+        .unwrap();
+        let (rho, momentum) = grid.macro_fields(&grid.f);
+        let velocity = grid.velocity_field(&rho, &momentum, &grid.force);
+        let work = grid.pressure_work_density(
+            &vec![1.0; grid.n],
+            &velocity,
+            &vec![THETA0; grid.n],
+            grid.open_faces.as_ref(),
+        );
+        // Independent public SI face traces, including their outward signs.
+        // A characteristic trace already lives on the face: it must not be
+        // averaged with the cell as if it were a prescribed ghost-center state.
+        let expected = THETA0
+            * [false, true]
+                .into_iter()
+                .flat_map(|high| grid.open_boundary_traces(high).unwrap())
+                .map(|trace| {
+                    trace.outward_normal_velocity_m_s * grid.law.dt_s / grid.law.dx_m
+                })
+                .sum::<f64>();
+        let actual: f64 = work.iter().sum();
+        let scale: f64 = work.iter().map(|value| value.abs()).sum();
+        assert!((actual - expected).abs() < 64.0 * f64::EPSILON * scale);
+    }
+}
+
+#[test]
+fn g1_periodic_compression_work_retains_fourth_order_spatial_convergence() {
+    for axis in 0..3 {
+        let mut errors = Vec::new();
+        for n in [16, 32, 64] {
+            let mut setup = spec(axis, WallThermal::Adiabatic);
+            setup.periodic = [true; 3];
+            setup.dims = [1; 3];
+            setup.dims[axis] = n;
+            let grid = NsfGrid3::<D3q27>::new(
+                setup,
+                |_| false,
+                |_| (1.0, [0.0; 3], 293.15),
+            )
+            .unwrap();
+            let wave_number = std::f64::consts::TAU / n as f64;
+            let amplitude = 0.01;
+            let phase: Vec<_> = (0..grid.n)
+                .map(|i| wave_number * (grid.at(i)[axis] as f64 + 0.5))
+                .collect();
+            let rho: Vec<_> = phase.iter().map(|&x| 1.0 + 0.02 * x.cos()).collect();
+            let velocity: Vec<_> = phase
+                .iter()
+                .map(|&x| {
+                    let mut velocity = [0.0; 3];
+                    velocity[axis] = amplitude * x.sin();
+                    velocity
+                })
+                .collect();
+            let work =
+                grid.pressure_work_density(&rho, &velocity, &vec![THETA0; grid.n], None);
+            let scale = THETA0 * amplitude * wave_number;
+            let error = work
+                .iter()
+                .enumerate()
+                .map(|(i, &actual)| {
+                    let exact = rho[i] * scale * phase[i].cos();
+                    (actual - exact).abs() / scale
+                })
+                .fold(0.0_f64, f64::max);
+            errors.push(error);
+            assert!(work.iter().any(|&value| value < 0.0));
+            assert!(work.iter().any(|&value| value > 0.0));
+            assert!(work.iter().sum::<f64>() > 0.0);
+        }
+        assert!(errors[2] < 4e-6, "axis={axis}: {errors:?}");
+        assert!(
+            errors
+                .windows(2)
+                .all(|e| (15.0..16.1).contains(&(e[0] / e[1]))),
+            "axis={axis}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn g1_wall_traction_work_and_fourier_heat_have_independent_signs() {
     let stress_tensor = [0.003, -0.002, 0.004, 0.005, -0.006, 0.007];
     for axis in 0..3 {
