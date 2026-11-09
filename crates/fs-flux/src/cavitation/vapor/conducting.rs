@@ -14,11 +14,13 @@
 //! by the field operator without being deposited in these cells.
 //!
 //! The common fixed enthalpy reference gives the discrete thermal account
-//! `Delta(U_v-h_ref m_v)+Delta H_liquid+W_v+Q_outer+H_outer-Q_visc=0`.
+//! `Delta(U_v+U_g-h_ref m_v)+Delta H_liquid+W_contents+Q_outer+H_outer-Q_visc=0`.
 //! Outer conductive heat and advected enthalpy are positive OUT of the grid.
 //! They connect to the prescribed-temperature exterior reservoir; the finite
-//! shell domain is not a sealed finite-liquid vessel. The vapor pressure work
-//! remains in its original mechanical owner.
+//! shell domain is not a sealed finite-liquid vessel. W_contents integrates
+//! (p_v+p_g)dV and remains in the same mechanical/thermal ownership. The optional
+//! conserved dry gas shares the native temperature and volume; its original
+//! energy increment is independently checked against integral m_g Cv Tdot.
 //!
 //! The field uses its explicitly bounded saturation-branch liquid caloric
 //! approximation, with pressure-path, property-drift and pressure-heating
@@ -29,17 +31,29 @@
 
 use super::liquid::{LiquidThermalRates, MAX_LIQUID_THERMAL_CELLS, SphericalLiquidField};
 use super::{
-    SaturatedVaporBubble, VaporBubbleError, VaporBubbleNumerics, VaporBubbleObservation,
-    VaporBubbleState, VaporBubbleStep, stage_derivatives, validate_numerics,
+    BubbleContentsLoad, SaturatedVaporBubble, VaporBubbleError, VaporBubbleNumerics,
+    VaporBubbleObservation, VaporBubbleState, VaporBubbleStep, stage_derivatives,
+    validate_numerics,
 };
 use crate::cavitation::{CavitationError, positive, stepper};
+#[cfg(feature = "caloric-cavitation")]
+use fs_material::cavitation::vapor::gas::ConservedBubbleGas;
+#[cfg(feature = "caloric-cavitation")]
+use fs_material::thermochemical_gas::energy::GasEnergyError;
+
+/// Conserved noncondensable inventory and explicit wet-mixture validity bounds.
+#[cfg(feature = "caloric-cavitation")]
+#[path = "conducting/gas.rs"]
+pub mod gas;
 
 const PHASE_COORDINATES: usize = 8;
 const FIELD_END: usize = PHASE_COORDINATES + MAX_LIQUID_THERMAL_CELLS;
 const OUTER_HEAT: usize = FIELD_END;
 const OUTER_ENTHALPY: usize = FIELD_END + 1;
 const VISCOUS_HEAT: usize = FIELD_END + 2;
-const COORDINATES: usize = FIELD_END + 3;
+const GAS_ENERGY: usize = FIELD_END + 3;
+const GAS_WORK: usize = FIELD_END + 4;
+const COORDINATES: usize = FIELD_END + 5;
 
 /// Local error scales and independent whole-window thermal balances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,7 +70,15 @@ pub struct ConductingVaporBubbleNumerics {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConductingVaporBubbleError {
     Physics(VaporBubbleError),
+    #[cfg(feature = "caloric-cavitation")]
+    Gas(GasEnergyError),
     InvalidInput(&'static str),
+    OutsideDomain {
+        quantity: &'static str,
+        value: f64,
+        minimum: f64,
+        maximum: f64,
+    },
     SourceMismatch,
     Balance {
         quantity: &'static str,
@@ -85,11 +107,48 @@ impl From<CavitationError> for ConductingVaporBubbleError {
     }
 }
 
+#[cfg(feature = "caloric-cavitation")]
+impl From<GasEnergyError> for ConductingVaporBubbleError {
+    fn from(error: GasEnergyError) -> Self {
+        if error == GasEnergyError::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::Gas(error)
+        }
+    }
+}
+
+/// Accepted/stage gas contribution and explicitly estimated mixture limits.
+/// The temperature and volume are the SAME ones in the native bubble state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasVaporObservation {
+    pub mass_kg: f64,
+    pub density_kg_m3: f64,
+    pub partial_pressure_pa: f64,
+    pub cv_j_kg_k: f64,
+    pub energy_rate_w: f64,
+    pub pressure_work_power_w: f64,
+    /// Heat INTO the conserved dry component, m_g Cv Tdot + p_g Vdot.
+    pub heat_power_w: f64,
+    pub mixture_density_kg_m3: f64,
+    /// Frozen-composition speed of the declared additive mixture approximation.
+    pub mixture_sound_speed_m_s: f64,
+    pub vapor_mass_fraction: f64,
+    /// Fourier power entering the gas-vapor interior: Q_liquid-L*mdot_v.
+    pub internal_heat_power_w: f64,
+    pub estimated_internal_temperature_difference_k: f64,
+    pub relative_composition_gradient_scale: f64,
+    pub thermal_response_ratio: f64,
+    pub diffusion_response_ratio: f64,
+    pub pressure_relaxation_ratio: f64,
+}
+
 /// Native physical endpoint and the same resolved liquid thermal response.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductingVaporBubbleObservation {
     pub bubble: VaporBubbleObservation,
     pub liquid: LiquidThermalRates,
+    pub gas: Option<GasVaporObservation>,
 }
 
 /// One admitted window of radial, phase and liquid thermal evolution.
@@ -97,6 +156,15 @@ pub struct ConductingVaporBubbleObservation {
 pub struct ConductingVaporBubbleStep {
     pub bubble: VaporBubbleStep,
     pub liquid: LiquidThermalRates,
+    pub gas: Option<GasVaporObservation>,
+    /// Independent integral m_g Cv(T) Tdot dt, zero without gas [J].
+    pub integrated_noncondensable_energy_j: f64,
+    /// Integral p_g Vdot dt [J]. Already INCLUDED in bubble.pressure_work_j.
+    pub noncondensable_pressure_work_j: f64,
+    /// Integral (m_g Cv Tdot+p_g Vdot) dt [J], heat into the dry component.
+    pub noncondensable_heat_j: f64,
+    /// Original m_g Delta u_g minus its independently integrated coordinate.
+    pub noncondensable_energy_residual_j: f64,
     /// Actual source enthalpy change in the fixed-volume liquid shells [J].
     pub liquid_energy_change_j: f64,
     /// Fourier heat leaving the finite thermal grid into the exterior bath [J].
@@ -107,7 +175,7 @@ pub struct ConductingVaporBubbleStep {
     pub viscous_heat_j: f64,
     /// Delta H_liq + Q_interface + H_interface + Q_outer + H_outer - Q_visc.
     pub liquid_energy_residual_j: f64,
-    /// Delta(U_v-h_ref m_v) + Delta H_liq + W_v + Q_outer + H_outer - Q_visc.
+    /// Delta(U_v+U_g-h_ref m_v) + Delta H_liq + W_contents + Q_outer + H_outer - Q_visc.
     pub total_energy_residual_j: f64,
 }
 
@@ -116,6 +184,8 @@ pub struct ConductingVaporBubble {
     model: SaturatedVaporBubble,
     liquid: SphericalLiquidField,
     temperatures_k: [f64; MAX_LIQUID_THERMAL_CELLS],
+    #[cfg(feature = "caloric-cavitation")]
+    gas: Option<gas::GasBinding>,
 }
 
 /// Complete uncommitted physical window. Observation may still refuse it.
@@ -194,9 +264,39 @@ impl ConductingVaporBubble {
             model,
             liquid,
             temperatures_k: temperatures,
+            #[cfg(feature = "caloric-cavitation")]
+            gas: None,
         })
     }
 
+    /// Add an explicitly initialized noncondensable inventory at the SAME
+    /// accepted T and spherical volume. Existing inventory cannot be replaced.
+    /// No heat, mass or pressure is created to force an equilibrium radius.
+    #[cfg(feature = "caloric-cavitation")]
+    pub fn with_noncondensable_gas(
+        mut self,
+        inventory: ConservedBubbleGas,
+        limits: gas::GasVaporLimits,
+    ) -> Result<Self, ConductingVaporBubbleError> {
+        if self.gas.is_some() {
+            return Err(ConductingVaporBubbleError::InvalidInput(
+                "a conserved noncondensable inventory is already bound",
+            ));
+        }
+        let (thermal, _) = self.model.thermal_state(self.state())?;
+        self.gas = Some(gas::GasBinding::new(inventory, limits, &thermal)?);
+        Ok(self)
+    }
+
+    /// Immutable original inventory/source; its reference parcel is NOT an
+    /// independently evolved gas state. Current T/V belong to Self::state.
+    #[cfg(feature = "caloric-cavitation")]
+    pub fn gas(&self) -> Option<&ConservedBubbleGas> {
+        self.gas.as_ref().map(|binding| &binding.inventory)
+    }
+
+    /// Original water-phase owner. Use Self::observe for the composed dynamics
+    /// when a conserved gas inventory is present.
     pub const fn model(&self) -> &SaturatedVaporBubble {
         &self.model
     }
@@ -236,14 +336,45 @@ impl ConductingVaporBubble {
         let stage = self
             .liquid
             .prepare(&thermal, temperatures_k, bath_temperature_k)?;
-        let bubble = self.model.observe_thermal(
+        #[cfg(feature = "caloric-cavitation")]
+        let sample = self
+            .gas
+            .as_ref()
+            .map(|binding| binding.sample(state.temperature_k(), thermal.volume_m3))
+            .transpose()?;
+        #[cfg(feature = "caloric-cavitation")]
+        let load = sample
+            .as_ref()
+            .map_or_else(BubbleContentsLoad::default, |sample| BubbleContentsLoad {
+                gas_pressure_pa: sample.pressure_pa,
+                gas_heat_capacity_j_k: sample.heat_capacity_j_k,
+            });
+        #[cfg(not(feature = "caloric-cavitation"))]
+        let load = BubbleContentsLoad::default();
+        let bubble = self.model.observe_thermal_loaded(
             thermal,
             variation,
             pressure_pa,
             stage.interface_heat_power_w(),
+            load,
         )?;
         let liquid = self.liquid.finish(stage, &bubble, pressure_pa)?;
-        Ok(ConductingVaporBubbleObservation { bubble, liquid })
+        #[cfg(feature = "caloric-cavitation")]
+        let gas = match (self.gas.as_ref(), sample) {
+            (Some(binding), Some(sample)) => Some(binding.observe(
+                sample,
+                &bubble,
+                self.model.source().state().liquid_density_kg_m3(),
+            )?),
+            _ => None,
+        };
+        #[cfg(not(feature = "caloric-cavitation"))]
+        let gas = None;
+        Ok(ConductingVaporBubbleObservation {
+            bubble,
+            liquid,
+            gas,
+        })
     }
 
     /// One fully coupled physical advance. Pressure and bath-temperature laws
@@ -344,20 +475,25 @@ impl ConductingVaporBubble {
                 rates[OUTER_HEAT] = observation.liquid.outer_conductive_power_w;
                 rates[OUTER_ENTHALPY] = observation.liquid.outer_advected_power_w;
                 rates[VISCOUS_HEAT] = observation.liquid.viscous_heat_power_w;
+                rates[GAS_ENERGY] = observation.bubble.noncondensable_heat_capacity_j_k
+                    * observation.bubble.temperature_rate_k_s;
+                rates[GAS_WORK] = observation.bubble.noncondensable_pressure_pa
+                    * observation.bubble.volume_rate_m3_s;
                 Ok(rates)
             },
             cancelled,
             &|error: &ConductingVaporBubbleError| {
                 matches!(
                     error,
-                    ConductingVaporBubbleError::Physics(
-                        VaporBubbleError::OutsideModel { .. }
-                            | VaporBubbleError::TemperatureOutsideDomain { .. }
-                            | VaporBubbleError::Dynamics(
-                                CavitationError::RadiusOutsideDomain { .. }
-                                    | CavitationError::NonFiniteDerived(_)
-                            )
-                    )
+                    ConductingVaporBubbleError::OutsideDomain { .. }
+                        | ConductingVaporBubbleError::Physics(
+                            VaporBubbleError::OutsideModel { .. }
+                                | VaporBubbleError::TemperatureOutsideDomain { .. }
+                                | VaporBubbleError::Dynamics(
+                                    CavitationError::RadiusOutsideDomain { .. }
+                                        | CavitationError::NonFiniteDerived(_)
+                                )
+                        )
                 )
             },
         )?;
@@ -388,12 +524,32 @@ impl ConductingVaporBubble {
             rhs_evaluations: result.rhs_evaluations,
             maximum_normalized_local_error: result.maximum_normalized_local_error,
         };
+        #[cfg(feature = "caloric-cavitation")]
+        let gas_energy_change = self
+            .gas
+            .as_ref()
+            .map(|binding| {
+                binding
+                    .inventory
+                    .energy_change_j(start.temperature_k(), next.temperature_k())
+            })
+            .transpose()?
+            .unwrap_or(0.0);
+        #[cfg(not(feature = "caloric-cavitation"))]
+        let gas_energy_change = 0.0;
+        let gas_energy_residual = gas_energy_change - result.values[GAS_ENERGY];
+        budget(
+            "original noncondensable caloric source",
+            gas_energy_residual,
+            numerics.bubble.energy_balance_tolerance_j,
+        )?;
         let bubble = self.model.finish_step(
             initial_phase,
             anchor,
             &phase_result,
             endpoint.bubble,
             &numerics.bubble,
+            gas_energy_change,
         )?;
         let liquid_change = endpoint.liquid.energy_change_from(&initial.liquid)?;
         let outer_heat = result.values[OUTER_HEAT];
@@ -426,10 +582,30 @@ impl ConductingVaporBubble {
                 "integrated resolved viscous heat",
             ));
         }
+        // Only qualified complete candidates may publish. The retained gas
+        // reference remains immutable; current T/V have one authoritative owner.
+        #[cfg(feature = "caloric-cavitation")]
+        if let Some(binding) = &self.gas {
+            poll(cancelled)?;
+            binding
+                .inventory
+                .qualify(next.temperature_k(), endpoint.bubble.volume_m3)?;
+        }
         poll(cancelled)?;
+        let gas_heat = result.values[GAS_ENERGY] + result.values[GAS_WORK];
+        if !gas_heat.is_finite() {
+            return Err(ConductingVaporBubbleError::InvalidInput(
+                "represented gas heat integral",
+            ));
+        }
         let step = ConductingVaporBubbleStep {
             bubble,
             liquid: endpoint.liquid,
+            gas: endpoint.gas,
+            integrated_noncondensable_energy_j: result.values[GAS_ENERGY],
+            noncondensable_pressure_work_j: result.values[GAS_WORK],
+            noncondensable_heat_j: gas_heat,
+            noncondensable_energy_residual_j: gas_energy_residual,
             liquid_energy_change_j: liquid_change,
             outer_conductive_heat_j: outer_heat,
             outer_advected_enthalpy_j: outer_enthalpy,

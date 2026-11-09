@@ -8,8 +8,8 @@ use fs_material::cavitation::vapor::liquid::SaturatedWaterLiquidThermal;
 use fs_qty::Temperature;
 use fs_thermochem::water::if97::If97SaturationPair;
 
-const RADIUS: f64 = 1e-4;
-const TEMPERATURE: f64 = 373.15;
+pub(super) const RADIUS: f64 = 1e-4;
+pub(super) const TEMPERATURE: f64 = 373.15;
 const CELLS: usize = 8;
 
 fn source(surface_tension: f64) -> SaturatedWaterCavitation {
@@ -57,7 +57,7 @@ fn field_with_cells(source: SaturatedWaterCavitation, cells: usize) -> Spherical
     .unwrap()
 }
 
-fn model(offset: f64, velocity: f64) -> ConductingVaporBubble {
+pub(super) fn model(offset: f64, velocity: f64) -> ConductingVaporBubble {
     model_with_cells(offset, velocity, CELLS)
 }
 
@@ -77,12 +77,12 @@ fn model_with_cells(offset: f64, velocity: f64, cells: usize) -> ConductingVapor
     .unwrap()
 }
 
-fn equilibrium_pressure() -> f64 {
+pub(super) fn equilibrium_pressure() -> f64 {
     let liquid = source(0.06).state();
     liquid.saturation_pressure_pa() - 2.0 * liquid.surface_tension_n_m() / RADIUS
 }
 
-fn numerics() -> ConductingVaporBubbleNumerics {
+pub(super) fn numerics() -> ConductingVaporBubbleNumerics {
     ConductingVaporBubbleNumerics {
         bubble: VaporBubbleNumerics {
             radial: BubbleNumerics {

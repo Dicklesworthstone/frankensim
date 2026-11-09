@@ -192,7 +192,7 @@ fn stage_derivatives(observation: &VaporBubbleObservation, anchor: f64) -> [f64;
         observation.temperature_rate_k_s,
         observation.heat_power_w,
         (observation.vapor.liquid_enthalpy_j_kg() - anchor) * observation.vapor_mass_rate_kg_s,
-        observation.vapor.pressure_pa() * observation.volume_rate_m3_s,
+        observation.bubble_pressure_pa * observation.volume_rate_m3_s,
         observation.vapor_mass_rate_kg_s,
         observation.neglected_specific_enthalpy_j_kg * observation.vapor_mass_rate_kg_s.abs(),
     ]
@@ -272,12 +272,26 @@ pub struct VaporBubbleThermalState {
     pub vapor_mass_kg: f64,
 }
 
+// A common-temperature conserved gas contributes pressure and heat capacity
+// without owning another radial/thermal clock or changing the pure Copy owner.
+#[derive(Clone, Copy, Debug, Default)]
+struct BubbleContentsLoad {
+    gas_pressure_pa: f64,
+    gas_heat_capacity_j_k: f64,
+}
+
 /// Instantaneous phase flux, mechanical flow and independently reported limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VaporBubbleObservation {
     pub state: VaporBubbleState,
     /// Original phase endpoints and raw IF97 Gibbs discrepancy remain available.
     pub vapor: SaturatedWaterVapor,
+    /// Total contents pressure; equals original saturation pressure without gas.
+    pub bubble_pressure_pa: f64,
+    /// Conserved noncondensable contribution, exactly zero on the pure path.
+    pub noncondensable_pressure_pa: f64,
+    /// Original m_g Cv(T), sharing the interface temperature [J/K].
+    pub noncondensable_heat_capacity_j_k: f64,
     pub wall_velocity_m_s: f64,
     pub liquid_acceleration_m_s2: f64,
     pub temperature_rate_k_s: f64,
@@ -314,16 +328,21 @@ pub struct VaporBubbleStep {
     pub mass_residual_kg: f64,
     /// Actual Delta(m_v u_v) in the released IF97 energy datum.
     pub vapor_energy_change_j: f64,
+    /// Original source-integrated m_g Delta u_g; zero without conserved gas.
+    pub noncondensable_energy_change_j: f64,
+    /// Delta U_v + Delta U_g in their retained original source datums.
+    pub contents_energy_change_j: f64,
     pub supplied_heat_j: f64,
     /// Integral h_l dm_v in the SAME original source datum.
     pub transferred_enthalpy_j: f64,
-    /// Integral p_v dV_b, positive for work done by vapor.
+    /// Integral (p_v+p_g) dV_b, positive for work done by the bubble contents.
     pub pressure_work_j: f64,
     /// Original initial liquid enthalpy used only as a constant energy anchor.
     pub reference_liquid_enthalpy_j_kg: f64,
+    /// Delta(U_v-h_ref m_v) + Delta U_g; gas formation offsets cancel first.
     pub reference_invariant_energy_change_j: f64,
     pub reference_invariant_transferred_enthalpy_j: f64,
-    /// Delta(U-h_ref m) - Q - integral(h_l-h_ref)dm + integral p_v dV.
+    /// Delta(U_v+U_g-h_ref m_v) - Q - integral(h_l-h_ref)dm + integral p_b dV.
     /// This removes arbitrary common mass-energy datums from balance admission.
     pub energy_residual_j: f64,
     /// Same balance in the released absolute datum, including h_ref*mass residual.
@@ -483,6 +502,34 @@ impl SaturatedVaporBubble {
         pressure: f64,
         heat: f64,
     ) -> Result<VaporBubbleObservation, VaporBubbleError> {
+        self.observe_thermal_loaded(
+            thermal,
+            frozen_liquid_relative_change,
+            pressure,
+            heat,
+            BubbleContentsLoad::default(),
+        )
+    }
+
+    // SAME mass/momentum/first-law kernel for pure vapor and a bounded,
+    // well-mixed common-temperature conserved noncondensable inventory.
+    fn observe_thermal_loaded(
+        &self,
+        thermal: VaporBubbleThermalState,
+        frozen_liquid_relative_change: f64,
+        pressure: f64,
+        heat: f64,
+        load: BubbleContentsLoad,
+    ) -> Result<VaporBubbleObservation, VaporBubbleError> {
+        if !load.gas_pressure_pa.is_finite()
+            || load.gas_pressure_pa < 0.0
+            || !load.gas_heat_capacity_j_k.is_finite()
+            || load.gas_heat_capacity_j_k < 0.0
+        {
+            return Err(VaporBubbleError::InvalidInput(
+                "finite nonnegative contents load",
+            ));
+        }
         if !pressure.is_finite() || !heat.is_finite() {
             return Err(VaporBubbleError::InvalidInput(
                 "finite absolute pressure and interface heat power",
@@ -499,8 +546,9 @@ impl SaturatedVaporBubble {
         let ratio = rho_v / rho_l;
         let latent = vapor.latent_enthalpy_j_kg();
         let density_tangent = (radius / 3.0) * vapor.vapor_density_temperature_derivative_kg_m3_k();
-        let capacity = (radius / 3.0) * vapor.phase_temperature_capacity_j_m3_k();
-        let volume_latent = rho_v * latent;
+        let capacity = (radius / 3.0) * vapor.phase_temperature_capacity_j_m3_k()
+            + load.gas_heat_capacity_j_k / area;
+        let volume_latent = rho_v * latent + load.gas_pressure_pa;
         let heat_flux = heat / area;
         let determinant = (1.0 - ratio) * capacity + (volume_latent / rho_l) * density_tangent;
         if !positive(area) || !positive(determinant) || !heat_flux.is_finite() {
@@ -543,8 +591,16 @@ impl SaturatedVaporBubble {
         )?;
         let recoil = mass_flux * (vapor_relative_velocity - stefan_slip);
         let viscous_pressure = 4.0 * liquid.dynamic_viscosity_pa_s() * velocity / radius;
+        // Only water crosses the interface. Its species speed relative to
+        // the wall is j/rho_v; the noncondensable species has zero wall flux.
+        // Consequently recoil retains rho_v, not the total mixture density.
+        let bubble_pressure = finite(
+            vapor.pressure_pa() + load.gas_pressure_pa,
+            "total gas-vapor pressure",
+        )?;
         let interface_departure =
-            -2.0 * liquid.surface_tension_n_m() / radius - viscous_pressure + recoil;
+            load.gas_pressure_pa - 2.0 * liquid.surface_tension_n_m() / radius - viscous_pressure
+                + recoil;
         let interface_pressure = vapor.pressure_pa() + interface_departure;
         let bulk = rho_l * liquid.liquid_sound_speed_m_s() * liquid.liquid_sound_speed_m_s();
         bound(
@@ -581,8 +637,7 @@ impl SaturatedVaporBubble {
         )?;
         // Preserve subtraction around the physical vapor/ambient pressure
         // before capillary stress, as in the original zero-mass-flux owner.
-        let driving = -(pressure - vapor.pressure_pa()
-            + 2.0 * liquid.surface_tension_n_m() / radius)
+        let driving = -(pressure - bubble_pressure + 2.0 * liquid.surface_tension_n_m() / radius)
             - viscous_pressure
             + recoil;
         let acceleration =
@@ -609,6 +664,9 @@ impl SaturatedVaporBubble {
         Ok(VaporBubbleObservation {
             state,
             vapor,
+            bubble_pressure_pa: bubble_pressure,
+            noncondensable_pressure_pa: load.gas_pressure_pa,
+            noncondensable_heat_capacity_j_k: load.gas_heat_capacity_j_k,
             wall_velocity_m_s: wall_velocity,
             liquid_acceleration_m_s2: acceleration,
             temperature_rate_k_s: temperature_rate,
@@ -727,7 +785,7 @@ impl SaturatedVaporBubble {
         let (thermal, variation) = self.thermal_state(next)?;
         let power = heat(next.time_s, &thermal)?;
         let observation = self.observe_thermal(thermal, variation, pressure(next.time_s), power)?;
-        let step = self.finish_step(initial, anchor, &result, observation, numerics)?;
+        let step = self.finish_step(initial, anchor, &result, observation, numerics, 0.0)?;
         if cancelled() {
             return Err(VaporBubbleError::Cancelled);
         }
@@ -743,7 +801,12 @@ impl SaturatedVaporBubble {
         result: &stepper::ArrayStep<8>,
         observation: VaporBubbleObservation,
         numerics: &VaporBubbleNumerics,
+        noncondensable_energy_change_j: f64,
     ) -> Result<VaporBubbleStep, VaporBubbleError> {
+        finite(
+            noncondensable_energy_change_j,
+            "original noncondensable energy change",
+        )?;
         let start = self.state;
         let next = observation.state;
         let thermal = VaporBubbleThermalState {
@@ -769,10 +832,11 @@ impl SaturatedVaporBubble {
                 tolerance_kg: numerics.mass_balance_tolerance_kg,
             });
         }
-        let anchored_change = initial.vapor_mass_kg
+        let vapor_anchored_change = initial.vapor_mass_kg
             * (thermal.vapor.vapor_internal_energy_j_kg()
                 - initial.vapor.vapor_internal_energy_j_kg())
             + delta_mass * (thermal.vapor.vapor_internal_energy_j_kg() - anchor);
+        let anchored_change = vapor_anchored_change + noncondensable_energy_change_j;
         let energy_residual = finite(
             anchored_change - result.values[3] - result.values[4] + result.values[5],
             "vapor source energy balance",
@@ -784,8 +848,12 @@ impl SaturatedVaporBubble {
             });
         }
         let full_change = finite(
-            anchored_change + anchor * delta_mass,
+            vapor_anchored_change + anchor * delta_mass,
             "vapor internal-energy change",
+        )?;
+        let contents_change = finite(
+            full_change + noncondensable_energy_change_j,
+            "total contents internal-energy change",
         )?;
         let full_enthalpy = finite(
             result.values[4] + anchor * result.values[6],
@@ -810,6 +878,8 @@ impl SaturatedVaporBubble {
             transferred_vapor_mass_kg: result.values[6],
             mass_residual_kg: mass_residual,
             vapor_energy_change_j: full_change,
+            noncondensable_energy_change_j,
+            contents_energy_change_j: contents_change,
             supplied_heat_j: result.values[3],
             transferred_enthalpy_j: full_enthalpy,
             pressure_work_j: result.values[5],

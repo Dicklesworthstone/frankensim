@@ -11643,3 +11643,58 @@ the exact borrowed caloric/liquid pair across repeated fixed and adaptive
 advances. Focused integration cases cover identity refusal, actual-temperature
 property resolution, independent total enthalpy-plus-interface accounting,
 unchanged numerical receipts, and transactional original-source/volume gates.
+
+## Conserved gas inside the resolved thermal vapor bubble
+
+The existing `vapor::conducting::ConductingVaporBubble` accepts an optional
+original `ConservedBubbleGas` through `with_noncondensable_gas`, under
+`caloric-cavitation`. The pure-vapor constructor remains available. Gas
+mass and dry composition are immutable; the bubble's existing temperature
+and radius are the sole evolving contents state. There is no separate gas
+clock, fitted polytropic exponent or second radial/thermal integrator.
+
+One shared loaded phase kernel evaluates water partial saturation pressure
+and original ideal dry-gas partial pressure. Its common-temperature balance
+is `[V*C_phase+m_g*Cv_g] Tdot + [rho_v*L+p_g] Vdot = Q_liquid`.
+The original Stefan relation then supplies interface velocity and vapor mass
+flux. Total pressure drives liquid momentum and contents pressure work.
+The pressure correction to the liquid enthalpy and the flat-interface
+chemical-potential admission include the dry partial pressure.
+
+At the interface the noncondensable species has zero relative mass flux,
+while vapor has relative speed `-j/rho_v`. Summing species momentum gives
+the retained recoil `j^2(1/rho_v-1/rho_liquid)`; substituting total gas
+density would discard the species diffusion momentum. Existing vapor
+velocity/omitted-energy screens remain, and the new owner additionally
+admits total interior density and frozen-mixture Mach/pressure relaxation.
+The latter sound derivative follows the additive original real-vapor and
+ideal-dry Helmholtz approximation. It is an admission quantity; emitted
+sound still propagates through the original surrounding liquid.
+
+The same fixed-stack adaptive solve now carries two additional gas
+quadratures, `integral m_g Cv_g Tdot dt` and `integral p_g Vdot dt`.
+The original source `m_g integral Cv_g dT` independently checks gas
+storage. Vapor-only energy remains separately reported, while contents
+energy, pressure work and the combined liquid/contents thermal balance
+include the retained gas. Formation references never enter a gas increment.
+The original gas source is qualified at the accepted candidate's actual
+temperature and dry partial pressure before publication.
+
+Uniform interior temperature/composition is a bounded approximation.
+`GasVaporTransportBounds` requires explicit lower bounds on WET-mixture
+conductivity and water/gas molecular diffusivity over declared temperature,
+total-pressure and vapor-fraction intervals. Dry-gas conductivity is not
+substituted. Each stage checks implied interior temperature variation from
+`Q_liquid-L*mdot_v`, relative gradients of both species, and thermal and
+diffusion times against actual state-change rates and an authored imposed
+forcing-rate/bandwidth bound. These are applicability estimates, not
+measured transport data or mathematical error certificates.
+
+This owner does not resolve gas concentration/temperature boundary layers,
+finite-rate interfacial accommodation, dissolution, cross-virial/fugacity
+interactions, shocks or nonspherical collapse. It refuses declared mixing
+limits instead of claiming those dynamics. The liquid grid and native
+acoustic source remain shared, and a refused candidate or final cancellation
+publishes no gas/phase/liquid history.
+
+Fresh verification after the executor returned: the focused original-source material lane passed 33/33 tests, including all four conserved-gas groups, and the native `caloric-cavitation` lane passed 105/105 cavitation tests, including all six new mixed-gas groups and the retained pure-vapor, liquid, caloric, population and cluster regressions. Sources were scoped-formatted with Rust 2024 rustfmt. These local fallback lanes compile the actual product modules through the retained focused facades; DSR/RCH are unavailable, and no full-workspace or release-gate result is claimed.
