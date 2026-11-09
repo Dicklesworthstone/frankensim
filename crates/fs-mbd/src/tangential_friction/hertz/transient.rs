@@ -363,7 +363,9 @@ impl PreparedRigidHertzTransient {
 }
 
 /// Actual normal point-rate response to [Fx,Fy,M/a] with original full inertia.
-fn normal_response_row(pair: &PreparedRigidHertzTrajectory) -> Result<Vec3, RigidHertzError> {
+pub(super) fn normal_response_row(
+    pair: &PreparedRigidHertzTrajectory,
+) -> Result<Vec3, RigidHertzError> {
     let mut row = [0.0; 3];
     for i in 0..2 {
         let orientation = pair.before[i].pose().orientation();

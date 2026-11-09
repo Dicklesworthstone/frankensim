@@ -1,3 +1,30 @@
+## Driven original-body Hertz shear and spin
+
+`tangential_friction::hertz::driven` advances held external world forces and
+body-frame torques together with the original joint Hertz sliding/spin law.
+Original masses, full inertia, orientations and contact arms supply the complete
+three-coordinate mobility. The explicit resting/sliding mode survives accepted
+continuation. Static admission, breakaway and arrest belong to the original
+pressure-resolved surface; no separate force/spin caps or velocity clamp replace it.
+
+Each original body receives one summed external/contact impulse. Actual native
+momenta and compensated kinetic change independently check the law endpoint and
+work. External work retains common-body motion: the analytically integrated free
+source work is corrected by `g dot (travel - free_travel)`, where `W g = a_drive`.
+It is never inferred from heat, numerical loss or rounded free endpoint storage.
+Static force transmission can accelerate both bodies with nonzero drive work and
+zero frictional heat. The full balance is `Delta K + Q_friction - W_external`.
+Bodies and retained mode publish together only after every original gate passes.
+
+Poses, arms, inertia, normal load and radius remain held. A conservative full-path
+normal-response bound refuses unsupported opening. Invariant directions retain
+exact constant-acceleration events; curved motion and curved capture retain the
+law's explicit first-order timestep approximation. Finite pose/normal evolution,
+changing source drive and general driven rate-weakening laws remain separate.
+Focused native tests cover analytic common-motion work, motor spin and split
+continuation, an independent full-body power/trajectory ODE, world/body-frame
+covariance, unrepresentable source work, atomic refusal and unaffected bodies.
+
 ## Native recoil from local-speed Hertz friction
 
 `tangential_friction::hertz::rate_dependent` advances the original

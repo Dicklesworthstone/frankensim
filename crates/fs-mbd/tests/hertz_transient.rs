@@ -1,4 +1,6 @@
 //! G1/G3: curved original Hertz traction, finite recoil and physical stopping.
+#[path = "hertz_transient/driven.rs"]
+mod driven;
 #[path = "hertz_transient/rate_dependent.rs"]
 mod rate_dependent;
 
