@@ -1,4 +1,4 @@
-<!-- fs-couple contract, part 3 of 8; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-couple contract, part 3 of 8; a higher number is newer. Index: ../CONTRACT.md. -->
 ## Finite thermochemical feedback through the complete acoustic load
 
 `DgPortLoad::step_with_finite_gas_controlled` connects the original finite

@@ -1,4 +1,4 @@
-<!-- fs-lbm contract, part 1 of 3; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-lbm contract, part 1 of 3; a higher number is newer. Index: ../CONTRACT.md. -->
 ## Rigid wall momentum on the original thermal VOF trajectory
 
 The immutable thermal rigid-wall candidate methods use the existing link-resolved rigid reflection with current cellwise material relaxation and the original Guo force frame. That same native tick records the actual mass routes consumed by extensive-enthalpy transport. Final source/rheology, wetting, wall mass, population/Mach, material speed, SI conversion and cancellation checks precede return.

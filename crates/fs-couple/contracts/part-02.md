@@ -1,4 +1,4 @@
-<!-- fs-couple contract, part 2 of 8; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-couple contract, part 2 of 8; a higher number is newer. Index: ../CONTRACT.md. -->
 ## Source-resolved Hertz islands on shared finite thermal cells — v0
 
 `friction_heat::hertz::multiple::propose_rigid_hertz_island_heat` couples

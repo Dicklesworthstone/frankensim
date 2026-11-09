@@ -1,4 +1,4 @@
-<!-- fs-couple contract, part 4 of 8; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-couple contract, part 4 of 8; a higher number is newer. Index: ../CONTRACT.md. -->
 ## No-claim boundaries
 
 - TOMBSTONE-3ez8g.13.5: `traveling_wave_line` is dead code with zero

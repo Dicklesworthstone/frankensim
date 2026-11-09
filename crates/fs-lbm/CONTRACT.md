@@ -1,17 +1,18 @@
 # CONTRACT: fs-lbm
 
 > **Layout (restored 2026-11-09).** This contract is an index plus part files. Once this file grew
-> past 1 MiB (1,048,576 bytes), an edit through one write path replaced the whole contract with its
-> one new section. The likely cause is the GitHub contents API, which returns empty content for
-> files above 1 MB, so that writer saw an empty file.
+> past 1 MiB (1,048,576 bytes), a commit replaced the whole contract with its one new section. The
+> cause has not been identified: the cutting commit is an ordinary multi-file commit, so a tool that
+> cannot read past 1 MiB and then writes the file whole is the likely kind of cause.
 > That happened to this file once, at 23b90dcc17 (2026-11-07 02:15), when it was 1,050,479 bytes; the
 > text written before that cut was absent from then until this restore and is now in the parts.
 >
 > - Earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
 >   inside a part, sections keep the order they had in the single file.
 > - Sections written since the cut are below, exactly as they were.
-> - When this file passes 600 KB, move its oldest sections into a new highest-numbered part and add
->   its row to the table. No file here may exceed 900 KB.
+> - There is no size limit on this file or on the parts (owner ruling, 2026-11-09). If a tool shows
+>   you this file empty or cut short, do not write it back whole: add your section with a patch, and
+>   check that `git diff --stat` shows no large deletion here before you commit.
 > - The ten required sections are in the parts named under their headings at the end of this file.
 
 ## Native full rigid-frame evolution

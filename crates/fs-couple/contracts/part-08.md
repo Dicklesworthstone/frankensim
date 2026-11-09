@@ -1,4 +1,4 @@
-<!-- fs-couple contract, part 8 of 8; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-couple contract, part 8 of 8; a higher number is newer. Index: ../CONTRACT.md. -->
 ## Driven full-curve Hertz friction with original thermal sources
 
 `friction_heat::hertz::rate_dependent::driven` connects the original local-speed

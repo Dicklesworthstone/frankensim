@@ -1,16 +1,18 @@
 # CONTRACT: fs-couple
 
 > **Layout (restored 2026-11-09).** This contract is an index plus part files. Once this file grew
-> past 1 MiB (1,048,576 bytes), edits through one write path replaced the whole contract with their
-> one new section; no edit below that size ever did. The likely cause is the GitHub contents API,
-> which returns empty content for files above 1 MB, so that writer saw an empty file.
+> past 1 MiB (1,048,576 bytes), some commits replaced the whole contract with their one new
+> section; no edit below that size ever did. The cause has not been identified: the cutting commits
+> are ordinary multi-file commits, so a tool that cannot read past 1 MiB and then writes the file
+> whole is the likely kind of cause.
 > This file was cut to a single section 18 times between 2026-10-30 and 2026-11-09; the text written before 2026-11-05 19:45 (2.3 MB) was absent from then until this restore.
 >
 > - All earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
 >   inside a part, sections are newest first, as they were in the single file.
 > - Add a new section under "New sections" below, newest first.
-> - When this file passes 600 KB, move the sections under "New sections" into a new
->   highest-numbered part and add its row to the table. No file here may exceed 900 KB.
+> - There is no size limit on this file or on the parts (owner ruling, 2026-11-09). If a tool shows
+>   you this file empty or cut short, do not write it back whole: add your section with a patch, and
+>   check that `git diff --stat` shows no large deletion here before you commit.
 > - The ten required sections are in the parts named under their headings below.
 
 ## New sections (newest first)

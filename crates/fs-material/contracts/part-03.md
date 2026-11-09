@@ -1,4 +1,4 @@
-<!-- fs-material contract, part 3 of 4; a higher number is newer. Index: ../CONTRACT.md. Keep this file under 900 KB: the GitHub contents API returns empty content above 1 MiB, and a writer that sees an empty file overwrites it. -->
+<!-- fs-material contract, part 3 of 4; a higher number is newer. Index: ../CONTRACT.md. -->
 ## Authority-separated multi-case identifiability schema (bead I10.1)
 
 `identifiability/authoritative.rs` is the current public I10.1 contract. It
