@@ -11264,3 +11264,38 @@ The combined audit cancels internal plastic transfer once, using actual native k
 The physical scope remains held poses/frame, prescribed normal loading at interval start and frozen material properties. Interval-average heat and the original inertial midpoint phase require temporal refinement. Finite orientation integration, normal body motion and temperature-dependent source feedback are separate operations.
 
 Three focused integration cases cover eight driven intervals with independent kinetic/contact/cell/outside energy and background power, separation and fresh recontact while physical time advances, and post-snap transport failure, both final cancellation forms, stale time/history and deterministic retry. Pinned format checks and recursive Rust syntax/module-path parsing passed. These new integration cases were not compiled or run: DSR and RCH are unavailable and local memory/disk headroom is exhausted.
+
+## Accepted-temperature water/silica phase with original current absorption
+
+`AnalyticThermoOpticalSource::{try_iapws_water,try_corning_7980_silica}` binds
+one explicitly selected original analytic phase family to the canonical
+independent current-state wavelength/alpha spectrum. The complete original
+snapshot also owns scalar permeability and, for water, bulk mass density.
+Accepted native cell temperatures refresh all retained selected claims once;
+the existing water/silica Maxwell adapter then evaluates phase and loss at
+that SAME state and retains its original finite support and gap admission.
+
+The existing monochromatic and mutually incoherent broadband thermal owners
+consume this sealed source through their original coherent film fields,
+positive local absorbed work, caloric capacity, conduction and transaction
+boundaries. Applied/endpoint snapshots preserve the full original source;
+subsequent intervals start from the accepted endpoint. The original source
+card, absolute-temperature coordinate, alpha domain and analytic phase domain
+remain binding, including the CHARMS fit's 300 K ceiling. Cancellation or an
+endpoint source/phase refusal returns no partial optical/thermal update.
+
+The source owns no extra Beer-law or Ohmic heating term. Current source
+coefficients are held over each original quasi-steady thermal interval; it
+supplies no causal field reservoir, transient constitutive parameter work,
+flow/EOS closure, phase classification, geometry change or expansion work.
+Fixed thermal mass/geometry remain explicit caller-owned approximations when
+an independently supplied density path changes. This does not qualify an
+empirical loss spectrum or infer a material identity from its name.
+
+Two authored native regression groups exercise BOTH original phase families:
+nonuniform two-cell coherent heating against a constant-capacity backward
+Euler oracle, next-interval refresh and late cancellation; and two-line
+broadband complex Airy heat/enthalpy, original alpha refresh and transactional
+phase/absorption domain exits. Native tests are defined but unexecuted here;
+independent scalar Airy arithmetic confirms the finite heating and domain-exit
+fixtures, and source/API review checks the existing native integration.

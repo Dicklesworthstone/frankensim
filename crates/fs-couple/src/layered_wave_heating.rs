@@ -52,7 +52,7 @@ pub mod substrate;
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
 pub use thermo_optical::{
-    BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating,
+    AnalyticThermoOpticalSource, BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating,
     BroadbandThermoOpticalWaveStep, SchottThermoOpticalSource, SpectralThermoOpticalSource,
     ThermoOpticalLayer, ThermoOpticalSource, ThermoOpticalSpectralLine, ThermoOpticalWaveHeating,
     ThermoOpticalWaveStep,

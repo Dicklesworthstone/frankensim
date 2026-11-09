@@ -1,5 +1,8 @@
 //! Accepted-temperature optical feedback and transactional source support.
 
+#[path = "thermo_optical/analytic.rs"]
+mod analytic;
+
 #[path = "thermo_optical/schott.rs"]
 mod schott;
 #[path = "thermo_optical/spectral.rs"]

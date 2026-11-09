@@ -29,12 +29,17 @@ pub use broadband::{
 mod schott;
 pub use schott::SchottThermoOpticalSource;
 
+/// Original analytic water/silica phase with independently sourced current loss.
+mod analytic;
+pub use analytic::AnalyticThermoOpticalSource;
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for fs_material::state_point::VisibleConductorStatePoint {}
     impl Sealed for fs_material::state_point::VisibleOpticalStatePoint {}
     impl Sealed for super::SpectralThermoOpticalSource {}
     impl Sealed for super::SchottThermoOpticalSource {}
+    impl Sealed for super::AnalyticThermoOpticalSource {}
 }
 
 /// Original source families supported by this thermal/Maxwell bridge.
@@ -45,6 +50,9 @@ mod sealed {
 /// `SpectralThermoOpticalSource` retains explicit finite-band infrared sources.
 /// `SchottThermoOpticalSource` keeps a reference spectrum fixed while the native
 /// cell temperature drives its separately sourced real-index correction.
+/// `AnalyticThermoOpticalSource` uses original IAPWS water or CHARMS silica
+/// phase and refreshes its complete current absorption/density/permeability
+/// source at every accepted native cell temperature.
 pub trait ThermoOpticalSource: sealed::Sealed + Clone {
     fn resolved(&self) -> &ResolvedMaterialStatePoint;
     fn at_query_point(
