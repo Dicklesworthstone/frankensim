@@ -130,12 +130,15 @@ pub struct PeriodicDynamicSgs {
     wall_velocity: [[f64; 3]; 2],
     velocity: Vec<[f64; 3]>,
     filtered: Vec<[f64; 4]>,
-    // The stress tensor is needed only through prepare_contractions. A
+    // The test-box-weighted stress tensor is needed only through
+    // prepare_contractions. A
     // successful fit then reuses lane 0 for its nonnegative C_s squared;
     // scalar fits and Lagrangian history never read this retired tensor.
     basis: Vec<[f64; 6]>,
     strain_rate: Vec<f64>,
     contraction: Vec<[f64; 2]>,
+    // Before fitting, this otherwise unused output stores the normalized
+    // donor density with its test-box weight. No additional field is needed.
     viscosity: Vec<f64>,
 }
 
@@ -565,11 +568,15 @@ impl PeriodicDynamicSgs {
                 [0.0; 2],
             ));
         }
+        let samples = self.geometry.samples();
         for (cell, v) in self.velocity.iter_mut().enumerate() {
             poll(&mut cancelled, cell)?;
             for component in v {
                 *component /= velocity_scale;
             }
+            // Keep the original division order, but compute each donor's
+            // weight once rather than at every neighbor of both sweeps.
+            self.viscosity[cell] = density[cell] / density_scale / samples;
         }
         if matches!(self.geometry, FilterGeometry::Channel(_)) {
             for wall in &mut self.wall_velocity {
@@ -578,7 +585,6 @@ impl PeriodicDynamicSgs {
                 }
             }
         }
-        let samples = self.geometry.samples();
         let ratio_squared = self.geometry.ratio_squared();
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
@@ -601,9 +607,15 @@ impl PeriodicDynamicSgs {
                     reason: "unrepresentable normalized stress basis",
                 });
             }
+            // The unweighted basis has already passed its original admission.
+            // Every consumer below needs precisely this weighted value; moving
+            // the division here preserves its bits and the summation order.
+            for value in &mut self.basis[cell] {
+                *value /= samples;
+            }
             let mut filtered = [0.0; 4];
             self.geometry.each_box(self.shape, cell, |j| {
-                let rho = density[j] / density_scale / samples;
+                let rho = self.viscosity[j];
                 filtered[3] += rho;
                 for (k, v) in filtered[..3].iter_mut().enumerate() {
                     *v += rho * self.velocity[j][k];
@@ -628,7 +640,7 @@ impl PeriodicDynamicSgs {
             let mut l = [0.0; 6];
             let mean = self.filtered[cell];
             self.geometry.each_box(self.shape, cell, |j| {
-                let rho = density[j] / density_scale / samples;
+                let rho = self.viscosity[j];
                 let d = core::array::from_fn::<_, 3, _>(|k| self.velocity[j][k] - mean[k]);
                 let product = [
                     d[0] * d[0],
@@ -640,7 +652,7 @@ impl PeriodicDynamicSgs {
                 ];
                 for k in 0..6 {
                     l[k] += rho * product[k];
-                    a[k] += self.basis[j][k] / samples;
+                    a[k] += self.basis[j][k];
                 }
             });
             let (rate, s) = strain(
