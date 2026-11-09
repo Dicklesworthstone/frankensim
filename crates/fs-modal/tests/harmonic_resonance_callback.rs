@@ -5,7 +5,8 @@ use fs_modal::harmonic::resonance::{
     HarmonicTransferSample, ResonanceControls, ResonanceError, TransferExtremumKind,
     refine_half_power_bandwidth_with_cancel, refine_transfer_extremum_with_cancel,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
 const MASS: f64 = 2.0;
 const STIFFNESS: f64 = 50.0;
@@ -143,6 +144,45 @@ fn true_asymmetric_half_power_crossings_determine_the_response_quality_factor() 
     assert!((bandwidth.angular_bandwidth_rad_s - DAMPING / MASS).abs() > 0.1);
     let modal_quality = (MASS * STIFFNESS).sqrt() / DAMPING;
     assert!((bandwidth.response_quality_factor - modal_quality).abs() > 0.1);
+}
+
+#[test]
+fn stationary_resonance_reuses_its_physical_solve_within_a_tight_query_budget() {
+    // The exact response of a damped first-order mode in a rotating frame:
+    // (gamma - i*(omega-center))*H = gamma. Its peak and all bisection
+    // midpoints are exactly representable. Each callback may be a full coupled
+    // factorization, so resolving its two-sided bracket must not repeatedly
+    // solve the unchanged peak.
+    let calls = RefCell::new(BTreeSet::new());
+    let tolerance = 2.0_f64.powi(-34);
+    let result = refine_transfer_extremum_with_cancel(
+        (6.0, 10.0),
+        ResonanceControls {
+            absolute_angular_tolerance_rad_s: tolerance,
+            relative_angular_tolerance: 0.0,
+            maximum_evaluations: 76,
+        },
+        || false,
+        |omega| {
+            assert!(
+                calls.borrow_mut().insert(omega.to_bits()),
+                "repeated original physical solve at {omega}"
+            );
+            let denominator = C64::new(0.5, 8.0 - omega);
+            let amplitude = C64::from_re(0.5) / denominator;
+            Ok::<_, &'static str>(HarmonicTransferSample {
+                amplitude,
+                angular_derivative: C64::new(0.0, 1.0) * amplitude / denominator,
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(result.angular_frequency_rad_s, 8.0);
+    assert_eq!(result.sample.amplitude, C64::ONE);
+    assert!(result.bracket_rad_s.0 < 8.0 && result.bracket_rad_s.1 > 8.0);
+    assert!(result.bracket_rad_s.1 - result.bracket_rad_s.0 <= tolerance);
+    assert_eq!(result.evaluations, calls.borrow().len());
+    assert!(result.evaluations <= 76);
 }
 
 #[test]

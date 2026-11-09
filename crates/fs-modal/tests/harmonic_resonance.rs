@@ -4,7 +4,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_math::c64::C64;
 use fs_modal::harmonic::resonance::{
     HarmonicTransferSample, ResonanceControls, ResonanceError, TransferExtremumKind,
-    refine_half_power_bandwidth, refine_transfer_extremum,
+    refine_half_power_bandwidth, refine_half_power_bandwidth_with_cancel, refine_transfer_extremum,
+    refine_transfer_extremum_with_cancel,
 };
 use fs_modal::harmonic::{
     HarmonicFrequencyControls, HarmonicResponseControls, HarmonicResponseError,
@@ -158,6 +159,80 @@ fn g1_high_q_peak_and_linewidth_are_resolved_without_a_frequency_grid() {
         close(linewidth.response_quality_factor, natural / damping, 2.0);
         assert!(peak.evaluations < 100);
     });
+}
+
+#[test]
+fn g1_unresolved_high_q_flanks_refuse_instead_of_reporting_a_numerical_linewidth() {
+    // Original scalar oscillator q'' + c*q' + q = exp(-i*w*t).
+    // Its displacement Q is nearly 100_000; a tolerance larger than the
+    // physical width previously returned Q ~= 1280 from touching brackets.
+    let damping: f64 = 1e-5;
+    let sample = |w: f64| -> Result<_, &'static str> {
+        let dynamic = C64::new(1.0 - w * w, -damping * w);
+        Ok(HarmonicTransferSample {
+            amplitude: C64::ONE / dynamic,
+            angular_derivative: C64::new(2.0 * w, damping) / (dynamic * dynamic),
+        })
+    };
+    let coarse = ResonanceControls {
+        absolute_angular_tolerance_rad_s: 1e-3,
+        relative_angular_tolerance: 0.0,
+        maximum_evaluations: 256,
+    };
+    let peak = refine_transfer_extremum_with_cancel((0.9, 1.1), coarse, || false, sample).unwrap();
+    assert!(matches!(
+        refine_half_power_bandwidth_with_cancel(
+            &peak,
+            (0.9, peak.angular_frequency_rad_s),
+            (peak.angular_frequency_rad_s, 1.1),
+            coarse,
+            || false,
+            sample,
+        ),
+        Err(ResonanceError::InvalidBracket(_))
+    ));
+
+    let fine = ResonanceControls {
+        absolute_angular_tolerance_rad_s: 1e-10,
+        ..coarse
+    };
+    let peak = refine_transfer_extremum_with_cancel((0.9, 1.1), fine, || false, sample).unwrap();
+    let band = refine_half_power_bandwidth_with_cancel(
+        &peak,
+        (0.9, peak.angular_frequency_rad_s),
+        (peak.angular_frequency_rad_s, 1.1),
+        fine,
+        || false,
+        sample,
+    )
+    .unwrap();
+
+    // Independent half-height roots follow by completing the square in w^2
+    // in |1-w^2-i*c*w|^2, without assuming a symmetric Lorentzian line shape.
+    let peak_square = 1.0 - damping * damping / 2.0;
+    let spread = damping * (1.0 - damping * damping / 4.0).sqrt();
+    let lower = (peak_square - spread).sqrt();
+    let upper = (peak_square + spread).sqrt();
+    let width = upper - lower;
+    assert!(band.lower_bracket_rad_s.1 < band.upper_bracket_rad_s.0);
+    close(band.lower_angular_frequency_rad_s, lower, 1e-10);
+    close(band.upper_angular_frequency_rad_s, upper, 1e-10);
+    close(band.angular_bandwidth_rad_s, width, 2e-10);
+    close(
+        band.response_quality_factor,
+        peak_square.sqrt() / width,
+        2.0,
+    );
+    for frequency in [
+        band.lower_angular_frequency_rad_s,
+        band.upper_angular_frequency_rad_s,
+    ] {
+        close(
+            (sample(frequency).unwrap().amplitude / peak.sample.amplitude).norm_sq(),
+            0.5,
+            2e-5,
+        );
+    }
 }
 
 #[test]

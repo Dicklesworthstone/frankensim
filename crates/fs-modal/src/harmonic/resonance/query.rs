@@ -343,6 +343,14 @@ pub fn refine_half_power_bandwidth_with_cancel<E>(
     }
     let (lower, lower_bracket_rad_s) = query.refine(l0, l1, level, false)?;
     let (upper, upper_bracket_rad_s) = query.refine(u0, u1, level, false)?;
+    if lower_bracket_rad_s.1 >= upper_bracket_rad_s.0 {
+        // A coarse frequency tolerance can stop both flanks while they still
+        // share the peak. Their midpoint difference is then a numerical step,
+        // not a resolved positive linewidth of a narrow physical resonance.
+        return Err(ResonanceError::InvalidBracket(
+            "half-power crossing brackets do not resolve a positive linewidth",
+        ));
+    }
     let width = upper.frequency - lower.frequency;
     let quality = peak.angular_frequency_rad_s / width;
     if width <= 0.0 || !quality.is_finite() {
@@ -474,6 +482,11 @@ where
         level: impl Fn(HarmonicTransferSample) -> f64 + Copy,
         finite_maximum: bool,
     ) -> Result<(Point, (f64, f64)), ResonanceError<E>> {
+        // An exactly stationary response stays between two shrinking sign
+        // endpoints. Its original physical solve is still valid there; keep
+        // just that sample instead of refactoring the same frequency on every
+        // iteration. The cache is local to this level/transfer and O(1).
+        let mut stationary: Option<Point> = None;
         loop {
             self.poll()?;
             let width = right.frequency - left.frequency;
@@ -483,6 +496,8 @@ where
                 left
             } else if middle == right.frequency {
                 right
+            } else if let Some(point) = stationary.filter(|p| p.frequency == middle) {
+                point
             } else {
                 self.sample(middle, level)?
             };
@@ -500,6 +515,7 @@ where
                 ));
             }
             if point.level == 0.0 {
+                stationary = Some(point);
                 // Do not confuse a flat response or stationary inflection with
                 // a peak. Keep two-sided strict orientation while shrinking
                 // around an exactly stationary/crossing numerical sample.

@@ -244,7 +244,11 @@ damping ratio or a statement about total absorbed mechanical power.
 Normalized signs avoid overflowing/underflowing amplitude squares. Explicit
 absolute/relative frequency resolution and one callback-evaluation ceiling
 bound each query; refinement also stops at irreducible floating-point spacing,
-visible in the returned brackets. Cancellation or a physical evaluator's
+visible in the returned brackets. Final half-power crossing brackets must be
+strictly separated: unresolved positive linewidth refuses instead of reporting
+Q from touching flanks. Exactly stationary samples are reused while their
+strict sign brackets shrink, avoiding repeated physical solves without changing
+the result or relaxing the resolution. Cancellation or a physical evaluator's
 refusal publishes no partial result and preserves the original error.
 
 Complex receiver transfer rows are first-class observations. Fixed complex
