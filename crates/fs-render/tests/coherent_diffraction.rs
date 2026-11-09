@@ -1638,3 +1638,6 @@ mod interferometer_jones_pixel;
 
 #[path = "coherent_diffraction/interferometer_arm_spectrum.rs"]
 mod interferometer_arm_spectrum;
+
+#[path = "coherent_diffraction/linewidth.rs"]
+mod linewidth;

@@ -4452,6 +4452,31 @@ original source-bank limits. Focused regressions cover polarization/analyzer
 laws, circular phase, independent factors, scalar parity, weak populations,
 finite bright outputs and refusal/cancellation reuse.
 
+### Stationary finite-linewidth interferometry
+
+`InterferometerTemporalCoherence` supplies an explicit Lorentzian or Gaussian
+power-spectrum FWHM in Hz and a separately authored complete relative group
+delay in seconds. Scalar and Jones `observe_interferometer_with_linewidth`
+reuse the original source banks, carrier phases, passive splits and arm optics.
+The normalized field correlations are `exp(-pi*FWHM*abs(delay))` and
+`exp(-(pi*FWHM*delay)^2/(4*ln(2)))`. Both ports use positive mixtures of their
+coherent and independent-arm outer products; cross-arm coherency changes but
+arm energy does not. `expm1` retains linewidth-induced leakage at a dark port
+even when the rounded correlation is one. The scalar finite-pixel counterpart
+evaluates an optional authored linear delay gradient inside the original positive
+quadrature and admits resolution/work for the temporal envelope too.
+
+This is a stationary separable narrowband ensemble mean: pupil transfer and
+Jones optics are frozen at the original wavelength, and the authored delay
+contains all relative propagation/optics. Phase OPD is not substituted for
+group delay. Admission caps FWHM at 1% of carrier frequency; this is not an
+accuracy certificate. Higher-order dispersion, broad chromatic response,
+source turn-on and finite-shutter fluctuations remain outside this model.
+The existing explicitly resolved line-spectrum exposure path is unchanged.
+Focused G1/G3/G4 tests compare independent spectral Fourier integrals,
+finite-pixel square-pupil integrals, weak dark leakage, polarization/spatial
+independence, power closure and refusal/cancellation reuse.
+
 ### Spectral interferometry on the original finite shutter
 
 `PreparedCoherentDiffractionExposure::observe_interferometer` recombines both

@@ -39,6 +39,7 @@ mod pixel;
 mod polarization;
 pub use interferometer::CoherentInterferometerPixelPower;
 pub use interferometer::{CoherentDiffractionInterferometer, CoherentInterferometerSample};
+pub use interferometer::InterferometerTemporalCoherence;
 pub use polarization::{CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample};
 pub use polarization::{
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
@@ -137,6 +138,8 @@ pub enum CoherentDiffractionError {
     InvalidSensorPlane,
     /// Arm weights must be passive and optical path/combiner phase finite.
     InvalidInterferometer,
+    /// Linewidth/delay is invalid or FWHM exceeds 1% of the optical carrier.
+    InvalidTemporalCoherence,
     /// Every tone must declare the same ordered covariance-factor identities.
     InconsistentCoherenceFactors,
     /// An ideal Jones analyzer needs a finite, nonzero polarization direction.

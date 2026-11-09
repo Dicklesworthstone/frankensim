@@ -7,7 +7,8 @@ use super::super::{
     poll, rounded,
 };
 use super::{
-    CoherentDiffractionInterferometer, admit_sensor, length_phase, mul, rotation, visibility,
+    CoherentDiffractionInterferometer, InterferometerTemporalCoherence, TemporalWeights,
+    admit_sensor, length_phase, mul, rotation, visibility,
 };
 use fs_math::c64::C64;
 
@@ -59,9 +60,53 @@ impl PreparedCoherentDiffraction<'_, '_> {
         receiver: CoherentDiffractionInterferometer,
         relay_offsets: CoherentDiffractionPixel,
         limits: CoherentDiffractionPixelLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentInterferometerPixelPower, CoherentDiffractionError> {
+        self.integrate_interferometer_pixel_with_coherence(
+            receiver, None, relay_offsets, limits, cancelled,
+        )
+    }
+
+    /// Integrate the stationary finite-linewidth ports over a common relay pixel.
+    ///
+    /// The authored linear group-delay law is evaluated at every quadrature
+    /// point, before powers and mutual coherence are integrated. The temporal
+    /// envelope's variation contributes to the original resolution/work bounds;
+    /// a center-pixel visibility multiplier would miss localized coherence.
+    /// The narrowband/frozen-optics assumptions of [`InterferometerTemporalCoherence`]
+    /// apply to the complete footprint. No finite-shutter fluctuations are supplied.
+    pub fn integrate_interferometer_pixel_with_linewidth(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        coherence: InterferometerTemporalCoherence,
+        relay_offsets: CoherentDiffractionPixel,
+        limits: CoherentDiffractionPixelLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentInterferometerPixelPower, CoherentDiffractionError> {
+        self.integrate_interferometer_pixel_with_coherence(
+            receiver, Some(coherence), relay_offsets, limits, cancelled,
+        )
+    }
+
+    fn integrate_interferometer_pixel_with_coherence(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        coherence: Option<InterferometerTemporalCoherence>,
+        relay_offsets: CoherentDiffractionPixel,
+        limits: CoherentDiffractionPixelLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoherentInterferometerPixelPower, CoherentDiffractionError> {
         poll(&mut cancelled)?;
+        let fixed_temporal = if let Some(coherence) = coherence {
+            coherence.admit(self.wavelength_nm)?;
+            if coherence.uniform_delay() {
+                Some(coherence.weights([0.0; 2])?)
+            } else {
+                None
+            }
+        } else {
+            Some(TemporalWeights::COHERENT)
+        };
         admit_sensor(self.camera, receiver.sensor_distance_m())?;
         let centers = receiver.coordinates();
         let lower = relay_offsets.minimum_tangent();
@@ -97,8 +142,14 @@ impl PreparedCoherentDiffraction<'_, '_> {
                 let chirp_bandwidth = path_gradient[axis].abs() * Dd::from_f64(1e9)
                     / Dd::from_f64(medium_wavelength_nm)
                     * tau;
+                let envelope_rate = if let Some(coherence) = coherence.filter(|_| interfering) {
+                    Dd::from_f64(coherence.envelope_rate(axis)?)
+                } else {
+                    Dd::ZERO
+                };
                 maximum_step[axis] =
-                    limits.maximum_phase_span_rad / rounded(pupil_bandwidth + chirp_bandwidth)?;
+                    limits.maximum_phase_span_rad
+                        / rounded(pupil_bandwidth + chirp_bandwidth + envelope_rate)?;
             }
         }
         let (subdivisions, quadrature_samples, pupil_evaluations) =
@@ -127,6 +178,13 @@ impl PreparedCoherentDiffraction<'_, '_> {
                     translated(centers, offset),
                     amplitudes,
                     arm_rotation,
+                    if let Some(temporal) = fixed_temporal {
+                        temporal
+                    } else if let Some(coherence) = coherence {
+                        coherence.weights(offset)?
+                    } else {
+                        TemporalWeights::COHERENT
+                    },
                     cancelled,
                 )
             },

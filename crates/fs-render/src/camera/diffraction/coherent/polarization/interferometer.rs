@@ -9,7 +9,7 @@ use super::super::{
     CoherentDiffractionError, CoherentDiffractionInterferometer, CoherentJonesPupilLayer,
     admit_count,
     exposure::admit_sensor,
-    interferometer::{mul, visibility},
+    interferometer::{InterferometerTemporalCoherence, TemporalWeights, mul, visibility},
     poll, rounded,
 };
 use super::{
@@ -125,9 +125,49 @@ impl PreparedPolarizedCoherentDiffraction<'_, '_> {
         receiver: CoherentDiffractionInterferometer,
         arms: [CoherentJonesArm; 2],
         maximum_pupil_evaluations: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PolarizedCoherentInterferometerSample, CoherentDiffractionError> {
+        self.observe_interferometer_with_coherence(
+            receiver, arms, None, maximum_pupil_evaluations, cancelled,
+        )
+    }
+
+    /// Stationary finite-linewidth interference through the original Jones arms.
+    ///
+    /// The temporal correlation attenuates the complete cross-arm coherency,
+    /// including phase-dependent output polarization when the arm polarizations
+    /// are orthogonal. It leaves each arm's polarization and power unchanged.
+    /// Positive coherent/independent-arm outer products preserve weak populations
+    /// and the original source-bank independence. Jones optics and pupil transfer
+    /// remain frozen at the central wavelength under the explicit narrowband law.
+    pub fn observe_interferometer_with_linewidth(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        arms: [CoherentJonesArm; 2],
+        coherence: InterferometerTemporalCoherence,
+        maximum_pupil_evaluations: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PolarizedCoherentInterferometerSample, CoherentDiffractionError> {
+        self.observe_interferometer_with_coherence(
+            receiver, arms, Some(coherence), maximum_pupil_evaluations, cancelled,
+        )
+    }
+
+    fn observe_interferometer_with_coherence(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        arms: [CoherentJonesArm; 2],
+        coherence: Option<InterferometerTemporalCoherence>,
+        maximum_pupil_evaluations: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PolarizedCoherentInterferometerSample, CoherentDiffractionError> {
         poll(&mut cancelled)?;
+        let temporal = if let Some(coherence) = coherence {
+            coherence.admit(self.wavelength_nm)?;
+            coherence.weights([0.0; 2])?
+        } else {
+            TemporalWeights::COHERENT
+        };
         admit_sensor(self.camera, receiver.sensor_distance_m())?;
         let pupil_evaluations =
             receiver.pupil_evaluations(self.waves, maximum_pupil_evaluations)?;
@@ -158,9 +198,14 @@ impl PreparedPolarizedCoherentDiffraction<'_, '_> {
             for component in &mut fields[1] {
                 *component = product(*component, rotation)?;
             }
+            let mut independent = [Dd::ZERO; 4];
             for arm in 0..2 {
                 let moment = outer(fields[arm])?;
                 power[arm] = power[arm] + (moment[0] + moment[1]);
+                for index in 0..4 {
+                    independent[index] = independent[index]
+                        + moment[index] * (temporal.incoherent * Dd::from_f64(0.5));
+                }
             }
             for component in 0..2 {
                 let cross = product(
@@ -168,7 +213,7 @@ impl PreparedPolarizedCoherentDiffraction<'_, '_> {
                     [fields[1][component][0], -fields[1][component][1]],
                 )?;
                 for axis in 0..2 {
-                    mutual[axis] = mutual[axis] + cross[axis];
+                    mutual[axis] = mutual[axis] + cross[axis] * temporal.coherent;
                 }
             }
             for (port, sign) in [Dd::ONE, -Dd::ONE].into_iter().enumerate() {
@@ -176,14 +221,16 @@ impl PreparedPolarizedCoherentDiffraction<'_, '_> {
                 for component in 0..2 {
                     field[component] = product(
                         std::array::from_fn(|axis| {
-                            fields[0][component][axis] + sign * fields[1][component][axis]
+                            (fields[0][component][axis] + sign * fields[1][component][axis])
+                                * temporal.field_scale
                         }),
                         combiner,
                     )?;
                 }
                 let moment = outer(field)?;
                 for index in 0..4 {
-                    output[port][index] = output[port][index] + moment[index];
+                    output[port][index] = output[port][index]
+                        + (moment[index] + independent[index]);
                 }
             }
         }

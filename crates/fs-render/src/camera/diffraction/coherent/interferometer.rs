@@ -16,6 +16,9 @@ use fs_math::{c64::C64, det};
 
 mod pixel;
 pub use pixel::CoherentInterferometerPixelPower;
+mod linewidth;
+pub use linewidth::InterferometerTemporalCoherence;
+pub(super) use linewidth::TemporalWeights;
 
 /// Passive sampling of two positions on one physical sensor plane.
 ///
@@ -169,9 +172,47 @@ impl PreparedCoherentDiffraction<'_, '_> {
         &self,
         receiver: CoherentDiffractionInterferometer,
         maximum_pupil_evaluations: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentInterferometerSample, CoherentDiffractionError> {
+        self.observe_interferometer_with_coherence(
+            receiver, None, maximum_pupil_evaluations, cancelled,
+        )
+    }
+
+    /// Stationary finite-linewidth port powers using the original spatial fields.
+    ///
+    /// The explicit narrowband source multiplies cross-arm coherence by its
+    /// analytic temporal envelope at the authored group delay. Each bank's
+    /// output is a positive mixture of its coherent port and independent-arm
+    /// powers. Passive arm energy is unchanged, including at a dark fringe.
+    /// This ensemble mean does not model finite-shutter noise or infer delays
+    /// from the phase OPD. See [`InterferometerTemporalCoherence`].
+    pub fn observe_interferometer_with_linewidth(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        coherence: InterferometerTemporalCoherence,
+        maximum_pupil_evaluations: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentInterferometerSample, CoherentDiffractionError> {
+        self.observe_interferometer_with_coherence(
+            receiver, Some(coherence), maximum_pupil_evaluations, cancelled,
+        )
+    }
+
+    fn observe_interferometer_with_coherence(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        coherence: Option<InterferometerTemporalCoherence>,
+        maximum_pupil_evaluations: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoherentInterferometerSample, CoherentDiffractionError> {
         poll(&mut cancelled)?;
+        let temporal = if let Some(coherence) = coherence {
+            coherence.admit(self.wavelength_nm)?;
+            coherence.weights([0.0; 2])?
+        } else {
+            TemporalWeights::COHERENT
+        };
         admit_sensor(self.camera, receiver.sensor_distance_m)?;
         let evaluations = receiver.pupil_evaluations(self.waves, maximum_pupil_evaluations)?;
         let amplitudes = receiver.arm_amplitudes();
@@ -186,6 +227,7 @@ impl PreparedCoherentDiffraction<'_, '_> {
             receiver.coordinates,
             amplitudes,
             rotation,
+            temporal,
             &mut cancelled,
         )?;
         let visibility = visibility([moments[0], moments[1]], [moments[4], moments[5]])?;
@@ -207,6 +249,7 @@ impl PreparedCoherentDiffraction<'_, '_> {
         coordinates: [[f64; 2]; 2],
         amplitudes: [Dd; 2],
         rotation: [Dd; 2],
+        temporal: TemporalWeights,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[Dd; 6], CoherentDiffractionError> {
         let mut arms = [Dd::ZERO; 2];
@@ -226,18 +269,22 @@ impl PreparedCoherentDiffraction<'_, '_> {
                 }
             }
             fields[1] = mul(fields[1], rotation);
+            let powers = [square(fields[0])?, square(fields[1])?];
             for arm in 0..2 {
-                arms[arm] = arms[arm] + square(fields[arm])?;
+                arms[arm] = arms[arm] + powers[arm];
             }
+            let independent = powers[0] * (temporal.incoherent * Dd::from_f64(0.5))
+                + powers[1] * (temporal.incoherent * Dd::from_f64(0.5));
             let cross = mul(fields[0], [fields[1][0], -fields[1][1]]);
             for axis in 0..2 {
-                mutual[axis] = mutual[axis] + cross[axis];
+                mutual[axis] = mutual[axis] + cross[axis] * temporal.coherent;
             }
             for (port, sign) in [Dd::ONE, -Dd::ONE].into_iter().enumerate() {
                 let field = std::array::from_fn(|axis| {
-                    (fields[0][axis] + sign * fields[1][axis]) * combiner_amplitude
+                    ((fields[0][axis] + sign * fields[1][axis]) * combiner_amplitude)
+                        * temporal.field_scale
                 });
-                outputs[port] = outputs[port] + square(field)?;
+                outputs[port] = outputs[port] + (square(field)? + independent);
             }
         }
         Ok([

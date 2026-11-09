@@ -26,6 +26,7 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
+    InterferometerTemporalCoherence,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionInterferometer, CoherentDiffractionLimits, CoherentDiffractionPixel,
