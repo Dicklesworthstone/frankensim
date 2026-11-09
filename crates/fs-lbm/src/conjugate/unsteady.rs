@@ -52,7 +52,7 @@ pub use endpoint::{MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpoi
 pub use native_buoyancy::{
     march_conjugate_implicit_buoyancy, march_conjugate_with_sgs_implicit_buoyancy,
 };
-pub use pressure_program::PressureProgram;
+pub use pressure_program::{PressureOffsetProgram, PressureProgram};
 
 #[cfg(feature = "enthalpy-coupling")]
 mod material;
@@ -66,7 +66,7 @@ use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, Therma
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
-use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
+use super::simple::{FvBoundary, FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{
     TransientRecord, energy_step_with_conductivity, heat_capacity, junction_stored_energy_change_j,
     record_energy_step, scale_power, solve_step_with_fields, storage_record,
@@ -162,6 +162,10 @@ pub struct UnsteadyConfig {
     /// conjugate marches, including implicit endpoint feedback. A flow-only
     /// pressure callback, when supplied, multiplies this factor.
     pub pressure_program: PressureProgram,
+    /// Optional signed-Pa offset programs on the six boundary planes in
+    /// `Face3::ALL` order. Each selected plane must be Pressure/Outlet.
+    /// Offsets add after the scalar factor and preserve authored profiles.
+    pub opening_pressure_programs: [Option<PressureOffsetProgram>; 6],
 }
 
 impl UnsteadyConfig {
@@ -178,7 +182,18 @@ impl UnsteadyConfig {
             average_from_step: steps / 2 + 1,
             probe: None,
             pressure_program: PressureProgram::IDENTITY,
+            opening_pressure_programs: [None; 6],
         }
+    }
+
+    fn opening_pressure_offsets_pa(&self, time_s: f64) -> Result<[f64; 6], ChtError> {
+        let mut offsets = [0.0; 6];
+        for (side, program) in self.opening_pressure_programs.iter().enumerate() {
+            if let Some(program) = program {
+                offsets[side] = program.sample_pa(time_s)?;
+            }
+        }
+        Ok(offsets)
     }
 }
 
@@ -281,6 +296,19 @@ fn admit_unsteady(
             "simple.fan",
             "a face fan's operating-point iteration is steady; use an internal fan",
         );
+    }
+    for (side, program) in unsteady.opening_pressure_programs.iter().enumerate() {
+        if program.is_some()
+            && !matches!(
+                config.faces[side],
+                FvBoundary::Pressure { .. } | FvBoundary::Outlet
+            )
+        {
+            return refuse(
+                "unsteady.opening_pressure_programs",
+                "each selected plane requires an original pressure opening",
+            );
+        }
     }
     Ok(())
 }
@@ -501,23 +529,26 @@ pub fn simple_unsteady(
 ///
 /// At each step's end time, the finite signed `pressure_schedule(t)` multiplies
 /// [`UnsteadyConfig::pressure_program`]. Their product modulates every authored
-/// Pressure/Outlet value, including spatial profiles, as
-/// `p_face(t) = p_reference + factor(t) * (p_face_authored - p_reference)`.
-/// Each disconnected fluid component retains its original reference, chosen
-/// from its first exposed reservoir. Thus the schedule changes pressure
-/// differences without multiplying an atmospheric or other common offset.
+/// Pressure/Outlet value, including spatial profiles, before adding that plane's
+/// optional [`UnsteadyConfig::opening_pressure_programs`] offset in Pa:
+/// `p_face(t) = p_ref0 + factor(t)*(p_authored - p_ref0) + offset_side(t)`.
+/// Each disconnected component keeps its original anchor opening; numerical
+/// pressure is centered on `p_ref0 + offset_anchor(t)`. Neither the factor
+/// nor independently scheduled offsets multiply a common atmospheric pressure.
 ///
-/// A factor of one exactly reproduces [`simple_unsteady`]. Zero equalizes the
-/// prescribed reservoir pressures in each component; a negative factor
-/// reverses their head. Existing inertia, viscosity, body loads and internal
+/// A factor of one exactly reproduces [`simple_unsteady`]. Without opening
+/// offset programs, zero equalizes each component's reservoir pressures and a
+/// negative factor reverses their head. Offsets remain independent of the factor.
+/// Existing inertia, viscosity, body loads and internal
 /// fans still determine the actual flow, including backflow. The same native
 /// solver, BE/BDF2 velocity history and pressure projection persist throughout
 /// the march. The callback is sampled once per endpoint, never inside a
 /// nonlinear sweep; resolve authored jumps with the time grid.
 ///
-/// This is one scalar modulation of the authored differential profile, not
-/// independent per-port control or thermodynamic common-mode pressure evolution.
-/// Reservoir tangential velocities and other loads retain their own controls.
+/// The callback remains scalar modulation of the original differential profile.
+/// Independent per-plane mechanical pressure histories use the offset programs;
+/// neither control evolves thermodynamic pressure. Reservoir tangential
+/// velocities and other loads retain their own controls.
 /// Energy and coupled thermal marches are not advanced by this flow-only entry.
 ///
 /// # Errors
@@ -631,8 +662,9 @@ fn simple_unsteady_inner(
         poll(gate)?;
         let time_s = step as f64 * unsteady.time_step_s;
         let inflow = inlet_schedule(time_s);
-        marcher.solver.scale_pressure(
+        marcher.solver.set_pressure_loads(
             unsteady.pressure_program.sample(time_s)? * pressure_schedule(time_s),
+            unsteady.opening_pressure_offsets_pa(time_s)?,
             gate,
         )?;
         marcher.step(step, inflow, gate)?;
@@ -646,7 +678,8 @@ fn simple_unsteady_inner(
 /// buoyancy (when declared) follows the previous step's temperature, and
 /// radiation (when declared) converges emission and irradiation at the new endpoint.
 /// [`UnsteadyConfig::pressure_program`] scales the original differential
-/// reservoir profile once per endpoint, before momentum and thermal feedback.
+/// reservoir profile and [`UnsteadyConfig::opening_pressure_programs`] add
+/// independent plane offsets once per endpoint, before momentum/thermal feedback.
 /// The projected signed flux drives the original thermal backflow boundaries.
 /// Physical-heating applicability is unchanged: this does not admit open
 /// reservoirs into a transient heat owner that requires a closed box.
@@ -1270,9 +1303,11 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
         let time_s = step as f64 * unsteady.time_step_s;
         // Hold the same authored reservoir load through every coupled trial.
         // The original solver, pressure datum and time history remain intact.
-        marcher
-            .solver
-            .scale_pressure(unsteady.pressure_program.sample(time_s)?, gate)?;
+        marcher.solver.set_pressure_loads(
+            unsteady.pressure_program.sample(time_s)?,
+            unsteady.opening_pressure_offsets_pa(time_s)?,
+            gate,
+        )?;
         let (next, record) = if let Some(feedback) = endpoint.as_deref_mut() {
             let inflow = inlet_schedule(time_s);
             let scale = power_schedule(time_s);

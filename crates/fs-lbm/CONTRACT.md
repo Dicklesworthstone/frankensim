@@ -21,6 +21,64 @@ Zero spin retains existing acceleration arithmetic. Focused regressions cover
 native D3Q19/D3Q27 families, inertial/geostrophic evolution, transported density,
 moving-wall work, executor replay and refusal/retry.
 
+## Independent pressure histories on native reservoir planes
+
+`UnsteadyConfig::opening_pressure_programs` supplies an optional
+`PressureOffsetProgram` on each original boundary plane in `Face3::ALL`
+order. Each selected plane must be a Pressure/Outlet opening. Programs retain
+one to sixteen finite signed-Pa knots inline, with strictly increasing
+non-negative times, linear interpolation and endpoint holds. They add after
+the existing global scalar pressure program or flow callback:
+`p_face(t) = r0 + scale(t)*(p_authored - r0) + offset_side(t)`.
+Thus different reservoirs may ramp and reverse independently while their
+authored spatial profiles remain intact. Defaults preserve the existing path.
+
+Each connected fluid component retains both its original datum `r0` and
+the original opening plane that selected it. Equal original datum values do
+not merge distinct anchor planes. At each endpoint the native coordinate
+reference is `r0 + offset_anchor(t)`; the head used by momentum and reservoir
+work is formed as
+`scale*(p_authored-r0) + (offset_side-offset_anchor)`.
+The offset difference is computed before adding the small authored head.
+A large changing common pressure therefore cannot become acceleration or
+erase a small head. Sealed components and face-fan ambient references keep
+their original rules. Pressure readback and the physical-pressure continuity
+work audit restore/subtract the same current component reference.
+
+Both flow-only and shared coupled thermal/material loops install the complete
+sampled load once before endpoint iteration. The same native solver, spatial
+profiles, signed backflow fluxes, component topology and BE/BDF2 velocity
+history persist through every trial. No per-step allocation or component
+graph walk is introduced. Pressure is an instantaneous incompressibility
+multiplier: changing its common datum shifts physical readback without
+advancing momentum history or inserting a common pressure gradient.
+Checkpointed momentum retains the old offset samples and rebases its pressure
+guess into the receiving solver's current reference epoch, without restoring
+a stale boundary load.
+
+Admission checks all samples, doubled opening heads and physical references
+before changing either the scalar factor or offsets. Invalid roles, overflow
+or cancellation publish no partial load/march. Programs control at most six
+whole boundary planes; separate openings on one plane share its program.
+They prescribe incompressible mechanical pressure, not thermodynamic source
+pressure, compressibility or reservoir storage. Existing physical-heating
+admission is unchanged; transient open-reservoir viscous heating is not
+enabled by these controls.
+
+Focused regressions exercise production reference arithmetic, independent
+all-axis flow reversal and thermal backflow under BE/BDF2, three-opening
+equivalence with separately authored static profiles, disconnected components
+with equal original datums but different anchor planes, checkpoint epochs,
+native Stokes reservoir work/heat, large changing common pressure and atomic
+refusal. The native integration definitions retain their original solver and
+constitutive owners; no substitute flow or heat model is used.
+
+Six bounded tests of the actual pressure-program and component-reference
+arithmetic compiled and passed. The native solver, thermal/backflow,
+checkpoint-owner and Stokes work/heat regression definitions were not compiled
+or executed here because the complete dependency closure was unavailable.
+Rust parsing and source review do not replace those integration gates.
+
 ## Acceleration endpoints during native sparse rigid-wall motion
 
 `FreeSurface3::planar_rigid_wall_motion_with_body_acceleration_candidate` and
@@ -76,9 +134,9 @@ thermodynamic pressure, composition, caloric law and heat storage ownership
 are unchanged. Their existing validity and convergence refusals still apply.
 Reference-density Boussinesq owners do not become compressible material flow.
 
-This is scalar modulation of one authored differential pressure profile,
-not independent per-port pressure histories or common-mode thermodynamic
-pressure evolution. It does not add pressure control to a distinct liquid
+The scalar program alone modulates one authored differential pressure profile;
+independent per-plane histories additionally use `opening_pressure_programs`.
+Neither evolves common-mode thermodynamic pressure. It does not add pressure control to a distinct liquid
 owner that does not receive `UnsteadyConfig`, nor change physical-heating
 admission: the current native transient viscous-heat entry still requires a
 closed domain. Pressure forcing is not directly deposited as a heat source.
@@ -129,8 +187,8 @@ Pressure/Outlet value, including spatial profiles, becomes
 `p_ref + factor * (p_authored - p_ref)`, using the existing fixed reference of
 its own connected fluid component. Factor one preserves the original march;
 zero removes reservoir head and negative values reverse it. This is scalar
-modulation of the differential profile, not independent per-port pressure
-control or thermodynamic evolution of a common pressure datum.
+modulation of the differential profile. Independent per-plane offsets use
+`opening_pressure_programs`; neither control evolves a thermodynamic datum.
 
 The original solver retains its BE/BDF2 velocity history, face inertia,
 pressure projection, physical half-cell opening masses and backflow rules.

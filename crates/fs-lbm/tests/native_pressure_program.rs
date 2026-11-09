@@ -4,8 +4,8 @@
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     ChtError, ConjugateMarch, ConvectionScheme, EnergyConfig, FlowResistance, FluidProperties,
-    FvBoundary, MaterialEndpointConfig, PressureProgram, SimpleConfig, ThermalFace, ThermalSetup,
-    TimeScheme, UnsteadyConfig, VoxelDomain, march_conjugate,
+    FvBoundary, MaterialEndpointConfig, PressureOffsetProgram, PressureProgram, SimpleConfig,
+    ThermalFace, ThermalSetup, TimeScheme, UnsteadyConfig, VoxelDomain, march_conjugate,
     simple_unsteady_with_pressure_schedule,
 };
 use fs_lbm::material::conjugate::MaterialChtFluid;
@@ -428,6 +428,192 @@ fn pressure_program_refuses_unrepresentable_heads_and_cancelled_marches_atomical
         ),
         Err(ChtError::InvalidInput {
             field: "unsteady.end_time_s",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn independent_opening_histories_drive_native_reversal_and_share_thermal_backflow() {
+    let gate = CancelGate::new_clock_free();
+    for axis in 0..3 {
+        for scheme in [TimeScheme::BackwardEuler, TimeScheme::Bdf2] {
+            let (domain, flow, thermal) = channel(axis, 0.0);
+            let mut time = clock(scheme);
+            time.pressure_program = PressureProgram::IDENTITY;
+            time.opening_pressure_programs[2 * axis] =
+                Some(PressureOffsetProgram::new(&[(0.0, 0.0), (0.25, 0.0), (0.5, -2.0)]).unwrap());
+            time.opening_pressure_programs[2 * axis + 1] =
+                Some(PressureOffsetProgram::new(&[(0.0, 0.0), (0.25, 1.0), (0.5, 2.0)]).unwrap());
+            let driven = run(&domain, &flow, &thermal, &time, &gate).unwrap();
+            let (mut previous, mut older) = (0.0, 0.0);
+            let mut temperature = [300.0; 4];
+            for (step, head_pa) in [0.5, 0.0, -1.5, -3.0, -3.0, -3.0].into_iter().enumerate() {
+                let impulse = time.time_step_s * head_pa / 4.0;
+                let expected = if step > 0 && scheme == TimeScheme::Bdf2 {
+                    (2.0 * previous - 0.5 * older + impulse) / 1.5
+                } else {
+                    previous + impulse
+                };
+                close(
+                    driven.flow.records[step].probe_velocity_m_s[axis],
+                    expected,
+                    2e-8,
+                );
+                close(
+                    driven.flow.records[step].kinetic_energy_j,
+                    2.0 * expected * expected,
+                    2e-8,
+                );
+                temperature = heat_step(temperature, expected, time.time_step_s);
+                close(driven.energy_records[step].closure_j, 0.0, 2e-7);
+                older = previous;
+                previous = expected;
+            }
+            assert!(previous < 0.0);
+            for (cell, (&actual, expected)) in
+                driven.temperature.iter().zip(temperature).enumerate()
+            {
+                close(actual, expected, 2e-9);
+                let at = domain.coords(cell);
+                let x = domain.center(at[0], at[1], at[2])[axis];
+                // Both independently authored final pressures are restored:
+                // p_left=1-2=-1 Pa and p_right=0+2=2 Pa.
+                close(driven.flow.flow.pressure_pa[cell], -1.0 + 0.75 * x, 2e-8);
+            }
+
+            // Add the SAME changing large datum to both programs. Its slope
+            // must neither accelerate the fluid nor alter reservoir heat.
+            let common = 1_099_511_627_776.0;
+            time.opening_pressure_programs[2 * axis] = Some(
+                PressureOffsetProgram::new(&[
+                    (0.0, common),
+                    (0.25, common + 128.0),
+                    (0.5, common - 130.0),
+                ])
+                .unwrap(),
+            );
+            time.opening_pressure_programs[2 * axis + 1] = Some(
+                PressureOffsetProgram::new(&[
+                    (0.0, common),
+                    (0.25, common + 129.0),
+                    (0.5, common - 126.0),
+                ])
+                .unwrap(),
+            );
+            let shifted = run(&domain, &flow, &thermal, &time, &gate).unwrap();
+            assert_eq!(shifted.flow.records, driven.flow.records);
+            assert_eq!(
+                shifted.flow.flow.velocity_m_s,
+                driven.flow.flow.velocity_m_s
+            );
+            assert_eq!(shifted.flow.flow.field, driven.flow.flow.field);
+            assert_same_thermal(&shifted, &driven);
+            for (&shifted, &base) in shifted
+                .flow
+                .flow
+                .pressure_pa
+                .iter()
+                .zip(&driven.flow.flow.pressure_pa)
+            {
+                assert!(((shifted - (common - 128.0)) - base).abs() <= 4.0 * f64::EPSILON * common);
+            }
+            assert!(shifted.flow.flow.report.max_divergence_m3_s < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn three_opening_programs_match_independently_authored_static_profiles() {
+    let domain = VoxelDomain::new(4, 3, 1, 0.5).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Pressure { pressure_pa: 1.0 };
+    faces[1] = FvBoundary::Pressure { pressure_pa: 0.0 };
+    faces[2] = FvBoundary::wall();
+    faces[3] = FvBoundary::Pressure { pressure_pa: 0.5 };
+    let mut flow = SimpleConfig::new(faces);
+    flow.pressure_tolerance = 1e-12;
+    flow.pressure_profiles_pa[0] = Some(vec![1.0, 0.5, 1.5]);
+    flow.pressure_profiles_pa[3] = Some(vec![0.5, 0.75, 0.25, 1.0]);
+    let mut thermal_faces = [ThermalFace::Adiabatic; 6];
+    for (side, backflow_temperature) in [(0, 320.0), (1, 280.0), (3, 305.0)] {
+        thermal_faces[side] = ThermalFace::Outflow {
+            backflow_temperature,
+        };
+    }
+    let thermal = ThermalSetup::new(thermal_faces);
+    let mut time = clock(TimeScheme::Bdf2);
+    time.time_step_s = 0.05;
+    time.steps = 3;
+    time.pressure_program = PressureProgram::new(&[(0.0, 0.5)]).unwrap();
+    let offsets = [1.0, -0.5, 0.0, 0.25, 0.0, 0.0];
+    let mut prescribed = flow.clone();
+    for side in [0, 1, 3] {
+        time.opening_pressure_programs[side] =
+            Some(PressureOffsetProgram::new(&[(0.0, offsets[side])]).unwrap());
+        if let FvBoundary::Pressure { pressure_pa } = &mut prescribed.faces[side] {
+            *pressure_pa = 1.0 + 0.5 * (*pressure_pa - 1.0) + offsets[side];
+        }
+        if let Some(profile) = &mut prescribed.pressure_profiles_pa[side] {
+            for pressure in profile {
+                *pressure = 1.0 + 0.5 * (*pressure - 1.0) + offsets[side];
+            }
+        }
+    }
+    let initial = vec![300.0; domain.cell_count()];
+    let gate = CancelGate::new_clock_free();
+    let march = |flow: &SimpleConfig, time: &UnsteadyConfig| {
+        march_conjugate(
+            &domain,
+            &fluid(),
+            &[],
+            &thermal,
+            flow,
+            time,
+            None,
+            &initial,
+            |_| 1.0,
+            |_| 1.0,
+            &energy(),
+            None,
+            &gate,
+        )
+        .unwrap()
+    };
+    let driven = march(&flow, &time);
+    let mut held = time;
+    held.pressure_program = PressureProgram::IDENTITY;
+    held.opening_pressure_programs = [None; 6];
+    let equivalent = march(&prescribed, &held);
+    assert_eq!(driven.flow, equivalent.flow);
+    assert_same_thermal(&driven, &equivalent);
+    assert!(driven.temperature.iter().any(|t| (t - 300.0).abs() > 1e-4));
+    assert!(driven.flow.flow.report.max_divergence_m3_s < 1e-10);
+    for record in &driven.energy_records {
+        close(record.closure_j, 0.0, 2e-7);
+    }
+}
+
+#[test]
+fn opening_programs_refuse_closed_planes_and_unrepresentable_pressure_offsets() {
+    let (domain, flow, thermal) = channel(0, 0.0);
+    let gate = CancelGate::new_clock_free();
+    let mut time = clock(TimeScheme::BackwardEuler);
+    time.opening_pressure_programs[2] = Some(PressureOffsetProgram::ZERO);
+    assert!(matches!(
+        run(&domain, &flow, &thermal, &time, &gate),
+        Err(ChtError::InvalidInput {
+            field: "unsteady.opening_pressure_programs",
+            ..
+        })
+    ));
+    time.opening_pressure_programs[2] = None;
+    time.opening_pressure_programs[0] =
+        Some(PressureOffsetProgram::new(&[(0.0, 0.0), (0.125, 0.0), (0.25, f64::MAX)]).unwrap());
+    assert!(matches!(
+        run(&domain, &flow, &thermal, &time, &gate),
+        Err(ChtError::InvalidInput {
+            field: "unsteady.pressure_difference_pa",
             ..
         })
     ));

@@ -1089,7 +1089,7 @@ impl Solver<'_> {
             add(
                 &mut pressure_constraint_power_w,
                 (if self.pressure_work_axis.is_some() {
-                    pressure_pa[c] - self.pressure_reference_pa.at(c)
+                    pressure_pa[c] - self.physical_pressure_reference_pa(c)
                 } else {
                     pressure_pa[c]
                 }) * outward,
@@ -1138,5 +1138,78 @@ impl Solver<'_> {
             residual_w,
             reynolds,
         })
+    }
+}
+
+#[cfg(test)]
+mod opening_pressure_tests {
+    use super::*;
+
+    /// G1/G3: the actual native traction-mouth solve and its original work
+    /// quadrature see the same independently driven reservoir pressures.
+    #[test]
+    fn independent_opening_loads_preserve_native_stokes_work_and_heat() {
+        let domain =
+            VoxelDomain::graded([vec![0.5, 1.0, 1.5], vec![0.75, 1.25], vec![1.0]]).unwrap();
+        let fluid = FluidProperties {
+            density_kg_m3: 1.0,
+            specific_heat_j_kg_k: 2.0,
+            conductivity_w_m_k: 0.02,
+            kinematic_viscosity_m2_s: 100.0,
+        };
+        let mut faces = [FvBoundary::Symmetry; 6];
+        faces[0] = FvBoundary::Outlet;
+        faces[1] = FvBoundary::Outlet;
+        faces[2] = FvBoundary::wall();
+        faces[3] = FvBoundary::wall();
+        let mut config = SimpleConfig::new(faces);
+        config.tolerance = 1e-12;
+        config.momentum_tolerance = 1e-10;
+        config.pressure_tolerance = 1e-12;
+        config.pressure_profiles_pa[0] = Some(vec![2.0, 6.0]);
+        config.pressure_profiles_pa[1] = Some(vec![0.0; 2]);
+        let viscosity = vec![100.0; domain.cell_count()];
+        let controls = ViscousHeatControls {
+            maximum_reynolds: 0.1,
+            power_tolerance_w: 1e-7,
+        };
+        let gate = CancelGate::new_clock_free();
+        let solve = |common: f64| {
+            let offsets = [common + 1.0, common - 2.0, 0.0, 0.0, 0.0, 0.0];
+            let mut solver =
+                material_solver(&domain, &fluid, &viscosity, None, None, &config, &gate).unwrap();
+            solver.creeping = true;
+            solver.pressure_work_axis = Some(0);
+            solver.set_pressure_loads(0.5, offsets, &gate).unwrap();
+            let flow = solve_steady(solver, &fluid, &config, &gate).unwrap();
+            // Reuse the original audit owner on the returned physical field.
+            let mut sampler =
+                material_solver(&domain, &fluid, &viscosity, None, None, &config, &gate).unwrap();
+            sampler.pressure_work_axis = Some(0);
+            sampler.set_pressure_loads(0.5, offsets, &gate).unwrap();
+            for (axis, fluxes) in flow.field.face_arrays().into_iter().enumerate() {
+                for (face, flux) in fluxes.iter().enumerate() {
+                    sampler.vel[axis][face] = flux / sampler.comp_face_area(axis, face);
+                }
+            }
+            let power = sampler.viscous_power(&flow, controls, &gate).unwrap();
+            (flow, power)
+        };
+        let (flow, heat) = solve(0.0);
+        // Actual mouths are [3,5] Pa on XMin and -1 Pa on XMax.
+        // Their current reference is 3 Pa, so inlet heads are [0,2],
+        // and both outlet heads are -4 Pa.
+        let supply = 2.0 * flow.field.flux_x(0, 1, 0)
+            + 4.0 * (flow.field.flux_x(3, 0, 0) + flow.field.flux_x(3, 1, 0));
+        assert!(supply > 0.0);
+        assert!((heat.supplied_pressure_power_w - supply).abs() < 1e-10);
+        assert!((heat.heat_w - supply).abs() < controls.power_tolerance_w);
+        let (shifted, shifted_heat) = solve(1_099_511_627_776.0);
+        assert_eq!(flow.velocity_m_s, shifted.velocity_m_s);
+        assert_eq!(flow.field, shifted.field);
+        assert_eq!(heat.cell_heat_w, shifted_heat.cell_heat_w);
+        assert_eq!(heat.pressure_power_w, shifted_heat.pressure_power_w);
+        assert!(shifted_heat.pressure_constraint_power_w.abs() < controls.power_tolerance_w);
+        assert!(shifted_heat.residual_w.abs() < controls.power_tolerance_w);
     }
 }

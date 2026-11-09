@@ -250,8 +250,8 @@ pub use tensor_conduction::{
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, MaterialEndpointConfig, MaterialEndpointMarch,
-    MaterialEndpointStepReport, PressureProgram, UnsteadyConfig, UnsteadyFlow, march_conjugate,
-    march_conjugate_implicit_buoyancy, march_conjugate_with_sgs,
+    MaterialEndpointStepReport, PressureOffsetProgram, PressureProgram, UnsteadyConfig,
+    UnsteadyFlow, march_conjugate, march_conjugate_implicit_buoyancy, march_conjugate_with_sgs,
     march_conjugate_with_sgs_implicit_buoyancy, simple_unsteady,
     simple_unsteady_with_pressure_schedule, simple_unsteady_with_sgs,
     simple_unsteady_with_sgs_and_pressure_schedule,
@@ -280,7 +280,9 @@ pub use unsteady::{
 /// differences on the retained native BE/BDF2 momentum timeline.
 /// Version 12 shares retained pressure programs with native coupled thermal,
 /// SGS, wall-heat and source-material endpoint marches.
-pub const CHT_SEMANTICS_VERSION: u32 = 12;
+/// Version 13 admits independent pressure-opening histories while centering
+/// each component on its own moving reservoir reference.
+pub const CHT_SEMANTICS_VERSION: u32 = 13;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

@@ -50,6 +50,7 @@ fn controls(dt: f64, config: &SimpleConfig) -> UnsteadyConfig {
         average_from_step: 1,
         probe: None,
         pressure_program: super::PressureProgram::IDENTITY,
+        opening_pressure_programs: [None; 6],
     }
 }
 

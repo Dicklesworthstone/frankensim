@@ -516,26 +516,33 @@ impl SimpleConfig {
                     .map(|value| ((side, index), value))
             })
         };
-        if self.faces.iter().all(|face| face.prescribed_pressure().is_none()) {
-            return PressureReferences::Uniform(0.0);
+        if self
+            .faces
+            .iter()
+            .all(|face| face.prescribed_pressure().is_none())
+        {
+            return PressureReferences::Uniform(PressureReference::AMBIENT);
         }
         // The ordinary all-fluid domain has only one connected component.
         // Retain its original face-first datum and allocation-free storage.
         if (0..domain.cell_count()).all(|cell| domain.is_fluid(cell)) {
             if self.fan.is_some() {
-                return PressureReferences::Uniform(0.0);
+                return PressureReferences::Uniform(PressureReference::AMBIENT);
             }
             for side in 0..6 {
                 let cell = Self::pressure_profile_cell(domain, side, 0);
                 if let Some((_, value)) = pressure(cell, side) {
-                    return PressureReferences::Uniform(value);
+                    return PressureReferences::Uniform(PressureReference {
+                        value_pa: value,
+                        opening: Some(Face3::ALL[side]),
+                    });
                 }
             }
-            return PressureReferences::Uniform(0.0);
+            return PressureReferences::Uniform(PressureReference::AMBIENT);
         }
 
         let mut visited = vec![false; domain.cell_count()];
-        let mut values = vec![0.0; domain.cell_count()];
+        let mut values = vec![PressureReference::AMBIENT; domain.cell_count()];
         let mut component = Vec::new();
         let mut first_reference = None;
         let mut uniform = true;
@@ -571,9 +578,14 @@ impl SimpleConfig {
             // A fan uses physical pressure relative to its own ambient zero.
             // Only components that meet that fan inherit this fixed datum.
             let reference = if fan_ambient {
-                0.0
+                PressureReference::AMBIENT
             } else {
-                chosen.map_or(0.0, |x| x.1)
+                chosen.map_or(PressureReference::AMBIENT, |((side, _), value)| {
+                    PressureReference {
+                        value_pa: value,
+                        opening: Some(Face3::ALL[side]),
+                    }
+                })
             };
             uniform &= *first_reference.get_or_insert(reference) == reference;
             for &cell in &component {
@@ -581,7 +593,7 @@ impl SimpleConfig {
             }
         }
         if uniform {
-            PressureReferences::Uniform(first_reference.unwrap_or(0.0))
+            PressureReferences::Uniform(first_reference.unwrap_or(PressureReference::AMBIENT))
         } else {
             PressureReferences::ByCell(values)
         }
@@ -841,26 +853,81 @@ struct MomentumResidual {
     absolute_force_n: f64,
 }
 
+/// One original component datum and the opening whose pressure offset it follows.
+/// No opening means a sealed component or a face fan's fixed ambient reference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PressureReference {
+    value_pa: f64,
+    opening: Option<Face3>,
+}
+
+impl PressureReference {
+    const AMBIENT: Self = Self {
+        value_pa: 0.0,
+        opening: None,
+    };
+
+    fn offset(self, offsets_pa: &[f64; 6]) -> f64 {
+        self.opening.map_or(0.0, |side| offsets_pa[side as usize])
+    }
+
+    fn physical(self, offsets_pa: &[f64; 6]) -> f64 {
+        let offset = self.offset(offsets_pa);
+        if offset == 0.0 {
+            self.value_pa
+        } else {
+            self.value_pa + offset
+        }
+    }
+
+    fn difference(self, authored_pa: f64, scale: f64, side: usize, offsets_pa: &[f64; 6]) -> f64 {
+        let original = (authored_pa - self.value_pa) * scale;
+        // Cancel common offsets BEFORE adding the original small head. Forming
+        // (p_authored + offset) first can erase that head at a large pressure.
+        let offset = offsets_pa[side] - self.offset(offsets_pa);
+        if offset == 0.0 {
+            original
+        } else {
+            original + offset
+        }
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    fn shift_from(self, previous: Self, previous_offsets: &[f64; 6], offsets: &[f64; 6]) -> f64 {
+        let original = previous.value_pa - self.value_pa;
+        let offset = previous.offset(previous_offsets) - self.offset(offsets);
+        if offset == 0.0 {
+            original
+        } else {
+            original + offset
+        }
+    }
+}
+
 /// Numerical coordinates only: every active face inside one fluid component
-/// sees the same reference. The usual common-datum case retains scalar storage.
+/// sees the same reference. The usual single-component case retains scalar storage.
 #[derive(Debug, Clone, PartialEq)]
 enum PressureReferences {
-    Uniform(f64),
-    ByCell(Vec<f64>),
+    Uniform(PressureReference),
+    ByCell(Vec<PressureReference>),
 }
 
 impl PressureReferences {
-    fn at(&self, cell: usize) -> f64 {
+    fn reference(&self, cell: usize) -> PressureReference {
         match self {
             Self::Uniform(value) => *value,
             Self::ByCell(values) => values[cell],
         }
     }
 
+    fn at(&self, cell: usize) -> f64 {
+        self.reference(cell).value_pa
+    }
+
     #[cfg(feature = "enthalpy-coupling")]
     fn admit(&self, cells: usize) -> Result<(), ChtError> {
         match self {
-            Self::Uniform(value) => finite("simple.momentum_pressure_reference_pa", *value),
+            Self::Uniform(value) => finite("simple.momentum_pressure_reference_pa", value.value_pa),
             Self::ByCell(values) => {
                 if values.len() != cells {
                     return Err(ChtError::InvalidInput {
@@ -868,8 +935,8 @@ impl PressureReferences {
                         reason: "retained component references must match the native domain".into(),
                     });
                 }
-                for &value in values {
-                    finite("simple.momentum_pressure_reference_pa", value)?;
+                for value in values {
+                    finite("simple.momentum_pressure_reference_pa", value.value_pa)?;
                 }
                 Ok(())
             }
@@ -902,8 +969,10 @@ pub(super) struct Solver<'a> {
     /// Component-local numerical datums restored only for physical readback.
     pressure_reference_pa: PressureReferences,
     /// Endpoint modulation of authored reservoir pressure differences.
-    /// The fixed component datums and all momentum time levels are retained.
+    /// Source profiles, component anchors and all momentum time levels are retained.
     pressure_scale: f64,
+    /// Independently sampled pressure offsets on the six original boundary planes.
+    pressure_offsets_pa: [f64; 6],
     /// SIMPLEC `d` per face (0 for non-unknown faces until set).
     d: [Vec<f64>; 3],
     /// Krylov iterations spent on momentum and pressure correction.
@@ -969,6 +1038,7 @@ pub(super) struct MomentumState {
     velocity: [Vec<f64>; 3],
     pressure: Vec<f64>,
     pressure_reference_pa: PressureReferences,
+    pressure_offsets_pa: [f64; 6],
 }
 
 #[cfg(feature = "enthalpy-coupling")]
@@ -1273,6 +1343,7 @@ impl<'a> Solver<'a> {
             pressure: vec![0.0; domain.cell_count()],
             pressure_reference_pa: config.pressure_reference_pa(domain),
             pressure_scale: 1.0,
+            pressure_offsets_pa: [0.0; 6],
             d,
             momentum_krylov: 0,
             pressure_krylov: 0,
@@ -1608,14 +1679,27 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// Modulate only the prescribed reservoir head, retaining the pressure
-    /// datum, native velocity history, profile shape and opening topology.
-    /// Admission walks the exposed planes without allocating or rediscovering
-    /// connected components. A rejected sample leaves the old factor intact.
-    pub(super) fn scale_pressure(&mut self, scale: f64, gate: &CancelGate) -> Result<(), ChtError> {
+    /// Admit one endpoint's complete reservoir load without changing velocity
+    /// history, source profiles or topology. Component anchors were prepared
+    /// at construction; only active original pressure planes are visited here.
+    pub(super) fn set_pressure_loads(
+        &mut self,
+        scale: f64,
+        offsets_pa: [f64; 6],
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
         poll(gate)?;
         finite("unsteady.pressure_schedule", scale)?;
-        if scale == self.pressure_scale {
+        for (side, &offset) in offsets_pa.iter().enumerate() {
+            finite("unsteady.opening_pressure_pa", offset)?;
+            if offset != 0.0 && self.config.faces[side].prescribed_pressure().is_none() {
+                return Err(ChtError::InvalidInput {
+                    field: "unsteady.opening_pressure_pa",
+                    reason: format!("offset on face {side} requires a pressure opening"),
+                });
+            }
+        }
+        if scale == self.pressure_scale && offsets_pa == self.pressure_offsets_pa {
             return Ok(());
         }
         for side in 0..6 {
@@ -1632,28 +1716,45 @@ impl<'a> Solver<'a> {
                 if !self.domain.is_fluid(cell) {
                     continue;
                 }
-                let reference = self.pressure_reference_pa.at(cell);
+                let reference = self.pressure_reference_pa.reference(cell);
                 let pressure = self
                     .config
                     .pressure_at(side, self.n, self.domain.coords(cell))
                     .expect("admitted pressure opening");
-                let difference = (pressure - reference) * scale;
+                let difference = reference.difference(pressure, scale, side, &offsets_pa);
                 finite("unsteady.pressure_difference_pa", 2.0 * difference)?;
-                finite("unsteady.reservoir_pressure_pa", reference + difference)?;
+                let physical = reference.physical(&offsets_pa);
+                finite("unsteady.pressure_reference_pa", physical)?;
+                finite("unsteady.reservoir_pressure_pa", physical + difference)?;
             }
         }
         poll(gate)?;
+        // Pressure is an instantaneous incompressibility multiplier, without
+        // its own time derivative. Retain the centered pressure guess and its
+        // gradients when the anchor shifts; never inject a common-mode impulse.
         self.pressure_scale = scale;
+        self.pressure_offsets_pa = offsets_pa;
         Ok(())
     }
 
-    /// Prescribed pressure in the same local coordinates as the momentum rows.
+    fn physical_pressure_reference_pa(&self, cell: usize) -> f64 {
+        self.pressure_reference_pa
+            .reference(cell)
+            .physical(&self.pressure_offsets_pa)
+    }
+
+    /// Prescribed pressure in the same local coordinates as momentum AND work.
     fn boundary_pressure_difference(&self, side: usize, cell: usize) -> f64 {
         let pressure = self
             .config
             .pressure_at(side, self.n, self.domain.coords(cell))
             .expect("pressure-opening topology");
-        (pressure - self.pressure_reference_pa.at(cell)) * self.pressure_scale
+        self.pressure_reference_pa.reference(cell).difference(
+            pressure,
+            self.pressure_scale,
+            side,
+            &self.pressure_offsets_pa,
+        )
     }
 
     /// Secant step of the fan operating point, taken only on a settled
@@ -1678,7 +1779,7 @@ impl<'a> Solver<'a> {
             .cells
             .iter()
             .map(|&c| {
-                (self.pressure[c] + self.pressure_reference_pa.at(c))
+                (self.pressure[c] + self.physical_pressure_reference_pa(c))
                     * self.domain.face_area(c, axis)
             })
             .sum::<f64>()
@@ -1848,6 +1949,7 @@ impl<'a> Solver<'a> {
             velocity: self.vel.clone(),
             pressure: self.pressure.clone(),
             pressure_reference_pa: self.pressure_reference_pa.clone(),
+            pressure_offsets_pa: self.pressure_offsets_pa,
         }
     }
 
@@ -1866,17 +1968,26 @@ impl<'a> Solver<'a> {
                 reason: "retained momentum must match the native staggered domain".into(),
             });
         }
-        state.pressure_reference_pa.admit(self.domain.cell_count())?;
+        state
+            .pressure_reference_pa
+            .admit(self.domain.cell_count())?;
+        for &offset in &state.pressure_offsets_pa {
+            finite("simple.momentum_pressure_offset_pa", offset)?;
+        }
         // A changed phase mask can join or split fluid components. Retain the
         // new topology's common datum on every connected face, and rebase the
         // pressure guess without first restoring a large absolute pressure.
         for (cell, &pressure) in state.pressure.iter().enumerate() {
-            let rebased = pressure + (state.pressure_reference_pa.at(cell)
-                - self.pressure_reference_pa.at(cell));
+            let shift = self.pressure_reference_pa.reference(cell).shift_from(
+                state.pressure_reference_pa.reference(cell),
+                &state.pressure_offsets_pa,
+                &self.pressure_offsets_pa,
+            );
+            let rebased = pressure + shift;
             finite("simple.momentum_pressure", rebased)?;
             finite(
                 "simple.momentum_pressure",
-                rebased + self.pressure_reference_pa.at(cell),
+                rebased + self.physical_pressure_reference_pa(cell),
             )?;
         }
         // Opening a formerly constrained face retains its exact zero speed.
@@ -1898,8 +2009,11 @@ impl<'a> Solver<'a> {
         self.vel.clone_from(&state.velocity);
         self.pressure.clone_from(&state.pressure);
         for (cell, pressure) in self.pressure.iter_mut().enumerate() {
-            let difference = state.pressure_reference_pa.at(cell)
-                - self.pressure_reference_pa.at(cell);
+            let difference = self.pressure_reference_pa.reference(cell).shift_from(
+                state.pressure_reference_pa.reference(cell),
+                &state.pressure_offsets_pa,
+                &self.pressure_offsets_pa,
+            );
             if difference != 0.0 {
                 *pressure += difference;
             }
@@ -2066,13 +2180,9 @@ impl<'a> Solver<'a> {
     /// reach an incomplete factorization.
     pub(super) fn guard_finite(&self) -> Result<(), ChtError> {
         let finite = self.vel.iter().all(|v| v.iter().all(|u| u.is_finite()))
-            && self
-                .pressure
-                .iter()
-                .enumerate()
-                .all(|(cell, p)| {
-                    p.is_finite() && (*p + self.pressure_reference_pa.at(cell)).is_finite()
-                });
+            && self.pressure.iter().enumerate().all(|(cell, p)| {
+                p.is_finite() && (*p + self.physical_pressure_reference_pa(cell)).is_finite()
+            });
         if finite {
             Ok(())
         } else {
@@ -2975,7 +3085,7 @@ impl Solver<'_> {
                 self.pressure[c] = 0.0;
                 continue;
             }
-            let reference = self.pressure_reference_pa.at(c);
+            let reference = self.physical_pressure_reference_pa(c);
             if reference != 0.0 {
                 self.pressure[c] += reference;
             }

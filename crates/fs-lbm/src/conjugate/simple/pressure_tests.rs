@@ -6,6 +6,58 @@ use crate::conjugate::{
     simple_unsteady_with_pressure_schedule, solve_energy,
 };
 
+/// G0/G3: use the production pressure-coordinate arithmetic itself. Common
+/// offsets must cancel before the small authored or independent head is added.
+#[test]
+fn opening_reference_offsets_preserve_small_heads_and_fixed_ambient() {
+    for opening in Face3::ALL {
+        let reference = PressureReference {
+            value_pa: 1024.0,
+            opening: Some(opening),
+        };
+        let offsets = [1.0e16; 6];
+        for side in 0..6 {
+            assert_eq!(reference.difference(1024.125, 2.0, side, &offsets), 0.25);
+            assert_eq!(reference.difference(1024.0, 1.0, side, &offsets), 0.0);
+        }
+        let mut independent = [8.0; 6];
+        independent[(opening as usize + 1) % 6] = -4.0;
+        assert_eq!(
+            reference.difference(1024.125, 2.0, (opening as usize + 1) % 6, &independent,),
+            -11.75
+        );
+        assert_eq!(reference.physical(&independent), 1032.0);
+    }
+    // A face fan's ambient does not follow an unrelated reservoir offset.
+    assert_eq!(PressureReference::AMBIENT.physical(&[8.0; 6]), 0.0);
+    assert_eq!(
+        PressureReference::AMBIENT.difference(0.25, 2.0, 1, &[8.0; 6]),
+        8.5
+    );
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+#[test]
+fn opening_reference_checkpoint_shift_keeps_sub_ulp_offset_changes() {
+    let old = PressureReference {
+        value_pa: 1.0e16,
+        opening: Some(Face3::XMin),
+    };
+    let new = PressureReference {
+        value_pa: 1.0e16,
+        opening: Some(Face3::YMax),
+    };
+    let mut old_offsets = [0.0; 6];
+    old_offsets[Face3::XMin as usize] = 0.125;
+    let mut new_offsets = [0.0; 6];
+    new_offsets[Face3::YMax as usize] = 0.375;
+    assert_eq!(new.shift_from(old, &old_offsets, &new_offsets), -0.25);
+    let references = PressureReferences::ByCell(vec![old, new]);
+    assert_eq!(references.at(0), references.at(1));
+    assert_eq!(references.reference(0).offset(&old_offsets), 0.125);
+    assert_eq!(references.reference(1).offset(&new_offsets), 0.375);
+}
+
 fn fluid() -> FluidProperties {
     FluidProperties {
         density_kg_m3: 1.0,
@@ -1210,4 +1262,111 @@ fn fan_ambient_does_not_choose_an_unconnected_reservoir_datum() {
     let references = config.pressure_reference_pa(&domain);
     assert_eq!(references.at(domain.index(0, 0, 0)), 0.0);
     assert_eq!(references.at(domain.index(1, 3, 0)), 1_048_576.0);
+}
+
+#[test]
+fn independent_openings_keep_disconnected_anchors_and_static_equivalence() {
+    use crate::conjugate::{PressureOffsetProgram, Voxel};
+
+    let (mut domain, mut config) = separated_pressure_channels(0, [0.0; 2], [0.0; 2]);
+    for y in [3, 4] {
+        // This component sees only XMax. Its reference MUST follow XMax,
+        // even though both components have the same original datum, zero.
+        domain.set(0, y, 0, Voxel::Solid(0));
+    }
+    config.pressure_profiles_pa[1] = Some(vec![-0.5, -0.5, 0.0, 0.0, 0.0]);
+    let references = config.pressure_reference_pa(&domain);
+    assert_eq!(references.at(domain.index(1, 0, 0)), 0.0);
+    assert_eq!(references.at(domain.index(1, 3, 0)), 0.0);
+    assert_eq!(
+        references.reference(domain.index(1, 0, 0)).opening,
+        Some(Face3::XMin)
+    );
+    assert_eq!(
+        references.reference(domain.index(1, 3, 0)).opening,
+        Some(Face3::XMax)
+    );
+
+    let mut time = UnsteadyConfig::new(0.05, 3);
+    time.inner_iterations = 1000;
+    time.inner_tolerance = 1e-10;
+    let offsets = [2.0, -1.0];
+    for side in 0..2 {
+        time.opening_pressure_programs[side] =
+            Some(PressureOffsetProgram::new(&[(0.0, offsets[side])]).unwrap());
+    }
+    let gate = CancelGate::new_clock_free();
+    let driven = simple_unsteady(&domain, &fluid(), &config, &time, |_| 1.0, &gate).unwrap();
+    let mut prescribed = config.clone();
+    for side in 0..2 {
+        for pressure in prescribed.pressure_profiles_pa[side].as_mut().unwrap() {
+            *pressure += offsets[side];
+        }
+    }
+    let mut held = time;
+    held.opening_pressure_programs = [None; 6];
+    let equivalent =
+        simple_unsteady(&domain, &fluid(), &prescribed, &held, |_| 1.0, &gate).unwrap();
+    assert_eq!(driven, equivalent);
+    assert!(driven.flow.field.flux_x(8, 0, 0) > 0.0);
+    for cell in 0..domain.cell_count() {
+        if domain.is_fluid(cell) && domain.coords(cell)[1] > 2 {
+            assert_eq!(driven.flow.velocity_m_s[cell], [0.0; 3]);
+            assert_eq!(driven.flow.pressure_pa[cell], -1.0);
+        }
+    }
+
+    for side in 0..2 {
+        time.opening_pressure_programs[side] = Some(
+            PressureOffsetProgram::new(&[(0.0, 1_099_511_627_776.0 + offsets[side])]).unwrap(),
+        );
+    }
+    let common = simple_unsteady(&domain, &fluid(), &config, &time, |_| 1.0, &gate).unwrap();
+    assert_eq!(common.records, driven.records);
+    assert_eq!(common.flow.velocity_m_s, driven.flow.velocity_m_s);
+    assert_eq!(common.flow.field, driven.flow.field);
+    assert_eq!(common.mean_field, driven.mean_field);
+    assert!(common.flow.report.max_divergence_m3_s < 1e-10);
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+#[test]
+fn independent_opening_checkpoint_and_refusal_keep_the_current_load_epoch() {
+    let (domain, config) = channel(2, 0, 1_099_511_627_777.0, 1_099_511_627_776.0);
+    let gate = CancelGate::new_clock_free();
+    let fluid = fluid();
+    let mut solver = Solver::new(&domain, &fluid, &config);
+    let old = [0.125, -0.375, 0.0, 0.0, 0.0, 0.0];
+    solver.set_pressure_loads(0.5, old, &gate).unwrap();
+    for _ in 0..5 {
+        solver.sweep(&gate).unwrap();
+    }
+    let state = solver.momentum_state();
+    let current = [-0.25, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let mut restored = Solver::new(&domain, &fluid, &config);
+    restored.set_pressure_loads(2.0, current, &gate).unwrap();
+    restored.restore_momentum(&state).unwrap();
+    assert_eq!(restored.pressure_scale, 2.0);
+    assert_eq!(restored.pressure_offsets_pa, current);
+    assert_eq!(restored.vel, state.velocity);
+    for (&actual, &previous) in restored.pressure.iter().zip(&state.pressure) {
+        assert_eq!(actual, previous + 0.375);
+    }
+    let saved = restored.momentum_state();
+    assert!(
+        restored
+            .set_pressure_loads(3.0, [f64::MAX, 0.0, 0.0, 0.0, 0.0, 0.0], &gate)
+            .is_err()
+    );
+    assert_eq!(restored.pressure_scale, 2.0);
+    assert_eq!(restored.pressure_offsets_pa, current);
+    assert_eq!(restored.pressure, saved.pressure);
+    assert_eq!(restored.vel, saved.velocity);
+    gate.request();
+    assert!(matches!(
+        restored.set_pressure_loads(1.0, [0.0; 6], &gate),
+        Err(ChtError::Cancelled)
+    ));
+    assert_eq!(restored.pressure_offsets_pa, current);
+    assert_eq!(restored.pressure, saved.pressure);
 }

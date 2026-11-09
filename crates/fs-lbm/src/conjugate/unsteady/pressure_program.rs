@@ -16,9 +16,9 @@ use super::ChtError;
 /// The factor acts on `p_authored - p_reference`, retaining each component's
 /// original datum. Momentum and thermal backflow share the same projected
 /// flux. Existing physical-heating admission rules still apply. It does not
-/// prescribe independent port histories, absolute thermodynamic pressure,
-/// fan curves or source EOS pressure. Source-material queries retain their
-/// original pressure context.
+/// prescribe absolute thermodynamic pressure, fan curves or source EOS pressure.
+/// Independent opening histories use [`PressureOffsetProgram`]. Source-material
+/// queries retain their original pressure context.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PressureProgram {
     points: [(f64, f64); 16],
@@ -41,17 +41,21 @@ impl PressureProgram {
     /// [`ChtError::InvalidInput`] for zero or more than sixteen points,
     /// non-finite entries, negative time, or non-increasing knot times.
     pub fn new(points: &[(f64, f64)]) -> Result<Self, ChtError> {
+        Self::from_points(points, "unsteady.pressure_program")
+    }
+
+    fn from_points(points: &[(f64, f64)], field: &'static str) -> Result<Self, ChtError> {
         let invalid = |reason: &str| ChtError::InvalidInput {
-            field: "unsteady.pressure_program",
+            field,
             reason: reason.into(),
         };
         if points.is_empty() || points.len() > Self::MAX_POINTS {
-            return Err(invalid("requires one to sixteen (time_s, factor) points"));
+            return Err(invalid("requires one to sixteen (time_s, value) points"));
         }
         for (i, &(time, factor)) in points.iter().enumerate() {
             if !time.is_finite() || time < 0.0 || !factor.is_finite() {
                 return Err(invalid(
-                    "times must be finite and non-negative, factors finite",
+                    "times must be finite and non-negative, values finite",
                 ));
             }
             if i > 0 && time <= points[i - 1].0 {
@@ -82,9 +86,13 @@ impl PressureProgram {
     /// # Errors
     /// [`ChtError::InvalidInput`] for non-finite or negative sample time.
     pub fn sample(&self, time_s: f64) -> Result<f64, ChtError> {
+        self.sample_at(time_s, "unsteady.pressure_program.time_s")
+    }
+
+    fn sample_at(&self, time_s: f64, field: &'static str) -> Result<f64, ChtError> {
         if !time_s.is_finite() || time_s < 0.0 {
             return Err(ChtError::InvalidInput {
-                field: "unsteady.pressure_program.time_s",
+                field,
                 reason: "sample time must be finite and non-negative".into(),
             });
         }
@@ -115,6 +123,68 @@ impl PressureProgram {
 impl Default for PressureProgram {
     fn default() -> Self {
         Self::IDENTITY
+    }
+}
+
+/// Independently prescribed pressure offset on one original opening plane, Pa.
+///
+/// Attach to `UnsteadyConfig::opening_pressure_programs` in `Face3::ALL` order.
+/// The offset is added AFTER the global differential factor:
+/// `p_face(t) = p_ref0 + factor(t)*(p_authored - p_ref0) + offset_side(t)`.
+/// It translates the plane's original spatial profile without scaling it.
+/// One to sixteen finite signed-Pa knots use linear interpolation and endpoint
+/// holds, sampled once per original step endpoint. A single knot is constant.
+///
+/// The native solver subtracts the offset of each component's own anchor
+/// opening before momentum and pressure work; common pressure changes perform
+/// no incompressible work. Reported pressure restores that current reference.
+/// Thermal backflow follows the same projected signed flux. This does not
+/// change source thermodynamic pressure, interpolate between distinct openings
+/// on one plane, or relax the original physical-heating admission rules.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureOffsetProgram {
+    values: PressureProgram,
+}
+
+impl PressureOffsetProgram {
+    /// No additional reservoir pressure.
+    pub const ZERO: Self = Self {
+        values: PressureProgram {
+            points: [(0.0, 0.0); 16],
+            len: 1,
+        },
+    };
+
+    /// Retain `(time_s, offset_pa)` knots without a heap allocation.
+    ///
+    /// # Errors
+    /// [`ChtError::InvalidInput`] for zero or more than sixteen points,
+    /// non-finite entries, negative time, or non-increasing knot times.
+    pub fn new(points: &[(f64, f64)]) -> Result<Self, ChtError> {
+        Ok(Self {
+            values: PressureProgram::from_points(points, "unsteady.opening_pressure_program")?,
+        })
+    }
+
+    /// Original ordered `(time_s, offset_pa)` knots.
+    #[must_use]
+    pub fn points(&self) -> &[(f64, f64)] {
+        self.values.points()
+    }
+
+    /// Offset in Pa at a finite, non-negative time, with endpoint holds.
+    ///
+    /// # Errors
+    /// [`ChtError::InvalidInput`] for non-finite or negative sample time.
+    pub fn sample_pa(&self, time_s: f64) -> Result<f64, ChtError> {
+        self.values
+            .sample_at(time_s, "unsteady.opening_pressure_program.time_s")
+    }
+}
+
+impl Default for PressureOffsetProgram {
+    fn default() -> Self {
+        Self::ZERO
     }
 }
 
@@ -168,6 +238,40 @@ mod tests {
         }
         let cancel = PressureProgram::new(&[(0.0, max), (2.0, -max)]).unwrap();
         assert_eq!(cancel.sample(1.0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn opening_offset_programs_preserve_pa_units_and_independent_history() {
+        let left = PressureOffsetProgram::new(&[(0.0, 2.0), (2.0, -2.0)]).unwrap();
+        let right = PressureOffsetProgram::new(&[(1.0, -1.0), (3.0, 3.0)]).unwrap();
+        assert_eq!(left.points(), &[(0.0, 2.0), (2.0, -2.0)]);
+        for (time, left_pa, right_pa) in [
+            (0.0, 2.0, -1.0),
+            (1.0, 0.0, -1.0),
+            (2.0, -2.0, 1.0),
+            (4.0, -2.0, 3.0),
+        ] {
+            assert_eq!(left.sample_pa(time).unwrap(), left_pa);
+            assert_eq!(right.sample_pa(time).unwrap(), right_pa);
+            assert_eq!(
+                PressureOffsetProgram::default().sample_pa(time).unwrap(),
+                0.0
+            );
+        }
+        assert!(matches!(
+            PressureOffsetProgram::new(&[(0.0, f64::NAN)]),
+            Err(ChtError::InvalidInput {
+                field: "unsteady.opening_pressure_program",
+                ..
+            })
+        ));
+        assert!(matches!(
+            left.sample_pa(f64::INFINITY),
+            Err(ChtError::InvalidInput {
+                field: "unsteady.opening_pressure_program.time_s",
+                ..
+            })
+        ));
     }
 
     #[test]
