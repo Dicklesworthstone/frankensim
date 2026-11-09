@@ -200,35 +200,12 @@ impl LocalLangmuirTransfer {
         temperature: Temperature,
         conditions: &QueryPoint,
     ) -> Result<LocalLangmuirRate> {
-        require(
-            owned_axes()
-                .iter()
-                .all(|(axis, _, _)| !conditions.axes().contains_key(*axis)),
-            "caller cannot override actual concentration, temperature, loading or volume",
-        )?;
-        nonnegative(loading.value(), "actual loading must be nonnegative")?;
-        positive(solution_volume.value(), "solution volume must be positive")?;
-        let capacity = self.equilibrium.capacity().value();
-        require(
-            loading.value() <= capacity,
-            "actual loading exceeds source capacity",
-        )?;
-        let point = conditions
-            .clone()
-            .with_quantity(
-                LOADING_AXIS,
-                QuantitySpec::dimensional(AdsorbentLoading::DIMS),
-                loading.value(),
-            )?
-            .with_quantity(
-                VOLUME_AXIS,
-                QuantitySpec::dimensional(Volume::DIMS),
-                solution_volume.value(),
-            )?;
+        let point = self.local_point(loading, solution_volume, conditions)?;
         let equilibrium = self
             .equilibrium
             .loading_at(concentration, temperature, &point)?;
         self.admit(&equilibrium.conditions)?;
+        let capacity = self.equilibrium.capacity().value();
         // Near saturation the vacant form retains a desorption tail that would
         // disappear if the rounded occupied target were subtracted from q_max.
         let vacant = capacity - loading.value();
@@ -254,6 +231,58 @@ impl LocalLangmuirTransfer {
             conditions: equilibrium.conditions.clone(),
             equilibrium,
         })
+    }
+
+    /// Qualify the same actual local point without cloning complete source
+    /// models or calculating a rate that an implicit consumer does not use.
+    /// This is source admission only; the original LDF equation still governs.
+    pub(crate) fn admit_loading_point(
+        &self,
+        concentration: AmountConcentration,
+        loading: AdsorbentLoading,
+        solution_volume: Volume,
+        temperature: Temperature,
+        conditions: &QueryPoint,
+    ) -> Result<()> {
+        let point = self.local_point(loading, solution_volume, conditions)?;
+        let point = self
+            .equilibrium
+            .admit_loading_point(concentration, temperature, &point)?;
+        self.admit(&point)
+    }
+
+    fn local_point(
+        &self,
+        loading: AdsorbentLoading,
+        solution_volume: Volume,
+        conditions: &QueryPoint,
+    ) -> Result<QueryPoint> {
+        require(
+            owned_axes()
+                .iter()
+                .all(|(axis, _, _)| !conditions.axes().contains_key(*axis)),
+            "caller cannot override actual concentration, temperature, loading or volume",
+        )?;
+        nonnegative(loading.value(), "actual loading must be nonnegative")?;
+        positive(solution_volume.value(), "solution volume must be positive")?;
+        let capacity = self.equilibrium.capacity().value();
+        require(
+            loading.value() <= capacity,
+            "actual loading exceeds source capacity",
+        )?;
+        let point = conditions
+            .clone()
+            .with_quantity(
+                LOADING_AXIS,
+                QuantitySpec::dimensional(AdsorbentLoading::DIMS),
+                loading.value(),
+            )?
+            .with_quantity(
+                VOLUME_AXIS,
+                QuantitySpec::dimensional(Volume::DIMS),
+                solution_volume.value(),
+            )?;
+        Ok(point)
     }
 
     fn admit(&self, point: &QueryPoint) -> Result<()> {

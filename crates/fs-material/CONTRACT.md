@@ -17289,6 +17289,55 @@ changing water, time refinement, trace release, budgets and cancellation. One
 hydraulic adapter/clock-binding regression is authored but unexecuted because
 the full material dependency graph remains resource-blocked.
 
+### Source-bound finite-capacity sorption during porous solute transport
+
+`LiquidSaturationCandidate::transport_langmuir_dilute_solutes` couples the
+original aqueous finite-volume owner to `AqueousLangmuir` equilibrium storage
+or its independently sourced `LocalLangmuirTransfer` LDF law. Retained dry
+adsorbent mass per bulk transverse area converts original mol/kg loading into
+mol/m². The same analytical element is required throughout each constituent;
+independent slots do not compete for sites. Inert slots retain zero site stocks.
+Actual hydraulic water capacity times an explicit physical transverse area
+supplies the local source's solution-volume coordinate. Prescribed temperature,
+additional chemical conditions, concentration and loading retain original typed
+source admission at the initial state and every nonlinear trial/end point.
+
+Backward Euler eliminates local bound loading as a convex combination of its
+original stock and the original isotherm target. The occupied and vacant stocks
+remain independent so a representable vacancy tail survives rounded saturation;
+vacant sites never enter the transported analytical-element balance. Both site
+balances use cancellation-sensitive compensated sums. Equilibrium initialization
+must already agree with the original isotherm within the declared amount budget.
+Finite-rate mode permits disequilibrium, adsorption and desorption; zero local
+rates and inert columns retain the original free-transport solve arithmetic.
+
+Damped, concentration-box-preserving Newton reuses native adjacent-pivot
+tridiagonal LU; only the local storage tangent changes. Water geometry, accepted
+hydraulic face integrals, donor-cell advection and wet diffusion/film resistances
+remain unchanged. The original source owners expose shared borrowed admission
+and stable loading/tangent seams, avoiding source-model clones and duplicate
+isotherm evaluation in nonlinear trials. Every trial consumes the cumulative
+source-point budget; linear solves, iterations and backtracks are independently
+bounded. Source refusal, loss of representability, cancellation and unclosed
+equations discard the whole private proposal. The numerical workspace allowance
+includes all Newton/phase arrays; original source query/receipt allocations and
+borrowed source carriers remain outside that numerical-payload allowance.
+
+Nine new authored G1/G3/G4 groups passed natively with the exact production
+numerical and original source-owner modules: independent kinetic quadratics,
+heterogeneous diffusion face roots, saturating breakthrough/outlet integrals,
+zero-rate/inert parity, changing-water uniformity, first-order time refinement,
+independent vacancy tails, source/site refusals, work limits and cancellation.
+All 16 existing porous transport/sorption tests and 27 existing aqueous
+isotherm/batch/flow tests also passed (52 total); compiler stderr was empty.
+This bounded native run does not type-check the full hydraulic adapter or
+replace the resource-blocked fs-material/workspace gate. Changed Rust files
+passed the pinned formatter check. This remains first-order passive dilute
+analytical-element transport: no competitive uptake, ionic migration, reaction,
+sorption heat, evolving site capacity or hydraulic feedback is inferred.
+Newton convergence and residual budgets do not certify global convergence,
+temporal error, or experimental validity of the caller's material sources.
+
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
 `AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control

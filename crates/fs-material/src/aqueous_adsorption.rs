@@ -248,6 +248,26 @@ impl AqueousLangmuir {
         temperature: Temperature,
         conditions: &QueryPoint,
     ) -> Result<LangmuirLoading> {
+        let query = self.admit_loading_point(concentration, temperature, conditions)?;
+        let (loading, vacant_loading) = self.loading_values(concentration.value())?;
+        Ok(LangmuirLoading {
+            model: self.clone(),
+            concentration,
+            temperature,
+            loading: AdsorbentLoading::new(loading),
+            vacant_loading: AdsorbentLoading::new(vacant_loading),
+            conditions: query,
+        })
+    }
+
+    /// Shared source admission for implicit consumers that retain the original
+    /// model by reference and do not need a cloned public response receipt.
+    pub(crate) fn admit_loading_point(
+        &self,
+        concentration: AmountConcentration,
+        temperature: Temperature,
+        conditions: &QueryPoint,
+    ) -> Result<QueryPoint> {
         nonnegative(
             concentration.value(),
             "instantaneous concentration must be nonnegative",
@@ -270,25 +290,48 @@ impl AqueousLangmuir {
             )?
             .with_quantity(TEMPERATURE_AXIS, temperature_spec(), temperature.value())?;
         self.admit(&query)?;
-        let (occupied, vacant) = fractions(concentration.value(), self.half_saturation.value())?;
-        let loading = multiply(
-            self.capacity.value(),
-            occupied,
-            "instantaneous equilibrium loading",
-        )?;
-        let vacant_loading = multiply(
-            self.capacity.value(),
-            vacant,
-            "instantaneous equilibrium vacant loading",
-        )?;
-        Ok(LangmuirLoading {
-            model: self.clone(),
+        Ok(query)
+    }
+
+    /// Original constitutive arithmetic for implicit spatial consumers. A caller
+    /// MUST subsequently admit the actual complete state through the shared
+    /// source-admission owner before using this response. The derivative
+    /// is dq/dc [m³/kg]; it uses the independently retained vacant fraction.
+    pub(crate) fn loading_components(&self, concentration: f64) -> Result<(f64, f64, f64)> {
+        let half = self.half_saturation.value();
+        let (loading, vacant_loading) = self.loading_values(concentration)?;
+        let scale = concentration.max(half);
+        let denominator = concentration + half;
+        let derivative = if denominator.is_finite() {
+            divide(vacant_loading, denominator, "Langmuir loading tangent")?
+        } else {
+            divide(
+                divide(vacant_loading, scale, "scaled Langmuir loading tangent")?,
+                1.0 + concentration.min(half) / scale,
+                "Langmuir loading tangent",
+            )?
+        };
+        Ok((loading, vacant_loading, derivative))
+    }
+
+    fn loading_values(&self, concentration: f64) -> Result<(f64, f64)> {
+        nonnegative(
             concentration,
-            temperature,
-            loading: AdsorbentLoading::new(loading),
-            vacant_loading: AdsorbentLoading::new(vacant_loading),
-            conditions: query,
-        })
+            "instantaneous concentration must be nonnegative",
+        )?;
+        let (occupied, vacant) = fractions(concentration, self.half_saturation.value())?;
+        Ok((
+            multiply(
+                self.capacity.value(),
+                occupied,
+                "instantaneous equilibrium loading",
+            )?,
+            multiply(
+                self.capacity.value(),
+                vacant,
+                "instantaneous equilibrium vacant loading",
+            )?,
+        ))
     }
 
     /// Solve one ideal equilibrium contact at fixed volume and dry adsorbent mass.

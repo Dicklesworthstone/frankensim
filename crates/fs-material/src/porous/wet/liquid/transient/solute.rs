@@ -9,13 +9,18 @@
 //! and the passive dilute approximation at the actual aqueous state. Solutes do not alter water
 //! pressure, saturation, viscosity, density or retention. Activity/cross-friction,
 //! ionic migration, reaction and hydrodynamic dispersion need their own laws.
-//! The explicit linear sorption extension adds reversible immobile storage;
-//! sorption is never inferred from the aqueous diffusivity or tortuosity.
+//! Explicit linear and original-source Langmuir extensions add reversible
+//! immobile storage; sorption is never inferred from aqueous D or tortuosity.
 
 use super::{LiquidSaturationCandidate, LiquidSaturationColumn};
 
+mod langmuir;
 mod sorption;
 mod transport;
+pub use langmuir::{
+    LangmuirSoluteControls, LangmuirSoluteError, LangmuirSoluteLaw, LangmuirSoluteSorption,
+    LangmuirSoluteStep,
+};
 pub use sorption::{LinearSoluteSorption, SorbingDiluteSoluteReport, SorbingDiluteSoluteStep};
 pub use transport::{
     DiluteSoluteBoundary, DiluteSoluteControls, DiluteSoluteError, DiluteSoluteReport,
@@ -23,6 +28,63 @@ pub use transport::{
 };
 
 impl LiquidSaturationCandidate {
+    /// Transport passive analytical-element solutes with original source-bound
+    /// Langmuir storage, optionally at the independently sourced LOCAL LDF rate.
+    /// Each cell/constituent slot has independent sites; there is no competition
+    /// or charged-species migration. `None` denotes inert, zero-site storage.
+    ///
+    /// Actual cell liquid volume is the hydraulic water capacity per area times
+    /// `transverse_area_m2`; it is never a freely chosen source coordinate.
+    /// Retained dry mass and occupied/vacant stocks use the same bulk area basis.
+    /// Equilibrium mode requires an already equilibrated original loading.
+    /// Finite-rate mode permits disequilibrium and independent desorption.
+    ///
+    /// Bounded damped Newton reuses the original tridiagonal aqueous stencil.
+    /// Every nonlinear trial checks the original constitutive sources at its
+    /// actual concentration, loading, volume and prescribed temperature. A
+    /// source refusal, exhausted work or unconverged residual publishes nothing.
+    /// Newton globalization and first-order endpoint coupling do not establish
+    /// global convergence or temporal accuracy. The numerical payload budget
+    /// excludes transient original source-owner query/receipt allocations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_langmuir_dilute_solutes<'a, const N: usize>(
+        &self,
+        original: &LiquidSaturationColumn,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        initial_sorbed_amount_mol_m2: &'a [[f64; N]],
+        initial_vacant_amount_mol_m2: &'a [[f64; N]],
+        sorption: &'a [[Option<LangmuirSoluteSorption<'a>>; N]],
+        transverse_area_m2: f64,
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: LangmuirSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LangmuirSoluteStep<N>, LangmuirSoluteError> {
+        let mut storage = langmuir::LangmuirStorage::new(
+            original.cells.len(),
+            self.step.duration_s,
+            initial_sorbed_amount_mol_m2,
+            initial_vacant_amount_mol_m2,
+            sorption,
+            transverse_area_m2,
+            controls,
+            &mut cancelled,
+        )?;
+        let result = self.transport_solute_storage(
+            original,
+            initial_aqueous_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls.transport,
+            &mut storage,
+            &mut cancelled,
+        );
+        let aqueous = storage.recover(result)?;
+        storage.finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+    }
+
     /// Transport dilute solutes with explicit reversible linear immobile storage.
     ///
     /// Aqueous and sorbed amounts are both mol per bulk transverse m². Every

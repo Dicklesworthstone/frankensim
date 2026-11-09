@@ -198,42 +198,63 @@ impl<'a, const N: usize> SorptionStorage<'a, N> {
         step: DiluteSoluteStep<N>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SorbingDiluteSoluteStep<N>> {
-        let mut aqueous_before = [0.0; N];
-        let mut aqueous_after = [0.0; N];
-        let mut aqueous_change = [0.0; N];
-        let mut bound_before = [0.0; N];
-        let mut bound_after = [0.0; N];
-        let mut bound_change = [0.0; N];
-        for k in 0..N {
-            poll(cancelled)?;
-            aqueous_before[k] = sum(initial.iter().map(|a| a[k]))?;
-            aqueous_after[k] = sum(step.amount_mol_m2.iter().map(|a| a[k]))?;
-            aqueous_change[k] = sum(initial
-                .iter()
-                .zip(&step.amount_mol_m2)
-                .map(|(a, b)| b[k] - a[k]))?;
-            bound_before[k] = sum(self.original.iter().map(|a| a[k]))?;
-            bound_after[k] = sum(self.bound.iter().map(|a| a[k]))?;
-            bound_change[k] = sum(self.exchange.iter().map(|a| a[k]))?;
-        }
-        poll(cancelled)?;
-        Ok(SorbingDiluteSoluteStep {
-            aqueous_amount_mol_m2: step.amount_mol_m2,
-            sorbed_amount_mol_m2: self.bound,
-            concentration_mol_m3: step.concentration_mol_m3,
-            exchange_into_sorbed_mol_m2: self.exchange,
-            report: SorbingDiluteSoluteReport {
-                total: step.report,
-                aqueous_amount_before_mol_m2: aqueous_before,
-                aqueous_amount_after_mol_m2: aqueous_after,
-                aqueous_amount_change_mol_m2: aqueous_change,
-                sorbed_amount_before_mol_m2: bound_before,
-                sorbed_amount_after_mol_m2: bound_after,
-                sorbed_amount_change_mol_m2: bound_change,
-                maximum_sorption_equation_defect_mol_m2: self.maximum_defect,
-            },
-        })
+        finish_sorption(
+            self.original,
+            self.bound,
+            self.exchange,
+            self.maximum_defect,
+            initial,
+            step,
+            cancelled,
+        )
     }
+}
+
+/// Shared phase accounting for linear and source-bound nonlinear storage.
+pub(super) fn finish_sorption<const N: usize>(
+    original: &[[f64; N]],
+    bound: Vec<[f64; N]>,
+    exchange: Vec<[f64; N]>,
+    maximum_defect: [f64; N],
+    initial: &[[f64; N]],
+    step: DiluteSoluteStep<N>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SorbingDiluteSoluteStep<N>> {
+    let mut aqueous_before = [0.0; N];
+    let mut aqueous_after = [0.0; N];
+    let mut aqueous_change = [0.0; N];
+    let mut bound_before = [0.0; N];
+    let mut bound_after = [0.0; N];
+    let mut bound_change = [0.0; N];
+    for k in 0..N {
+        poll(cancelled)?;
+        aqueous_before[k] = sum(initial.iter().map(|a| a[k]))?;
+        aqueous_after[k] = sum(step.amount_mol_m2.iter().map(|a| a[k]))?;
+        aqueous_change[k] = sum(initial
+            .iter()
+            .zip(&step.amount_mol_m2)
+            .map(|(a, b)| b[k] - a[k]))?;
+        bound_before[k] = sum(original.iter().map(|a| a[k]))?;
+        bound_after[k] = sum(bound.iter().map(|a| a[k]))?;
+        bound_change[k] = sum(exchange.iter().map(|a| a[k]))?;
+    }
+    poll(cancelled)?;
+    Ok(SorbingDiluteSoluteStep {
+        aqueous_amount_mol_m2: step.amount_mol_m2,
+        sorbed_amount_mol_m2: bound,
+        concentration_mol_m3: step.concentration_mol_m3,
+        exchange_into_sorbed_mol_m2: exchange,
+        report: SorbingDiluteSoluteReport {
+            total: step.report,
+            aqueous_amount_before_mol_m2: aqueous_before,
+            aqueous_amount_after_mol_m2: aqueous_after,
+            aqueous_amount_change_mol_m2: aqueous_change,
+            sorbed_amount_before_mol_m2: bound_before,
+            sorbed_amount_after_mol_m2: bound_after,
+            sorbed_amount_change_mol_m2: bound_change,
+            maximum_sorption_equation_defect_mol_m2: maximum_defect,
+        },
+    })
 }
 
 impl<const N: usize> ImmobileStorage<N> for SorptionStorage<'_, N> {
@@ -242,9 +263,10 @@ impl<const N: usize> ImmobileStorage<N> for SorptionStorage<'_, N> {
     }
 
     fn admit(
-        &self,
+        &mut self,
         mobile: &[[f64; N]],
         water: &[f64],
+        _: &[f64],
         controls: DiluteSoluteControls<N>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<()> {

@@ -3,6 +3,8 @@
 
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
+pub(super) mod nonlinear;
+
 /// Independent solute boundary; the hydraulic owner has already selected water flux.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DiluteSoluteBoundary<const N: usize> {
@@ -97,6 +99,15 @@ pub enum DiluteSoluteError {
         species: usize,
         residual_mol_m2: f64,
         allowance_mol_m2: f64,
+    },
+    Nonlinear {
+        species: usize,
+        linear_solves: usize,
+        maximum_residual_mol_m2: f64,
+    },
+    NonlinearWork {
+        required_linear_solves: usize,
+        maximum_linear_solves: usize,
     },
     Balance {
         species: usize,
@@ -272,8 +283,9 @@ pub(super) trait ImmobileStorage<const N: usize> {
         0
     }
     fn admit(
-        &self,
+        &mut self,
         _: &[[f64; N]],
+        _: &[f64],
         _: &[f64],
         _: DiluteSoluteControls<N>,
         _: &mut impl FnMut() -> bool,
@@ -283,6 +295,24 @@ pub(super) trait ImmobileStorage<const N: usize> {
     /// Add only to the concentration-system storage diagonal and amount RHS.
     fn terms(&self, _: usize, _: usize) -> Result<(f64, f64)> {
         Ok((0.0, 0.0))
+    }
+    /// Solve the assembled ORIGINAL aqueous stencil. Nonlinear immobile
+    /// storage can change its local diagonal, never its physical face terms.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_species(
+        &mut self,
+        _: usize,
+        lower: &[f64],
+        diagonal: &[f64],
+        upper: &[f64],
+        rhs: &mut [f64],
+        solver: &mut TridiagonalWorkspace,
+        _: DiluteSoluteControls<N>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<usize> {
+        solver.factor(lower, diagonal, upper, &mut *cancelled)?;
+        solver.solve_factored_in_place(rhs, &mut *cancelled)?;
+        Ok(1)
     }
     fn finish_cell(
         &mut self,
@@ -425,13 +455,19 @@ pub(super) fn transport_with_storage<const N: usize>(
             residual_m: water_residual,
         });
     }
-    storage.admit(initial, before_water_m, controls, &mut cancelled)?;
+    storage.admit(
+        initial,
+        before_water_m,
+        after_water_m,
+        controls,
+        &mut cancelled,
+    )?;
     let mut step = DiluteSoluteStep {
         amount_mol_m2: vec![[0.0; N]; n],
         concentration_mol_m3: vec![[0.0; N]; n],
         report: DiluteSoluteReport {
             interval_s,
-            linear_solves: N,
+            linear_solves: 0,
             cell_species,
             workspace_bytes,
             maximum_water_balance_defect_m,
@@ -523,8 +559,16 @@ pub(super) fn transport_with_storage<const N: usize>(
                 rhs[cell] = finite(rhs[cell] + integrated_flux(coefficient, c[k])?)?;
             }
         }
-        solver.factor(&lower, &diagonal, &upper, &mut cancelled)?;
-        solver.solve_factored_in_place(&mut rhs, &mut cancelled)?;
+        step.report.linear_solves += storage.solve_species(
+            k,
+            &lower,
+            &diagonal,
+            &upper,
+            &mut rhs,
+            &mut solver,
+            controls,
+            &mut cancelled,
+        )?;
         for i in 0..n {
             if i % 128 == 0 {
                 poll(&mut cancelled)?;
