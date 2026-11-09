@@ -28,6 +28,9 @@ use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+mod sgs;
+pub use sgs::{BoussinesqOpenSgsError3, BoussinesqOpenSgsStep3};
+
 /// Additional resource and constitutive-consistency limits for this owner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoussinesqOpenLimits3 {

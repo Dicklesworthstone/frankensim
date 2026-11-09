@@ -156,11 +156,45 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
         workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
     ) -> Result<OpenThermalSgsStep3, OpenThermalSgsError3<L::Error>> {
-        let poll = || {
-            cx.checkpoint()
-                .map_err(|_| OpenThermalSgsError3::Sgs(SgsStepError::Grid(GridError3::Cancelled)))
-        };
-        poll()?;
+        let (sgs, maximum_eddy_diffusivity_lu, maximum_diffusivity_to_molecular) = self
+            .prepare_open_thermal_sgs(
+                config,
+                molecular_collisions,
+                molecular_thermal_relaxation,
+                workspace,
+                None,
+                || cx.checkpoint().map_err(|_| GridError3::Cancelled),
+            )?;
+        let transport = self.step_serial_with_thermal(
+            thermal,
+            cx,
+            Some(workspace.flow.collisions()),
+            heat_per_step,
+            Some(&workspace.thermal),
+            origin,
+        )?;
+        Ok(OpenThermalSgsStep3 {
+            transport,
+            sgs,
+            maximum_eddy_diffusivity_lu,
+            maximum_diffusivity_to_molecular,
+        })
+    }
+
+    // One coefficient owner for passive thermal and buoyant/spatial-force
+    // transactions. The explicit force slice belongs to the accepted incoming
+    // populations; endpoint forces are owned by the subsequent native step.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::lattice3::open_boundaries) fn prepare_open_thermal_sgs(
+        &self,
+        config: OpenThermalSgsConfig3,
+        molecular_collisions: Option<&[L::Collision]>,
+        molecular_thermal_relaxation: &[f64],
+        workspace: &mut OpenThermalSgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
+        mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(SgsReport, f64, f64), OpenThermalSgsError3<L::Error>> {
+        checkpoint().map_err(SgsStepError::Grid)?;
         config.closure.validate()?;
         if !config.turbulent_prandtl.is_finite()
             || config.turbulent_prandtl <= 0.0
@@ -177,17 +211,18 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
                 "molecular/total thermal tau shape mismatch",
             ));
         }
-        let sgs = self.prepare_sgs(
-            cx,
+        let sgs = self.prepare_open_sgs(
             config.closure,
             molecular_collisions,
             &mut workspace.flow,
+            forces,
+            &mut checkpoint,
         )?;
         let mut maximum_eddy_diffusivity_lu = 0.0_f64;
         let mut maximum_diffusivity_to_molecular = 0.0_f64;
         for (cell, &tau) in molecular_thermal_relaxation.iter().enumerate() {
             if cell % 64 == 0 {
-                poll()?;
+                checkpoint().map_err(SgsStepError::Grid)?;
             }
             if !tau.is_finite() || tau <= 0.5 {
                 return Err(OpenThermalSgsError3::Invalid(
@@ -225,20 +260,11 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
             maximum_eddy_diffusivity_lu = maximum_eddy_diffusivity_lu.max(alpha);
             maximum_diffusivity_to_molecular = maximum_diffusivity_to_molecular.max(ratio);
         }
-        poll()?;
-        let transport = self.step_serial_with_thermal(
-            thermal,
-            cx,
-            Some(workspace.flow.collisions()),
-            heat_per_step,
-            Some(&workspace.thermal),
-            origin,
-        )?;
-        Ok(OpenThermalSgsStep3 {
-            transport,
+        checkpoint().map_err(SgsStepError::Grid)?;
+        Ok((
             sgs,
             maximum_eddy_diffusivity_lu,
             maximum_diffusivity_to_molecular,
-        })
+        ))
     }
 }

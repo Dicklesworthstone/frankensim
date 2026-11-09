@@ -1828,3 +1828,40 @@ The existing `ThermalOpenField3::set_reservoir_temperature` supports changing in
 `set_finite_wall_heat(face, heat_per_step)` changes the external source of each retained finite wall cell in original x-fast surface order. The field covers the complete wall array, is finite, and is zero in slots adjacent to solid grid cells. Negative source values represent cooling. Stored temperatures, capacities, contact resistances and prepared wall-conduction factors remain unchanged; no energy is deposited by the setter. The original finite-wall solve credits each active source once and balances it against fluid heat, solid storage and reciprocal wall conduction. `wall_states` exposes current sources, while `boundaries` retains the original finite-wall declaration.
 
 All inputs are admitted before mutation. A refused update leaves both inputs and physical state unchanged. A subsequent failed or cancelled step retains the newly authored inputs and the prior physical epoch, matching reservoir-update semantics; the next attempt rebuilds scratch from the retained state. The Boussinesq owner forwards all three APIs, pre-admits prescribed wall temperature through its density-departure envelope, and retains the original actual-trace checks for flux and ambient-film laws. Native held-force, varying-force, scalar-diffusion and tensor-diffusion steps use these same boundary owners without a second heat solve or extra source allocation.
+
+## Spatial-force and buoyant open-boundary SGS
+
+`ForcedOpenBoundaryGrid3` now prepares and advances the existing local
+Smagorinsky, WALE and Vreman closures with each cell's accepted spatial Guo
+half-force. Held-force and next-force entries share the native reservoir/wall
+gradient and original collision/stream transaction. SGS samples only the
+opening physical velocity; the supplied endpoint force retains its separate
+native reconstruction and trapezoidal impulse semantics.
+
+`BoussinesqOpenGrid3::step_serial_with_sgs` and `advance_serial_with_sgs`
+compose that same momentum closure with `alpha_t = nu_t / Pr_t` and the
+original D3Q7 molecular thermal relaxation. Fresh molecular collision/thermal
+fields are explicit, augmentation is frozen for the interval, zero SGS retains
+their exact bits, and eddy/molecular limits refuse rather than clip. One shared
+coefficient preparation serves passive and buoyant thermal owners without
+additional per-step arrays or population clones.
+
+The original joint owner retains heat-source half-kicks, reservoir/backflow
+exchange, finite conducting walls, temperature-dependent endpoint buoyancy,
+and separate body/background/buoyancy impulse accounts. Successful publication
+alone advances flow, heat, walls, force epochs and clocks or exchanges a supplied
+endpoint-background buffer. Late source, ratio, force or cancellation refusal
+does not publish a partial physical state. Modeled shear transfer remains
+diagnostic; neither it nor mechanical-force work is added to heat.
+
+Four focused regression groups cover analytic spatial-force gradients and
+native composition, exact zero-SGS trajectories, active buoyant feedback with
+independent fluid/solid heat and impulse accounts, and warmed late-refusal
+replay. The first three exercise D3Q19 TRT and D3Q27 cumulant lattices with all
+three closures. Scoped pinned formatting and whitespace checks passed before the execution
+environment went offline; the final source was recovered from those reviewed
+edits through GitHub. Native execution remains pending the pinned dependency
+build's resource requirement.
+This is the existing explicit fixed-reference-capacity Boussinesq split with
+local exploratory closures, not a variable-density total-energy model,
+buoyancy-production turbulence closure or new temporal-order qualification.

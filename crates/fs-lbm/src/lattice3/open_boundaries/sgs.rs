@@ -8,6 +8,7 @@
 use super::*;
 use crate::sgs3::{SgsConfig, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3};
 
+mod forcing;
 mod thermal;
 pub use thermal::{
     OpenThermalSgsConfig3, OpenThermalSgsError3, OpenThermalSgsStep3, OpenThermalSgsWorkspace3,
@@ -95,16 +96,17 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
         molecular: Option<&[L::Collision]>,
         workspace: &mut OpenSgsWorkspace3<L::Collision>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
-        self.prepare_open_sgs(config, molecular, workspace, || {
+        self.prepare_open_sgs(config, molecular, workspace, None, || {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)
         })
     }
 
-    fn prepare_open_sgs(
+    pub(super) fn prepare_open_sgs(
         &self,
         config: SgsConfig,
         molecular: Option<&[L::Collision]>,
         workspace: &mut OpenSgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
         checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         if workspace.eddy.len() != self.grid.f.len() {
@@ -114,7 +116,7 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
             config,
             molecular,
             &mut workspace.local,
-            None,
+            forces,
             |cell, velocity| self.rheology_gradient(cell, velocity),
             |cell, eddy| workspace.eddy[cell] = eddy,
             checkpoint,
@@ -150,7 +152,7 @@ impl<L: EquilibriumLattice3<Q> + SgsLattice3<Q>, const Q: usize> OpenBoundaryGri
         workspace: &mut OpenSgsWorkspace3<L::Collision>,
         origin: [f64; 3],
     ) -> Result<OpenSgsStep3, SgsStepError<L::Error>> {
-        let sgs = self.prepare_open_sgs(config, molecular, workspace, || {
+        let sgs = self.prepare_open_sgs(config, molecular, workspace, None, || {
             if gate.is_requested() {
                 Err(GridError3::Cancelled)
             } else {
