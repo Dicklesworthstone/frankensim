@@ -39,6 +39,7 @@ pub use density_transport::{
     MaterialMomentumStep, MaterialVolumeSource,
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
+    SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
 };
 mod material_momentum;
 pub use material_momentum::{

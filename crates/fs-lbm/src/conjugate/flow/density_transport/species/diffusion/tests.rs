@@ -827,3 +827,203 @@ fn adaptive_diffusion_preserves_the_zero_coefficient_identity_without_refinement
     assert_eq!(result.total_pair_updates, 0);
     assert_eq!(result.estimated_mass_fraction_error, [0.0; 2]);
 }
+
+#[test]
+fn partial_enthalpy_diffuses_with_the_exact_binary_mass_transfer() {
+    let gate = CancelGate::new_clock_free();
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let initial = [[0.8, 0.2], [0.2, 0.8]];
+    let partial_h = [-200_000.0, 500_000.0];
+    let initial_h = initial.map(|m| m[0] * partial_h[0] + m[1] * partial_h[1]);
+    let calls = std::cell::Cell::new(0);
+    let result = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &initial_h, &[0.15; 2], 2.0,
+        |cells, axis| {
+            assert_eq!(cells, [0, 1]);
+            assert_eq!(axis, 0);
+            calls.set(calls.get() + 1);
+            Ok(partial_h)
+        }, controls(7), 1e-8, &gate,
+    ).unwrap();
+    assert_eq!(calls.get(), 1);
+    let mass_transfer = 0.5 * 0.6 * (-(-0.6_f64).exp_m1());
+    let energy_transfer = mass_transfer * (partial_h[0] - partial_h[1]);
+    near(result.diffusive_enthalpy_change_j[0], -energy_transfer, 1e-9);
+    near(result.diffusive_enthalpy_change_j[1], energy_transfer, 1e-9);
+    // Isothermal ideal mixing must retain its original caloric temperature:
+    // endpoint mixture enthalpy equals the transported caloric inventory.
+    for c in 0..2 {
+        let m = result.species.species_mass_kg[c];
+        near(result.specific_enthalpy_j_kg[c],
+            m[0] * partial_h[0] + m[1] * partial_h[1], 2e-9);
+    }
+    let mass_only = state.diffuse_binary_species(
+        &domain, &initial, &[0.15; 2], 2.0, controls(7), &gate,
+    ).unwrap();
+    assert_eq!(result.species, mass_only);
+    assert!(result.report.absolute_enthalpy_defect_j < 1e-8);
+}
+
+#[test]
+fn multicomponent_enthalpy_mixing_preserves_isothermal_caloric_inventory() {
+    let domain = VoxelDomain::graded([vec![0.5, 1.0, 2.0], vec![1.0], vec![1.0]]).unwrap();
+    let mass = [0.5, 2.0, 1.0];
+    let state = carrier(&domain, &mass);
+    let initial = [[0.35, 0.1, 0.05], [0.2, 1.4, 0.4], [0.3, 0.2, 0.5]];
+    let h = [-1e6, 3e5, 8e5];
+    let initial_h: Vec<_> = initial.iter().zip(mass).map(|(m, carrier)|
+        m.iter().zip(h).map(|(mk, hk)| mk * hk).sum::<f64>() / carrier
+    ).collect();
+    let ctl = SpeciesDiffusionControls {
+        substeps: 16, maximum_pair_updates: 1000, maximum_storage_bytes: 1 << 20,
+        maximum_mass_defect_kg: [1e-12; 3], maximum_partition_defect_kg: 1e-12,
+    };
+    let gate = CancelGate::new_clock_free();
+    let result = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &initial_h, &[0.1; 3], 4.0, |_, _| Ok(h),
+        ctl, 1e-7, &gate,
+    ).unwrap();
+    for c in 0..3 {
+        let expected = result.species.species_mass_kg[c].iter().zip(h)
+            .map(|(mk, hk)| mk * hk).sum::<f64>();
+        near(mass[c] * result.specific_enthalpy_j_kg[c], expected, 1e-8);
+    }
+    // A common source datum must not turn rounding of sum(j_k) into heat.
+    let uniform = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[1e200; 3], &[0.1; 3], 4.0,
+        |_, _| Ok([1e200; 3]), ctl, 0.0, &gate,
+    ).unwrap();
+    assert_eq!(uniform.diffusive_enthalpy_change_j, [0.0; 3]);
+    assert_eq!(uniform.specific_enthalpy_j_kg, [1e200; 3]);
+    assert_eq!(uniform.report.absolute_enthalpy_defect_j, 0.0);
+}
+
+#[test]
+fn diffusive_enthalpy_is_invariant_to_a_common_resolvable_datum() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let initial = [[0.75, 0.25], [0.25, 0.75]];
+    let run = |datum: f64| state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[datum + 125.0, datum + 175.0], &[0.2; 2], 0.5,
+        |_, _| Ok([datum + 100.0, datum + 200.0]), controls(3), 0.001,
+        &CancelGate::new_clock_free(),
+    ).unwrap();
+    let native = run(0.0);
+    let shifted = run(1e12);
+    assert_eq!(native.species, shifted.species);
+    assert_eq!(native.diffusive_enthalpy_change_j, shifted.diffusive_enthalpy_change_j);
+    for c in 0..2 {
+        near(shifted.specific_enthalpy_j_kg[c] - 1e12, native.specific_enthalpy_j_kg[c], 0.0002);
+    }
+}
+
+#[test]
+fn enthalpy_diffusion_refuses_unrepresented_heat_and_failed_face_sources_atomically() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let initial = [[0.75, 0.25], [0.25, 0.75]];
+    let gate = CancelGate::new_clock_free();
+    let run = |initial_h, limit, ctl, partial_h| state.diffuse_species_with_enthalpy(
+        &domain, &initial, initial_h, &[0.2; 2], 0.5, |_, _| Ok(partial_h),
+        ctl, limit, &gate,
+    );
+    assert!(run(&[1e30; 2], 1e-12, controls(2), [100.0, 200.0]).is_err());
+    assert!(run(&[125.0, 175.0], 1e-9, controls(2), [f64::NAN, 200.0]).is_err());
+    let mut constrained = controls(2);
+    constrained.maximum_storage_bytes = 1;
+    assert!(run(&[125.0, 175.0], 1e-9, constrained, [100.0, 200.0]).is_err());
+    let source_error = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[125.0, 175.0], &[0.2; 2], 0.5,
+        |_, _| Err(refuse("original source is out of its thermal domain")),
+        controls(2), 1e-9, &gate,
+    );
+    assert!(source_error.is_err());
+    let cancelled = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[125.0, 175.0], &[0.2; 2], 0.5,
+        |_, _| { gate.request(); Ok([100.0, 200.0]) },
+        controls(2), 1e-9, &gate,
+    );
+    assert!(cancelled.is_err());
+    assert_eq!(state.mass_kg, [1.0; 2]);
+    assert_eq!(initial, [[0.75, 0.25], [0.25, 0.75]]);
+}
+
+#[test]
+fn rounded_carrier_flux_cannot_create_unbudgeted_chemical_heat() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    // The majority cannot represent the trace correction at this scale. Its
+    // independent mass budget is permissive, but the chemical energy budget
+    // must still see the amplified mass-frame defect.
+    let initial = [[0.0, 0.5, 1e-20, 0.5], [0.0, 0.25, 0.0, 0.75]];
+    let ctl = SpeciesDiffusionControls {
+        substeps: 1, maximum_pair_updates: 10, maximum_storage_bytes: 1 << 20,
+        maximum_mass_defect_kg: [1e-12, 1e-12, 1e-30, 1e-12],
+        maximum_partition_defect_kg: 1e-12,
+    };
+    let result = state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[0.0; 2], &[0.2; 2], 0.5,
+        |_, _| Ok([0.0, 1e20, 1e20, 1e20]), ctl, 1e-10,
+        &CancelGate::new_clock_free(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn opposing_species_formation_terms_retain_small_diffusive_heat() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let state = carrier(&domain, &[1.0; 2]);
+    let initial = [[0.5, 0.375, 0.125], [0.5, 0.125, 0.375]];
+    // In both charts h_mix = 4*Y_2: Y_0 stays at one half, so the
+    // negative and positive formation terms cancel in each original cell.
+    let initial_h = [0.5, 1.5];
+    let gate = CancelGate::new_clock_free();
+    let run = |h| state.diffuse_species_with_enthalpy(
+        &domain, &initial, &initial_h, &[0.2; 2], 0.5, |_, _| Ok(h),
+        common_controls(1), 1e-13, &gate,
+    ).unwrap();
+    let baseline = run([0.0, 0.0, 4.0]);
+    let transfer = 0.5 * 0.25 * (-(-0.2_f64).exp_m1());
+    near(baseline.diffusive_enthalpy_change_j[0], 4.0 * transfer, 1e-14);
+    for formation in [2.0_f64.powi(53), 2.0_f64.powi(54)] {
+        // The first chart loses product low parts; the second also loses
+        // the +4 while centering h_2-h_0. Either loss changes actual heat,
+        // even though a mass or paired-energy conservation audit can pass.
+        let result = run([-formation, formation, formation + 4.0]);
+        assert_eq!(result.species, baseline.species);
+        for c in 0..2 {
+            near(result.diffusive_enthalpy_change_j[c],
+                baseline.diffusive_enthalpy_change_j[c], 1e-14);
+            near(result.specific_enthalpy_j_kg[c],
+                4.0 * result.species.species_mass_kg[c][2], 1e-14);
+        }
+        assert!(result.report.absolute_enthalpy_defect_j < 1e-13);
+    }
+}
+
+#[test]
+fn mass_product_roundoff_is_charged_to_the_enthalpy_budget() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let epsilon = 2.0_f64.powi(-27);
+    let mass = 1.0 + epsilon;
+    let state = carrier(&domain, &[mass; 2]);
+    let initial = [[1.0, epsilon], [0.0, mass]];
+    let gate = CancelGate::new_clock_free();
+    let run = |limit| state.diffuse_species_with_enthalpy(
+        &domain, &initial, &[0.0; 2], &[1e30; 2], 1.0,
+        |_, _| Ok([0.0, 2.0_f64.powi(55)]), controls(1), limit, &gate,
+    );
+    // Full pair relaxation transfers exactly half a kilogram, hence 2^54 J.
+    // Each returned |h| is 2^54-2^27; its EXACT represented mass product is
+    // 2^54-1, although ordinary f64 multiplication rounds it back to 2^54.
+    // The two one-joule local errors must not hide behind zero global change.
+    assert!(run(1.0).is_err());
+    let accepted = run(2.0).unwrap();
+    assert_eq!(accepted.diffusive_enthalpy_change_j,
+        [2.0_f64.powi(54), -2.0_f64.powi(54)]);
+    assert_eq!(accepted.report.stored_enthalpy_change_j, 0.0);
+    assert_eq!(accepted.report.transported_enthalpy_change_j, 0.0);
+    assert_eq!(accepted.report.absolute_enthalpy_defect_j, 2.0);
+    assert_eq!(state.mass_kg, [mass; 2]);
+}

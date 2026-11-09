@@ -27,6 +27,9 @@ use super::{
 use crate::conjugate::VoxelDomain;
 use fs_math::det;
 
+mod enthalpy;
+pub use enthalpy::{SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep};
+
 /// Explicit diffusion work, storage and independent constituent-mass budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeciesDiffusionControls<const N: usize> {
@@ -132,6 +135,15 @@ struct Inventory<const N: usize> {
     mass: [Sum; N],
     increment: [Sum; N],
 }
+
+trait DiffusionObserver<const N: usize> {
+    fn storage_bytes(&self, _: usize, _: usize) -> Option<usize> { Some(0) }
+    fn prepare_storage(&mut self, _: usize, _: usize) {}
+    fn prepare(&mut self, _: [usize; 2], _: usize) -> Result<(), ChtError> { Ok(()) }
+    fn transferred(&mut self, _: usize, _: [f64; N]) -> Result<(), ChtError> { Ok(()) }
+}
+
+impl<const N: usize> DiffusionObserver<N> for () {}
 
 fn refuse(reason: &str) -> ChtError {
     ChtError::InvalidInput {
@@ -412,6 +424,27 @@ impl MaterialAdvectionStep {
         gate: &CancelGate,
         mut checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
     ) -> Result<SpeciesDiffusionStep<N>, ChtError> {
+        self.diffuse_species_observed(
+            domain, species_mass_kg, diffusivity_m2_s, duration_s, controls, gate,
+            &mut checkpoint, &mut (),
+        )
+    }
+
+    /// Both entries share the original mass solve. A thermal consumer prepares
+    /// one immutable face image and observes its actual signed constituent
+    /// transfers; it never reconstructs fluxes from rounded endpoint masses.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn diffuse_species_observed<const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        diffusivity_m2_s: &[f64],
+        duration_s: f64,
+        controls: SpeciesDiffusionControls<N>,
+        gate: &CancelGate,
+        mut checkpoint: impl FnMut(usize) -> Result<(), ChtError>,
+        observer: &mut impl DiffusionObserver<N>,
+    ) -> Result<SpeciesDiffusionStep<N>, ChtError> {
         poll(gate)?;
         let transport = self.accepted_mass_transport(gate)?;
         let count = domain.cell_count();
@@ -498,10 +531,12 @@ impl MaterialAdvectionStep {
             .checked_mul(core::mem::size_of::<Inventory<N>>() + core::mem::size_of::<[f64; N]>())
             .and_then(|n| n.checked_add(face_count.checked_mul(core::mem::size_of::<Face>())?))
             .and_then(|n| n.checked_add(fixed_bytes.max(2048)))
+            .and_then(|n| n.checked_add(observer.storage_bytes(count, face_count)?))
             .ok_or_else(|| refuse("diffusion storage extent overflows"))?;
         if bytes > controls.maximum_storage_bytes {
             return Err(refuse("diffusion storage budget exhausted"));
         }
+        observer.prepare_storage(count, face_count);
         let mut faces = Vec::with_capacity(face_count);
         let mut maximum_pair_relaxation: f64 = 0.0;
         for c in 0..count {
@@ -538,6 +573,7 @@ impl MaterialAdvectionStep {
                     return Err(refuse("diffusion relaxation is unrepresentable"));
                 }
                 maximum_pair_relaxation = maximum_pair_relaxation.max(relaxation);
+                observer.prepare([c, next], axis)?;
                 faces.push(Face {
                     cells: [c, next],
                     exchange_capacity_kg: positive(capacity * relaxation)?,
@@ -562,11 +598,11 @@ impl MaterialAdvectionStep {
                 poll(gate)?;
                 for (index, face) in faces.iter().enumerate() {
                     poll_every(gate, index)?;
-                    exchange(face, &self.mass_kg, &mut inventories)?;
+                    observer.transferred(index, exchange(face, &self.mass_kg, &mut inventories)?)?;
                 }
-                for (index, face) in faces.iter().rev().enumerate() {
+                for (index, face) in faces.iter().enumerate().rev() {
                     poll_every(gate, index)?;
-                    exchange(face, &self.mass_kg, &mut inventories)?;
+                    observer.transferred(index, exchange(face, &self.mass_kg, &mut inventories)?)?;
                 }
                 checkpoint(substep + 1)?;
             }
@@ -636,7 +672,7 @@ fn exchange<const N: usize>(
     face: &Face,
     carrier: &[f64],
     inventory: &mut [Inventory<N>],
-) -> Result<(), ChtError> {
+) -> Result<[f64; N], ChtError> {
     let [left, right] = face.cells;
     let mut transfers = [0.0; N];
     if N == 2 {
@@ -685,7 +721,7 @@ fn exchange<const N: usize>(
             }
         }
     }
-    Ok(())
+    Ok(transfers)
 }
 
 #[cfg(test)]

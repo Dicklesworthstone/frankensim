@@ -13,6 +13,7 @@ pub use species::{
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
+    SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
 };
 
 mod momentum;

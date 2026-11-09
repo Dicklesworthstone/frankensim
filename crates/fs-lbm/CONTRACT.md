@@ -1490,3 +1490,43 @@ thermal-bracket recovery and atomic late work/source/cancellation failure.
 Scoped pinned formatting and whitespace checks passed. Full native integration
 execution remains blocked by the pinned asupersync dependency exceeding this
 environment's build resources before the changed crates compile.
+
+
+### Partial enthalpy on the same constituent diffusion transfers
+
+`MaterialAdvectionStep::diffuse_species_with_enthalpy` adds thermal storage to
+the original common-diffusivity owner. One callback supplies the original
+partial specific enthalpies in J/kg at each conducting face, frozen for the
+interval. Every actual signed constituent transfer contributes `sum(h_k dm_k)`;
+one cell loses exactly the energy its neighbor receives. The existing positive
+mass relaxations, graded-grid conductances, ordered sweeps and mass/partition
+budgets remain the only species solve. Source face queries occur once before
+the sweeps, and both inventories publish together only after final admission.
+
+Because the barycentric diffusive carrier flux is zero, a shared enthalpy datum
+is subtracted before products. Species-specific formation/latent differences
+remain. Error-free subtraction and product transforms retain their low parts
+until opposing species contributions cancel; compensating already-rounded
+products alone is insufficient. Compensated cell increments update `m*h` storage
+in centered coordinates; an absolute joule budget includes local unrepresented
+work, closed-domain storage/transfer defects, and rounded carrier-flux defects
+weighted by the partial-enthalpy range. The endpoint audit also retains low
+parts of mass times the represented enthalpy change; opposing local storage
+errors cannot disappear through rounded products or a zero global balance. Large formation-energy totals cannot
+enlarge that budget. Thermal face/scratch/output storage is included in the
+original allocation ceiling. Source error, cancellation or failed mass/heat
+admission returns no partial candidate.
+
+The returned endpoint enthalpy already contains the reported diffusion energy.
+Consumers must invert it with the returned composition using their original
+caloric law, re-evaluate face properties as needed, and accept both inventories
+together. This component supplies no EOS, source identity, temperature solve,
+reaction or pressure-work source, arbitrary multicomponent molecular law, Soret
+term or coupled temporal-order guarantee. Freezing partial enthalpies is a
+declared approximation for a changing state. Focused G0/G1/G3 regression
+definitions cover analytic binary relaxation/energy flux, multicomponent
+isothermal caloric inventory, common-datum invariance, retained small heat amid
+opposing formation terms, unchanged mass-only results, and unrepresented-work,
+source, storage and cancellation refusals. These
+new regressions require native execution; the authoring environment went
+offline before that check completed.
