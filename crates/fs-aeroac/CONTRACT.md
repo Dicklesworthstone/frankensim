@@ -3910,6 +3910,44 @@ velocity against independent pressure derivatives, the full Helmholtz residual,
 illuminated/shadow/transition asymptotic limits, skew incidence, material density
 scaling, observation-line parity and domain/cancellation refusals (G1/G2/G3).
 
+### Placed straight edges and coherent angular spectra
+
+`diffraction::PreparedHalfPlaneSpectrum` reuses that Sommerfeld owner for every
+supplied propagating plane-wave component. `HalfPlaneFrame` places the edge in
+world coordinates with explicit origin, edge direction and sheet normal. The
+finite nonzero axes are normalized; nonorthogonality beyond 64 epsilons refuses.
+The incident complex peak pressures [Pa] are referenced to one explicit world
+point. DD displacement/phase products move them to the edge origin exactly once,
+so translating the boundary never silently resets the source phase.
+
+All components' complex pressure and actual Euler velocity accumulate in DD.
+The complete velocity is rotated into the world frame before active/reactive
+intensity is formed; coherent interference cross terms and quiet residuals are
+retained. `evaluate_harmonic_line` feeds the original finite-window and sampled
+observers without a second delay or assumed pressure-to-velocity conversion.
+Exact surface traces use `HalfPlaneReceiver::SheetFace` and a named face; world
+points resolving exactly on the sheet refuse instead of inferring signed zero
+after a rotation. Nearby points are never snapped onto the boundary.
+
+Preparation and storage are O(N); each receiver is allocation-free O(N), with
+the original transition cancellation checks and a caller component budget plus
+a hard cap of 4096. There is no mode cutoff, implicit quadrature normalization
+or angular interpolation. A continuous incident spectrum requires its own
+angular-refinement evidence. The operator accepts only propagating components
+whose resolved normal direction exceeds 64 epsilons in magnitude, refusing
+unresolved grazing incidence after world projection. It adds no evanescent incidence, source reconstruction, finite
+barrier, impedance edge or moving-medium approximation. The angular-spectrum
+convention follows [JASA 148, EL333 (2020), §2.1](https://pmc.ncbi.nlm.nih.gov/articles/PMC7567611/).
+
+`diffraction::spectrum::tests` checks world rotations and phase-reference changes,
+bitwise whole-world translation, coherent power cross terms, a 1e-20 quiet
+component between cancelling unit fields, both rotated sheet traces, world
+pressure-gradient velocity and original observation-line parity. A smooth
+propagating angular spectrum converges over 16/32/64 components against a 1024
+component reference; the finest combined pressure/impedance-scaled-velocity
+absolute error is below 3e-5 Pa for that fixture (G1/G3). Geometry, budget,
+edge/ambiguous-face and cancellation refusals are checked separately.
+
 ## Complete causal returns between opposing ideal walls
 
 `curle3d::slab::PreparedSlabSourceObserver` observes the original stationary

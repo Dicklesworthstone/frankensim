@@ -4,6 +4,8 @@
 //! Coordinates and output velocity use that same orthonormal physical frame.
 //! Both faces are retained: y = +0 selects the upper face and y = -0 the
 //! lower face. No geometric visibility cutoff discards the shadow field.
+//! [`PreparedHalfPlaneSpectrum`] places this same exact edge in world space
+//! and retains coherent interference between supplied incident plane waves.
 //!
 //! For exp(-i omega t), arrival azimuth alpha and receiver azimuth theta,
 //! the transverse solution is
@@ -26,6 +28,12 @@ use crate::curle3d::{CoherentCompactField, IdealPlaneBoundary};
 use crate::observation::HarmonicFieldLine;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod spectrum;
+pub use spectrum::{
+    HalfPlaneFace, HalfPlaneFrame, HalfPlaneIncidentWave, HalfPlaneReceiver,
+    HalfPlaneSpectrumBudget, MAX_HALF_PLANE_COMPONENTS, PreparedHalfPlaneSpectrum,
+};
 
 const INV_SQRT_TWO_PI: f64 = 0.398_942_280_401_432_7;
 const SCOPE: &str = "Prescribed plane-wave diffraction by one infinite straight-edged, \
