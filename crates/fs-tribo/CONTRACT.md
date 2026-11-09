@@ -1,3 +1,33 @@
+## Driven original local-speed Hertz trajectories
+
+`HertzFrictionPatch::advance_driven` follows the original three-coordinate
+initial-value problem under held normal load, radius, source curve, geometry,
+external acceleration and full SPD mobility. Every positive RK4 stage evaluates
+the original local-speed pressure field and integrates actual power, impulse
+and travel. Weakening evolution is not replaced by an arbitrary algebraic root.
+The shared RK4 step-doubling primitive supplies accumulated rate/impulse/travel/
+heat estimates, separately from pressure-panel refinement and original-matrix
+work gates. The existing passive arithmetic operation tree remains unchanged.
+
+Rest is an explicit retained mode. Original joint static support either holds
+the drive or supplies the zero-speed kinetic right-limit release direction.
+An original separating support plane bounds the first moving interval; later
+intervals exclude zero through the original mobility norm. The numerical finite
+horizon envelope includes positive drive quadrature and admitted work defect;
+every endpoint/stage must stay within its admitted mass-radius/local-speed
+domain. The whole-path native wrench bound includes static reactions as well
+as the original finite-speed kinetic coefficient bound.
+
+Nonconstant driven zero-rate events lacking a proved continuation return
+`UnresolvedDrivenEvent`, without speed capture, passive stopping tails or invented
+terminal heat. Genuine Coulomb delegates its existing event owner and explicitly
+marks adaptive error estimates unavailable. Unloaded nonconstant curves retain
+finite free-path bounds on their original coefficients. General nonconstant
+arrest/restart, evolving normal geometry and source changes within a phase remain
+outside this owner. Focused tests cover analytic forced affine and full-SPD
+viscous motion, unstable weakening, clipped re-entry, independent Stribeck
+pressure refinement, retained mode, covariance/replay and bounded refusal.
+
 ## Driven Hertz shear and spin with retained physical mode
 
 `HertzWrenchContact::advance_driven` advances one held-load/radius/coefficient/

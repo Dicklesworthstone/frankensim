@@ -18,7 +18,7 @@
 //! prefix; embedded prefix errors are estimates, not validated-flow enclosures.
 //! Area, strengths, mobility and geometry remain fixed, with no external drive.
 
-mod metric;
+pub(crate) mod metric;
 
 use super::contact::{AdhesiveWrenchConfig, AdhesiveWrenchContact, AdhesiveWrenchError};
 use super::relaxation::{
@@ -532,10 +532,10 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct Sample {
-    wrench: Vector,
-    velocity: Vector,
-    power: f64,
+pub(crate) struct Sample {
+    pub wrench: Vector,
+    pub velocity: Vector,
+    pub power: f64,
 }
 struct Work<'a, F, C> {
     law: CircularTransientLaw<F>,
@@ -576,13 +576,13 @@ where
         })
     }
 }
-struct Step {
-    impulse: Vector,
-    impulse_error: Vector,
-    travel: Vector,
-    travel_error: Vector,
-    heat: f64,
-    heat_error: f64,
+pub(crate) struct Step {
+    pub impulse: Vector,
+    pub impulse_error: Vector,
+    pub travel: Vector,
+    pub travel_error: Vector,
+    pub heat: f64,
+    pub heat_error: f64,
 }
 fn step<F, C>(
     work: &mut Work<'_, F, C>,
@@ -629,20 +629,29 @@ struct Integral {
 // The second half starts at a positive first-half combination, so EVERY stage
 // stays within h*beta of the original mass-metric point. The existing safe-step
 // proof therefore applies to the coarse path and both fine half-steps.
-fn rk4<F, C>(
-    work: &mut Work<'_, F, C>,
+fn rk4(
+    sample: &mut impl FnMut(Vector) -> Result<Sample, Error>,
     matrix: [[f64; 3]; 3],
     q: Vector,
+    drive: Vector,
     a: Sample,
     h: f64,
-) -> Result<Integral, Error>
-where
-    F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
-    C: FnMut() -> bool,
-{
-    let b = work.sample(add(q, multiply(matrix, a.wrench.map(|v| 0.5 * h * v))))?;
-    let c = work.sample(add(q, multiply(matrix, b.wrench.map(|v| 0.5 * h * v))))?;
-    let d = work.sample(add(q, multiply(matrix, c.wrench.map(|v| h * v))))?;
+) -> Result<Integral, Error> {
+    let b = sample(stage_rate(
+        q,
+        matrix,
+        a.wrench.map(|v| 0.5 * h * v),
+        drive,
+        0.5 * h,
+    ))?;
+    let c = sample(stage_rate(
+        q,
+        matrix,
+        b.wrench.map(|v| 0.5 * h * v),
+        drive,
+        0.5 * h,
+    ))?;
+    let d = sample(stage_rate(q, matrix, c.wrench.map(|v| h * v), drive, h))?;
     let combine =
         |values: [f64; 4]| (h / 6.0) * (values[0] + 2.0 * values[1] + 2.0 * values[2] + values[3]);
     Ok(Integral {
@@ -667,11 +676,24 @@ where
     F: FnMut([f64; 2], f64) -> Result<CircularTransientTraction, AdhesiveWrenchError>,
     C: FnMut() -> bool,
 {
-    let coarse = rk4(work, matrix, q, first, h)?;
-    let left = rk4(work, matrix, q, first, 0.5 * h)?;
-    let middle = add(q, multiply(matrix, left.impulse));
-    let middle_rate = work.sample(middle)?;
-    let right = rk4(work, matrix, middle, middle_rate, 0.5 * h)?;
+    doubled_rk4_with_drive(&mut |q| work.sample(q), matrix, q, [0.0; 3], first, h)
+}
+
+/// Existing positive RK4 quadrature, shared by passive and driven circular
+/// pressure owners. The zero-drive branch retains the passive operation tree.
+pub(crate) fn doubled_rk4_with_drive(
+    sample: &mut impl FnMut(Vector) -> Result<Sample, Error>,
+    matrix: [[f64; 3]; 3],
+    q: Vector,
+    drive: Vector,
+    first: Sample,
+    h: f64,
+) -> Result<Step, Error> {
+    let coarse = rk4(sample, matrix, q, drive, first, h)?;
+    let left = rk4(sample, matrix, q, drive, first, 0.5 * h)?;
+    let middle = stage_rate(q, matrix, left.impulse, drive, 0.5 * h);
+    let middle_rate = sample(middle)?;
+    let right = rk4(sample, matrix, middle, drive, middle_rate, 0.5 * h)?;
     let impulse = add(left.impulse, right.impulse);
     let travel = add(left.travel, right.travel);
     let heat = finite(left.heat + right.heat)?;
@@ -687,6 +709,15 @@ where
         heat,
         heat_error: finite((heat - coarse.heat) / 15.0)?,
     })
+}
+
+fn stage_rate(q: Vector, matrix: [[f64; 3]; 3], impulse: Vector, drive: Vector, h: f64) -> Vector {
+    let passive = add(q, multiply(matrix, impulse));
+    if drive == [0.0; 3] {
+        passive
+    } else {
+        add(passive, drive.map(|v| h * v))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

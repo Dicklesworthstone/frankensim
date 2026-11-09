@@ -3,7 +3,7 @@
 use super::*;
 use crate::sliding_patch::contact::{Factor, factor_circular_response};
 
-pub(super) struct Metric {
+pub(crate) struct Metric {
     factor: Factor,
     lower: [[f64; 3]; 3],
     root_scale: f64,

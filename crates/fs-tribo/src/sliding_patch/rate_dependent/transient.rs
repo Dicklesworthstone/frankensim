@@ -381,7 +381,10 @@ impl HertzFrictionPatch {
 // Monotonic pieces use the shared original coefficient evaluation. For
 // Stribeck, remove only the nonnegative viscous term to obtain a lower bound;
 // its decreasing dry part is evaluated by the same original curve owner.
-fn coefficient_bounds(law: &FrictionLaw, speed: f64) -> Result<[f64; 2], HertzRateTransientError> {
+pub(super) fn coefficient_bounds(
+    law: &FrictionLaw,
+    speed: f64,
+) -> Result<[f64; 2], HertzRateTransientError> {
     let zero = law.zero_speed_kinetic_coefficient()?;
     let (lower, upper) = match *law {
         FrictionLaw::Stribeck {

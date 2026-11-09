@@ -29,6 +29,9 @@ use crate::{FrictionLaw, TriboError};
 
 mod clipped;
 
+/// Physical driven trajectories under the original local-speed pressure law.
+pub mod driven;
+
 /// Passive finite-body trajectories driven by this original local-speed law.
 pub mod transient;
 
