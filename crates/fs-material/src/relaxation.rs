@@ -56,6 +56,8 @@ use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// Exact positive time-domain compression realization of the same reservoirs.
 pub mod bulk;
+/// Exact causal compressibility memories of the original molecular calorics.
+pub mod compliance;
 /// Analytic phase and attenuation slopes of the original molecular wave.
 pub mod frequency;
 /// Bounded native declarations of the same species/reservoir laws.
