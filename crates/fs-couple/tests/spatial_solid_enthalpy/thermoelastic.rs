@@ -305,3 +305,6 @@ fn loaded_softening_matches_independent_work_and_failed_proposals_are_atomic() {
         ).is_err());
     });
 }
+
+#[path = "thermoelastic/dynamic.rs"]
+mod dynamic;

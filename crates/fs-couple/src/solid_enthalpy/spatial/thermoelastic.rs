@@ -11,8 +11,13 @@
 //! reference geometry. Spatial and temporal refinement remain necessary. The
 //! centroid material temperature is not a claim of resolved within-element
 //! temperature or exact nodal entropy production. The physical material heat
-//! is separate from every numerical residual. Phase changes, inertia, radiation
-//! and moving thermal geometry retain their existing separate owners.
+//! is separate from every numerical residual. Native pointwise radiation stays
+//! with its original boundary owner. The dynamic child retains the original
+//! inertial trajectory; phase changes and moving thermal geometry remain outside
+//! this small-strain, stationary-reference model.
+
+/// Reciprocal nodal heat and the original full tetrahedral inertia.
+pub mod dynamic;
 
 use super::*;
 use crate::solid_enthalpy::thermoelastic::{MAX_THERMOELASTIC_ITERATIONS, ThermoelasticSolve};
@@ -78,10 +83,19 @@ fn invalid(message: &'static str) -> SpatialThermoelasticError {
     SpatialThermoelasticError::Invalid(message)
 }
 fn finite(value: Dd) -> Result<f64> {
-    let value = value.to_f64();
-    if value.is_finite() { Ok(value) } else { Err(invalid("unrepresentable reciprocal nodal account")) }
+    let rounded = value.to_f64();
+    if value.hi.is_finite() && value.lo.is_finite() && rounded.is_finite() {
+        Ok(rounded)
+    } else {
+        Err(invalid("unrepresentable reciprocal nodal account"))
+    }
 }
 fn dd(value: f64) -> Dd { Dd::from_f64(value) }
+// Compare the retained physical account, not only its rounded report value.
+fn within(value: Dd, tolerance: f64) -> Result<bool> {
+    finite(value)?;
+    Ok(!dd(tolerance).lt(value.abs()))
+}
 fn admit_controls(config: ThermoelasticSolve) -> Result<()> {
     if config.maximum_iterations == 0
         || config.maximum_iterations > MAX_THERMOELASTIC_ITERATIONS
@@ -286,6 +300,29 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
         config: ThermoelasticSolve,
         cx: &Cx<'_>,
     ) -> Result<SpatialThermoelasticCandidate<'s, 'a, 'm, 'c>> {
+        self.advance_with_radiation(
+            dt_s, boundary, interfaces, volumetric_source, loads,
+            thermal_config, config, EnthalpyRadiation::None, cx,
+        )
+    }
+
+    /// The same joint candidate with an original pointwise radiative boundary.
+    /// Emission/reflection and its signed external heat remain with native
+    /// conduction; they are never added as a second Robin or nodal source.
+    /// Unsupported mean-patch approximations refuse in the native heat owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_radiation(
+        &self,
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        volumetric_source: &ScalarField,
+        loads: &TetLoadCase3<'_, '_>,
+        thermal_config: EnthalpyStepConfig,
+        config: ThermoelasticSolve,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialThermoelasticCandidate<'s, 'a, 'm, 'c>> {
         check(cx)?;
         admit_controls(config)?;
         let end_s = self.time_s + dt_s;
@@ -301,36 +338,16 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
         let mut defects = [f64::INFINITY; 3];
         for iteration in 1..=config.maximum_iterations {
             check(cx)?;
-            let mut thermal = source.thermal.advance_with_nodal_heat(
+            let mut thermal = source.thermal.advance_with_nodal_heat_and_radiation(
                 cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, dt_s, thermal_config, &applied,
+                &self.specific_h, dt_s, thermal_config, &applied, radiation,
             )?;
             let state = source.resolve_at(&thermal.specific_enthalpy_j_kg, end_s, cx)?;
             let equilibrium = state.solve(loads, &self.fixed_dofs, self.solve, cx)?;
-            let mut nodal_heat = vec![Dd::ZERO; applied.len()];
-            let mut elements = Vec::with_capacity(source.tetrahedra.len());
-            let (mut work, mut internal, mut heat) = (Dd::ZERO, Dd::ZERO, Dd::ZERO);
-            for (element, tet) in source.tetrahedra.iter().enumerate() {
-                check(cx)?;
-                let before = &self.equilibrium.solution.stress.elements()[element];
-                let after = &equilibrium.solution.stress.elements()[element];
-                let sample = &state.samples[element];
-                let exchange = self.laws[sample.material_index].exchange(
-                    self.state.samples[element].phase.temperature_k(),
-                    *before.total_strain_mandel(),
-                    sample.phase.temperature_k(),
-                    *after.total_strain_mandel(),
-                    sample.reference_volume_m3,
-                )?;
-                admit_native(&exchange.before, before, source.maximum_absolute_mandel_strain, config)?;
-                admit_native(&exchange.after, after, source.maximum_absolute_mandel_strain, config)?;
-                work = work + exchange.retained_mechanical_work_j();
-                internal = internal + exchange.retained_internal_energy_change_j();
-                heat = heat + exchange.retained_reversible_heat_j();
-                let quarter = dd(0.25) * exchange.retained_reversible_heat_j();
-                for &node in tet { nodal_heat[node] = nodal_heat[node] + quarter; }
-                elements.push(exchange);
-            }
+            let ElementExchange { elements, nodal_heat, work, internal, heat } = element_exchange(
+                source, &self.laws, &self.state, &self.equilibrium.solution.stress,
+                &state, &equilibrium.solution.stress, config, cx,
+            )?;
             let before = self.equilibrium.solution.displacement.displacement_m();
             let after = equilibrium.solution.displacement.displacement_m();
             let mut external = Dd::ZERO;
@@ -339,28 +356,31 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
                 external = external + dd(0.5) * dd(force)
                     * (dd(after[dof / 3][dof % 3]) - dd(before[dof / 3][dof % 3]));
             }
-            let mechanical_residual_j = finite(work - external)?;
-            if mechanical_residual_j.abs() > config.energy_tolerance_j {
+            let mechanical_residual = work - external;
+            let mechanical_residual_j = finite(mechanical_residual)?;
+            if !within(mechanical_residual, config.energy_tolerance_j)? {
                 return Err(invalid("native nodal work and original element stress work disagree"));
             }
-            let endpoint = source.thermal.evaluate_endpoint_with_nodal_heat(
+            let endpoint = source.thermal.evaluate_endpoint_with_nodal_heat_and_radiation(
                 cx, source.thermal_problem(boundary, volumetric_source)?, interfaces,
-                &self.specific_h, &thermal.specific_enthalpy_j_kg, dt_s, thermal_config, &nodal_heat,
+                &self.specific_h, &thermal.specific_enthalpy_j_kg, dt_s, thermal_config,
+                &nodal_heat, radiation,
             )?;
             let external_heat = endpoint.energy.volumetric_source_j
-                + endpoint.energy.dirichlet_in_j - endpoint.energy.neumann_out_j - endpoint.energy.robin_out_j;
+                + endpoint.energy.dirichlet_in_j - endpoint.energy.neumann_out_j
+                - endpoint.energy.robin_out_j - endpoint.energy.radiation_out_j;
             let total = endpoint.energy.stored_energy_change_j + internal - external - external_heat;
             let mut heat_defect = Dd::ZERO;
             for (&actual, &used) in nodal_heat.iter().zip(&applied) {
-                heat_defect = heat_defect + dd(finite(actual - used)?.abs());
+                heat_defect = heat_defect + (actual - used).abs();
             }
             let heat_defect_j = finite(heat_defect)?;
             let total_energy_residual_j = finite(total)?;
             defects = [heat_defect_j, endpoint.maximum_free_residual_j, total_energy_residual_j];
-            if heat_defect_j <= config.heat_tolerance_j
+            if within(heat_defect, config.heat_tolerance_j)?
                 && endpoint.maximum_free_residual_j <= thermal_config.energy_tolerance_j
-                && finite(endpoint.energy.residual_j)?.abs() <= thermal_config.energy_tolerance_j
-                && total_energy_residual_j.abs() <= config.energy_tolerance_j
+                && within(endpoint.energy.residual_j, thermal_config.energy_tolerance_j)?
+                && within(total, config.energy_tolerance_j)?
             {
                 thermal.endpoint = endpoint;
                 let report = SpatialThermoelasticReport {
@@ -392,6 +412,54 @@ impl<'s, 'a: 's, 'm: 'a, 'c: 'a> ReciprocalSpatialSolid<'s, 'a, 'm, 'c> {
     }
 }
 
+struct ElementExchange {
+    elements: Vec<ThermoelasticExchange>,
+    nodal_heat: Vec<Dd>,
+    work: Dd,
+    internal: Dd,
+    heat: Dd,
+}
+
+// Both equilibrium and inertia use the same original quadrature, exact total
+// strains, source/native point checks and retained finite material increments.
+#[allow(clippy::too_many_arguments)]
+fn element_exchange(
+    source: &SpatialSolidEnthalpy<'_, '_, '_>,
+    laws: &[AffineThermoelastic],
+    before_state: &SpatialSolidState<'_>,
+    before_stress: &fs_solid::linear3::TetThermalStressReport,
+    after_state: &SpatialSolidState<'_>,
+    after_stress: &fs_solid::linear3::TetThermalStressReport,
+    config: ThermoelasticSolve,
+    cx: &Cx<'_>,
+) -> Result<ElementExchange> {
+    let mut nodal_heat = vec![Dd::ZERO; source.thermal.mesh().vertex_count()];
+    let mut elements = Vec::with_capacity(source.tetrahedra.len());
+    let (mut work, mut internal, mut heat) = (Dd::ZERO, Dd::ZERO, Dd::ZERO);
+    for (element, tet) in source.tetrahedra.iter().enumerate() {
+        check(cx)?;
+        let before = &before_stress.elements()[element];
+        let after = &after_stress.elements()[element];
+        let sample = &after_state.samples[element];
+        let exchange = laws[sample.material_index].exchange(
+            before_state.samples[element].phase.temperature_k(),
+            *before.total_strain_mandel(),
+            sample.phase.temperature_k(),
+            *after.total_strain_mandel(),
+            sample.reference_volume_m3,
+        )?;
+        admit_native(&exchange.before, before, source.maximum_absolute_mandel_strain, config)?;
+        admit_native(&exchange.after, after, source.maximum_absolute_mandel_strain, config)?;
+        work = work + exchange.retained_mechanical_work_j();
+        internal = internal + exchange.retained_internal_energy_change_j();
+        heat = heat + exchange.retained_reversible_heat_j();
+        let quarter = dd(0.25) * exchange.retained_reversible_heat_j();
+        for &node in tet { nodal_heat[node] = nodal_heat[node] + quarter; }
+        elements.push(exchange);
+    }
+    Ok(ElementExchange { elements, nodal_heat, work, internal, heat })
+}
+
 fn admit_native(
     potential: &ThermoelasticState,
     native: &fs_solid::linear3::TetElementEigenstrainStress,
@@ -403,9 +471,22 @@ fn admit_native(
         .any(|(a, b)| (a - b).abs() > strain_tolerance)
         || potential.stress_mandel_pa.iter().zip(native.stress_mandel_pa())
             .any(|(a, b)| (a - b).abs() > config.stress_tolerance_pa)
-        || finite(dd(potential.free_energy_j) - dd(native.elastic_energy_j()))?.abs() > config.energy_tolerance_j
+        || !within(dd(potential.free_energy_j) - dd(native.elastic_energy_j()), config.energy_tolerance_j)?
     {
         return Err(invalid("actual native strain, stress or energy differs from the original source potential"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_account_gate_retains_the_low_component_at_the_tolerance() {
+        assert!(!within(Dd::from_pair(1.0, 1e-30), 1.0).unwrap());
+        assert!(within(Dd::from_pair(1.0, -1e-30), 1.0).unwrap());
+        assert!(!within(Dd::from_pair(-1.0, -1e-30), 1.0).unwrap());
+        assert!(within(Dd::from_pair(-1.0, 1e-30), 1.0).unwrap());
+    }
 }
