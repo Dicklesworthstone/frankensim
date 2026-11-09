@@ -14,7 +14,7 @@ use fs_qty::Temperature;
 use std::sync::Arc;
 
 /// Operation-tree version for explicit continuous caloric references.
-pub const NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1: u32 = 2;
+pub const NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1: u32 = 3;
 
 // Shared reaction calorics combine original source coefficients before applying
 // their common temperature basis. Summing rounded absolute species energies
@@ -88,6 +88,12 @@ pub(crate) struct ReactionCaloricSum {
     entropy_offset: CaloricSum,
 }
 impl ReactionCaloricSum {
+    fn add_coefficients(&mut self, coefficients: &[f64; 9], coefficient: f64) {
+        for (total, &value) in self.coefficients.iter_mut().zip(coefficients) {
+            total.add(coefficient * value);
+        }
+    }
+
     // Callers still admit every original species through its usual property
     // evaluator, preserving domain and finite-property checks and receipts.
     pub(crate) fn add_model(
@@ -101,9 +107,7 @@ impl ReactionCaloricSum {
                 bits: temperature.to_bits(),
             },
         )?;
-        for (total, value) in self.coefficients.iter_mut().zip(region.coefficients()) {
-            total.add(coefficient * value);
-        }
+        self.add_coefficients(region.coefficients(), coefficient);
         if let Some(reference) = model.caloric_reference() {
             let correction = &reference.regions()[index];
             self.enthalpy_offset
@@ -228,8 +232,12 @@ impl Nasa9StandardStateModelV1 {
     /// low-temperature formation values within the caller's explicit budget.
     ///
     /// Every cumulative offset is checked against its declared molar bound.
-    /// Gaps and unrepresentable one-sided endpoint agreement refuse. This does
-    /// not prove positive Cp/Cv; consumers still validate caloric stability.
+    /// Seam differences combine original coefficients before evaluating H/S,
+    /// so a common formation or entropy datum cannot hide a required correction.
+    /// Gaps and unrepresentable corrections or corrected properties refuse.
+    /// Continuity is of the source laws, within floating-point rounding; it does
+    /// not force separately rounded absolute endpoint values to be bit-identical.
+    /// This does not prove positive Cp/Cv; consumers still validate stability.
     /// Repeated calls always derive from original cards, never compound offsets.
     /// Construction uses at most two source evaluations per seam (16 regions).
     pub fn with_caloric_continuity(
@@ -283,16 +291,19 @@ impl Nasa9StandardStateModelV1 {
             };
             let original = self.evaluate_source_region(index, boundary)?;
             let adjacent = self.evaluate_source_region(neighbor, boundary)?;
-            let h = shifted(
-                adjacent.h().value(),
-                corrections[neighbor].enthalpy_offset().value(),
-            );
-            let s = shifted(
-                adjacent.s().value(),
-                corrections[neighbor].entropy_offset().value(),
-            );
-            let dh = h - original.h().value();
-            let ds = s - original.s().value();
+            // A common datum cancels at the coefficient level, before either
+            // absolute source evaluation is rounded. In particular, a large
+            // elemental reference must not suppress a Cp-dependent seam and
+            // thereby create reaction heat in the corrected high-T chart.
+            let mut difference = ReactionCaloricSum::default();
+            difference.add_coefficients(self.regions[neighbor].coefficients(), 1.0);
+            difference.add_coefficients(self.regions[index].coefficients(), -1.0);
+            let (delta_h, _, _, delta_s) =
+                difference.evaluate(&ReactionCaloricBasis::new(Temperature::new(boundary)), 0.0);
+            let previous_h = corrections[neighbor].enthalpy_offset().value();
+            let previous_s = corrections[neighbor].entropy_offset().value();
+            let dh = previous_h + delta_h;
+            let ds = previous_s + delta_s;
             if !dh.is_finite() || dh.abs() > maximum_h {
                 return Err(refused(
                     index,
@@ -305,12 +316,21 @@ impl Nasa9StandardStateModelV1 {
                     "entropy correction exceeds the declared molar bound",
                 ));
             }
-            if shifted(original.h().value(), dh).to_bits() != h.to_bits()
-                || shifted(original.s().value(), ds).to_bits() != s.to_bits()
+            // Raw endpoint operation trees round independently. Forcing exact
+            // bit agreement here would put their datum-dependent rounding error
+            // back into the physical correction just calculated above.
+            if ![
+                shifted(original.h().value(), dh),
+                shifted(original.s().value(), ds),
+                shifted(adjacent.h().value(), previous_h),
+                shifted(adjacent.s().value(), previous_s),
+            ]
+            .into_iter()
+            .all(f64::is_finite)
             {
                 return Err(refused(
                     index,
-                    "caloric seam agreement is not representable",
+                    "corrected caloric seam properties are not representable",
                 ));
             }
             corrections[index].enthalpy_offset_bits = dh.to_bits();

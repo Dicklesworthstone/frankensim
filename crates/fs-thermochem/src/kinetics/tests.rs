@@ -469,6 +469,67 @@ fn g0_reaction_calorics_retain_raw_region_jumps_and_explicit_corrections() {
 }
 
 #[test]
+fn g3_reconciled_reaction_heat_is_invariant_to_conserved_elemental_datums() {
+    for datum in [-1e24, 0.0, 1e24] {
+        let a = source("A", 0.01, 3.5, datum, -datum);
+        let b = source("B", 0.01, 3.5, datum, -datum);
+        let mut lower = b.regions()[0].card().clone();
+        lower.validity = ValidityDomain::unconstrained().with("T", 200.0, 1000.0);
+        let mut upper = lower.clone();
+        upper.validity = ValidityDomain::unconstrained().with("T", 1000.0, 6000.0);
+        upper.parameters.get_mut("a2").unwrap().value = 4.0;
+        let b = Nasa9StandardStateModelV1::new(
+            id("B"),
+            b.molar_mass(),
+            b.convention().clone(),
+            vec![
+                Nasa9RegionV1::from_card(lower).unwrap(),
+                Nasa9RegionV1::from_card(upper).unwrap(),
+            ],
+        )
+        .unwrap()
+        .with_caloric_continuity(
+            Temperature::new(500.0),
+            MolarEnergyQuantityV1::new(5000.0),
+            crate::MolarThermalQuantityV1::new(100.0),
+        )
+        .unwrap();
+        let mechanism = IdealGasKineticsV1::new(
+            thermo(vec![a, b], vec![1, 1]),
+            "continuous-reference-calorics",
+            1,
+            vec![reaction(
+                "A-B",
+                &[("A", 1)],
+                &[("B", 1)],
+                rate(1.0, 0.0, 0.0),
+            )],
+            1e-12,
+        )
+        .unwrap();
+        for t in [500.0_f64, 1000.0, 1200.0, 2500.0] {
+            let temperature = Temperature::new(t);
+            let caloric = mechanism
+                .reaction_caloric_change_at(0, temperature, || false)
+                .unwrap();
+            // A and B have identical formation and low-temperature calorics.
+            // Their reaction heat above the seam is just integral Delta Cp dT.
+            let h = 0.5 * R * (t - 1000.0).max(0.0);
+            let s = 0.5 * R * (t / 1000.0).max(1.0).ln();
+            close(caloric.molar_enthalpy.value(), h, 3e-10);
+            close(caloric.molar_internal_energy.value(), h, 3e-10);
+            close(caloric.molar_entropy.value(), s, 2e-12);
+            close(caloric.molar_gibbs_energy.value(), h - t * s, 3e-9);
+            assert_equilibrium_caloric_crosswalk(
+                &mechanism,
+                temperature,
+                caloric.molar_gibbs_energy.value(),
+            );
+        }
+    }
+}
+
+#[test]
 fn original_irreversible_source_preserves_forward_rate_and_signed_entropy() {
     let reversible = isomers(0.0, rate(7.0, 0.7, 25000.0));
     let mechanism = IdealGasKineticsV1::new(

@@ -58,7 +58,11 @@ fn g0_caloric_reconciliation_preserves_source_cp_and_the_declared_anchor() {
         let p = full.properties();
         assert_eq!(p.cp().value().to_bits(), original.cp().value().to_bits());
         assert_eq!(
-            corrected.evaluate_heat_capacity(Temperature::new(t)).unwrap().value().to_bits(),
+            corrected
+                .evaluate_heat_capacity(Temperature::new(t))
+                .unwrap()
+                .value()
+                .to_bits(),
             original.cp().value().to_bits(),
         );
         if t < 1000.0 {
@@ -92,8 +96,10 @@ fn g0_caloric_reconciliation_preserves_source_cp_and_the_declared_anchor() {
     let right = corrected
         .evaluate_properties(Temperature::new(1000.0))
         .unwrap();
-    assert_eq!(left.h().value().to_bits(), right.h().value().to_bits());
-    assert_eq!(left.s().value().to_bits(), right.s().value().to_bits());
+    // Source-coefficient reconciliation must not absorb the independent
+    // rounding errors of these absolute property operation trees.
+    assert_close(left.h().value(), right.h().value());
+    assert_close(left.s().value(), right.s().value());
     assert_eq!(corrected, continuous(&corrected, 298.15));
     let high_anchor = continuous(&raw, 2000.0);
     assert_eq!(high_anchor.caloric_reference().unwrap().anchor_region(), 1);
@@ -250,4 +256,97 @@ fn g0_caloric_reconciliation_refuses_gaps_and_excess_cumulative_adjustment() {
             .is_err()
     );
     assert!(raw.caloric_reference().is_none());
+}
+
+fn shifted_piecewise_source(datum: f64) -> Nasa9StandardStateModelV1 {
+    let mut regions = Vec::new();
+    for (lo, hi, cp) in [
+        (200.0, 600.0, 3.5),
+        (600.0, 1000.0, 4.0),
+        (1000.0, 1500.0, 5.0),
+    ] {
+        let mut coefficients = [0.0; 9];
+        coefficients[2] = cp;
+        coefficients[7] = datum;
+        coefficients[8] = -datum;
+        regions.push(Nasa9RegionV1::from_card(card(lo, hi, 100000.0, coefficients)).unwrap());
+    }
+    Nasa9StandardStateModelV1::new(
+        SpeciesId::new("N2").unwrap(),
+        MolarMass::new(0.028),
+        convention(100000.0),
+        regions,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g3_caloric_reconciliation_cancels_shared_datums_before_resolving_each_seam() {
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+    let low_h = [0.0, -300.0 * r, -1300.0 * r];
+    let low_s = [
+        0.0,
+        -0.5 * r * 600.0_f64.ln(),
+        -0.5 * r * 600.0_f64.ln() - r * 1000.0_f64.ln(),
+    ];
+    for (anchor, region) in [(300.0, 0), (800.0, 1), (1200.0, 2)] {
+        let reconcile = |datum| {
+            shifted_piecewise_source(datum)
+                .with_caloric_continuity(
+                    Temperature::new(anchor),
+                    MolarEnergyQuantityV1::new(20000.0),
+                    MolarThermalQuantityV1::new(200.0),
+                )
+                .unwrap()
+        };
+        let unshifted = reconcile(0.0);
+        let original = unshifted.caloric_reference().unwrap();
+        for datum in [-1e24, -1e12, 1e12, 1e24] {
+            let shifted = reconcile(datum);
+            let reference = shifted.caloric_reference().unwrap();
+            assert_eq!(reference.anchor_region(), region);
+            for (i, (actual, baseline)) in reference
+                .regions()
+                .iter()
+                .zip(original.regions())
+                .enumerate()
+            {
+                // These are physical reference adjustments, independent of the
+                // arbitrary common enthalpy and entropy datums in the cards.
+                assert_eq!(actual.enthalpy_offset(), baseline.enthalpy_offset());
+                assert_eq!(actual.entropy_offset(), baseline.entropy_offset());
+                assert_close(actual.enthalpy_offset().value(), low_h[i] - low_h[region]);
+                assert_close(actual.entropy_offset().value(), low_s[i] - low_s[region]);
+            }
+            for (a, b) in [(300.0, 800.0), (800.0, 1200.0), (300.0, 1200.0)] {
+                let from = Temperature::new(a);
+                let to = Temperature::new(b);
+                assert_eq!(
+                    shifted.molar_enthalpy_change(from, to).unwrap(),
+                    unshifted.molar_enthalpy_change(from, to).unwrap()
+                );
+                assert_eq!(
+                    shifted.molar_entropy_change(from, to).unwrap(),
+                    unshifted.molar_entropy_change(from, to).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_large_absolute_datums_cannot_hide_an_excess_caloric_correction() {
+    for datum in [-1e24, 0.0, 1e24] {
+        let source = shifted_piecewise_source(datum);
+        for (h, s) in [(0.0, 200.0), (20000.0, 0.0), (10000.0, 200.0)] {
+            assert!(matches!(
+                source.with_caloric_continuity(
+                    Temperature::new(300.0),
+                    MolarEnergyQuantityV1::new(h),
+                    MolarThermalQuantityV1::new(s),
+                ),
+                Err(ThermochemErrorV1::CaloricReferenceRefused { .. })
+            ));
+        }
+    }
 }
