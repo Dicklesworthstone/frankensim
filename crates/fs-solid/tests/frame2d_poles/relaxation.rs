@@ -1,8 +1,11 @@
 //! Source Maxwell storage/loss, original native poles, full strain coupling and
 //! physical descriptor loading. Independent closed-form member equations.
 
+#[path = "relaxation/tensile.rs"]
 mod tensile;
+#[path = "relaxation/transient.rs"]
 mod transient;
+#[path = "relaxation/transverse.rs"]
 mod transverse;
 
 use super::{NO_RAYLEIGH, RADIUS, RHO, YOUNG, guided, with_cx};

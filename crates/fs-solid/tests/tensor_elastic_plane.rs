@@ -67,7 +67,7 @@ fn g1_full_tensor_stress_tangent_and_work_share_the_original_mandel_law() {
     let response = law.strain_response(mandel(e)).unwrap();
     assert_eq!(
         response.material_state_identity,
-        *law.material_state_identity()
+        law.material_state_identity()
     );
     close(
         response.stored_energy_density_j_m3,

@@ -25,7 +25,7 @@ use fs_matdb::{
     SystemContext, UncertaintyModel,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
-use fs_material::thermal::transport::TabulatedHeatStorage;
+use fs_material::thermal::transport::storage::TabulatedHeatStorage;
 use fs_rep_mesh::TetComplex;
 use fs_solver::NewtonKrylovConfig;
 use support::{with_cancelled_cx, with_cx};

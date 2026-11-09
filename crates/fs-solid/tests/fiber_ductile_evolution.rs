@@ -29,7 +29,13 @@ fn settings() -> DuctileJ2Settings {
         characteristic_length_m: 0.1,
         post_initiation_plastic_work_j_m2: 0.001,
         maximum_damage_increment: 1.0,
-        energy_tolerances: EnergyTolerances::default(),
+        // EnergyTolerances has no Default (the ductile settings take no material
+        // defaults); these are frame_ductile_damage.rs's, the sibling test of the
+        // same commit on the same UniaxialDuctileJ2 -> DuctileFiberLaw path.
+        energy_tolerances: EnergyTolerances {
+            energy_j_m3: 1e-9,
+            yield_pa: 1e-8,
+        },
     }
 }
 fn conditions() -> DuctileJ2Conditions {

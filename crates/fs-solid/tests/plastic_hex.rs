@@ -312,9 +312,10 @@ fn g3_quadrature_laws_preserve_pointwise_plastic_history_through_reversal() {
     let original = with_cx(|cx| p.solve(cx)).unwrap();
     p.laws = SmallStrainLawField::PerQuadrature(&uniform_field);
     assert_eq!(with_cx(|cx| p.solve(cx)).unwrap(), original);
-    for count in [0, 7] {
-        let incomplete = [&uniform[..count]];
-        p.laws = SmallStrainLawField::PerQuadrature(&incomplete);
+    // `p` borrows each field across iterations, so every field outlives the loop.
+    let incompletes = [0, 7].map(|count| [&uniform[..count]]);
+    for incomplete in &incompletes {
+        p.laws = SmallStrainLawField::PerQuadrature(incomplete);
         assert!(with_cx(|cx| p.solve(cx)).is_err());
     }
 }

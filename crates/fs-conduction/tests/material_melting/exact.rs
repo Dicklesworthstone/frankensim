@@ -1,7 +1,7 @@
 //! Compact original calorics in the native spatial phase and conductivity solve.
 
 use super::*;
-use fs_conduction::transient::enthalpy::EnthalpyRadiation;
+use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
 use fs_conduction::transient::enthalpy::material::MaterialEnthalpyError;
 use fs_conduction::transient::enthalpy::material::melting::ExactMaterialMeltingSource;
 use fs_conduction::transient::enthalpy::sdirk::EnthalpySdirk2Input;

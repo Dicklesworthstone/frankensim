@@ -1,6 +1,7 @@
 //! Original tensor-Prony base excitation with independent mechanical/heat oracles.
 //! The declared tensors are manufactured numerical fixtures, not measured data.
 
+#[path = "visco_harmonic_supports/impedance.rs"]
 mod impedance;
 
 use fs_exec::Cx;

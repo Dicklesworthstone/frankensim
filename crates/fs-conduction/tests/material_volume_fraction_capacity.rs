@@ -131,8 +131,8 @@ fn constituent_masses_set_the_heating_rate_and_preparation_is_immutable() {
     // Per m3, the two fixed constituent masses are 500 kg and 4000 kg.
     // Their heat capacities add to 2.5e6 J/K. Averaging rho and Cp separately
     // would give 3.375e6 J/K and the wrong temperature response.
-    let expected = 300.0 + 100_000.0 * 2.0 / (500.0 * 1000.0 + 4000.0 * 500.0);
-    let wrong = 300.0 + 100_000.0 * 2.0 / (4500.0 * 750.0);
+    let expected: f64 = 300.0 + 100_000.0 * 2.0 / (500.0 * 1000.0 + 4000.0 * 500.0);
+    let wrong: f64 = 300.0 + 100_000.0 * 2.0 / (4500.0 * 750.0);
     assert!((expected - wrong).abs() > 0.02);
     with_cx(|cx| {
         for theta in [0.5, 1.0] {

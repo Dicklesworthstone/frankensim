@@ -1268,7 +1268,9 @@ mod tests {
             let expected = 1.0 - 1.2 * (0.5 * (eta + 1.0));
             assert!(expected > 0.0);
             assert!((f[0] * f[4] - f[1] * f[3] - expected).abs() < 1e-14);
-            material.first_piola(&f).unwrap();
+            // Both imported traits name first_piola; the FiniteStrainPotential blanket impl
+            // forwards to HyperelasticMaterial's, so naming the trait changes no call.
+            FiniteStrainPotential::first_piola(&material, &f).unwrap();
         }
         assert!(matches!(
             problem.unconstrained_residual(&displacement, 1.0),

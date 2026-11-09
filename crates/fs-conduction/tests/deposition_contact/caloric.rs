@@ -18,7 +18,6 @@ use fs_material::thermal::{
     conduction::{LayerConductionConfig, LayerGeometry},
     interface::ThermalInterfacePoint,
     transport::{
-        CONDUCTIVITY, DENSITY, SPECIFIC_HEAT,
         conduction::{CaloricConductionLayer, IntegratedCaloricLink},
         isobaric::{IsobaricHeatCapacityLaw, IsobaricHeatCapacityQuery, conduction::IsobaricConductionLaw},
         isochoric::{IsochoricHeatCapacityLaw, IsochoricHeatCapacityQuery, conduction::IsochoricConductionLaw},
@@ -29,7 +28,13 @@ use fs_material::thermal::{
         volumetric::VOLUMETRIC_HEAT_CAPACITY_DIMS,
     },
 };
-use fs_qty::{Pressure, QuantitySpec, Temperature};
+// The rho/c/k dimension constants of fs_material::thermal::transport are
+// private; these public constants hold the identical dimension vectors.
+use fs_material::state_point::{
+    SPECIFIC_HEAT_CAPACITY_DIMS as SPECIFIC_HEAT, THERMAL_CONDUCTIVITY_DIMS as CONDUCTIVITY,
+};
+use fs_qty::{Density, Pressure, QuantitySpec, Temperature};
+const DENSITY: fs_qty::Dims = Density::DIMS;
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink,

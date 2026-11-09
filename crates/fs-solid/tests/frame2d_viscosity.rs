@@ -1,6 +1,7 @@
 //! Source viscosity reaches the real native frame history, not a modal fit.
 //! Data are manufactured; the references are the continuous mechanical ODEs.
 
+#[path = "frame2d_viscosity/reference_kinematics.rs"]
 mod reference_kinematics;
 
 use fs_evidence::ValidityDomain;

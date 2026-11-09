@@ -676,7 +676,7 @@ fn g3_small_support_acceleration_retains_work_beside_unchanged_translation() {
 
 #[test]
 fn g0_moving_support_thermal_memory_keeps_separate_work_and_physical_heat() {
-    use fs_qty::ContentHash;
+    use fs_blake3::ContentHash;
     use fs_solid::linear3::{TetThermalStrainField, TetThermalStrainState};
     with_cx(|cx, _| {
         let law = coupled();

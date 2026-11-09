@@ -3,6 +3,7 @@ use super::*;
 use fs_solid::hyper3::visco::dynamics::{SolidImpulseControls, TetImpulsePoint};
 use fs_solver::CheckedCgConfig;
 
+#[path = "impulse/split.rs"]
 mod split;
 
 const RHO: [f64; 4] = [30.0, 150.0, 30.0, 30.0];

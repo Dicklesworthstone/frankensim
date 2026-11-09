@@ -389,21 +389,26 @@ fn nonlinear_films_integrate_calorics_through_host_melting_in_both_integrators()
                 (31.6, 175.0, 325.0),
             ] {
                 let dt = time - previous_time;
-                let (next, stored, defect) = if sdirk {
+                let (next_h, next_t, stored, defect) = if sdirk {
                     let step = engine
                         .advance_sdirk2(cx, [input(p); 2], &old, dt, controls())
                         .unwrap();
                     (
-                        step.second_stage,
+                        step.second_stage.specific_enthalpy_j_kg,
+                        step.second_stage.temperature,
                         step.stored_energy_change_j,
                         step.energy_residual_j,
                     )
                 } else {
                     let step = engine.advance(cx, p, None, &old, dt, controls()).unwrap();
-                    let (stored, defect) = (step.stored_energy_change_j, step.energy_residual_j);
-                    (step, stored, defect)
+                    (
+                        step.specific_enthalpy_j_kg,
+                        step.temperature,
+                        step.stored_energy_change_j,
+                        step.energy_residual_j,
+                    )
                 };
-                for (&h, &t) in next.specific_enthalpy_j_kg.iter().zip(&next.temperature) {
+                for (&h, &t) in next_h.iter().zip(&next_t) {
                     close(h, expected_h, 3e-8);
                     close(t, expected_t, 2e-8);
                 }
@@ -414,7 +419,7 @@ fn nonlinear_films_integrate_calorics_through_host_melting_in_both_integrators()
                 );
                 close(stored, dt * 10.0, 5e-8);
                 close(defect, 0.0, controls().energy_tolerance_j);
-                old = next.specific_enthalpy_j_kg;
+                old = next_h;
                 previous_t = expected_t;
                 previous_time = time;
             }
@@ -911,7 +916,7 @@ fn profiled_nonlinear_storage_drives_the_original_transient_and_history_adjoint(
         let material = ConductivityModel::isotropic_declared(2.0).unwrap();
         let source = ScalarField::Uniform(0.0);
         let p = problem(&mesh, &boundary, &material, &source);
-        let (target, dt) = ([292.0, 293.0, 294.0, 295.0], 0.1);
+        let (target, dt): ([f64; 4], f64) = ([292.0, 293.0, 294.0, 295.0], 0.1);
         // Independent regular-tet K*T = (4/3)*(T-mean(T)). Each host row has
         // mass=1/4 and Cp=2. Invert its quadratic film-plus-host energy to
         // manufacture the OLD state for this explicitly specified endpoint.

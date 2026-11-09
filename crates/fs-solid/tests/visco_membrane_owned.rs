@@ -336,7 +336,9 @@ fn nonkinetic_changes_and_late_refusals_preserve_the_complete_owned_state() {
             .with_kinetics(&vec![law.clone(); 3], || false)
             .is_err()
     );
-    let mut targets = vec![law; 4];
+    // `motion` still borrows `law` (ViscoelasticLawField::Uniform) for the final
+    // shared-buffer check, so the halved targets are copies, as vec! made anyway.
+    let mut targets = vec![law.clone(); 4];
     for target in &mut targets {
         target.branches[0].tau_s *= 0.5;
     }

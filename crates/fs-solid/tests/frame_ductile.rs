@@ -372,7 +372,7 @@ fn native_load_ramp_and_newmark_keep_original_motion_work_and_all_subincrements(
 fn branches<const N: usize>() -> FiberLaw {
     FiberLaw::chaboche_branches(
         UniaxialChaboche::new(
-            ChabocheJ2::new(
+            ChabocheJ2::<N>::new(
                 VoceJ2::new(backbone(), 80e6, 500.0).unwrap(),
                 std::array::from_fn(|i| {
                     BackstressBranch::new(6e9 + 2e9 * i as f64, 50.0 * (i + 1).pow(2) as f64)

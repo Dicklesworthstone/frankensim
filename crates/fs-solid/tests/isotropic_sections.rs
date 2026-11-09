@@ -136,7 +136,7 @@ fn frame(section: ConcentricElasticSection) -> Frame2d {
 
 #[test]
 fn independent_moduli_and_aliased_density_reach_weight_compliance_and_frame_modes() {
-    let mut reference = None;
+    let mut reference: Option<Vec<f64>> = None;
     for derived in [false, true] {
         let source = section(2.0e6, 0.8e6, derived, false);
         if derived {
@@ -180,7 +180,7 @@ fn independent_moduli_and_aliased_density_reach_weight_compliance_and_frame_mode
 #[test]
 fn independent_moduli_drive_rod_forces_torque_links_and_reference_inertia() {
     let gate = CancelGate::new_clock_free();
-    let mut baseline = None;
+    let mut baseline: Option<Vec<f64>> = None;
     for derived in [false, true] {
         let elastic = section(2.0e6, 0.8e6, derived, false);
         let shear = if derived {

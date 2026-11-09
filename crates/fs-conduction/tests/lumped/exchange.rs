@@ -1,6 +1,8 @@
 //! Native uniform-body exchange through sensible branches and sharp fusion.
 
+#[path = "exchange/driven.rs"]
 mod driven;
+#[path = "exchange/pair.rs"]
 mod pair;
 
 use super::*;

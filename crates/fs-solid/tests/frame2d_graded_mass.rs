@@ -469,8 +469,10 @@ fn asymmetric_density_drives_signed_rotation_from_an_axial_impulse() {
         let spin = 5.0 * LENGTH.powi(3) / 105.0 + 2.0 * 0.2 * LENGTH / 15.0;
         let coupling = -first * LENGTH / 12.0;
         let determinant = axial * spin - coupling * coupling;
+        // Unloaded, undamped continuation as in the axial impulse test above;
+        // neither enters the velocity jump M_ff * delta_v = impulse_f.
         frame
-            .apply_nodal_impulse(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0])
+            .apply_impulse(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0], &[0.0; 6], UNDAMPED, 0.01)
             .unwrap();
         near(frame.velocities()[3], 2.0 * spin / determinant, 1.0);
         near(frame.velocities()[5], -2.0 * coupling / determinant, 1.0);

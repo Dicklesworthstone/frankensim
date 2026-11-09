@@ -119,7 +119,7 @@ fn world_held_torsion_uses_each_heated_segments_actual_shear_modulus() {
         expected_twist += 0.5 * twist_rate;
     }
     near(
-        rod.frames()[2].log().unwrap().angular.x,
+        rod.frames()[2].log().angular.x,
         expected_twist,
         2e-7,
     );

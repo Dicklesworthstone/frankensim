@@ -425,7 +425,7 @@ fn law() -> FiberLaw {
 }
 fn branches<const N: usize>() -> FiberLaw {
     let voce = VoceJ2::new(backbone(), 80e6, 500.0).unwrap();
-    let native = ChabocheJ2::new(
+    let native = ChabocheJ2::<N>::new(
         voce,
         std::array::from_fn(|i| {
             BackstressBranch::new(6e9 + 2e9 * i as f64, 50.0 * (i + 1).pow(2) as f64).unwrap()

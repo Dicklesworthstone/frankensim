@@ -77,7 +77,7 @@ fn steady(
         let boundary = steady_boundary(mesh, flux, 300.0 + control[2]);
         let solved = fs_conduction::solve(cx, ConductionProblem {
             mesh, boundary: &boundary, material, element_materials: None, source: &source,
-        }, config).unwrap();
+        }, config.clone()).unwrap();
         let means = [mean(mesh, &boundary, &solved.temperature, "east") - 300.0,
             mean(mesh, &boundary, &solved.temperature, "north") - 300.0];
         let next = [STEADY_SLOPES[0] * means[0] + STEADY_SLOPES[1] * means[1] + control[1],
