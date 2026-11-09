@@ -45,7 +45,7 @@ pub struct AffineThermalRecoveringCreep {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum FrozenRecovery {
+pub(super) enum FrozenRecovery {
     Standalone(FiniteRecoveringNortonCreep),
     Combined(FiniteRecoveringNortonJ2),
 }
@@ -54,8 +54,8 @@ enum FrozenRecovery {
 /// cannot advance a history; a physical step retains its complete recovery law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrozenThermalRecoveringCreep {
-    thermal: FrozenThermalFiniteJ2,
-    native: Option<FrozenRecovery>,
+    pub(super) thermal: FrozenThermalFiniteJ2,
+    pub(super) native: Option<FrozenRecovery>,
     combined: bool,
 }
 

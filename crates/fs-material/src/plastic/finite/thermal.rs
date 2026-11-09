@@ -81,6 +81,8 @@ use fs_math::det;
 
 mod inelastic;
 pub use inelastic::{FiniteThermalInelasticMaterial, FiniteThermalInelasticPoint};
+/// Original-volume thermal inelasticity with independent mixed pressure.
+pub mod mixed;
 /// Independent resistance recovery through the same thermal kinematics and energy.
 pub mod recovery;
 pub use recovery::{
@@ -290,6 +292,8 @@ impl<S> FiniteJ2ThermalIncrement<S> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum FiniteJ2ThermalError {
     Material(FiniteJ2Error),
+    /// Original mixed pressure inverse, volume branch or saddle-point refusal.
+    MixedPressure(crate::MaterialError),
     Parameters(&'static str),
     Temperature {
         temperature_k: f64,
@@ -309,6 +313,7 @@ impl core::fmt::Display for FiniteJ2ThermalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Material(error) => error.fmt(f),
+            Self::MixedPressure(error) => error.fmt(f),
             Self::Parameters(what) => write!(f, "finite thermoplastic parameters: {what}"),
             Self::Temperature {
                 temperature_k,
@@ -940,36 +945,71 @@ impl AffineThermalFiniteJ2 {
         response: impl FnOnce(&[f64; 9]) -> Result<FiniteJ2Response<S>, FiniteJ2ThermalError>,
         native_state: fn(&S) -> &FiniteJ2State,
     ) -> Result<FiniteJ2ThermalIncrement<S>, FiniteJ2ThermalError> {
+        Self::increment_with_response_selected(
+            old_f,
+            old_state,
+            new_f,
+            yield_tolerance_pa,
+            old_law,
+            new_law,
+            response,
+            native_state,
+            true,
+        )
+    }
+
+    // Mixed pressure owns volumetric storage separately. Omit it here before
+    // any multiplication; never subtract a large penalty from a full response.
+    #[allow(clippy::too_many_arguments)]
+    fn increment_with_response_selected<S>(
+        old_f: &[f64; 9],
+        old_state: &FiniteJ2State,
+        new_f: &[f64; 9],
+        yield_tolerance_pa: f64,
+        old_law: &FrozenThermalFiniteJ2,
+        new_law: &FrozenThermalFiniteJ2,
+        response: impl FnOnce(&[f64; 9]) -> Result<FiniteJ2Response<S>, FiniteJ2ThermalError>,
+        native_state: fn(&S) -> &FiniteJ2State,
+        include_bulk: bool,
+    ) -> Result<FiniteJ2ThermalIncrement<S>, FiniteJ2ThermalError> {
         let old_temperature_k = old_law.temperature_k;
         let new_temperature_k = new_law.temperature_k;
-        old_law.validate_committed(old_f, old_state, yield_tolerance_pa)?;
-        let old_endpoint = old_law.inspect(old_f, old_state)?;
+        old_law.validate_committed_selected(old_f, old_state, yield_tolerance_pa, include_bulk)?;
+        let old_endpoint = old_law.inspect_selected(old_f, old_state, include_bulk)?;
         let old_fm = old_law.mechanical_deformation(old_f)?.0;
         let (new_fm, new_j) = new_law.mechanical_deformation(new_f)?;
         let native = response(&new_fm)?;
         let native_piola = native.first_piola_pa;
         let mechanical = new_law.map_response(native, new_j)?;
         let state = native_state(&mechanical.state);
-        let new_endpoint = new_law.inspect(new_f, state)?;
-        new_law.validate_committed(new_f, state, yield_tolerance_pa)?;
+        let new_endpoint = new_law.inspect_selected(new_f, state, include_bulk)?;
+        new_law.validate_committed_selected(new_f, state, yield_tolerance_pa, include_bulk)?;
         let old = old_endpoint.thermodynamics;
         let new = new_endpoint.thermodynamics;
         let old_p = old_law.backbone().parameters();
         let new_p = new_law.backbone().parameters();
-        let mut coefficient_storage_change_j_m3 = finite(
+        let mut coefficient_storage_change_j_m3 = finite(if include_bulk {
             (new_p.shear_modulus_pa - old_p.shear_modulus_pa) * old_endpoint.deviator_squared
                 + 0.5
                     * (new_p.bulk_modulus_pa - old_p.bulk_modulus_pa)
                     * old_endpoint.log_volume.powi(2)
                 + 0.5
                     * (new_p.hardening_modulus_pa - old_p.hardening_modulus_pa)
-                    * old_state.alpha.powi(2),
-        )?;
-        let mut frozen_old_storage = finite(
+                    * old_state.alpha.powi(2)
+        } else {
+            (new_p.shear_modulus_pa - old_p.shear_modulus_pa) * old_endpoint.deviator_squared
+                + 0.5
+                    * (new_p.hardening_modulus_pa - old_p.hardening_modulus_pa)
+                    * old_state.alpha.powi(2)
+        })?;
+        let mut frozen_old_storage = finite(if include_bulk {
             new_p.shear_modulus_pa * old_endpoint.deviator_squared
                 + 0.5 * new_p.bulk_modulus_pa * old_endpoint.log_volume.powi(2)
-                + 0.5 * new_p.hardening_modulus_pa * old_state.alpha.powi(2),
-        )?;
+                + 0.5 * new_p.hardening_modulus_pa * old_state.alpha.powi(2)
+        } else {
+            new_p.shear_modulus_pa * old_endpoint.deviator_squared
+                + 0.5 * new_p.hardening_modulus_pa * old_state.alpha.powi(2)
+        })?;
         if let (Some(old), Some(new)) = (old_law.voce_hardening, new_law.voce_hardening) {
             let shape = super::voce::saturation_primitive(old_state.alpha, new.rate_per_strain);
             let change = new.saturation_pa - old.saturation_pa;
@@ -1047,6 +1087,7 @@ impl AffineThermalFiniteJ2 {
 struct Inspection {
     thermodynamics: FiniteJ2Thermodynamics,
     deviator_squared: f64,
+    deviator: [f64; 9],
     log_volume: f64,
 }
 
@@ -1168,7 +1209,38 @@ impl FrozenThermalFiniteJ2 {
         state: &FiniteJ2State,
         yield_tolerance_pa: f64,
     ) -> Result<(), FiniteJ2ThermalError> {
+        self.validate_committed_selected(f, state, yield_tolerance_pa, true)
+    }
+
+    fn validate_committed_selected(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+        include_bulk: bool,
+    ) -> Result<(), FiniteJ2ThermalError> {
         let (fm, _) = self.mechanical_deformation(f)?;
+        if !include_bulk {
+            return Ok(match &self.native {
+                FrozenNative::RateIndependent(_)
+                | FrozenNative::CombinedInspection(_)
+                | FrozenNative::Combined(_) => self.backbone().validate_committed_selected(
+                    &fm,
+                    state,
+                    yield_tolerance_pa,
+                    false,
+                )?,
+                FrozenNative::Overstress(_) | FrozenNative::Inspection(_) => {
+                    super::rate::validate_viscous_committed_selected(
+                        self.backbone(),
+                        &fm,
+                        state,
+                        yield_tolerance_pa,
+                        false,
+                    )?
+                }
+            });
+        }
         match &self.native {
             FrozenNative::RateIndependent(law) | FrozenNative::CombinedInspection(law) => {
                 law.validate_committed(&fm, state, yield_tolerance_pa)?;
@@ -1208,6 +1280,15 @@ impl FrozenThermalFiniteJ2 {
         f: &[f64; 9],
         state: &FiniteJ2State,
     ) -> Result<Inspection, FiniteJ2ThermalError> {
+        self.inspect_selected(f, state, true)
+    }
+
+    fn inspect_selected(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        include_bulk: bool,
+    ) -> Result<Inspection, FiniteJ2ThermalError> {
         let (fm, jacobian) = self.mechanical_deformation(f)?;
         let endpoint = self.backbone().elastic_endpoint(&fm, state)?;
         self.backbone()
@@ -1217,13 +1298,21 @@ impl FrozenThermalFiniteJ2 {
         let g = endpoint.log_j;
         let a = self.expansion_per_k;
         let shape = super::dot(&endpoint.deviator, &endpoint.deviator);
-        let free_energy_j_m3 = self.backbone().energy(g, &endpoint.deviator, state.alpha)?;
-        let mut entropy_j_m3_k = finite(
+        let free_energy_j_m3 = if include_bulk {
+            self.backbone().energy(g, &endpoint.deviator, state.alpha)?
+        } else {
+            self.backbone()
+                .remainder_energy(&endpoint.deviator, state.alpha)?
+        };
+        let mut entropy_j_m3_k = finite(if include_bulk {
             3.0 * p.bulk_modulus_pa * a * g
                 - s.shear_modulus_pa_k * shape
                 - 0.5 * s.bulk_modulus_pa_k * g * g
-                - 0.5 * s.hardening_modulus_pa_k * state.alpha * state.alpha,
-        )?;
+                - 0.5 * s.hardening_modulus_pa_k * state.alpha * state.alpha
+        } else {
+            -s.shear_modulus_pa_k * shape
+                - 0.5 * s.hardening_modulus_pa_k * state.alpha * state.alpha
+        })?;
         if let Some(hardening) = self.voce_hardening {
             if hardening.saturation_slope_pa_k != 0.0 {
                 entropy_j_m3_k = finite(
@@ -1244,18 +1333,22 @@ impl FrozenThermalFiniteJ2 {
         }
         let internal_energy_j_m3 =
             finite(self.temperature_k.mul_add(entropy_j_m3_k, free_energy_j_m3))?;
-        let heat_capacity_j_m3_k = finite(
+        let heat_capacity_j_m3_k = finite(if include_bulk {
             self.temperature_k
                 * ((6.0 * s.bulk_modulus_pa_k * a
                     + 3.0 * p.bulk_modulus_pa * self.expansion_slope_per_k2)
                     * g
-                    - 9.0 * p.bulk_modulus_pa * a * a),
-        )?;
+                    - 9.0 * p.bulk_modulus_pa * a * a)
+        } else {
+            0.0
+        })?;
         let mut tau = endpoint.deviator.map(|e| 2.0 * p.shear_modulus_pa * e);
         let mut tau_temperature = endpoint.deviator.map(|e| 2.0 * s.shear_modulus_pa_k * e);
-        for i in [0, 4, 8] {
-            tau[i] += p.bulk_modulus_pa * g;
-            tau_temperature[i] += s.bulk_modulus_pa_k * g - 3.0 * p.bulk_modulus_pa * a;
+        if include_bulk {
+            for i in [0, 4, 8] {
+                tau[i] += p.bulk_modulus_pa * g;
+                tau_temperature[i] += s.bulk_modulus_pa_k * g - 3.0 * p.bulk_modulus_pa * a;
+            }
         }
         let inverse_transpose = super::transpose(&super::inverse(f, jacobian)?);
         let first_piola_pa = super::multiply(&tau, &inverse_transpose);
@@ -1281,6 +1374,7 @@ impl FrozenThermalFiniteJ2 {
                 mechanical_jacobian: endpoint.jacobian,
             },
             deviator_squared: shape,
+            deviator: endpoint.deviator,
             log_volume: g,
         })
     }

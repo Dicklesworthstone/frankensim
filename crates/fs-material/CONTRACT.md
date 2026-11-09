@@ -87,13 +87,59 @@ Flow potential, physical plastic/creep losses and pressure-constraint work remai
 separate. Fixed-history energy/domain checks do not flow or recover again, and
 exact incompressibility never evaluates unused penalty storage or stress.
 Spatial consumers must use one common kinetic interval and publish complete
-history only after equilibrium and work acceptance. Thermal evolution remains
-with its existing separate owner.
+history only after equilibrium and work acceptance. Evolving temperature uses
+the original thermal family's mixed extension below.
 
 `tests/plastic_finite_mixed_kinetic.rs` covers full native/condensed parity for
 all admitted kinetic families, independent value/stress derivatives, an unused
 overflowing penalty, and analytical unloaded recovery with unchanged-history
 refusals. These synthetic regressions make no material-calibration claim.
+
+## Mixed finite thermal inelasticity
+
+`plastic::finite::thermal::mixed` extends the original thermal point protocol
+with a borrowed mixed potential and fixed-history mixed thermodynamics.
+Native and source-bound affine J2, Perzyna, Norton, simultaneous creep/J2,
+linear/Voce/tabulated hardening, primary creep and recovering-resistance
+families preserve their complete original history and actual physical interval.
+No new return map, thermal coefficient convention or caloric material is inferred.
+
+These native thermal laws store energy per ORIGINAL volume, unlike a relaxed-
+volume hyperelastic thermal reference. With `q=theta(T)^3`, physical pressure
+`p` maps to native mechanical pressure `q*p`. The original-volume pressure dual
+is `C(q*p)+p*(q-1)`, reconstructed volume is `q*Jm(q*p)`, and compliance is
+`q^2*C''(q*p)`. Bulk storage remains the original `U(Jm)`, without a factor q.
+Exact elastic incompressibility imposes `J=q` weakly and evaluates no unused
+bulk penalty. The original actual and reconstructed strain/volume bounds remain.
+
+Bulk-free thermal inspection and incremental work reuse the native owner with
+bulk omitted at its original assembly sites. The mixed bulk account adds only
+pressure-reconstructed storage. Its entropy retains
+`s_bulk=3*a(T)*p*J_reconstructed-(K'(T)/K(T))*U_bulk`, including the nonzero
+pressure/expansion entropy in exact incompressibility. Mixed thermodynamic
+results deliberately do not relabel the displacement-only heat capacity or
+temperature-stress derivative as a fixed-pressure derivative.
+
+`checked_mixed_increment` reuses already frozen old/new material points;
+`checked_mixed_increment_for_step` supplies the family convenience path.
+Accepted history is checked at OLD temperature before a new-temperature return,
+so genuine thermal softening can produce additional yielding. Recovering
+resistance remains independent of permanent accumulated strain. Inspection
+never flows or recovers and kinetic inspection cannot substitute for a step.
+
+Physical inelastic heat, reversible caloric exchange, coefficient work,
+`delta(T*s)`, and signed endpoint defects remain separate. Thermal bulk-volume
+work uses `p_new*(q_new-q_old)*Jm_old`; the remaining actual endpoint-volume
+work error belongs to the numerical defect. Neither that error nor flow
+potential is deposited as heat. The point identity closes mechanical work into
+mechanical internal-energy change, physical caloric transfer and signed defect.
+Supplying temperatures does not establish a coupled enthalpy capacity, heat
+transport solution, temporal accuracy, or material calibration.
+
+`tests/plastic_finite_mixed_thermal.rs` specifies native pressure-condensation
+parity, all mixed tangent blocks, exact thermal volume and pressure entropy,
+temperature-induced yielding, activated creep/recovery and independent work
+accounts. These bounded manufactured cases retain the original source domains.
 
 ## Source-bound Johnson--Cook ductile initiation
 

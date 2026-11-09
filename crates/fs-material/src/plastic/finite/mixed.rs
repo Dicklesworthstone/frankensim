@@ -19,8 +19,9 @@
 //! owner. Explicit Perzyna, Norton, simultaneous creep/J2 and recovering
 //! primary-creep owners retain their original physical interval and complete
 //! history. Their flow potential and physical heat remain separate. No kinetic
-//! inspection backbone is converted to a rate-independent law; thermal,
-//! porous and ductile evolution remain separate owners.
+//! inspection backbone is converted to a rate-independent law. Evolving
+//! temperature uses [`super::thermal::mixed`]; porous and ductile evolution
+//! retain their separate owners.
 
 use super::{
     FiniteInelasticMaterial, FiniteJ2, FiniteJ2Error, FiniteJ2Material, FiniteJ2Response,
