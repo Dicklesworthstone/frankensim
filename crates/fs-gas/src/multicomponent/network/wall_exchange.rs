@@ -11,6 +11,8 @@
 //! halves and discard them when the complete wave/reaction step is retried.
 //! An optional original-source transport binding refreshes developed
 //! branch drag and conductance from each cell's current mixture at every half.
+//! Opt-in source-coupled drag also resolves these properties along the actual
+//! mechanical relaxation and refreshes the local film before heat exchange.
 //! A material wall-conduction binding composes the solid's k(T) and actual
 //! resistance geometry with that same film and finite-wall or reservoir heat
 //! transaction, without changing the original thermal energy owner.
@@ -22,6 +24,8 @@ use crate::multicomponent::wall_exchange::{
 };
 use crate::multicomponent::{Cell, Mesh1d, MixtureGas, allocated, positive, sum};
 use fs_qty::Time;
+
+pub use crate::multicomponent::wall_exchange::SourceCoupledDragControl;
 
 mod caloric;
 
@@ -103,7 +107,8 @@ struct BranchShape {
 /// Each local thermal contact owns a distinct wall. [`Self::with_shared_walls`]
 /// instead attaches several gas amounts to one original finite wall inventory,
 /// retaining each gas cell's current composition without mixing its species.
-/// Drag coefficients are frozen during each source interval. Plenums have no
+/// Drag coefficients are frozen during each source interval unless
+/// [`Self::with_source_coupled_drag`] is selected. Plenums have no
 /// bulk momentum and therefore admit only `WallDrag::None`.
 /// [`Self::with_shared_branch_supports`] couples every cell of a selected
 /// branch to one finite axial inertia, with bounded mechanical time refinement.
@@ -445,6 +450,22 @@ impl<'law> NetworkWallOperator<'law> {
                         None => None,
                     },
                 };
+                let motion = match motion {
+                    Some(motion) => Some(motion),
+                    None => match self.transport.as_mut() {
+                        Some(transport) => transport.advance_drag(
+                            &self.gas,
+                            branch_index,
+                            state,
+                            shape.mesh.volumes()[i],
+                            duration,
+                            contact,
+                            controls,
+                            cancelled,
+                        )?,
+                        None => None,
+                    },
+                };
                 let thermal_state = motion.map_or(state, |motion| Cell {
                     momentum: motion.momentum,
                     energy: motion.energy,
@@ -770,3 +791,6 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), WallExchangeError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_drag_tests;

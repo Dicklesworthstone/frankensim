@@ -11259,9 +11259,55 @@ The interface oracle retains both one-sided contributions at contrast 1e18.
 These focused builds used the original numerical kernels without numerical
 stubs; full Cargo/runtime integration was not run. This is passive transport
 with fixed storage properties, without variable-Cp enthalpy, phase change,
-buoyancy/thermal feedback or three-dimensional LES qualification. The original
+or three-dimensional LES qualification. The opt-in joint Boussinesq owner
+below supplies thermal feedback under a separate linear-density scope. The original
 BDF entries do not enforce scalar bounds; the explicit bounded lane is described
 below.
+
+## Coupled planar SGS temperature and Boussinesq momentum
+
+`PlanarSgs::bdf1_boussinesq_step` couples the original mixed BDM1/P0 momentum
+owner to its P1-DG thermal transport. Each original Picard candidate recomputes
+Smagorinsky, WALE or Vreman stress and `alpha_m + nu_t/Pr_t`, solves thermal
+BDF1 from the same immutable old temperature, then applies the resulting
+affine temperature at the original cell-indexed momentum quadrature. Final
+native residual and reaction assembly repeats both preparations at the
+accepted velocity; the returned temperature is that same endpoint. This is
+implicit partitioned BDF1 with the original sparse solves and work caps,
+without a second coupling loop or a monolithic Newton claim.
+
+The acceleration is `-beta*(T-Tref)*g` for explicitly signed physical gravity.
+Pressure and prescribed total traction use reference-hydrostatic-reduced
+pressure `p_physical/rho - g.(x-x_ref)`; the caller retains its boundary datum
+and must not add reference-density gravity again. Molecular viscosity,
+thermal diffusivity, density and Cp stay fixed. The authored signed expansion
+coefficient supplies only the linear momentum anomaly. Positive kelvin and
+the caller's `|beta*(T-Tref)|` limit in `[0,0.1]` are required throughout every
+candidate and the actual affine boundary-temperature traces, including their
+endpoints. This declared small-departure scope is not an approximation-error
+certificate or an EOS model.
+
+Results retain independent original momentum and thermal residuals, thermal
+storage/source/boundary rates, final SGS diagnostics and the accepted integral
+of buoyancy acceleration dotted with velocity. The latter has units m4/s3 per
+unit depth; multiplying by constant rho and depth gives watts. It is neither
+a heat source nor a whole-step mechanical/potential-energy balance. No
+molecular, modeled SGS, pressure or buoyancy work is deposited as heat.
+Picard convergence remains conditional on coupling strength and timestep.
+Thermal BDF1 is not bound-preserving: invalid temperature/departure or either
+solver's refusal returns no joint endpoint. Cancellation at existing assembly
+and thermal checkpoints preserves both input histories; the synchronous
+momentum linear solve has no new preemption guarantee.
+
+Four new native physical groups passed: all three closures with heat-driven
+circulation and independent final-temperature momentum/thermal oracles;
+uniform source heating with an exact endpoint force and thermal budget;
+both gravity signs with the native pinned hydrostatic pressure balance; and
+nonconvergence, invalid source/temperature/affine-boundary traces, late
+cancellation and deterministic retry. All five existing scalar groups also
+passed. The focused build compiled the original numerical NS, boundary,
+reaction, SGS, scalar, LU and controlled-Krylov owners without numerical
+stubs; full Cargo/runtime integration was not run.
 
 ## Resolved moving liquid heat around a phase-changing vapor bubble
 

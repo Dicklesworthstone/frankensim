@@ -11,6 +11,7 @@ fn imposed(pressure: f64, head: f64, injection: f64) -> RegionalCarreauDrive {
         }],
         branch_heads: Some(vec![Pressure::new(head)]),
         branch_head_laws: None,
+        branch_heat_destinations: None,
     }
 }
 
@@ -457,6 +458,7 @@ fn g4_invalid_events_late_drive_source_and_free_junction_injection_refuse_atomic
                     }],
                     branch_heads: None,
                     branch_head_laws: None,
+                    branch_heat_destinations: None,
                 })
             },
             |_, _, flow, _| Ok::<_, ()>(exchange(flow, 300.0)),

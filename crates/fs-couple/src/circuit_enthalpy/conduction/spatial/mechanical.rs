@@ -14,6 +14,8 @@
 //! energy admission. No field, inertia, force law or Joule source is replaced.
 
 mod prepare;
+/// Original nonlinear current and native momentum at one implicit midpoint.
+pub mod response;
 
 use fs_em::{
     conduction::ConductionControls,
@@ -321,25 +323,12 @@ fn solve_field<'a, C: SpatialConductorMaterial>(
     controls: SpatialConductionKickControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(SpatialMovingConductionField<'a, C>, Wrench)> {
-    let mut nodal = Vec::with_capacity(problem.positions_m().len());
-    for &position in problem.positions_m() {
-        poll(cancelled)?;
-        let v = velocity.linear + velocity.angular.cross(vector(position));
-        let value = [v.x, v.y, v.z];
-        for component in value {
-            finite(component)?;
-        }
-        nodal.push(value);
-    }
-    let mut cell_velocity = Vec::with_capacity(problem.mesh().tets.len());
-    for tet in &problem.mesh().tets {
-        poll(cancelled)?;
-        let mut mean = [0.0; 3];
-        for axis in 0..3 {
-            mean[axis] = finite(tet.iter().map(|&v| 0.25 * nodal[v as usize][axis]).sum())?;
-        }
-        cell_velocity.push(mean);
-    }
+    let (nodal, cell_velocity) = rigid_velocity_trace(
+        problem.positions_m(),
+        &problem.mesh().tets,
+        velocity,
+        cancelled,
+    )?;
     let field = problem.solve_with_motion(
         boundary,
         SpatialConductionMotion {
@@ -361,4 +350,34 @@ fn solve_field<'a, C: SpatialConductorMaterial>(
     }
     poll(cancelled)?;
     Ok((field, wrench))
+}
+
+// The linear affine cache and nonlinear actual-source iteration use the same
+// original P1 rigid velocity trace and exact cell mean, in body coordinates.
+fn rigid_velocity_trace(
+    positions_m: &[[f64; 3]],
+    tets: &[[u32; 4]],
+    velocity: Twist,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<[f64; 3]>, Vec<[f64; 3]>)> {
+    let mut nodal = Vec::with_capacity(positions_m.len());
+    for &position in positions_m {
+        poll(cancelled)?;
+        let v = velocity.linear + velocity.angular.cross(vector(position));
+        let value = [v.x, v.y, v.z];
+        for component in value {
+            finite(component)?;
+        }
+        nodal.push(value);
+    }
+    let mut cell_velocity = Vec::with_capacity(tets.len());
+    for tet in tets {
+        poll(cancelled)?;
+        let mut mean = [0.0; 3];
+        for axis in 0..3 {
+            mean[axis] = finite(tet.iter().map(|&v| 0.25 * nodal[v as usize][axis]).sum())?;
+        }
+        cell_velocity.push(mean);
+    }
+    Ok((nodal, cell_velocity))
 }

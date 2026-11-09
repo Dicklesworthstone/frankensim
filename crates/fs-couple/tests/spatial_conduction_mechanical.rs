@@ -1,4 +1,6 @@
 //! G1/G3/G4: original sourced inertia and moving-current feedback, not a motor fit.
+#[path = "spatial_conduction_mechanical/response.rs"]
+mod response;
 use fs_couple::circuit_enthalpy::conduction::spatial::mechanical::{
     PreparedSpatialConductionKick, SpatialConductionKickControls, SpatialConductionKickError,
 };
