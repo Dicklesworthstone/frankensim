@@ -25,6 +25,7 @@ bench = false
 layer = "L3"
 
 [dependencies]
+fs-cutfem = { path = "../fs-cutfem" }
 fs-alloc = { path = "../fs-alloc" }
 fs-aeroac = { path = "../fs-aeroac" }
 fs-bem = { path = "../fs-bem" }
@@ -76,7 +77,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
-fs-cutfem = { path = "../fs-cutfem" }
+fs-ivl = { path = "../fs-ivl" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-io = { path = "../fs-io" }

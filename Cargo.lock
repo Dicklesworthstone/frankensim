@@ -1351,6 +1351,7 @@ dependencies = [
  "fs-geom",
  "fs-iface",
  "fs-io",
+ "fs-ivl",
  "fs-la",
  "fs-ladder",
  "fs-lbm",

@@ -261,6 +261,8 @@ pub mod shock_loading;
 pub mod speaker;
 /// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
 pub mod solid_enthalpy;
+/// Reciprocal native CutFEM elasticity and the original finite caloric timeline.
+pub mod cut_thermoelastic;
 /// Finite sublimation, deposition and reciprocal molecular recoil on original caloric stores.
 pub mod solid_gas;
 /// Shared conservative gravity and its analytic derivatives on deforming solids.
