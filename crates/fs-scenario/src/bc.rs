@@ -146,6 +146,10 @@ pub enum Expectation {
     /// A legacy scalar/signal/profile or an explicitly typed scalar with these
     /// dimensions. Each physical role also checks its exact quantity semantics.
     ValueOrScalar(Dims),
+    /// A legacy outward scalar flux, a typed scalar flux, or a three-component
+    /// physical flux vector. The native surface owner projects vectors onto
+    /// its original outward face normals; scalar flux keeps its declared sign.
+    ValueOrScalarOrVector(Dims),
     /// A legacy scalar/signal/profile or an explicitly typed Cartesian vector
     /// with these dimensions. Legacy values retain their wire meaning and do
     /// not acquire an inferred direction. Executable vector consumers require
@@ -190,7 +194,7 @@ mod dims {
 /// The dimensional contract of every supported (physics, kind) pair.
 #[must_use]
 pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
-    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrScalar, ValueOrVector,
+    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrScalar, ValueOrScalarOrVector, ValueOrVector,
         ValueOrVectorOrTensor};
     match (physics, kind) {
         (Physics::IncompressibleFlow, BcKind::Dirichlet) => ValueOrVector(dims::VELOCITY),
@@ -203,7 +207,7 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
         (Physics::IncompressibleFlow, BcKind::Traction) => Value(dims::PRESSURE),
         (Physics::IncompressibleFlow, BcKind::WallNoSlip | BcKind::WallSlip) => NoValue,
         (Physics::Thermal, BcKind::Dirichlet) => ValueOrScalar(dims::TEMPERATURE),
-        (Physics::Thermal, BcKind::Neumann) => ValueOrScalar(dims::HEAT_FLUX),
+        (Physics::Thermal, BcKind::Neumann) => ValueOrScalarOrVector(dims::HEAT_FLUX),
         (Physics::Thermal, BcKind::Robin) => ValueOrScalar(dims::HTC),
         (Physics::Elasticity, BcKind::Dirichlet) => ValueOrVector(dims::DISPLACEMENT),
         (Physics::Elasticity, BcKind::Neumann) => Typed {
@@ -311,6 +315,7 @@ impl BoundaryCondition {
             }
             Expectation::Value(expected)
             | Expectation::ValueOrScalar(expected)
+            | Expectation::ValueOrScalarOrVector(expected)
             | Expectation::ValueOrVector(expected)
             | Expectation::ValueOrVectorOrTensor(expected) => match &self.value {
                 None => out.push(Violation {
@@ -321,6 +326,12 @@ impl BoundaryCondition {
                         expected.0
                     ),
                 }),
+                Some(BcValue::Typed(payload))
+                    if matches!(expectation(self.physics, self.kind),
+                        Expectation::ValueOrScalarOrVector(_)) =>
+                {
+                    self.check_heat_flux_payload(payload, expected, ctx, out);
+                }
                 Some(BcValue::Typed(payload))
                     if matches!(expectation(self.physics, self.kind),
                         Expectation::ValueOrVectorOrTensor(_)) =>
@@ -480,6 +491,51 @@ impl BoundaryCondition {
             });
         }
         Ok(())
+    }
+
+    fn check_heat_flux_payload(
+        &self,
+        payload: &Payload,
+        expected_dims: Dims,
+        ctx: BoundaryDiagnosticContext<'_>,
+        out: &mut Vec<Violation>,
+    ) {
+        let kind = match payload {
+            Payload::Scalar(_) => PayloadKind::Scalar,
+            Payload::Vector(vector) => {
+                if vector.components() != 3 {
+                    out.push(Violation {
+                        code: "bc-heat-flux-components",
+                        what: format!("{ctx}: Cartesian heat flux requires three components"),
+                        fix: "supply all three signed components in the declared Cartesian frame".into(),
+                    });
+                }
+                PayloadKind::Vector
+            }
+            _ => {
+                out.push(Violation {
+                    code: "bc-heat-flux-payload",
+                    what: format!("{ctx}: heat flux requires an outward scalar or Cartesian vector"),
+                    fix: "declare a scalar normal flux or three physical flux components".into(),
+                });
+                return;
+            }
+        };
+        self.check_typed_payload(payload, kind, Some(expected_dims), ctx, out);
+        if !crate::scalar::thermal_contract(self.kind, payload.meta().contract()) {
+            out.push(Violation {
+                code: "bc-thermal-semantics",
+                what: format!("{ctx}: heat flux requires its exact W/m² dimensional contract"),
+                fix: "declare heat-flux density, not total power or another semantic quantity".into(),
+            });
+        }
+        if payload.meta().orientation() != OrientationParity::Even {
+            out.push(Violation {
+                code: "bc-thermal-parity",
+                what: format!("{ctx}: ordinary heat flux requires even parity"),
+                fix: "declare OrientationParity::Even".into(),
+            });
+        }
     }
 
     fn check_traction_payload(

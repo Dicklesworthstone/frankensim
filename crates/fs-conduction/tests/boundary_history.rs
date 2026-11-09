@@ -196,3 +196,57 @@ fn g3_typed_temperature_reuses_the_partition_and_explicit_physical_frames() {
     with_cx(|cx| assert_eq!(history.at(cx, 1.0).unwrap().conditions()[0],
         ThermalBc::dirichlet(350.0).unwrap()));
 }
+
+#[test]
+fn g3_rotating_flux_vectors_preserve_the_original_multi_normal_partition() {
+    use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
+    use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, Payload, PayloadId,
+        PayloadMeta, QuantityContract, ReferenceSemantics, SampleSource, TableInterpolation,
+        VectorPayload};
+    let mesh = mesh();
+    let env = Environment::earth_lab();
+    let mut frames = FrameTree::new();
+    frames.add(Frame { id: FrameId(1), name: "translated".into(), parent: WORLD,
+        motion: FrameMotion::Translating { direction: [1.0, 0.0, 0.0],
+            displacement: ramp(0.0, 1e12, Dims([1, 0, 0, 0, 0, 0])) } });
+    frames.add(Frame { id: FrameId(2), name: "flux-axes".into(), parent: FrameId(1),
+        motion: FrameMotion::Rotating { axis: [0.0, 0.0, 1.0], center: Default::default(),
+            rate: QtyAny::new(std::f64::consts::FRAC_PI_2, Dims([0, 0, -1, 0, 0, 0])) } });
+    let payload = VectorPayload::new(PayloadMeta::new(
+        QuantityContract::Dimensions(HEAT_FLUX_DIMS),
+        PayloadId::new("basis/frame-cartesian").unwrap(), FrameId(2),
+        OrientationParity::Even, ReferenceSemantics::Continuous).unwrap(),
+        SampleSource::table(
+            [0.0, 1.0].map(|t| QtyAny::new(t, Dims([0, 0, 1, 0, 0, 0]))).to_vec(),
+            vec![[10.0, 0.0, 0.0].map(|v| QtyAny::new(v, HEAT_FLUX_DIMS)).to_vec(); 2],
+            TableInterpolation::Linear, OutsideDomainPolicy::Clamp,
+        ).unwrap()).unwrap();
+    let row = BoundaryCondition { region: "exterior".into(), physics: Physics::Thermal,
+        kind: BcKind::Neumann, value: Some(BcValue::Typed(Payload::Vector(payload))),
+        compatibility: None, frame: 2 };
+    assert!(ThermalBc::from_scenario_row(&row, &env, None).is_err());
+    let original = ThermalBoundaryBuilder::new(&mesh)
+        .remainder("exterior", ThermalBc::adiabatic()).unwrap().finish().unwrap();
+    let history = with_cx(|cx| ThermalBoundaryHistory::from_boundary_in_frames(
+        cx, &mesh, &original, &env, &frames,
+        vec![ThermalRegionHistory { row, reference_temperature: None }], 0.0,
+    ).unwrap());
+    with_cx(|cx| {
+        for (time, expected) in [(0.0, [10.0, 0.0, 0.0]),
+            (1.0, [0.0, 10.0, 0.0]), (2.0, [-10.0, 0.0, 0.0])]
+        {
+            let boundary = history.at(cx, time).unwrap();
+            let ThermalBc::NeumannVector { flux } = boundary.conditions()[0] else {
+                panic!("typed flux must reach the native vector owner");
+            };
+            for axis in 0..3 { assert!((flux[axis] - expected[axis]).abs() < 1e-10); }
+            assert_eq!(boundary.region_names(), original.region_names());
+            for slot in 0..mesh.boundary().len() {
+                assert_eq!(boundary.region_for(slot), original.region_for(slot));
+            }
+        }
+    });
+    with_cancelled_cx(|cx| assert!(matches!(history.at(cx, 1.0),
+        Err(ConductionError::Cancelled { .. }))));
+    assert_eq!(original.conditions(), &[ThermalBc::adiabatic()]);
+}

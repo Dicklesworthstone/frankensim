@@ -14,10 +14,12 @@
 //! capacity reaction; no instantaneous impulse is invented. At a jump, accepted
 //! fields and reports describe the interval-ending, pre-jump state.
 //!
-//! Typed scalar tables share this rule without copying their histories.
+//! Typed scalar and heat-flux vector tables share this rule without copying
+//! their histories. Vector components rotate at the actual endpoint even when
+//! a held source uses its previous value.
 //! Refuse/Clamp tails retain their declared meaning. Periodic typed tables
 //! require a finite unrolled schedule for event stepping; endpoint sampling
-//! still supports the scalar owner's periodic policy. Scalar frames resolve at
+//! still supports the original payload owner's periodic policy. Frames resolve at
 //! physical time, and ancestor translation/tilt knots join the same event clock.
 
 /// Local-error-controlled implicit stepping that retains every schedule event.
@@ -25,7 +27,7 @@ pub mod adaptive;
 
 use super::{HeatSourceHistory, ThermalHistoryMethod, ThermalHistoryRun,
     ThermalHistoryStep, invalid, poll};
-use super::super::{ThermalBoundaryHistory, checkpoint, typed_value};
+use super::super::{ThermalBoundaryHistory, checkpoint, sample_error, typed_flux, typed_value};
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc,
     ThermalBoundary, ThermalBoundaryBuilder, TEMPERATURE_DIMS, VOLUMETRIC_SOURCE_DIMS};
 use crate::transient::backward_euler::StepConfig;
@@ -33,7 +35,7 @@ use fs_exec::Cx;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::bc::{BcValue, BoundaryCondition};
 use fs_scenario::frame::{FrameId, FrameMotion, FrameTree, WORLD};
-use fs_scenario::payload::{OutsideDomainPolicy, Payload, SampleSource, TableInterpolation};
+use fs_scenario::payload::{OutsideDomainPolicy, Payload, SampleSource, TableInterpolation, VectorPayload};
 use fs_scenario::signal::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, TimeSignal};
 
 /// One completed interval, which may stop before the requested target.
@@ -113,20 +115,11 @@ pub(super) fn next_endpoint<'s>(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_
         match &row.row.value {
             Some(BcValue::Signal(signal)) => limit(signal, start, &mut end)?,
             Some(BcValue::Typed(Payload::Scalar(payload))) => {
-                match payload.source() {
-                    SampleSource::Fixed(_) => {}
-                    SampleSource::Table { outside: OutsideDomainPolicy::Periodic, .. } => {
-                        return Err(invalid("periodic thermal event histories require a finite unrolled table"));
-                    }
-                    SampleSource::Table { times, .. } => {
-                        if let Some(time) = times.get(times.partition_point(|t| t.value <= start)) {
-                            if time.value < end { end = time.value; }
-                        }
-                    }
-                    SampleSource::Distribution { .. } => {
-                        return Err(invalid("a thermal event history requires explicit samples"));
-                    }
-                }
+                limit_typed(payload.source(), start, &mut end)?;
+                limit_frames(cx, &history.frames, payload.meta().frame(), start, &mut end)?;
+            }
+            Some(BcValue::Typed(Payload::Vector(payload))) => {
+                limit_typed(payload.source(), start, &mut end)?;
                 limit_frames(cx, &history.frames, payload.meta().frame(), start, &mut end)?;
             }
             _ => {}
@@ -147,15 +140,35 @@ pub(super) fn next_endpoint<'s>(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_
     Ok(end)
 }
 
+fn limit_typed<T>(source: &SampleSource<T>, start: f64, end: &mut f64)
+    -> Result<(), ConductionError>
+{
+    match source {
+        SampleSource::Fixed(_) => {}
+        SampleSource::Table { outside: OutsideDomainPolicy::Periodic, .. } => {
+            return Err(invalid("periodic thermal event histories require a finite unrolled table"));
+        }
+        SampleSource::Table { times, .. } => {
+            if let Some(time) = times.get(times.partition_point(|t| t.value <= start)) {
+                if time.value < *end { *end = time.value; }
+            }
+        }
+        SampleSource::Distribution { .. } => {
+            return Err(invalid("a thermal event history requires explicit samples"));
+        }
+    }
+    Ok(())
+}
+
 fn limit_frames(cx: &Cx<'_>, frames: &FrameTree, mut id: FrameId,
     start: f64, end: &mut f64) -> Result<(), ConductionError>
 {
-    // Initial scalar admission checked this immutable, at-most-256-row chain.
+    // Initial history admission checked this immutable, at-most-256-row chain.
     for at in 0..=frames.frames.len() {
         poll(cx, at)?;
         if id == WORLD { return Ok(()); }
         let frame = frames.frames.iter().find(|frame| frame.id == id)
-            .ok_or_else(|| invalid("thermal scalar frame is absent from the retained tree"))?;
+            .ok_or_else(|| invalid("thermal history frame is absent from the retained tree"))?;
         match &frame.motion {
             FrameMotion::Translating { displacement, .. } => limit(displacement, start, end)?,
             FrameMotion::Tilt { angle, .. } => limit(angle, start, end)?,
@@ -248,6 +261,8 @@ pub(super) fn boundary_before(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_>,
             Some(BcValue::Signal(signal)) => ThermalBc::from_scenario_value(
                 row, &history.environment, reference, value_before(signal, time)?,
             )?,
+            Some(BcValue::Typed(Payload::Vector(_))) =>
+                vector_before(cx, row, &history.frames, time)?,
             Some(BcValue::Typed(_)) => ThermalBc::from_scenario_value(
                 row, &history.environment, reference,
                 typed_before(cx, row, &history.frames, time)?,
@@ -265,6 +280,34 @@ pub(super) fn boundary_before(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_>,
     boundary.surface_conduction = history.partition.surface_conduction.clone();
     poll(cx, history.rows.len())?;
     Ok(boundary)
+}
+
+fn vector_before(cx: &Cx<'_>, row: &BoundaryCondition, frames: &FrameTree, time: f64)
+    -> Result<ThermalBc, ConductionError>
+{
+    // Validate the actual source domain, physical frame and boundary role before
+    // selecting a held left value. Only three components are copied, never the
+    // complete authored table or frame tree.
+    let sampled = typed_flux(row, frames, time, &mut || checkpoint(cx))?;
+    if let Some(BcValue::Typed(Payload::Vector(payload))) = &row.value {
+        if let SampleSource::Table { times, values, interpolation, outside } = payload.source() {
+            if *outside == OutsideDomainPolicy::Periodic {
+                return Err(invalid("periodic thermal event histories require a finite unrolled table"));
+            }
+            if *interpolation == TableInterpolation::StepLeft {
+                let index = times.partition_point(|t| t.value < time);
+                if index > 0 && times.get(index).is_some_and(|t| t.value == time) {
+                    let held = VectorPayload::new(payload.meta().clone(),
+                        SampleSource::Fixed(values[index - 1].clone()))
+                        .map_err(|error| invalid(&error.to_string()))?;
+                    let flux = held.world_vector_at(frames, time, &mut || checkpoint(cx))
+                        .map_err(|error| sample_error(row, error))?;
+                    return ThermalBc::neumann_vector(flux.values);
+                }
+            }
+        }
+    }
+    Ok(sampled)
 }
 
 fn typed_before(cx: &Cx<'_>, row: &BoundaryCondition, frames: &FrameTree, time: f64)

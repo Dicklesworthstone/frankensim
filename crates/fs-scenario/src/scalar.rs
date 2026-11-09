@@ -42,7 +42,8 @@ pub(crate) fn pressure_contract(contract: QuantityContract) -> bool {
 pub(crate) fn thermal_contract(kind: BcKind, contract: QuantityContract) -> bool {
     use crate::bc::{Expectation, expectation};
     let expected = match expectation(Physics::Thermal, kind) {
-        Expectation::Value(dims) | Expectation::ValueOrScalar(dims) => dims,
+        Expectation::Value(dims) | Expectation::ValueOrScalar(dims)
+        | Expectation::ValueOrScalarOrVector(dims) => dims,
         _ => return false,
     };
     match contract {

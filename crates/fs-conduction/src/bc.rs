@@ -53,6 +53,12 @@ pub enum ThermalBc {
         /// Outward flux field, W/m².
         outward_flux: ScalarField,
     },
+    /// Spatially uniform WORLD heat-flux vector, W/m². Each original face
+    /// receives `flux · outward_normal`; a region may contain different normals.
+    NeumannVector {
+        /// Cartesian heat flux, W/m², without an inferred normal or sign.
+        flux: [f64; 3],
+    },
     /// Convective transfer: `(−k∇T)·n = h (T − T_ref)`.
     Robin {
         /// Transfer coefficient, W/(m²·K); must be positive.
@@ -68,7 +74,7 @@ impl ThermalBc {
     pub const fn tag(&self) -> &'static str {
         match self {
             ThermalBc::Dirichlet { .. } => "dirichlet",
-            ThermalBc::Neumann { .. } => "neumann",
+            ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. } => "neumann",
             ThermalBc::Robin { .. } => "robin",
         }
     }
@@ -91,6 +97,36 @@ impl ThermalBc {
         Ok(ThermalBc::Neumann {
             outward_flux: ScalarField::uniform("neumann outward flux", outward_flux_w_m2)?,
         })
+    }
+
+    /// A uniform Cartesian WORLD heat-flux vector. Projection belongs to each
+    /// mesh face, so shared vertices do not average different face normals.
+    ///
+    /// # Errors
+    /// [`ConductionError::NonFinite`] for a nonfinite component.
+    pub fn neumann_vector(flux_w_m2: [f64; 3]) -> Result<ThermalBc, ConductionError> {
+        let row = ThermalBc::NeumannVector { flux: flux_w_m2 };
+        row.validate(0)?;
+        Ok(row)
+    }
+
+    /// Prescribed Neumann data at one original face's three vertices. A vector
+    /// is constant on that face; scalar nodal data retains its original P1
+    /// variation. Reservoir rows prescribe no Neumann heat and return zero.
+    pub(crate) fn neumann_face_flux(&self, face: &BoundaryFace) -> [f64; 3] {
+        match self {
+            ThermalBc::Neumann { outward_flux } => {
+                face.vertices.map(|vertex| outward_flux.at(vertex as usize))
+            }
+            ThermalBc::NeumannVector { flux } => {
+                let normal = face.outward_normal;
+                let outward = flux[0].mul_add(
+                    normal[0], flux[1].mul_add(normal[1], flux[2] * normal[2]),
+                );
+                [outward; 3]
+            }
+            ThermalBc::Dirichlet { .. } | ThermalBc::Robin { .. } => [0.0; 3],
+        }
     }
 
     /// An adiabatic (zero-flux) row. The same thing the natural boundary
@@ -134,6 +170,12 @@ impl ThermalBc {
             }
             ThermalBc::Neumann { outward_flux } => {
                 outward_flux.validate("neumann outward flux", vertex_count)
+            }
+            ThermalBc::NeumannVector { flux } => {
+                for &value in flux {
+                    crate::require_finite("neumann heat-flux vector", value)?;
+                }
+                Ok(())
             }
             ThermalBc::Robin { htc, t_ref } => {
                 htc.validate("robin htc", vertex_count)?;
@@ -190,7 +232,8 @@ impl ThermalBc {
             });
         }
         let expected = match expectation(row.physics, row.kind) {
-            Expectation::Value(dims) | Expectation::ValueOrScalar(dims) => dims,
+            Expectation::Value(dims) | Expectation::ValueOrScalar(dims)
+            | Expectation::ValueOrScalarOrVector(dims) => dims,
             other => {
                 return Err(ConductionError::ScenarioRow {
                     region: row.region.clone(),
@@ -659,6 +702,10 @@ impl<'m> ThermalBoundaryBuilder<'m> {
         let mut assigned: Vec<Option<(usize, f64)>> = vec![None; self.mesh.vertex_count()];
         for (slot, region) in self.face_region.iter().enumerate() {
             let Some(region) = *region else { continue };
+            if let condition @ ThermalBc::NeumannVector { .. } = &self.conditions[region] {
+                crate::require_finite("neumann normal flux",
+                    condition.neumann_face_flux(&self.mesh.boundary()[slot])[0])?;
+            }
             let ThermalBc::Dirichlet { temperature } = &self.conditions[region] else {
                 continue;
             };

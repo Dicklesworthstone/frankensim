@@ -6137,3 +6137,36 @@ have not executed, and the new source has not been typechecked or formatted by
 Rust tools: the execution environment disconnected during dependency
 compilation before edits. Source review is the available evidence; no passing
 runtime or physical-validation claim is made.
+
+
+## Physical vector flux on the original thermal faces
+
+`ThermalBc::NeumannVector` prescribes a spatially uniform WORLD heat-flux
+vector in W/m². Its checked constructor retains all three components. Each
+original exterior face receives `q · n_out`; shared vertices never average
+normals, and one named region may cover differently oriented faces. The same
+projection feeds original P1 surface assembly, total prescribed heat, entropy
+exchange, isolated-equilibrium admission and optional flux verification.
+Scalar nodal flux retains its previous face integration. The native boundary
+builder refuses a nonfinite projected normal flux before publishing a boundary.
+
+Typed scenario vectors lower through `heat_flux_world_at` into this native
+row. The original history owner preserves its exact partition, Dirichlet
+precedence and static surface conduction. The shared event clock visits vector
+source knots and used ancestor-motion knots. At held jumps, the previous three
+components are rotated at the actual endpoint; neither physical time nor the
+frame is shifted by an epsilon. Periodic event histories still require finite
+unrolling. Native heat/cancellation/budget checks precede accepted-state publication.
+
+The existing radiation helpers continue requiring their declared uniform
+normal-flux or Robin traces on radiating regions; they do not silently replace
+a vector row. Unrelated vector boundaries remain in total enclosure heat.
+This adds no spatially varying vector field, moving mesh, continuous-time work
+integral for rotating forcing, or vector-control adjoint.
+
+Regressions compare a multi-normal native vector solve with independently
+assigned scalar face rows and check analytic heat balance. History regressions
+retain the partition under moving axes and compare the original backward-Euler
+pulse account with scalar forcing, including a rotated held left value, source
+and frame knots, tails, cancellation and exhausted budgets. Pinned Rust syntax
+parsing and source review completed; compilation and runtime tests remain unrun.

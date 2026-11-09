@@ -1414,8 +1414,8 @@ pub(crate) fn energy_balance(
         ];
         match condition {
             ThermalBc::Dirichlet { .. } => {}
-            ThermalBc::Neumann { outward_flux } => {
-                let mean = verts.iter().map(|&v| outward_flux.at(v)).sum::<f64>() / 3.0;
+            ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. } => {
+                let mean = condition.neumann_face_flux(face).iter().sum::<f64>() / 3.0;
                 neumann_out_w = face.area.mul_add(mean, neumann_out_w);
             }
             ThermalBc::Robin { htc, t_ref } => {

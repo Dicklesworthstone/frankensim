@@ -677,12 +677,13 @@ fn assemble_boundary(
             let area = face.area;
             match condition {
                 ThermalBc::Dirichlet { .. } => {}
-                ThermalBc::Neumann { outward_flux } => {
+                ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. } => {
+                    let outward_flux = condition.neumann_face_flux(face);
                     for a in 0..3 {
                         let mut acc = 0.0f64;
-                        for (b, &vb) in verts.iter().enumerate() {
+                        for (b, &value) in outward_flux.iter().enumerate() {
                             let w = if a == b { area / 6.0 } else { area / 12.0 };
-                            acc = w.mul_add(outward_flux.at(vb), acc);
+                            acc = w.mul_add(value, acc);
                         }
                         load[verts[a]] -= acc;
                         if let Some((_, relative_load)) = &mut centered {

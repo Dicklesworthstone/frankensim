@@ -556,17 +556,18 @@ pub(super) fn evaluate(
         }
         let vertices = face.vertices.map(|v| v as usize);
         match context.problem.boundary.condition_for(slot) {
-            Some(ThermalBc::Neumann { outward_flux }) => {
+            Some(condition @ (ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. })) => {
+                let outward_flux = condition.neumann_face_flux(face);
                 for (a, &va) in vertices.iter().enumerate() {
                     let mut out = 0.0_f64;
-                    for (b, &vb) in vertices.iter().enumerate() {
+                    for (b, &value) in outward_flux.iter().enumerate() {
                         let weight = if a == b {
                             face.area / 6.0
                         } else {
                             face.area / 12.0
                         };
-                        out = weight.mul_add(outward_flux.at(vb), out);
-                        has_unclassified |= outward_flux.at(vb) != 0.0;
+                        out = weight.mul_add(value, out);
+                        has_unclassified |= value != 0.0;
                     }
                     neumann.add(finite(-out / temperature[va])?)?;
                 }

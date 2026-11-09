@@ -261,8 +261,10 @@ pub(crate) fn prescribed_neumann_heat(
     let mut heat = 0.0;
     for (slot, face) in problem.mesh.boundary().iter().enumerate() {
         if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
-        if let Some(ThermalBc::Neumann { outward_flux }) = problem.boundary.condition_for(slot) {
-            let mean = face.vertices.iter().map(|&v| outward_flux.at(v as usize)).sum::<f64>() / 3.0;
+        if let Some(condition @ (ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. }))
+            = problem.boundary.condition_for(slot)
+        {
+            let mean = condition.neumann_face_flux(face).iter().sum::<f64>() / 3.0;
             heat = finite(heat + face.area * mean)?;
         }
     }

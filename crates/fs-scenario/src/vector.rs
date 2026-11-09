@@ -84,6 +84,41 @@ impl VectorPayload {
 }
 
 impl BoundaryCondition {
+    /// Sample physical heat-flux density in WORLD Cartesian components [W/m²].
+    ///
+    /// The native boundary owner must contract these components with each
+    /// original outward unit normal. Translation does not act on this free
+    /// vector; moving axes rotate it at physical time. The row prescribes no
+    /// total power, normal direction, mesh motion or stochastic realization.
+    pub fn heat_flux_world_at(
+        &self,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<[f64; 3], VectorEvaluationError> {
+        use VectorEvaluationError as E;
+        poll(checkpoint)?;
+        if self.physics != Physics::Thermal || self.kind != BcKind::Neumann {
+            return Err(E::Unsupported("heat-flux vector requires Thermal/Neumann"));
+        }
+        if self.region.is_empty() || self.compatibility.is_some() {
+            return Err(E::Unsupported("heat flux requires a named patch and no mass-flow compatibility tag"));
+        }
+        let Some(BcValue::Typed(Payload::Vector(value))) = &self.value else {
+            return Err(E::Unsupported("physical heat flux requires a typed vector"));
+        };
+        if value.meta().frame().0 != self.frame {
+            return Err(E::Unsupported("heat-flux payload and boundary must declare the same component frame"));
+        }
+        if value.meta().contract() != QuantityContract::Dimensions(Dims([0, 1, -3, 0, 0, 0])) {
+            return Err(E::Unsupported("heat flux requires a dimensions-only W/m² vector"));
+        }
+        if value.meta().orientation() != OrientationParity::Even {
+            return Err(E::Unsupported("heat flux requires ordinary even-parity vector components"));
+        }
+        value.world_vector_at(frames, time_s, checkpoint).map(|sample| sample.values)
+    }
+
     /// Evaluate prescribed fluid velocity in WORLD Cartesian components [m/s].
     ///
     /// This consumes the typed-vector form of IncompressibleFlow/Dirichlet.

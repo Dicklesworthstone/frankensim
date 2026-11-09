@@ -474,11 +474,11 @@ fn admit_isolated(
         if let Some(condition) = problem.boundary.condition_for(slot) {
             condition.validate(n)?;
             match condition {
-                ThermalBc::Neumann { outward_flux } => {
-                    if face
-                        .vertices
+                ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. } => {
+                    if condition
+                        .neumann_face_flux(face)
                         .iter()
-                        .any(|&v| outward_flux.at(v as usize) != 0.0)
+                        .any(|&value| value != 0.0)
                     {
                         return Err(invalid(
                             "isolated equilibrium requires zero flux on every boundary face",

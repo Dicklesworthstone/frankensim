@@ -69,6 +69,28 @@ fn typed_history(
     history
 }
 
+// The fixture supplies the local direction explicitly; frame rotation and the
+// bottom face's -Y normal determine the physical inward/outward exchange.
+fn vector_flux_history(mut history: ThermalRegionHistory, direction: [f64; 3]) -> ThermalRegionHistory {
+    use fs_scenario::payload::{OrientationParity, Payload, PayloadId, PayloadMeta,
+        QuantityContract, ReferenceSemantics, SampleSource, VectorPayload};
+    let Some(BcValue::Typed(Payload::Scalar(scalar))) = history.row.value.take() else {
+        panic!("fixture requires a typed scalar table");
+    };
+    let SampleSource::Table { times, values, interpolation, outside } = scalar.source() else {
+        panic!("fixture requires a table");
+    };
+    let vectors = values.iter().map(|q| direction.map(|d| -q.value * d)
+        .map(|v| fs_qty::QtyAny::new(v, HEAT_FLUX_DIMS)).to_vec()).collect();
+    history.row.value = Some(BcValue::Typed(Payload::Vector(VectorPayload::new(
+        PayloadMeta::new(QuantityContract::Dimensions(HEAT_FLUX_DIMS),
+            PayloadId::new("basis/frame-cartesian").unwrap(), scalar.meta().frame(),
+            OrientationParity::Even, ReferenceSemantics::Continuous).unwrap(),
+        SampleSource::table(times.clone(), vectors, *interpolation, *outside).unwrap(),
+    ).unwrap())));
+    history
+}
+
 #[test]
 fn g1_short_pulse_is_not_lost_or_backdated_at_its_switches() {
     let mesh = mesh();
@@ -187,15 +209,27 @@ fn g1_typed_surface_pulse_delivers_actual_face_heat_and_visits_ancestor_frame_kn
         motion: FrameMotion::Translating { direction: [1.0, 0.0, 0.0],
             displacement: held(vec![0.0, 0.0625], vec![0.0, 3.0],
                 Dims([1, 0, 0, 0, 0, 0])) } });
+    frames.add(Frame { id: FrameId(2), name: "turning-flux".into(), parent: FrameId(1),
+        motion: FrameMotion::Tilt { axis: [0.0, 0.0, 1.0], center: Default::default(),
+            angle: TimeSignal::Ramp { t_start: 0.0, t_end: 0.25,
+                from: fs_qty::QtyAny::new(0.0, Dims([0; 6])),
+                to: fs_qty::QtyAny::new(std::f64::consts::FRAC_PI_2, Dims([0; 6])) } } });
+    for use_vector in [false, true] {
     let mut flux = row("bottom", BcKind::Neumann, 0.125, 0.0, -120.0, HEAT_FLUX_DIMS);
     flux.row.value = Some(BcValue::Signal(held(
         vec![0.0, 0.125, 0.25], vec![0.0, -120.0, 0.0], HEAT_FLUX_DIMS)));
+    let flux = typed_history(flux, OutsideDomainPolicy::Clamp,
+        if use_vector { FrameId(2) } else { FrameId(1) });
+    // At the pulse's right knot, the held local +X vector rotates to +Y at
+    // physical time 0.25. Sampling the new zero or freezing the previous frame
+    // would both miss the original BE endpoint's 15 J inward contribution.
+    let flux = if use_vector { vector_flux_history(flux, [1.0, 0.0, 0.0]) } else { flux };
     let history = with_cx(|cx| ThermalBoundaryHistory::new_in_frames(
         cx, ThermalBoundaryBuilder::new(&mesh)
             .region("bottom", |f| on_box_face(f.centroid[1], 0.0), ThermalBc::adiabatic()).unwrap()
             .adiabatic_remainder(),
         &Environment::earth_lab(), &frames,
-        vec![typed_history(flux, OutsideDomainPolicy::Clamp, FrameId(1))], 0.0,
+        vec![flux], 0.0,
     ).unwrap());
     let mut driver = with_cx(|cx| run(cx, &history, &material,
         HeatSourceHistory::Fixed(ScalarField::Uniform(0.0)), 4));
@@ -222,6 +256,7 @@ fn g1_typed_surface_pulse_delivers_actual_face_heat_and_visits_ancestor_frame_kn
         assert_eq!(driver.time_s(), 1.0);
         assert_eq!(driver.temperature(), old.as_slice());
     });
+    }
 }
 
 #[test]
@@ -230,16 +265,19 @@ fn g0_typed_tail_policies_refuse_without_losing_accepted_thermal_state() {
     let mesh = mesh();
     let material = ConductivityModel::isotropic_declared(10.0).unwrap();
     with_cx(|cx| {
+      for use_vector in [false, true] {
         for outside in [OutsideDomainPolicy::Refuse, OutsideDomainPolicy::Periodic] {
             let mut flux = row("bottom", BcKind::Neumann, 0.125, 0.0, -120.0, HEAT_FLUX_DIMS);
             flux.row.value = Some(BcValue::Signal(held(
                 vec![0.0, 0.125, 0.25], vec![0.0, -120.0, 0.0], HEAT_FLUX_DIMS)));
+            let flux = typed_history(flux, outside, fs_scenario::WORLD);
+            let flux = if use_vector { vector_flux_history(flux, [0.0, 1.0, 0.0]) } else { flux };
             let history = ThermalBoundaryHistory::new(
                 cx, ThermalBoundaryBuilder::new(&mesh)
                     .region("bottom", |f| on_box_face(f.centroid[1], 0.0), ThermalBc::adiabatic()).unwrap()
                     .adiabatic_remainder(),
                 &Environment::earth_lab(),
-                vec![typed_history(flux, outside, fs_scenario::WORLD)], 0.0,
+                vec![flux], 0.0,
             ).unwrap();
             let mut driver = run(cx, &history, &material,
                 HeatSourceHistory::Fixed(ScalarField::Uniform(0.0)), 4);
@@ -250,7 +288,8 @@ fn g0_typed_tail_policies_refuse_without_losing_accepted_thermal_state() {
                 // Endpoint sampling preserves periodic behavior, while finite
                 // event stepping requires the author to unroll repeated knots.
                 assert_eq!(history.at(cx, 0.375).unwrap().conditions()[0],
-                    ThermalBc::neumann(-120.0).unwrap());
+                    if use_vector { ThermalBc::neumann_vector([0.0, 120.0, 0.0]).unwrap() }
+                    else { ThermalBc::neumann(-120.0).unwrap() });
             }
             let time = driver.time_s();
             let old = driver.temperature().to_vec();
@@ -260,5 +299,6 @@ fn g0_typed_tail_policies_refuse_without_losing_accepted_thermal_state() {
             assert_eq!(driver.temperature(), old.as_slice());
             assert_eq!(driver.accepted_steps(), steps);
         }
+      }
     });
 }

@@ -170,8 +170,8 @@ fn admit(cx: &Cx<'_>, problem: ConductionProblem<'_>, budget: FluxBudget) -> Res
             Some(ThermalBc::Dirichlet { temperature }) => {
                 BoundaryCondition::Dirichlet(vertices.map(|v| temperature.at(v)))
             }
-            Some(ThermalBc::Neumann { outward_flux }) => {
-                let flux = vertices.map(|v| outward_flux.at(v));
+            Some(condition @ (ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. })) => {
+                let flux = condition.neumann_face_flux(face);
                 if flux.iter().any(|&v| v != flux[0]) {
                     return Err(unsupported(
                         "nonconstant face Neumann flux requires a higher-order normal trace",
@@ -224,7 +224,7 @@ fn dual_boundary(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<ThermalB
         poll(cx)?;
         let dual = match condition {
             ThermalBc::Dirichlet { .. } => ThermalBc::dirichlet(0.0)?,
-            ThermalBc::Neumann { .. } => ThermalBc::adiabatic(),
+            ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. } => ThermalBc::adiabatic(),
             ThermalBc::Robin { htc, .. } => ThermalBc::Robin {
                 htc: htc.clone(),
                 t_ref: ScalarField::Uniform(0.0),

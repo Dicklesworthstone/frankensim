@@ -516,6 +516,99 @@ fn rectangular_affine_temperature_patch() {
     );
 }
 
+#[test]
+fn world_heat_flux_on_multiple_face_normals_matches_native_affine_equilibrium() {
+    const FLUX: [f64; 3] = [3.0, -4.0, 2.0];
+    const K: f64 = 10.0;
+    let exact = |point: [f64; 3]| {
+        300.0 - FLUX.iter().zip(point).map(|(q, x)| q * x).sum::<f64>() / K
+    };
+    let mesh = ConductionMesh::new(
+        fs_rep_mesh::TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![[0.0, 0.0, 0.0], [1.2, 0.1, 0.0], [0.2, 1.1, 0.0], [0.1, 0.2, 0.9]],
+    ).unwrap();
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let fixed = ThermalBc::Dirichlet {
+        temperature: ScalarField::Nodal(mesh.positions().iter().map(|&p| exact(p)).collect()),
+    };
+    let vector = ThermalBc::neumann_vector(FLUX).unwrap();
+    assert_eq!(vector.tag(), "neumann");
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(ThermalBc::neumann_vector([1.0, bad, 2.0]).is_err());
+    }
+    assert!(ThermalBoundaryBuilder::new(&mesh).region(
+        "invalid vector", |_| true, ThermalBc::NeumannVector { flux: [f64::NAN; 3] },
+    ).is_err());
+
+    let vector_boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("fixed base", |face| face.centroid[2] == 0.0, fixed.clone()).unwrap()
+        .remainder("one vector region", vector).unwrap().finish().unwrap();
+    let mut scalar_builder = ThermalBoundaryBuilder::new(&mesh)
+        .region("fixed base", |face| face.centroid[2] == 0.0, fixed).unwrap();
+    let mut manual_load = vec![0.0; mesh.vertex_count()];
+    let mut face_fluxes = Vec::new();
+    for (slot, face) in mesh.boundary().iter().enumerate() {
+        if face.centroid[2] == 0.0 { continue; }
+        assert_eq!(vector_boundary.region_for(slot), Some(1));
+        // Independent scalar face rows and the exact integral of a constant
+        // normal flux. Adjacent faces share vertices but retain different q·n.
+        let normal_flux = FLUX.iter().zip(face.outward_normal)
+            .map(|(q, n)| q * n).sum::<f64>();
+        face_fluxes.push(normal_flux);
+        for &vertex in &face.vertices {
+            manual_load[vertex as usize] -= face.area * normal_flux / 3.0;
+        }
+        scalar_builder = scalar_builder.region(&format!("face-{}", face.face),
+            |candidate| candidate.face == face.face, ThermalBc::neumann(normal_flux).unwrap(),
+        ).unwrap();
+    }
+    assert_eq!(vector_boundary.region_names().len(), 2);
+    assert_eq!(face_fluxes.len(), 3);
+    assert!(face_fluxes.iter().any(|&value| value > 0.0));
+    assert!(face_fluxes.iter().any(|&value| value < 0.0));
+    let scalar_boundary = scalar_builder.finish().unwrap();
+
+    with_cx(|cx| {
+        let temperature: Vec<_> = mesh.positions().iter().map(|&p| exact(p)).collect();
+        let vector_system = assemble_operator(cx, &mesh, &vector_boundary,
+            &material, &source, &temperature).unwrap();
+        let scalar_system = assemble_operator(cx, &mesh, &scalar_boundary,
+            &material, &source, &temperature).unwrap();
+        for ((&vector, &scalar), &manual) in vector_system.load.iter()
+            .zip(&scalar_system.load).zip(&manual_load)
+        {
+            assert!((vector - scalar).abs() < 1e-13);
+            assert!((vector - manual).abs() < 1e-13);
+        }
+        let run = |boundary| solve(cx, ConductionProblem {
+            mesh: &mesh, boundary, material: &material, source: &source, element_materials: None,
+        }, config()).unwrap();
+        let vector_solution = run(&vector_boundary);
+        let scalar_solution = run(&scalar_boundary);
+        for (&vector, &scalar) in vector_solution.temperature.iter().zip(&scalar_solution.temperature) {
+            assert!((vector - scalar).abs() < 1e-10);
+        }
+        assert!(max_nodal_error(&mesh, &vector_solution.temperature, &exact) < 1e-10);
+        let recovered = element_heat_flux(&mesh, &material, &vector_solution.temperature).unwrap();
+        for (&actual, expected) in recovered[0].iter().zip(FLUX) {
+            assert!((actual - expected).abs() < 1e-9);
+        }
+        // The base has independently computed area (1.2*1.1 - 0.1*0.2)/2
+        // and outward normal -Z. Constant-vector divergence is zero, so all
+        // other faces must remove exactly its incoming 1.3 W.
+        let expected_heat = FLUX[2] * (1.2 * 1.1 - 0.1 * 0.2) / 2.0;
+        for solution in [&vector_solution, &scalar_solution] {
+            let energy = solution.report.energy;
+            assert!((energy.neumann_out_w - expected_heat).abs() < 1e-12);
+            assert!((energy.dirichlet_in_w - expected_heat).abs() < 1e-10);
+            assert!(energy.closure_w.abs() < 1e-10);
+            assert_eq!(energy.source_w, 0.0);
+            assert_eq!(energy.robin_out_w, 0.0);
+        }
+    });
+}
+
 // ---------------------------------------------------- cylindrical shell
 
 const R_IN: f64 = 0.05;

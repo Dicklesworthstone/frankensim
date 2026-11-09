@@ -1894,3 +1894,27 @@ wire schema is unchanged. Focused source regressions cover semantic admission,
 replay, native backward-Euler equivalence and a physically integrated surface
 pulse. These new thermal changes are source-reviewed only: the execution
 environment disconnected before Rust formatting, typechecking or test execution.
+
+
+## Physical vector heat-flux boundary execution
+
+`Thermal/Neumann` admits legacy normal-flux values, typed scalar normal flux,
+and typed three-component physical heat-flux vectors through
+`Expectation::ValueOrScalarOrVector`. All carry exact W/m² dimensions; typed
+values retain matching boundary/payload frames and ordinary even parity.
+The scalar sign belongs to the consuming thermal boundary owner. A vector
+carries direction, not an inferred normal or total power.
+
+`BoundaryCondition::heat_flux_world_at` uses the existing vector sampler for
+fixed, held and linear sources, declared tails and physical-time rotation.
+Frame translation does not act on a free heat-flux vector. Unsupported basis,
+reference reset, distribution, shape, frame and cancellation refuse normally.
+The native conduction owner projects WORLD components onto each original
+exterior-face normal and retains its original face measure and region partition.
+No wire schema, geometry selector, material law or time integrator is added.
+
+Focused scenario regressions cover canonical scalar/vector replay, interpolated
+components, wrong rank/dimensions/frame/parity/role and cancelled sampling.
+Native conduction/history regressions cover multiple face normals and actual
+endpoint heat accounting. The changed source and tests pass pinned Rust syntax
+parsing; compilation and runtime tests have not run in this environment.

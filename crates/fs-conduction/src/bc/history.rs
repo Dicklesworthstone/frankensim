@@ -1,6 +1,6 @@
 //! Scenario time histories on an explicitly tagged thermal boundary.
 //!
-//! Signal and typed-scalar interpolation, declared tails and quantity/frame
+//! Signal and typed scalar/vector interpolation, declared tails and quantity/frame
 //! validation remain owned by fs-scenario. Spatial profiles remain refused:
 //! this consumes its existing thermal vocabulary without a second schema or
 //! an implicit spatial sampling rule. Frames do not move the mesh partition.
@@ -19,6 +19,7 @@ use crate::mesh::ConductionMesh;
 use fs_exec::Cx;
 use fs_qty::QtyAny;
 use fs_scenario::FrameTree;
+use fs_scenario::payload::Payload;
 use fs_scenario::scalar::ScalarEvaluationError;
 use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition};
 use fs_scenario::scenario::Environment;
@@ -33,7 +34,7 @@ impl ThermalBc {
     /// Uniform rows retain their steady semantics. A signal uses its declared
     /// interpolation and clamping; the steady entry point still refuses to
     /// choose an implicit instant. `t_ref` has the same kelvin/ambient semantics
-    /// as [`Self::from_scenario_row`]. Typed scalars use the implicit world tree;
+    /// as [`Self::from_scenario_row`]. Typed values use the implicit world tree;
     /// use [`Self::from_scenario_row_at_in_frames`] for declared non-world frames.
     ///
     /// # Errors
@@ -53,9 +54,10 @@ impl ThermalBc {
 
     /// Sample a thermal row using its original immutable frame tree.
     /// Source values can clamp or wrap; frames always use physical time.
-    /// Typed temperatures preserve absolute-temperature semantics, while the
-    /// native owner retains outward flux signs and the separate Robin ambient.
-    /// The checkpoint is polled around sampling and by the scalar/frame owner.
+    /// Typed temperatures preserve absolute-temperature semantics. Heat-flux
+    /// vectors rotate to WORLD; the original native faces project their outward
+    /// component without changing the partition. Scalar signs and the separate
+    /// Robin ambient retain their meaning. Original sample/frame checkpoints apply.
     pub fn from_scenario_row_at_in_frames(
         row: &BoundaryCondition,
         environment: &Environment,
@@ -72,6 +74,9 @@ impl ThermalBc {
             return Err(ConductionError::ScenarioRow {
                 region: row.region.clone(), what: first.what, fix: first.fix,
             });
+        }
+        if matches!(&row.value, Some(BcValue::Typed(Payload::Vector(_)))) {
+            return typed_flux(row, frames, time_s, checkpoint);
         }
         let value = match &row.value {
             Some(BcValue::Signal(signal)) => signal.eval(time_s)
@@ -159,7 +164,7 @@ impl<'m> ThermalBoundaryHistory<'m> {
 
     /// Attach typed histories with an explicitly borrowed scenario frame tree.
     /// Its immutable borrow lasts for the trajectory; no motion table is copied.
-    /// Scalar frames validate coordinate declarations but never retarget faces.
+    /// Frames rotate physical flux vectors but never retarget faces.
     pub fn new_in_frames(
         cx: &Cx<'_>, builder: ThermalBoundaryBuilder<'m>,
         environment: &Environment, frames: &'m FrameTree,
@@ -225,7 +230,7 @@ impl<'m> ThermalBoundaryHistory<'m> {
         if frames.frames.len() > 256 {
             return Err(ConductionError::Config {
                 parameter: "thermal history frames",
-                what: "scalar histories admit at most 256 frame rows".into(),
+                what: "thermal histories admit at most 256 frame rows".into(),
             });
         }
         let mut seen = BTreeSet::new();
@@ -288,16 +293,30 @@ impl<'m> ThermalBoundaryHistory<'m> {
     }
 }
 
-fn typed_value(
+fn typed_flux(
     row: &BoundaryCondition, frames: &FrameTree, time_s: f64,
     checkpoint: &mut impl FnMut() -> ControlFlow<()>,
-) -> Result<QtyAny, ConductionError> {
-    let sample = row.thermal_at(frames, time_s, checkpoint).map_err(|error| match error {
+) -> Result<ThermalBc, ConductionError> {
+    let flux = row.heat_flux_world_at(frames, time_s, checkpoint)
+        .map_err(|error| sample_error(row, error))?;
+    ThermalBc::neumann_vector(flux)
+}
+
+fn sample_error(row: &BoundaryCondition, error: ScalarEvaluationError) -> ConductionError {
+    match error {
         ScalarEvaluationError::Cancelled => ConductionError::Cancelled {
             stage: "thermal-boundary-history", at: 0,
         },
         other => row_error(row, other.to_string()),
-    })?;
+    }
+}
+
+fn typed_value(
+    row: &BoundaryCondition, frames: &FrameTree, time_s: f64,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+) -> Result<QtyAny, ConductionError> {
+    let sample = row.thermal_at(frames, time_s, checkpoint)
+        .map_err(|error| sample_error(row, error))?;
     let dims = sample.contract.dims()
         .ok_or_else(|| row_error(row, "thermal scalar must have homogeneous dimensions".into()))?;
     Ok(QtyAny::new(sample.value, dims))
@@ -316,7 +335,7 @@ fn check(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Conduct
 fn row_error(row: &BoundaryCondition, what: String) -> ConductionError {
     ConductionError::ScenarioRow {
         region: row.region.clone(), what,
-        fix: "supply a valid thermal scalar/time history on a matching named region, with kelvin reference data only for Robin".into(),
+        fix: "supply a valid thermal history on a matching named region, with a scalar or three-component Neumann flux and kelvin reference data only for Robin".into(),
     }
 }
 

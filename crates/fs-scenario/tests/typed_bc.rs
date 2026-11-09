@@ -20,6 +20,7 @@ const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
+const HEAT_FLUX: Dims = Dims([0, 1, -3, 0, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const DISPLACEMENT: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const MAGNETIC_VECTOR_POTENTIAL: Dims = Dims([1, 1, -2, 0, -1, 0]);
@@ -491,6 +492,57 @@ fn g0_velocity_adds_an_explicit_vector_without_reinterpreting_legacy_rows() {
         expectation(Physics::Elasticity, BcKind::Traction),
         Expectation::ValueOrVectorOrTensor(PRESSURE)
     );
+}
+
+#[test]
+fn g0_heat_flux_admits_scalar_and_vector_with_exact_role_and_canonical_replay() {
+    use std::ops::ControlFlow;
+    assert_eq!(expectation(Physics::Thermal, BcKind::Neumann),
+        Expectation::ValueOrScalarOrVector(HEAT_FLUX));
+    let vector = typed_bc(Physics::Thermal, BcKind::Neumann,
+        vector_table_payload(HEAT_FLUX, 0));
+    let mut scalar = typed_bc(Physics::Thermal, BcKind::Neumann,
+        scalar_payload(HEAT_FLUX, 0));
+    scalar.region = "scalar-flux".into();
+    let mut scenario = Scenario::new("thermal-vector", 73, Environment::earth_lab());
+    scenario.base_bcs = vec![vector.clone(), scalar];
+    assert!(scenario.validate().is_empty());
+    let mut findings = Vec::new();
+    check_round_trip(&scenario, &mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
+    let restored = parse_ir(&write_ir(&scenario)).unwrap();
+    assert_eq!(restored.scenario().base_bcs[0].heat_flux_world_at(
+        &restored.scenario().frames, 0.5, &mut || ControlFlow::Continue(()),
+    ).unwrap(), [2.5, 3.5, 4.5]);
+    assert_eq!(restored.scenario().base_bcs[1].thermal_at(
+        &restored.scenario().frames, 0.5, &mut || ControlFlow::Continue(()),
+    ).unwrap().value, 1.0);
+
+    let bad_rows = [
+        typed_bc(Physics::Thermal, BcKind::Neumann, vector_payload(PRESSURE, 0)),
+        typed_bc(Physics::Thermal, BcKind::Neumann, vector_payload(HEAT_FLUX, 7)),
+        typed_bc(Physics::Thermal, BcKind::Dirichlet, vector_payload(TEMPERATURE, 0)),
+        typed_bc(Physics::Thermal, BcKind::Neumann, Payload::Vector(VectorPayload::new(
+            dimensional_meta(HEAT_FLUX, 0), SampleSource::fixed(vec![QtyAny::new(1.0, HEAT_FLUX); 2]),
+        ).unwrap())),
+        typed_bc(Physics::Thermal, BcKind::Neumann, Payload::Vector(VectorPayload::new(
+            PayloadMeta::new(QuantityContract::Dimensions(HEAT_FLUX), id("basis/world-cartesian"),
+                FrameId(0), OrientationParity::Odd, ReferenceSemantics::Continuous).unwrap(),
+            SampleSource::fixed(vec![QtyAny::new(1.0, HEAT_FLUX); 3]),
+        ).unwrap())),
+    ];
+    for bad in bad_rows {
+        findings.clear();
+        bad.check(&mut findings);
+        assert!(!findings.is_empty());
+        assert!(bad.heat_flux_world_at(&scenario.frames, 0.5,
+            &mut || ControlFlow::Continue(())).is_err());
+    }
+    assert!(vector.heat_flux_world_at(&scenario.frames, 2.0,
+        &mut || ControlFlow::Continue(())).is_err());
+    assert!(matches!(vector.heat_flux_world_at(&scenario.frames, 0.5,
+        &mut || ControlFlow::Break(())),
+        Err(fs_scenario::vector::VectorEvaluationError::Cancelled)));
 }
 
 #[test]
