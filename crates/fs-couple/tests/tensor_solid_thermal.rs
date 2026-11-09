@@ -1,6 +1,8 @@
 //! Synthetic Kelvin/Maxwell self-heating; no empirical material qualification.
 #[path = "tensor_solid_thermal/spatial.rs"]
 mod spatial;
+#[path = "tensor_solid_thermal/tones.rs"]
+mod tones;
 use std::collections::BTreeMap;
 use fs_blake3::ContentHash;
 use fs_couple::tensor_material::{InitialMemory, TensorMaterialBudget, solid::TensorSolidBody};

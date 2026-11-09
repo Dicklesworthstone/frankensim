@@ -13,6 +13,8 @@
 pub mod relaxation;
 /// Original sparse spatial dynamics and element heat, without modal projection.
 pub mod spatial;
+/// Continuous multitone force motion and its physical finite-cell self-heating.
+pub mod tones;
 /// Coherent original-quadrature harmonic heat on the finite enthalpy residual.
 pub mod harmonic;
 
@@ -53,6 +55,8 @@ pub enum SolidThermalError<E> {
     Solid(SolidError),
     /// Original sparse spatial constitutive/dynamic owner refusal.
     Spatial(fs_solid::linear3::visco::ViscoElementError),
+    /// Original prepared continuous-force and complete material-memory refusal.
+    Prepared(super::prepared::PreparedSolidError),
     Thermal(DepositionError),
     Phase(PhaseStateError),
     Observer(E),

@@ -12456,3 +12456,37 @@ MBD/pHS and finite-caloric/thermal event owners in a bounded native build, as
 did all four existing driven-thermal regressions after the shared acceptance
 hook changed. Numerical kernels and tested source were unchanged. A complete
 workspace build remains outstanding.
+
+## Continuous force-driven tensor solids with finite-cell self-heating
+
+`tensor_material::solid::thermal::tones` connects
+`PreparedTensorSolidBody::advance_tones_thermal_candidate` to the existing
+continuous-tone mechanical flow and original finite-cell enthalpy timeline.
+All supplied nodal tones act simultaneously on the original consistent inertia
+and retained Kelvin/Maxwell system. Each mechanical interval advances once,
+independently of caloric event/CFL cuts. Positive original element heat enters
+its explicit whole-reference-mass/volume receiver exactly once.
+
+The accepted history must borrow the exact prepared body, share the thermal
+clock and retain one complete unique caloric route per element. Exact caloric
+law identity, reference inventory and explicit fully-solid frozen-coefficient
+temperature intervals remain binding at thermal substeps/events. All native
+observer source, transport, interval, transition, event and timestep hooks
+survive through the shared heat handoff. Mechanical history, thermal state and
+observer history publish together; late refusal and cancellation preserve both
+accepted endpoints.
+
+The report retains original nodal force-work moments, kinetic/elastic/Maxwell
+storage and independently integrated physical heat. Stable original mechanical,
+native caloric and actual heat-handoff residuals form the joint account;
+recovered storage and numerical defects never become heat. Mechanical
+coefficients, supports and geometry remain fixed; the original full/reduced
+basis scope and endpoint-only strain/startup-band limitations remain. Mean heat
+over a fixed mechanical interval preserves the original explicit thermal
+order/CFL; mechanical duration and thermal cuts need physical time refinement.
+
+Three focused tests specify independent original Tet4 inertia/strain/Maxwell
+ODE work and heat, startup interference and unforced decay, original multi-cell
+routing with transport/events, and source/clock/late refusal/retry/cancellation
+isolation. Native execution and shared-helper type checking were unavailable
+when this extension was authored; no runtime validation is inferred.

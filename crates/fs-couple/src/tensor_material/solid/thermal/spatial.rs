@@ -21,7 +21,7 @@ use fs_math::dd::Dd;
 use fs_solid::linear3::visco::{ViscoDynamicState, ViscoDynamicStep, ViscoElementError};
 use fs_solid::linear3::{QuadraticThermalStrainField, TetElasticError};
 use fs_thermal::enthalpy::{
-    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event, HeatTransfer,
     collect_source_rates,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +85,7 @@ fn native<E>(error: ViscoElementError) -> SolidThermalError<E> {
         other => SolidThermalError::Spatial(other),
     }
 }
-fn same_inventory(a: f64, b: f64) -> bool {
+pub(super) fn same_inventory(a: f64, b: f64) -> bool {
     a.is_finite()
         && b.is_finite()
         && a > 0.0
@@ -194,7 +194,6 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
         ));
     }
     let mut element_heat_j = Vec::with_capacity(receivers.len());
-    let mut powers = Vec::with_capacity(receivers.len());
     let mut total = 0.0;
     for element in &step.constitutive.element_steps {
         poll(cx)?;
@@ -204,14 +203,7 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
                 "negative native constitutive heat",
             ));
         }
-        let power = number(heat / duration)?;
-        if heat > 0.0 && power == 0.0 {
-            return Err(SolidThermalError::Invalid(
-                "unrepresentable positive element heat rate",
-            ));
-        }
         element_heat_j.push(heat);
-        powers.push(power);
         total = number(total + heat)?;
     }
     let heat = number(step.constitutive.step_dissipated_j)?;
@@ -224,32 +216,14 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
     let mechanical = number((change + Dd::from_f64(heat) - work).to_f64())?;
     balance(mechanical, config.energy_tolerance_j)?;
 
-    let heating = NativeHeat {
-        inner: observer.clone(),
-        receivers,
-        powers,
-        cx,
-        accepted_time_s: thermal.time_s(),
-        target_s: target,
-        pending: None,
-        deposited_j: 0.0,
-    };
-    let (next_thermal, heating, audit) =
-        thermal.advance_observed(&heating, target, config.thermal, || {
-            cx.checkpoint().map_err(|_| DepositionError::Cancelled)
-        })?;
-    if heating.pending.is_some()
-        || heating.accepted_time_s.to_bits() != target.to_bits()
-        || next_thermal.time_s().to_bits() != target.to_bits()
-    {
-        return Err(SolidThermalError::Invalid(
-            "spatial and caloric candidates ended at different times",
-        ));
-    }
-    let handoff = number(
-        (Dd::from_f64(heating.deposited_j) - Dd::from_f64(heat)).to_f64(),
+    let (next_thermal, next_observer, audit, deposited_j) = deposit_element_heat(
+        thermal, observer, receivers, &element_heat_j, target, config,
+        || cx.checkpoint().is_err(),
     )?;
-    let external = Dd::from_f64(audit.external_heat_j) - Dd::from_f64(heating.deposited_j);
+    let handoff = number(
+        (Dd::from_f64(deposited_j) - Dd::from_f64(heat)).to_f64(),
+    )?;
+    let external = Dd::from_f64(audit.external_heat_j) - Dd::from_f64(deposited_j);
     let combined = number(
         (change + Dd::from_f64(audit.stored_energy_change_j)
             - Dd::from_f64(audit.incoming_energy_j) - external - work)
@@ -261,14 +235,14 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
     Ok(SpatialViscoThermalCandidate {
         solid: next,
         thermal: next_thermal,
-        observer: heating.inner,
+        observer: next_observer,
         report: SpatialViscoThermalReport {
             mechanical: step,
             energy: SolidThermalReport {
                 thermal: audit,
                 element_heat_j,
                 material_heat_j: heat,
-                deposited_heat_j: heating.deposited_j,
+                deposited_heat_j: deposited_j,
                 external_thermal_heat_j: number(external.to_f64())?,
                 mechanical_work_j: number(work.to_f64())?,
                 mechanical_energy_change_j: number(change.to_f64())?,
@@ -280,6 +254,67 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
     })
 }
 
+// Both original motion owners deposit already integrated element loss. The
+// caloric owner alone chooses thermal cuts; none of those cuts reruns motion.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn deposit_element_heat<'t, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'t>,
+    observer: &O,
+    receivers: Vec<Receiver<'_>>,
+    element_heat_j: &[f64],
+    target_s: f64,
+    config: SolidThermalConfig,
+    cancelled: impl Fn() -> bool,
+) -> Result<(DepositionSimulation<'t>, O, EnergyAudit, f64), O::Error> {
+    poll_heat(&cancelled)?;
+    let duration = number(target_s - thermal.time_s())?;
+    if duration <= 0.0 || receivers.len() != element_heat_j.len() {
+        return Err(SolidThermalError::Invalid(
+            "one complete positive material-heat interval and receiver inventory required",
+        ));
+    }
+    let mut powers = Vec::with_capacity(element_heat_j.len());
+    for &heat in element_heat_j {
+        poll_heat(&cancelled)?;
+        let heat = number(heat)?;
+        let power = number(heat / duration)?;
+        if heat < 0.0 || heat > 0.0 && power == 0.0 {
+            return Err(SolidThermalError::Invalid(
+                "unrepresentable nonnegative element heat rate",
+            ));
+        }
+        powers.push(power);
+    }
+    let heating = NativeHeat {
+        inner: observer.clone(),
+        receivers,
+        powers,
+        cancelled: &cancelled,
+        accepted_time_s: thermal.time_s(),
+        target_s,
+        pending: None,
+        deposited_j: 0.0,
+    };
+    let (next, heating, audit) =
+        thermal.advance_observed(&heating, target_s, config.thermal, || {
+            if cancelled() { Err(DepositionError::Cancelled) } else { Ok(()) }
+        })?;
+    if heating.pending.is_some()
+        || heating.accepted_time_s.to_bits() != target_s.to_bits()
+        || next.time_s().to_bits() != target_s.to_bits()
+    {
+        return Err(SolidThermalError::Invalid(
+            "material and caloric candidates ended at different times",
+        ));
+    }
+    poll_heat(&cancelled)?;
+    Ok((next, heating.inner, audit, heating.deposited_j))
+}
+
+fn poll_heat<E>(cancelled: &dyn Fn() -> bool) -> Result<(), E> {
+    if cancelled() { Err(SolidThermalError::Cancelled) } else { Ok(()) }
+}
+
 #[derive(Clone, Copy)]
 struct Pending {
     start_s: f64,
@@ -289,26 +324,26 @@ struct Pending {
 }
 
 #[derive(Clone)]
-struct NativeHeat<'m, 'c, 'scope, O> {
+struct NativeHeat<'m, 'c, O> {
     inner: O,
     receivers: Vec<Receiver<'m>>,
     powers: Vec<f64>,
-    cx: &'c Cx<'scope>,
+    cancelled: &'c dyn Fn() -> bool,
     accepted_time_s: f64,
     target_s: f64,
     pending: Option<Pending>,
     deposited_j: f64,
 }
-impl<O: DepositionObserver> NativeHeat<'_, '_, '_, O> {
+impl<O: DepositionObserver> NativeHeat<'_, '_, O> {
     fn admit(&self, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
         for receiver in &self.receivers {
-            poll(self.cx)?;
+            poll_heat(self.cancelled)?;
             receiver.admit(thermal)?;
         }
         Ok(())
     }
 }
-impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, '_, O> {
+impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, O> {
     type Error = SolidThermalError<O::Error>;
     fn begin(&mut self) -> Result<(), O::Error> {
         self.inner.begin().map_err(SolidThermalError::Observer)
@@ -479,6 +514,6 @@ impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, '_, O> {
         self.admit(thermal)?;
         self.deposited_j = number(self.deposited_j + pending.deposited_j)?;
         self.accepted_time_s = pending.end_s;
-        poll(self.cx)
+        poll_heat(self.cancelled)
     }
 }
