@@ -12,6 +12,8 @@ use super::{Uniaxial, WoolFelt, WoolFeltResponse, WoolFeltState};
 use crate::MaterialError;
 use fs_math::{dd::Dd, det};
 
+mod prony;
+
 /// The original source realization retains at most eight active material arms.
 pub const MAX_FELT_RATE_BRANCHES: usize = 8;
 
