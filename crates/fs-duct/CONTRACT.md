@@ -4773,6 +4773,51 @@ equilibrium/direction, half-volume forces, atomic refusals and instantaneous
 speed limits). `superfluid_superleak` demonstrates the sourced 1.8 K helium
 reference and prints the native conservation reports.
 
+
+## Closed-channel Landau–Khalatnikov bulk transport
+
+`TwoFluidChannel::configure_closed_transport` consumes the original
+`fs_material::superfluid::transport::LongitudinalTransport` before stepping.
+It retains the exact material identity, its normal shear viscosity, reciprocal
+second viscosities and explicit Fourier conductivity. Two kinetic-energy
+diffusion modes advance barycentric and counterflow motion; the conductive
+mode uses `kappa/(rho Cv)`, including the pressure response required to leave
+local density unchanged during an isolated conduction update.
+
+The stationary impermeable ends impose zero velocity on both components and
+zero conductive heat flux. Longitudinal traction impulses are reported
+separately from pressure and sidewall drag and join the existing momentum
+audit. The end supports do no work. Longitudinal viscous loss is integrated
+as nonnegative gradient squares and joins the existing per-cell physical heat
+route exactly once. Conductive availability destruction is a separate account:
+dividing it by the frozen reference temperature gives generated entropy; it
+is never added to caloric heat. The wave balance includes this availability
+loss, including when a Vinen line-energy store is active.
+
+A symmetric transport/wave/transport composition preserves second-order time
+consistency for the frozen linear system. The uniform constitutive operator is
+diagonalized once at configuration; transport half-steps reuse scalar
+tridiagonal factors and buffers. Work is O(cells * accepted diffusion substeps),
+storage is O(cells), and stepping allocates nothing. The caller's maximum
+diffusive Courant number is in (0, 0.5], keeping midpoint diffusion modes
+nonoscillatory; a finite substep budget refuses unresolved stiff requests.
+The wave Courant policy remains separate. Source, solve, balance, heat-owner
+or cancellation refusal publishes neither fields nor cumulative accounts.
+
+Scalar normal-wall drag, authored body forces, mutual friction and configured
+Vinen tangles remain composable. Moving or counterflow-driven endpoints,
+endpoint-response queries and transverse normal-profile memory refuse this
+configuration explicitly. The present boundary model does not supply their
+missing viscous/thermal ports. It also does not establish a frequency-dependent
+transport fit, nonlinear thermal feedback, phase transitions, critical velocity,
+microscopic helium calibration or exact preservation of stiff driven equilibria.
+
+G1/G3/G4 regressions in `tests/superfluid_transport.rs` compare the complete
+four-field solution against an independent physical-coordinate ODE, verify
+second-order time refinement, separate conduction from physical heat, close
+forced momentum/heat with sidewall and mutual drag, retain the zero-transport
+path, and verify transactional cancellation, heat refusal and budget limits.
+
 ## Condensed harmonic modal wall fields
 
 `ModalGalerkin::into_viscothermal_harmonic` evaluates the SAME uniform-cylinder,

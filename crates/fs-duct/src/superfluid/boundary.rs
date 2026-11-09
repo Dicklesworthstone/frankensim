@@ -333,6 +333,7 @@ impl TwoFluidChannel {
     /// independent of the new boundary velocity, while the second half-step
     /// changes no pressure or barycentric momentum. The complete coupled step
     /// still applies the original friction law to its actual moving solution.
+    /// Configured closed bulk transport has no admitted moving-end response.
     pub fn impermeable_end_response(
         &mut self,
         dt_s: f64,
@@ -340,6 +341,12 @@ impl TwoFluidChannel {
         friction: MutualFriction,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ImpermeableEndResponse, ChannelError> {
+        poll(&mut cancelled)?;
+        if self.transport.is_some() {
+            return Err(ChannelError::Invalid(
+                "configured bulk transport excludes endpoint response queries",
+            ));
+        }
         self.stage_step(
             dt_s,
             BoundaryVelocities::CLOSED,

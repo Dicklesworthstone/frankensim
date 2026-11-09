@@ -207,7 +207,9 @@ impl TwoFluidChannel {
         let mut correction = 0.0;
         let mut scale =
             before.abs() + after.abs() + body.abs() + channel.interior_wall_impulse_n_s.abs();
-        let mut wall = channel.boundary_pressure_impulse_n_s;
+        let mut wall = [0, 1].map(|i| {
+            channel.boundary_pressure_impulse_n_s[i] + channel.boundary_longitudinal_impulse_n_s[i]
+        });
         for (end, i) in [0, n].into_iter().enumerate() {
             let (_, _, density) = force.components(i, &self.material);
             let volume = 0.5 * self.cell_volume;
@@ -219,7 +221,9 @@ impl TwoFluidChannel {
         scale += wall[0].abs()
             + wall[1].abs()
             + channel.boundary_pressure_impulse_n_s[0].abs()
-            + channel.boundary_pressure_impulse_n_s[1].abs();
+            + channel.boundary_pressure_impulse_n_s[1].abs()
+            + channel.boundary_longitudinal_impulse_n_s[0].abs()
+            + channel.boundary_longitudinal_impulse_n_s[1].abs();
         let defect =
             (after - before) - body - (wall[0] + wall[1]) - channel.interior_wall_impulse_n_s;
         let tolerance = 65536.0 * f64::EPSILON * scale;

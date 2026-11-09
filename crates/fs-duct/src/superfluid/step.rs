@@ -89,6 +89,18 @@ impl TwoFluidChannel {
                 .face_to_modes(v, end.normal_m_s - end.superfluid_m_s);
         }
         let n = self.cells();
+        if self.transport.is_some()
+            && (!physical_limits
+                || boundary != BoundaryVelocities::CLOSED
+                || self
+                    .accepted
+                    .iter()
+                    .any(|f| f.faces[0] != 0.0 || f.faces[n] != 0.0))
+        {
+            return Err(ChannelError::Invalid(
+                "configured bulk transport requires stationary closed ends and excludes endpoint response queries",
+            ));
+        }
         force.validate(n + 1, &self.material, cancelled)?;
         let before = self.energy_with_profile(false, cancelled)?;
         let vortex_before = self.vortex_energy_with(false, cancelled)?;
@@ -106,6 +118,9 @@ impl TwoFluidChannel {
                 self.pending_heat_j[i] = 0.0;
                 self.pending_viscous_heat_j[i] = 0.0;
                 self.pending_dissipation_heat_j[i] = 0.0;
+                if let Some(transport) = &mut self.transport {
+                    transport.pending_heat_j[i] = 0.0;
+                }
             }
         }
         for mode in 0..2 {
@@ -125,6 +140,17 @@ impl TwoFluidChannel {
             friction
         };
         self.friction_half_step(split_friction, dt / 2.0, cancelled)?;
+        let transport_before = self.transport_half_step(dt / 2.0, cancelled)?;
+        if let Some(transport) = &mut self.transport {
+            for i in 0..n {
+                if i % 128 == 0 {
+                    poll(cancelled)?;
+                }
+                for mode in 0..2 {
+                    transport.wave_start[mode][i] = self.pending[mode].cells[i];
+                }
+            }
+        }
         let (source_work, residual, wall_impulse) = if self.uses_fitted_wave_operator(friction) {
             // Linear drag, authored force and the midpoint wave gradient share
             // one exact face evolution. A split stiff relaxation would destroy
@@ -141,8 +167,12 @@ impl TwoFluidChannel {
             let mut source_work = self.force_half_step(force, dt / 2.0, cancelled)?;
             let mut residual: f64 = 0.0;
             for mode in 0..2 {
+                let old = match &self.transport {
+                    Some(transport) => &transport.wave_start[mode],
+                    None => &self.accepted[mode].cells,
+                };
                 residual = residual.max(midpoint(
-                    &self.accepted[mode].cells,
+                    old,
                     &mut self.pending[mode],
                     &mut self.workspace[mode],
                     self.modes.speed[mode] * dt / self.dx,
@@ -155,7 +185,7 @@ impl TwoFluidChannel {
         };
         let mut work = 0.0;
         for mode in 0..2 {
-            let old = &self.accepted[mode].cells;
+            let old = self.wave_initial_cells(mode);
             let new = &self.pending[mode].cells;
             work += dt
                 * self.area_m2
@@ -163,9 +193,44 @@ impl TwoFluidChannel {
                 * (0.5 * (old[0] + new[0]) * port_modes[0][mode]
                     - 0.5 * (old[n - 1] + new[n - 1]) * port_modes[1][mode]);
         }
+        // Wave pressure is evaluated around the wave block itself. The two
+        // surrounding conduction steps have their own zero-work insulated ports.
+        let mut pressure_impulse = [0.0; 2];
+        for (end, cell) in [0, n - 1].into_iter().enumerate() {
+            let old = self.modes.cell(
+                &self.material,
+                [
+                    self.wave_initial_cells(0)[cell],
+                    self.wave_initial_cells(1)[cell],
+                ],
+            );
+            let new = self.modes.cell(
+                &self.material,
+                [self.pending[0].cells[cell], self.pending[1].cells[cell]],
+            );
+            pressure_impulse[end] = dt
+                * self.area_m2
+                * (0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa)
+                * if end == 0 { 1.0 } else { -1.0 };
+        }
         if force != BodyForce::None {
             self.validate_pending_with_limits(physical_limits, cancelled)?;
         }
+        let transport_after = self.transport_half_step(dt / 2.0, cancelled)?;
+        let conductive_loss =
+            transport_before.conductive_loss_j + transport_after.conductive_loss_j;
+        let longitudinal_impulse = [0, 1].map(|i| {
+            transport_before.boundary_impulse_n_s[i] + transport_after.boundary_impulse_n_s[i]
+        });
+        let transport_substeps = transport_before
+            .substeps
+            .checked_add(transport_after.substeps)
+            .ok_or(ChannelError::Invalid(
+                "bulk transport substep count overflow",
+            ))?;
+        let residual = residual
+            .max(transport_before.residual)
+            .max(transport_after.residual);
         self.friction_half_step(split_friction, dt / 2.0, cancelled)?;
         vortex_transport.add(self.transport_vortex_half_step(dt / 2.0, cancelled)?)?;
         self.validate_pending_with_limits(physical_limits, cancelled)?;
@@ -182,16 +247,22 @@ impl TwoFluidChannel {
         let mut correction = 0.0;
         let mut viscous_heat = 0.0;
         let mut viscous_correction = 0.0;
+        let mut longitudinal_heat = 0.0;
+        let mut longitudinal_correction = 0.0;
         for i in 0..n {
             if i % 128 == 0 {
                 poll(cancelled)?;
             }
             let value = self.pending_heat_j[i];
             let viscous = self.pending_viscous_heat_j[i];
-            let combined = value + viscous;
-            if ![value, viscous, combined].into_iter().all(f64::is_finite)
+            let longitudinal = self.transport.as_ref().map_or(0.0, |t| t.pending_heat_j[i]);
+            let combined = value + viscous + longitudinal;
+            if ![value, viscous, longitudinal, combined]
+                .into_iter()
+                .all(f64::is_finite)
                 || value < 0.0
                 || viscous < 0.0
+                || longitudinal < 0.0
             {
                 return Err(ChannelError::Invalid(
                     "cell dissipation heat is not representable",
@@ -200,18 +271,30 @@ impl TwoFluidChannel {
             self.pending_dissipation_heat_j[i] = combined;
             accumulate(&mut heat, &mut correction, value);
             accumulate(&mut viscous_heat, &mut viscous_correction, viscous);
+            accumulate(
+                &mut longitudinal_heat,
+                &mut longitudinal_correction,
+                longitudinal,
+            );
+        }
+        if let Some(transport) = &self.transport {
+            transport.admit_totals(longitudinal_heat, conductive_loss)?;
         }
         let total_heat = self.total_heat_j + heat;
         let total_viscous_heat = self.total_viscous_heat_j + viscous_heat;
-        let dissipated = heat + viscous_heat;
-        let total_dissipated = total_heat + total_viscous_heat;
+        let dissipated = heat + viscous_heat + longitudinal_heat;
+        let total_dissipated = total_heat
+            + total_viscous_heat
+            + self.cumulative_longitudinal_viscous_heat_j()
+            + longitudinal_heat;
         let (defect, scale) = if self.vinen_tangle.is_some() {
             (
                 (after - before) + (vortex_after - vortex_before)
                     - work
                     - source_work
                     - vortex_energy_in
-                    + dissipated,
+                    + dissipated
+                    + conductive_loss,
                 before
                     + after
                     + vortex_before
@@ -220,14 +303,15 @@ impl TwoFluidChannel {
                     + source_work.abs()
                     + vortex_transport_energy[0].abs()
                     + vortex_transport_energy[1].abs()
-                    + dissipated,
+                    + dissipated
+                    + conductive_loss,
             )
         } else {
             // Preserve the original no-tangle arithmetic, including its signed
             // zero and rounding behavior, for every existing friction closure.
             (
-                (after - before) - work - source_work + dissipated,
-                before + after + work.abs() + source_work.abs() + dissipated,
+                (after - before) - work - source_work + dissipated + conductive_loss,
+                before + after + work.abs() + source_work.abs() + dissipated + conductive_loss,
             )
         };
         let tolerance = 32768.0 * f64::EPSILON * scale;
@@ -236,6 +320,10 @@ impl TwoFluidChannel {
             total_heat,
             viscous_heat,
             total_viscous_heat,
+            longitudinal_heat,
+            conductive_loss,
+            longitudinal_impulse[0],
+            longitudinal_impulse[1],
             dissipated,
             total_dissipated,
             work,
@@ -269,21 +357,6 @@ impl TwoFluidChannel {
         let boundary_heat = dt
             * self.area_m2
             * (left.counterflow_heat_flux_w_m2 - right.counterflow_heat_flux_w_m2);
-        let mut pressure_impulse = [0.0; 2];
-        for (end, cell) in [0, n - 1].into_iter().enumerate() {
-            let old = self.modes.cell(
-                &self.material,
-                [self.accepted[0].cells[cell], self.accepted[1].cells[cell]],
-            );
-            let new = self.modes.cell(
-                &self.material,
-                [self.pending[0].cells[cell], self.pending[1].cells[cell]],
-            );
-            pressure_impulse[end] = dt
-                * self.area_m2
-                * (0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa)
-                * if end == 0 { 1.0 } else { -1.0 };
-        }
         if ![
             boundary_mass,
             boundary_entropy,
@@ -299,8 +372,9 @@ impl TwoFluidChannel {
             ));
         }
         poll(cancelled)?;
+        let boundary_impulse = [0, 1].map(|i| pressure_impulse[i] + longitudinal_impulse[i]);
         let momentum =
-            self.audit_resolved_momentum(force, dt, pressure_impulse, wall_impulse, cancelled)?;
+            self.audit_resolved_momentum(force, dt, boundary_impulse, wall_impulse, cancelled)?;
         Ok(ChannelStep {
             time_s: next_time,
             wave_energy_before_j: before,
@@ -321,6 +395,10 @@ impl TwoFluidChannel {
             resolved_momentum_defect_n_s: momentum[3],
             mutual_friction_heat_j: heat,
             normal_viscous_heat_j: viscous_heat,
+            longitudinal_viscous_heat_j: longitudinal_heat,
+            conductive_availability_loss_j: conductive_loss,
+            boundary_longitudinal_impulse_n_s: longitudinal_impulse,
+            transport_substeps,
             wave_balance_defect_j: defect,
             boundary_mass_kg: boundary_mass,
             boundary_entropy_j_k: boundary_entropy,

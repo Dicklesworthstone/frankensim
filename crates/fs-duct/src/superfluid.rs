@@ -31,13 +31,17 @@
 //! drift field, reflecting or reservoir boundaries, and explicit line-energy
 //! ports. Positivity-preserving finite volumes retain the same native wave and
 //! coupling interfaces; transport allocates only during configuration.
+//! Optional [`ClosedTransportControls`] adds longitudinal shear/second
+//! viscosities and Fourier conduction in a stationary closed, insulated channel.
+//! Its symmetric diffusion/wave split reuses scalar tridiagonal workspaces.
+//! Viscous loss is physical heat; conductive loss of availability is separate.
 //! Wave storage is availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
 //! The scalar permeability option is quasisteady; the spectral option resolves
 //! an authored number of transverse laminar modes with an explicit passive
 //! high-mode approximation. Neither includes local radial vortex friction,
 //! nonlinear heating/phase feedback, resolved vortex geometry, critical
-//! velocities, longitudinal/second viscosities, Kapitza resistance, entrance
+//! velocities, moving-end bulk transport, Kapitza resistance, entrance
 //! effects or arbitrary transverse geometry.
 
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
@@ -52,6 +56,7 @@ mod momentum;
 mod step;
 mod tangle;
 mod thermomechanical;
+mod transport;
 mod viscosity;
 pub use boundary::{
     ChannelEnd, CounterflowEndsResponse, ImpermeableEndResponse, ImpermeableEndsResponse,
@@ -61,6 +66,7 @@ use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 pub use tangle::{VortexTransportBoundaries, VortexTransportBoundary, VortexTransportControls};
 pub use thermomechanical::ThermomechanicalEndsResponse;
+pub use transport::ClosedTransportControls;
 
 /// Source admission, caller domain, cancellation or numerical refusal.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,8 +255,19 @@ pub struct ChannelStep {
     /// Normal-fluid kinetic energy dissipated by the stationary viscous walls.
     /// Exported separately from mutual friction, with the same cell heat route.
     pub normal_viscous_heat_j: f64,
+    /// Longitudinal normal shear and second-viscosity heat, exported once.
+    pub longitudinal_viscous_heat_j: f64,
+    /// Fourier conduction destroys wave availability and redistributes heat.
+    /// This is T0 times generated entropy, NOT an extra caloric heat deposit.
+    pub conductive_availability_loss_j: f64,
+    /// Longitudinal viscous traction impulses ON the fluid at [left, right].
+    /// The stationary end supports receive the exact opposite impulses.
+    pub boundary_longitudinal_impulse_n_s: [f64; 2],
+    /// Diffusion substeps across both halves of the symmetric transport split.
+    pub transport_substeps: usize,
     /// Change in wave plus vortex storage, minus boundary/body work and inward
-    /// transported line energy, plus exported dissipative heat. With no tangle
+    /// transported line energy, plus exported dissipative heat and conductive
+    /// availability loss. With no tangle
     /// this is the wave-only balance.
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
@@ -264,9 +281,9 @@ pub struct ChannelStep {
 }
 
 impl ChannelStep {
-    /// Physical heat exported once by both dissipative mechanisms.
+    /// Physical heat exported once by the mechanical dissipative mechanisms.
     pub fn dissipated_heat_j(&self) -> f64 {
-        self.mutual_friction_heat_j + self.normal_viscous_heat_j
+        self.mutual_friction_heat_j + self.normal_viscous_heat_j + self.longitudinal_viscous_heat_j
     }
 }
 
@@ -315,6 +332,7 @@ pub struct TwoFluidChannel {
     normal_wall_rate_s_inv: f64,
     normal_profile: Option<viscosity::NormalProfileMemory>,
     vinen_tangle: Option<tangle::VinenTangleMemory>,
+    transport: Option<transport::TransportMemory>,
     length_m: f64,
     area_m2: f64,
     dx: f64,
@@ -379,6 +397,7 @@ impl TwoFluidChannel {
             normal_wall_rate_s_inv: 0.0,
             normal_profile: None,
             vinen_tangle: None,
+            transport: None,
             length_m,
             area_m2,
             dx,
@@ -476,6 +495,20 @@ impl TwoFluidChannel {
         {
             return Err(ChannelError::Invalid(
                 "initialization needs N cells and N+1 faces before the first step",
+            ));
+        }
+        if self.transport.is_some()
+            && [
+                normal_m_s[0],
+                normal_m_s[n],
+                superfluid_m_s[0],
+                superfluid_m_s[n],
+            ]
+            .into_iter()
+            .any(|v| v != 0.0)
+        {
+            return Err(ChannelError::Invalid(
+                "configured bulk transport requires stationary closed initial ends",
             ));
         }
         for i in 0..=n {
@@ -617,10 +650,15 @@ impl TwoFluidChannel {
         self.last_heat_j
             .iter()
             .zip(&self.last_viscous_heat_j)
-            .map(|(mutual, viscous)| mutual + viscous)
+            .enumerate()
+            .map(|(i, (mutual, viscous))| {
+                mutual + viscous + self.transport.as_ref().map_or(0.0, |t| t.last_heat_j[i])
+            })
     }
     pub fn cumulative_dissipated_heat_j(&self) -> f64 {
-        self.total_heat_j + self.total_viscous_heat_j
+        self.total_heat_j
+            + self.total_viscous_heat_j
+            + self.cumulative_longitudinal_viscous_heat_j()
     }
     /// Courant <= 1 accuracy policy; implicit midpoint is not a time-error estimator.
     pub fn maximum_step_s(&self) -> f64 {
@@ -683,7 +721,8 @@ impl TwoFluidChannel {
     /// Prepare the original thermal owner's candidate before publishing a wave step.
     ///
     /// The callback receives the proposed report and per-cell total dissipated
-    /// joules, including mutual friction and the configured normal wall drag.
+    /// joules, including mutual friction, normal wall drag and longitudinal
+    /// viscosity. Fourier availability loss is never deposited as extra heat.
     /// It must return a private candidate without changing external accepted state.
     /// A thermal refusal or the final cancellation drops that candidate and leaves
     /// channel fields, clock and heat unchanged. On success the returned candidate
@@ -721,6 +760,9 @@ impl TwoFluidChannel {
         }
         if let Some(tangle) = &mut self.vinen_tangle {
             tangle.publish();
+        }
+        if let Some(transport) = &mut self.transport {
+            transport.publish(report);
         }
         self.time_s = report.time_s;
         self.total_heat_j += report.mutual_friction_heat_j;

@@ -658,8 +658,11 @@ impl TwoFluidChannel {
         let mut residual: f64 = 0.0;
         for mode in 0..2 {
             let q = operator.cell_rows[mode];
-            let old =
-                |i: usize| q[0] * self.accepted[0].cells[i] + q[1] * self.accepted[1].cells[i];
+            let wave_start = self.transport.as_ref().map(|t| &t.wave_start);
+            let old = |i: usize| match wave_start {
+                Some(cells) => q[0] * cells[0][i] + q[1] * cells[1][i],
+                None => q[0] * self.accepted[0].cells[i] + q[1] * self.accepted[1].cells[i],
+            };
             let r = operator.r[mode];
             let work = &mut self.workspace[mode];
             super::step::factor_midpoint(work, r, dt, cancelled)?;
@@ -748,7 +751,7 @@ impl TwoFluidChannel {
             }
             let old = operator.components([self.pending[0].faces[i], self.pending[1].faces[i]]);
             let gradient = [0, 1].map(|m| {
-                0.5 * ((self.accepted[m].cells[i] - self.accepted[m].cells[i - 1])
+                0.5 * ((self.wave_initial_cells(m)[i] - self.wave_initial_cells(m)[i - 1])
                     + (self.pending[m].cells[i] - self.pending[m].cells[i - 1]))
             });
             let body = operator.force_increment(force, i, dt);
