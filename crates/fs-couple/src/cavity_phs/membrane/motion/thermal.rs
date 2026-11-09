@@ -1,6 +1,10 @@
 //! Continuing motion with source-owned simultaneous heating and volume work.
+mod contact;
 mod gas;
 mod operator;
+pub use contact::{
+    GasMembraneContactCandidate, GasMembraneContactError, GasMembraneContactStep, MembraneGasSample,
+};
 #[cfg(test)]
 mod tests;
 
@@ -273,8 +277,34 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         heat_j: f64,
         exterior_heat_j: Option<f64>,
         controls: GasMembraneThermalControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<GasMembraneHeatVolumeStep<R>, GasMembraneMotionError> {
+        self.step_with_sample::<R>(
+            duration_s,
+            dead_load_n,
+            heat_j,
+            exterior_heat_j,
+            controls,
+            false,
+            cancelled,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Only finite-body contact retains the first gas's final native source
+    /// sample. Intermediate Newton trials and existing public steps do not clone it.
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_sample<R: gas::HeatVolumeLaw>(
+        &mut self,
+        duration_s: f64,
+        dead_load_n: &[[f64; 3]],
+        heat_j: f64,
+        exterior_heat_j: Option<f64>,
+        controls: GasMembraneThermalControls,
+        retain_sample: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(GasMembraneHeatVolumeStep<R>, Option<MembraneGasSample>), GasMembraneMotionError>
+    {
         poll(&mut cancelled)?;
         controls.validate()?;
         if self.state.steps >= controls.maximum_steps {
@@ -322,7 +352,7 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         }
         let time =
             result.map_err(|error| operator.take_failure().unwrap_or_else(|| error.into()))?;
-        let trial = operator.final_trial(&candidate.q)?;
+        let mut trial = operator.final_trial(&candidate.q, retain_sample)?;
         kinetic(&self.masses_kg, &candidate.v)?;
         let mut kinetic_change = Dd::from_f64(0.0);
         let mut dead_work = Dd::from_f64(0.0);
@@ -419,6 +449,7 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
                 allowance_j: controls.energy_tolerance_j,
             });
         }
+        let sample = trial.gas.sampling_state.take();
         let accepted = trial.into_evaluation(dead_load_n)?;
         if operator.cancelled() {
             return Err(operator.take_stop().expect("stopped operator"));
@@ -429,6 +460,6 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         candidate.history.push(entry);
         self.state = candidate;
         self.accepted = accepted;
-        Ok(frame)
+        Ok((frame, sample))
     }
 }

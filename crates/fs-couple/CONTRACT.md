@@ -135,6 +135,56 @@ incompatibility, late failure/cancellation, work-budget refusal and exact retry.
 All six plus the five original Hertz heat regressions pass in the bounded
 actual-source closure; full workspace proof remains separate.
 
+## Finite-body thermal contact in nonlinear membrane pressure motion
+
+`GasMembraneThermalMotion::thermal_discrete_gradient_candidate` solves one
+reciprocal heat transfer between the first original gas and an explicit finite
+enthalpy/phase body over the same nonlinear mechanical interval. Each trial
+delegates the existing native Gibbs pressure/work trajectory and original
+enthalpy entropy chart. The shared bounded heat-feedback solver closes
+`Q = dt G (theta_body - theta_gas)`; no gas law, time integrator, scalar
+root method or thermal storage model is replaced.
+
+`MembraneGasSample` retains the actual ideal or homogeneous Peng--Robinson
+thermodynamic mean, including its original source/transport state. The callback
+also receives the actual body enthalpy midpoint, preserving latent phase
+fractions. The thermal force uses the body's original `Delta h / Delta s`,
+which generally differs from midpoint temperature. Work pressure remains the
+native discrete Gibbs effort and is distinct from the sample's EOS pressure.
+Only this new path copies the first gas's final source sample; existing
+midpoint/Gibbs calls and intermediate Newton caches retain their prior behavior.
+
+One signed Q is debited from the body and credited to the first gas. Prescribed
+first-gas, body and opposing-gas heat remain separate. A sealed opposing chamber
+keeps its original volume/work/heat law. Reports independently retain all
+mechanical and caloric storage, pressure work, source residual, body energy,
+original gas/body entropy and evaluated nonnegative Fourier-contact production.
+The entropy allowance derives from native gas, body and heat-law error budgets.
+Structural integration error stays in the existing mechanical-energy account;
+it is never converted into heat or used to correct the gas Gibbs balance.
+
+The joint candidate contains motion, original finite-body proposal and balances.
+All root trials use one private scratch trajectory; complete accepted history
+is copied only for the final candidate. Source, body, interface, work, energy,
+entropy or cancellation refusal preserves both gas states, body input and
+accepted mechanical history. Conductance callbacks must remain repeatable and
+defer irreversible side effects until joint publication.
+
+The body retains fixed mass/geometry and negligible-pV-work enthalpy storage.
+It is an explicitly supplied thermal inventory; membrane calorics, thermal
+expansion, spatial equilibration and moving thermal geometry are not inferred.
+The original fixed-perimeter structural and homogeneous-gas limits apply.
+Positive evaluated contact entropy does not establish temporal or constitutive
+accuracy; physical-step refinement remains necessary.
+
+Four focused native regression definitions cover hot/cold continuing motion,
+independent variable-Cv/finite-body balances and insulating parity, latent
+melting/freezing with a heated opposing chamber, full PR source-sample identity
+and work-pressure separation, and late source/cancellation/work refusal with
+exact retry. All changed Rust sources parse; the implementation and new test
+modules were formatted. The full coupled tests were not compiled or executed because
+the available dependency closure lacks the original material/solid/time stack.
+
 ## Discrete Gibbs pressure in native nonlinear membrane motion
 
 `GasMembraneThermalMotion::step_discrete_gradient` connects the original ideal
