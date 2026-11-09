@@ -1,13 +1,16 @@
 //! Implicit dynamic hydraulic loads on the original BDF Stokes operator.
 
 use super::{
-    StokesAssembly, StokesBoundaryError, StokesResistancePort, StokesSolution, invalid, port_flow,
+    StokesAssembly, StokesBoundaryError, StokesResistancePort, StokesSolution, invalid,
+    velocity_port_flow,
 };
 use crate::ns::boundary::{StokesBoundary, bdf::StokesBdfStep};
 use crate::ns::{FluxParams, FluxSystem};
 
 #[path = "windkessel/model.rs"]
 mod model;
+#[path = "windkessel/nonlinear.rs"]
+mod nonlinear;
 use model::ReducedWindkesselPort;
 pub use model::{StokesWindkesselBalance, StokesWindkesselPort};
 
@@ -25,9 +28,9 @@ pub struct StokesWindkesselHistory<'a> {
 }
 
 /// Accepted native field plus the dynamic state and power of every external load.
-pub struct StokesWindkesselSolution {
+pub struct StokesWindkesselSolution<S = StokesSolution> {
     /// Original continuum field, pressure datum and discrete boundary reactions.
-    pub flow: StokesSolution,
+    pub flow: S,
     /// Resolved-fluid kinetic energy divided by reference density [m⁴/s²],
     /// evaluated using the same retained mass metric as the momentum step.
     pub kinetic_energy_m4_s2: f64,
@@ -120,9 +123,46 @@ pub(crate) fn solve_windkessel_assembly(
     absolute_pressure_tolerance_m2_s2: f64,
     absolute_flow_tolerance_m2_s: f64,
 ) -> Result<StokesWindkesselSolution, StokesBoundaryError> {
+    let (reduced, equivalent) = reduce_windkessel_ports(
+        assembly.system,
+        ports,
+        loads,
+        previous,
+        older_history,
+        timestep_s,
+        absolute_pressure_tolerance_m2_s2,
+        absolute_flow_tolerance_m2_s,
+    )?;
+    let relative_tolerance = assembly.params.tol;
+    let prepared = assembly.prepare_flow_control(ports)?;
+    let solved = prepared.solve_resistance_ports(&equivalent, absolute_pressure_tolerance_m2_s2)?;
+    let energy = prepared.kinetic_energy(&solved.flow.field.x)?;
+    report_windkessel_ports(
+        &reduced,
+        solved.flow,
+        energy,
+        solved.pressure_offsets_m2_s2,
+        solved.outward_volume_rates_m2_s,
+        relative_tolerance,
+        absolute_pressure_tolerance_m2_s2,
+        absolute_flow_tolerance_m2_s,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_windkessel_ports(
+    system: &FluxSystem<'_>,
+    ports: &[&[usize]],
+    loads: &[StokesWindkesselPort],
+    previous: StokesWindkesselHistory<'_>,
+    older_history: Option<(StokesWindkesselHistory<'_>, f64)>,
+    timestep_s: f64,
+    absolute_pressure_tolerance_m2_s2: f64,
+    absolute_flow_tolerance_m2_s: f64,
+) -> Result<(Vec<ReducedWindkesselPort>, Vec<StokesResistancePort>), StokesBoundaryError> {
     let step = StokesBdfStep::new(timestep_s, older_history.map(|(_, dt)| dt)).map_err(invalid)?;
     let valid_history = |history: StokesWindkesselHistory<'_>| {
-        history.velocity.len() == assembly.system.n_u
+        history.velocity.len() == system.n_u
             && history.compliance_pressures_m2_s2.len() == ports.len()
             && history
                 .velocity
@@ -144,15 +184,24 @@ pub(crate) fn solve_windkessel_assembly(
             "complete finite paired fluid/storage histories and tolerances required",
         ));
     }
-    let relative_tolerance = assembly.params.tol;
-    let prepared = assembly.prepare_flow_control(ports)?;
+    if ports.is_empty() || ports.iter().any(|port| port.is_empty()) {
+        return Err(invalid("at least one nonempty controlled port required"));
+    }
+    for &edge in ports.iter().flat_map(|port| port.iter()) {
+        if edge >= system.mesh.edges.len() {
+            return Err(StokesBoundaryError::EdgeOutOfRange { edge });
+        }
+        if !system.mesh.is_boundary(edge) {
+            return Err(StokesBoundaryError::InteriorEdge { edge });
+        }
+    }
     let mut reduced = Vec::with_capacity(loads.len());
     let mut equivalent = Vec::with_capacity(loads.len());
     for (i, &load) in loads.iter().enumerate() {
-        let previous_q = port_flow(&prepared.assembly, &prepared.ports[i], previous.velocity);
+        let previous_q = velocity_port_flow(system, ports[i], previous.velocity);
         let older = older_history.map(|(history, _)| {
             (
-                port_flow(&prepared.assembly, &prepared.ports[i], history.velocity),
+                velocity_port_flow(system, ports[i], history.velocity),
                 history.compliance_pressures_m2_s2[i],
             )
         });
@@ -170,18 +219,37 @@ pub(crate) fn solve_windkessel_assembly(
         });
         reduced.push(port);
     }
-    let solved = prepared.solve_resistance_ports(&equivalent, absolute_pressure_tolerance_m2_s2)?;
-    let mut balances = Vec::with_capacity(loads.len());
+    Ok((reduced, equivalent))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_windkessel_ports<S>(
+    reduced: &[ReducedWindkesselPort],
+    flow: S,
+    kinetic_energy_m4_s2: f64,
+    pressure_offsets_m2_s2: Vec<f64>,
+    outward_volume_rates_m2_s: Vec<f64>,
+    relative_tolerance: f64,
+    absolute_pressure_tolerance_m2_s2: f64,
+    absolute_flow_tolerance_m2_s: f64,
+) -> Result<StokesWindkesselSolution<S>, StokesBoundaryError> {
+    if !kinetic_energy_m4_s2.is_finite()
+        || kinetic_energy_m4_s2 < 0.0
+        || pressure_offsets_m2_s2.len() != reduced.len()
+        || outward_volume_rates_m2_s.len() != reduced.len()
+    {
+        return Err(invalid(
+            "unrepresentable hydraulic endpoint energy or incomplete port result",
+        ));
+    }
+    let mut balances = Vec::with_capacity(reduced.len());
     let mut maximum_pressure_residual_m2_s2 = 0.0_f64;
     let mut maximum_flow_residual_m2_s = 0.0_f64;
     for (i, port) in reduced.iter().enumerate() {
         // solve_resistance_ports already re-integrates Q from the accepted BDM
         // field. Reuse that measured value, never a matrix-predicted flow.
         let (balance, pressure_scale, flow_scale) = port
-            .report(
-                solved.outward_volume_rates_m2_s[i],
-                solved.pressure_offsets_m2_s2[i],
-            )
+            .report(outward_volume_rates_m2_s[i], pressure_offsets_m2_s2[i])
             .map_err(invalid)?;
         let pressure_tolerance =
             absolute_pressure_tolerance_m2_s2 + relative_tolerance * pressure_scale;
@@ -206,12 +274,11 @@ pub(crate) fn solve_windkessel_assembly(
         maximum_flow_residual_m2_s = maximum_flow_residual_m2_s.max(flow_residual);
         balances.push(balance);
     }
-    let kinetic_energy_m4_s2 = prepared.kinetic_energy(&solved.flow.field.x)?;
     Ok(StokesWindkesselSolution {
-        flow: solved.flow,
+        flow,
         kinetic_energy_m4_s2,
-        pressure_offsets_m2_s2: solved.pressure_offsets_m2_s2,
-        outward_volume_rates_m2_s: solved.outward_volume_rates_m2_s,
+        pressure_offsets_m2_s2,
+        outward_volume_rates_m2_s,
         balances,
         maximum_pressure_residual_m2_s2,
         maximum_flow_residual_m2_s,

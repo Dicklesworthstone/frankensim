@@ -1,6 +1,9 @@
 //! Integral hydraulic resistance coupled to the native resolved port responses.
 
-use super::{PreparedStokesFlowControl, StokesBoundaryError, StokesSolution, invalid, port_flow};
+use super::{
+    PreparedStokesFlowControl, StokesAssembly, StokesBoundaryError, StokesSolution, invalid,
+    port_flow,
+};
 use fs_la::factor::lu;
 use fs_math::dd::Dd;
 
@@ -65,19 +68,7 @@ impl PreparedStokesFlowControl<'_, '_> {
         absolute_pressure_tolerance_m2_s2: f64,
     ) -> Result<StokesResistanceSolution, StokesBoundaryError> {
         let count = self.ports.len();
-        if loads.len() != count
-            || !absolute_pressure_tolerance_m2_s2.is_finite()
-            || absolute_pressure_tolerance_m2_s2 < 0.0
-            || loads.iter().any(|load| {
-                !load.reservoir_pressure_m2_s2.is_finite()
-                    || !load.resistance_s_inv.is_finite()
-                    || load.resistance_s_inv < 0.0
-            })
-        {
-            return Err(invalid(
-                "finite complete reservoir pressures, nonnegative resistances and tolerance required",
-            ));
-        }
+        admit_resistance_loads(count, loads, absolute_pressure_tolerance_m2_s2)?;
         let mut matrix = vec![0.0; self.mobility.len()];
         let mut rhs = vec![0.0; count];
         let mut row_scales = vec![0.0_f64; count];
@@ -125,42 +116,14 @@ impl PreparedStokesFlowControl<'_, '_> {
             }
         }
         let flow = self.report_pressures(&pressures)?;
-        let mut flows = Vec::with_capacity(count);
-        let mut dissipation = Vec::with_capacity(count);
-        let mut maximum_pressure_residual_m2_s2 = 0.0_f64;
-        for (i, load) in loads.iter().enumerate() {
-            let q = port_flow(&self.assembly, &self.ports[i], &flow.field.x);
-            let drop = load.resistance_s_inv * q;
-            let loss = drop * q;
-            let residual = (Dd::from_f64(pressures[i])
-                - Dd::from_f64(load.reservoir_pressure_m2_s2)
-                - Dd::from_f64(load.resistance_s_inv) * Dd::from_f64(q))
-            .to_f64()
-            .abs();
-            let scale = pressures[i]
-                .abs()
-                .max(load.reservoir_pressure_m2_s2.abs())
-                .max(drop.abs());
-            let tolerance = absolute_pressure_tolerance_m2_s2 + self.assembly.params.tol * scale;
-            if ![q, drop, loss, residual, tolerance]
-                .iter()
-                .all(|x| x.is_finite())
-            {
-                return Err(invalid(
-                    "unrepresentable hydraulic port pressure, flow or power",
-                ));
-            }
-            if residual > tolerance {
-                return Err(StokesBoundaryError::ResistanceLawNotConverged {
-                    port: i,
-                    residual_m2_s2: residual,
-                    tolerance_m2_s2: tolerance,
-                });
-            }
-            maximum_pressure_residual_m2_s2 = maximum_pressure_residual_m2_s2.max(residual);
-            flows.push(q);
-            dissipation.push(loss);
-        }
+        let (flows, dissipation, maximum_pressure_residual_m2_s2) = checked_resistance_ports(
+            &self.assembly,
+            &self.ports,
+            loads,
+            absolute_pressure_tolerance_m2_s2,
+            &pressures,
+            &flow.field.x,
+        )?;
         Ok(StokesResistanceSolution {
             flow,
             pressure_offsets_m2_s2: pressures,
@@ -169,4 +132,78 @@ impl PreparedStokesFlowControl<'_, '_> {
             maximum_pressure_residual_m2_s2,
         })
     }
+}
+
+pub(super) fn admit_resistance_loads(
+    count: usize,
+    loads: &[StokesResistancePort],
+    absolute_pressure_tolerance_m2_s2: f64,
+) -> Result<(), StokesBoundaryError> {
+    if loads.len() != count
+        || !absolute_pressure_tolerance_m2_s2.is_finite()
+        || absolute_pressure_tolerance_m2_s2 < 0.0
+        || loads.iter().any(|load| {
+            !load.reservoir_pressure_m2_s2.is_finite()
+                || !load.resistance_s_inv.is_finite()
+                || load.resistance_s_inv < 0.0
+        })
+    {
+        return Err(invalid(
+            "finite complete reservoir pressures, nonnegative resistances and tolerance required",
+        ));
+    }
+    Ok(())
+}
+
+// The frozen response and the reassembled nonlinear endpoint must use this
+// SAME integrated-flow law check, including relaxed pressure unknowns.
+pub(super) fn checked_resistance_ports(
+    assembly: &StokesAssembly<'_, '_>,
+    ports: &[impl AsRef<[usize]>],
+    loads: &[StokesResistancePort],
+    absolute_pressure_tolerance_m2_s2: f64,
+    pressures: &[f64],
+    velocity: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>, f64), StokesBoundaryError> {
+    admit_resistance_loads(ports.len(), loads, absolute_pressure_tolerance_m2_s2)?;
+    if pressures.len() != ports.len() || pressures.iter().any(|p| !p.is_finite()) {
+        return Err(invalid("finite complete external port pressures required"));
+    }
+    let mut flows = Vec::with_capacity(ports.len());
+    let mut dissipation = Vec::with_capacity(ports.len());
+    let mut maximum_pressure_residual_m2_s2 = 0.0_f64;
+    for (i, load) in loads.iter().enumerate() {
+        let q = port_flow(assembly, ports[i].as_ref(), velocity);
+        let drop = load.resistance_s_inv * q;
+        let loss = drop * q;
+        let residual = (Dd::from_f64(pressures[i])
+            - Dd::from_f64(load.reservoir_pressure_m2_s2)
+            - Dd::from_f64(load.resistance_s_inv) * Dd::from_f64(q))
+        .to_f64()
+        .abs();
+        let scale = pressures[i]
+            .abs()
+            .max(load.reservoir_pressure_m2_s2.abs())
+            .max(drop.abs());
+        let tolerance = absolute_pressure_tolerance_m2_s2 + assembly.params.tol * scale;
+        if ![q, drop, loss, residual, tolerance]
+            .iter()
+            .all(|x| x.is_finite())
+        {
+            return Err(invalid(
+                "unrepresentable hydraulic port pressure, flow or power",
+            ));
+        }
+        if residual > tolerance {
+            return Err(StokesBoundaryError::ResistanceLawNotConverged {
+                port: i,
+                residual_m2_s2: residual,
+                tolerance_m2_s2: tolerance,
+            });
+        }
+        maximum_pressure_residual_m2_s2 = maximum_pressure_residual_m2_s2.max(residual);
+        flows.push(q);
+        dissipation.push(loss);
+    }
+    Ok((flows, dissipation, maximum_pressure_residual_m2_s2))
 }

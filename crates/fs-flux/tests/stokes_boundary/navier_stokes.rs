@@ -8,6 +8,8 @@ use fs_flux::{NavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
 mod reservoir;
 #[path = "navier_stokes_rheology.rs"]
 mod rheology;
+#[path = "navier_stokes/windkessel.rs"]
+mod windkessel;
 
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::new();

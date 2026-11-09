@@ -344,11 +344,11 @@ impl<'m> FluxSystem<'m> {
         absolute_tolerance_m2_s: f64,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
-        let control = Some(FlowControl {
+        let control = Some(FlowControl::targets(
             ports,
-            targets: outward_volume_rates_m2_s,
+            outward_volume_rates_m2_s,
             absolute_tolerance_m2_s,
-        });
+        ));
         if let Some(dt) = timestep_s {
             self.bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
                 params,
@@ -909,11 +909,11 @@ impl<'m> FluxSystem<'m> {
             timestep_s,
             controls,
             source_is_valid,
-            Some(FlowControl {
+            Some(FlowControl::targets(
                 ports,
-                targets: outward_volume_rates_m2_s,
+                outward_volume_rates_m2_s,
                 absolute_tolerance_m2_s,
-            }),
+            )),
         )
     }
 
@@ -1246,7 +1246,7 @@ impl<'m> FluxSystem<'m> {
     // One prepared constitutive response and one temporal mass-history owner
     // serve both pressure-driven and integral-flow-driven endpoints.
     #[allow(clippy::too_many_arguments)]
-    fn bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
+    pub(super) fn bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
         &self,
         params: FluxParams,
         prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,

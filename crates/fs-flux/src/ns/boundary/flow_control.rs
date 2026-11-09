@@ -294,16 +294,115 @@ impl PreparedStokesFlowControl<'_, '_> {
 #[derive(Clone, Copy)]
 pub(super) struct FlowControl<'a> {
     pub(super) ports: &'a [&'a [usize]],
-    pub(super) targets: &'a [f64],
-    pub(super) absolute_tolerance_m2_s: f64,
+    pub(super) law: PortLaw<'a>,
 }
 
-impl FlowControl<'_> {
+#[derive(Clone, Copy)]
+pub(super) enum PortLaw<'a> {
+    Flow {
+        targets: &'a [f64],
+        absolute_tolerance_m2_s: f64,
+    },
+    Resistance {
+        loads: &'a [StokesResistancePort],
+        absolute_pressure_tolerance_m2_s2: f64,
+    },
+}
+
+impl<'a> FlowControl<'a> {
+    pub(super) fn targets(
+        ports: &'a [&'a [usize]],
+        targets: &'a [f64],
+        absolute_tolerance_m2_s: f64,
+    ) -> Self {
+        Self {
+            ports,
+            law: PortLaw::Flow {
+                targets,
+                absolute_tolerance_m2_s,
+            },
+        }
+    }
+
     pub(super) fn admit(&self) -> Result<(), StokesBoundaryError> {
         if self.ports.is_empty() || self.ports.iter().any(|port| port.is_empty()) {
             return Err(invalid("at least one nonempty controlled port required"));
         }
-        admit_flow_targets(self.ports.len(), self.targets, self.absolute_tolerance_m2_s)
+        match self.law {
+            PortLaw::Flow {
+                targets,
+                absolute_tolerance_m2_s,
+            } => admit_flow_targets(self.ports.len(), targets, absolute_tolerance_m2_s),
+            PortLaw::Resistance {
+                loads,
+                absolute_pressure_tolerance_m2_s2,
+            } => resistance::admit_resistance_loads(
+                self.ports.len(),
+                loads,
+                absolute_pressure_tolerance_m2_s2,
+            ),
+        }
+    }
+
+    // Both nonlinear laws use exactly the original pressure-response operator.
+    pub(super) fn solve(
+        &self,
+        assembly: StokesAssembly<'_, '_>,
+    ) -> Result<(StokesSolution, Vec<f64>), StokesBoundaryError> {
+        let prepared = assembly.prepare_flow_control(self.ports)?;
+        match self.law {
+            PortLaw::Flow {
+                targets,
+                absolute_tolerance_m2_s,
+            } => {
+                let solved = prepared.solve(targets, absolute_tolerance_m2_s)?;
+                Ok((solved.flow, solved.pressure_offsets_m2_s2))
+            }
+            PortLaw::Resistance {
+                loads,
+                absolute_pressure_tolerance_m2_s2,
+            } => {
+                let solved =
+                    prepared.solve_resistance_ports(loads, absolute_pressure_tolerance_m2_s2)?;
+                Ok((solved.flow, solved.pressure_offsets_m2_s2))
+            }
+        }
+    }
+
+    pub(super) fn check_endpoint(
+        &self,
+        assembly: &StokesAssembly<'_, '_>,
+        pressures: &[f64],
+        velocity: &[f64],
+    ) -> Result<(Vec<f64>, f64), StokesBoundaryError> {
+        match self.law {
+            PortLaw::Flow {
+                targets,
+                absolute_tolerance_m2_s,
+            } => checked_port_flows(
+                assembly,
+                self.ports,
+                targets,
+                absolute_tolerance_m2_s,
+                velocity,
+            ),
+            PortLaw::Resistance {
+                loads,
+                absolute_pressure_tolerance_m2_s2,
+            } => {
+                let (flows, _, _) = resistance::checked_resistance_ports(
+                    assembly,
+                    self.ports,
+                    loads,
+                    absolute_pressure_tolerance_m2_s2,
+                    pressures,
+                    velocity,
+                )?;
+                // This internal result has no prescribed-flow constraint.
+                // Dynamic callers separately report both original RCR laws.
+                Ok((flows, 0.0))
+            }
+        }
     }
 }
 
@@ -380,10 +479,14 @@ pub(super) fn checked_port_flows(
 }
 
 fn port_flow(assembly: &StokesAssembly<'_, '_>, edges: &[usize], x: &[f64]) -> f64 {
+    velocity_port_flow(assembly.system, edges, x)
+}
+
+fn velocity_port_flow(system: &crate::ns::FluxSystem<'_>, edges: &[usize], x: &[f64]) -> f64 {
     edges
         .iter()
         .fold(Dd::from_f64(0.0), |sum, &edge| {
-            sum + Dd::from_f64(assembly.system.mesh.edges[edge].len) * Dd::from_f64(x[2 * edge])
+            sum + Dd::from_f64(system.mesh.edges[edge].len) * Dd::from_f64(x[2 * edge])
         })
         .to_f64()
 }

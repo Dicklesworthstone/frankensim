@@ -1,6 +1,6 @@
 //! Checked generalized-Newtonian Stokes flow with open traction boundaries.
 
-use super::flow_control::{FlowControl, checked_port_flows, pressure_rhs};
+use super::flow_control::{FlowControl, pressure_rhs};
 use super::{
     FluxParams, FluxSystem, StokesAssembly, StokesBoundary, StokesBoundaryError,
     StokesFlowControlSolution, StokesSolution,
@@ -337,11 +337,11 @@ impl<'m> FluxSystem<'m> {
             boundaries,
             initial_velocity,
             controls,
-            Some(FlowControl {
+            Some(FlowControl::targets(
                 ports,
-                targets: outward_volume_rates_m2_s,
+                outward_volume_rates_m2_s,
                 absolute_tolerance_m2_s,
-            }),
+            )),
             source_is_valid,
         )
     }
@@ -465,10 +465,7 @@ impl<'m> FluxSystem<'m> {
                 )));
             }
             let (linear, mut pressures) = if let Some(control) = flow_control {
-                let controlled = assembled?
-                    .prepare_flow_control(control.ports)?
-                    .solve(control.targets, control.absolute_tolerance_m2_s)?;
-                (controlled.flow, controlled.pressure_offsets_m2_s2)
+                control.solve(assembled?)?
             } else {
                 (assembled?.solve()?, Vec::new())
             };
@@ -524,13 +521,7 @@ impl<'m> FluxSystem<'m> {
                 let mut endpoint = endpoint?;
                 let (flows, maximum_flow_residual_m2_s) = if let Some(control) = flow_control {
                     endpoint.rhs = pressure_rhs(&endpoint, control.ports, &pressures)?;
-                    checked_port_flows(
-                        &endpoint,
-                        control.ports,
-                        control.targets,
-                        control.absolute_tolerance_m2_s,
-                        &next.x,
-                    )?
+                    control.check_endpoint(&endpoint, &pressures, &next.x)?
                 } else {
                     (Vec::new(), 0.0)
                 };

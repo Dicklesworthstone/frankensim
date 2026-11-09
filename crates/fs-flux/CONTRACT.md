@@ -9718,3 +9718,36 @@ faces, positive traces, convexity/source/workspace refusals, large-step energy
 and positivity refusal, cancellation and deterministic replay. This is focused
 numerical execution, not a full-workspace or physical-validation certificate.
 
+
+## Nonlinear laminar flow with implicit external storage
+
+The native convective Windkessel entries now solve RCR/compliance/series-inertia
+loads inside the ORIGINAL bounded Navier–Stokes Picard iteration, including
+candidate-dependent generalized-Newtonian viscosity. They reuse the same
+BDF1/startup or variable-step BDF2 history owner and dynamic elimination as the
+linear entry. Each current Oseen/constitutive operator supplies its own coupled
+port mobility; an initial or lagged mobility is not used for final acceptance.
+
+The existing nonlinear port owner admits either prescribed integral flow or
+finite-resistance laws. It keeps pressure increments as additional unknowns and
+relaxes them with the complete field. At an acceptance candidate, viscosity and
+convection are reassembled at that velocity, the ACTUAL accepted pressure load
+is added to the original RHS, and both original/scaled nonlinear residuals are
+checked. The same integrated resistance-law evaluator checks the accepted field.
+The dynamic wrapper then checks both unreduced capacitor and inertance laws
+using the accepted BDM flow. Failed nonlinear budgets or source laws return no
+partial fluid/compliance state.
+
+Natural/dissipative backflow and explicit incoming reservoir momentum retain
+their original meanings. External storage, resistor losses and signed BDF
+defect do not include convected kinetic energy, fluid viscous heat, or added
+backflow-policy work. No combined arbitrary-step nonlinear passivity, heat
+deposition, turbulence or material-memory claim follows.
+
+Focused native regressions are authored with nonzero convection, live viscosity
+updates, forward/reverse port flow, BDF1/unequal BDF2, pressure relaxation,
+independently reassembled momentum equations and nonlinear-budget refusal.
+Full FEM execution remains blocked by the prior pinned-asupersync SIGKILL;
+format/parsing and bounded static API review are distinct from runtime evidence.
+The original six scalar BDF/RCR model tests were previously executed; their
+unchanged leaf model does not establish new nonlinear integration test coverage.
