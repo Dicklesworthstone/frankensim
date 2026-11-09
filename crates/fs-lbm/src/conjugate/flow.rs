@@ -41,6 +41,7 @@ pub use density_transport::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
+    ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
 };
 pub use density_transport::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,

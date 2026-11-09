@@ -116,6 +116,7 @@ pub use flow::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
+    ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
 };
 pub(crate) use flow::scale_rows;
 #[cfg(feature = "implicit-enthalpy-coupling")]

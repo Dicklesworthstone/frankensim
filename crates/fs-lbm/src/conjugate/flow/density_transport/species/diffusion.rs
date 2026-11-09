@@ -60,6 +60,7 @@ pub use gas::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
+    ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
 };
 pub use gas::{
     BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource,

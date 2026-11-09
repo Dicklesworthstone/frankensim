@@ -330,3 +330,7 @@ mod conduction;
 
 #[path = "species_enthalpy_gas/advection.rs"]
 mod advection;
+
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "species_enthalpy_gas/conjugate_conduction.rs"]
+mod conjugate_conduction;

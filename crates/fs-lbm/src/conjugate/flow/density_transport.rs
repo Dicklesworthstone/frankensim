@@ -18,6 +18,7 @@ pub use species::{
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
+    ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
 };
 pub use species::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,

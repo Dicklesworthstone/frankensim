@@ -9,12 +9,14 @@ use super::{
     Sum, VoxelDomain, invalid, poll, poll_every,
 };
 use crate::conjugate::{
-    ConductivityTensor, TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step,
-    TensorCaloricStep, TensorCaloricStorage, TensorConductivityLaw, TensorNonlinearConfig,
-    ThermalSetup, TransientRecord, advance_caloric_tensor_conduction,
+    ConductivityTensor, SolidMaterial, TensorCaloricEndpoint, TensorCaloricLaw,
+    TensorCaloricSdirk2Step, TensorCaloricStep, TensorCaloricStorage, TensorConductivityLaw,
+    TensorNonlinearConfig, ThermalSetup, TransientRecord, advance_caloric_tensor_conduction,
     advance_caloric_tensor_conduction_sdirk2,
 };
 
+mod conjugate;
+pub use conjugate::{ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell};
 mod source;
 use source::{GasConductionCaloric, GasConductionQueryBudget};
 
@@ -32,8 +34,9 @@ pub struct ThermochemicalConductionControls {
     /// The native Newton, Krylov and backtracking ceilings apply to the entire
     /// heat interval, including both stages when SDIRK2 is selected.
     pub thermal: TensorNonlinearConfig,
-    /// Shared original caloric query allowance across every cell and native
-    /// trial. The source inverse also retains its own bounded root iterations.
+    /// Shared original gas-source caloric query allowance across every fluid
+    /// cell and native trial. Borrowed solid queries retain native work limits;
+    /// the gas source inverse also retains its own bounded root iterations.
     pub maximum_caloric_queries: usize,
     /// Native interval energy closure plus initial and final source inversion
     /// defects must fit this absolute allowance. The sum of each cell's largest
@@ -113,6 +116,118 @@ fn admitted_defect(value: f64, allowance: f64) -> Result<f64, ChtError> {
     }
 }
 
+fn admit_interval(
+    start_time_s: f64,
+    duration_s: f64,
+    controls: &ThermochemicalConductionControls,
+) -> Result<(), ChtError> {
+    if !controls.maximum_enthalpy_defect_j.is_finite()
+        || controls.maximum_enthalpy_defect_j < 0.0
+        || !start_time_s.is_finite()
+        || start_time_s < 0.0
+        || !duration_s.is_finite()
+        || duration_s <= 0.0
+        || !(start_time_s + duration_s).is_finite()
+        || start_time_s + duration_s <= start_time_s
+    {
+        return Err(invalid(
+            "gas conduction needs resolved physical time and absolute joule controls",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_native(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    prescribed: &[(usize, f64)],
+    start_time_s: f64,
+    duration_s: f64,
+    controls: &ThermochemicalConductionControls,
+    gate: &CancelGate,
+) -> Result<ThermochemicalConductionAdvance, ChtError> {
+    match controls.scheme {
+        ThermochemicalConductionScheme::BackwardEuler => Ok(
+            ThermochemicalConductionAdvance::BackwardEuler(advance_caloric_tensor_conduction(
+                domain,
+                solids,
+                setup,
+                conductivity_laws,
+                storage,
+                prescribed,
+                start_time_s,
+                duration_s,
+                &controls.thermal,
+                gate,
+            )?),
+        ),
+        ThermochemicalConductionScheme::Sdirk2 => Ok(ThermochemicalConductionAdvance::Sdirk2(
+            advance_caloric_tensor_conduction_sdirk2(
+                domain,
+                solids,
+                [setup, setup],
+                conductivity_laws,
+                storage,
+                [prescribed, prescribed],
+                start_time_s,
+                duration_s,
+                &controls.thermal,
+                gate,
+            )?,
+        )),
+    }
+}
+
+fn gas_query_defect(
+    calorics: &[GasConductionCaloric<'_, '_>],
+    allowance: f64,
+    gate: &CancelGate,
+) -> Result<f64, ChtError> {
+    let mut defect = Sum::default();
+    for (cell, law) in calorics.iter().enumerate() {
+        poll_every(gate, cell)?;
+        defect.add(law.maximum_query_caloric_defect_j());
+    }
+    admitted_defect(defect.value, allowance)
+}
+
+fn conduction_report(
+    thermal: &ThermochemicalConductionAdvance,
+    initial_caloric_defect_j: f64,
+    endpoint_caloric_defect_j: f64,
+    maximum_query_caloric_defect_j: f64,
+    caloric_queries: usize,
+    controls: &ThermochemicalConductionControls,
+) -> Result<ThermochemicalSpeciesConductionReport, ChtError> {
+    let endpoint_caloric_defect_j = admitted_defect(
+        endpoint_caloric_defect_j,
+        controls.maximum_enthalpy_defect_j,
+    )?;
+    let native_energy_defect_j = thermal.record().closure_j.abs();
+    let mut defect = Sum::default();
+    for value in [
+        native_energy_defect_j,
+        initial_caloric_defect_j,
+        endpoint_caloric_defect_j,
+    ] {
+        defect.add(value);
+    }
+    let absolute_enthalpy_defect_j =
+        admitted_defect(defect.value, controls.maximum_enthalpy_defect_j)?;
+    Ok(ThermochemicalSpeciesConductionReport {
+        caloric_queries,
+        initial_caloric_defect_j,
+        endpoint_caloric_defect_j,
+        maximum_query_caloric_defect_j,
+        native_energy_defect_j,
+        absolute_enthalpy_defect_j,
+    })
+}
+
 impl MaterialAdvectionStep {
     /// Conduct Fourier heat through the original gas mixture caloric laws.
     ///
@@ -156,19 +271,7 @@ impl MaterialAdvectionStep {
         gate: &CancelGate,
     ) -> Result<ThermochemicalSpeciesConductionStep<'a, N>, ChtError> {
         poll(gate)?;
-        if !controls.maximum_enthalpy_defect_j.is_finite()
-            || controls.maximum_enthalpy_defect_j < 0.0
-            || !start_time_s.is_finite()
-            || start_time_s < 0.0
-            || !duration_s.is_finite()
-            || duration_s <= 0.0
-            || !(start_time_s + duration_s).is_finite()
-            || start_time_s + duration_s <= start_time_s
-        {
-            return Err(invalid(
-                "gas conduction needs resolved physical time and absolute joule controls",
-            ));
-        }
+        admit_interval(start_time_s, duration_s, &controls)?;
         let cells = domain.cell_count();
         for cell in 0..cells {
             poll_every(gate, cell)?;
@@ -228,43 +331,20 @@ impl MaterialAdvectionStep {
             reference_mass_kg: &self.mass_kg,
             previous_specific_energy_j_kg: specific_enthalpy_j_kg,
         };
-        let thermal = match controls.scheme {
-            ThermochemicalConductionScheme::BackwardEuler => {
-                ThermochemicalConductionAdvance::BackwardEuler(advance_caloric_tensor_conduction(
-                    domain,
-                    &[],
-                    setup,
-                    &conductivity_laws,
-                    storage,
-                    &prescribed,
-                    start_time_s,
-                    duration_s,
-                    &controls.thermal,
-                    gate,
-                )?)
-            }
-            ThermochemicalConductionScheme::Sdirk2 => {
-                ThermochemicalConductionAdvance::Sdirk2(advance_caloric_tensor_conduction_sdirk2(
-                    domain,
-                    &[],
-                    [setup, setup],
-                    &conductivity_laws,
-                    storage,
-                    [&prescribed, &prescribed],
-                    start_time_s,
-                    duration_s,
-                    &controls.thermal,
-                    gate,
-                )?)
-            }
-        };
-        let mut query_defect = Sum::default();
-        for (cell, law) in calorics.iter().enumerate() {
-            poll_every(gate, cell)?;
-            query_defect.add(law.maximum_query_caloric_defect_j());
-        }
+        let thermal = advance_native(
+            domain,
+            &[],
+            setup,
+            &conductivity_laws,
+            storage,
+            &prescribed,
+            start_time_s,
+            duration_s,
+            &controls,
+            gate,
+        )?;
         let maximum_query_caloric_defect_j =
-            admitted_defect(query_defect.value, controls.maximum_enthalpy_defect_j)?;
+            gas_query_defect(&calorics, controls.maximum_enthalpy_defect_j, gate)?;
         let caloric_queries = budget.queries();
         // Release the per-cell source models and all borrowed law views before
         // preparing the reusable endpoint image. Native heat owns its own output.
@@ -280,29 +360,19 @@ impl MaterialAdvectionStep {
             &thermal.endpoint().specific_energy_j_kg,
             gate,
         )?;
-        let endpoint_defect = admitted_defect(
+        let report = conduction_report(
+            &thermal,
+            initial_defect,
             state.absolute_caloric_residual_j(),
-            controls.maximum_enthalpy_defect_j,
+            maximum_query_caloric_defect_j,
+            caloric_queries,
+            &controls,
         )?;
-        let native_energy_defect_j = thermal.record().closure_j.abs();
-        let mut defect = Sum::default();
-        for value in [native_energy_defect_j, initial_defect, endpoint_defect] {
-            defect.add(value);
-        }
-        let absolute_enthalpy_defect_j =
-            admitted_defect(defect.value, controls.maximum_enthalpy_defect_j)?;
         poll(gate)?;
         Ok(ThermochemicalSpeciesConductionStep {
             thermal,
             state,
-            report: ThermochemicalSpeciesConductionReport {
-                caloric_queries,
-                initial_caloric_defect_j: initial_defect,
-                endpoint_caloric_defect_j: endpoint_defect,
-                maximum_query_caloric_defect_j,
-                native_energy_defect_j,
-                absolute_enthalpy_defect_j,
-            },
+            report,
         })
     }
 }

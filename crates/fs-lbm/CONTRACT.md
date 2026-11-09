@@ -3180,3 +3180,48 @@ an independent scalar momentum root with analytically eliminated thermal rows.
 They cover joint source coordinates, molecular-only heating, separate modeled
 transfer, original finite-wall history, all three zero closures, refreshed
 thermal molecular caps, bounded work, cancellation and deterministic retry.
+
+### Original gas and finite solid calorics in one heat solve
+
+`MaterialAdvectionStep::conduct_thermochemical_species_with_solids` assembles
+accepted gas inventories and explicit `ThermochemicalSolidConductionCell`
+bindings into the existing heterogeneous tensor-caloric BE/SDIRK2 owner.
+Every solid voxel has exactly one binding in increasing cell order, with its
+own positive reference mass, previous specific energy, original caloric law
+and tensor conductivity law. The unchanged gas carrier retains zero solid
+mass. The native material table admits occupancy and material-pair contacts;
+it does not reconstruct either gas or solid thermal inventory.
+
+Gas and solids share the same physical face equations. Internal interface
+heat enters their storage equations once with opposite signs, including
+finite face resistance and original source-contact laws. Each solid retains
+its declared storage basis, source domain, reference constraints and nonlinear
+conductivity integral. Original phase curves retain exact zero dT/de on a
+latent plateau; no apparent-Cp smoothing or additional latent deposit is added.
+Fixed solid temperatures require explicit prescribed energy because temperature
+alone cannot choose a phase fraction. Native fixed-state coverage and original
+T(e) consistency checks remain authoritative.
+
+The untouched native result contains physical temperatures and original
+specific energies for every voxel, both stages where requested, and the
+combined gas-plus-solid interval ledger. A separate gas h vector masks solid
+slots to exact zero and feeds original gas endpoint preparation. Initial
+combined-energy storage is reused for this masked output. The existing
+gas-only entry retains its borrowed endpoint getter.
+
+The shared caloric-query allowance counts gas-source inversions; solid queries
+retain original law admissions and native shared Newton/backtracking/Krylov
+limits. Gas caloric residuals accompany the combined native energy closure
+within the absolute joule allowance. Bindings, source refusal, work limits,
+energy failure and cancellation return no partial gas or solid state.
+Occupancy, reference masses and gas composition remain fixed during the
+interval. Crossing an admitted latent chart does not infer moving walls,
+expansion, mass transfer or a new phase geometry. Opening gas conductivity
+remains held in this entry; each supplied solid law keeps its original k(T).
+
+Focused original-path regressions cover graded unequal-mass gas/solid heat
+exchange, finite interface resistance, latent storage and crossing, prescribed
+plateau energy, original solid mass binding and transactional refusals.
+Pinned syntax/scoped-format checks passed. Native integration compilation and
+execution remain unverified under the previously documented runner/storage
+limitation.
