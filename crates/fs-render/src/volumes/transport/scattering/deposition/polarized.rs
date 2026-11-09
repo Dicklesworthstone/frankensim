@@ -9,6 +9,7 @@ use super::*;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, PolarizedBeam};
+use crate::volumes::transport::scattering::field::CellScatteringGrid;
 use crate::volumes::transport::scattering::polarized::{PolarizedScatteringError, RayleighGrid};
 
 /// Original spatial/history limits plus a bounded physical angular sampler.
@@ -167,40 +168,13 @@ impl ScatteringGrid<'_> {
         }
         validate_ray(origin, frame.direction(), f64::INFINITY)?;
         RayleighGrid::try_new(cx, self)?;
-        let carrier = DielectricGlass::new(
-            CauchyIor::try_constant(1.0).map_err(BeamError::from)?,
-            BeerLambertAbsorption::CLEAR,
-            GlassProvenance::Custom,
-        );
-        let initial = PolarizedPhase {
-            beam: PolarizedBeam::try_new(
-                origin,
-                frame,
-                wavelengths_nm[0],
-                carrier,
-                Stokes::unpolarized(1.0),
-            )?,
-            max_proposals: config.max_phase_proposals,
-        };
-        let mut phases = [initial; N];
-        for lane in 0..N {
-            let s = incident_stokes_w[lane];
-            if Stokes::try_new(s.i, s.q, s.u, s.v).is_none() {
-                return Err(BeamError::InvalidStokes.into());
-            }
-            let normalized = if s.i == 0.0 {
-                Stokes::unpolarized(1.0)
-            } else {
-                Stokes {
-                    i: 1.0,
-                    q: s.q / s.i,
-                    u: s.u / s.i,
-                    v: s.v / s.i,
-                }
-            };
-            phases[lane].beam =
-                PolarizedBeam::try_new(origin, frame, wavelengths_nm[lane], carrier, normalized)?;
-        }
+        let phases = initial_phases(
+            origin,
+            frame,
+            wavelengths_nm,
+            incident_stokes_w,
+            config.max_phase_proposals,
+        )?;
         let powers = incident_stokes_w.map(|s| s.i);
         if self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some() {
             let medium = PaletteOptics::try_new(self, *wavelengths_nm, &mut || checkpoint(cx))?;
@@ -236,6 +210,139 @@ impl ScatteringGrid<'_> {
             absorption_estimator,
         )?)
     }
+}
+
+impl<const N: usize> CellScatteringGrid<'_, '_, N> {
+    /// Full-Stokes heating through the original prepared cell coefficients.
+    ///
+    /// Active molecular, depolarized-molecular or spherical phase laws are
+    /// admitted before histories begin. The chosen absorption estimator shares
+    /// the original cell traversal, statistics and conservative heat account;
+    /// isotropic absorption never changes normalized polarization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_polarized_power(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        frame: PolarizationFrame,
+        incident_stokes_w: &[Stokes; N],
+        config: PolarizedDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+    ) -> Result<ScatteringPowerDeposition<N>, PolarizedScatteringError> {
+        self.deposit_polarized_power_with_checkpoint(
+            &mut || checkpoint(cx),
+            origin,
+            frame,
+            incident_stokes_w,
+            config,
+            absorption_estimator,
+        )
+    }
+
+    /// Hosting-solver variant; cancellation or angular-proposal exhaustion
+    /// refuses the complete result, without returning partial heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_polarized_power_with_checkpoint(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        origin: Point3,
+        frame: PolarizationFrame,
+        incident_stokes_w: &[Stokes; N],
+        config: PolarizedDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+    ) -> Result<ScatteringPowerDeposition<N>, PolarizedScatteringError> {
+        check()?;
+        let phases = initial_phases(
+            origin,
+            frame,
+            self.wavelengths_nm(),
+            incident_stokes_w,
+            config.max_phase_proposals,
+        )?;
+        self.admit_polarized_phases(check)?;
+        Ok(deposit_prepared_sampled(
+            self,
+            check,
+            origin,
+            frame.direction(),
+            &incident_stokes_w.map(|s| s.i),
+            config.transport,
+            None,
+            &phases,
+            absorption_estimator,
+        )?)
+    }
+
+    /// Source admission without tracing: used before native thermal work starts.
+    pub(crate) fn admit_polarized_source(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        origin: Point3,
+        frame: PolarizationFrame,
+        incident_stokes_w: &[Stokes; N],
+        max_phase_proposals: u32,
+    ) -> Result<(), PolarizedScatteringError> {
+        check()?;
+        initial_phases(
+            origin,
+            frame,
+            self.wavelengths_nm(),
+            incident_stokes_w,
+            max_phase_proposals,
+        )?;
+        self.admit_polarized_phases(check)
+    }
+}
+
+fn initial_phases<const N: usize>(
+    origin: Point3,
+    frame: PolarizationFrame,
+    wavelengths_nm: &[f64; N],
+    incident_stokes_w: &[Stokes; N],
+    max_phase_proposals: u32,
+) -> Result<[PolarizedPhase; N], PolarizedScatteringError> {
+    if N == 0 {
+        return Err(VolumeTransportError::Sample.into());
+    }
+    if max_phase_proposals == 0 {
+        return Err(VolumeTransportError::Budget.into());
+    }
+    validate_ray(origin, frame.direction(), f64::INFINITY)?;
+    let carrier = DielectricGlass::new(
+        CauchyIor::try_constant(1.0).map_err(BeamError::from)?,
+        BeerLambertAbsorption::CLEAR,
+        GlassProvenance::Custom,
+    );
+    let initial = PolarizedPhase {
+        beam: PolarizedBeam::try_new(
+            origin,
+            frame,
+            wavelengths_nm[0],
+            carrier,
+            Stokes::unpolarized(1.0),
+        )?,
+        max_proposals: max_phase_proposals,
+    };
+    let mut phases = [initial; N];
+    for lane in 0..N {
+        let s = incident_stokes_w[lane];
+        if Stokes::try_new(s.i, s.q, s.u, s.v).is_none() {
+            return Err(BeamError::InvalidStokes.into());
+        }
+        let normalized = if s.i == 0.0 {
+            Stokes::unpolarized(1.0)
+        } else {
+            Stokes {
+                i: 1.0,
+                q: s.q / s.i,
+                u: s.u / s.i,
+                v: s.v / s.i,
+            }
+        };
+        phases[lane].beam =
+            PolarizedBeam::try_new(origin, frame, wavelengths_nm[lane], carrier, normalized)?;
+    }
+    Ok(phases)
 }
 
 // A fresh copy starts every independent history. Isotropic absorption changes

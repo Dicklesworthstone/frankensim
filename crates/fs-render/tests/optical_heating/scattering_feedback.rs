@@ -986,3 +986,6 @@ fn continuous_feedback_refusals_leave_native_and_optical_inputs_unchanged() {
         assert!(heating.deposition().is_none());
     });
 }
+
+#[path = "scattering_feedback/polarized.rs"]
+mod polarized;

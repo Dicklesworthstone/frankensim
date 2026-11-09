@@ -3881,6 +3881,21 @@ whole-trajectory refinement retain the chosen estimator. Continuous absorption
 does not universally reduce variance, alter the admitted material laws or
 remove the separate time/sampling/unresolved-energy accuracy gates.
 
+`from_polarized_field` binds an `IncidentPolarizedScatteringBeam` to the same
+compiled field and native thermal observer. Original frame/Stokes admission and
+molecular, depolarized-molecular, spherical or supported mixture Mueller laws
+supply the physical angular response. `CellScatteringGrid::deposit_polarized_power`
+and its hosting-checkpoint variant share those histories with either native
+absorption estimator. Isotropic absorption changes watts while actual scattering
+carries normalized Stokes state; no extra angular weight, albedo debit,
+dichroism or response inferred from a scalar phase is introduced. The source
+and phase-proposal bound remain immutable across clones and trajectory
+refinement. Only phase entries with actual scattering in prepared physical
+cells require polarized support. If heating activates an unsupported phase,
+admission refuses before source histories and the native advance publishes no
+partial thermal or optical state. Existing heat/error admission, unresolved
+radiation, work budgets and exact native cancellation remain authoritative.
+
 The original cell transport kernel follows all scattering continuations through
 that prepared local field. True absorption supplies the original thermal cells,
 including off-beam receivers; ballistic escape, diffuse escape and unresolved

@@ -182,6 +182,8 @@ pub enum OpticalFeedbackError {
         maximum_j_kg: f64,
     },
     Transport(VolumeTransportError),
+    /// Full-Stokes source or active phase data cannot be physically admitted.
+    Polarized(crate::volumes::transport::scattering::polarized::PolarizedScatteringError),
     Heating(OpticalHeatingError),
     Thermal(DepositionError),
     /// The complete native refinement sequence did not meet time accuracy.
@@ -199,6 +201,19 @@ impl From<DepositionError> for OpticalFeedbackError {
 impl From<VolumeTransportError> for OpticalFeedbackError {
     fn from(error: VolumeTransportError) -> Self {
         Self::Transport(error)
+    }
+}
+impl From<crate::volumes::transport::scattering::polarized::PolarizedScatteringError>
+    for OpticalFeedbackError
+{
+    fn from(
+        error: crate::volumes::transport::scattering::polarized::PolarizedScatteringError,
+    ) -> Self {
+        use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
+        match error {
+            PolarizedScatteringError::Volume(error) => Self::Transport(error),
+            error => Self::Polarized(error),
+        }
     }
 }
 impl From<OpticalHeatingError> for OpticalFeedbackError {

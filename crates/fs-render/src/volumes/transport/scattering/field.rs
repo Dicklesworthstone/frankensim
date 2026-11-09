@@ -265,6 +265,48 @@ impl<'g, 'a, const N: usize> CellScatteringGrid<'g, 'a, N> {
         (cell < self.geometry.cell_count()).then(|| self.phase.at(cell))
     }
 
+    /// Admit only phase laws with actual scattering in this prepared packet.
+    /// Shared palette entries are checked once; absorbers and vacuum cells do
+    /// not need a fictitious polarized phase response.
+    #[cfg(feature = "tracer")]
+    pub(super) fn admit_polarized_phases(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    ) -> Result<(), super::polarized::PolarizedScatteringError> {
+        check()?;
+        if !self.has_scattering() {
+            return Ok(());
+        }
+        match self.phase {
+            CellPhaseFunction::Uniform(phase) => phase.admit_polarized()?,
+            CellPhaseFunction::Indexed {
+                palette,
+                cell_indices,
+            } => {
+                let mut active = Vec::new();
+                active
+                    .try_reserve_exact(palette.len())
+                    .map_err(|_| VolumeTransportError::Budget)?;
+                active.resize(palette.len(), false);
+                for (cell, coefficients) in self.scattering_m2_kg.iter().enumerate() {
+                    check()?;
+                    if self.geometry.grid.data[cell] > 0.0 && coefficients.iter().any(|s| *s > 0.0)
+                    {
+                        active[cell_indices[cell]] = true;
+                    }
+                }
+                for (phase, active) in palette.iter().zip(active) {
+                    check()?;
+                    if active {
+                        phase.admit_polarized()?;
+                    }
+                }
+            }
+        }
+        check()?;
+        Ok(())
+    }
+
     /// Exact shadow attenuation through local extinction at the fixed packet.
     pub fn transmittance(
         &self,

@@ -739,6 +739,14 @@ pub(super) fn transport_checkpoint<T>(
         &mut dyn FnMut() -> Result<(), VolumeTransportError>,
     ) -> Result<T, VolumeTransportError>,
 ) -> Result<T, OpticalFeedbackError> {
+    transport_checkpoint_with_error(checkpoint, operation)
+}
+/// Preserve the hosting thermal refusal while retaining a transport owner's
+/// richer source-admission error. Existing scalar callers keep their exact type.
+pub(super) fn transport_checkpoint_with_error<T, E: Into<OpticalFeedbackError>>(
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    operation: impl FnOnce(&mut dyn FnMut() -> Result<(), VolumeTransportError>) -> Result<T, E>,
+) -> Result<T, OpticalFeedbackError> {
     let mut refusal = None;
     let result = operation(&mut || match checkpoint() {
         Ok(()) => Ok(()),

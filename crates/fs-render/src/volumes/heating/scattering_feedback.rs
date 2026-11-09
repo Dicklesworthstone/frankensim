@@ -21,13 +21,17 @@ use super::feedback::{OpticalFeedbackError, TemperatureAbsorptionTable};
 use super::scattering::{ScatteringEnergyBudget, ScatteringHeating, ScatteringHeatingTolerance};
 use super::temperature_field::{
     TemperatureOpticalField, TemperatureOpticalFieldBudget, TemperatureOpticalState,
-    transport_checkpoint,
+    transport_checkpoint_with_error,
 };
 use super::{CheckedSum, OpticalHeatingError, nonnegative};
+use crate::polarization::Stokes;
+use crate::polarization::dielectric::transport::PolarizationFrame;
 use crate::volumes::transport::scattering::PhaseFunction;
 use crate::volumes::transport::scattering::deposition::{
-    AbsorptionEstimator, ScatteringDepositionConfig, ScatteringPowerDeposition,
+    AbsorptionEstimator, PolarizedDepositionConfig, ScatteringDepositionConfig,
+    ScatteringPowerDeposition,
 };
+use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 use fs_blake3::DomainHasher;
 use fs_geom::{Point3, Vec3};
@@ -57,6 +61,24 @@ pub struct IncidentScatteringBeam<const N: usize> {
     pub unit_direction: Vec3,
     pub wavelengths_nm: [f64; N],
     pub incident_power_w: [f64; N],
+}
+
+/// Full-Stokes collimated source with spectral-quadrature-weighted watts.
+/// Polarization is referred to the common physical frame. Absorption remains
+/// isotropic; the admitted molecular/spherical phase law supplies the angular
+/// response, including polarization developed during later scattering events.
+#[derive(Clone, Copy, Debug)]
+pub struct IncidentPolarizedScatteringBeam<const N: usize> {
+    pub origin: Point3,
+    pub frame: PolarizationFrame,
+    pub wavelengths_nm: [f64; N],
+    pub incident_stokes_w: [Stokes; N],
+}
+
+#[derive(Clone, Copy)]
+struct PolarizedSource<const N: usize> {
+    beam: IncidentPolarizedScatteringBeam<N>,
+    max_phase_proposals: u32,
 }
 
 /// Storage bounds at admission and aggregate work ceilings for ONE native
@@ -101,6 +123,7 @@ struct FeedbackModel<'g, const N: usize> {
     beam: IncidentScatteringBeam<N>,
     config: ScatteringDepositionConfig,
     absorption_estimator: AbsorptionEstimator,
+    polarized: Option<PolarizedSource<N>>,
     tolerance: ScatteringHeatingTolerance,
 }
 
@@ -130,6 +153,7 @@ impl<const N: usize> core::fmt::Debug for TemperatureScatteringHeating<'_, N> {
             .field("time_s", &self.time_s)
             .field("histories_per_lane", &self.histories)
             .field("absorption_estimator", &self.model.absorption_estimator)
+            .field("polarized", &self.is_polarized())
             .field("source_evaluations", &self.evaluations)
             .field("traced_segments", &self.segments)
             .field("energy", &self.energy)
@@ -245,6 +269,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             budget,
             config,
             absorption_estimator,
+            None,
             tolerance,
         )
     }
@@ -286,6 +311,75 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
         config: ScatteringDepositionConfig,
         absorption_estimator: AbsorptionEstimator,
         tolerance: ScatteringHeatingTolerance,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        Self::from_field_source(
+            field,
+            beam,
+            None,
+            thermal,
+            budget,
+            config,
+            absorption_estimator,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    /// Couple an admitted full-Stokes source to the SAME changing native field.
+    ///
+    /// Original Stokes/frame admission and active phase matrices are checked
+    /// before any history is sampled. Every native source query then prepares
+    /// the accepted temperatures and carries polarization through each actual
+    /// scattering event. Isotropic absorption changes watts, not normalized
+    /// Stokes state. The source, proposal bound and estimator are immutable
+    /// across clones, replica streams, history changes and trajectory refinement.
+    ///
+    /// A scalar phase without a retained polarized response refuses whenever
+    /// its prepared cell has scattering; pure absorbers need no such response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_polarized_field(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        beam: IncidentPolarizedScatteringBeam<N>,
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: PolarizedDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+        tolerance: ScatteringHeatingTolerance,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        let scalar = IncidentScatteringBeam {
+            origin: beam.origin,
+            unit_direction: beam.frame.direction(),
+            wavelengths_nm: beam.wavelengths_nm,
+            incident_power_w: beam.incident_stokes_w.map(|s| s.i),
+        };
+        Self::from_field_source(
+            field,
+            scalar,
+            Some(PolarizedSource {
+                beam,
+                max_phase_proposals: config.max_phase_proposals,
+            }),
+            thermal,
+            budget,
+            config.transport,
+            absorption_estimator,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_field_source(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        beam: IncidentScatteringBeam<N>,
+        polarized: Option<PolarizedSource<N>>,
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: ScatteringDepositionConfig,
+        absorption_estimator: AbsorptionEstimator,
+        tolerance: ScatteringHeatingTolerance,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
         checkpoint()?;
@@ -302,9 +396,22 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             ));
         }
         let coefficients = field.initial_state(thermal, &mut checkpoint)?;
-        transport_checkpoint(&mut checkpoint, |check| {
-            field.field(&coefficients, check).map(|_| ())
-        })?;
+        transport_checkpoint_with_error(
+            &mut checkpoint,
+            |check| -> Result<(), PolarizedScatteringError> {
+                let prepared = field.field(&coefficients, check)?;
+                if let Some(source) = polarized {
+                    prepared.admit_polarized_source(
+                        check,
+                        source.beam.origin,
+                        source.beam.frame,
+                        &source.beam.incident_stokes_w,
+                        source.max_phase_proposals,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
         Self::assembled(
             field,
             coefficients,
@@ -313,6 +420,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             budget,
             config,
             absorption_estimator,
+            polarized,
             tolerance,
         )
     }
@@ -326,6 +434,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
         budget: ScatteringFeedbackBudget,
         config: ScatteringDepositionConfig,
         absorption_estimator: AbsorptionEstimator,
+        polarized: Option<PolarizedSource<N>>,
         tolerance: ScatteringHeatingTolerance,
     ) -> Result<Self, OpticalFeedbackError> {
         let sums = EnergySums::default();
@@ -336,6 +445,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
                 beam,
                 config,
                 absorption_estimator,
+                polarized,
                 tolerance,
             }),
             coefficients,
@@ -391,6 +501,10 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
     /// Estimator selected for every source draw in this thermal trajectory.
     pub fn absorption_estimator(&self) -> AbsorptionEstimator {
         self.model.absorption_estimator
+    }
+    /// Whether native histories carry the admitted full-Stokes source state.
+    pub fn is_polarized(&self) -> bool {
+        self.model.polarized.is_some()
     }
     /// Conservative over all admitted temperatures; an initially transparent
     /// scattering law may become active later along the thermal trajectory.
@@ -489,27 +603,44 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
             .field
             .prepare(thermal, &mut self.coefficients, checkpoint)?;
         let config = self.step_config();
-        let report = transport_checkpoint(checkpoint, |check| {
-            let field = self.model.field.field(&self.coefficients, check)?;
-            match self.model.absorption_estimator {
-                AbsorptionEstimator::Collision => field
-                    .deposit_multiple_scattering_power_with_checkpoint(
-                        &mut || check(),
-                        self.model.beam.origin,
-                        self.model.beam.unit_direction,
-                        &self.model.beam.incident_power_w,
-                        config,
-                    ),
-                AbsorptionEstimator::Continuous => field
-                    .deposit_continuous_absorption_power_with_checkpoint(
-                        &mut || check(),
-                        self.model.beam.origin,
-                        self.model.beam.unit_direction,
-                        &self.model.beam.incident_power_w,
-                        config,
-                    ),
-            }
-        })?;
+        let report = transport_checkpoint_with_error(
+            checkpoint,
+            |check| -> Result<_, PolarizedScatteringError> {
+                let field = self.model.field.field(&self.coefficients, check)?;
+                if let Some(source) = self.model.polarized {
+                    return field.deposit_polarized_power_with_checkpoint(
+                        check,
+                        source.beam.origin,
+                        source.beam.frame,
+                        &source.beam.incident_stokes_w,
+                        PolarizedDepositionConfig {
+                            transport: config,
+                            max_phase_proposals: source.max_phase_proposals,
+                        },
+                        self.model.absorption_estimator,
+                    );
+                }
+                match self.model.absorption_estimator {
+                    AbsorptionEstimator::Collision => field
+                        .deposit_multiple_scattering_power_with_checkpoint(
+                            &mut || check(),
+                            self.model.beam.origin,
+                            self.model.beam.unit_direction,
+                            &self.model.beam.incident_power_w,
+                            config,
+                        ),
+                    AbsorptionEstimator::Continuous => field
+                        .deposit_continuous_absorption_power_with_checkpoint(
+                            &mut || check(),
+                            self.model.beam.origin,
+                            self.model.beam.unit_direction,
+                            &self.model.beam.incident_power_w,
+                            config,
+                        ),
+                }
+                .map_err(Into::into)
+            },
+        )?;
         let segments = self
             .segments
             .checked_add(report.traced_segments)
