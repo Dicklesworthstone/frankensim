@@ -1721,7 +1721,41 @@ osmolarity subtraction is made. Empty analytical stocks therefore do not
 supply an exactly normalized pure-water solvent activity. Chemical reaction
 water, crystal/solute partial volumes, phase-change heat,
 extra aqueous complexes, competing solids and kinetic rates are not supplied
-by this adapter.
+by this equilibrium adapter.
+
+### Finite-rate ionic material states
+
+`electrolyte::kinetics::KineticElectrolyteSolubilitySolution` retains one original
+`MineralKineticsV1` and its actual mineral/aqueous state. Constructors require
+explicit dissolved cation, dissolved analytical-family and solid inventories.
+The original source-bound chemistry owns fast aqueous speciation and finite
+mineral exchange. The material adapter never initializes an undeclared
+equilibrium partition or substitutes total family concentration for free anion
+activity.
+
+Solvent-volume changes preserve the actual crystal and dissolved component
+stocks, scale the common activity basis with the original `SolventActivityBasis`,
+and re-solve only aqueous pH/protonation. Subsequent time advancement then
+dissolves or grows the solid under the explicitly declared surface rate and
+growth policy. This makes the delay after dilution or solvent removal visible
+instead of immediately imposing mineral equilibrium. Complete analytical totals
+remain distinct from the current dissolved-only osmotic particle view.
+
+`with_dissolved_analytical_totals` replaces explicitly declared aqueous cation,
+family and spectator amounts on their existing identity/charge layout. The
+actual solid remains fixed while fast aqueous chemistry responds to dosing or
+removal. The resulting complete totals include that unchanged solid with its
+original stoichiometric coefficients. Subsequent mineral transfer uses the same
+rate source; missing counterions or undeclared added species are not inferred.
+
+Both equilibrium and kinetic material paths use one shared publisher for H+,
+OH-, each analytical-family member and each spectator exactly once. The solid
+and solvent do not enter that dissolved particle axis. Accepted updates retain
+the source and species identities; failures or cancellation publish no partial
+material endpoint. The native kinetic outcome remains available for inspection
+of actual saturation, balances and numerical work. The same fixed-temperature,
+ideal-dilute and fixed-solvent chemical limitations above apply; the adapter does
+not add ionic heat transport, complexes or nonideal activity corrections.
 
 ## Absolute thermo-optic response for refraction
 

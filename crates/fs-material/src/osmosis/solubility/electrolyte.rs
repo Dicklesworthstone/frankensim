@@ -17,8 +17,11 @@
 //! osmolarity is `2 * sqrt(K_w) * reference_amount_per_m3`. Thus empty analytical
 //! stocks still have this small positive particle pressure and an activity
 //! slightly below one; this view does not exactly normalize to pure solvent.
-//! Reaction water, solute/crystal partial volumes, heat, rates, additional
-//! complexes and competing solids remain outside this adapter.
+//! Reaction water, solute/crystal partial volumes, heat, additional complexes
+//! and competing solids remain outside this adapter. Explicit finite-rate
+//! crystal inventories use [`kinetics`] with the same aqueous publication.
+
+pub mod kinetics;
 
 use std::sync::Arc;
 
@@ -430,82 +433,105 @@ impl ElectrolyteSolubilitySolution {
         species_axis: Option<Arc<[SpeciesId]>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
-        poll(cancelled)?;
-        let aqueous = equilibrium.aqueous();
-        let count = 2
-            + aqueous
-                .families
-                .iter()
-                .map(|family| family.forms.len())
-                .sum::<usize>()
-            + aqueous.spectators.len();
-        if count > MAX_OSMOTIC_SOLUTES
-            || species_axis
-                .as_ref()
-                .is_some_and(|axis| axis.len() != count)
-        {
-            return Err(ElectrolyteSolubilityError::Invalid(
-                "speciated material requires at most 64 particles in its original layout",
-            ));
-        }
-        let mut amounts = Vec::with_capacity(count);
-        let mut identities = if species_axis.is_none() {
-            Vec::with_capacity(count)
-        } else {
-            Vec::new()
-        };
-        let water = aqueous.model().water();
-        let mut append = |id: &SpeciesId, amount: Amount| -> Result<()> {
-            poll(cancelled)?;
-            if id == water.water() || id == equilibrium.solid() {
-                return Err(ElectrolyteSolubilityError::Invalid(
-                    "solvent or solid cannot be counted as dissolved osmotic particles",
-                ));
-            }
-            if let Some(axis) = &species_axis {
-                if axis.get(amounts.len()) != Some(id) {
-                    return Err(ElectrolyteSolubilityError::Invalid(
-                        "speciation changed the original dissolved species ordering",
-                    ));
-                }
-            } else if identities.contains(id) {
-                return Err(ElectrolyteSolubilityError::Invalid(
-                    "a dissolved species cannot contribute osmotic particles twice",
-                ));
-            } else {
-                identities.push(id.clone());
-            }
-            amounts.push(amount.value());
-            Ok(())
-        };
-        append(water.proton(), aqueous.proton_amount)?;
-        append(water.hydroxide(), aqueous.hydroxide_amount)?;
-        for family in &aqueous.families {
-            for form in &family.forms {
-                append(&form.species, form.amount)?;
-            }
-        }
-        for ion in &aqueous.spectators {
-            append(&ion.species, ion.amount)?;
-        }
-        let solution: AqueousSolution = IdealDiluteSolution::new(
-            equilibrium.standard().temperature().value(),
-            basis.solvent_molar_volume_m3_mol,
-            volume.value(),
-            amounts,
-        )?
-        .into();
-        solution.water_activity()?;
-        poll(cancelled)?;
+        let (species, solution) = publish_aqueous(
+            basis,
+            volume,
+            equilibrium.aqueous(),
+            equilibrium.solid(),
+            equilibrium.standard().temperature(),
+            species_axis,
+            cancelled,
+        )?;
         Ok(Self {
             basis,
             options,
             stocks,
             equilibrium,
-            species: species_axis.unwrap_or_else(|| identities.into()),
+            species,
             solution,
         })
     }
+}
+
+/// Publish exactly the original speciated particles for either a frozen finite
+/// kinetic phase or the original equilibrium owner. No solid-phase calculation
+/// or additional aqueous equilibrium is performed at this material boundary.
+fn publish_aqueous(
+    basis: SolventActivityBasis,
+    volume: Volume,
+    aqueous: &AcidBaseSpeciation,
+    solid: &SpeciesId,
+    temperature: fs_qty::Temperature,
+    species_axis: Option<Arc<[SpeciesId]>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Arc<[SpeciesId]>, AqueousSolution)> {
+    poll(cancelled)?;
+    let count = 2
+        + aqueous
+            .families
+            .iter()
+            .map(|family| family.forms.len())
+            .sum::<usize>()
+        + aqueous.spectators.len();
+    if count > MAX_OSMOTIC_SOLUTES
+        || species_axis
+            .as_ref()
+            .is_some_and(|axis| axis.len() != count)
+    {
+        return Err(ElectrolyteSolubilityError::Invalid(
+            "speciated material requires at most 64 particles in its original layout",
+        ));
+    }
+    let mut amounts = Vec::with_capacity(count);
+    let mut identities = if species_axis.is_none() {
+        Vec::with_capacity(count)
+    } else {
+        Vec::new()
+    };
+    let water = aqueous.model().water();
+    let mut append = |id: &SpeciesId, amount: Amount| -> Result<()> {
+        poll(cancelled)?;
+        if id == water.water() || id == solid {
+            return Err(ElectrolyteSolubilityError::Invalid(
+                "solvent or solid cannot be counted as dissolved osmotic particles",
+            ));
+        }
+        if let Some(axis) = &species_axis {
+            if axis.get(amounts.len()) != Some(id) {
+                return Err(ElectrolyteSolubilityError::Invalid(
+                    "speciation changed the original dissolved species ordering",
+                ));
+            }
+        } else if identities.contains(id) {
+            return Err(ElectrolyteSolubilityError::Invalid(
+                "a dissolved species cannot contribute osmotic particles twice",
+            ));
+        } else {
+            identities.push(id.clone());
+        }
+        amounts.push(amount.value());
+        Ok(())
+    };
+    append(water.proton(), aqueous.proton_amount)?;
+    append(water.hydroxide(), aqueous.hydroxide_amount)?;
+    for family in &aqueous.families {
+        for form in &family.forms {
+            append(&form.species, form.amount)?;
+        }
+    }
+    for ion in &aqueous.spectators {
+        append(&ion.species, ion.amount)?;
+    }
+    let solution: AqueousSolution = IdealDiluteSolution::new(
+        temperature.value(),
+        basis.solvent_molar_volume_m3_mol,
+        volume.value(),
+        amounts,
+    )?
+    .into();
+    solution.water_activity()?;
+    poll(cancelled)?;
+    Ok((species_axis.unwrap_or_else(|| identities.into()), solution))
 }
 
 fn positive(value: f64) -> bool {

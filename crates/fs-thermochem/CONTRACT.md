@@ -1461,6 +1461,11 @@ retain actual aqueous speciation, phase/component balances, saturation and work
 counts. Solid exhaustion is a bounded endpoint, not a claimed exact continuous
 event time. A failed or cancelled advance leaves its input state unchanged.
 
+The `mineral_precipitation --kinetics` mode runs the same original USGS
+iron/goethite source selection with explicit initial dissolved/solid stocks and
+a separately supplied surface rate. Its equilibrium comparison is diagnostic;
+it never replaces a finite-rate state.
+
 This capability holds source temperature, pressure and ideal activity conventions
 fixed, and omits competing minerals, additional dissolved complexes, nonideal
 ionic activities, reaction heat, finite-solvent H/O balance and evolving particle
