@@ -46,21 +46,37 @@ impl SourceAttribution {
         state_energies: [f64; 2],
     ) -> Result<(), SingletTripletError> {
         let (absorbed, events, relaxation, passive) = if beam < self.external_paths {
-            (&mut self.external_absorbed[index], &mut self.external_events[index],
-                &mut self.external_relaxation[index], &mut self.external_passive[index])
+            (
+                &mut self.external_absorbed[index],
+                &mut self.external_events[index],
+                &mut self.external_relaxation[index],
+                &mut self.external_passive[index],
+            )
         } else {
-            (&mut self.recycled_absorbed[index], &mut self.recycled_events[index],
-                &mut self.recycled_relaxation[index], &mut self.recycled_passive[index])
+            (
+                &mut self.recycled_absorbed[index],
+                &mut self.recycled_events[index],
+                &mut self.recycled_relaxation[index],
+                &mut self.recycled_passive[index],
+            )
         };
         for target in 0..2 {
             let count = packet.absorbed_by_state[target];
             events[target].add(count)?;
             absorbed[target].add(positive_product(count, energy, "attributed pump energy")?)?;
             if count > 0.0 {
-                relaxation[target].add(positive_product(count, energy - state_energies[target], "attributed pump relaxation")?)?;
+                relaxation[target].add(positive_product(
+                    count,
+                    energy - state_energies[target],
+                    "attributed pump relaxation",
+                )?)?;
             }
         }
-        passive.add(positive_product(packet.passive, energy, "attributed passive heat")?)?;
+        passive.add(positive_product(
+            packet.passive,
+            energy,
+            "attributed passive heat",
+        )?)?;
         Ok(())
     }
 }
@@ -83,18 +99,23 @@ impl<const B: usize> SaturablePumpBeams<B> {
         incident: &[[f64; B]],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<Vec<cell::Channel>>, Vec<[f64; B]>), SingletTripletError> {
-        let mut channels: Vec<_> = self.visits.iter()
-            .map(|visits| Vec::with_capacity(visits.len() * B)).collect();
+        let mut channels: Vec<_> = self
+            .visits
+            .iter()
+            .map(|visits| Vec::with_capacity(visits.len() * B))
+            .collect();
         let mut outgoing = incident.to_vec();
         for (beam, path) in self.paths.iter().enumerate() {
             for (ordinal, segment) in path.segments.iter().enumerate() {
                 poll(cancelled)?;
-                let visit = Visit { beam, segment: ordinal };
+                let visit = Visit {
+                    beam,
+                    segment: ordinal,
+                };
                 for lane in 0..B {
                     let channel = self.channel(visit, lane, outgoing[beam][lane]);
-                    outgoing[beam][lane] = cell::transmitted_rate(
-                        channel, means[segment.cell_index],
-                    )?;
+                    outgoing[beam][lane] =
+                        cell::transmitted_rate(channel, means[segment.cell_index])?;
                     channels[segment.cell_index].push(channel);
                 }
             }
@@ -107,6 +128,7 @@ impl<const B: usize> SaturablePumpBeams<B> {
         &self,
         initial: &[[f64; 3]],
         incident: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
         duration: f64,
         nonlinear: bool,
         limits: PumpBeamsLimits,
@@ -122,9 +144,15 @@ impl<const B: usize> SaturablePumpBeams<B> {
             let (channels, outgoing) = self.trace(&means, incident, cancelled)?;
             let mut cells = Vec::with_capacity(self.models.len());
             for (index, &model) in self.models.iter().enumerate() {
-                cells.push(cell::solve(
-                    model, initial[index], &channels[index], duration,
-                    limits.column, evaluations, cancelled,
+                cells.push(cell::solve_with_local(
+                    model,
+                    initial[index],
+                    &channels[index],
+                    local::at(local_pumps, index),
+                    duration,
+                    limits.column,
+                    evaluations,
+                    cancelled,
                 )?);
             }
             return Ok(Some(Substep { cells, outgoing }));
@@ -141,9 +169,15 @@ impl<const B: usize> SaturablePumpBeams<B> {
                         channels.push(self.channel(visit, lane, outgoing[visit.beam][lane]));
                     }
                 }
-                let trial = cell::solve(
-                    self.models[index], initial[index], &channels,
-                    duration, limits.column, evaluations, cancelled,
+                let trial = cell::solve_with_local(
+                    self.models[index],
+                    initial[index],
+                    &channels,
+                    local::at(local_pumps, index),
+                    duration,
+                    limits.column,
+                    evaluations,
+                    cancelled,
                 )?;
                 for (ordinal, visit) in self.visits[index].iter().enumerate() {
                     for lane in 0..B {
@@ -153,9 +187,14 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 }
                 trials[index] = Some(trial);
             }
-            let cells = trials.into_iter().map(|trial| {
-                trial.ok_or(SingletTripletError::Invalid("incomplete pump beam topology"))
-            }).collect::<Result<_, _>>()?;
+            let cells = trials
+                .into_iter()
+                .map(|trial| {
+                    trial.ok_or(SingletTripletError::Invalid(
+                        "incomplete pump beam topology",
+                    ))
+                })
+                .collect::<Result<_, _>>()?;
             return Ok(Some(Substep { cells, outgoing }));
         }
 
@@ -163,18 +202,31 @@ impl<const B: usize> SaturablePumpBeams<B> {
         let mut previous_delta = vec![0.0_f64; means.len()];
         for _ in 0..limits.maximum_coupling_iterations {
             poll(cancelled)?;
-            *coupling_iterations = coupling_iterations.checked_add(1)
-                .ok_or(SingletTripletError::Unrepresentable("pump coupling iteration counter"))?;
+            *coupling_iterations =
+                coupling_iterations
+                    .checked_add(1)
+                    .ok_or(SingletTripletError::Unrepresentable(
+                        "pump coupling iteration counter",
+                    ))?;
             let (channels, outgoing) = self.trace(&means, incident, cancelled)?;
             let mut trials = Vec::with_capacity(self.models.len());
             let mut consistent = true;
             for (index, &model) in self.models.iter().enumerate() {
-                let trial = cell::evaluate(
-                    model, initial[index], &channels[index], duration,
-                    means[index], limits.column, evaluations, cancelled,
+                let trial = cell::evaluate_with_local(
+                    model,
+                    initial[index],
+                    &channels[index],
+                    local::at(local_pumps, index),
+                    duration,
+                    means[index],
+                    limits.column,
+                    evaluations,
+                    cancelled,
                 )?;
                 consistent &= cell::consistent(
-                    &trial, means[index], limits.column.kinetic.relative_tolerance,
+                    &trial,
+                    means[index],
+                    limits.column.kinetic.relative_tolerance,
                 );
                 trials.push(trial);
             }
@@ -182,18 +234,28 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 // Every channel used exactly this same common field; its
                 // independently propagated photon packet matches the one
                 // shared kinetic history, within the original strict audit.
-                return Ok(Some(Substep { cells: trials, outgoing }));
+                return Ok(Some(Substep {
+                    cells: trials,
+                    outgoing,
+                }));
             }
             drop(trials);
             for (index, &model) in self.models.iter().enumerate() {
-                let trial = cell::solve(
-                    model, initial[index], &channels[index], duration,
-                    limits.column, evaluations, cancelled,
+                let trial = cell::solve_with_local(
+                    model,
+                    initial[index],
+                    &channels[index],
+                    local::at(local_pumps, index),
+                    duration,
+                    limits.column,
+                    evaluations,
+                    cancelled,
                 )?;
                 let delta = trial.mean_ground - means[index];
                 // Dampen an alternating source-iteration component without
                 // clipping any population or altering the accepted history.
-                let alternating = delta != 0.0 && previous_delta[index] != 0.0
+                let alternating = delta != 0.0
+                    && previous_delta[index] != 0.0
                     && delta.is_sign_positive() != previous_delta[index].is_sign_positive();
                 means[index] = if alternating {
                     means[index] + 0.5 * delta
@@ -209,10 +271,11 @@ impl<const B: usize> SaturablePumpBeams<B> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn uniform(
+    pub(super) fn uniform_with_local(
         &self,
         initial: &[[f64; 3]],
         incident: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
         duration: f64,
         substeps: usize,
         nonlinear: bool,
@@ -222,8 +285,17 @@ impl<const B: usize> SaturablePumpBeams<B> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<PumpBeamsStep<B>>, SingletTripletError> {
         self.uniform_attributed(
-            initial, incident, duration, substeps, nonlinear, limits,
-            evaluations, coupling_iterations, None, cancelled,
+            initial,
+            incident,
+            local_pumps,
+            duration,
+            substeps,
+            nonlinear,
+            limits,
+            evaluations,
+            coupling_iterations,
+            None,
+            cancelled,
         )
     }
 
@@ -232,6 +304,7 @@ impl<const B: usize> SaturablePumpBeams<B> {
         &self,
         initial: &[[f64; 3]],
         incident: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
         duration: f64,
         substeps: usize,
         nonlinear: bool,
@@ -245,18 +318,32 @@ impl<const B: usize> SaturablePumpBeams<B> {
         let mut totals: Vec<_> = self.models.iter().map(|_| KineticTotals::new()).collect();
         let mut passive = vec![Sum::default(); self.models.len()];
         let mut beams: Vec<_> = self.paths.iter().map(|_| BeamTotals::<B>::new()).collect();
+        let mut local: Vec<_> = local_pumps
+            .iter()
+            .map(|_| local::LocalTotals::new())
+            .collect();
         let mut start = 0.0;
         for ordinal in 0..substeps {
             poll(cancelled)?;
             let end = duration * ((ordinal + 1) as f64 / substeps as f64);
             let h = end - start;
             if duration > 0.0 && h <= 0.0 {
-                return Err(SingletTripletError::Unrepresentable("pump beam temporal resolution"));
+                return Err(SingletTripletError::Unrepresentable(
+                    "pump beam temporal resolution",
+                ));
             }
             let Some(trial) = self.substep(
-                &populations, incident, h, nonlinear, limits,
-                evaluations, coupling_iterations, cancelled,
-            )? else {
+                &populations,
+                incident,
+                local_pumps,
+                h,
+                nonlinear,
+                limits,
+                evaluations,
+                coupling_iterations,
+                cancelled,
+            )?
+            else {
                 return Ok(None);
             };
             for (index, trial) in trial.cells.into_iter().enumerate() {
@@ -264,14 +351,22 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 populations[index] = trial.kinetics.populations;
                 totals[index].add(&trial.kinetics)?;
                 passive[index].add(trial.passive_heat_j)?;
+                if let Some(total) = local.get_mut(index) {
+                    total.add(trial.local_pump)?;
+                }
                 for (ordinal, visit) in self.visits[index].iter().enumerate() {
                     for lane in 0..B {
                         let packet = trial.channels[ordinal * B + lane];
                         beams[visit.beam].add_packet(lane, packet)?;
                         if let Some(split) = attribution.as_deref_mut() {
                             let energy = self.paths[visit.beam].photon_energies_j[lane];
-                            split.add_packet(index, visit.beam, packet, energy,
-                                self.models[index].excitation_energies_j())?;
+                            split.add_packet(
+                                index,
+                                visit.beam,
+                                packet,
+                                energy,
+                                self.models[index].excitation_energies_j(),
+                            )?;
                         }
                     }
                 }
@@ -286,7 +381,9 @@ impl<const B: usize> SaturablePumpBeams<B> {
         for (index, total) in totals.into_iter().enumerate() {
             poll(cancelled)?;
             cells.push(total.finish(
-                self.models[index], initial[index], populations[index],
+                self.models[index],
+                initial[index],
+                populations[index],
                 limits.column.kinetic.relative_tolerance,
             )?);
             passive_heat_j.push(passive[index].value()?);
@@ -295,17 +392,32 @@ impl<const B: usize> SaturablePumpBeams<B> {
         for (index, total) in beams.into_iter().enumerate() {
             poll(cancelled)?;
             summaries.push(total.finish(
-                incident[index], duration, self.paths[index].photon_energies_j,
+                incident[index],
+                duration,
+                self.paths[index].photon_energies_j,
                 limits.column.kinetic.relative_tolerance,
             )?);
         }
+        let local_pumps = local
+            .into_iter()
+            .map(|total| total.finish())
+            .collect::<Result<Vec<_>, _>>()?;
         let residual_j = self.energy_balance(
-            initial, &cells, &passive_heat_j, &summaries,
+            initial,
+            &cells,
+            &passive_heat_j,
+            &summaries,
+            &local_pumps,
             limits.column.kinetic.relative_tolerance,
         )?;
         Ok(Some(PumpBeamsStep {
-            cells, passive_heat_j, beams: summaries, residual_j,
-            substeps, cell_evaluations: *evaluations,
+            cells,
+            passive_heat_j,
+            beams: summaries,
+            local_pumps,
+            residual_j,
+            substeps,
+            cell_evaluations: *evaluations,
             coupling_iterations: *coupling_iterations,
             max_energy_discrepancy_j: 0.0,
         }))

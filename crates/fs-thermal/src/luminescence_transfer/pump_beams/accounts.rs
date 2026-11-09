@@ -116,12 +116,21 @@ impl<const B: usize> SaturablePumpBeams<B> {
         cells: &[SaturableSingletTripletStep],
         passive: &[f64],
         beams: &[PumpBeamStep<B>],
+        local_pumps: &[LocalPumpStep],
         tolerance: f64,
     ) -> Result<f64, SingletTripletError> {
         let mut residual = Sum::default();
         let mut scale = Sum::default();
         let mut spectral_minus_target = Sum::default();
         let mut pump_scale = Sum::default();
+        for local in local_pumps {
+            for energy in local.absorbed_energy_j {
+                residual.add(energy)?;
+                scale.add(energy)?;
+                spectral_minus_target.add(energy)?;
+                pump_scale.add(energy)?;
+            }
+        }
         for beam in beams {
             for lane in 0..B {
                 residual.add(beam.incident_energy_j[lane])?;
@@ -228,6 +237,17 @@ impl<const B: usize> SaturablePumpBeams<B> {
             result.extend(beam.transmitted_energy_j);
             result.extend(beam.absorbed_energy_j);
             result.extend(beam.passive_absorbed_energy_j);
+        }
+        for (index, local) in step.local_pumps.iter().enumerate() {
+            result.extend(local.absorbed_energy_j);
+            result.extend(local.relaxation_heat_j);
+            for target in 0..2 {
+                result.push(positive_product(
+                    local.events[target],
+                    self.models[index].excitation_energies_j()[target],
+                    "local event convergence energy",
+                )?);
+            }
         }
         Ok(result)
     }

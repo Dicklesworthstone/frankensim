@@ -4318,6 +4318,49 @@ owner to original geometry, material absorption, native heat and accepted
 endpoint opacity. Its separate full-runtime tests remain unexecuted;
 lower-owner checks do not establish that renderer gate.
 
+### Prescribed local excitation sharing transported photons
+
+`pump_beams::LocalPhotonPump` declares per-ground `G->S` and `G->T`
+hazards in inverse seconds and their original photon energies in joules.
+`SaturablePumpBeams::advance_with_local_pumps`, its
+`advance_with_local_pumps_and_annihilation` counterpart, and
+`SaturablePhotonRecycling::advance_with_local_pumps` combine those fields
+with actual transported photons on the same original finite inventories.
+Local entries follow original model order. Empty or all-dark input retains
+the existing numerical path and an empty local report.
+
+Local hazards enter before the single native population propagation. Actual
+local events are the hazard times that same integrated ground residence;
+recovery can therefore support more than one absorbed photon per original
+emitter without increasing its inventory. `LocalPumpStep` retains these
+events, consumed photon energy and excess-energy heat separately from every
+beam and internally recycled path. No weak-opacity surrogate ray, beam area,
+or incident/transmitted local reservoir ledger is constructed. The caller
+must justify a prescribed field as externally maintained or optically thin
+and must not declare the same illumination again as an external beam.
+
+The stationary flow admission, positive nonlinear/pair stages, fastest-rate
+bound and temporal energy checks all include the same local hazards. The
+physical residual includes actual local absorbed energy as external supply,
+alongside initial excitation, incident beams and any uphill bath transfer.
+Gross photon circulation remains excluded from external supply and the
+global error scale. Local contributions are accumulated directly, without
+subtracting large transported or recycled totals. Incorrect cell counts,
+nonfinite/negative data, or active photons below their destination energy
+refuse before state publication.
+
+All 28 focused native pump tests passed with unchanged controls: the 25
+existing column/shared-beam/recycling/pair groups and three new independent
+local-pump oracles. The exact two-state transient consumed 1.0347737207 photons
+per emitter while conserving its inventory, with final S/N=0.60563795311.
+A shared local/beam/recycling/pair equilibrium used one substep and one cell
+evaluation; the independent direct local/pair branch used two substeps and
+six evaluations. Their energy residual magnitudes were below 7e-23 J.
+The transient also checks inactive-field parity and invalid shape/energy
+refusal. The prior trapping and 65-cell ring results and work counts stayed
+unchanged. These tests executed actual production math and thermal sources
+in the existing harness with no compiler diagnostics or ignored tests.
+
 ## Stationary and harmonic prescribed throughflow
 
 The native implicit operating-point and thermal-impedance owners now admit

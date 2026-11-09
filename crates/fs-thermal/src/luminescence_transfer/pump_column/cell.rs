@@ -1,5 +1,6 @@
 //! Shared local optical/kinetic closure for one or many simultaneous paths.
 
+use super::super::pump_beams::{LocalPhotonPump, LocalPumpStep};
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +25,7 @@ pub(crate) struct ChannelStep {
 
 pub(crate) struct SharedTrial {
     pub kinetics: SaturableSingletTripletStep,
+    pub local_pump: LocalPumpStep,
     pub channels: Vec<ChannelStep>,
     pub mean_ground: f64,
     pub passive_heat_j: f64,
@@ -36,7 +38,10 @@ pub(crate) fn transmitted_rate(
     channel: Channel,
     mean_ground: f64,
 ) -> Result<f64, SingletTripletError> {
-    Ok(attenuate(channel.incident_rate, depth(channel, mean_ground)?))
+    Ok(attenuate(
+        channel.incident_rate,
+        depth(channel, mean_ground)?,
+    ))
 }
 
 fn depth(channel: Channel, mean_ground: f64) -> Result<f64, SingletTripletError> {
@@ -47,8 +52,8 @@ fn depth(channel: Channel, mean_ground: f64) -> Result<f64, SingletTripletError>
 }
 
 pub(crate) fn consistent(trial: &SharedTrial, guess: f64, tolerance: f64) -> bool {
-    let close = (trial.mean_ground - guess).abs()
-        <= 0.0625 * tolerance * trial.mean_ground.max(guess);
+    let close =
+        (trial.mean_ground - guess).abs() <= 0.0625 * tolerance * trial.mean_ground.max(guess);
     close && photons_close(trial, 0.25 * tolerance)
 }
 
@@ -76,6 +81,29 @@ pub(crate) fn solve(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SharedTrial, SingletTripletError> {
+    solve_with_local(
+        model,
+        populations,
+        channels,
+        LocalPhotonPump::default(),
+        duration,
+        limits,
+        evaluations,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_with_local(
+    model: SingletTripletDecay,
+    populations: [f64; 3],
+    channels: &[Channel],
+    local: LocalPhotonPump,
+    duration: f64,
+    limits: PumpColumnLimits,
+    evaluations: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SharedTrial, SingletTripletError> {
     let mut total = Sum::default();
     for value in populations {
         total.add(value)?;
@@ -87,8 +115,16 @@ pub(crate) fn solve(
             .iter()
             .any(|c| c.incident_rate > 0.0 && c.depth.iter().any(|&x| x > 0.0));
     if !active {
-        return evaluate(
-            model, populations, channels, duration, populations[0], limits, evaluations, cancelled,
+        return evaluate_with_local(
+            model,
+            populations,
+            channels,
+            local,
+            duration,
+            populations[0],
+            limits,
+            evaluations,
+            cancelled,
         );
     }
     let mut low = 0.0;
@@ -113,8 +149,16 @@ pub(crate) fn solve(
                 low + 0.5 * (high - low)
             }
         };
-        let trial = evaluate(
-            model, populations, channels, duration, guess, limits, evaluations, cancelled,
+        let trial = evaluate_with_local(
+            model,
+            populations,
+            channels,
+            local,
+            duration,
+            guess,
+            limits,
+            evaluations,
+            cancelled,
         )?;
         let residual = finite(trial.mean_ground - guess, "mean ground residual")?;
         if consistent(&trial, guess, limits.kinetic.relative_tolerance) {
@@ -137,10 +181,11 @@ pub(crate) fn solve(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate(
+pub(crate) fn evaluate_with_local(
     model: SingletTripletDecay,
     populations: [f64; 3],
     channels: &[Channel],
+    local: LocalPhotonPump,
     duration: f64,
     mean_ground: f64,
     limits: PumpColumnLimits,
@@ -149,12 +194,21 @@ pub(crate) fn evaluate(
 ) -> Result<SharedTrial, SingletTripletError> {
     *evaluations = evaluations
         .checked_add(1)
-        .ok_or(SingletTripletError::Unrepresentable("pump cell evaluation counter"))?;
-    cap("pump column cell evaluations", *evaluations, limits.maximum_cell_evaluations)?;
+        .ok_or(SingletTripletError::Unrepresentable(
+            "pump cell evaluation counter",
+        ))?;
+    cap(
+        "pump column cell evaluations",
+        *evaluations,
+        limits.maximum_cell_evaluations,
+    )?;
     poll(cancelled)?;
     let mut hazards = Vec::with_capacity(channels.len());
     let mut packets = Vec::with_capacity(channels.len());
     let mut rates = [Sum::default(); 2];
+    for target in 0..2 {
+        rates[target].add(local.rates_s[target])?;
+    }
     for &channel in channels {
         poll(cancelled)?;
         let depth = depth(channel, mean_ground)?;
@@ -167,28 +221,41 @@ pub(crate) fn evaluate(
         let transmitted_rate = attenuate(channel.incident_rate, depth);
         let transmitted = attenuate(incident, depth);
         if transmitted_rate == 0.0 && transmitted > 0.0 {
-            return Err(SingletTripletError::Unrepresentable("transmitted photon rate"));
+            return Err(SingletTripletError::Unrepresentable(
+                "transmitted photon rate",
+            ));
         }
         let passive = product3(incident, channel.passive_depth, mean_transmission)?;
         let mut hazard = [0.0; 2];
         for target in 0..2 {
             hazard[target] = product3(
-                channel.incident_rate, channel.depth[target], mean_transmission,
+                channel.incident_rate,
+                channel.depth[target],
+                mean_transmission,
             )?;
             rates[target].add(hazard[target])?;
         }
         hazards.push(hazard);
         packets.push(ChannelStep {
-            incident, transmitted, absorbed: 0.0, absorbed_by_state: [0.0; 2], passive,
-            transmitted_rate, residual: 0.0,
+            incident,
+            transmitted,
+            absorbed: 0.0,
+            absorbed_by_state: [0.0; 2],
+            passive,
+            transmitted_rate,
+            residual: 0.0,
         });
     }
     let rates = values(rates)?;
     // Original channel quanta are retained until after actual event splitting.
     // Averaging energies first erases weak but positive pump-relaxation heat.
     let plan = SaturableSingletTripletPlan::prepare_with_population_integrals(
-        model, rates, model.excitation_energies_j(), duration,
-        limits.kinetic, &mut *cancelled,
+        model,
+        rates,
+        model.excitation_energies_j(),
+        duration,
+        limits.kinetic,
+        &mut *cancelled,
     )?;
     let mut kinetics = plan.advance_with_cancel(populations, &mut *cancelled)?;
     let residence = plan.integrate_populations_with_cancel(populations, &mut *cancelled)?;
@@ -199,6 +266,17 @@ pub(crate) fn evaluate(
     };
     let mut pump_energy = [Sum::default(); 2];
     let mut pump_heat = [Sum::default(); 2];
+    let mut local_events = [0.0; 2];
+    for target in 0..2 {
+        local_events[target] =
+            positive_product(local.rates_s[target], residence[0], "local pump events")?;
+    }
+    let local_pump =
+        LocalPumpStep::from_events(local_events, local, model.excitation_energies_j())?;
+    for target in 0..2 {
+        pump_energy[target].add(local_pump.absorbed_energy_j[target])?;
+        pump_heat[target].add(local_pump.relaxation_heat_j[target])?;
+    }
     let mut passive_heat = Sum::default();
     for ((channel, hazard), packet) in channels.iter().zip(hazards).zip(&mut packets) {
         let mut events = Sum::default();
@@ -206,15 +284,18 @@ pub(crate) fn evaluate(
             if rates[target] > 0.0 {
                 let weight = hazard[target] / rates[target];
                 if hazard[target] > 0.0 && weight == 0.0 {
-                    return Err(SingletTripletError::Unrepresentable("spectral pump branching"));
+                    return Err(SingletTripletError::Unrepresentable(
+                        "spectral pump branching",
+                    ));
                 }
-                let count = positive_product(
-                    kinetics.pump_events[target], weight, "spectral pump events",
-                )?;
+                let count =
+                    positive_product(kinetics.pump_events[target], weight, "spectral pump events")?;
                 packet.absorbed_by_state[target] = count;
                 events.add(count)?;
                 pump_energy[target].add(positive_product(
-                    count, channel.energy, "spectral pump energy",
+                    count,
+                    channel.energy,
+                    "spectral pump energy",
                 )?)?;
                 let excess = if hazard[target] > 0.0 {
                     channel.energy - model.excitation_energies_j()[target]
@@ -222,24 +303,38 @@ pub(crate) fn evaluate(
                     0.0
                 };
                 pump_heat[target].add(positive_product(
-                    count, excess, "spectral pump excess heat",
+                    count,
+                    excess,
+                    "spectral pump excess heat",
                 )?)?;
             }
         }
         packet.absorbed = events.value()?;
         packet.residual = photon_balance(
-            [packet.incident], [packet.transmitted], [packet.absorbed], [packet.passive],
+            [packet.incident],
+            [packet.transmitted],
+            [packet.absorbed],
+            [packet.passive],
         )?[0];
         passive_heat.add(positive_product(
-            packet.passive, channel.energy, "passive pump energy",
+            packet.passive,
+            channel.energy,
+            "passive pump energy",
         )?)?;
     }
     kinetics.absorbed_pump_energy_j = values(pump_energy)?;
     kinetics.pump_relaxation_heat_j = values(pump_heat)?;
     kinetics.residual_j = kinetic_energy_residual(
-        model, populations, &kinetics, limits.kinetic.relative_tolerance,
+        model,
+        populations,
+        &kinetics,
+        limits.kinetic.relative_tolerance,
     )?;
     Ok(SharedTrial {
-        kinetics, channels: packets, mean_ground, passive_heat_j: passive_heat.value()?,
+        kinetics,
+        local_pump,
+        channels: packets,
+        mean_ground,
+        passive_heat_j: passive_heat.value()?,
     })
 }

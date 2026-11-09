@@ -79,6 +79,9 @@ pub struct PumpBeamsStep<const B: usize> {
     pub cells: Vec<SaturableSingletTripletStep>,
     pub passive_heat_j: Vec<f64>,
     pub beams: Vec<PumpBeamStep<B>>,
+    /// Actual local-field supply in original cell order, separate from beams.
+    /// Empty when all local hazards are zero.
+    pub local_pumps: Vec<LocalPumpStep>,
     pub residual_j: f64,
     pub substeps: usize,
     /// Includes all local scalar, coupling and discarded temporal work.
@@ -240,8 +243,37 @@ impl<const B: usize> SaturablePumpBeams<B> {
         incident_photon_rates_s: &[[f64; B]],
         duration_s: f64,
         limits: PumpBeamsLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PumpBeamsStep<B>, SingletTripletError> {
+        self.advance_with_local_pumps(
+            populations,
+            incident_photon_rates_s,
+            &[],
+            duration_s,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Combine externally maintained local hazards and transported beams on
+    /// the same finite inventory. Local entries follow original model order;
+    /// an empty or all-dark slice preserves the ordinary beam path exactly.
+    /// Only actual local absorption supplies energy, separately from beams.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_local_pumps(
+        &self,
+        populations: &[[f64; 3]],
+        incident_photon_rates_s: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
+        duration_s: f64,
+        limits: PumpBeamsLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PumpBeamsStep<B>, SingletTripletError> {
+        let local_pumps = if local::validate(&self.models, local_pumps, &mut cancelled)? {
+            local_pumps
+        } else {
+            &[]
+        };
         self.validate_advance(
             populations,
             incident_photon_rates_s,
@@ -276,9 +308,10 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 substeps,
                 column.maximum_substeps,
             )?;
-            let candidate = self.uniform(
+            let candidate = self.uniform_with_local(
                 populations,
                 incident_photon_rates_s,
+                local_pumps,
                 duration_s,
                 substeps,
                 nonlinear,
@@ -374,12 +407,15 @@ mod accounts;
 mod annihilation;
 #[path = "pump_beams/evolution.rs"]
 mod evolution;
-/// Finite-ground absorption of actual emitted photons on the same cell history.
-#[path = "pump_beams/recycling.rs"]
-pub mod recycling;
+#[path = "pump_beams/local.rs"]
+mod local;
+pub use local::{LocalPhotonPump, LocalPumpStep};
 #[cfg(test)]
 #[path = "pump_beams/oracles.rs"]
 mod oracles;
+/// Finite-ground absorption of actual emitted photons on the same cell history.
+#[path = "pump_beams/recycling.rs"]
+pub mod recycling;
 #[cfg(test)]
 #[path = "pump_beams/tests.rs"]
 mod tests;

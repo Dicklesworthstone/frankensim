@@ -19,9 +19,41 @@ impl<const B: usize> SaturablePumpBeams<B> {
         duration_s: f64,
         laws: &[Option<TripletAnnihilation>],
         limits: PumpBeamsLimits,
+        annihilation: AnnihilationLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PumpBeamsStep<B>, SingletTripletError> {
+        self.advance_with_local_pumps_and_annihilation(
+            populations,
+            incident_photon_rates_s,
+            &[],
+            duration_s,
+            laws,
+            limits,
+            annihilation,
+            cancelled,
+        )
+    }
+
+    /// Local photon fields, depleted beams and optional pair encounters share
+    /// every original finite-population stage. Local fields are external supply
+    /// only through their actual ground-state residence and absorbed photons.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_local_pumps_and_annihilation(
+        &self,
+        populations: &[[f64; 3]],
+        incident_photon_rates_s: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
+        duration_s: f64,
+        laws: &[Option<TripletAnnihilation>],
+        limits: PumpBeamsLimits,
         mut annihilation: AnnihilationLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PumpBeamsStep<B>, SingletTripletError> {
+        let local_pumps = if local::validate(&self.models, local_pumps, &mut cancelled)? {
+            local_pumps
+        } else {
+            &[]
+        };
         let active = pairs::validate(
             &self.models,
             laws,
@@ -31,9 +63,10 @@ impl<const B: usize> SaturablePumpBeams<B> {
             &mut cancelled,
         )?;
         if !active || duration_s == 0.0 {
-            return self.advance(
+            return self.advance_with_local_pumps(
                 populations,
                 incident_photon_rates_s,
+                local_pumps,
                 duration_s,
                 limits,
                 cancelled,
@@ -47,15 +80,17 @@ impl<const B: usize> SaturablePumpBeams<B> {
             &mut cancelled,
         )?;
         let column = limits.column;
-        if incident_photon_rates_s
-            .iter()
-            .flatten()
-            .all(|&rate| rate == 0.0)
+        if local_pumps.is_empty()
+            && incident_photon_rates_s
+                .iter()
+                .flatten()
+                .all(|&rate| rate == 0.0)
             && self.models.iter().copied().all(pairs::is_stable)
         {
-            let mut step = self.advance(
+            let mut step = self.advance_with_local_pumps(
                 populations,
                 incident_photon_rates_s,
+                local_pumps,
                 duration_s,
                 limits,
                 &mut cancelled,
@@ -97,6 +132,11 @@ impl<const B: usize> SaturablePumpBeams<B> {
                 })
             });
         let mut upper_hazards = vec![Sum::default(); self.models.len()];
+        for (index, pump) in local_pumps.iter().enumerate() {
+            for rate in pump.rates_s {
+                upper_hazards[index].add(rate)?;
+            }
+        }
         for (path, rates) in self.paths.iter().zip(incident_photon_rates_s) {
             for segment in &path.segments {
                 poll(&mut cancelled)?;
@@ -135,9 +175,10 @@ impl<const B: usize> SaturablePumpBeams<B> {
                     poll(cancelled)?;
                     *model = pairs::frozen_model(self.models[index], laws[index], rates[index])?;
                 }
-                let Some(mut step) = frozen.uniform(
+                let Some(mut step) = frozen.uniform_with_local(
                     state,
                     incident_photon_rates_s,
+                    local_pumps,
                     duration,
                     1,
                     nonlinear,
@@ -212,6 +253,7 @@ impl<const B: usize> SaturablePumpBeams<B> {
             &step.cells,
             &step.passive_heat_j,
             &step.beams,
+            &step.local_pumps,
             tolerance,
         )?;
         Ok(())
@@ -243,6 +285,17 @@ impl<const B: usize> PairHistory for PumpBeamsStep<B> {
                 &mut beam.transmitted_energy_j,
                 &mut beam.absorbed_energy_j,
                 &mut beam.passive_absorbed_energy_j,
+            ] {
+                for value in row {
+                    visitor(value)?;
+                }
+            }
+        }
+        for local in &mut self.local_pumps {
+            for row in [
+                &mut local.events,
+                &mut local.absorbed_energy_j,
+                &mut local.relaxation_heat_j,
             ] {
                 for value in row {
                     visitor(value)?;

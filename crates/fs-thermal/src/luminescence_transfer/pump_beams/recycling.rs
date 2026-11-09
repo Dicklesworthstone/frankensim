@@ -86,6 +86,9 @@ pub struct SaturableRecyclingStep<const B: usize> {
     pub passive_heat_j: Vec<f64>,
     pub external_beams: Vec<PumpBeamStep<B>>,
     pub emission_paths: Vec<PumpBeamStep<B>>,
+    /// Actual local-field supply, separate from every transported photon path.
+    /// Original cell order when active; empty when all local hazards are zero.
+    pub local_pumps: Vec<LocalPumpStep>,
     pub external_absorbed_pump_energy_j: Vec<[f64; 2]>,
     pub recycled_absorbed_pump_energy_j: Vec<[f64; 2]>,
     pub external_pump_events: Vec<[f64; 2]>,
@@ -99,8 +102,9 @@ pub struct SaturableRecyclingStep<const B: usize> {
     pub emitted_energy_j: Vec<[f64; 2]>,
     pub escaped_energy_j: Vec<[f64; 2]>,
     pub unresolved_energy_j: Vec<[f64; 2]>,
-    /// Initial excitation + external incident + uphill bath energy - final
-    /// excitation - external transmitted - escaped - unresolved - physical heat.
+    /// Initial excitation + external incident + actual local absorption +
+    /// uphill bath energy - final excitation - external transmitted - escaped -
+    /// unresolved - physical heat.
     /// Internal photon traffic is excluded from both residual and error scale.
     pub residual_j: f64,
     pub substeps: usize,
@@ -259,8 +263,39 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         duration_s: f64,
         laws: &[Option<TripletAnnihilation>],
         limits: SaturableRecyclingLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SaturableRecyclingStep<B>, SingletTripletError> {
+        self.advance_with_local_pumps(
+            populations,
+            incident_external_s,
+            &[],
+            duration_s,
+            laws,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Advance local photon hazards, external beams, radiative return and pair
+    /// encounters on one shared finite inventory. Local entries are in original
+    /// cell order. Empty/all-dark local supply preserves the ordinary path;
+    /// nonzero local absorption is reported as separate true external input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_local_pumps(
+        &self,
+        populations: &[[f64; 3]],
+        incident_external_s: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
+        duration_s: f64,
+        laws: &[Option<TripletAnnihilation>],
+        limits: SaturableRecyclingLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SaturableRecyclingStep<B>, SingletTripletError> {
+        let local_pumps = if local::validate(self.models(), local_pumps, &mut cancelled)? {
+            local_pumps
+        } else {
+            &[]
+        };
         pairs::validate(
             self.models(),
             laws,
@@ -297,6 +332,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                     &mut frozen,
                     populations,
                     &incident,
+                    local_pumps,
                     duration_s,
                     limits,
                     &mut cells,
@@ -327,6 +363,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
             &frozen,
             populations,
             incident_external_s,
+            local_pumps,
             duration_s,
             limits,
             &mut cells,
@@ -357,7 +394,12 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         }
         let mut temporal = limits.annihilation;
         temporal.maximum_substeps = temporal.maximum_substeps.min(column.maximum_substeps);
-        let fastest = self.fastest_rate(populations, incident_external_s, &mut cancelled)?;
+        let fastest = self.fastest_rate(
+            populations,
+            incident_external_s,
+            local_pumps,
+            &mut cancelled,
+        )?;
         let result = pairs::midpoint(
             populations,
             laws,
@@ -377,6 +419,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                     &mut frozen,
                     initial,
                     incident_external_s,
+                    local_pumps,
                     duration,
                     limits,
                     &mut cells,
@@ -428,6 +471,7 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         &self,
         initial: &[[f64; 3]],
         external: &[[f64; B]],
+        local_pumps: &[LocalPhotonPump],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, SingletTripletError> {
         let mut upper = external.to_vec();
@@ -446,6 +490,11 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
             upper.push(lanes);
         }
         let mut hazards = vec![Sum::default(); initial.len()];
+        for (index, pump) in local_pumps.iter().enumerate() {
+            for rate in pump.rates_s {
+                hazards[index].add(rate)?;
+            }
+        }
         for (path, rates) in self.transport.paths.iter().zip(upper) {
             for segment in &path.segments {
                 poll(cancelled)?;
@@ -490,6 +539,9 @@ fn admit_storage<T>(length: usize, quantity: &'static str) -> Result<(), Singlet
 mod accounts;
 #[path = "recycling/feedback.rs"]
 mod feedback;
+#[cfg(test)]
+#[path = "recycling/local_oracles.rs"]
+mod local_oracles;
 #[path = "recycling/secant.rs"]
 mod secant;
 #[path = "recycling/stationary.rs"]
