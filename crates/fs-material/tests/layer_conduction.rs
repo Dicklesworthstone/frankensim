@@ -6,6 +6,8 @@ use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
 
 #[path = "layer_conduction/source_domains.rs"]
 mod source_domains;
+#[path = "layer_conduction/thin_films.rs"]
+mod thin_films;
 
 fn config() -> LayerConductionConfig {
     LayerConductionConfig { max_iterations: 96, absolute_heat_tolerance_w: 1e-9,

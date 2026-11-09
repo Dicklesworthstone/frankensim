@@ -12036,6 +12036,25 @@ source queries or hashes, and runs checkpoints per layer and iteration under
 the caller's finite iteration budget. Cancelled or failed work publishes no
 response and mutates no prepared input.
 
+### Retained material drops for thin conducting films
+
+The two-layer and ordered-stack heat audits retain the relative temperature
+displacement solved inside each original affine conductivity segment. They
+reintegrate that solved displacement, including any fully crossed source
+segments, before rounding the reported absolute face temperature. Rebuilding
+a thin conducting film's heat from two rounded absolute temperatures can
+amplify Kelvin roundoff by `k/d` and falsely reject a conservative physical
+solution. The retained integral is recomputed from the solved displacement;
+it is not copied from the requested common flux. Original heat tolerances,
+source endpoints, contact-temperature gates and refusal of nonzero inverses
+whose absolute temperature cannot change remain unchanged.
+
+The same two-layer owner supplies bulk/contact, gray-gap and source-backed
+surface-exchange closures. Ordered stacks retain these integrals for marched
+layers in fixed bounded workspace; the final layer still closes the original
+shooting residual against its exact cold boundary. No added source traversal,
+allocation, effective conductivity or enlarged source domain is introduced.
+
 Feed the secant conductance into the existing thermal owner's candidate-state
 coefficient callback; endpoint derivatives serve a separate Newton assembly.
 The original timeline continues to own storage, time integration, sources,

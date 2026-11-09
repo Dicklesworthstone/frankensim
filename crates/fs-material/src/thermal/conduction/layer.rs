@@ -184,12 +184,28 @@ impl ConductivityCurve {
         initial: f64,
         integral: f64,
     ) -> Result<f64, DepositionError> {
+        self.inverse_integral_w_m(initial, integral)
+            .map(|(temperature, _)| temperature)
+    }
+
+    // Retain the inverse's ORIGINAL relative temperature displacement when
+    // checking its integral. Reintegrating from the rounded absolute endpoint
+    // loses the small drop of a thin, highly conducting layer; k/d then
+    // amplifies that Kelvin rounding into a false heat-continuity failure.
+    // The returned integral is recomputed from the solved affine-segment
+    // displacement, not copied from the requested value or relaxed by a
+    // temperature-dependent heat tolerance.
+    pub(super) fn inverse_integral_w_m(
+        &self,
+        initial: f64,
+        integral: f64,
+    ) -> Result<(f64, f64), DepositionError> {
         self.segment(initial)?;
         if !integral.is_finite() {
             return Err(invalid("conductivity integral must be finite"));
         }
         if integral == 0.0 {
-            return Ok(initial);
+            return Ok((initial, 0.0));
         }
         let heating = integral > 0.0;
         let span = self.temperature_range_k();
@@ -200,7 +216,7 @@ impl ConductivityCurve {
                 return Err(DepositionError::MaterialDomain);
             }
             if target == available.abs() {
-                return Ok(boundary);
+                return Ok((boundary, available));
             }
         }
         let mut index = if heating {
@@ -227,7 +243,7 @@ impl ConductivityCurve {
             let next = cumulative + corrected;
             if target <= next {
                 if target == next {
-                    return Ok(end);
+                    return Ok((end, integral.signum() * next));
                 }
                 let energy_fraction = if amount.is_finite() {
                     (target - cumulative) / amount
@@ -235,10 +251,13 @@ impl ConductivityCurve {
                     ((target - cumulative) / mean) / width
                 };
                 let scale = a.max(b);
-                let (a, b) = (a / scale, b / scale);
-                let root = ((1.0 - energy_fraction) * a * a + energy_fraction * b * b).sqrt();
-                let fraction = energy_fraction * (a + b) / (a + root);
-                let t = current + fraction * (end - current);
+                let (scaled_a, scaled_b) = (a / scale, b / scale);
+                let root = ((1.0 - energy_fraction) * scaled_a * scaled_a
+                    + energy_fraction * scaled_b * scaled_b)
+                    .sqrt();
+                let fraction = energy_fraction * (scaled_a + scaled_b) / (scaled_a + root);
+                let displacement = fraction * (end - current);
+                let t = current + displacement;
                 if !fraction.is_finite()
                     || !(0.0..=1.0).contains(&fraction)
                     || !t.is_finite()
@@ -248,7 +267,14 @@ impl ConductivityCurve {
                 {
                     return Err(DepositionError::Arithmetic);
                 }
-                return Ok(t);
+                // The mean over the SOLVED fraction of this original segment
+                // is k_start + fraction*(k_end-k_start)/2. Its convex form
+                // avoids overflowing positive endpoint conductivities.
+                let half_fraction = 0.5 * fraction;
+                let mean = positive((1.0 - half_fraction) * a + half_fraction * b)?;
+                let partial = positive(mean * displacement.abs())?;
+                let actual = positive(finite(cumulative + (partial - correction))?)?;
+                return Ok((t, integral.signum() * actual));
             }
             correction = (next - cumulative) - corrected;
             cumulative = next;
@@ -291,6 +317,9 @@ pub struct LayerConductionResponse {
     /// A state-dependent contact law chains this with its own dR''/dh.
     pub contact_resistance_derivative_w2_m2_k: f64,
     /// Hot-layer outgoing minus cold-layer incoming power, independent of a/b order.
+    /// Each inverse retains its relative affine-segment drop for this audit;
+    /// reconstructing heat from rounded absolute interface temperatures can
+    /// lose accuracy for thin conducting layers.
     pub layer_heat_residual_w: f64,
     /// Diagnostic temperature-jump residual divided by resistance, W. This is
     /// ill-conditioned near perfect contact, NOT an energy defect. Acceptance
@@ -613,19 +642,19 @@ impl<'a> TwoLayerConduction<'a> {
         for iteration in 0..config.max_iterations {
             checkpoint()?;
             // Keep source endpoints exact across division/multiplication.
-            let u = if flux == hot_flux_limit {
-                hot_limit
+            let (u, hot_integral) = if flux == hot_flux_limit {
+                (hot_limit, -hot_integral)
             } else if surface_temperature_bounds_k.is_some() && flux == hot_minimum {
-                hot_near
+                (hot_near, kh.integral_w_m(th, hot_near)?)
             } else {
-                kh.temperature_after_integral_w_m(th, -finite(flux * dh)?)?
+                kh.inverse_integral_w_m(th, -finite(flux * dh)?)?
             };
-            let v = if flux == cold_flux_limit {
-                cold_limit
+            let (v, cold_integral) = if flux == cold_flux_limit {
+                (cold_limit, cold_integral)
             } else if surface_temperature_bounds_k.is_some() && flux == cold_minimum {
-                cold_near
+                (cold_near, kc.integral_w_m(tc, cold_near)?)
             } else {
-                kc.temperature_after_integral_w_m(tc, finite(flux * dc)?)?
+                kc.inverse_integral_w_m(tc, finite(flux * dc)?)?
             };
             if let Some(bounds) = surface_temperature_bounds_k {
                 if !(bounds[hot][0]..=bounds[hot][1]).contains(&u)
@@ -637,10 +666,7 @@ impl<'a> TwoLayerConduction<'a> {
             let update = evaluate(LayerFluxTrial {
                 flux_w_m2: flux,
                 surface_temperature_k: [u, v],
-                layer_flux_w_m2: [
-                    finite(kh.integral_w_m(u, th)? / dh)?,
-                    finite(kc.integral_w_m(tc, v)? / dc)?,
-                ],
+                layer_flux_w_m2: [finite(-hot_integral / dh)?, finite(cold_integral / dc)?],
                 iterations: iteration + 1,
             })?;
             if surface_temperature_bounds_k.is_some() {

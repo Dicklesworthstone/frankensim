@@ -48,6 +48,9 @@ pub struct LayerStackConduction<'a> {
 
 struct Shot {
     temperatures: [[f64; 2]; MAX_CONDUCTION_LAYERS],
+    // Positive hot-to-cold fluxes reconstructed from each solved relative
+    // material drop. Rounded absolute faces cannot resolve thin-film heat.
+    layer_fluxes_w_m2: [f64; MAX_CONDUCTION_LAYERS],
     last_flux: f64,
     last_index: usize,
     // Sensitivities of the last layer's hot inlet: dT/dTh and -dT/dj.
@@ -273,7 +276,7 @@ impl<'a> LayerStackConduction<'a> {
             let differential_resistance = positive(last_resistance + shot.inlet_flux_slope)?;
             if residual.abs() <= tolerance {
                 let (heat_error, contact_error, contact_roundoff, contacts_admit) =
-                    self.residuals(&shot.temperatures, sign * power, tolerance, &mut checkpoint)?;
+                    self.residuals(&shot, sign * power, tolerance, &mut checkpoint)?;
                 if heat_error <= tolerance && contacts_admit {
                     let hot_slope = positive(
                         (self.area / differential_resistance) * shot.inlet_temperature_slope,
@@ -346,6 +349,7 @@ impl<'a> LayerStackConduction<'a> {
     ) -> Result<ShotResult, DepositionError> {
         let n = self.curves.len();
         let mut temperatures = [[0.0; 2]; MAX_CONDUCTION_LAYERS];
+        let mut layer_fluxes_w_m2 = [0.0; MAX_CONDUCTION_LAYERS];
         let mut inlet = hot;
         let mut a = 1.0;
         let mut b = 0.0;
@@ -367,9 +371,12 @@ impl<'a> LayerStackConduction<'a> {
                 } else {
                     [cold, inlet]
                 };
+                let last_flux = positive(curve.integral_w_m(cold, inlet)? / self.thicknesses[i])?;
+                layer_fluxes_w_m2[i] = last_flux;
                 return Ok(ShotResult::Supported(Shot {
                     temperatures,
-                    last_flux: positive(curve.integral_w_m(cold, inlet)? / self.thicknesses[i])?,
+                    layer_fluxes_w_m2,
+                    last_flux,
                     last_index: i,
                     inlet_temperature_slope: a,
                     inlet_flux_slope: b,
@@ -383,10 +390,10 @@ impl<'a> LayerStackConduction<'a> {
             if flux > maximum_flux {
                 return Ok(ShotResult::TooCold);
             }
-            let outlet = if flux == maximum_flux {
-                limit
+            let (outlet, integral) = if flux == maximum_flux {
+                (limit, -available)
             } else {
-                curve.temperature_after_integral_w_m(inlet, -requested)?
+                curve.inverse_integral_w_m(inlet, -requested)?
             };
             if outlet < cold {
                 return Ok(ShotResult::TooCold);
@@ -396,6 +403,7 @@ impl<'a> LayerStackConduction<'a> {
             } else {
                 [outlet, inlet]
             };
+            layer_fluxes_w_m2[i] = positive(-integral / self.thicknesses[i])?;
             let outlet_k = curve.conductivity_w_m_k(outlet)?;
             let ratio = positive(inlet_k / outlet_k)?;
             a = positive(a * ratio)?;
@@ -413,7 +421,7 @@ impl<'a> LayerStackConduction<'a> {
 
     fn residuals(
         &self,
-        temperatures: &[[f64; 2]; MAX_CONDUCTION_LAYERS],
+        shot: &Shot,
         power: f64,
         tolerance: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
@@ -422,11 +430,14 @@ impl<'a> LayerStackConduction<'a> {
         let mut contact_error: f64 = 0.0;
         let mut roundoff: f64 = 0.0;
         let mut contacts_admit = true;
-        for (i, curve) in self.curves.iter().enumerate() {
+        let temperatures = &shot.temperatures;
+        for (i, &layer_flux) in shot.layer_fluxes_w_m2[..self.curves.len()]
+            .iter()
+            .enumerate()
+        {
             checkpoint()?;
-            let [left, right] = temperatures[i];
-            let actual =
-                finite(self.area * (curve.integral_w_m(right, left)? / self.thicknesses[i]))?;
+            let [_, right] = temperatures[i];
+            let actual = finite(power.signum() * (self.area * layer_flux))?;
             heat_error = heat_error.max(finite(actual - power)?.abs());
             if i < self.contacts.len() {
                 let next = temperatures[i + 1][0];
