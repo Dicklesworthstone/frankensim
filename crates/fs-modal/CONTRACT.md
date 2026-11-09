@@ -170,7 +170,18 @@ the same robust quadratic root owner on
 `m*tau*lambda^2 + (m+C*tau)*lambda + C+k_b*b^2*tau`.
 Binary-factored source products and signed DD coefficient sums preserve weak
 relaxation and active C before common scaling; unrepresentable coefficients
-or poles refuse. The default QR cap is 120 sweeps per active window;
+or poles refuse. A passive scalar resonator with one Maxwell branch uses a
+bounded contraction when `C/(m*omega) <= 1` and `k_b*b^2/K <= 1/8`. It solves
+the relaxation-pole shift directly and recovers the conjugate pair from its
+sum/product identities, preserving tiny mechanical decay without trace
+subtraction. The full cubic is retained; the bounds select a stable numerical
+route, not an approximation of the material law. Binary-factored dimensional
+products retain physical decay even when its dimensionless shift underflows;
+unrepresentable physical poles refuse. G1/G3 tests in
+`tests/relaxation_modes.rs` cover manufactured finite-loss roots, relative weak
+decay down to 1e-300, separated relaxation rates and changes of units.
+Other scalar regimes and coupled/multi-arm systems retain the dense solver.
+The default QR cap is 120 sweeps per active window;
 `_with_cancel` accepts an explicit cap and cancellation, returning no partial
 spectrum on refusal. Invalid source data and failed mass factors also refuse.
 Exact source structure can bound zero multiplicity for triangular invertible

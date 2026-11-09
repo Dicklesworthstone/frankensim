@@ -53,6 +53,134 @@ fn material_memory_retains_three_exact_overdamped_poles() {
 }
 
 #[test]
+fn weak_material_decay_survives_pole_roundoff_and_relaxation_separation() {
+    // G1: first-order perturbation at lambda=+-i*omega gives
+    // decay = g*omega^2*r/(2*(r^2+omega^2)) + O(g^2).
+    // Here the omitted relative correction is below 1e-18. A small residual
+    // of the cubic alone cannot detect replacing this physical decay by zero.
+    let omega = 2.0_f64;
+    for g in [1e-20, 1e-100, 1e-300] {
+        let poles = maxwell_eigenvalues(
+            &[1.0],
+            &[0.0],
+            &[omega * omega],
+            1,
+            &[branch(g * omega * omega, 1.0 / omega, &[1.0])],
+        )
+        .unwrap();
+        let decay = 0.25 * g * omega;
+        let oscillatory: Vec<_> = poles.iter().filter(|s| s.im != 0.0).collect();
+        assert_eq!(oscillatory.len(), 2);
+        for pole in oscillatory {
+            assert!((pole.re / -decay - 1.0).abs() < 6e-15, "{pole:?}, {decay}");
+            assert!((pole.im.abs() / omega - 1.0).abs() < 6e-15);
+        }
+    }
+    let g = 1e-20;
+    for tau in [1e-100, 0.02, 0.5, 10.0, 1e100] {
+        let r = 1.0 / tau;
+        let decay = if r >= omega {
+            let ratio = omega / r;
+            0.5 * g * omega * ratio / (1.0 + ratio * ratio)
+        } else {
+            let ratio = r / omega;
+            0.5 * g * r / (1.0 + ratio * ratio)
+        };
+        let poles = maxwell_eigenvalues(
+            &[1.0],
+            &[0.0],
+            &[omega * omega],
+            1,
+            &[branch(g * omega * omega, tau, &[1.0])],
+        )
+        .unwrap();
+        assert_eq!(poles.len(), 3);
+        for pole in &poles {
+            if pole.im != 0.0 {
+                assert!(
+                    (pole.re / -decay - 1.0).abs() < 6e-15,
+                    "tau={tau}, {pole:?}, {decay}"
+                );
+            } else {
+                assert!((pole.re / -r - 1.0).abs() < 6e-15);
+            }
+        }
+        assert!(poles.iter().all(|s| s.re < 0.0));
+    }
+}
+
+#[test]
+fn scalar_material_and_viscous_loss_recover_manufactured_cubic_roots() {
+    // G1: prescribe -u and -d+-i*nu, then solve the characteristic
+    // coefficients for the original material arm. This tests finite loss,
+    // not merely its weak-loss asymptote or a residual of the same algorithm.
+    let (m, k, alpha, r, u) = (3.0_f64, 12.0_f64, 0.1_f64, 3.0_f64, 2.98_f64);
+    let shift = r - u;
+    let gamma = shift * (u * u - alpha * u + k / m) / u;
+    let decay = 0.5 * (alpha + shift);
+    let frequency = (k / m * r / u - decay * decay).sqrt();
+    let material = [branch(m * gamma, 1.0 / r, &[1.0])];
+    let poles = maxwell_eigenvalues(&[m], &[m * alpha], &[k], 1, &material).unwrap();
+    let expected = [
+        C64::from_re(-u),
+        C64::new(-decay, -frequency),
+        C64::new(-decay, frequency),
+    ];
+    for (&actual, expected) in poles.iter().zip(expected) {
+        close(actual, expected, 5e-15);
+        polynomial_residual(
+            actual,
+            &[1.0, alpha + r, k / m + alpha * r + gamma, k / m * r],
+        );
+    }
+    assert_eq!(
+        poles,
+        maxwell_eigenvalues(&[m], &[m * alpha], &[k], 1, &material).unwrap()
+    );
+}
+
+#[test]
+fn scalar_material_decay_retains_dimensional_source_products() {
+    // G3: an invertible coordinate/unit change must not lose b² or m*omega.
+    let reference =
+        maxwell_eigenvalues(&[1.0], &[0.0], &[4.0], 1, &[branch(1e-20, 0.5, &[1.0])]).unwrap();
+    for exponent in [-800, 800] {
+        let mass = 2.0_f64.powi(exponent);
+        let material = [branch(1e-20 * 2.0_f64.powi(-exponent), 0.5, &[mass])];
+        let poles = maxwell_eigenvalues(&[mass], &[0.0], &[4.0 * mass], 1, &material).unwrap();
+        for (&actual, expected) in poles.iter().zip(&reference) {
+            assert!((actual.re / expected.re - 1.0).abs() < 6e-15);
+            assert_eq!(actual.im, expected.im);
+        }
+    }
+    // Even an underflowed dimensionless stiffness ratio must not erase a
+    // representable dimensional decay rate (k_b/K=1e-400, omega=1e100).
+    let poles = maxwell_eigenvalues(
+        &[1.0],
+        &[0.0],
+        &[1e200],
+        1,
+        &[branch(1e-200, 1e-100, &[1.0])],
+    )
+    .unwrap();
+    for pole in poles.iter().filter(|s| s.im != 0.0) {
+        assert!((pole.re / -2.5e-301 - 1.0).abs() < 6e-15);
+    }
+    // At an extremely slow relaxation rate, the mechanical oscillation sees
+    // the unrelaxed modulus while the material pole still carries finite heat.
+    let poles =
+        maxwell_eigenvalues(&[1.0], &[0.0], &[1e300], 1, &[branch(1e299, 1e300, &[1.0])]).unwrap();
+    for pole in &poles {
+        if pole.im == 0.0 {
+            assert!((pole.re / (-1e-300 / 1.1) - 1.0).abs() < 6e-15);
+        } else {
+            assert!((pole.re / (-0.05e-300 / 1.1) - 1.0).abs() < 6e-15);
+            assert!((pole.im.abs() / (1e150 * 1.1_f64.sqrt()) - 1.0).abs() < 6e-15);
+        }
+    }
+}
+
+#[test]
 fn maxwell_loss_does_not_add_equilibrium_stiffness_to_a_free_coordinate() {
     // A Maxwell material relaxes under static strain. Keeping its branch
     // stiffness in K as well would incorrectly erase the exact zero pole.

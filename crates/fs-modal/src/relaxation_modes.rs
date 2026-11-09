@@ -15,6 +15,9 @@
 //! Exact source zero-count guards catch some lost poles, not every loss of
 //! decay-rate accuracy. A free scalar coordinate with one branch instead
 //! factors out its exact zero and uses stable quadratic root recovery.
+//! A passive scalar resonator with one weak Maxwell arm instead solves the
+//! small relaxation-pole shift directly, retaining weak mechanical decay
+//! without subtracting nearly equal eigenvalues (see `weak_scalar_maxwell`).
 //!
 //! For symmetric K and positive-semidefinite symmetric part of C, the branch
 //! storage `s^2/(2 k_b)` gives physical heat rate `s^2/(k_b tau)`; gyroscopic
@@ -160,6 +163,14 @@ pub fn maxwell_eigenvalues_with_cancel(
             return Err(ModalError::Cancelled);
         }
         return Ok(poles);
+    }
+    if n == 1 && k[0] > 0.0 && c[0] >= 0.0 && branches.len() == 1 {
+        if let Some(poles) = weak_scalar_maxwell(m[0], c[0], k[0], &branches[0])? {
+            if cancelled() {
+                return Err(ModalError::Cancelled);
+            }
+            return Ok(poles);
+        }
     }
     let exponents: Vec<_> = (0..n)
         .map(|i| quadratic_fraction(m[i * n + i]).1.div_euclid(2))
@@ -312,6 +323,142 @@ pub fn maxwell_eigenvalues_with_cancel(
         return Err(ModalError::Cancelled);
     }
     Ok(poles)
+}
+
+// A product/quotient of nonnegative finite source factors. Carry the binary
+// exponent separately so a change of mechanical units cannot first overflow
+// b², m*omega or the dimensional branch stiffness. There are at most four
+// numerator and three denominator factors here, so mantissa products are safe.
+#[allow(clippy::float_cmp)] // Exact zero factors carry exact uncoupled/source identities.
+fn positive_ratio(numerator: &[f64], denominator: &[f64]) -> f64 {
+    let mut value = 1.0;
+    let mut exponent = 0;
+    for &factor in numerator {
+        if factor == 0.0 {
+            return 0.0;
+        }
+        let (fraction, power) = quadratic_fraction(factor);
+        value *= fraction;
+        exponent += power;
+    }
+    for &factor in denominator {
+        let (fraction, power) = quadratic_fraction(factor);
+        value /= fraction;
+        exponent -= power;
+    }
+    quadratic_power_scale(value, exponent)
+}
+
+// Let omega²=K/m, a=C/(m*omega), g=k_b*b²/K and r=1/tau. The real
+// relaxation pole is -u=-r*(1-t), where
+//   t = g / ((r/omega)²*(1-t)² - a*(r/omega)*(1-t) + 1 + g).
+// For 0<=a<=1 and 0<=g<=1/8, this maps [0,1/7] into itself and has
+// derivative magnitude <=4/9. Indeed D=x²-a*x+1>=3/4 and
+// |x*(2*x-a)|/D<=8/3. The other two roots are therefore an underdamped
+// conjugate pair: their total decay is C/m + r*t, without trace subtraction.
+// Their product is omega²/(1-t); r*t/omega<=g gives an imaginary-part floor.
+//
+// These restrictions select a numerically stable route, not a material-law
+// approximation. All other parameter regimes keep the complete dense owner.
+// Work is bounded by 64 scalar contractions, independent of frequency/rate
+// separation. The physical shift r*t is evaluated from original factors even
+// when the dimensionless t or g is smaller than the least positive f64.
+#[allow(clippy::float_cmp, clippy::too_many_lines)] // Complete source admission and bounded scalar pole recovery.
+fn weak_scalar_maxwell(
+    mass: f64,
+    damping: f64,
+    stiffness: f64,
+    branch: &MaxwellDampingBranch,
+) -> Result<Option<Vec<C64>>, ModalError> {
+    let invalid = || ModalError::QuadraticEig {
+        detail: "scalar Maxwell decay requires representable poles".into(),
+    };
+    let (kf, ke) = quadratic_fraction(stiffness);
+    let (mf, me) = quadratic_fraction(mass);
+    let exponent = ke - me;
+    let omega = quadratic_power_scale(
+        det::sqrt(
+            (kf / mf)
+                * if exponent.rem_euclid(2) == 0 {
+                    1.0
+                } else {
+                    2.0
+                },
+        ),
+        exponent.div_euclid(2),
+    );
+    if !omega.is_finite() || omega <= 0.0 {
+        return Err(invalid());
+    }
+    let strain = branch.strain[0].abs();
+    let a = positive_ratio(&[damping], &[mass, omega]);
+    let g = positive_ratio(&[branch.stiffness, strain, strain], &[stiffness]);
+    if a > 1.0 || g > 0.125 {
+        return Ok(None);
+    }
+    let rate = 1.0 / branch.relaxation_time_s;
+    if !rate.is_finite() {
+        return Err(invalid());
+    }
+    let fast = rate >= omega;
+    let ratio = if fast { omega / rate } else { rate / omega };
+    let denominator = |t: f64| {
+        let remaining = 1.0 - t;
+        if fast {
+            remaining * (remaining - a * ratio) + (1.0 + g) * ratio * ratio
+        } else {
+            let x = ratio * remaining;
+            x * (x - a) + 1.0 + g
+        }
+    };
+    let mut t = 0.0;
+    let mut converged = false;
+    for _ in 0..64 {
+        let next = if fast { g * ratio * ratio } else { g } / denominator(t);
+        converged = next == t || (next - t).abs() <= 4.0 * f64::EPSILON * next;
+        t = next;
+        if converged {
+            break;
+        }
+    }
+    if !converged {
+        return Ok(None);
+    }
+    let shift = if fast {
+        positive_ratio(
+            &[branch.stiffness, strain, strain, branch.relaxation_time_s],
+            &[mass, denominator(t)],
+        )
+    } else {
+        positive_ratio(
+            &[branch.stiffness, strain, strain, rate],
+            &[stiffness, denominator(t)],
+        )
+    };
+    let viscous = positive_ratio(&[damping], &[mass]);
+    let total_decay = viscous + shift;
+    let decay = if total_decay.is_finite() {
+        0.5 * total_decay
+    } else {
+        0.5 * viscous + 0.5 * shift
+    };
+    let scaled_decay = decay / omega;
+    let frequency = omega * det::sqrt(1.0 / (1.0 - t) - scaled_decay * scaled_decay);
+    let real = -rate * (1.0 - t);
+    if ![decay, frequency, real].into_iter().all(f64::is_finite)
+        || frequency <= 0.0
+        || (strain != 0.0 && shift == 0.0)
+        || ((strain != 0.0 || damping != 0.0) && decay == 0.0)
+    {
+        return Err(invalid());
+    }
+    let mut poles = vec![
+        C64::from_re(real),
+        C64::new(-decay, -frequency),
+        C64::new(-decay, frequency),
+    ];
+    poles.sort_by(|a, b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+    Ok(Some(poles))
 }
 
 // lambda * [m*tau*lambda² + (m+c*tau)*lambda + c+k_b*b²*tau].
