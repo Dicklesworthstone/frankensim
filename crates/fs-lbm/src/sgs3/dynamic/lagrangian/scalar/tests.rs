@@ -83,6 +83,83 @@ fn g3_native_refresh_preserves_history_and_public_time_admission() {
 }
 
 #[test]
+fn g3_adaptive_native_refresh_reemits_current_strain_without_aging_either_history() {
+    let shape = [5, 6, 7];
+    let (rho, velocity, scalar) = field(shape, 0.05, 2.0);
+    for normal in [None, Some(0), Some(1), Some(2)] {
+        let mut owner = match normal {
+            None => LagrangianDynamicScalar::new(shape, [1.0; 3], usize::MAX),
+            Some(axis) => {
+                LagrangianDynamicScalar::new_channel(shape, [1.0; 3], axis, usize::MAX)
+            }
+        }
+        .unwrap()
+        .with_adaptive_momentum_memory(AdaptiveLagrangianMemory {
+            coefficient: 0.15,
+            minimum_time: 0.05,
+        })
+        .unwrap();
+        let walls = normal.map(|axis| {
+            let mut walls = [[0.01; 3], [-0.02; 3]];
+            walls[0][axis] = 0.0;
+            walls[1][axis] = 0.0;
+            walls
+        });
+        let scalar_walls = normal.map(|_| [ScalarWall::Value(0.0); 2]);
+        let initial = owner
+            .prepare_or_refresh(
+                momentum_config(), scalar_config(), 0.0, &rho, &velocity, walls,
+                &scalar, scalar_walls, || false,
+            )
+            .unwrap();
+        let viscosity = initial.viscosities().to_vec();
+        let diffusivity = initial.diffusivities().to_vec();
+        assert!(viscosity.iter().any(|&value| value > 0.0));
+        assert!(diffusivity.iter().any(|&value| value > 0.0));
+        initial.commit();
+        // The accepted normalized histories are the refresh's exact source;
+        // their initial normalization can round the pre-commit ratio by an ulp.
+        let coefficient = |pair: &[f64; 2]| {
+            if pair[1] == 0.0 { 0.0 } else { (pair[0] / pair[1]).max(0.0) }
+        };
+        let coefficients: Vec<_> = owner.flow.history.iter().map(coefficient).collect();
+        let scalar_coefficients: Vec<_> = owner.scalar.history.iter().map(coefficient).collect();
+        let accepted = (
+            owner.flow.history.clone(), owner.scalar.history.clone(),
+            owner.flow.history_log_scale, owner.scalar.history_log_scale,
+            owner.accepted_momentum_memory_time_range(),
+        );
+        // Same-time wall/force rebinding changes the resolved strain, not
+        // the accumulated Germano identities or either physical model clock.
+        for factor in [2.0, 0.0] {
+            let current_velocity: Vec<_> = velocity.iter()
+                .map(|u| u.map(|value| factor * value)).collect();
+            let current_scalar: Vec<_> = scalar.iter().map(|value| 3.0 * value).collect();
+            let current_walls = walls.map(|w| w.map(|u| u.map(|value| factor * value)));
+            let trial = owner
+                .prepare_or_refresh(
+                    momentum_config(), scalar_config(), 0.0, &rho, &current_velocity,
+                    current_walls, &current_scalar, scalar_walls, || false,
+                )
+                .unwrap();
+            assert_eq!(trial.coefficients_squared().collect::<Vec<_>>(), coefficients);
+            assert_eq!(trial.scalar_coefficients().collect::<Vec<_>>(), scalar_coefficients);
+            for cell in 0..rho.len() {
+                close(trial.viscosities()[cell], factor * viscosity[cell], 2e-14);
+                close(trial.diffusivities()[cell], factor * diffusivity[cell], 2e-14);
+            }
+            drop(trial);
+            assert_eq!(owner.flow.history, accepted.0);
+            assert_eq!(owner.scalar.history, accepted.1);
+            assert_eq!(owner.flow.history_log_scale, accepted.2);
+            assert_eq!(owner.scalar.history_log_scale, accepted.3);
+            assert_eq!(owner.accepted_momentum_memory_time_range(), accepted.4);
+            assert_eq!(owner.accepted_time(), Some(0.0));
+        }
+    }
+}
+
+#[test]
 fn g3_native_history_fork_excludes_rejected_scratch_and_evolves_independently() {
     let shape = [5, 6, 7];
     let (rho, velocity, scalar) = field(shape, 0.05, 2.0);

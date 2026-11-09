@@ -144,7 +144,10 @@ impl AdaptiveUpdate {
         let memory_time = self.memory_time(advected, density);
         let relaxation = update.elapsed / memory_time;
         let fresh = -det::expm1(-relaxation);
-        if fresh == 0.0 {
+        // Native wall/force refreshes have exactly zero elapsed time: their
+        // accepted contractions must survive with unit old weight and no new
+        // source. Only a positive interval lost to rounding is unrepresentable.
+        if update.elapsed > 0.0 && fresh == 0.0 {
             return Err(DynamicSgsError::Invalid(
                 "unrepresentable adaptive Lagrangian relaxation interval",
             ));

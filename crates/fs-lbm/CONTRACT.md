@@ -609,7 +609,10 @@ G1/G3/G4 regressions cover the one-update endpoint against the original shared
 model, conservative closed-box energy, final-checkpoint rollback/replay,
 moving-channel same-time refresh, independent multi-step thermal trials,
 workspace/geometry/usage and representable-clock refusals. Core regressions
-cover zero-time refresh and history-copy independence from rejected scratch.
+cover zero-time refresh with both fixed and adaptive momentum memory, all
+three channel normals, current-strain re-emission and history-copy independence
+from rejected scratch. An exactly zero interval is an identity; a positive
+interval whose adaptive relaxation underflows still refuses.
 The pathline/source update remains first order even though native energy uses
 its original endpoint trapezoid. No open boundary, interior-solid filter,
 backscatter-energy model, complete compressible LES closure, turbulent-wall

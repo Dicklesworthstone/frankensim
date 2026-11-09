@@ -106,6 +106,36 @@ fn advected_history_controls_local_time_and_exact_frozen_source_relaxation() {
 }
 
 #[test]
+fn zero_time_refresh_is_identity_but_an_underflowed_positive_interval_refuses() {
+    let history = vec![[-0.5, 1.0]; 27];
+    let current = vec![[0.25, 0.75]; 27];
+    let controls = AdaptiveLagrangianMemory {
+        coefficient: 1.0,
+        minimum_time: 1e-300,
+    };
+    for elapsed in [0.0, f64::from_bits(1)] {
+        // The fastest authored relaxation is representable even for the
+        // smallest positive interval. This cell's signed history selects the
+        // upper time bound, whose positive interval can underflow instead.
+        let base = update(Some(0.0), None, elapsed, controls.minimum_time);
+        let rule = AdaptiveUpdate::new(
+            controls, 2.0, 1.0, Some(0.0), None, &base,
+        );
+        let result = rule.pair(&base, 13, [0.0; 3], 1.0, &history, &current);
+        if elapsed == 0.0 {
+            assert_eq!(result.unwrap(), (history[13], 2.0));
+        } else {
+            assert_eq!(
+                result,
+                Err(DynamicSgsError::Invalid(
+                    "unrepresentable adaptive Lagrangian relaxation interval",
+                )),
+            );
+        }
+    }
+}
+
+#[test]
 fn authored_bounds_do_not_erase_signed_history_or_require_representable_products() {
     let base = update(Some(1000.0), Some(0.0), 1000.0, 1.0);
     let rule = AdaptiveUpdate::new(
