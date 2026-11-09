@@ -77,6 +77,73 @@ fn bits(s: &ExactLinearSolid) -> Vec<u64> {
 }
 
 #[test]
+fn g3_small_transverse_work_survives_large_unchanged_kinetic_energy() {
+    with_cx(false, |cx| {
+        let pencil = assembly(&[0.0; 4], &[1.0, 0.0, 0.0, 1.0], 2);
+        for affine in [false, true] {
+            let mut solid = if affine {
+                ExactLinearSolid::prepare_affine_forces(
+                    &pencil,
+                    1.0,
+                    &[0.0; 2],
+                    &[1e8, 0.0],
+                    1.0,
+                    controls(),
+                    cx,
+                )
+            } else {
+                ExactLinearSolid::prepare(&pencil, 1.0, &[0.0; 2], &[1e8, 0.0], controls(), cx)
+            }
+            .unwrap();
+            let step = if affine {
+                solid.advance_affine(&[0.0; 2], &[0.0, 2.0], cx)
+            } else {
+                solid.advance(&[0.0, 1.0], cx)
+            }
+            .unwrap();
+            // m=1 and Delta v=1 give 1/2 J independently of the other axis.
+            // The public diagnostic totals cannot resolve that half joule.
+            assert_eq!(step.energy.kinetic_before_j, step.energy.kinetic_after_j);
+            near(step.energy.supplied_work_j, 0.5, 1e-12);
+            near(step.energy.cumulative_balance_error_j, 0.0, 1e-12);
+            let kick = solid
+                .apply_momentum_impulse(&[0.0, -1.0], 1e-12, cx)
+                .unwrap();
+            near(kick.energy.supplied_work_j, -0.5, 1e-12);
+            near(kick.energy.cumulative_balance_error_j, 0.0, 1e-12);
+            near(solid.cumulative_work_j(), 0.0, 2e-12);
+
+            // A longitudinal force below the velocity ULP supplies real work
+            // but produces no representable momentum change. Still refuse it,
+            // rather than suppressing the physical gate with a large H scale.
+            let before = bits(&solid);
+            let rejected = if affine {
+                solid.advance_affine(&[1e-12, 0.0], &[1e-12, 0.0], cx)
+            } else {
+                solid.advance(&[1e-12, 0.0], cx)
+            };
+            assert!(matches!(
+                rejected,
+                Err(fs_solid::dynamics::ExactLinearSolidError::Energy { .. })
+            ));
+            assert_eq!(bits(&solid), before);
+            with_cx(true, |cancelled| {
+                assert!(
+                    solid
+                        .apply_momentum_impulse(&[0.0, 1.0], 1e-12, cancelled)
+                        .is_err()
+                );
+            });
+            assert_eq!(bits(&solid), before);
+            solid
+                .apply_momentum_impulse(&[0.0, 1.0], 1e-12, cx)
+                .unwrap();
+            near(solid.cumulative_work_j(), 0.5, 2e-12);
+        }
+    });
+}
+
+#[test]
 fn g1_impulse_preserves_viscous_affine_continuation_and_consistent_mass() {
     with_cx(false, |cx| {
         let pencil = assembly(&[3.0, 1.0, 1.0, 4.0], &[2.0, 1.0, 1.0, 2.0], 2);

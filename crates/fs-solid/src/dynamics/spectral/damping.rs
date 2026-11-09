@@ -2,8 +2,8 @@
 
 use super::{
     CompleteSpectralSolid, CompleteSpectralSolidControls, ExactLinearSolidStep,
-    LinearSolidImpulseError, LinearSolidImpulseReport, Result, add, bound, check_operator,
-    invalid, poll, project, reconstruct, symmetric, zeros,
+    LinearSolidImpulseError, LinearSolidImpulseReport, Result, add, bound, check_operator, invalid,
+    poll, project, reconstruct, symmetric, zeros,
 };
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
@@ -76,7 +76,10 @@ impl DampedSpectralSolid {
             controls.maximum_preparation_bytes as u128,
         )?;
         let preparation_terms = 6 * nn * nn * nn + 64 * nn * nn + 8192 * nn;
-        bound(preparation_terms, controls.maximum_preparation_multiply_terms as u128)?;
+        bound(
+            preparation_terms,
+            controls.maximum_preparation_multiply_terms as u128,
+        )?;
         let solid = CompleteSpectralSolid::prepare_with_basis(
             assembly,
             eigenvalues_rad2_s2,
@@ -177,7 +180,10 @@ impl DampedSpectralSolid {
                     scale *= 0.5;
                     preparation_terms += 512;
                 }
-                bound(preparation_terms, controls.maximum_preparation_multiply_terms as u128)?;
+                bound(
+                    preparation_terms,
+                    controls.maximum_preparation_multiply_terms as u128,
+                )?;
                 prepared.push(
                     LinearForceTransition::try_new_with_damping_rate(omega, rates[i], dt_s)
                         .map_err(|_| invalid("unrepresentable damped oscillator transition"))?,
@@ -254,6 +260,7 @@ impl DampedSpectralSolid {
             impulse_kg_m_s,
             maximum_impulse_error_kg_m_s,
             self.cumulative_dissipated_j,
+            self.dissipation_correction_j,
             cx,
         )?;
         Ok(self.solid.accept_momentum_impulse(candidate))
@@ -279,13 +286,17 @@ impl DampedSpectralSolid {
                 force_start_n,
                 force_end_n,
                 self.cumulative_dissipated_j,
+                self.dissipation_correction_j,
                 cx,
             );
         };
         let n = self.free_dofs().len();
         if force_start_n.len() != n
             || force_end_n.len() != n
-            || force_start_n.iter().chain(force_end_n).any(|value| !value.is_finite())
+            || force_start_n
+                .iter()
+                .chain(force_end_n)
+                .any(|value| !value.is_finite())
         {
             return Err(invalid("complete finite force endpoints required"));
         }
@@ -347,6 +358,7 @@ impl DampedSpectralSolid {
             work,
             heat,
             cumulative_heat,
+            correction,
             step,
             time_s,
             cx,

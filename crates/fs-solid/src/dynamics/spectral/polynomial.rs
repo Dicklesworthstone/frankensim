@@ -429,9 +429,14 @@ impl CompleteSpectralSolid {
             supplied_work_j,
             dissipated_j: 0.0,
             cumulative_dissipated_j: 0.0,
-            balance_error_j: supplied_work_j - change,
-            cumulative_balance_error_j: cumulative_work_j
-                - (stored_after_j + kinetic_after_j - self.initial_energy_j),
+            balance_error_j: (Dd::from_f64(supplied_work_j) - change).to_f64(),
+            cumulative_balance_error_j: self.cumulative_balance_error(
+                cumulative_work_j,
+                correction_j,
+                0.0,
+                0.0,
+                self.storage_change(&displacement, &velocity, cx)?,
+            ),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
             if !defect_j.is_finite() || defect_j.abs() > self.controls.maximum_work_error_j {

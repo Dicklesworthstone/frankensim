@@ -294,13 +294,11 @@ impl SupportedSpectralSolid {
             cumulative_applied_work_j,
             cumulative_support_work_j,
             balance_error_j: product_sum(&mean, &impulse_residual_kg_m_s)?,
-            // Preparation and continuous motion define the energy reference
-            // from the rounded sum of both stores. Retain that convention:
-            // splitting this sum here would give a zero event a new datum.
             cumulative_balance_error_j: represented(
                 Dd::from_f64(cumulative_applied_work_j) + Dd::from_f64(cumulative_support_work_j)
-                    - Dd::from_f64(self.stored_j + kinetic_after_j)
-                    + Dd::from_f64(self.initial_energy_j),
+                    - Dd::from_f64(applied_correction_j)
+                    - Dd::from_f64(support_correction_j)
+                    - self.storage_change(&self.displacement, &velocity, cx)?,
             )?,
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {

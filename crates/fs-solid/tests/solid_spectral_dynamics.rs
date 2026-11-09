@@ -80,6 +80,43 @@ fn bits(s: &CompleteSpectralSolid) -> Vec<u64> {
         .map(f64::to_bits)
         .collect()
 }
+
+#[test]
+fn g3_spectral_work_and_impulses_resolve_a_transverse_joule_under_a_large_boost() {
+    with_cx(false, |cx| {
+        let pencil = assembly(&[0.0; 4], &[1.0, 0.0, 0.0, 1.0], 2);
+        let mut solid = CompleteSpectralSolid::prepare_with_basis(
+            &pencil,
+            &[0.0; 2],
+            &[1.0, 0.0, 0.0, 1.0],
+            1.0,
+            &[0.0; 2],
+            &[1e8, 0.0],
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let first = solid.advance(&[0.0, 1.0], cx).unwrap();
+        assert_eq!(first.energy.kinetic_before_j, first.energy.kinetic_after_j);
+        near(first.energy.supplied_work_j, 0.5, 1e-14);
+        near(first.energy.cumulative_balance_error_j, 0.0, 1e-14);
+        let kick = solid
+            .apply_momentum_impulse(&[0.0, -1.0], 1e-12, cx)
+            .unwrap();
+        near(kick.energy.supplied_work_j, -0.5, 1e-14);
+        near(kick.energy.cumulative_balance_error_j, 0.0, 1e-14);
+        let before = bits(&solid);
+        assert!(matches!(
+            solid.advance(&[1e-12, 0.0], cx),
+            Err(CompleteSpectralSolidError::Energy { .. })
+        ));
+        assert_eq!(bits(&solid), before);
+        let retry = solid.advance(&[0.0, 1.0], cx).unwrap();
+        near(retry.energy.supplied_work_j, 0.5, 1e-14);
+        near(retry.energy.cumulative_balance_error_j, 0.0, 1e-14);
+    });
+}
+
 fn multiply(a: &[f64], q: &[f64]) -> Vec<f64> {
     let n = q.len();
     (0..n)

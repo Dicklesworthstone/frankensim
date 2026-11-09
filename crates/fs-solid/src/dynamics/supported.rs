@@ -21,6 +21,7 @@ use super::spectral::{
 };
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_sparse::{Coo, Csr};
 
 mod admission;
@@ -198,7 +199,8 @@ pub struct SupportedSpectralSolid {
     controls: SupportedSolidControls,
     stored_j: f64,
     kinetic_j: f64,
-    initial_energy_j: f64,
+    reference_displacement: Vec<f64>,
+    reference_velocity: Vec<f64>,
     applied_work_j: f64,
     applied_correction_j: f64,
     support_work_j: f64,
@@ -297,7 +299,8 @@ impl SupportedSpectralSolid {
             controls,
             stored_j,
             kinetic_j,
-            initial_energy_j: stored_j + kinetic_j,
+            reference_displacement: copy(initial_displacement_m)?,
+            reference_velocity: copy(initial_velocity_mps)?,
             applied_work_j: 0.0,
             applied_correction_j: 0.0,
             support_work_j: 0.0,
@@ -596,9 +599,14 @@ impl SupportedSpectralSolid {
             support_work_j,
             cumulative_applied_work_j,
             cumulative_support_work_j,
-            balance_error_j: applied_work_j + support_work_j - change,
-            cumulative_balance_error_j: cumulative_applied_work_j + cumulative_support_work_j
-                - (stored_after_j + kinetic_after_j - self.initial_energy_j),
+            balance_error_j: (Dd::from_f64(applied_work_j) + Dd::from_f64(support_work_j) - change)
+                .to_f64(),
+            cumulative_balance_error_j: (Dd::from_f64(cumulative_applied_work_j)
+                - Dd::from_f64(applied_correction_j)
+                + Dd::from_f64(cumulative_support_work_j)
+                - Dd::from_f64(support_correction_j)
+                - self.storage_change(&displacement, &velocity, cx)?)
+            .to_f64(),
         };
         if [
             applied_work_j,
@@ -641,6 +649,13 @@ impl SupportedSpectralSolid {
                 energy,
             },
         })
+    }
+
+    fn storage_change(&self, u: &[f64], v: &[f64], cx: &Cx<'_>) -> Result<Dd> {
+        Ok(
+            quadratic_change(&self.stiffness, &self.reference_displacement, u, cx)?
+                + quadratic_change(&self.mass, &self.reference_velocity, v, cx)?,
+        )
     }
 
     fn accept_affine_supports(&mut self, trial: SupportedIntervalTrial) -> SupportedSolidStep {
@@ -829,22 +844,9 @@ fn quadratic(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<f64> {
     }
     Ok(total)
 }
-fn quadratic_change(matrix: &[f64], before: &[f64], after: &[f64], cx: &Cx<'_>) -> Result<f64> {
-    let n = before.len();
-    let (mut total, mut correction) = (0.0, 0.0);
-    for i in 0..n {
-        poll(cx)?;
-        let row = (0..n).fold(0.0, |s, j| {
-            matrix[i * n + j].mul_add(after[j] - before[j], s)
-        });
-        add(
-            &mut total,
-            &mut correction,
-            (0.5 * before[i] + 0.5 * after[i]) * row,
-        );
-    }
-    if !total.is_finite() {
-        return Err(invalid("physical energy increment overflow"));
-    }
-    Ok(total)
+fn quadratic_change(matrix: &[f64], before: &[f64], after: &[f64], cx: &Cx<'_>) -> Result<Dd> {
+    super::quadratic_change(matrix, before, after, cx).map_err(|error| match error {
+        super::ExactLinearSolidError::Cancelled => SupportedSolidError::Cancelled,
+        _ => invalid("unrepresentable original storage change"),
+    })
 }

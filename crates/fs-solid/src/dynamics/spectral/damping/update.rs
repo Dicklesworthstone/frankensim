@@ -119,12 +119,13 @@ impl DampedSpectralSolid {
             cx,
         )?;
         let mut candidate = Self::prepare_viscosity(replacement, viscosity_kg_per_s, terms, cx)?;
-        let work = parameter_work(
+        let coefficient_change = parameter_work(
             &self.solid.stiffness,
             &candidate.solid.stiffness,
             &self.solid.displacement,
             cx,
         )?;
+        let work = coefficient_change.to_f64();
         if work.abs() > maximum_parameter_work_j {
             return Err(CompleteSpectralSolidError::Energy {
                 defect_j: work,
@@ -142,11 +143,32 @@ impl DampedSpectralSolid {
             return Err(invalid("unrepresentable accumulated parameter work"));
         }
 
-        // Preparation copies the physical u/v exactly, while checking their
-        // reconstruction in the new complete basis. Preserve the old kinetic
-        // bits and initial datum, instead of rebasing either energy inventory.
+        // Keep the original reference coordinates. Only the coefficient
+        // storage at those fixed coordinates changes; subsequent motion uses
+        // the new original operator and a polarized reference-to-state change.
+        // This account is independent of parameter work at the current u.
+        candidate.solid.reference_parameter_change_j = self.solid.reference_parameter_change_j
+            + parameter_work(
+                &self.solid.stiffness,
+                &candidate.solid.stiffness,
+                &self.solid.reference_displacement,
+                cx,
+            )?;
+        candidate.solid.reference_displacement =
+            super::super::copy(&self.solid.reference_displacement)?;
+        candidate.solid.reference_velocity = super::super::copy(&self.solid.reference_velocity)?;
+        let storage_before =
+            self.solid
+                .storage_change(&self.solid.displacement, &self.solid.velocity, cx)?;
+        let storage_after = candidate.solid.storage_change(
+            &candidate.solid.displacement,
+            &candidate.solid.velocity,
+            cx,
+        )?;
+
+        // Preparation copies physical u/v exactly and checks reconstruction
+        // in the new complete basis. Preserve the accepted kinetic bits too.
         candidate.solid.kinetic_j = self.solid.kinetic_j;
-        candidate.solid.initial_energy_j = self.solid.initial_energy_j;
         candidate.solid.steps = self.solid.steps;
         candidate.solid.cumulative_work_j = self.solid.cumulative_work_j;
         candidate.solid.work_correction_j = self.solid.work_correction_j;
@@ -162,14 +184,13 @@ impl DampedSpectralSolid {
             kinetic_energy_j: self.solid.kinetic_j,
             parameter_work_j: work,
             cumulative_parameter_work_j: accumulated,
-            balance_error_j: (Dd::from_f64(work) + Dd::from_f64(self.solid.stored_j)
-                - Dd::from_f64(candidate.solid.stored_j))
-            .to_f64(),
+            balance_error_j: (coefficient_change - (storage_after - storage_before)).to_f64(),
             cumulative_balance_error_j: candidate.solid.cumulative_balance_error(
                 candidate.solid.cumulative_work_j,
+                candidate.solid.work_correction_j,
                 candidate.cumulative_dissipated_j,
-                candidate.solid.stored_j,
-                candidate.solid.kinetic_j,
+                candidate.dissipation_correction_j,
+                storage_after,
             ),
         };
         for defect_j in [report.balance_error_j, report.cumulative_balance_error_j] {
@@ -185,7 +206,7 @@ impl DampedSpectralSolid {
     }
 }
 
-fn parameter_work(before: &[f64], after: &[f64], u: &[f64], cx: &Cx<'_>) -> Result<f64> {
+fn parameter_work(before: &[f64], after: &[f64], u: &[f64], cx: &Cx<'_>) -> Result<Dd> {
     let n = u.len();
     let mut work = Dd::ZERO;
     for i in 0..n {
@@ -204,5 +225,5 @@ fn parameter_work(before: &[f64], after: &[f64], u: &[f64], cx: &Cx<'_>) -> Resu
     if !work.hi.is_finite() || !work.lo.is_finite() || !work.to_f64().is_finite() {
         return Err(invalid("unrepresentable stiffness parameter work"));
     }
-    Ok(work.to_f64())
+    Ok(work)
 }

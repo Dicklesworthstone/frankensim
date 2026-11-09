@@ -23,6 +23,7 @@
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
 use fs_la::factor::{FactorError, cholesky};
+use fs_math::{dd::Dd, quadratic as quadratic_work};
 use fs_phs::linear_exact::prepared::PreparedQuadraticFlow;
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, split_quadratic,
@@ -149,7 +150,9 @@ pub struct ExactLinearSolid<F = PreparedQuadraticFlow> {
     dt_s: f64,
     controls: ExactLinearSolidControls,
     steps: u64,
-    initial_energy_j: f64,
+    // Retain coordinates, not a rounded total: a small transverse exchange
+    // must remain observable beside a much larger unchanged motion.
+    reference_state: Vec<f64>,
     cumulative_work_j: f64,
     work_correction_j: f64,
     affine_force_scale_n: Option<f64>,
@@ -568,11 +571,11 @@ impl ExactLinearSolid {
             mass,
             inverse_mass: inverse,
             free_dofs: assembly.free_dofs.clone(),
+            reference_state: state.clone(),
             state,
             dt_s,
             controls,
             steps: 0,
-            initial_energy_j,
             cumulative_work_j: 0.0,
             work_correction_j: 0.0,
             affine_force_scale_n,
@@ -772,8 +775,9 @@ impl<F> ExactLinearSolid<F> {
         let kinetic_before_j = self.kinetic_energy_j();
         let stored_after_j = quadratic(&self.stiffness, u);
         let kinetic_after_j = quadratic(&self.mass, v);
-        let change = quadratic_change(&self.stiffness, self.displacement_m(), u)
-            + quadratic_change(&self.mass, self.velocity_mps(), v);
+        let change = quadratic_change(&self.stiffness, self.displacement_m(), u, cx)?
+            + quadratic_change(&self.mass, self.velocity_mps(), v, cx)?;
+        let cumulative_change = self.storage_change(u, v, cx)?;
         let increment = supplied_work_j - self.work_correction_j;
         let cumulative_work_j = self.cumulative_work_j + increment;
         let correction = (cumulative_work_j - self.cumulative_work_j) - increment;
@@ -789,10 +793,14 @@ impl<F> ExactLinearSolid<F> {
             supplied_work_j,
             dissipated_j,
             cumulative_dissipated_j,
-            balance_error_j: supplied_work_j - change - dissipated_j,
-            cumulative_balance_error_j: cumulative_work_j
-                - (stored_after_j + kinetic_after_j - self.initial_energy_j)
-                - cumulative_dissipated_j,
+            balance_error_j: (Dd::from_f64(supplied_work_j) - change - Dd::from_f64(dissipated_j))
+                .to_f64(),
+            cumulative_balance_error_j: (Dd::from_f64(cumulative_work_j)
+                - Dd::from_f64(correction)
+                - cumulative_change
+                - Dd::from_f64(cumulative_dissipated_j)
+                + Dd::from_f64(loss_correction))
+            .to_f64(),
         };
         if [
             stored_before_j,
@@ -866,7 +874,7 @@ impl<F> ExactLinearSolid<F> {
             dt_s: self.dt_s,
             controls: self.controls,
             steps: self.steps,
-            initial_energy_j: self.initial_energy_j,
+            reference_state: self.reference_state,
             cumulative_work_j: self.cumulative_work_j,
             work_correction_j: self.work_correction_j,
             affine_force_scale_n: self.affine_force_scale_n,
@@ -874,6 +882,21 @@ impl<F> ExactLinearSolid<F> {
             cumulative_dissipated_j: self.cumulative_dissipated_j,
             dissipation_correction_j: self.dissipation_correction_j,
         })
+    }
+
+    fn storage_change(
+        &self,
+        displacement: &[f64],
+        velocity: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Dd, ExactLinearSolidError> {
+        let n = self.free_dofs.len();
+        Ok(quadratic_change(
+            &self.stiffness,
+            &self.reference_state[..n],
+            displacement,
+            cx,
+        )? + quadratic_change(&self.mass, &self.reference_state[n..], velocity, cx)?)
     }
 }
 
@@ -939,12 +962,40 @@ fn quadratic(matrix: &[f64], x: &[f64]) -> f64 {
         )
     })
 }
-fn quadratic_change(matrix: &[f64], a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len();
-    (0..n).fold(0.0, |s, i| {
-        ((a[i] + b[i]) * 0.5).mul_add(
-            (0..n).fold(0.0, |s, j| matrix[i * n + j].mul_add(b[j] - a[j], s)),
-            s,
-        )
+fn quadratic_change(
+    matrix: &[f64],
+    before: &[f64],
+    after: &[f64],
+    cx: &Cx<'_>,
+) -> Result<Dd, ExactLinearSolidError> {
+    // The same original dense action is used for interval and whole-window
+    // changes. The shared owner retains endpoint difference/mean low words.
+    quadratic_work::increment(
+        before,
+        after,
+        |x, y, cancelled| {
+            let n = x.len();
+            for i in 0..n {
+                if cancelled() {
+                    return Err(());
+                }
+                let mut row = 0.0;
+                for j in 0..n {
+                    if j % 256 == 0 && cancelled() {
+                        return Err(());
+                    }
+                    row = matrix[i * n + j].mul_add(x[j], row);
+                }
+                y[i] = row;
+            }
+            Ok(())
+        },
+        &mut || cx.checkpoint().is_err(),
+    )
+    .map(|value| value.change)
+    .map_err(|error| match error {
+        quadratic_work::QuadraticError::Cancelled
+        | quadratic_work::QuadraticError::Operator(()) => ExactLinearSolidError::Cancelled,
+        _ => invalid("unrepresentable original storage change"),
     })
 }

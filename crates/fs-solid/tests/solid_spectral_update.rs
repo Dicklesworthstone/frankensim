@@ -453,7 +453,7 @@ fn rejected_parameter_candidates_never_replace_state_operators_or_history() {
 fn parameter_work_does_not_subtract_large_unchanged_stored_energy() {
     with_cx(false, |cx| {
         let mut limit = controls();
-        limit.maximum_work_error_j = 2.0; // Explicit endpoint storage-rounding allowance.
+        limit.maximum_work_error_j = 1e-10;
         let mut solid = DampedSpectralSolid::prepare_with_basis(
             &pencil(&[1e16, 0.0, 0.0, 1.0], &[1.0, 0.0, 0.0, 1.0], 2),
             &matrix(&[0.0; 4], 2),
@@ -492,6 +492,8 @@ fn parameter_work_does_not_subtract_large_unchanged_stored_energy() {
             )
             .unwrap();
         assert_eq!(report.parameter_work_j, 1.0);
+        assert_eq!(report.balance_error_j, 0.0);
+        assert_eq!(report.cumulative_balance_error_j, 0.0);
         assert_eq!(solid.cumulative_parameter_work_j(), 1.0);
         assert_ne!(
             report.stored_after_j - report.stored_before_j,
@@ -499,5 +501,20 @@ fn parameter_work_does_not_subtract_large_unchanged_stored_energy() {
         );
         assert_eq!(solid.cumulative_work_j(), 0.0);
         assert_eq!(solid.cumulative_dissipated_j(), 0.0);
+        // Returning the same stiffness returns exactly the supplied joule,
+        // without rebasing the reference to a rounded current energy total.
+        let returned = solid
+            .replace_parameters(
+                &matrix(&[1e16, 0.0, 0.0, 1.0], 2),
+                &matrix(&[0.0; 4], 2),
+                &[1e16, 1.0],
+                &[1.0, 0.0, 0.0, 1.0],
+                1.0,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(returned.parameter_work_j, -1.0);
+        assert_eq!(returned.cumulative_balance_error_j, 0.0);
+        assert_eq!(solid.cumulative_parameter_work_j(), 0.0);
     });
 }

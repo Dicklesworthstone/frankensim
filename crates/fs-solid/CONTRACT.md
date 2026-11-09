@@ -9731,6 +9731,27 @@ the energy difference. Interval and accumulated original physical work balances
 gate publication. Invalid operators, exhausted budgets, invalid force, work
 refusal and cancellation preserve every accepted state field.
 
+The dense, harmonic, complete-spectrum and prescribed-support owners retain
+their original reference displacement and velocity. Both interval and
+whole-window storage changes use the original K/M actions and the shared
+`fs-math::quadratic` polarized increment, with retained low words before the
+work balance is rounded. Rounded endpoint energy totals remain diagnostics;
+subtracting them cannot erase a small transverse force, impulse or support
+exchange beside a large unchanged kinetic store. Stiffness replacement carries
+the coefficient-storage change at the fixed reference coordinates, separately
+from parameter work at the current displacement. No tolerance is enlarged and
+no missing kinetic change is filled from a source-work residual. Additional
+reference storage and scratch are O(n), within the existing conservative
+envelopes; original dense operator actions remain O(n²). These are arithmetic
+and storage bounds, not a measured speed claim or an arbitrary-conditioning
+accuracy certificate.
+
+Focused G3 regressions in `solid_linear_dynamics`, `solid_spectral_dynamics`
+and `solid_supported_dynamics` exercise sub-ULP diagnostic energy exchanges,
+signed impulse return, support acceleration, physical-work refusal and retry.
+`solid_spectral_update` checks a one-joule stiffness change beside a 5e15 J
+unchanged store with a 1e-10 J work gate and exact return of that parameter work.
+
 The supported reduced assembly represents homogeneous stationary constraints.
 This API neither accepts a full nodal-force vector that silently drops
 constrained forces nor reconstructs missing support reactions or moving-support

@@ -18,9 +18,9 @@ use fs_exec::Cx;
 use fs_math::{dd::Dd, det};
 use fs_sparse::Csr;
 
+mod damping;
 /// Exact cubic forces and continuous displacement moments for moving supports.
 pub mod polynomial;
-mod damping;
 pub use damping::{
     DampedSpectralSolid, HarmonicDampedSpectralSolid, MultiToneDampedSpectralSolid,
     SpectralParameterUpdate,
@@ -207,7 +207,11 @@ pub struct CompleteSpectralSolid {
     steps: u64,
     stored_j: f64,
     kinetic_j: f64,
-    initial_energy_j: f64,
+    reference_displacement: Vec<f64>,
+    reference_velocity: Vec<f64>,
+    // Changes of the original stiffness at the fixed reference coordinates.
+    // This keeps the original energy datum through parameter replacement.
+    reference_parameter_change_j: Dd,
     cumulative_work_j: f64,
     work_correction_j: f64,
     cumulative_parameter_work_j: f64,
@@ -338,8 +342,7 @@ impl CompleteSpectralSolid {
                 let mut retained = zeros(square)?;
                 for i in 0..n {
                     poll(cx)?;
-                    retained[i * n..(i + 1) * n]
-                        .copy_from_slice(&matrix[i * n..(i + 1) * n]);
+                    retained[i * n..(i + 1) * n].copy_from_slice(&matrix[i * n..(i + 1) * n]);
                 }
                 retained
             }
@@ -436,7 +439,9 @@ impl CompleteSpectralSolid {
             steps: 0,
             stored_j,
             kinetic_j,
-            initial_energy_j: stored_j + kinetic_j,
+            reference_displacement: copy(initial_displacement_m)?,
+            reference_velocity: copy(initial_velocity_mps)?,
+            reference_parameter_change_j: Dd::ZERO,
             cumulative_work_j: 0.0,
             work_correction_j: 0.0,
             cumulative_parameter_work_j: 0.0,
@@ -477,21 +482,24 @@ impl CompleteSpectralSolid {
     fn cumulative_balance_error(
         &self,
         work_j: f64,
+        work_correction_j: f64,
         heat_j: f64,
-        stored_j: f64,
-        kinetic_j: f64,
+        heat_correction_j: f64,
+        storage_change_j: Dd,
     ) -> f64 {
-        if self.cumulative_parameter_work_j == 0.0 {
-            // Keep the established arithmetic for unchanged-parameter runs.
-            work_j - heat_j - (stored_j + kinetic_j - self.initial_energy_j)
-        } else {
-            (Dd::from_f64(work_j) + Dd::from_f64(self.cumulative_parameter_work_j)
-                - Dd::from_f64(heat_j)
-                - Dd::from_f64(stored_j)
-                - Dd::from_f64(kinetic_j)
-                + Dd::from_f64(self.initial_energy_j))
+        (Dd::from_f64(work_j) - Dd::from_f64(work_correction_j)
+            + Dd::from_f64(self.cumulative_parameter_work_j)
+            - Dd::from_f64(self.parameter_work_correction_j)
+            - Dd::from_f64(heat_j)
+            + Dd::from_f64(heat_correction_j)
+            - storage_change_j)
             .to_f64()
-        }
+    }
+
+    fn storage_change(&self, u: &[f64], v: &[f64], cx: &Cx<'_>) -> Result<Dd> {
+        Ok(self.reference_parameter_change_j
+            + quadratic_change(&self.stiffness, &self.reference_displacement, u, cx)?
+            + quadratic_change(&self.mass, &self.reference_velocity, v, cx)?)
     }
 
     /// Apply an instantaneous impulse in the original `free_dofs()` order.
@@ -545,6 +553,7 @@ impl CompleteSpectralSolid {
             impulse_kg_m_s,
             maximum_impulse_error_kg_m_s,
             0.0,
+            0.0,
             cx,
         )
     }
@@ -554,6 +563,7 @@ impl CompleteSpectralSolid {
         impulse_kg_m_s: &[f64],
         maximum_impulse_error_kg_m_s: f64,
         cumulative_dissipated_j: f64,
+        dissipation_correction_j: f64,
         cx: &Cx<'_>,
     ) -> core::result::Result<SpectralImpulseCandidate, LinearSolidImpulseError> {
         let n = self.free_dofs.len();
@@ -598,11 +608,15 @@ impl CompleteSpectralSolid {
                 time_s: self.time_s(),
                 stored_j: self.stored_j,
                 kinetic_before_j: self.kinetic_j,
-                initial_energy_j: self.initial_energy_j,
+                storage_change_j: self
+                    .storage_change(&self.displacement, &velocity, cx)
+                    .map_err(map_error)?,
                 cumulative_parameter_work_j: self.cumulative_parameter_work_j,
+                parameter_work_correction_j: self.parameter_work_correction_j,
                 cumulative_work_j: self.cumulative_work_j,
                 work_correction_j: self.work_correction_j,
                 cumulative_dissipated_j,
+                dissipation_correction_j,
                 maximum_work_error_j: self.controls.maximum_work_error_j,
             },
             cx,
@@ -644,7 +658,7 @@ impl CompleteSpectralSolid {
         force_end_n: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ExactLinearSolidStep> {
-        self.advance_affine_with_dissipation(force_start_n, force_end_n, 0.0, cx)
+        self.advance_affine_with_dissipation(force_start_n, force_end_n, 0.0, 0.0, cx)
     }
 
     fn advance_affine_with_dissipation(
@@ -652,6 +666,7 @@ impl CompleteSpectralSolid {
         force_start_n: &[f64],
         force_end_n: &[f64],
         cumulative_dissipated_j: f64,
+        dissipation_correction_j: f64,
         cx: &Cx<'_>,
     ) -> Result<ExactLinearSolidStep> {
         poll(cx)?;
@@ -707,6 +722,7 @@ impl CompleteSpectralSolid {
             supplied_work_j,
             0.0,
             cumulative_dissipated_j,
+            dissipation_correction_j,
             step,
             time_s,
             cx,
@@ -736,6 +752,7 @@ impl CompleteSpectralSolid {
             supplied_work_j,
             0.0,
             0.0,
+            0.0,
             step,
             time_s,
             cx,
@@ -752,6 +769,7 @@ impl CompleteSpectralSolid {
         supplied_work_j: f64,
         dissipated_j: f64,
         cumulative_dissipated_j: f64,
+        dissipation_correction_j: f64,
         step: u64,
         time_s: f64,
         cx: &Cx<'_>,
@@ -784,12 +802,14 @@ impl CompleteSpectralSolid {
             supplied_work_j,
             dissipated_j,
             cumulative_dissipated_j,
-            balance_error_j: supplied_work_j - dissipated_j - change,
+            balance_error_j: (Dd::from_f64(supplied_work_j) - Dd::from_f64(dissipated_j) - change)
+                .to_f64(),
             cumulative_balance_error_j: self.cumulative_balance_error(
                 cumulative_work_j,
+                correction,
                 cumulative_dissipated_j,
-                stored_after_j,
-                kinetic_after_j,
+                dissipation_correction_j,
+                self.storage_change(&displacement, &velocity, cx)?,
             ),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
@@ -938,22 +958,9 @@ fn quadratic(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<f64> {
     }
     Ok(result)
 }
-fn quadratic_change(matrix: &[f64], before: &[f64], after: &[f64], cx: &Cx<'_>) -> Result<f64> {
-    let n = before.len();
-    let (mut result, mut correction) = (0.0, 0.0);
-    for i in 0..n {
-        poll(cx)?;
-        let row = (0..n).fold(0.0, |s, j| {
-            matrix[i * n + j].mul_add(after[j] - before[j], s)
-        });
-        add(
-            &mut result,
-            &mut correction,
-            (0.5 * before[i] + 0.5 * after[i]) * row,
-        );
-    }
-    if !result.is_finite() {
-        return Err(invalid("physical energy change overflow"));
-    }
-    Ok(result)
+fn quadratic_change(matrix: &[f64], before: &[f64], after: &[f64], cx: &Cx<'_>) -> Result<Dd> {
+    super::quadratic_change(matrix, before, after, cx).map_err(|error| match error {
+        super::ExactLinearSolidError::Cancelled => CompleteSpectralSolidError::Cancelled,
+        _ => invalid("unrepresentable original storage change"),
+    })
 }

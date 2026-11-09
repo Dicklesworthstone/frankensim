@@ -216,6 +216,65 @@ fn bits(s: &SupportedSpectralSolid) -> Vec<u64> {
 }
 
 #[test]
+fn g3_small_applied_and_support_work_survive_a_large_unforced_motion() {
+    with_cx(false, |cx| {
+        let mut mass = Coo::new(3, 3);
+        for i in 0..3 {
+            mass.push(i, i, 1.0);
+        }
+        let pencil = TetElasticAssembly {
+            stiffness: Coo::new(3, 3).assemble(),
+            mass: mass.assemble(),
+            free_dofs: vec![0, 1, 2],
+            total_mass_kg: 3.0,
+            minimum_scaled_jacobian: 1.0,
+            element_volumes_m3: vec![1.0],
+        };
+        let mut solid = SupportedSpectralSolid::prepare_with_basis(
+            &pencil,
+            &[2],
+            &[0.0; 2],
+            &[1.0, 0.0, 0.0, 1.0],
+            1.0,
+            &[0.0; 3],
+            &[1e8, 0.0, 0.0],
+            &[0.0],
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let first = solid
+            .advance_affine_supports(&[0.0], &[0.0, 1.0, 0.0], &[0.0, 1.0, 0.0], cx)
+            .unwrap();
+        assert_eq!(first.energy.kinetic_before_j, first.energy.kinetic_after_j);
+        near(first.energy.applied_work_j, 0.5, 1e-14);
+        near(first.energy.cumulative_balance_error_j, 0.0, 1e-14);
+
+        // Return the free-coordinate half joule and supply another half joule
+        // through a support-rate jump, with the common kinetic store unchanged.
+        let kick = solid
+            .apply_momentum_impulse(&[0.0, -1.0, 0.0], &[1.0], 1e-12, cx)
+            .unwrap();
+        near(kick.energy.applied_work_j, -0.5, 1e-14);
+        near(kick.energy.support_work_j, 0.5, 1e-14);
+        near(kick.energy.cumulative_balance_error_j, 0.0, 1e-14);
+        let before = bits(&solid);
+        assert!(
+            solid
+                .advance_affine_supports(&[0.0], &[1e-12, 0.0, 0.0], &[1e-12, 0.0, 0.0], cx,)
+                .is_err()
+        );
+        assert_eq!(bits(&solid), before);
+        // The next acceleration ramp adds 5/8 J on the independent support.
+        let accelerated = solid
+            .advance_affine_supports(&[1.0], &[0.0; 3], &[0.0; 3], cx)
+            .unwrap();
+        near(accelerated.energy.support_work_j, 0.625, 1e-14);
+        near(accelerated.energy.cumulative_balance_error_j, 0.0, 1e-13);
+    });
+}
+
+#[test]
 fn g1_accelerating_supports_retain_cross_mass_reaction_and_independent_work() {
     with_cx(false, |cx| {
         let reference = Reference::fixture();
