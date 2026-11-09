@@ -401,9 +401,10 @@ impl CutElasticity3 {
         )
     }
 
-    /// Apply identical retained-point physical admission without allocating
-    /// a response array. Strong-support recovery shares this thermal owner.
-    pub(in crate::elastic3) fn admit_eigenstrain(
+    /// Apply the same retained-point physical admission as thermal response
+    /// without allocating an observation array. Total and elastic strain use
+    /// separate domains; arbitrary between-point extrema are not certified.
+    pub fn admit_eigenstrain(
         &self,
         prepared: &PreparedEigenstrain3,
         u: &[f64],

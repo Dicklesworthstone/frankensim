@@ -5,6 +5,7 @@ use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3,MaterialBodyLoad3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::stress::{AffineBulkStress3, BulkStressPoint3};
 use fs_cutfem::elastic3::mass::MaterialMass3;
+use fs_cutfem::elastic3::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3};
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::dirichlet::EmbeddedReaction3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
@@ -43,6 +44,21 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// displacement space. Reused for every grid of an adaptive study.
     fn prepare_material_body_load(&self, acceleration: &dyn Fn([f64; 3]) -> [f64; 3], max_terms: usize,
         checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<MaterialBodyLoad3, ElasticityError3>;
+    /// Bind a fixed free-strain preparation to this exact material/geometry owner.
+    fn validate_eigenstrain(&self, field: &PreparedEigenstrain3) -> Result<(), ElasticityError3>;
+    /// Current-scale thermal load, including its original Nitsche surface term.
+    fn eigenstrain_load(&self, field: &PreparedEigenstrain3, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<f64>, ElasticityError3>;
+    /// Admit actual/projected total and elastic strain without allocating responses.
+    fn admit_eigenstrain(&self, field: &PreparedEigenstrain3, u: &[f64], maximum_kinematic_strain: f64,
+        max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>;
+    /// Physical and reference thermal stress on the original retained bulk points.
+    fn eigenstrain_response(&self, field: &PreparedEigenstrain3, u: &[f64], maximum_kinematic_strain: f64,
+        max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<EigenstrainResponse3>, ElasticityError3>;
+    /// Exact dual work of the scale-dependent free-strain load; no extra scale.
+    fn eigenstrain_load_scale_pullback(&self, field: &PreparedEigenstrain3, dual: &[f64],
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3>;
     /// Current reference-material multipliers.
     fn scales(&self)->&[f64];
     /// Transactional reference-material update.
@@ -107,6 +123,23 @@ impl Sdf3Elasticity for CutElasticity3 {
         checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<MaterialBodyLoad3, ElasticityError3> {
         CutElasticity3::prepare_material_body_load(self, acceleration, max_terms, checkpoint)
     }
+    fn validate_eigenstrain(&self,field:&PreparedEigenstrain3)->Result<(),ElasticityError3> {
+        CutElasticity3::validate_eigenstrain(self,field)
+    }
+    fn eigenstrain_load(&self,field:&PreparedEigenstrain3,checkpoint:impl FnMut()->ControlFlow<()>)
+        ->Result<Vec<f64>,ElasticityError3> {CutElasticity3::eigenstrain_load(self,field,checkpoint)}
+    fn admit_eigenstrain(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<(),ElasticityError3> {
+        CutElasticity3::admit_eigenstrain(self,field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_response(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<EigenstrainResponse3>,ElasticityError3> {
+        CutElasticity3::eigenstrain_response(self,field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_load_scale_pullback(&self,field:&PreparedEigenstrain3,dual:&[f64],
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<f64>,ElasticityError3> {
+        CutElasticity3::eigenstrain_load_scale_pullback(self,field,dual,checkpoint)
+    }
     fn scales(&self)->&[f64] {CutElasticity3::scales(self)}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {CutElasticity3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {CutElasticity3::fixed(self)}
@@ -162,6 +195,23 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn prepare_material_body_load(&self, acceleration: &dyn Fn([f64; 3]) -> [f64; 3], max_terms: usize,
         checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<MaterialBodyLoad3, ElasticityError3> {
         AdaptiveElasticity3::prepare_material_body_load(self, acceleration, max_terms, checkpoint)
+    }
+    fn validate_eigenstrain(&self,field:&PreparedEigenstrain3)->Result<(),ElasticityError3> {
+        AdaptiveElasticity3::validate_eigenstrain(self,field)
+    }
+    fn eigenstrain_load(&self,field:&PreparedEigenstrain3,checkpoint:impl FnMut()->ControlFlow<()>)
+        ->Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::eigenstrain_load(self,field,checkpoint)}
+    fn admit_eigenstrain(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<(),ElasticityError3> {
+        AdaptiveElasticity3::admit_eigenstrain(self,field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_response(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<EigenstrainResponse3>,ElasticityError3> {
+        AdaptiveElasticity3::eigenstrain_response(self,field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_load_scale_pullback(&self,field:&PreparedEigenstrain3,dual:&[f64],
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<f64>,ElasticityError3> {
+        AdaptiveElasticity3::eigenstrain_load_scale_pullback(self,field,dual,checkpoint)
     }
     fn scales(&self)->&[f64] {AdaptiveElasticity3::scales(self)}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveElasticity3::set_scales(self,v)}
@@ -235,6 +285,23 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn prepare_material_body_load(&self, acceleration: &dyn Fn([f64; 3]) -> [f64; 3], max_terms: usize,
         checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<MaterialBodyLoad3, ElasticityError3> {
         self.elasticity().prepare_material_body_load(acceleration, max_terms, checkpoint)
+    }
+    fn validate_eigenstrain(&self,field:&PreparedEigenstrain3)->Result<(),ElasticityError3> {
+        self.elasticity().validate_eigenstrain(field)
+    }
+    fn eigenstrain_load(&self,field:&PreparedEigenstrain3,checkpoint:impl FnMut()->ControlFlow<()>)
+        ->Result<Vec<f64>,ElasticityError3> {self.elasticity().eigenstrain_load(field,checkpoint)}
+    fn admit_eigenstrain(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<(),ElasticityError3> {
+        self.elasticity().admit_eigenstrain(field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_response(&self,field:&PreparedEigenstrain3,u:&[f64],maximum:f64,max_points:usize,
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<EigenstrainResponse3>,ElasticityError3> {
+        self.elasticity().eigenstrain_response(field,u,maximum,max_points,checkpoint)
+    }
+    fn eigenstrain_load_scale_pullback(&self,field:&PreparedEigenstrain3,dual:&[f64],
+        checkpoint:impl FnMut()->ControlFlow<()>)->Result<Vec<f64>,ElasticityError3> {
+        self.elasticity().eigenstrain_load_scale_pullback(field,dual,checkpoint)
     }
     fn scales(&self)->&[f64] {self.elasticity().scales()}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveSolveSpace3::set_scales(self,v)}

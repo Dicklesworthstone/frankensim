@@ -1144,3 +1144,23 @@ exact repeated mode, negative-envelope recovery, and packet/cancellation
 transaction boundaries. `buckling_cluster_sizing` demonstrates the complete
 mode constraint and independently re-solves both the retained physical loads
 and conservative envelope.
+
+
+## Fixed-field thermal CutFEM density design
+
+`CutDensityStudy3::evaluate_eigenstrain` solves independent prescribed thermal or
+manufacturing strain experiments on the original Cartesian, adaptive, or prepared
+adaptive operator. Its objective is complete equivalent-load work, including the
+current-scale free-strain load and configured reference-density body load. The
+exact scale derivative includes `2 u^T db_free/ds - u^T dK/ds u`; physical occupancy
+retains its separate body-force derivative through the original filter, projection,
+protected-region and SIMP chain. Free strain and the source tensor stay fixed.
+
+Total deformation and elastic calibration have separate native admission limits.
+Preparations must belong to the exact original geometry/material owner. Failed
+and cancelled trials restore incoming scales. No thermal field is silently attached
+to cold modal, load-ball or refinement consumers. This work objective can have
+positive density derivatives, so the force-only OC sign assumption does not apply.
+`tests/eigenstrain_sdf3.rs` supplies full-chain derivative, adaptive, free-expansion,
+source-binding and rollback regressions. These are discrete fixed-field mechanics,
+not a heat equation, temperature-dependent stiffness law, or elastic-storage objective.

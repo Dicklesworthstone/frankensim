@@ -94,9 +94,10 @@ impl AdaptiveElasticity3 {
         )
     }
 
-    /// Admit the original thermal state without a global displacement copy or
-    /// an allocated response array. The raw owner performs the same checks.
-    pub(in crate::elastic3) fn admit_eigenstrain(
+    /// Admit the original thermal state at retained points without a global
+    /// displacement copy or observation array. The raw owner performs the same
+    /// separate total-kinematics and elastic-material checks as response.
+    pub fn admit_eigenstrain(
         &self,
         prepared: &PreparedEigenstrain3,
         u: &[f64],

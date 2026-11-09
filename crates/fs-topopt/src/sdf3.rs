@@ -30,6 +30,8 @@ pub mod stress;
 pub mod design;
 pub mod robust;
 pub mod modal;
+/// Fixed thermal/manufacturing free strain through the original density pipeline.
+pub mod eigenstrain;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub(crate) use operator::{
     admit_affine_material_domain, admit_load_space_material_domain, admit_material_domain,
@@ -251,6 +253,12 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     // are identical for nominal and eroded material fields.
     fn evaluate_design(&mut self, design: Design3, loads: &[LoadCase<'_>], control: &mut SolveControl<'_>)
         -> Result<CutDensityEvaluation3, EvaluationStop> {
+        self.evaluate_design_family(design, loads, None, control)
+    }
+
+    fn evaluate_design_family(&mut self, design: Design3, loads: &[LoadCase<'_>],
+        eigenstrain: Option<eigenstrain::EigenstrainFamily3<'_, '_>>, control: &mut SolveControl<'_>)
+        -> Result<CutDensityEvaluation3, EvaluationStop> {
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales).map_err(|_|failure("sdf3-scales"))?;
         let result = (|| {
@@ -263,15 +271,25 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let mut occupancy_gradient = vec![0.0;self.cells()];
             let mut displacements = Vec::with_capacity(loads.len());
             let mut case_compliances = Vec::with_capacity(loads.len());
-            for load in loads {
+            for (case, load) in loads.iter().enumerate() {
                 control.checkpoint("sdf3-elasticity")?;
-                let rhs = self.external_force(load.force, body.as_deref(), control)?;
+                let mut rhs = self.external_force(load.force, body.as_deref(), control)?;
+                if let Some(family) = eigenstrain {
+                    family.add_load(&self.operator, case, &mut rhs, control)?;
+                }
                 let u = checked_solve_preconditioned(&self.operator,&prepared,&rhs,1e-11,"sdf3-elasticity",control)?;
-                admit_material_domain(&self.operator, &u, control)?;
+                if let Some(family) = eigenstrain {
+                    family.admit_displacement(&self.operator, case, &u, control)?;
+                } else {
+                    admit_material_domain(&self.operator, &u, control)?;
+                }
                 let c: f64 = rhs.iter().zip(&u).map(|(f,u)|f*u).sum();
                 compliance += load.weight*c;
                 let energies = self.operator.scale_quadratic_forms(&u).map_err(|_|failure("sdf3-energy"))?;
                 for (value,energy) in local.iter_mut().zip(energies) { *value -= load.weight*energy; }
+                if let Some(family) = eigenstrain {
+                    family.add_scale_gradient(&self.operator, case, &u, 2.0*load.weight, &mut local, control)?;
+                }
                 // Compliance is the work of the TOTAL physical force. Both
                 // its explicit load and the equilibrium depend on occupancy.
                 self.add_material_body_gradient(&u, 2.0*load.weight, &mut occupancy_gradient, control)?;
