@@ -89,6 +89,10 @@ impl DriveReceipt for CapacitiveBatteryMotorCycleStep {
             native: &self.native,
             storage_change_j: self.storage_change_j,
             heat: self.heat_joules(),
+            gate: self.converter.gate.as_ref().map(|gate| GateTransfers {
+                source_work_j: gate.source_work_j,
+                resistor_heat_j: gate.resistor_heat_j,
+            }),
             battery_terminal_work_j: self.battery_terminal_work_j,
             converter_terminal_work_j: self.converter.terminal_work_j,
             motor_electrical_work_j: self.motor_electrical_work_j,
@@ -102,10 +106,15 @@ impl DriveReceipt for CapacitiveBatteryMotorCycleStep {
         // Independently check the native breakdown before the common seven-owner
         // and fourteen-dissipator physical balances.
         let c = &self.converter;
-        let components = sum([c.inductor_energy_change_j]
+        let mut components = sum([c.inductor_energy_change_j]
             .into_iter()
             .chain(c.bus_capacitor_energy_change_j)
             .chain(c.device_capacitor_energy_change_j))?;
+        if let Some(gate) = &c.gate {
+            components = components
+                + sum(gate.gate_source_energy_change_j)?
+                + sum(gate.gate_drain_energy_change_j)?;
+        }
         let stored = Dd::from_f64(finite(c.storage_change_j)?);
         let grouped = Dd::from_f64(finite(self.storage_change_j[3])?);
         for residual in [components - stored, stored - grouped] {

@@ -11,7 +11,8 @@
 //! device limits do not certify unresolved peaks or semiconductor safe area.
 //! The default nine-state lane has no device capacitor states; `capacitance`
 //! adds explicit constant output-charge storage; `charge` retains complete Q(V)
-//! laws. Gate-drive energy, reverse recovery, avalanche and temperature-varying
+//! laws. The `gate` child adds finite gate charge, Miller coupling and independently
+//! sourced gate-driver heat/work. Reverse recovery, avalanche and temperature-varying
 //! charge laws remain outside these fixed-storage material connections.
 
 use super::*;
@@ -19,6 +20,8 @@ use super::*;
 pub mod capacitance;
 /// Complete immutable voltage-charge laws on the original eleven coordinates.
 pub mod charge;
+/// Finite gate charge, reciprocal Miller storage and separately received driver heat.
+pub mod gate;
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError, closed_balance};
 use crate::circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatError;
@@ -255,10 +258,17 @@ fn admit_original_state(native: &BatteryMotorDrive, state: &[f64; 9]) -> Result<
 }
 
 /// A view of actual native physical transfers, never an averaged receipt.
+#[derive(Clone, Copy)]
+struct GateTransfers {
+    source_work_j: [f64; 4],
+    resistor_heat_j: [f64; 4],
+}
+
 struct DrivePower<'a> {
     native: &'a fs_phs::PreparedStepRecord,
     storage_change_j: [f64; 7],
     heat: [f64; 14],
+    gate: Option<GateTransfers>,
     battery_terminal_work_j: f64,
     converter_terminal_work_j: [f64; 2],
     motor_electrical_work_j: f64,
@@ -266,6 +276,21 @@ struct DrivePower<'a> {
     shaft_work_j: [f64; 2],
     load_work_j: f64,
 }
+/// Source bundles keep their own complete material receipts. Only actual native
+/// coefficients participate in a per-call numerical cache; source/domain checks
+/// still run freshly on every proposal.
+trait DriveSources: Clone + PartialEq {
+    fn same_electrical_coefficients(&self, _other: &Self) -> bool {
+        true
+    }
+    fn gate_driver_cells(&self) -> Option<[CellId; 4]> {
+        None
+    }
+}
+impl DriveSources for () {}
+impl DriveSources for Arc<[DeviceCapacitanceMaterial; 4]> {}
+impl DriveSources for Arc<[DeviceChargeMaterial; 4]> {}
+
 trait DriveReceipt: Clone {
     fn account(&self) -> DrivePower<'_>;
     fn admit_storage(&self, _allowance_j: f64) -> Result<(), Error> {
@@ -278,6 +303,7 @@ impl DriveReceipt for CommutatedBatteryMotorCycleStep {
             native: &self.native,
             storage_change_j: self.storage_change_j,
             heat: self.heat_joules(),
+            gate: None,
             battery_terminal_work_j: self.battery_terminal_work_j,
             converter_terminal_work_j: self.converter_terminal_work_j,
             motor_electrical_work_j: self.motor_electrical_work_j,
@@ -367,7 +393,15 @@ fn physical_account(receipt: &impl DriveReceipt, allowance_j: f64) -> Result<(Dd
             "commutated drive needs fourteen nonnegative physical heats and actual load work",
         ));
     }
-    let total = sum(heat)?;
+    let gate_heat = step.gate.map_or([0.0; 4], |gate| gate.resistor_heat_j);
+    if gate_heat.iter().any(|q| !q.is_finite() || *q < 0.0) {
+        return Err(invalid(
+            "gate driver heat must be a nonnegative physical resistor integral",
+        ));
+    }
+    let driver_heat = sum(gate_heat)?;
+    let gate_work = sum(step.gate.map_or([0.0; 4], |gate| gate.source_work_j))?;
+    let total = sum(heat)? + driver_heat;
     let s = step.storage_change_j;
     let battery = sum(s[..3].iter().copied())?;
     let converter = Dd::from_f64(finite(s[3])?);
@@ -380,13 +414,13 @@ fn physical_account(receipt: &impl DriveReceipt, allowance_j: f64) -> Result<(Dd
     let electromagnetic = Dd::from_f64(finite(step.electromagnetic_work_j)?);
     let shaft = sum(step.shaft_work_j)?;
     let load = Dd::from_f64(step.load_work_j);
-    let external = shaft - load;
+    let external = shaft - load + gate_work;
     let delta = Dd::from_f64(finite(step.native.delta_h)?);
-    let converter_heat = sum(heat[..5].iter().chain(&heat[10..]).copied())?;
+    let converter_heat = sum(heat[..5].iter().chain(&heat[10..]).copied())? + driver_heat;
     let residuals = [
         battery + sum([heat[5], heat[6]])? - battery_work,
         battery_work + Dd::from_f64(heat[7]) + input,
-        converter + converter_heat - input - output,
+        converter + converter_heat - input - output - gate_work,
         output + motor + load,
         magnetic + Dd::from_f64(heat[8]) + electromagnetic - motor,
         kinetic + Dd::from_f64(heat[9]) - electromagnetic - shaft,
@@ -681,7 +715,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
         Out,
         E: From<ConverterThermalError>,
         const N: usize,
-        C: Clone + PartialEq,
+        C: DriveSources,
         Step: DriveReceipt,
     >(
         &self,
@@ -781,7 +815,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
         }
         // Every storage coefficient and the accepted state are fixed within this call.
         // Capacitor source/domain admission still runs on every thermal proposal.
-        let cache = RefCell::new(None::<([u64; 33], [f64; N], Step)>);
+        let cache = RefCell::new(None::<([u64; 33], C, [f64; N], Step)>);
         let (thermal, drive, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -808,10 +842,12 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                 let cached = cache
                     .borrow()
                     .as_ref()
-                    .filter(|entry| entry.0 == bits)
+                    .filter(|entry| {
+                        entry.0 == bits && entry.1.same_electrical_coefficients(&capacitors)
+                    })
                     .cloned();
                 let reused = cached.is_some();
-                let (next, step) = if let Some((_, next, step)) = cached {
+                let (next, step) = if let Some((_, _, next, step)) = cached {
                     (next, step)
                 } else {
                     let original = original_drive(
@@ -825,6 +861,11 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     advance(original, parameters.devices, &capacitors, &drive.state)
                         .map_err(map_drive)?
                 };
+                if step.account().gate.is_some() != capacitors.gate_driver_cells().is_some() {
+                    return Err(map_drive(invalid(
+                        "gate work and heat require their complete original driver bindings",
+                    )));
+                }
                 let (heat, external) = physical_account(&step, controls.total_energy_tolerance_j)
                     .map_err(map_drive)?;
                 let load_heat = load_heat_cell.map(|cell| RegulatedLoadHeat {
@@ -838,7 +879,7 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                 finite(external_work_j.lo)?;
                 check(cancel).map_err(map_drive)?;
                 if !reused {
-                    *cache.borrow_mut() = Some((bits, next, step.clone()));
+                    *cache.borrow_mut() = Some((bits, capacitors.clone(), next, step.clone()));
                 }
                 Ok(DrivenCoefficients {
                     circuit: DriveDriver {
@@ -890,6 +931,15 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     checkpoint()?;
                     add(driver.drive.devices[i].cell(), heat[1 + i]);
                     add(driver.drive.devices[i].cell(), heat[10 + i]);
+                }
+                if let (Some(cells), Some(gate)) = (
+                    driver.drive.capacitors.gate_driver_cells(),
+                    driver.step.account().gate,
+                ) {
+                    for (cell, energy) in cells.into_iter().zip(gate.resistor_heat_j) {
+                        checkpoint()?;
+                        add(cell, energy);
+                    }
                 }
                 if let Some(load) = &driver.load_heat {
                     checkpoint()?;

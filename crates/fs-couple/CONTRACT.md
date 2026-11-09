@@ -9097,6 +9097,52 @@ time refinement. Synthetic curves do not qualify measured devices, gate
 dynamics, recovery, hysteresis, avalanche, temperature-dependent reversible
 field energy or unresolved operating peaks.
 
+### Finite gate charge, Miller feedback and separately received driver heat
+
+`converter::commutation::battery_motor::gate` connects the original
+fifteen-state gate-controlled finite battery/converter/motor trajectory to the
+same material and finite-cell/`HeatAssembly` enthalpy owners. Its nine converter
+coordinates retain four gate charges in addition to flux, two bus charges and
+two node charges grouped with the high-side gate electrodes. All accepted
+coordinates continue through commands and thermal boundaries.
+
+`GateMaterialBindings` requires four complete intrinsic drain-source Q(V)
+sources, four positive constant Cgs sources, four nonnegative constant Cgd
+sources, four complete positive G(Vgs,T) conductance lines and eight original
+on/off driver-resistance bindings. Charge, capacitance and channel response
+belong to the corresponding semiconductor package. An on/off resistor pair
+names one explicit driver-heat receiver; shared receivers sum their actual
+heats. Gate-clamped Coss is not silently reinterpreted as intrinsic Qds.
+
+Full typed gate-voltage support, every original conductance knot, material
+claim, package, held context and caloric applicability remain retained. The
+conductance and driver resistances refresh at the actual thermal proposal.
+Intrinsic Qds, Cgs and Cgd remain unchanged along accepted charge history;
+temperature-dependent reversible storage requires its own caloric model and
+is refused here. Unowned drain bias/frequency, changed source authority,
+reinterpreted incoming charge and incomplete receivers also refuse.
+
+Every proposal uses the same native gate-controlled solve and original
+electrical/thermal loop. The numerical cache compares the complete resolved
+G(Vgs) curves and all driver coefficients in addition to the existing 33-word
+drive key. Fresh source admission and full subdivision-budget charging still
+precede reuse. Converter storage includes the separate intrinsic drain, Cgs
+and Cgd energy changes. Four signed gate-supply works and four nonnegative
+driver heats extend the original fourteen-loss physical balance; driver
+recovery does not become negative heat or an inferred battery transfer.
+The original finite coolant, contact and radiation owners transport the
+deposited physical heat.
+
+Focused regressions define independent finite-RC/temperature feedback and
+negative gate-source recovery, full Miller/channel storage-work-heat balance,
+source/receiver/continuation refusals and two finite thermal inventories.
+The new coupled code and fixtures passed pinned Rust syntax formatting and
+an API review against the native prepared owner. Full coupled typechecking
+and execution remain unverified because the complete native dependency graph
+is unavailable. Endpoint thermal feedback requires time refinement. Synthetic
+source curves do not qualify measured devices, unresolved waveform peaks,
+saturation, reverse recovery, avalanche or finite-energy gate-rail dynamics.
+
 ## Finite source impedance, regulated demand and material heat
 
 `converter::voltage::power_load` adds `step_power_loaded_candidate` to the

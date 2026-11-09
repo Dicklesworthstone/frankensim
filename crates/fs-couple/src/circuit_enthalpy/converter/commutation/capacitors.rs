@@ -55,6 +55,20 @@ pub(super) fn resolve_capacitances(
     retained: Option<&[DeviceCapacitanceMaterial; 4]>,
     cancel: &RefCell<impl FnMut() -> bool>,
 ) -> Result<[DeviceCapacitanceMaterial; 4], Error> {
+    resolve_constant_capacitances(cells, bindings, thermal, sample, retained, false, cancel)
+}
+
+/// The intrinsic gate-drain branch may explicitly author zero capacitance.
+/// Existing device output capacitance and gate-source storage stay positive.
+pub(super) fn resolve_constant_capacitances(
+    cells: &[MaterialCell<'_>],
+    bindings: &[DeviceCapacitanceBinding<'_>; 4],
+    thermal: &DepositionSimulation<'_>,
+    sample: &MaterialNetworkSample,
+    retained: Option<&[DeviceCapacitanceMaterial; 4]>,
+    allow_zero: bool,
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<[DeviceCapacitanceMaterial; 4], Error> {
     let mut capacitors = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
         check(cancel)?;
@@ -107,7 +121,11 @@ pub(super) fn resolve_capacitances(
         } else {
             let requirement = ScalarPropertyRequirement::try_with_key(
                 binding.key,
-                ScalarAdmissibility::StrictlyPositive,
+                if allow_zero {
+                    ScalarAdmissibility::NonNegative
+                } else {
+                    ScalarAdmissibility::StrictlyPositive
+                },
             )
             .map_err(source)?;
             resolve_material_state_point(
@@ -139,9 +157,15 @@ pub(super) fn resolve_capacitances(
             ));
         }
         let capacitance_f = property.value_si();
-        if !capacitance_f.is_finite() || capacitance_f <= 0.0 {
+        if !capacitance_f.is_finite()
+            || if allow_zero {
+                capacitance_f < 0.0
+            } else {
+                capacitance_f <= 0.0
+            }
+        {
             return Err(invalid(
-                "device output capacitance must be positive and finite",
+                "device capacitance must obey its positive-storage or explicit zero-Miller role",
             ));
         }
         if retained.is_some_and(|originals| {

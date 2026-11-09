@@ -3,6 +3,8 @@
 mod capacitance;
 #[path = "battery_motor/charge.rs"]
 mod charge;
+#[path = "battery_motor/gate.rs"]
+mod gate;
 
 use super::*;
 use fs_couple::circuit_enthalpy::{

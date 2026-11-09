@@ -16,6 +16,11 @@ pub use capacitors::{DeviceCapacitanceBinding, DeviceCapacitanceMaterial};
 mod charge;
 pub use charge::{DeviceChargeBinding, DeviceChargeMaterial};
 
+mod gate;
+pub use gate::{
+    GateConductanceBinding, GateConductanceMaterial, GateMaterial, GateMaterialBindings,
+};
+
 mod devices;
 pub use devices::{DeviceConductionBinding, DeviceConductionKeys, DeviceConductionMaterial};
 
