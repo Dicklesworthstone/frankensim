@@ -6,9 +6,10 @@ use super::*;
 use fs_couple::rigid_damping_heat::{
     driven::network::{DrivenNetworkDampingThermalConfig, advance_candidate as advance_driven},
     relaxation::{
-        HeldInternalEffort, RelaxationDampingThermalConfig, RelaxationDampingThermalInput,
-        RelaxationNetworkLimits, RelaxationNetworkMotionControls, SpatialRelaxationBranch,
-        advance_candidate as advance_memory,
+        HeldInternalEffort, RelaxationDampingImplicitConfig, RelaxationDampingThermalConfig,
+        RelaxationDampingThermalInput, RelaxationNetworkLimits, RelaxationNetworkMotionControls,
+        SpatialRelaxationBranch, advance_candidate as advance_memory,
+        advance_implicit_candidate as advance_memory_implicit,
     },
 };
 use fs_mbd::spatial_loads::{
@@ -34,6 +35,16 @@ fn memory_controls() -> RelaxationDampingThermalConfig {
         thermal: original.thermal,
         maximum_heat_bindings: 2,
         energy_tolerance_j: original.energy_tolerance_j,
+    }
+}
+fn memory_implicit_controls(scheme: ImplicitThermalScheme) -> RelaxationDampingImplicitConfig {
+    let common = implicit_config(scheme);
+    RelaxationDampingImplicitConfig {
+        mechanical: memory_controls().mechanical,
+        thermal: common.thermal,
+        scheme,
+        maximum_heat_bindings: 2,
+        energy_tolerance_j: common.energy_tolerance_j,
     }
 }
 struct MemoryPair {
@@ -125,6 +136,152 @@ fn relative(states: &[RigidBodyState], bodies: &Bodies) -> f64 {
             .center_of_mass_velocity_world(bodies.properties[0])
             .unwrap()
             .x
+}
+
+#[test]
+fn implicit_maxwell_retries_and_continuation_preserve_original_memory_and_work() {
+    let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, 0.7);
+    let routes = [BTreeMap::from([(CellId(0), 0.7), (CellId(1), 0.2)])];
+    let input = fixture.input(&routes);
+    let calorics = laws();
+    let initial = stiff_thermal(&calorics, 128);
+    let saved_cells = initial.cells().clone();
+    let saved_memory = fixture.memory.clone();
+    let graph = stiff_graph(&calorics, &initial);
+    let observer = Observe::default();
+    let expected = reference(0.4, 1.3, 0.2, 0.7, -2.0, 0.6, 0.25);
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let mut controls = memory_implicit_controls(scheme);
+        controls.thermal.maximum_newton_iterations = 2;
+        controls.thermal.cell_tolerance_j = 1e-8;
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (whole, native) = advance_memory_implicit(
+            input,
+            &initial,
+            &observer,
+            0.25,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert!(native.rejected_intervals > 0);
+        assert_eq!(
+            whole.observer().hooks[8],
+            native.energy.substeps + native.rejected_intervals
+        );
+        assert_eq!(whole.observer().intervals.len(), native.energy.substeps);
+        assert_eq!(native.energy, whole.report().thermal);
+        near(
+            relative(whole.states(), &fixture.bodies),
+            expected[0],
+            8e-11,
+        );
+        near(whole.memory()[0][0][0], expected[1], 8e-11);
+        near(whole.report().dissipated_energy_j, expected[2], 8e-11);
+        near(whole.report().actuator_work_j, expected[3], 8e-11);
+        near(
+            whole.report().memory_energy_change_j,
+            0.5 * (expected[1] * expected[1] - 0.6 * 0.6),
+            8e-11,
+        );
+        near(whole.report().deposited_heat_j, 0.9 * expected[2], 8e-11);
+        near(
+            whole.report().unallocated_energy_j,
+            0.1 * expected[2],
+            8e-11,
+        );
+        near(whole.report().combined_energy_residual_j, 0.0, 1e-8);
+
+        // Split at an actually accepted endpoint. Rejected larger intervals
+        // cannot alter the memory that either continuation starts from.
+        let split = whole.observer().intervals[0].2;
+        let (first, first_native) = advance_memory_implicit(
+            input,
+            &initial,
+            &observer,
+            split,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let continued = RelaxationDampingThermalInput {
+            mechanical: RigidDampingThermalInput {
+                time_s: first.report().time_s,
+                states: first.states(),
+                ..input.mechanical
+            },
+            memory: first.memory(),
+            ..input
+        };
+        let (second, second_native) = advance_memory_implicit(
+            continued,
+            first.thermal(),
+            first.observer(),
+            0.25,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(second.states(), whole.states());
+        assert_eq!(second.memory(), whole.memory());
+        assert_eq!(second.thermal().cells(), whole.thermal().cells());
+        assert_eq!(
+            first_native.energy.substeps + second_native.energy.substeps,
+            native.energy.substeps
+        );
+        for (a, b, all) in [
+            (
+                first.report().dissipated_energy_j,
+                second.report().dissipated_energy_j,
+                whole.report().dissipated_energy_j,
+            ),
+            (
+                first.report().actuator_work_j,
+                second.report().actuator_work_j,
+                whole.report().actuator_work_j,
+            ),
+            (
+                first.report().memory_energy_change_j,
+                second.report().memory_energy_change_j,
+                whole.report().memory_energy_change_j,
+            ),
+        ] {
+            near(a + b, all, 8e-11);
+        }
+        let failing = Observe {
+            fail_at: Some(2),
+            ..Default::default()
+        };
+        assert!(matches!(
+            advance_memory_implicit(
+                input,
+                &initial,
+                &failing,
+                0.25,
+                &graph,
+                controls,
+                &mut workspace,
+                || false
+            ),
+            Err(RigidDampingThermalError::Observer(
+                DepositionError::InvalidInput("synthetic observer refusal")
+            ))
+        ));
+        assert!(failing.intervals.is_empty());
+    }
+    assert_eq!(fixture.memory, saved_memory);
+    assert_eq!(initial.cells(), &saved_cells);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(observer, Observe::default());
 }
 
 #[test]

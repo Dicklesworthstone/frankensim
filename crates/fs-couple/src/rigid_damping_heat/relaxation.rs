@@ -12,8 +12,9 @@ pub mod temperature;
 
 use super::{
     DampingSource, FrozenSource, MechanicalAdvance, MechanicalStep, Result,
-    RigidDampingThermalCandidate, RigidDampingThermalError, RigidDampingThermalInput,
-    RigidDampingThermalReport, ThermalControls, advance_with_source,
+    RigidDampingImplicitConfig, RigidDampingThermalCandidate, RigidDampingThermalError,
+    RigidDampingThermalInput, RigidDampingThermalReport, ThermalControls, ThermalDriver,
+    advance_with_source_driver, require_implicit_report,
 };
 use fs_mbd::{
     RigidBodyState,
@@ -31,6 +32,9 @@ use fs_mbd::{
     },
 };
 use fs_thermal::enthalpy::{DepositionObserver, DepositionSimulation, StepConfig};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionGraph, ImplicitConductionReport, ImplicitConductionWorkspace,
+};
 use std::borrow::Cow;
 
 pub use fs_mbd::spatial_loads::{
@@ -67,6 +71,11 @@ pub struct RelaxationDampingThermalConfig {
     pub maximum_heat_bindings: usize,
     pub energy_tolerance_j: f64,
 }
+
+/// Original Maxwell graph controls with native BE/SDIRK thermal transport.
+pub type RelaxationDampingImplicitConfig =
+    RigidDampingImplicitConfig<RelaxationNetworkMotionControls>;
+
 impl From<RelaxationDampingThermalConfig> for ThermalControls {
     fn from(config: RelaxationDampingThermalConfig) -> Self {
         Self {
@@ -135,35 +144,103 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     observer: &O,
     target_s: f64,
     config: RelaxationDampingThermalConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<RelaxationDampingThermalCandidate<'m, O>, O::Error> {
-    let links = prepare_links(input, config, &mut cancelled)?;
+    advance_with_driver(
+        input,
+        thermal,
+        observer,
+        target_s,
+        config.mechanical,
+        config.into(),
+        ThermalDriver::Explicit,
+        cancelled,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+/// Advance original Maxwell history with native implicit thermal conduction.
+///
+/// Each attempted physical interval starts from the accepted body and complete
+/// memory banks. Its independently integrated Kelvin/Maxwell loss feeds both
+/// SDIRK stages as one whole-interval mean; elastic storage and signed actuator
+/// work stay in their original accounts. Thermal acceptance commits bodies,
+/// memory and caloric storage together. A retry replaces the pending proposal,
+/// and any refusal returns no partial candidate.
+///
+/// Native graph, source and event admission follow
+/// [`super::advance_implicit_candidate`]. Fixed branch laws and the independent
+/// temporal-refinement obligations of [`advance_candidate`] remain in force:
+/// SDIRK thermal order does not establish the moving-mechanics split's order.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_implicit_candidate<'m, O: DepositionObserver>(
+    input: RelaxationDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    target_s: f64,
+    conduction: &ImplicitConductionGraph<'_>,
+    config: RelaxationDampingImplicitConfig,
+    workspace: &mut ImplicitConductionWorkspace,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(RelaxationDampingThermalCandidate<'m, O>, ImplicitConductionReport), O::Error> {
+    let (candidate, report) = advance_with_driver(
+        input,
+        thermal,
+        observer,
+        target_s,
+        config.mechanical,
+        config.thermal_controls(),
+        config.driver(conduction, workspace),
+        cancelled,
+    )?;
+    Ok((candidate, require_implicit_report(report)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_driver<'m, O: DepositionObserver>(
+    input: RelaxationDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    target_s: f64,
+    mechanical: RelaxationNetworkMotionControls,
+    config: ThermalControls,
+    driver: ThermalDriver<'_, '_>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<
+    (RelaxationDampingThermalCandidate<'m, O>, Option<ImplicitConductionReport>),
+    O::Error,
+> {
+    let links = prepare_links(input, mechanical, &mut cancelled)?;
     let mechanics = RelaxationMotion {
         links: &links,
         initial_memory: input.memory,
         memory: Cow::Borrowed(input.memory),
         efforts: input.efforts,
-        controls: config.mechanical,
+        controls: mechanical,
     };
-    let (native, _, mechanics) = advance_with_source(
+    let (native, _, mechanics, report) = advance_with_source_driver(
         input.mechanical,
         thermal,
         observer,
         FrozenSource(input.mechanical.links),
         mechanics,
         target_s,
-        config.into(),
+        config,
+        driver,
         cancelled,
     )?;
-    Ok(RelaxationDampingThermalCandidate {
-        native,
-        memory: mechanics.memory.into_owned(),
-    })
+    Ok((
+        RelaxationDampingThermalCandidate {
+            native,
+            memory: mechanics.memory.into_owned(),
+        },
+        report,
+    ))
 }
 
 fn prepare_links<E, S>(
     input: RelaxationDampingThermalInput<'_>,
-    config: RelaxationDampingThermalConfig,
+    mechanical: RelaxationNetworkMotionControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<RelaxationNetworkLink>, E, S> {
     if cancelled() {
@@ -173,8 +250,8 @@ fn prepare_links<E, S>(
     if input.branches.len() != n
         || input.memory.len() != n
         || input.efforts.len() != n
-        || n > config.mechanical.limits.source.maximum_connectors
-        || input.mechanical.states.len() > config.mechanical.limits.source.maximum_bodies
+        || n > mechanical.limits.source.maximum_connectors
+        || input.mechanical.states.len() > mechanical.limits.source.maximum_bodies
     {
         return Err(RigidDampingThermalError::Invalid(
             "complete original graph, branch, history and effort banks within native limits required",
@@ -190,7 +267,7 @@ fn prepare_links<E, S>(
             .ok_or(RigidDampingThermalError::Invalid(
                 "complete Maxwell branch count overflows",
             ))?;
-        if law.len() != history.len() || branches > config.mechanical.limits.maximum_branches {
+        if law.len() != history.len() || branches > mechanical.limits.maximum_branches {
             return Err(RigidDampingThermalError::Invalid(
                 "every original branch needs one complete history within native limits",
             ));

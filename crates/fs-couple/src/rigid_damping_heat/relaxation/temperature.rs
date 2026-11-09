@@ -12,11 +12,13 @@
 //! equilibrium spring, moisture calibration or source validity is inferred.
 
 use super::super::{
-    DampingSource, Result, RigidDampingThermalError, RigidDampingThermalReport, advance_with_source,
+    DampingSource, Result, RigidDampingThermalError, RigidDampingThermalReport, ThermalControls,
+    ThermalDriver, advance_with_source_driver, require_implicit_report,
 };
 use super::{
-    HeldRelaxationKinetics, RelaxationDampingThermalCandidate, RelaxationDampingThermalConfig,
-    RelaxationDampingThermalInput, RelaxationMotion, SpatialRelaxationBranch, prepare_links,
+    HeldRelaxationKinetics, RelaxationDampingImplicitConfig, RelaxationDampingThermalCandidate,
+    RelaxationDampingThermalConfig, RelaxationDampingThermalInput, RelaxationMotion,
+    RelaxationNetworkMotionControls, SpatialRelaxationBranch, prepare_links,
 };
 use fs_material::visco::{ViscoError, temperature::TemperatureShift};
 use fs_mbd::{
@@ -26,6 +28,9 @@ use fs_mbd::{
     },
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionGraph, ImplicitConductionReport, ImplicitConductionWorkspace,
+};
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Calibration or an attempted reinterpretation of original source data.
@@ -164,10 +169,89 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     temperature_cells: &[CellId],
     target_s: f64,
     config: RelaxationDampingThermalConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<TemperatureRelaxationDampingThermalCandidate<'m, O>, O::Error, RelaxationTemperatureError>
 {
-    let links = prepare_links(input, config, &mut cancelled)?;
+    advance_with_driver(
+        input,
+        thermal,
+        observer,
+        calibration,
+        temperature_cells,
+        target_s,
+        config.mechanical,
+        config.into(),
+        ThermalDriver::Explicit,
+        cancelled,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+/// Advance calibrated Maxwell history with native implicit thermal conduction.
+///
+/// The original Kelvin forms and relaxation times receive the same calibrated
+/// shift at each accepted physical interval start. Both SDIRK stages hold the
+/// resulting whole-interval heat proposal. Rejected thermal intervals retain
+/// accepted bodies, memory and source coefficients; the proposed mechanical
+/// interval is recomputed without resetting physical history or work counts.
+/// Final caloric temperatures and source-domain admission are synchronized
+/// after all native events before the joint candidate is returned.
+///
+/// BE/SDIRK conduction does not change the first-order lagged temperature
+/// feedback. Refine maximum_dt_s independently for kinetics and moving geometry.
+/// The original branch factors and memory basis stay fixed, so no elastic
+/// parameter work or extra heat is introduced. Graph/source/event admission is
+/// the same as [`super::super::advance_implicit_candidate`].
+#[allow(clippy::too_many_arguments)]
+pub fn advance_implicit_candidate<'m, O: DepositionObserver>(
+    input: RelaxationDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    calibration: &CalibratedRelaxationDamping<'_>,
+    temperature_cells: &[CellId],
+    target_s: f64,
+    conduction: &ImplicitConductionGraph<'_>,
+    config: RelaxationDampingImplicitConfig,
+    workspace: &mut ImplicitConductionWorkspace,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (TemperatureRelaxationDampingThermalCandidate<'m, O>, ImplicitConductionReport),
+    O::Error,
+    RelaxationTemperatureError,
+> {
+    let (candidate, report) = advance_with_driver(
+        input,
+        thermal,
+        observer,
+        calibration,
+        temperature_cells,
+        target_s,
+        config.mechanical,
+        config.thermal_controls(),
+        config.driver(conduction, workspace),
+        cancelled,
+    )?;
+    Ok((candidate, require_implicit_report(report)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_driver<'m, O: DepositionObserver>(
+    input: RelaxationDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    calibration: &CalibratedRelaxationDamping<'_>,
+    temperature_cells: &[CellId],
+    target_s: f64,
+    mechanical: RelaxationNetworkMotionControls,
+    config: ThermalControls,
+    driver: ThermalDriver<'_, '_>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<
+    (TemperatureRelaxationDampingThermalCandidate<'m, O>, Option<ImplicitConductionReport>),
+    O::Error,
+    RelaxationTemperatureError,
+> {
+    let links = prepare_links(input, mechanical, &mut cancelled)?;
     let n = links.len();
     if temperature_cells.len() != n
         || calibration.reference.len() != n
@@ -208,27 +292,31 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         initial_memory: input.memory,
         memory: Cow::Borrowed(input.memory),
         efforts: input.efforts,
-        controls: config.mechanical,
+        controls: mechanical,
     };
-    let (native, source, mechanics) = advance_with_source(
+    let (native, source, mechanics, report) = advance_with_source_driver(
         input.mechanical,
         thermal,
         observer,
         source,
         mechanics,
         target_s,
-        config.into(),
+        config,
+        driver,
         cancelled,
     )?;
-    Ok(TemperatureRelaxationDampingThermalCandidate {
-        native: RelaxationDampingThermalCandidate {
-            native,
-            memory: mechanics.memory.into_owned(),
+    Ok((
+        TemperatureRelaxationDampingThermalCandidate {
+            native: RelaxationDampingThermalCandidate {
+                native,
+                memory: mechanics.memory.into_owned(),
+            },
+            temperatures_k: source.temperatures_k,
+            factors: source.factors,
+            evaluations: source.evaluations,
         },
-        temperatures_k: source.temperatures_k,
-        factors: source.factors,
-        evaluations: source.evaluations,
-    })
+        report,
+    ))
 }
 
 #[derive(Clone)]

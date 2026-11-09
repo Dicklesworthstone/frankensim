@@ -84,10 +84,10 @@ pub enum ImplicitThermalScheme {
 
 /// Original mechanical limits and native implicit thermal controls.
 #[derive(Clone, Copy, Debug)]
-pub struct RigidDampingImplicitConfig {
-    /// Per-attempt native moving-network controls; rejected attempts still
-    /// contribute to the returned pair-relaxation work count.
-    pub mechanical: ViscousNetworkMotionControls,
+pub struct RigidDampingImplicitConfig<M = ViscousNetworkMotionControls> {
+    /// Per-attempt controls for the original mechanical owner. Successfully
+    /// prepared rejected attempts retain their reported native work counts.
+    pub mechanical: M,
     /// maximum_dt_s also bounds the physical mechanical interval. Source
     /// restrictions and exact native events may shorten it further.
     pub thermal: ImplicitConductionControls,
@@ -95,6 +95,31 @@ pub struct RigidDampingImplicitConfig {
     pub maximum_heat_bindings: usize,
     /// Independent whole-call mechanical, handoff and combined energy gates.
     pub energy_tolerance_j: f64,
+}
+impl<M> RigidDampingImplicitConfig<M> {
+    fn thermal_controls(&self) -> ThermalControls {
+        ThermalControls {
+            thermal: StepConfig {
+                max_dt_s: self.thermal.maximum_dt_s,
+                energy_tolerance_j: self.thermal.total_tolerance_j,
+            },
+            maximum_heat_bindings: self.maximum_heat_bindings,
+            energy_tolerance_j: self.energy_tolerance_j,
+        }
+    }
+
+    fn driver<'a, 'law>(
+        &self,
+        conduction: &'a ImplicitConductionGraph<'law>,
+        workspace: &'a mut ImplicitConductionWorkspace,
+    ) -> ThermalDriver<'a, 'law> {
+        ThermalDriver::Implicit {
+            conduction,
+            controls: self.thermal,
+            scheme: self.scheme,
+            workspace,
+        }
+    }
 }
 
 /// Physical heat, external work and numerical defects retain separate accounts.
@@ -327,27 +352,18 @@ pub fn advance_implicit_candidate<'m, O: DepositionObserver>(
         FrozenSource(input.links),
         NetworkMotion(config.mechanical),
         target_s,
-        ThermalControls {
-            thermal: StepConfig {
-                max_dt_s: config.thermal.maximum_dt_s,
-                energy_tolerance_j: config.thermal.total_tolerance_j,
-            },
-            maximum_heat_bindings: config.maximum_heat_bindings,
-            energy_tolerance_j: config.energy_tolerance_j,
-        },
-        ThermalDriver::Implicit {
-            conduction,
-            controls: config.thermal,
-            scheme: config.scheme,
-            workspace,
-        },
+        config.thermal_controls(),
+        config.driver(conduction, workspace),
         cancelled,
     )?;
-    Ok((
-        candidate,
-        report.ok_or(RigidDampingThermalError::Invalid(
-            "implicit thermal advance omitted its native report",
-        ))?,
+    Ok((candidate, require_implicit_report(report)?))
+}
+
+fn require_implicit_report<E, S>(
+    report: Option<ImplicitConductionReport>,
+) -> Result<ImplicitConductionReport, E, S> {
+    report.ok_or(RigidDampingThermalError::Invalid(
+        "implicit thermal advance omitted its native report",
     ))
 }
 

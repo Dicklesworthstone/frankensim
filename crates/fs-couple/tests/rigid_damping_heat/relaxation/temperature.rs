@@ -5,6 +5,7 @@ use fs_couple::rigid_damping_heat::{
     relaxation::temperature::{
         CalibratedRelaxationDamping, RelaxationTemperatureError,
         advance_candidate as advance_shifted_memory,
+        advance_implicit_candidate as advance_shifted_memory_implicit,
     },
     temperature::shift::CalibratedKelvinDamping,
 };
@@ -21,6 +22,170 @@ fn arrhenius(reference_k: f64, high_k: f64) -> TemperatureShift {
         [280.0, high_k],
     )
     .unwrap()
+}
+
+#[test]
+fn implicit_calibrated_maxwell_heat_updates_kinetics_and_preserves_continuation() {
+    let fixture = MemoryPair::new(0.4, 1.3, 0.2, 2.0, -2.0, 0.7);
+    let routes = [BTreeMap::from([(CellId(0), 0.7), (CellId(1), 0.2)])];
+    let input = fixture.input(&routes);
+    let calorics = laws();
+    let initial = stiff_thermal(&calorics, 8);
+    let saved_cells = initial.cells().clone();
+    let saved_memory = fixture.memory.clone();
+    let graph = stiff_graph(&calorics, &initial);
+    let shifts = [arrhenius(300.0, 360.0)];
+    let binding =
+        CalibratedRelaxationDamping::try_new(&fixture.links, &fixture.branches, &shifts).unwrap();
+    let observer = Observe::default();
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let controls = memory_implicit_controls(scheme);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (whole, native) = advance_shifted_memory_implicit(
+            input,
+            &initial,
+            &observer,
+            &binding,
+            &[CellId(0)],
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let (first, _) = advance_shifted_memory_implicit(
+            input,
+            &initial,
+            &observer,
+            &binding,
+            &[CellId(0)],
+            0.25,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(native.energy.substeps, 2);
+        assert_eq!(native.rejected_intervals, 0);
+        assert_eq!(native.energy, whole.report().thermal);
+
+        // Independent physical u/q/heat/work equations on the same accepted
+        // held-temperature intervals. The first hot cell changes viscosity
+        // AND the original Maxwell time, while its elastic form stays fixed.
+        let first_reference = reference(0.4, 1.3, 0.2, 0.7, -2.0, 2.0, 0.25);
+        let middle_t = first.thermal().temperature_k(CellId(0)).unwrap();
+        let middle_factor = (20_000.0 * (1.0 / middle_t - 1.0 / 300.0)).exp();
+        let second_reference = reference(
+            0.4 * middle_factor,
+            1.3,
+            0.2 * middle_factor,
+            0.7,
+            first_reference[0],
+            first_reference[1],
+            0.25,
+        );
+        near(
+            relative(whole.states(), &fixture.bodies),
+            second_reference[0],
+            1e-10,
+        );
+        near(whole.memory()[0][0][0], second_reference[1], 1e-10);
+        near(
+            whole.report().dissipated_energy_j,
+            first_reference[2] + second_reference[2],
+            1e-10,
+        );
+        near(
+            whole.report().actuator_work_j,
+            first_reference[3] + second_reference[3],
+            1e-10,
+        );
+        near(
+            whole.report().memory_energy_change_j,
+            0.5 * (second_reference[1] * second_reference[1] - 4.0),
+            1e-10,
+        );
+        assert!(middle_factor < 1.0);
+        assert!(whole.law_evaluations() > 1);
+        let temperature = whole.thermal().temperature_k(CellId(0)).unwrap();
+        assert_eq!(whole.temperatures_k(), [temperature]);
+        near(
+            whole.shift_factors()[0],
+            (20_000.0 * (1.0 / temperature - 1.0 / 300.0)).exp(),
+            2e-14,
+        );
+        near(
+            whole.report().unallocated_energy_j,
+            0.1 * whole.report().dissipated_energy_j,
+            1e-10,
+        );
+        near(whole.report().combined_energy_residual_j, 0.0, 1e-8);
+
+        let continued = RelaxationDampingThermalInput {
+            mechanical: RigidDampingThermalInput {
+                time_s: first.report().time_s,
+                states: first.states(),
+                ..input.mechanical
+            },
+            memory: first.memory(),
+            ..input
+        };
+        let (second, _) = advance_shifted_memory_implicit(
+            continued,
+            first.thermal(),
+            first.observer(),
+            &binding,
+            &[CellId(0)],
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(second.states(), whole.states());
+        assert_eq!(second.memory(), whole.memory());
+        assert_eq!(second.thermal().cells(), whole.thermal().cells());
+        assert_eq!(second.shift_factors(), whole.shift_factors());
+        near(
+            first.report().dissipated_energy_j + second.report().dissipated_energy_j,
+            whole.report().dissipated_energy_j,
+            1e-10,
+        );
+
+        let narrow_shifts = [arrhenius(300.0, 300.001)];
+        let narrow =
+            CalibratedRelaxationDamping::try_new(&fixture.links, &fixture.branches, &narrow_shifts)
+                .unwrap();
+        assert!(matches!(
+            advance_shifted_memory_implicit(
+                input,
+                &initial,
+                &observer,
+                &narrow,
+                &[CellId(0)],
+                0.25,
+                &graph,
+                controls,
+                &mut workspace,
+                || false
+            ),
+            Err(RigidDampingThermalError::Source {
+                error: RelaxationTemperatureError::Shift(_),
+                ..
+            })
+        ));
+    }
+    assert_eq!(fixture.memory, saved_memory);
+    assert_eq!(fixture.branches[0][0].relaxation_time_s(), Some(0.2));
+    assert_eq!(initial.cells(), &saved_cells);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(observer, Observe::default());
 }
 
 #[test]

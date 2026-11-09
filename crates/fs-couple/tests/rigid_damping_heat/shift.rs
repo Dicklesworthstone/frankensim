@@ -1,10 +1,13 @@
 //! Calibrated material kinetics entering the original moving/thermal owners.
 
-use super::{Bodies, Observe, config, laws, near, routes, thermal};
+use super::{
+    Bodies, ImplicitConductionWorkspace, ImplicitThermalScheme, Observe, config, implicit_config,
+    laws, near, routes, stiff_graph, stiff_thermal, thermal,
+};
 use fs_couple::rigid_damping_heat::{
     RigidDampingThermalError,
     temperature::{
-        TemperatureDampingLaw, advance_candidate,
+        TemperatureDampingLaw, advance_candidate, advance_implicit_candidate,
         shift::{CalibratedKelvinDamping, KelvinTemperatureShiftError},
     },
 };
@@ -210,4 +213,124 @@ fn endpoint_outside_calibrated_temperature_band_refuses_atomically() {
     assert_eq!(initial.cells(), &saved);
     assert_eq!(initial.time_s(), 0.0);
     assert!(observer.intervals.is_empty());
+}
+
+#[test]
+fn implicit_stiff_heat_calibrates_kelvin_endpoints_and_continues_original_references() {
+    let bodies = Bodies::new([0.7, 1.1]);
+    let calorics = laws();
+    let initial = stiff_thermal(&calorics, 8);
+    let graph = stiff_graph(&calorics, &initial);
+    let fractions = routes();
+    let input = bodies.input(&fractions);
+    let shifts = [arrhenius([280.0, 350.0]); 2];
+    let source = CalibratedKelvinDamping::try_new(&bodies.links, &shifts).unwrap();
+    let cells = [CellId(0), CellId(1)];
+    let observer = Observe::default();
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let controls = implicit_config(scheme);
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (whole, native) = advance_implicit_candidate(
+            input,
+            &initial,
+            &observer,
+            &source,
+            &cells,
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(native.energy.substeps, 2);
+        assert_eq!(native.energy, whole.report().thermal);
+        for (i, cell) in cells.into_iter().enumerate() {
+            let temperature = whole.thermal().temperature_k(cell).unwrap();
+            assert!(temperature > 300.0);
+            assert_eq!(whole.temperatures_k()[i], temperature);
+            let factor = (6000.0 * (1.0 / temperature - 1.0 / 300.0)).exp();
+            near(
+                whole.endpoint_links()[i].damping.native_coefficients()[0][0],
+                [0.7, 1.1][i] * factor,
+                2e-14,
+            );
+        }
+        near(whole.report().combined_energy_residual_j, 0.0, 1e-8);
+
+        let (first, _) = advance_implicit_candidate(
+            input,
+            &initial,
+            &observer,
+            &source,
+            &cells,
+            0.25,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let continued = fs_couple::rigid_damping_heat::RigidDampingThermalInput {
+            time_s: first.report().time_s,
+            states: first.states(),
+            ..input
+        };
+        // Keep the same original reference links and source calibration. The
+        // endpoint forms are diagnostics, not references to shift a second time.
+        let (second, _) = advance_implicit_candidate(
+            continued,
+            first.thermal(),
+            first.observer(),
+            &source,
+            &cells,
+            0.5,
+            &graph,
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(second.states(), whole.states());
+        assert_eq!(second.thermal().cells(), whole.thermal().cells());
+        assert_eq!(second.endpoint_links(), whole.endpoint_links());
+        near(
+            first.report().dissipated_energy_j + second.report().dissipated_energy_j,
+            whole.report().dissipated_energy_j,
+            1e-12,
+        );
+
+        let narrow = [arrhenius([300.0, 300.001]); 2];
+        let narrow_source = CalibratedKelvinDamping::try_new(&bodies.links, &narrow).unwrap();
+        assert!(matches!(
+            advance_implicit_candidate(
+                input,
+                &initial,
+                &observer,
+                &narrow_source,
+                &cells,
+                0.25,
+                &graph,
+                controls,
+                &mut workspace,
+                || false
+            ),
+            Err(RigidDampingThermalError::Source {
+                error: KelvinTemperatureShiftError::Shift(_),
+                ..
+            })
+        ));
+    }
+    assert_eq!(source.reference_links(), &bodies.links);
+    assert_eq!(initial.time_s(), 0.0);
+    assert!(
+        initial
+            .cells()
+            .values()
+            .all(|cell| cell.specific_h_j_kg == 0.0)
+    );
+    assert_eq!(observer, Observe::default());
 }

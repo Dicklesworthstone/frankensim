@@ -1,8 +1,10 @@
 //! Shared-body cycles, counteracting actuators and finite caloric feedback.
 use super::*;
 use fs_couple::rigid_damping_heat::driven::network::{
-    DrivenNetworkDampingThermalConfig, HeldInternalEffort, advance_candidate as advance_graph,
+    DrivenNetworkDampingImplicitConfig, DrivenNetworkDampingThermalConfig, HeldInternalEffort,
+    advance_candidate as advance_graph, advance_implicit_candidate as advance_graph_implicit,
     advance_temperature_candidate as advance_graph_temperature,
+    advance_temperature_implicit_candidate as advance_graph_temperature_implicit,
 };
 use fs_mbd::spatial_loads::{
     internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits,
@@ -76,6 +78,118 @@ fn cycle_reference(force: f64, time: f64) -> (f64, f64, f64) {
         force * (terminal * time + tail * first),
         c * (terminal * terminal * time + 2.0 * terminal * tail * first + tail * tail * second),
     )
+}
+
+#[test]
+fn implicit_driven_cycle_preserves_original_edge_accounts_and_temperature_bindings() {
+    let bodies = cycle_bodies();
+    let links = cycle_links();
+    let routes = cycle_routes();
+    let input = graph_input(&bodies, &links, &routes);
+    let calorics = linear_calorics();
+    let initial = stiff_thermal(&calorics, 8);
+    let graph = stiff_graph(&calorics, &initial);
+    let observer = Observe::default();
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let common = implicit_config(scheme);
+        let implicit = DrivenNetworkDampingImplicitConfig {
+            mechanical: graph_controls().mechanical,
+            thermal: common.thermal,
+            scheme,
+            maximum_heat_bindings: common.maximum_heat_bindings,
+            energy_tolerance_j: common.energy_tolerance_j,
+        };
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        for force in [-0.35, 0.4] {
+            let efforts = [held(force), held(force), held(2.0 * force)];
+            let (out, native) = advance_graph_implicit(
+                input,
+                &efforts,
+                &initial,
+                &observer,
+                0.5,
+                &graph,
+                implicit,
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+            let (u, work, heat) = cycle_reference(force, 0.5);
+            for (i, expected) in [(0, -u), (1, 0.0), (2, u), (3, -0.5)] {
+                near(
+                    out.states()[i]
+                        .center_of_mass_velocity_world(bodies.properties[i])
+                        .unwrap()
+                        .x,
+                    expected,
+                    3e-11,
+                );
+            }
+            for (i, factor) in [1.0, 1.0, 4.0].into_iter().enumerate() {
+                near(out.report().connector_heat_j[i], factor * heat, 4e-11);
+                near(
+                    out.report().connector_actuator_work_j[i],
+                    factor * work,
+                    4e-11,
+                );
+                assert!(out.report().connector_heat_j[i] > 0.0);
+            }
+            near(out.report().dissipated_energy_j, 6.0 * heat, 5e-11);
+            near(out.report().actuator_work_j, 6.0 * work, 5e-11);
+            near(out.report().deposited_heat_j, 3.0 * heat, 5e-11);
+            near(out.report().unallocated_energy_j, 3.0 * heat, 5e-11);
+            near(native.energy.stored_energy_change_j, 3.0 * heat, 1e-9);
+            near(out.report().combined_energy_residual_j, 0.0, 1e-8);
+            assert_eq!(work.is_sign_negative(), force > 0.0);
+            assert_eq!(native.energy.substeps, 2);
+            assert_eq!(native.energy, out.report().thermal);
+        }
+
+        let law = LinearTemperatureDamping {
+            beta_per_k: 0.5,
+            maximum_k: 303.0,
+        };
+        let cells = [CellId(0), CellId(1), CellId(0)];
+        let (out, native) = advance_graph_temperature_implicit(
+            input,
+            &[held(0.4), held(0.4), held(0.8)],
+            &initial,
+            &observer,
+            &law,
+            &cells,
+            0.5,
+            &graph,
+            implicit,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        for (i, cell) in cells.into_iter().enumerate() {
+            let temperature = out.thermal().temperature_k(cell).unwrap();
+            assert!(temperature > 300.0);
+            assert_eq!(out.temperatures_k()[i], temperature);
+            near(
+                out.endpoint_links()[i].damping.native_coefficients()[0][0],
+                0.7 * (1.0 + 0.5 * (temperature - 300.0)),
+                2e-14,
+            );
+        }
+        assert!(out.report().actuator_work_j < 0.0);
+        assert!(out.report().deposited_heat_j > 0.0);
+        near(out.report().combined_energy_residual_j, 0.0, 1e-8);
+        assert_eq!(native.energy, out.report().thermal);
+    }
+    assert_eq!(initial.time_s(), 0.0);
+    assert!(
+        initial
+            .cells()
+            .values()
+            .all(|cell| cell.specific_h_j_kg == 0.0)
+    );
+    assert_eq!(observer, Observe::default());
 }
 
 #[test]

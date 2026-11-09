@@ -1,8 +1,10 @@
 //! Actuator supply/recovery, positive heat and original finite caloric feedback.
 use super::*;
 use fs_couple::rigid_damping_heat::driven::{
-    DrivenDampingThermalConfig, HeldInternalEffort, advance_candidate as advance_driven,
+    DrivenDampingImplicitConfig, DrivenDampingThermalConfig, HeldInternalEffort,
+    advance_candidate as advance_driven, advance_implicit_candidate as advance_driven_implicit,
     advance_temperature_candidate as advance_driven_temperature,
+    advance_temperature_implicit_candidate as advance_driven_temperature_implicit,
 };
 
 fn pair_input<'a>(
@@ -45,6 +47,110 @@ fn scalar_reference(c: f64, force: f64, time: f64) -> (f64, f64, f64) {
         force * displacement,
         heat,
     )
+}
+
+#[test]
+fn implicit_driven_pair_keeps_signed_work_separate_from_heat_and_feedback() {
+    let bodies = Bodies::new([0.7, 0.0]);
+    let calorics = linear_calorics();
+    let initial = stiff_thermal(&calorics, 8);
+    let graph = stiff_graph(&calorics, &initial);
+    let routes = [BTreeMap::from([(CellId(0), 0.25), (CellId(1), 0.5)])];
+    let input = pair_input(&bodies, &routes);
+    let observer = Observe::default();
+    for scheme in [
+        ImplicitThermalScheme::BackwardEuler,
+        ImplicitThermalScheme::Sdirk2,
+    ] {
+        let common = implicit_config(scheme);
+        let implicit = DrivenDampingImplicitConfig {
+            mechanical: controls().mechanical,
+            thermal: common.thermal,
+            scheme,
+            maximum_heat_bindings: common.maximum_heat_bindings,
+            energy_tolerance_j: common.energy_tolerance_j,
+        };
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        for force in [-1.4, 1.4] {
+            let (out, native) = advance_driven_implicit(
+                input,
+                effort(force),
+                &initial,
+                &observer,
+                0.5,
+                &graph,
+                implicit,
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+            let (velocity, work, heat) = scalar_reference(0.7, force, 0.5);
+            let actual = out.states()[1]
+                .center_of_mass_velocity_world(bodies.properties[1])
+                .unwrap()
+                .x
+                - out.states()[0]
+                    .center_of_mass_velocity_world(bodies.properties[0])
+                    .unwrap()
+                    .x;
+            near(actual, velocity, 3e-12);
+            near(out.report().actuator_work_j, work, 3e-12);
+            near(out.report().dissipated_energy_j, heat, 3e-12);
+            near(out.report().deposited_heat_j, 0.75 * heat, 3e-12);
+            near(out.report().unallocated_energy_j, 0.25 * heat, 3e-12);
+            near(native.energy.stored_energy_change_j, 0.75 * heat, 1e-9);
+            near(
+                out.report().mechanical_energy_change_j,
+                0.5 * (velocity * velocity - 4.0),
+                3e-12,
+            );
+            near(out.report().combined_energy_residual_j, 0.0, 1e-8);
+            assert_eq!(out.report().actuator_work_j.is_sign_negative(), force > 0.0);
+            assert!(heat > 0.0);
+            assert_eq!(native.energy.substeps, 2);
+            assert_eq!(native.energy, out.report().thermal);
+            assert_eq!(out.observer().intervals.len(), 2);
+        }
+
+        let law = LinearTemperatureDamping {
+            beta_per_k: 0.5,
+            maximum_k: 303.0,
+        };
+        let (feedback, native) = advance_driven_temperature_implicit(
+            input,
+            effort(0.4),
+            &initial,
+            &observer,
+            &law,
+            &[CellId(0)],
+            0.5,
+            &graph,
+            implicit,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+        let temperature = feedback.thermal().temperature_k(CellId(0)).unwrap();
+        assert!(temperature > 300.0);
+        assert_eq!(feedback.temperatures_k(), [temperature]);
+        near(
+            feedback.endpoint_links()[0].damping.native_coefficients()[0][0],
+            0.7 * (1.0 + 0.5 * (temperature - 300.0)),
+            2e-14,
+        );
+        assert!(feedback.report().actuator_work_j < 0.0);
+        assert!(feedback.report().deposited_heat_j > 0.0);
+        near(feedback.report().combined_energy_residual_j, 0.0, 1e-8);
+        assert_eq!(native.energy, feedback.report().thermal);
+    }
+    assert_eq!(initial.time_s(), 0.0);
+    assert!(
+        initial
+            .cells()
+            .values()
+            .all(|cell| cell.specific_h_j_kg == 0.0)
+    );
+    assert_eq!(observer, Observe::default());
 }
 
 #[test]

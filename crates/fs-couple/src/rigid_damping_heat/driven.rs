@@ -15,8 +15,12 @@ pub mod network;
 
 use super::{
     FrozenSource, MechanicalAdvance, MechanicalStep, Result, RigidDampingThermalCandidate,
-    RigidDampingThermalError, RigidDampingThermalInput, ThermalControls, advance_with_source,
-    temperature::{TemperatureDampingLaw, TemperatureDampingThermalCandidate, advance_with_motion},
+    RigidDampingImplicitConfig, RigidDampingThermalError, RigidDampingThermalInput, ThermalControls,
+    advance_with_source, advance_with_source_driver, require_implicit_report,
+    temperature::{
+        TemperatureDampingLaw, TemperatureDampingThermalCandidate, advance_with_motion,
+        advance_with_motion_driver,
+    },
 };
 use fs_mbd::{
     RigidBodyState,
@@ -38,6 +42,9 @@ use fs_mbd::{
     },
 };
 use fs_thermal::enthalpy::{CellId, DepositionObserver, DepositionSimulation, StepConfig};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionGraph, ImplicitConductionReport, ImplicitConductionWorkspace,
+};
 
 pub use fs_mbd::spatial_loads::internal_motion::viscous::driven::HeldInternalEffort;
 
@@ -57,6 +64,10 @@ pub struct DrivenDampingThermalConfig {
     /// to mechanical balance, combined balance and absolute heat-handoff error.
     pub energy_tolerance_j: f64,
 }
+
+/// Original driven-pair controls with native BE/SDIRK thermal transport.
+pub type DrivenDampingImplicitConfig = RigidDampingImplicitConfig<ViscousConnectorControls>;
+
 impl From<DrivenDampingThermalConfig> for ThermalControls {
     fn from(config: DrivenDampingThermalConfig) -> Self {
         Self {
@@ -120,6 +131,47 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     .map(|(candidate, _, _)| candidate)
 }
 
+/// Advance the original driven pair with native implicit thermal conduction.
+///
+/// Signed actuator supply/recovery remains work; only the native positive
+/// viscous loss enters finite heat storage. Each attempted thermal interval
+/// prepares the same simultaneous mechanical trajectory as [`advance_candidate`].
+/// Both SDIRK stages hold that one interval's mean heat, and thermal retries
+/// recompute from the accepted bodies without publishing a partial candidate.
+///
+/// The graph, source restrictions and event admission follow
+/// [`super::advance_implicit_candidate`]. Removing the conductive CFL does not
+/// resolve moving geometry or held-source accuracy; refine maximum_dt_s
+/// independently. The returned report is the original thermal solver's report.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_implicit_candidate<'m, O: DepositionObserver>(
+    input: RigidDampingThermalInput<'_>,
+    effort: HeldInternalEffort,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    target_s: f64,
+    conduction: &ImplicitConductionGraph<'_>,
+    config: DrivenDampingImplicitConfig,
+    workspace: &mut ImplicitConductionWorkspace,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(RigidDampingThermalCandidate<'m, O>, ImplicitConductionReport), O::Error> {
+    let (candidate, _, _, report) = advance_with_source_driver(
+        input,
+        thermal,
+        observer,
+        FrozenSource(input.links),
+        DrivenMotion {
+            effort,
+            controls: config.mechanical,
+        },
+        target_s,
+        config.thermal_controls(),
+        config.driver(conduction, workspace),
+        cancelled,
+    )?;
+    Ok((candidate, require_implicit_report(report)?))
+}
+
 /// The same driven pair with original finite-cell temperature feedback.
 ///
 /// The single supplied temperature coordinate is independent of the heat
@@ -157,6 +209,57 @@ pub fn advance_temperature_candidate<'m, O: DepositionObserver, L: TemperatureDa
         config.into(),
         cancelled,
     )
+}
+
+/// Driven-pair temperature feedback with native implicit thermal transport.
+///
+/// Original reference laws, explicit caloric bindings, endpoint source-domain
+/// admission and signed-work accounting are those of
+/// [`advance_temperature_candidate`]. Thermal retries retain accepted physical
+/// history and refresh only the proposed interval. The candidate and complete
+/// native thermal report are returned together after every gate accepts.
+///
+/// BE/SDIRK conduction retains first-order lagged temperature feedback and held
+/// whole-interval mechanical heat. SDIRK thermal order does not certify the
+/// feedback or moving-geometry split; independently refine maximum_dt_s.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_temperature_implicit_candidate<
+    'm,
+    O: DepositionObserver,
+    L: TemperatureDampingLaw,
+>(
+    input: RigidDampingThermalInput<'_>,
+    effort: HeldInternalEffort,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    law: &L,
+    temperature_cells: &[CellId],
+    target_s: f64,
+    conduction: &ImplicitConductionGraph<'_>,
+    config: DrivenDampingImplicitConfig,
+    workspace: &mut ImplicitConductionWorkspace,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (TemperatureDampingThermalCandidate<'m, O>, ImplicitConductionReport),
+    O::Error,
+    L::Error,
+> {
+    let (candidate, report) = advance_with_motion_driver(
+        input,
+        thermal,
+        observer,
+        law,
+        temperature_cells,
+        DrivenMotion {
+            effort,
+            controls: config.mechanical,
+        },
+        target_s,
+        config.thermal_controls(),
+        config.driver(conduction, workspace),
+        cancelled,
+    )?;
+    Ok((candidate, require_implicit_report(report)?))
 }
 
 #[derive(Clone, Copy)]
