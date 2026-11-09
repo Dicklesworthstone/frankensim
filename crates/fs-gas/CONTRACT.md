@@ -9317,3 +9317,37 @@ Focused G1/G3/G4 regressions cover uniform free fall with explicit gas and wall
 loads, gas temperature and absent-species retention, force-density impulse from
 actual moving volumes, replay through the native prescribed-wall map, separate
 wall work, zero-source parity and late cancellation of all accepted states.
+
+
+## Reacting gas acceleration and two finite moving walls
+
+`ReactingEuler1d::step_with_inertial_walls_and_body_force` places the original
+chemistry half steps around the forced native two-wall pressure solve. The first
+chemistry half uses accepted volumes, each mechanical proposal uses the original
+F/2-ALE-F/2 owner, and the second chemistry half uses actual moved volumes. Both
+wall velocities are solved from finite mass and pressure reaction; gas momentum
+remains resolved. A force field applies to gas in moving-cell order. Wall loads,
+including each wall's weight, are separate authored inputs.
+
+The complete gas report counts physical chemical storage, boundary work and
+interior body work once. `gas_energy_change_j` restores both pressure and body
+work to the source-subtracted physical energy residual. The combined gas-plus-
+two-wall energy residual subtracts body work and wall-load work while retaining
+exterior-pressure work; its momentum counterpart likewise subtracts body impulse
+once. The native wall report still owns the middle mechanical stage only.
+Source-work representation defects and chemistry discrepancies stay diagnostic,
+not heat corrections or hidden wall forces.
+
+Shorter mechanical durations restart chemistry, forcing, pressure and both wall
+velocities from accepted state. The final actual source Mach gate follows the
+last chemistry half, then complete momentum/energy admission and cancellation
+precede atomic publication of species, mesh, clock and walls. Existing trial,
+reactor and source buffers are reused. Zero forcing retains original reacting
+wall behavior. This entry does not compose molecular diffusion, finite-wall heat
+or a hydrostatic reconstruction reference, and inherits the original declared
+reaction, splitting and unequal-caloric-contact limitations.
+
+Focused regressions cover independent physical chemical-gas/wall energy and
+momentum balances under heat release plus body forcing, analytic isomerizing
+free fall with explicit wall weights, zero-source parity, and cancellation after
+the candidate chemistry/geometry/wall solution has been formed.

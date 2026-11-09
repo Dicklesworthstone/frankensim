@@ -8,6 +8,7 @@ use crate::dynamics::inertial_walls::{
     InertialWallLoad, InertialWallsControl, InertialWallsStep, validate_controls,
 };
 use crate::dynamics::piston::{Piston, PistonError};
+use crate::body_force::{BodyForce, ForceControl};
 use crate::multicomponent::{Boundaries, Boundary};
 use fs_qty::Time;
 
@@ -25,10 +26,11 @@ pub struct ReactiveInertialWallsStep {
     /// species-reference changes rather than only stored gauged energy.
     pub gas_energy_change_j: f64,
     /// Complete gas plus BOTH walls momentum defect [N s], subtracting signed
-    /// exterior-pressure and additional-force impulses. No fixed support exists.
+    /// exterior-pressure, wall-load and interior body-force impulses.
+    /// No fixed support exists.
     pub combined_momentum_residual_n_s: f64,
     /// Complete chemical-gas plus wall kinetic-energy defect [J], including
-    /// exterior-pressure work and subtracting additional-force work.
+    /// exterior-pressure work and subtracting wall-load and interior body work.
     pub total_energy_residual_j: f64,
 }
 
@@ -70,9 +72,63 @@ impl ReactingEuler1d {
         controls: ReactiveStepControl,
         loads: [InertialWallLoad; 2],
         wall_controls: InertialWallsControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveInertialWallsStep, ReactiveError> {
+        self.step_with_inertial_walls_inner(
+            walls, maximum_duration, controls, loads, wall_controls, None, cancelled,
+        )
+    }
+
+    /// Couple chemical conversion, gas body acceleration and both finite walls.
+    ///
+    /// C/2 surrounds the original simultaneous F/2-ALE-F/2 pressure/wall solve.
+    /// The source uses the actual mixture mass and old/new physical volume at
+    /// each force half. Wall pressure and its work belong to the same native
+    /// moving-volume transport. Gas body work, physical chemical storage,
+    /// both wall kinetic energies and exterior/load work are counted once.
+    ///
+    /// Force values stay in moving-cell order for the accepted interval.
+    /// Wall weights or other wall acceleration sources remain explicit loads.
+    /// Every pressure-root proposal and shortened coupled attempt restarts the
+    /// whole relevant map. Final source Mach and complete momentum/energy gates
+    /// precede one atomic publication of gas, geometry, time and both walls.
+    /// Molecular/thermal owners and well-balanced atmospheres remain separate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_and_body_force(
+        &mut self,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        loads: [InertialWallLoad; 2],
+        wall_controls: InertialWallsControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveInertialWallsStep, ReactiveError> {
+        self.step_with_inertial_walls_inner(
+            walls, maximum_duration, controls, loads, wall_controls,
+            Some((force, force_controls)), cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_inertial_walls_inner(
+        &mut self,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        loads: [InertialWallLoad; 2],
+        wall_controls: InertialWallsControl,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveInertialWallsStep, ReactiveError> {
         poll(&mut cancelled)?;
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<FlowError>()?;
+            if !force.admit::<FlowError>(self.accepted.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
         validate_controls(
             *walls,
             maximum_duration,
@@ -152,14 +208,18 @@ impl ReactingEuler1d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
-                let mechanical = self.trial.step_with_inertial_walls(
-                    &mut trial_walls,
-                    Time::new(duration),
-                    controls.transport,
-                    loads,
-                    wall_controls,
-                    &mut cancelled,
-                )?;
+                let mechanical = match forcing {
+                    Some((force, force_controls)) => {
+                        self.trial.step_with_inertial_walls_and_body_force(
+                            &mut trial_walls, Time::new(duration), controls.transport,
+                            loads, wall_controls, force, force_controls, &mut cancelled,
+                        )?
+                    }
+                    None => self.trial.step_with_inertial_walls(
+                        &mut trial_walls, Time::new(duration), controls.transport,
+                        loads, wall_controls, &mut cancelled,
+                    )?,
+                };
                 if mechanical.gas.elapsed.value() != duration {
                     return Ok((mechanical.gas.elapsed.value(), None));
                 }
@@ -171,6 +231,17 @@ impl ReactingEuler1d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
+                if let Some((_, force_controls)) = forcing {
+                    for i in 0..self.trial.cell_count() {
+                        poll(&mut cancelled)?;
+                        let primitive = self.trial.gas.primitive(
+                            self.trial.cell(i).expect("admitted cell"), &mut cancelled,
+                        )?;
+                        force_controls.admit_velocity::<FlowError>(
+                            primitive.velocity, primitive.sound_speed,
+                        )?;
+                    }
+                }
                 let flow = coupled_report(
                     &self.trial.gas,
                     before,
@@ -180,19 +251,24 @@ impl ReactingEuler1d {
                     None,
                     retry,
                 )?;
-                // Restore the actual pressure boundary work to the original
-                // endpoint-based chemical energy residual. The species datum
-                // is already counted once by coupled_report.
-                let gas_energy_change_j =
+                // The original chemical-energy residual subtracts both
+                // boundary and body work. Restore pressure work for the
+                // coupled balance, then body work for the physical gas change.
+                let gas_change_without_body_work =
                     flow.absolute_energy_residual_j + flow.transport.boundary_change.energy;
+                let gas_energy_change_j = if flow.transport.source_change.work == 0.0 {
+                    gas_change_without_body_work
+                } else {
+                    sum([gas_change_without_body_work, flow.transport.source_change.work])
+                };
                 let total_energy_residual_j =
-                    sum(core::iter::once(gas_energy_change_j).chain((0..2).map(|i| {
+                    sum(core::iter::once(gas_change_without_body_work).chain((0..2).map(|i| {
                         mechanical.kinetic_energy_change_j[i]
                             + mechanical.exterior_pressure_work_j[i]
                             - mechanical.external_force_work_j[i]
                     })));
                 let combined_momentum_residual_n_s = sum(core::iter::once(
-                    flow.after.momentum - flow.before.momentum,
+                    flow.after.momentum - flow.before.momentum - flow.transport.source_change.impulse,
                 )
                 .chain((0..2).map(|i| {
                     let external_impulse = duration
