@@ -1774,6 +1774,37 @@ dispersive stored-energy law nor a causal transient realization. Mean flow,
 elastic porous-frame waves, negative-parameter media and experimental material
 qualification remain outside this numerical formulation.
 
+### Reciprocal mechanical walls in complex equivalent-fluid volumes
+
+`PreparedEquivalentFluid::new_with_coupled_mechanical_walls` retains original
+wall displacement, normal velocity and every Maxwell-memory coordinate in the
+same complete complex-material pressure factor. Real and complex bulk fluids
+share the original wall trace/material preparation and `CoupledPencil`. The same
+consistent face matrix transfers pressure force and wall volume velocity in
+opposite work accounts. No wall-impedance inverse, modal reduction or artificial
+damping is introduced at a local wall-impedance zero.
+
+Original Robin, mechanical and pressure-release faces must be disjoint;
+pressure release on adjacent faces removes no mechanical coordinates. The
+equivalent-fluid harmonic DOF and dense-byte limits count all active pressure,
+wall-motion and memory coordinates before any volume-material callback. Cached
+traction profiles remain bound to their exact preparation and act as physical
+pressure forces, independently of prescribed fluid velocity sources.
+
+The response exposes separate signed fluid source work, fluid-to-wall transfer,
+external traction work, boundary heat, density/compression volume heat and wall
+resistance/relaxation heat. Fluid, wall and complete-system balances retain these
+independently evaluated terms. Wall storage follows the original mechanical law;
+no dispersive bulk stored energy or frequency derivative is inferred from a
+single-frequency rho/K sample. Original rigid porous frames remain rigid; the
+added boundary motion is not an elastic Biot interior or a moving pore skeleton.
+
+`tests/equivalent_fluid_mechanical.rs` specifies G1 lossy-layer convergence to
+independent continuum pressure, wall motion/memory and heat integrals; G3
+coherent fluid/traction work and lossless agreement with the original wall owner;
+and G0/G4 local zero-impedance, adjacent pressure-release, source binding,
+complete-state admission and cancellation behavior.
+
 ## Heterogeneous resolved pressure acoustics
 
 `acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe` borrows the

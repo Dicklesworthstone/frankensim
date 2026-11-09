@@ -41,7 +41,7 @@ use fs_sparse::{Coo, Csr};
 mod harmonic;
 pub use harmonic::{
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
-    EquivalentFluidPressureField, PreparedEquivalentFluid,
+    EquivalentFluidPressureField, PreparedEquivalentFluid, PreparedEquivalentFluidTraction,
     MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
     MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
     MechanicalWallResidue, PreparedMechanicalResonance,

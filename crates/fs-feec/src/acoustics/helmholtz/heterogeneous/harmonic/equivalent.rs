@@ -14,10 +14,15 @@
 //! A sampled dispersive law alone does not determine stored energy or a causal
 //! transient realization. Neither is inferred from the real coefficients.
 
-use super::super::super::pressure_release::PressureReleaseConstraints;
 use super::super::super::HelmholtzFe;
+use super::super::super::pressure_release::PressureReleaseConstraints;
 use super::super::MAX_QUADRATURE_ORDER;
-use super::frequency::coupled::{CoupledPencil, MechanicalHarmonicLimits};
+use super::super::time::mechanical::{MechanicalBoundary, traction::WallTractionProfile};
+use super::frequency::coupled::{
+    CoupledPencil, MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallPhasors,
+    WallTraction,
+};
+use super::mechanical::mechanical_walls_for;
 use super::{
     BoundaryAdmittance, HarmonicLimits, HeterogeneousError, HeterogeneousHelmholtzFe,
     MAX_HARMONIC_DOFS, PreparedHeterogeneous, VelocityTrace, finite, invalid, poll,
@@ -53,7 +58,10 @@ impl EquivalentFluidCoefficients {
             || bulk.re <= 0.0
             || bulk.im < 0.0
         {
-            return Err(invalid("positive-real passive equivalent-fluid density and modulus required").into());
+            return Err(invalid(
+                "positive-real passive equivalent-fluid density and modulus required",
+            )
+            .into());
         }
         let alpha = rho.recip();
         let beta = bulk.recip();
@@ -82,6 +90,8 @@ pub struct EquivalentFluidControls {
     /// Sparse assembly storage and one element's temporary matrices are additional.
     pub max_element_loss_bytes: usize,
     /// Original dense factorization and componentwise physical residual limits.
+    /// With mechanical walls, `max_dofs` bounds ALL free pressure, displacement,
+    /// velocity and relaxation-memory coordinates, not just the pressure block.
     pub harmonic: HarmonicLimits,
 }
 
@@ -118,24 +128,44 @@ impl EquivalentFluidElementPower {
 #[derive(Clone, Debug)]
 pub struct EquivalentFluidPressureField {
     pub pressure_pa: Vec<C64>,
+    /// Signed work of imposed fluid velocity [W], separate from wall traction.
     pub input_power_w: f64,
     pub boundary_dissipation_w: f64,
     pub density_dissipation_w: f64,
     pub compressional_dissipation_w: f64,
     /// Same order as the original geometry().tetrahedra().
     pub element_power: Vec<EquivalentFluidElementPower>,
-    /// Original-equation backward error, not spatial or material-model error.
+    /// Every original wall displacement, velocity and Maxwell memory.
+    pub walls: Vec<MechanicalWallPhasors>,
+    /// Original wall storage, irreversible heat and signed pressure/traction work.
+    /// Bulk dispersive stored energy remains unspecified.
+    pub wall_accounting: MechanicalWallAccounting,
+    /// Complete fluid/wall equation error, not spatial or material-model error.
     pub backward_error: f64,
 }
 
 impl EquivalentFluidPressureField {
-    /// Signed source work minus independently evaluated surface and volume heat.
+    /// Fluid and mechanical source work minus independent boundary, volume and wall heat.
     #[must_use]
     pub fn power_balance_residual_w(&self) -> f64 {
         (Dd::from_f64(self.input_power_w)
+            + Dd::from_f64(self.wall_accounting.wall_traction_power_w)
             - Dd::from_f64(self.boundary_dissipation_w)
             - Dd::from_f64(self.density_dissipation_w)
-            - Dd::from_f64(self.compressional_dissipation_w))
+            - Dd::from_f64(self.compressional_dissipation_w)
+            - Dd::from_f64(self.wall_accounting.resistance_dissipation_w)
+            - Dd::from_f64(self.wall_accounting.relaxation_dissipation_w))
+        .to_f64()
+    }
+
+    /// Fluid source work minus boundary/volume heat and signed pressure work on walls.
+    #[must_use]
+    pub fn fluid_power_balance_residual_w(&self) -> f64 {
+        (Dd::from_f64(self.input_power_w)
+            - Dd::from_f64(self.boundary_dissipation_w)
+            - Dd::from_f64(self.density_dissipation_w)
+            - Dd::from_f64(self.compressional_dissipation_w)
+            - Dd::from_f64(self.wall_accounting.fluid_to_wall_power_w))
         .to_f64()
     }
 }
@@ -164,6 +194,30 @@ pub struct PreparedEquivalentFluid<'f, 'c> {
     pressure_release: PressureReleaseConstraints,
     boundary_conductance: Csr,
     losses: Vec<ElementLoss>,
+    boundaries: Vec<MechanicalBoundary>,
+}
+
+/// One applied traction shape bound to this exact fluid/wall preparation.
+/// Its amplitude is peak pressure [Pa], positive outward like interior pressure.
+/// The cached force uses the original consistent wall trace matrix.
+pub struct PreparedEquivalentFluidTraction<'p, 'f, 'c> {
+    owner: &'p PreparedEquivalentFluid<'f, 'c>,
+    wall: usize,
+    coefficients: Vec<f64>,
+    column: WallTraction,
+}
+
+impl PreparedEquivalentFluidTraction<'_, '_, '_> {
+    #[must_use]
+    pub const fn wall(&self) -> usize {
+        self.wall
+    }
+
+    /// Dimensionless coefficients in the original `wall_dofs` order.
+    #[must_use]
+    pub fn coefficients(&self) -> &[f64] {
+        &self.coefficients
+    }
 }
 
 impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
@@ -179,6 +233,43 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         geometry: &'f HelmholtzFe<'c>,
         frequency_hz: f64,
         admittances: &[BoundaryAdmittance],
+        pressure_release_faces: &[[u32; 3]],
+        controls: EquivalentFluidControls,
+        material_at: &mut impl FnMut(usize, [f64; 3]) -> Result<EquivalentFluidCoefficients, E>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, E> {
+        Self::new_with_coupled_mechanical_walls(
+            geometry,
+            frequency_hz,
+            admittances,
+            &[],
+            pressure_release_faces,
+            controls,
+            material_at,
+            cancelled,
+        )
+    }
+
+    /// Retain reciprocal motion of original local mechanical walls in the SAME
+    /// complex-material pressure solve, with every Maxwell memory coordinate.
+    ///
+    /// Robin, mechanical and pressure-release faces must be disjoint. Adjacent
+    /// pressure release eliminates no wall coordinates. The shared original
+    /// face mass transfers pressure force and normal wall motion reciprocally;
+    /// no inverse wall impedance or added damping is used, even at local Z=0.
+    /// `controls.harmonic.max_dofs` bounds all free fluid and wall states, and
+    /// dense admission uses their complete extent BEFORE material callbacks.
+    ///
+    /// Material coefficients are frozen at this exact frequency. This method
+    /// infers neither a dispersive frequency tangent nor a causal bulk time law.
+    /// Walls retain their original locally reacting law, without lateral bending,
+    /// moving porous frames, or an inferred exterior radiation impedance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_coupled_mechanical_walls<E: From<HeterogeneousError>>(
+        geometry: &'f HelmholtzFe<'c>,
+        frequency_hz: f64,
+        admittances: &[BoundaryAdmittance],
+        boundaries: &[MechanicalBoundary],
         pressure_release_faces: &[[u32; 3]],
         controls: EquivalentFluidControls,
         material_at: &mut impl FnMut(usize, [f64; 3]) -> Result<EquivalentFluidCoefficients, E>,
@@ -202,54 +293,100 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         {
             return Err(HeterogeneousError::from(invalid(
                 "invalid equivalent-fluid frequency, geometry or controls",
-            )).into());
+            ))
+            .into());
         }
         let elements = geometry.tetrahedra().len();
-        let points = elements.checked_mul(controls.quadrature_order.pow(3))
-            .ok_or_else(|| HeterogeneousError::from(invalid(
-                "equivalent-fluid quadrature extent overflow",
-            )))?;
-        admit_limit("equivalent-fluid volume quadrature points", points, controls.max_volume_points)?;
+        let points = elements
+            .checked_mul(controls.quadrature_order.pow(3))
+            .ok_or_else(|| {
+                HeterogeneousError::from(invalid("equivalent-fluid quadrature extent overflow"))
+            })?;
+        admit_limit(
+            "equivalent-fluid volume quadrature points",
+            points,
+            controls.max_volume_points,
+        )?;
         let order = geometry.order;
         let local_dofs = (order + 1) * (order + 2) * (order + 3) / 6;
         let triangle = local_dofs * (local_dofs + 1) / 2;
-        let loss_bytes = elements.checked_mul(
-            2 * triangle * core::mem::size_of::<f64>()
-                + local_dofs * core::mem::size_of::<usize>()
-                + core::mem::size_of::<ElementLoss>(),
-        ).ok_or_else(|| HeterogeneousError::from(invalid("equivalent-fluid loss storage overflow")))?;
-        admit_limit("equivalent-fluid element loss bytes", loss_bytes, controls.max_element_loss_bytes)?;
+        let loss_bytes = elements
+            .checked_mul(
+                2 * triangle * core::mem::size_of::<f64>()
+                    + local_dofs * core::mem::size_of::<usize>()
+                    + core::mem::size_of::<ElementLoss>(),
+            )
+            .ok_or_else(|| {
+                HeterogeneousError::from(invalid("equivalent-fluid loss storage overflow"))
+            })?;
+        admit_limit(
+            "equivalent-fluid element loss bytes",
+            loss_bytes,
+            controls.max_element_loss_bytes,
+        )?;
         let cap = limits.max_dofs.min(MAX_HARMONIC_DOFS);
         if pressure_release_faces.is_empty() {
-            admit_limit("unconstrained pressure degrees of freedom", geometry.ndof(), cap)?;
+            admit_limit(
+                "unconstrained pressure degrees of freedom",
+                geometry.ndof(),
+                cap,
+            )?;
         }
         let pressure_release = geometry
             .pressure_release_constraints(pressure_release_faces, cancelled)
             .map_err(HeterogeneousError::from)?;
         let n = pressure_release.free_dofs.len();
         admit_limit("unconstrained pressure degrees of freedom", n, cap)?;
-        let bytes = n.checked_mul(n).and_then(|value| value.checked_mul(32))
-            .ok_or_else(|| HeterogeneousError::from(invalid("equivalent-fluid dense extent overflow")))?;
-        admit_limit("full pressure dense matrix bytes", bytes, limits.max_dense_bytes)?;
-        for boundary in admittances {
-            for &face in &boundary.faces {
+        let bytes = n
+            .checked_mul(n)
+            .and_then(|value| value.checked_mul(32))
+            .ok_or_else(|| {
+                HeterogeneousError::from(invalid("equivalent-fluid dense extent overflow"))
+            })?;
+        admit_limit(
+            "full pressure dense matrix bytes",
+            bytes,
+            limits.max_dense_bytes,
+        )?;
+        let mut seen = pressure_release.faces.clone();
+        for faces in admittances
+            .iter()
+            .map(|b| &b.faces)
+            .chain(boundaries.iter().map(|b| &b.faces))
+        {
+            for &face in faces {
                 poll(cancelled)?;
                 let mut key = face;
                 key.sort_unstable();
-                if pressure_release.faces.contains(&key) {
+                if !seen.insert(key) {
                     return Err(HeterogeneousError::from(invalid(
-                        "pressure-release and admittance faces must not overlap",
-                    )).into());
+                        "mechanical, admittance and pressure-release faces must be disjoint",
+                    ))
+                    .into());
                 }
             }
         }
         let (boundary_conductance, susceptance) =
             HeterogeneousHelmholtzFe::boundary_coefficient_matrices_for(
                 geometry,
-                admittances.iter().map(|b| (b.faces.as_slice(), b.admittance_m_pa_s)),
+                admittances
+                    .iter()
+                    .map(|b| (b.faces.as_slice(), b.admittance_m_pa_s)),
                 true,
                 cancelled,
             )?;
+        let (walls, states) = mechanical_walls_for(geometry, boundaries, n, cap, cancelled)?;
+        let complete_bytes = states
+            .checked_mul(states)
+            .and_then(|value| value.checked_mul(32))
+            .ok_or_else(|| {
+                HeterogeneousError::from(invalid("equivalent-fluid complete dense extent overflow"))
+            })?;
+        admit_limit(
+            "complete harmonic dense matrix bytes",
+            complete_bytes,
+            limits.max_dense_bytes,
+        )?;
         let quadrature = duffy_quadrature(controls.quadrature_order);
         let mut stiffness = Coo::new(geometry.ndof(), geometry.ndof());
         let mut mass = Coo::new(geometry.ndof(), geometry.ndof());
@@ -269,7 +406,8 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             let mut volume = Dd::ZERO;
             for &(barycentric, weight) in &quadrature {
                 poll(cancelled)?;
-                let point = geometry.geometry_point(element, barycentric)
+                let point = geometry
+                    .geometry_point(element, barycentric)
                     .map_err(HeterogeneousError::from)?;
                 let (alpha, beta) = material_at(element, point.position_m)?.inverse()?;
                 let measure = weight * point.determinant_m3;
@@ -285,7 +423,8 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
                 {
                     return Err(HeterogeneousError::from(invalid(
                         "equivalent-fluid quadrature coefficient overflow",
-                    )).into());
+                    ))
+                    .into());
                 }
                 volume = volume + Dd::from_f64(measure);
                 for (i, (_, shape)) in dofs.iter().enumerate() {
@@ -300,8 +439,11 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
                 let mut index = 0;
                 for i in 0..count {
                     for j in i..count {
-                        let gradient: f64 = gradients[i].iter().zip(&gradients[j])
-                            .map(|(a, b)| a * b).sum();
+                        let gradient: f64 = gradients[i]
+                            .iter()
+                            .zip(&gradients[j])
+                            .map(|(a, b)| a * b)
+                            .sum();
                         let shape = values[i] * values[j];
                         local_k[index] += coefficients[0] * gradient;
                         local_m[index] += coefficients[1] * shape;
@@ -323,17 +465,22 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
                         if !value.is_finite() {
                             return Err(HeterogeneousError::from(invalid(
                                 "equivalent-fluid element assembly overflow",
-                            )).into());
+                            ))
+                            .into());
                         }
                         matrix.push(row, col, value);
-                        if i != j { matrix.push(col, row, value); }
+                        if i != j {
+                            matrix.push(col, row, value);
+                        }
                     }
                     index += 1;
                 }
             }
             let volume_m3 = volume.to_f64();
             if !volume_m3.is_finite() || volume_m3 <= 0.0 {
-                return Err(HeterogeneousError::from(invalid("equivalent-fluid volume overflow")).into());
+                return Err(
+                    HeterogeneousError::from(invalid("equivalent-fluid volume overflow")).into(),
+                );
             }
             losses.push(ElementLoss {
                 dofs: dofs.iter().map(|&(dof, _)| dof).collect(),
@@ -345,22 +492,28 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         for row in 0..geometry.ndof() {
             poll(cancelled)?;
             let (cols, values) = boundary_conductance.row(row);
-            for (&col, &value) in cols.iter().zip(values) { conductance.push(row, col, value); }
+            for (&col, &value) in cols.iter().zip(values) {
+                conductance.push(row, col, value);
+            }
         }
-        let (stiffness, mass, conductance) =
-            (stiffness.assemble(), mass.assemble(), conductance.assemble());
+        let (stiffness, mass, conductance) = (
+            stiffness.assemble(),
+            mass.assemble(),
+            conductance.assemble(),
+        );
         let pencil = CoupledPencil::prepare(
             omega,
             [&stiffness, &mass, &conductance, &susceptance],
             &pressure_release.free_dofs,
-            Vec::new(),
+            walls,
             MechanicalHarmonicLimits {
                 max_states: cap,
                 max_dense_bytes: limits.max_dense_bytes,
                 residual_tolerance: limits.residual_tolerance,
             },
             cancelled,
-        ).map_err(HeterogeneousError::from)?;
+        )
+        .map_err(HeterogeneousError::from)?;
         poll(cancelled)?;
         Ok(Self {
             geometry,
@@ -369,14 +522,58 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             pressure_release,
             boundary_conductance,
             losses,
+            boundaries: boundaries.to_vec(),
         })
     }
 
     #[must_use]
-    pub const fn geometry(&self) -> &'f HelmholtzFe<'c> { self.geometry }
+    pub const fn geometry(&self) -> &'f HelmholtzFe<'c> {
+        self.geometry
+    }
 
     #[must_use]
-    pub const fn frequency_hz(&self) -> f64 { self.frequency_hz }
+    pub const fn frequency_hz(&self) -> f64 {
+        self.frequency_hz
+    }
+
+    #[must_use]
+    pub fn wall_count(&self) -> usize {
+        self.boundaries.len()
+    }
+
+    #[must_use]
+    pub fn wall(&self, wall: usize) -> Option<&MechanicalBoundary> {
+        self.boundaries.get(wall)
+    }
+
+    /// Original sorted trace coordinates, including pressure-constrained vertices.
+    #[must_use]
+    pub fn wall_dofs(&self, wall: usize) -> Option<&[usize]> {
+        self.pencil.wall_dofs(wall)
+    }
+
+    /// Project an applied mechanical traction shape once on this exact owner.
+    /// The force drives wall momentum; it does not prescribe wall velocity.
+    pub fn prepare_wall_traction(
+        &self,
+        profile: &WallTractionProfile,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedEquivalentFluidTraction<'_, 'f, 'c>, HeterogeneousError> {
+        poll(cancelled)?;
+        let dofs = self
+            .wall_dofs(profile.wall)
+            .ok_or_else(|| invalid("traction wall index"))?;
+        let coefficients = profile.local_coefficients(dofs, cancelled)?;
+        let column = self
+            .pencil
+            .prepare_traction(profile.wall, &coefficients, cancelled)?;
+        Ok(PreparedEquivalentFluidTraction {
+            owner: self,
+            wall: profile.wall,
+            coefficients,
+            column,
+        })
+    }
 
     /// Solve simultaneous original linear normal-velocity traces [m/s].
     /// Sources interfere in the same pressure field before work is evaluated.
@@ -386,23 +583,52 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         inward_velocity: &[VelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EquivalentFluidPressureField, HeterogeneousError> {
+        self.solve_with_wall_tractions(inward_velocity, &[], cancelled)
+    }
+
+    /// Solve coherent fluid velocity [m/s] and independently applied wall
+    /// traction [Pa] through the same complete pressure/motion/memory factor.
+    /// The returned fluid, wall and total balances retain their signed work.
+    pub fn solve_with_wall_tractions(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        tractions: &[(&PreparedEquivalentFluidTraction<'_, 'f, 'c>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EquivalentFluidPressureField, HeterogeneousError> {
         poll(cancelled)?;
+        super::super::source::admit_count(tractions.len())?;
+        let mut columns = Vec::with_capacity(tractions.len());
+        for &(source, amplitude) in tractions {
+            poll(cancelled)?;
+            if !core::ptr::eq(source.owner, self) || !finite(amplitude) {
+                return Err(invalid(
+                    "finite traction amplitude and original prepared equivalent-fluid owner required",
+                ).into());
+            }
+            columns.push((&source.column, amplitude));
+        }
         PreparedHeterogeneous::admit_velocity_faces_for(
-            &self.pressure_release, inward_velocity, cancelled,
+            &self.pressure_release,
+            inward_velocity,
+            cancelled,
         )?;
-        let load = HeterogeneousHelmholtzFe::velocity_load_for(
-            self.geometry, inward_velocity, cancelled,
-        )?;
-        let solved = self.pencil.solve(&load, cancelled)?;
+        let load =
+            HeterogeneousHelmholtzFe::velocity_load_for(self.geometry, inward_velocity, cancelled)?;
+        let (mut solved, traction_power) = self
+            .pencil
+            .solve_with_tractions(&load, &columns, cancelled)?;
+        let (walls, mut wall_accounting) = self.pencil.wall_fields(&solved.pressure, cancelled)?;
+        wall_accounting.wall_traction_power_w = traction_power;
+        solved.pressure.truncate(self.geometry.ndof());
         let mut work = Dd::ZERO;
         for (pressure, source) in solved.pressure.iter().zip(&load) {
-            work = work + Dd::from_f64(pressure.re) * Dd::from_f64(source.re)
+            work = work
+                + Dd::from_f64(pressure.re) * Dd::from_f64(source.re)
                 + Dd::from_f64(pressure.im) * Dd::from_f64(source.im);
         }
         let input_power_w = 0.5 * work.to_f64();
-        let boundary_dissipation_w = 0.5 * quadratic_nonnegative(
-            &self.boundary_conductance, &solved.pressure, cancelled,
-        )?;
+        let boundary_dissipation_w =
+            0.5 * quadratic_nonnegative(&self.boundary_conductance, &solved.pressure, cancelled)?;
         let element_power = self.element_dissipation(&solved.pressure, cancelled)?;
         let mut density = Dd::ZERO;
         let mut compression = Dd::ZERO;
@@ -417,7 +643,10 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             boundary_dissipation_w,
             density_dissipation_w,
             compressional_dissipation_w,
-        ].iter().any(|v| !v.is_finite()) {
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+        {
             return Err(invalid("equivalent-fluid work overflow").into());
         }
         poll(cancelled)?;
@@ -428,6 +657,8 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             density_dissipation_w,
             compressional_dissipation_w,
             element_power,
+            walls,
+            wall_accounting,
             backward_error: solved.backward_error,
         })
     }
@@ -444,12 +675,11 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<EquivalentFluidElementPower>, HeterogeneousError> {
         poll(cancelled)?;
-        if pressure_pa.len() != self.geometry.ndof()
-            || pressure_pa.iter().any(|&p| !finite(p))
-        {
+        if pressure_pa.len() != self.geometry.ndof() || pressure_pa.iter().any(|&p| !finite(p)) {
             return Err(invalid(
                 "equivalent-fluid heat requires original finite pressure coefficients",
-            ).into());
+            )
+            .into());
         }
         let mut result = Vec::with_capacity(self.losses.len());
         for loss in &self.losses {
@@ -457,9 +687,8 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             result.push(EquivalentFluidElementPower {
                 volume_m3: loss.volume_m3,
                 density_dissipation_w: 0.5 * local_form(&loss.density, &loss.dofs, pressure_pa)?,
-                compressional_dissipation_w: 0.5 * local_form(
-                    &loss.compression, &loss.dofs, pressure_pa,
-                )?,
+                compressional_dissipation_w: 0.5
+                    * local_form(&loss.compression, &loss.dofs, pressure_pa)?,
             });
         }
         poll(cancelled)?;
@@ -467,10 +696,20 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
     }
 }
 
-fn admit_limit(what: &'static str, requested: usize, maximum: usize) -> Result<(), HeterogeneousError> {
+fn admit_limit(
+    what: &'static str,
+    requested: usize,
+    maximum: usize,
+) -> Result<(), HeterogeneousError> {
     if requested > maximum {
-        Err(HeterogeneousError::Limit { what, requested, maximum })
-    } else { Ok(()) }
+        Err(HeterogeneousError::Limit {
+            what,
+            requested,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn local_form(matrix: &[f64], dofs: &[usize], pressure: &[C64]) -> Result<f64, HeterogeneousError> {
@@ -482,21 +721,19 @@ fn local_form(matrix: &[f64], dofs: &[usize], pressure: &[C64]) -> Result<f64, H
         for (j, &col) in dofs.iter().enumerate().skip(i) {
             let q = pressure[col];
             let coefficient = matrix[index] * if i == j { 1.0 } else { 2.0 };
-            sum = sum + Dd::from_f64(coefficient)
-                * (Dd::from_f64(p.re) * Dd::from_f64(q.re)
-                    + Dd::from_f64(p.im) * Dd::from_f64(q.im));
+            sum = sum
+                + Dd::from_f64(coefficient)
+                    * (Dd::from_f64(p.re) * Dd::from_f64(q.re)
+                        + Dd::from_f64(p.im) * Dd::from_f64(q.im));
             absolute += coefficient.abs() * p.abs() * q.abs();
             index += 1;
         }
     }
     let value = sum.to_f64();
-    if !value.is_finite()
-        || !absolute.is_finite()
-        || value < -64.0 * f64::EPSILON * absolute
-    {
-        return Err(invalid(
-            "equivalent-fluid local dissipation form is nonfinite or negative",
-        ).into());
+    if !value.is_finite() || !absolute.is_finite() || value < -64.0 * f64::EPSILON * absolute {
+        return Err(
+            invalid("equivalent-fluid local dissipation form is nonfinite or negative").into(),
+        );
     }
     Ok(value.max(0.0))
 }

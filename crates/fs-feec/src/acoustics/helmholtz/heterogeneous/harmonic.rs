@@ -16,7 +16,7 @@ pub use dispersive::BoundaryAdmittanceFrequencySample;
 mod equivalent;
 pub use equivalent::{
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
-    EquivalentFluidPressureField, PreparedEquivalentFluid,
+    EquivalentFluidPressureField, PreparedEquivalentFluid, PreparedEquivalentFluidTraction,
 };
 mod frequency;
 mod mechanical;

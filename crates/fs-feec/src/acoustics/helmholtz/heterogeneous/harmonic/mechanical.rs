@@ -162,7 +162,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         let pressure_release = self
             .geometry
             .pressure_release_constraints(pressure_release_faces, cancelled)?;
-        let mut states = pressure_release.free_dofs.len();
+        let states = pressure_release.free_dofs.len();
         if states > limits.max_states {
             return Err(HeterogeneousError::Limit {
                 what: "complete pressure and mechanical wall states",
@@ -196,78 +196,13 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             })
             .collect();
         let (conductance, susceptance) = self.admittance_matrices(&robin, cancelled)?;
-        let mut walls = Vec::with_capacity(boundaries.len());
-        for boundary in boundaries {
-            poll(cancelled)?;
-            fs_phs::wall_specific_impedance(&boundary.wall, 1.0)
-                .map_err(HeterogeneousError::Wall)?;
-            let mut arms = Vec::with_capacity(boundary.relaxation.len());
-            for arm in &boundary.relaxation {
-                poll(cancelled)?;
-                let original = RelaxationBranch {
-                    projection: vec![1.0],
-                    stiffness: arm.stiffness_per_area,
-                    relaxation_time_s: arm.relaxation_time_s,
-                };
-                let coupling = original
-                    .scalar_relaxed_memory(1.0)
-                    .map_err(HeterogeneousError::Wall)?;
-                arms.push((coupling, 1.0 / arm.relaxation_time_s));
-            }
-            // Exactly the same original high-order/curved face Gram matrix as
-            // the distributed time-domain wall owner, with no face averaging.
-            let (global, _) = self.admittance_matrices(
-                &[BoundaryAdmittance {
-                    faces: boundary.faces.clone(),
-                    admittance_m_pa_s: C64::ONE,
-                }],
-                cancelled,
-            )?;
-            let mut dofs = Vec::new();
-            for row in 0..self.ndof() {
-                poll(cancelled)?;
-                let (columns, values) = global.row(row);
-                if columns.binary_search(&row).is_ok_and(|i| values[i] > 0.0) {
-                    dofs.push(row);
-                }
-            }
-            let count = arms
-                .len()
-                .checked_add(2)
-                .and_then(|n| dofs.len().checked_mul(n))
-                .ok_or_else(|| invalid("complete wall state extent overflow"))?;
-            states = states
-                .checked_add(count)
-                .ok_or_else(|| invalid("complete harmonic state extent overflow"))?;
-            if states > limits.max_states {
-                return Err(HeterogeneousError::Limit {
-                    what: "complete pressure and mechanical wall states",
-                    requested: states,
-                    maximum: limits.max_states,
-                });
-            }
-            let mut local = Coo::new(dofs.len(), dofs.len());
-            for (row, &global_row) in dofs.iter().enumerate() {
-                poll(cancelled)?;
-                let (cols, values) = global.row(global_row);
-                for (&col, &value) in cols.iter().zip(values) {
-                    if value != 0.0 {
-                        let col = dofs
-                            .binary_search(&col)
-                            .map_err(|_| invalid("incomplete original mechanical trace support"))?;
-                        local.push(row, col, value);
-                    }
-                }
-            }
-            walls.push(Wall {
-                dofs,
-                mass: local.assemble(),
-                surface_density: boundary.wall.surface_density,
-                stiffness: boundary.wall.stiffness_per_area,
-                resistance: boundary.wall.resistance,
-                arms,
-            });
-        }
+        let (walls, _) = mechanical_walls_for(
+            self.geometry,
+            boundaries,
+            states,
+            limits.max_states,
+            cancelled,
+        )?;
         let pencil = CoupledPencil::prepare(
             omega,
             [&self.stiffness, &self.mass, &conductance, &susceptance],
@@ -347,6 +282,88 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             },
         )
     }
+}
+
+/// The original distributed wall trace and material-memory preparation, shared
+/// by real and complex bulk fluids. Pressure release does not remove wall DOFs.
+pub(super) fn mechanical_walls_for(
+    geometry: &super::super::super::HelmholtzFe<'_>,
+    boundaries: &[MechanicalBoundary],
+    mut states: usize,
+    max_states: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<Wall>, usize), HeterogeneousError> {
+    let mut walls = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        poll(cancelled)?;
+        fs_phs::wall_specific_impedance(&boundary.wall, 1.0).map_err(HeterogeneousError::Wall)?;
+        let mut arms = Vec::with_capacity(boundary.relaxation.len());
+        for arm in &boundary.relaxation {
+            poll(cancelled)?;
+            let original = RelaxationBranch {
+                projection: vec![1.0],
+                stiffness: arm.stiffness_per_area,
+                relaxation_time_s: arm.relaxation_time_s,
+            };
+            let coupling = original
+                .scalar_relaxed_memory(1.0)
+                .map_err(HeterogeneousError::Wall)?;
+            arms.push((coupling, 1.0 / arm.relaxation_time_s));
+        }
+        // The same high-order/curved face Gram matrix as the time-domain
+        // owner, without face averaging or an inverse wall impedance.
+        let (global, _) = HeterogeneousHelmholtzFe::boundary_coefficient_matrices_for(
+            geometry,
+            [(boundary.faces.as_slice(), C64::ONE)],
+            true,
+            cancelled,
+        )?;
+        let mut dofs = Vec::new();
+        for row in 0..geometry.ndof() {
+            poll(cancelled)?;
+            let (columns, values) = global.row(row);
+            if columns.binary_search(&row).is_ok_and(|i| values[i] > 0.0) {
+                dofs.push(row);
+            }
+        }
+        let count = arms
+            .len()
+            .checked_add(2)
+            .and_then(|n| dofs.len().checked_mul(n))
+            .ok_or_else(|| invalid("complete wall state extent overflow"))?;
+        states = states
+            .checked_add(count)
+            .ok_or_else(|| invalid("complete harmonic state extent overflow"))?;
+        if states > max_states {
+            return Err(HeterogeneousError::Limit {
+                what: "complete pressure and mechanical wall states",
+                requested: states,
+                maximum: max_states,
+            });
+        }
+        let mut local = Coo::new(dofs.len(), dofs.len());
+        for (row, &global_row) in dofs.iter().enumerate() {
+            poll(cancelled)?;
+            let (cols, values) = global.row(global_row);
+            for (&col, &value) in cols.iter().zip(values) {
+                if value != 0.0 {
+                    let col = dofs
+                        .binary_search(&col)
+                        .map_err(|_| invalid("incomplete original mechanical trace support"))?;
+                    local.push(row, col, value);
+                }
+            }
+        }
+        walls.push(Wall {
+            dofs,
+            mass: local.assemble(),
+            surface_density: boundary.wall.surface_density,
+            stiffness: boundary.wall.stiffness_per_area,
+            resistance: boundary.wall.resistance,
+            arms,
+        });
+    }
+    Ok((walls, states))
 }
 
 impl<'m, 'f, 'c> PreparedMechanicalHarmonic<'m, 'f, 'c> {
