@@ -4,6 +4,8 @@
 //! buoyancy and validity checks. It removes the midpoint relaxation restriction
 //! for a frozen uniform bath and zero applied couple. It does not turn that
 //! numerical improvement into a broader hydrodynamic applicability claim.
+//! The explicit affine-flow entry also carries undisturbed pressure and the
+//! original physical source-history admission for a slowly accelerating fluid.
 
 use super::{CreepingLoad, CreepingSphere, Error, SphereLift, finite, norm, poll, vector};
 use crate::principal::{PrincipalBody, PrincipalFrame};
@@ -11,6 +13,9 @@ use fs_material::fluid_transport::FluidTransport;
 use fs_math::dd::Dd;
 use fs_mbd::linear_drag::{IsotropicLinearDrag, LinearDragError, LinearDragStep};
 use fs_mbd::{RigidBodyState, RigidKineticEnergyChange, Vec3, Wrench};
+
+mod flow;
+pub use flow::{ExactCreepingFlowStep, ExactCreepingFlowStepControls};
 
 /// Acceptance controls for the exact frozen-reservoir sphere flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +46,7 @@ pub struct ExactCreepingAffineStepControls {
 pub struct ExactCreepingStep {
     /// The original native body's exact drag flow and numerical residuals.
     /// Its applied force includes buoyancy and the caller's external force.
+    /// The explicit accelerating-flow entry also includes undisturbed pressure.
     pub dynamics: LinearDragStep,
     /// Original constitutive load and regime admission at the initial state.
     pub load_before: CreepingLoad,
@@ -49,9 +55,10 @@ pub struct ExactCreepingStep {
     /// Integrated translation and rotation dissipation [J], including any
     /// sourced Navier interface loss; no finite-body heat partition is inferred.
     pub viscous_heat_j: f64,
-    /// Signed work maintaining the uniform background flow [J].
+    /// Signed work maintaining the uniform background flow [J], including
+    /// separately reported pressure work in the accelerating-flow entry.
     pub background_work_j: f64,
-    /// Integrated external force work [J], excluding buoyancy, gravity and drag.
+    /// Integrated external work [J], excluding pressure, buoyancy, gravity and drag.
     pub applied_work_j: f64,
     /// Actual delta(kinetic + body gravity + buoyancy potential) [J].
     pub stored_energy_change_j: f64,
@@ -360,6 +367,26 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         controls: ExactCreepingStepControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactStep, Error> {
+        self.prepare_exact_frame_in_flow(
+            frame,
+            state,
+            applied,
+            self.ambient_velocity_world,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Current native frame and explicit flow epoch.
+    fn prepare_exact_frame_in_flow(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        applied: Wrench,
+        ambient_velocity_world: Vec3,
+        controls: ExactCreepingStepControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactStep, Error> {
         poll(cancelled)?;
         if self.selected_lift != SphereLift::None || applied.torque_body != Vec3::ZERO {
             return Err(Error::Invalid(
@@ -377,11 +404,11 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         }
         let properties = frame.properties();
         let (_, diffusion_ratio) = self.timescales_frame(frame)?;
-        let load_before = self.load_frame(frame, state, cancelled)?;
+        let load_before = self.load_frame_in_flow(frame, state, ambient_velocity_world, cancelled)?;
         let native = IsotropicLinearDrag::new(
             properties,
             self.gravity,
-            self.ambient_velocity_world,
+            ambient_velocity_world,
             self.resistance_kg_s,
             self.rotary_resistance_kg_m2_s,
         )
@@ -400,9 +427,40 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         controls: ExactCreepingStepControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ExactCreepingStep, Error> {
+        self.finish_exact_frame_in_flow(
+            frame,
+            state,
+            dynamics,
+            applied_work,
+            dd(dynamics.background_work_j),
+            self.ambient_velocity_world,
+            prepared,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Independent source work and actual ambient endpoint.
+    fn finish_exact_frame_in_flow(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        dynamics: LinearDragStep,
+        applied_work: Dd,
+        background_work: Dd,
+        ambient_velocity_after_world: Vec3,
+        prepared: PreparedExactStep,
+        controls: ExactCreepingStepControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ExactCreepingStep, Error> {
         let PreparedExactStep { load_before, diffusion_ratio, .. } = prepared;
         let properties = frame.properties();
-        let load_after = self.load_frame(frame, dynamics.state_after, &mut *cancelled)?;
+        let load_after = self.load_frame_in_flow(
+            frame,
+            dynamics.state_after,
+            ambient_velocity_after_world,
+            &mut *cancelled,
+        )?;
         let mut kinetic = RigidKineticEnergyChange::new();
         kinetic.add_body(properties, state, dynamics.state_after)?;
         let old_position = components(state.pose().position_world());
@@ -416,7 +474,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         }
         let defect = finite(
             (stored_change + dd(dynamics.dissipated_energy_j)
-                - dd(dynamics.background_work_j)
+                - background_work
                 - applied_work)
                 .to_f64(),
         )?;
@@ -432,7 +490,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             load_before,
             load_after,
             viscous_heat_j: dynamics.dissipated_energy_j,
-            background_work_j: dynamics.background_work_j,
+            background_work_j: finite(background_work.to_f64())?,
             applied_work_j: finite(applied_work.to_f64())?,
             stored_energy_change_j: finite(stored_change.to_f64())?,
             energy_defect_j: defect,

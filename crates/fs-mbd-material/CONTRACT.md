@@ -2264,3 +2264,39 @@ refinement. Existing source fixtures cover expanding Navier geometry with
 independent velocity/work/heat integrals, thermal partition and true-endpoint
 continuation, composed heat ownership, zero-force parity, and rollback after
 a late source-history regime failure.
+
+## Exact material sphere in a slowly varying uniform flow
+
+`CreepingSphere::step_exact_with_affine_force_and_flow` supplies the native
+simultaneous affine-force/bath flow with the original source-resolved Stokes
+and Navier resistances, body inertia, buoyancy and geometry. Both actual ambient
+endpoints are explicit inputs, and the accepted endpoint is returned for
+continuation. A constructor's original bath is never silently reused for a
+later interval. The original held-flow entry remains bit-identical when both
+explicit endpoints equal that prepared bath.
+
+The existing unsteady sphere's undisturbed pressure law `m_fluid*dU/dt` is now
+one shared physical helper, used here and by the original unsteady motion.
+The exact native drive includes that pressure and buoyancy; reported external
+applied work excludes both. Pressure work is separately visible and included
+once in maintained-fluid work alongside the actual `-c(v-U) dot U(t)` integral.
+Instantaneous Stokes-load receipts keep pressure separate. Original represented
+kinetic/gravity/buoyancy storage, positive viscous/spin heat and cancellation/
+work-defect acceptance retain their common owners.
+
+This explicit quasi-steady reduction requires the original body-relaxation
+fluid-diffusion gate and separately declared shortest physical variation
+scales for external force and ambient velocity. Those source scales do not
+change when a history is numerically subdivided; two endpoints cannot certify
+bandwidth or a sharp acceleration onset. The receipt retains force and flow
+diffusion ratios separately. Fast source histories refuse with `UnsteadyDrive`;
+added inertia, initial fluid layers and Basset memory remain the existing
+unsteady owner's domain. The actual whole-slip-path Reynolds bound includes
+fluid acceleration, rather than relying on endpoint speeds. Lift, applied
+couples and nonspherical inertia retain the original exact-path refusals.
+
+Focused existing-source fixtures cover material/Navier swaps with independent
+absolute motion and all power integrals, explicit ambient continuation and
+partitioned source work, cancellation, held parity, physical timescales under
+refinement, refusal of light-body inertia, and an interior slip maximum.
+No new finite-reservoir, thermal-advection or evolving-material claim is made.

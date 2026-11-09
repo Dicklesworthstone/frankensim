@@ -6,7 +6,7 @@
 //! The shared fluid snapshot supplies rho and mu; the original material body
 //! supplies mass and inertia. Native rigid-body mechanics owns all momentum,
 //! position and attitude updates. The ordinary entry closes its midpoint load
-//! relation; [`exact`] explicitly selects native exact held or affine-force motion.
+//! relation; [`exact`] selects native exact motion for authored force/flow histories.
 //!
 //! References: R. Fitzpatrick, *Axisymmetric Stokes Flow Around a Solid Sphere*,
 //! equations (10.94), (10.125)-(10.128),
@@ -33,11 +33,11 @@ use fs_mbd::{
     DynamicsError, Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 
-/// Exact held or affine-force Stokes motion and free-spin relaxation.
+/// Exact prescribed force/flow Stokes motion and free-spin relaxation.
 pub mod exact;
 pub use exact::{
-    ExactCreepingAffineStep, ExactCreepingAffineStepControls, ExactCreepingStep,
-    ExactCreepingStepControls,
+    ExactCreepingAffineStep, ExactCreepingAffineStepControls, ExactCreepingFlowStep,
+    ExactCreepingFlowStepControls, ExactCreepingStep, ExactCreepingStepControls,
 };
 /// Nonrotating, quasi-steady sphere motion beyond the Stokes regime.
 pub mod finite_reynolds;
@@ -74,9 +74,9 @@ pub enum CreepingFlowError {
         /// Caller-declared maximum dimensionless ratio.
         maximum: f64,
     },
-    /// Prescribed force varies too fast for quasi-steady viscous response.
+    /// Prescribed force or ambient flow varies too fast for quasi-steady response.
     UnsteadyDrive {
-        /// Fluid diffusion time / caller-declared shortest force-variation time.
+        /// Fluid diffusion time / caller-declared shortest source-variation time.
         diffusion_ratio: f64,
         /// Existing caller-declared maximum diffusion ratio.
         maximum: f64,
@@ -494,8 +494,15 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.load_frame_with_lift(frame, state, self.selected_lift, cancelled)
     }
 
+    /// Undisturbed uniform-flow pressure force, shared by exact quasi-steady
+    /// and unsteady motion. Added inertia and history are separate owners.
+    fn ambient_pressure_force(&self, acceleration_world_m_s2: Vec3) -> Result<Vec3, Error> {
+        vector(acceleration_world_m_s2)?;
+        vector(acceleration_world_m_s2.scale(self.fluid_mass_kg))
+    }
+
     /// Shared instantaneous Stokes admission for a time-evolving uniform flow.
-    /// Its acceleration pressure and history remain with the unsteady owner.
+    /// Acceleration pressure and any history are accounted separately.
     fn load_frame_in_flow(
         &self,
         frame: &PrincipalFrame,

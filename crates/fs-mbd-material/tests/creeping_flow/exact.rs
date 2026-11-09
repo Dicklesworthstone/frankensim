@@ -1,4 +1,6 @@
 //! Original material and interface data drive exact native velocity relaxation.
+#[path = "exact/flow.rs"]
+mod flow;
 use super::*;
 use fs_mbd::{Pose, RigidBodyState, Vec3 as NativeVec3, Wrench};
 use fs_mbd_material::creeping_flow::exact::ExactCreepingStepControls;

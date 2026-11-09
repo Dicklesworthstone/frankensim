@@ -522,7 +522,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 .acceleration_world()
                 .scale(-self.sphere.fluid_mass_kg),
         )?;
-        let ambient_pressure = vector(ambient_acceleration.scale(self.sphere.fluid_mass_kg))?;
+        let ambient_pressure = self.sphere.ambient_pressure_force(ambient_acceleration)?;
         let disturbance = vector(
             history_force
                 .add(added_force)
