@@ -10,11 +10,20 @@ use fs_fft::harmonic_window::{HarmonicPhaseInterval, phase_angular_interval_from
 use fs_material::visco::{MAX_HARMONIC_MATERIAL_LINES, TensorPronyHarmonicWindowPoint, ViscoError};
 use fs_material::visco_tensor::{
     TensorPronyError, TensorPronyHistory,
+    kelvin_control::{PreparedTensorKelvinPlaneStress, TensorKelvinStressControlBudget},
     stress_control::{
         PreparedTensorMixedControl, TensorPlaneStressHarmonicBudget, TensorStressControlBudget,
     },
 };
 use std::sync::Arc;
+
+mod viscoelastic;
+use viscoelastic::LayerControl;
+pub use viscoelastic::{
+    TensorShellViscoelasticCausalField, TensorShellViscoelasticCausalObserver,
+    TensorShellViscoelasticCausalPoint, TensorShellViscoelasticCausalStep,
+    TensorShellViscoelasticEnergyDensity,
+};
 
 const BARYCENTRIC: [[f64; 3]; 3] = [[0.5, 0.5, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5]];
 const GAUSS: f64 = 0.5773502691896258;
@@ -31,7 +40,7 @@ pub struct TensorShellMaterialCausalBudget {
 }
 
 struct LayerHistory {
-    control: PreparedTensorMixedControl,
+    control: LayerControl,
     virgin: TensorPronyHistory,
     faces_m: [f64; 2],
     to_principal: [[f64; 3]; 3],
@@ -176,6 +185,15 @@ impl TensorPronyShell {
         budget: TensorShellMaterialCausalBudget,
         cx: &Cx<'_>,
     ) -> Result<TensorShellMaterialCausalObserver<'_>, TensorShellHarmonicError> {
+        self.prepare_causal_material(budget, None, cx)
+    }
+
+    fn prepare_causal_material(
+        &self,
+        budget: TensorShellMaterialCausalBudget,
+        kelvin_budget: Option<TensorKelvinStressControlBudget>,
+        cx: &Cx<'_>,
+    ) -> Result<TensorShellMaterialCausalObserver<'_>, TensorShellHarmonicError> {
         checkpoint(cx)?;
         if budget.maximum_frequencies > MAX_HARMONIC_MATERIAL_LINES {
             return Err(invalid(
@@ -188,6 +206,7 @@ impl TensorPronyShell {
         let mut bytes = core::mem::size_of::<TensorShellMaterialCausalObserver<'_>>() as u128
             + 2 * core::mem::size_of::<TensorShellMaterialCausalHistory<'_>>() as u128
             + core::mem::size_of::<TensorShellMaterialCausalField>() as u128
+            + core::mem::size_of::<TensorShellViscoelasticCausalField>() as u128
             + 16 * self.model.dof_map.len() as u128
             + facets
                 * (core::mem::size_of::<PreparedFacet>()
@@ -205,17 +224,26 @@ impl TensorPronyShell {
             checkpoint(cx)?;
             for layer in 0..section.layer_count() {
                 checkpoint(cx)?;
-                let branches = section.layer_law(layer)?.branches().len() as u128;
+                let law = section.layer_law(layer)?;
+                let branches = law.branches().len() as u128;
+                let active_kelvin = kelvin_budget.filter(|_| {
+                    law.kv_pa_s().is_some_and(|d| d.iter().flatten().any(|v| *v != 0.0))
+                });
+                let (dense_scalars, preparation_work) = active_kelvin.map_or(
+                    (budget.control.max_dense_scalars, budget.control.max_preparation_work),
+                    |cap| (cap.max_dense_scalars, cap.max_preparation_work),
+                );
                 points += 6;
                 // Original model clone/factors, 1 virgin + 12 old + 12 new + 1
                 // temporary query history. No numerical branch is discarded.
                 bytes += core::mem::size_of::<LayerHistory>() as u128
                     + 4096 * (branches + 1)
-                    + 8 * budget.control.max_dense_scalars as u128
+                    + 8 * dense_scalars as u128
                     + 26 * (core::mem::size_of::<TensorPronyHistory>() as u128 + 48 * branches)
                     + 6 * (core::mem::size_of::<TensorShellMaterialCausalPoint>() as u128
+                        + core::mem::size_of::<TensorShellViscoelasticCausalPoint>() as u128
                         + f * core::mem::size_of::<[C64; 3]>() as u128);
-                work += budget.control.max_preparation_work as u128
+                work += preparation_work as u128
                     + 13 * budget.temporal.maximum_scalar_work as u128
                     + 32768 * (f + 1);
             }
@@ -244,14 +272,23 @@ impl TensorPronyShell {
             for layer in 0..section.layer_count() {
                 checkpoint(cx)?;
                 let (faces_m, to_principal) = section.layer_geometry(element, layer)?;
-                let virgin = section.layer_law(layer)?.history();
-                let control = PreparedTensorMixedControl::new(
-                    &virgin,
-                    [false, false, true, false, true, true],
-                    budget.control,
-                    || cx.checkpoint().is_err(),
-                )
-                .map_err(|e| material_error(self, element, layer, e))?;
+                let law = section.layer_law(layer)?;
+                let virgin = law.history();
+                let active_kelvin = kelvin_budget.filter(|_| {
+                    law.kv_pa_s().is_some_and(|d| d.iter().flatten().any(|v| *v != 0.0))
+                });
+                let control = if let Some(cap) = active_kelvin {
+                    PreparedTensorKelvinPlaneStress::new(
+                        &virgin, MaterialPlane::Axes12, cap, || cx.checkpoint().is_err(),
+                    ).map(LayerControl::Kelvin)
+                } else {
+                    PreparedTensorMixedControl::new(
+                        &virgin,
+                        [false, false, true, false, true, true],
+                        budget.control,
+                        || cx.checkpoint().is_err(),
+                    ).map(LayerControl::Maxwell)
+                }.map_err(|e| material_error(self, element, layer, e))?;
                 prepared_layers.push(LayerHistory {
                     control,
                     virgin,
@@ -338,6 +375,21 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
         duration_s: f64,
         cx: &Cx<'_>,
     ) -> Result<TensorShellMaterialCausalStep<'a>, TensorShellHarmonicError> {
+        self.advance_viscoelastic_window(
+            accepted, angular_frequencies_rad_s, displacements, bias, duration_s, cx,
+        )?.into_maxwell(cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_viscoelastic_window(
+        &self,
+        accepted: &TensorShellMaterialCausalHistory<'a>,
+        angular_frequencies_rad_s: &[f64],
+        displacements: &[&[C64]],
+        bias: &[f64],
+        duration_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TensorShellViscoelasticCausalStep<'a>, TensorShellHarmonicError> {
         checkpoint(cx)?;
         if !core::ptr::eq(self.source, accepted.source)
             || !Arc::ptr_eq(&self.binding, &accepted.binding)
@@ -434,6 +486,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
         // Interval start/end storage, direct change, Kelvin/Maxwell/total heat,
         // independent stress work, and original cumulative point work/heat.
         let mut totals = [Dd::ZERO; 9];
+        let mut partitioned_heat = true;
         for (element, layers) in self.layers.iter().enumerate() {
             checkpoint(cx)?;
             let facet = &self.facets[element];
@@ -444,8 +497,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                 checkpoint(cx)?;
                 let window = original
                     .control
-                    .prepare_plane_stress_harmonic_window(
-                        MaterialPlane::Axes12,
+                    .prepare_window(
                         angular_frequencies_rad_s,
                         accepted.time_s,
                         duration_s,
@@ -496,12 +548,14 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                         .map_err(|e| material_error(self.source, element, layer, e))?;
                     if physical {
                         let material = response.material;
+                        partitioned_heat &= material.kelvin_heat_j_m3.is_some()
+                            && material.maxwell_heat_j_m3.is_some();
                         let values = [
                             material.start_stored_energy_j_m3,
                             material.end_stored_energy_j_m3,
                             material.stored_energy_change_j_m3,
-                            material.kelvin_heat_j_m3,
-                            material.maxwell_heat_j_m3,
+                            material.kelvin_heat_j_m3.unwrap_or(0.0),
+                            material.maxwell_heat_j_m3.unwrap_or(0.0),
                             material.material_heat_j_m3,
                             material.stress_work_j_m3,
                             response.history.work(),
@@ -510,7 +564,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                         for (sum, value) in totals.iter_mut().zip(values) {
                             *sum = *sum + Dd::from_f64(volume) * Dd::from_f64(value);
                         }
-                        points.push(TensorShellMaterialCausalPoint {
+                        points.push(TensorShellViscoelasticCausalPoint {
                             element,
                             layer,
                             triangle_quadrature_point: triangle,
@@ -522,6 +576,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                             in_plane_bias: point_bias,
                             end_strain: response.history.strain(),
                             end_stress: response.history.stress(),
+                            end_strain_rate: response.strain_rate,
                             strain_bounds: response.strain_bounds,
                             material,
                         });
@@ -544,7 +599,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
             return Err(invalid("causal shell material account is unrepresentable"));
         }
         checkpoint(cx)?;
-        Ok(TensorShellMaterialCausalStep {
+        Ok(TensorShellViscoelasticCausalStep {
             history: TensorShellMaterialCausalHistory {
                 source: self.source,
                 binding: Arc::clone(&self.binding),
@@ -555,7 +610,7 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                 work_j: values[7],
                 dissipated_j: values[8],
             },
-            field: TensorShellMaterialCausalField {
+            field: TensorShellViscoelasticCausalField {
                 start_time_s_dd: accepted.time_s,
                 end_time_s_dd: end_time,
                 duration_s,
@@ -564,8 +619,8 @@ impl<'a> TensorShellMaterialCausalObserver<'a> {
                 start_stored_energy_j: values[0],
                 end_stored_energy_j: values[1],
                 stored_energy_change_j: values[2],
-                kelvin_heat_j: values[3],
-                maxwell_heat_j: values[4],
+                kelvin_heat_j: partitioned_heat.then_some(values[3]),
+                maxwell_heat_j: partitioned_heat.then_some(values[4]),
                 material_heat_j: values[5],
                 stress_work_j: values[6],
                 energy_balance_residual_j: balance,

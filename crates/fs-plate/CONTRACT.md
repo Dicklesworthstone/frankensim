@@ -2737,3 +2737,34 @@ dynamic force-equilibrium certification are not inferred. Focused cases in
 `tests/shell_prony_laminate_harmonic/causal.rs` cover original ramp/spatial
 references, partitioned and changed-bank continuation, layer-face admission,
 coherent nodal continuity, source binding and atomic cancellation.
+
+## Original Kelvin–Maxwell layers in causal shell harmonics
+
+`TensorPronyShell::prepare_viscoelastic_material_causal_observer` connects the
+original Kelvin plane-stress controller to the existing causal CST/DKT engine.
+The original Maxwell-only constructor, result fields and refusal domain remain
+available. Both interfaces share the same geometry, nodal continuity,
+vertex/face admission, twelve retained histories per layer and positive
+quadrature accounting; the compatibility conversion performs no second
+constitutive evaluation.
+
+Each layer selects its original material controller. Nonzero Kelvin layers
+retain the full tensor and all original Maxwell memory, with a numerically
+resolved SPD transverse viscosity block. Original independent control budgets
+apply to their respective layer types, while the shell payload/work admission
+also covers the common output and compatibility conversion. Frequency banks
+may change without rebinding accepted memory; empty banks retain relaxation.
+
+The general field always reports physical combined material heat, original
+stress work and direct storage change. Optional Kelvin/Maxwell channel fields
+are present only when every contributing point supplies a complete partition;
+absence is not interpreted as zero. Kelvin points expose the actual full
+endpoint strain rate needed to reconstruct the original constitutive stress.
+Source identity, advancing DD clocks, cancellation and atomic candidate
+publication remain unchanged.
+
+The three cases in
+`tests/shell_prony_laminate_harmonic/causal/viscoelastic.rs` target Maxwell-only
+compatibility, mixed-layer original-tensor stress and retained-heat behavior,
+and transverse-viscosity/resource refusal. Native execution is required before
+claiming numerical or complete runtime validation.

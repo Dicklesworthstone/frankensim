@@ -11,6 +11,9 @@ pub use causal::{
     TensorShellMaterialCausalBudget, TensorShellMaterialCausalField,
     TensorShellMaterialCausalHistory, TensorShellMaterialCausalObserver,
     TensorShellMaterialCausalPoint, TensorShellMaterialCausalStep,
+    TensorShellViscoelasticCausalField, TensorShellViscoelasticCausalObserver,
+    TensorShellViscoelasticCausalPoint, TensorShellViscoelasticCausalStep,
+    TensorShellViscoelasticEnergyDensity,
 };
 mod spectrum;
 pub use spectrum::{

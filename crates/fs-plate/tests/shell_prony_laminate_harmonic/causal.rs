@@ -1,4 +1,6 @@
 //! Causal CST/DKT layer histories, original reference volumes and real heat.
+mod viscoelastic;
+
 use super::*;
 use fs_material::visco_tensor::stress_control::{
     PreparedTensorMixedControl, TensorPlaneStressHarmonicBudget, TensorStressControlBudget,
