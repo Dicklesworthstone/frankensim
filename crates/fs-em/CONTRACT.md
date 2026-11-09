@@ -6856,6 +6856,39 @@ exact stationary/zero-GVD bulk identities. Source-bound integration fixtures
 were added and parsed/reviewed; full `fs-em` material integration was not
 executed in this editing environment.
 
+### Principal-crystal Fresnel boundary dispersion
+
+`PrincipalPlaneUniaxialInterface::boundary_frequency_dispersion` and its signed
+tangential-index counterpart retain the unchanged native carrier and normal
+propagation response, and add raw complex first/second frequency derivatives
+of reflected tangential E, transmitted tangential E and normalized conjugate H.
+The existing `FresnelAmplitudeDispersion` owner supplies phase delay and GDD
+where an amplitude is nonzero. Raw jets remain available at a Brewster zero;
+an undefined logarithmic phase is never replaced by zero.
+
+Both frequency constraints require the original incident-law jet for boundary
+admittance, including fixed dimensional transverse wavenumber. The existing
+normal-only query retains its broader admission. An already prepared
+`UniaxialFrequencyDispersion` can add the boundary response without another
+native Maxwell/root solve, using its exact retained incidence coordinate.
+
+The analytic fixed-size DD contractions use the original independent electric
+and magnetic transmission numerators, the outgoing gradient root, and the
+source-bound principal spectra. This retains tilted negative/zero normal phase,
+matched grazing and representable unmatched grazing derivatives. Reflected and
+transmitted normal-power slopes retain both field jets; TIR keeps exact constant
+normal powers while preserving its complex phase dispersion. Critical roots,
+unsupported source jets and unrepresentable derivatives refuse. These local
+boundary slopes do not provide finite-crystal interference, pulse reshaping or
+a single delay for an interfering pair of modes.
+
+Seven new numerical fixtures and three source-owner fixtures cover original
+isotropic parity, independent derivatives, both frequency constraints, magnetic
+contrast, zeros, TIR, source endpoints and grazing limits. They were parsed and
+independently source/math reviewed. They were not executed because the bounded
+native-build capacity check failed; the earlier 66-test native execution covers
+the previously published carrier and normal-propagation kernels only.
+
 ### Arbitrarily oriented transparent crystals
 
 `uniaxial::oriented::OrientedUniaxialInterface` retains the same original

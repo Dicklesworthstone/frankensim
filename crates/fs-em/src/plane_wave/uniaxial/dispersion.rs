@@ -2,9 +2,10 @@
 //!
 //! A normal-transfer delay depends on what is held fixed while frequency
 //! changes. The same explicit constraint as isotropic Fresnel dispersion is
-//! retained here. These are propagation jets of exp(-i*kz*z), not derivatives
-//! of a Fresnel coefficient, a finite-crystal residence time, or a shared delay
-//! for a coherent superposition of ordinary and extraordinary fields.
+//! retained here. The normal response keeps exp(-i*kz*z) propagation separate
+//! from the source-bound Fresnel jets in [`UniaxialBoundaryFrequencyDispersion`].
+//! Neither supplies finite-crystal residence time or a shared delay for a
+//! coherent superposition of ordinary and extraordinary fields.
 
 use super::kernel::Incidence;
 use super::{
@@ -18,6 +19,9 @@ use fs_math::c64::C64;
 
 pub(super) mod kernel;
 
+mod boundary;
+pub use boundary::UniaxialBoundaryFrequencyDispersion;
+
 type Result<T> = core::result::Result<T, ReflectionError>;
 
 /// Original principal-plane carrier plus its normal spatial-frequency jet.
@@ -28,6 +32,8 @@ pub struct UniaxialFrequencyDispersion<'s, 'm> {
     source: &'s PrincipalPlaneUniaxialInterface<'m>,
     omega_rad_s: f64,
     constraint: IncidenceFrequencyConstraint,
+    incidence: Incidence,
+    indices: [f64; 3],
     carrier: UniaxialInterfaceResponse,
     normal_derivatives: [C64; 2],
 }
@@ -59,7 +65,8 @@ impl<'s, 'm> UniaxialFrequencyDispersion<'s, 'm> {
     /// Native carrier propagation through a nonnegative normal distance [m],
     /// with local phase/group delay, GDD and evanescent attenuation slopes.
     /// The original Fresnel boundary amplitude is not multiplied into this
-    /// transfer; its phase would require a separate boundary derivative.
+    /// transfer; its separate phase jet is available through
+    /// [`Self::boundary_frequency_dispersion`].
     ///
     /// Signed slopes are retained, including tilted negative phase roots.
     /// They do not establish signal-front velocity or broadband pulse motion.
@@ -129,27 +136,49 @@ impl<'a> PrincipalPlaneUniaxialInterface<'a> {
             self.evaluate_with_indices(omega_rad_s, incidence, polarization)?;
         let derivatives =
             material_derivatives(self.incident, self.crystal, omega_rad_s, constraint)?;
-        let normal_derivatives = kernel::normal_derivatives(kernel::Input {
-            omega: omega_rad_s,
-            indices,
-            relative_permittivity_derivatives: derivatives.relative_permittivity,
-            principal_wavenumber_derivatives: derivatives.principal_wavenumber,
-            incidence,
-            axis: [self.optic_axis[0], 0.0, self.optic_axis[1]],
-            mode: carrier.mode,
-            kind: carrier.wave_kind,
-            normal_wavenumber: carrier.transmitted_normal_wavenumber_rad_m,
-            constraint,
-        })
-        .map_err(ReflectionError::Invalid)?;
-        Ok(UniaxialFrequencyDispersion {
-            source: self,
+        prepare_normal(
+            self,
             omega_rad_s,
+            incidence,
             constraint,
             carrier,
-            normal_derivatives,
-        })
+            indices,
+            &derivatives,
+        )
     }
+}
+
+fn prepare_normal<'s, 'm>(
+    source: &'s PrincipalPlaneUniaxialInterface<'m>,
+    omega_rad_s: f64,
+    incidence: Incidence,
+    constraint: IncidenceFrequencyConstraint,
+    carrier: UniaxialInterfaceResponse,
+    indices: [f64; 3],
+    derivatives: &MaterialDerivatives,
+) -> Result<UniaxialFrequencyDispersion<'s, 'm>> {
+    let normal_derivatives = kernel::normal_derivatives(kernel::Input {
+        omega: omega_rad_s,
+        indices,
+        relative_permittivity_derivatives: derivatives.relative_permittivity,
+        principal_wavenumber_derivatives: derivatives.principal_wavenumber,
+        incidence,
+        axis: [source.optic_axis[0], 0.0, source.optic_axis[1]],
+        mode: carrier.mode,
+        kind: carrier.wave_kind,
+        normal_wavenumber: carrier.transmitted_normal_wavenumber_rad_m,
+        constraint,
+    })
+    .map_err(ReflectionError::Invalid)?;
+    Ok(UniaxialFrequencyDispersion {
+        source,
+        omega_rad_s,
+        constraint,
+        incidence,
+        indices,
+        carrier,
+        normal_derivatives,
+    })
 }
 
 pub(super) struct MaterialDerivatives {

@@ -32,7 +32,7 @@ mod kernel;
 pub use kernel::{UniaxialInterfaceResponse, UniaxialMode, UniaxialWaveKind};
 
 mod dispersion;
-pub use dispersion::UniaxialFrequencyDispersion;
+pub use dispersion::{UniaxialBoundaryFrequencyDispersion, UniaxialFrequencyDispersion};
 
 /// Coupled ordinary/extraordinary transmission for an arbitrary crystal axis.
 pub mod oriented;
