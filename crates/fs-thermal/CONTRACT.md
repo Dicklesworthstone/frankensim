@@ -2260,6 +2260,45 @@ beyond the supplied material laws is claimed.
 
 ## Evaporation on the original thermal timeline
 
+The shared `evaporation::EvaporationLaw` selects an explicit immutable
+`InterfaceKinetics`. Its default `Equilibrium` retains the original Stefan-film
+arithmetic. `HertzKnudsen` and `Schrage` require a caller-supplied constant
+accommodation probability in `[0,1]`; zero seals the interface. The borrowed
+`KineticEvaporation` adapter delegates the complete original evaporation and
+thermal source, including caloric identity, storage basis, density, cell
+admission, entropy and species-advection bindings. No material property or
+accommodation probability is inferred from a name.
+
+Finite kinetics solve the nonlinear series balance
+`j = K*(p_sat-p_i) = C*ln[(p-p_v)/(p-p_i)]`, with
+`C = h_m*M*p/(R*T_f)` and `K = a*sqrt(M/(2*pi*R*T_s))`.
+Hertz--Knudsen uses `a=alpha`; Schrage uses `a=2*alpha/(2-alpha)`.
+The local gas and liquid share `T_s`; the representative film temperature
+remains the caller's `T_f`. The bounded, allocation-free scalar solve retains
+pressure differences directly and solves the smaller resistance's pressure
+drop, preserving evaporation, condensation and both limiting regimes. The
+analytic surface-temperature tangent includes `dK/dT_s=-K/(2*T_s)`.
+At zero net pressure drive it retains the combined conductance; a physically
+sealed film or interface has both zero rate and zero tangent.
+
+Scalar implicit latent steps, all original timeline variants, and the shared
+implicit network's initial and endpoint rates use this same selected closure.
+Mass, recession and complete vapor-stream enthalpy consequently derive from
+one transfer without a second latent source. G0/G1 regressions use manufactured
+interfacial pressures to check both nonlinear equations, finite-difference
+tangents, film/kinetic limits, pressure gaps below the total-pressure ULP,
+bitwise default equivalence, source delegation, scalar energy closure and
+native heat-network/inventory-retry integration. These establish implementation
+behavior when executed, not measured accommodation data or experimental accuracy.
+The equations' stated small-temperature-jump scope follows Lu et al., Nature
+Communications 10, 2368 (2019), equations (7)--(8),
+<https://doi.org/10.1038/s41467-019-10209-w>.
+
+The finite interface does not extend the gas film to pure vapor, boiling,
+rarefied transport or a resolved Knudsen layer. It supplies no nonisothermal
+molecular heat accommodation, curvature correction, nucleation or spray model.
+The original material, gas-film, geometry and pure-liquid validity checks remain.
+
 `enthalpy::evaporation` connects the continuum liquid/gas-film owner to the
 actual `DepositionSimulation` cell mass and original caloric enthalpy.
 `evaporate_cell` changes these two coordinates atomically and leaves the clock,

@@ -14,7 +14,8 @@ use crate::enthalpy::backward_euler::{
 use crate::enthalpy::observe::EnergySum;
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, finite, nonnegative};
 use crate::evaporation::{
-    EvaporationError, EvaporationLaw, GasFilm, LiquidSurfaceState, SurfaceStep, flux, properties,
+    EvaporationError, EvaporationLaw, GasFilm, LiquidSurfaceState, SurfaceStep, flux_with_kinetics,
+    properties,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -254,8 +255,15 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
         for surface in surfaces.values_mut() {
             checkpoint()?;
             let binding = surface.binding;
-            let p = properties(binding.law, initial.temperature_k(binding.id)?)?;
-            let rate = flux(p, binding.film)?.mass_flux_kg_m2_s;
+            let temperature_k = initial.temperature_k(binding.id)?;
+            let p = properties(binding.law, temperature_k)?;
+            let rate = flux_with_kinetics(
+                p,
+                temperature_k,
+                binding.film,
+                binding.law.interface_kinetics(),
+            )?
+            .mass_flux_kg_m2_s;
             surface.initial_transfer_kg = finite(rate * surface.area_m2 * heat.duration_s())?;
         }
         checkpoint()?;
@@ -433,7 +441,13 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                     let film = films
                         .as_ref()
                         .map_or(prepared.binding.film, |films| films[&id]);
-                    let rate = flux(p, film).map_err(ThermalEvaporationError::from)?;
+                    let rate = flux_with_kinetics(
+                        p,
+                        temperature_k,
+                        film,
+                        prepared.binding.law.interface_kinetics(),
+                    )
+                    .map_err(ThermalEvaporationError::from)?;
                     let raw_dm = finite(rate.mass_flux_kg_m2_s * prepared.area_m2 * dt)?;
                     let mass = finite(old.mass_kg - raw_dm)?;
                     if mass <= 0.0 {

@@ -11,16 +11,23 @@
 //! Positive flux evaporates liquid; negative flux condenses onto an EXISTING
 //! liquid surface. The caller supplies the gas-film temperature and coefficient;
 //! neither is inferred from a material name or a heat-transfer coefficient.
-//! The film approximation neglects thermal diffusion, gas nonideality, curvature,
-//! interfacial kinetic resistance and nucleation. Pure vapor and boiling refuse.
+//! The default interface is in local phase equilibrium. Explicit finite
+//! Hertz--Knudsen or Schrage kinetics can be selected through [`InterfaceKinetics`];
+//! the same flux then closes the nonlinear film and interface resistances.
+//! The film approximation neglects thermal diffusion, gas nonideality, curvature
+//! and nucleation. Pure vapor and boiling refuse.
 //! A remote bath is prescribed, so its mass, momentum and sensible heat are not
 //! evolved here. Finite-atmosphere owners must close those accounts themselves.
 //!
 //! The implicit surface step uses the original liquid enthalpy inverse. Area
 //! stays fixed during a step; no mesh or liquid-flow state is changed. It is a
 //! first-order, uniform-liquid model, not a spatial Stefan or droplet solver.
-//! Scalar rates and the bounded nonlinear solve allocate no memory. Shared
+//! Scalar rates and the bounded nonlinear solves allocate no memory. Shared
 //! deterministic elementary functions retain same-ISA arithmetic repeatability.
+
+/// Explicit interfacial accommodation in series with the original Stefan film.
+pub mod kinetics;
+pub use kinetics::{InterfaceKinetics, KineticEvaporation};
 
 /// Molar gas constant from the exact SI defining constants [J/(mol K)].
 pub const MOLAR_GAS_CONSTANT: f64 = 8.314_462_618_153_24;
@@ -78,6 +85,12 @@ pub struct EvaporationProperties {
 pub trait EvaporationLaw {
     fn temperature_range_k(&self) -> [f64; 2];
     fn properties(&self, temperature_k: f64) -> Result<EvaporationProperties, EvaporationError>;
+    /// Interfacial mass-transfer model, independent of the original caloric law.
+    /// The default retains the equilibrium-interface film exactly. Finite
+    /// accommodation is explicit data and must not be inferred from a name.
+    fn interface_kinetics(&self) -> InterfaceKinetics {
+        InterfaceKinetics::Equilibrium
+    }
 }
 
 /// Prescribed far-field volatile pressure and one admitted binary gas film.
@@ -266,14 +279,33 @@ pub(crate) fn flux(p: EvaporationProperties, film: GasFilm) -> Result<SurfaceFlu
     })
 }
 
-/// Signed continuum transfer; gas-film resistance and Stefan flow share one rate.
-/// Constant-work evaluation, with no state mutation or allocation.
+/// Dispatch cached source properties without querying or replacing their owner.
+pub(crate) fn flux_with_kinetics(
+    p: EvaporationProperties,
+    surface_temperature_k: f64,
+    film: GasFilm,
+    kinetics: InterfaceKinetics,
+) -> Result<SurfaceFlux, EvaporationError> {
+    match kinetics {
+        InterfaceKinetics::Equilibrium => flux(p, film),
+        _ => kinetics::flux(p, surface_temperature_k, film, kinetics),
+    }
+}
+
+/// Signed transfer through the selected interface and the original Stefan film.
+/// Bounded work, with no state mutation or allocation. Equilibrium interfaces
+/// retain the original constant-work evaluation and arithmetic.
 pub fn surface_flux<L: EvaporationLaw + ?Sized>(
     law: &L,
     surface_temperature_k: f64,
     film: GasFilm,
 ) -> Result<SurfaceFlux, EvaporationError> {
-    flux(properties(law, surface_temperature_k)?, film)
+    flux_with_kinetics(
+        properties(law, surface_temperature_k)?,
+        surface_temperature_k,
+        film,
+        law.interface_kinetics(),
+    )
 }
 
 /// Pure-liquid mass and ORIGINAL specific enthalpy; exposed area is caller-owned.
@@ -411,7 +443,7 @@ pub fn advance_surface_with_heat<L: EvaporationLaw + ?Sized>(
         evaluations += 1;
         let t = temperature(h)?;
         let p = properties(law, t)?;
-        let rate = flux(p, film)?.mass_flux_kg_m2_s;
+        let rate = flux_with_kinetics(p, t, film, law.interface_kinetics())?.mass_flux_kg_m2_s;
         let raw_dm = checked(rate * liquid.area_m2 * duration_s)?;
         let mass = checked(liquid.mass_kg - raw_dm)?;
         let dm = liquid.mass_kg - mass;

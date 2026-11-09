@@ -523,3 +523,119 @@ fn empty_phase_selection_keeps_the_original_implicit_heat_network() {
     close(next.energy_j(), old.energy_j(), 1e-8);
     assert_eq!(next.mass_kg(), old.mass_kg());
 }
+
+// Independent normal-scale pressure bisection with standard-library ln. The
+// production implementation instead solves a scaled pressure-drop fraction.
+fn kinetic_flux_reference(ps: f64, t: f64, alpha: f64, bath: GasFilm) -> f64 {
+    let k = alpha * (0.018 / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT * t)).sqrt();
+    let c = bath.mass_transfer_coefficient_m_s * 0.018 * bath.total_pressure_pa
+        / (MOLAR_GAS_CONSTANT * bath.temperature_k);
+    let mut lo = ps.min(bath.vapor_partial_pressure_pa);
+    let mut hi = ps.max(bath.vapor_partial_pressure_pa);
+    for _ in 0..100 {
+        let pi = 0.5 * (lo + hi);
+        let residual = c
+            * ((bath.total_pressure_pa - bath.vapor_partial_pressure_pa)
+                / (bath.total_pressure_pa - pi))
+                .ln()
+            - k * (ps - pi);
+        if residual < 0.0 {
+            lo = pi;
+        } else {
+            hi = pi;
+        }
+    }
+    k * (ps - 0.5 * (lo + hi))
+}
+
+#[test]
+fn finite_interface_kinetics_reaches_the_original_shared_heat_network() {
+    use crate::evaporation::{InterfaceKinetics, KineticEvaporation};
+    let alpha = 1e-6;
+    let law = KineticEvaporation::try_new(
+        &VARYING,
+        InterfaceKinetics::HertzKnudsen {
+            accommodation_coefficient: alpha,
+        },
+    )
+    .unwrap();
+    let sealed = KineticEvaporation::try_new(
+        &VARYING,
+        InterfaceKinetics::Schrage {
+            accommodation_coefficient: 0.0,
+        },
+    )
+    .unwrap();
+    let dt = 1000.0;
+    let expected_dm = kinetic_flux_reference(4500.0, 305.0, alpha, film(0.0)) * 0.01 * dt;
+    let required_heat = 0.1 * CP * 5.0 + expected_dm * (LATENT - 2000.0 * 5.0);
+    let old = simulation(
+        &CALORIC,
+        vec![
+            cell(1, 0.1, 300.0, 0.0, required_heat / dt),
+            cell(2, 0.1, 310.0, 0.0, 0.0),
+        ],
+        None,
+        vec![],
+    );
+    let bindings = [binding(1, &law, film(0.0)), binding(2, &sealed, film(0.0))];
+    let (next, (), report) = old
+        .solve_implicit_evaporating_network_step(
+            &bindings,
+            dt,
+            EvaporationNetworkImplicitControls::default(),
+            empty_network,
+            || Ok(()),
+        )
+        .unwrap();
+    close(next.temperature_k(CellId(1)).unwrap(), 305.0, 2e-8);
+    close(
+        report.physical.surfaces[&CellId(1)].transferred_mass_kg,
+        expected_dm,
+        2e-12,
+    );
+    assert_eq!(next.cells()[&CellId(2)].mass_kg, 0.1);
+    assert_eq!(report.physical.surfaces[&CellId(2)].transferred_mass_kg, 0.0);
+    assert!(report.physical.energy_residual_j.abs() < 1e-6);
+    assert!(report.physical.mass_balance_residual_kg.abs() < 1e-14);
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.cells()[&CellId(1)].mass_kg, 0.1);
+}
+
+#[test]
+fn inventory_retry_uses_the_selected_initial_and_endpoint_kinetic_rates() {
+    use crate::evaporation::{InterfaceKinetics, KineticEvaporation};
+    let alpha = 1e-6;
+    let law = KineticEvaporation::try_new(
+        &CONSTANT,
+        InterfaceKinetics::HertzKnudsen {
+            accommodation_coefficient: alpha,
+        },
+    )
+    .unwrap();
+    let rate = kinetic_flux_reference(4000.0, 300.0, alpha, film(0.0)) * 0.01;
+    let expected_limit = 0.1 / rate;
+    let old = simulation(
+        &CALORIC,
+        vec![cell(1, 0.1, 300.0, 0.0, 0.0)],
+        None,
+        vec![],
+    );
+    let bindings = [binding(1, &law, film(0.0))];
+    let step = EvaporatingNetworkBackwardEulerStep::new(
+        &old,
+        &bindings,
+        2.0 * expected_limit,
+        || Ok(()),
+    )
+    .unwrap();
+    let result = step.evaluate(&[0.0], empty_network, || Ok(()));
+    let Err(ThermalEvaporationError::Surface(EvaporationError::InventoryLimit {
+        maximum_duration_s,
+    })) = result
+    else {
+        panic!("the physical endpoint must refuse exhausted inventory");
+    };
+    close(maximum_duration_s, expected_limit, expected_limit * 2e-13);
+    assert_eq!(old.cells()[&CellId(1)].mass_kg, 0.1);
+}
