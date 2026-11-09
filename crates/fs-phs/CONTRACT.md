@@ -4208,3 +4208,24 @@ cross-coupled resistance, a 1e-12 history with 5e-25 J heat, independent
 same-trajectory quadrature, continuous nonlinear refinement, solver/cancellation
 refusal, budget/shape admission and retry. These source tests do not claim full
 impact-host or workspace verification.
+
+### Shared original nonlinear resisting-flow evaluation
+
+`NonlinearDissipation::evaluate_into` exposes the existing source-law
+evaluation and pointwise conjugate-work admission in caller-owned storage.
+It requires complete finite original state/effort vectors and complete
+callback writes, returns actual signed `e dot D`, and rejects materially
+active resisting flow. Two-word products and sums preserve weak physical
+work between opposing strong terms. Equilibrium linearization delegates to
+this same owner; the finite-amplitude periodic adapter consumes it directly.
+A roundoff-sized negative value is disclosed rather than clipped. This is
+neither global nor incremental passivity certification.
+
+`PortHamiltonian::vector_field_with_dissipation_from_effort_into` evaluates
+`J e-R e+G u-D` through the existing compensated physical row owner, with one
+final rounding and no dense identity map or extra port. It also composes the
+full continuous tangent from effort and resisting-flow directions. Complete
+J/R/G and argument extents are admitted before slicing, including raw-parts
+sources. This allocation-free algebra supplies no additional constitutive
+law; external work, native resistance and nonlinear internal work remain
+separate accounts.

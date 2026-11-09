@@ -2,6 +2,64 @@
 
 use crate::interconnection::accumulation::Sum;
 
+impl crate::PortHamiltonian {
+    /// Apply the original `J e - R e + G u - D` in one compensated contraction
+    /// per state. `D` is an already evaluated internal resisting flow, in the
+    /// ORIGINAL state coordinates; no artificial input port or identity matrix
+    /// is created. The same operation applies its complete tangent when `e`
+    /// and `D` are directional derivatives and the input direction is zero.
+    ///
+    /// This allocation-free algebra supplies no constitutive law or passivity
+    /// claim. The physical owner must account for `e dot D` separately from
+    /// external supplied work. Complete finite extents are required; `out` is
+    /// unpublished scratch on refusal.
+    pub fn vector_field_with_dissipation_from_effort_into(
+        &self,
+        effort: &[f64],
+        input: &[f64],
+        dissipation: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), crate::PhsError> {
+        if effort.len() != self.n
+            || dissipation.len() != self.n
+            || out.len() != self.n
+            || input.len() != self.m
+            || self.n.checked_mul(self.n) != Some(self.j.len())
+            || self.j.len() != self.r.len()
+            || self.n.checked_mul(self.m) != Some(self.g.len())
+        {
+            return Err(crate::PhsError::Dimension {
+                what: "internal dissipative flow extents",
+            });
+        }
+        if effort
+            .iter()
+            .chain(input)
+            .chain(dissipation)
+            .any(|v| !v.is_finite())
+        {
+            return Err(crate::PhsError::Unadmitted {
+                what: "nonfinite internal dissipative flow",
+            });
+        }
+        for (i, value) in out.iter_mut().enumerate() {
+            *value = row(
+                &self.j[i * self.n..(i + 1) * self.n],
+                &self.r[i * self.n..(i + 1) * self.n],
+                effort,
+                &self.g[i * self.m..(i + 1) * self.m],
+                input,
+                &[1.0],
+                &dissipation[i..i + 1],
+            )
+            .ok_or(crate::PhsError::Unadmitted {
+                what: "unrepresentable internal dissipative flow",
+            })?;
+        }
+        Ok(())
+    }
+}
+
 /// Retain the low word for a subsequent flow or power contraction. Empty rows
 /// represent zero-port input. Do not round before adding another physical force.
 pub(crate) fn port_input_row(g: &[f64], input: impl Fn(usize) -> f64) -> Option<Sum> {

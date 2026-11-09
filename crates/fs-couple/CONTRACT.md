@@ -13621,3 +13621,43 @@ applicability hidden in mechanical/caloric sources. Pinned rustfmt parsed the
 changed Rust sources and the scoped diff check passed. These regressions were
 not executed in this implementation session; compilation, runtime acceptance
 and experimental validation are not claimed.
+
+### Finite-amplitude internal nonlinear dissipation
+
+`phs_orbit::dissipative::DissipativeHamiltonian` evaluates the complete original
+ODE `xdot=(J-R) grad H-D(x,grad H)+G u(t)` through the existing fs-phs physical
+field and nonlinear-resistance owners. Its `NonlinearDissipation` is the same
+read-only law used by original time stepping and equilibrium linearization.
+All material-memory coordinates remain present, including resisting flows
+outside the external input map's range. No artificial physical ports, fitted
+damping ratio, resistance secant, or discarded generated harmonic is introduced.
+
+Native scaled seeded HB, adaptive retained/omitted-equation and waveform
+refinement, and exact discrete variational shooting consume the same complete
+tangent `(J-R) Hxx-D_x-D_e Hxx`. Independent state and effort directions enter
+the authored resisting action exactly once. A passive nonlinear law can have
+a negative differential slope at a driven bias; that slope is retained.
+An incomplete/refusing flow, tangent or original storage action refuses the
+result, with no finite-difference replacement of an authored tangent.
+
+The independent instantaneous accounts are original stored energy, external
+port power, native linear-resistance power, nonlinear `e dot D`, and
+`grad H dot xdot`. Nonlinear loss is never inferred from a residual balance
+or reported as external supplied power. The shared pointwise work admission
+preserves roundoff-sized signed values; it is not a global passivity proof.
+Raw signed R keeps its original semantics. Heat destinations remain with the
+physical composition.
+
+Preparation retains six state vectors, one physical-input vector and the
+existing storage-tangent owner, with hard limits of 256 states/ports and an
+authored action allowance covering every state direction. Adapter evaluation
+does not allocate; source callbacks retain their own work/storage behavior.
+Native solver budgets and cancellation boundaries are unchanged. Fixed
+harmonic order and finite shooting grids supply numerical evidence, not
+infinite-tail, primitive-period, stability or constitutive-validity certificates.
+
+Five focused tests compare independent original nonlinear ODE integration on
+three grids, generated third/fifth harmonics and explicit memory, separate
+power means, complete state/effort chain rules, variational shooting, passive
+negative differential slope, weak physical contractions, malformed data,
+source refusal and cancellation/reuse.

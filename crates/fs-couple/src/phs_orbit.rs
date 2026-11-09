@@ -43,6 +43,9 @@ pub use backbone_sensitivity::{
 /// Periodically modulated original Hamiltonians and exact physical pump work.
 pub mod parametric;
 
+/// Finite-amplitude internal nonlinear dissipation in the original Hamiltonian.
+pub mod dissipative;
+
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 
