@@ -641,6 +641,16 @@ do not classify physical SDF membership. Cancellation is checked per cell and
 before returning a complete bound. All observation methods keep assembly and
 solver arithmetic unchanged apart from translation-stable gradient recovery.
 
+Ordinary and controlled physical solves apply that same whole-field admission
+after the true residual gate and before publishing coefficients or observations.
+The controlled path polls cancellation per cell during this final check. It
+uses the operator's retained cell keys and node lattice, without rebuilding a
+tree or allocating a second field. Plane-stress thickness contraction and the
+cut-cell extension remain part of the bound; a domain exit is a physical-model
+refusal even when the linear equations have converged. Algebraic operator and
+adjoint actions remain available without treating their vectors as physical
+displacements.
+
 `tests/strain_recovery.rs` checks analytic extension/shear and energy against
 the original stiffness on uniform/graded grids, auxetic and nearly incompressible
 plane-stress materials, rigid translations/infinitesimal rotations, missed

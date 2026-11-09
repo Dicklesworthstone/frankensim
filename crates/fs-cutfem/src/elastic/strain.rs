@@ -8,6 +8,7 @@
 use super::{CellKey, CutElasticityOperator, CutElasticitySolution, CutFemError, ElasticPlane};
 use crate::Quadtree;
 use crate::fem::q1;
+use crate::grid::{cell_corner_nodes, cell_rect};
 use fs_material::{IsotropicElastic, Voigt, tensor};
 use std::ops::ControlFlow;
 
@@ -112,13 +113,12 @@ impl CutElasticitySolution {
 impl CutElasticityOperator {
     fn observation_values(
         &self,
-        grid: &Quadtree,
         coefficients: &[f64],
         cell: CellKey,
     ) -> Result<[[f64; 2]; 4], CutFemError> {
-        if grid.max_level() != self.lattice_level || coefficients.len() != self.dof_count() {
+        if coefficients.len() != self.dof_count() {
             return Err(invalid(
-                "strain observation requires the original lattice and complete coefficients",
+                "strain observation requires complete coefficients",
             ));
         }
         if self.active.binary_search(&cell).is_err() {
@@ -127,7 +127,10 @@ impl CutElasticityOperator {
             )));
         }
         let mut values = [[0.0; 2]; 4];
-        for (value, node) in values.iter_mut().zip(grid.corner_nodes(cell)) {
+        for (value, node) in values
+            .iter_mut()
+            .zip(cell_corner_nodes(cell, self.lattice_level))
+        {
             if let Some(expansions) = &self.node_expansions {
                 for &(id, weight) in &expansions[&node] {
                     for c in 0..2 {
@@ -164,8 +167,11 @@ impl CutElasticityOperator {
         cell: CellKey,
         point: [f64; 2],
     ) -> Result<ElasticStrainStress, CutFemError> {
-        let values = self.observation_values(grid, coefficients, cell)?;
-        let gradient = gradient(grid, cell, point, &values)?;
+        if grid.max_level() != self.lattice_level {
+            return Err(invalid("strain observation requires the original node lattice"));
+        }
+        let values = self.observation_values(coefficients, cell)?;
+        let gradient = gradient(cell, point, &values)?;
         response(&self.material, self.plane, gradient)
     }
 
@@ -190,6 +196,19 @@ impl CutElasticityOperator {
         &self,
         grid: &Quadtree,
         coefficients: &[f64],
+        control: impl FnMut() -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, f64>, CutFemError> {
+        if grid.max_level() != self.lattice_level {
+            return Err(invalid("strain observation requires the original node lattice"));
+        }
+        self.admit_retained_strain_domain(coefficients, control)
+    }
+
+    // The solve owns all active cells, node maps and material data already.
+    // Reuse the physical-field gate without storing or reconstructing a tree.
+    pub(crate) fn admit_retained_strain_domain<B>(
+        &self,
+        coefficients: &[f64],
         mut control: impl FnMut() -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, f64>, CutFemError> {
         let mut maximum = 0.0_f64;
@@ -197,10 +216,10 @@ impl CutElasticityOperator {
             if let ControlFlow::Break(reason) = control() {
                 return Ok(ControlFlow::Break(reason));
             }
-            let values = self.observation_values(grid, coefficients, cell)?;
-            let (lo, hi) = grid.rect(cell);
+            let values = self.observation_values(coefficients, cell)?;
+            let (lo, hi) = cell_rect(cell);
             for point in [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]] {
-                let gradient = gradient(grid, cell, point, &values)?;
+                let gradient = gradient(cell, point, &values)?;
                 maximum = maximum.max(admit(
                     &self.material,
                     &strain(&self.material, self.plane, gradient),
@@ -215,12 +234,11 @@ impl CutElasticityOperator {
 }
 
 fn gradient(
-    grid: &Quadtree,
     cell: CellKey,
     point: [f64; 2],
     values: &[[f64; 2]; 4],
 ) -> Result<[[f64; 2]; 2], CutFemError> {
-    let (lo, hi) = grid.rect(cell);
+    let (lo, hi) = cell_rect(cell);
     if (0..2).any(|a| !point[a].is_finite() || point[a] < lo[a] || point[a] > hi[a]) {
         return Err(invalid(
             "strain observation point must be finite and inside its cell",

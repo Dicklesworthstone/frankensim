@@ -1383,10 +1383,14 @@ impl CutElasticity<'_> {
     }
 
     /// Assemble and solve the vector problem with deterministic CG.
+    /// The full Q1 tensor strain, including the cut-cell extension, must remain
+    /// inside the original material's strain limit before a field is returned.
     ///
     /// # Errors
     /// Returns [`CutFemError::SolveNotConverged`] when the configured
-    /// residual gate is missed, plus all assembly refusals.
+    /// residual gate is missed, plus all assembly and material-strain refusals.
+    /// A converged linear solve outside that domain requires a different
+    /// constitutive model or smaller physical load, not a looser solver tolerance.
     pub fn solve(
         &self,
         f: &dyn Fn(f64, f64) -> [f64; 2],
@@ -1474,6 +1478,9 @@ impl CutElasticity<'_> {
                 rel_residual,
             });
         }
+        let _ = operator.admit_retained_strain_domain(&coefficients, || {
+            std::ops::ControlFlow::<()>::Continue(())
+        })?;
         let nodal = operator.nodal_values(&coefficients);
         let compliance = operator.algebraic_compliance(&coefficients)?;
         Ok(CutElasticitySolution {

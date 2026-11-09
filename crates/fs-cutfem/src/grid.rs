@@ -22,6 +22,26 @@ pub type CellKey = (u32, u32, u32);
 /// `0 ≤ g ≤ 2^max_level`.
 pub type NodeKey = (u32, u32);
 
+// Geometry of a retained, admitted cell needs only its key and node lattice,
+// not the quadtree's leaves. Operators use these same maps after assembly.
+pub(crate) fn cell_rect(c: CellKey) -> ([f64; 2], [f64; 2]) {
+    let (lv, i, j) = c;
+    let h = 1.0 / f64::from(1u32 << lv);
+    let lo = [f64::from(i) * h, f64::from(j) * h];
+    (lo, [lo[0] + h, lo[1] + h])
+}
+
+pub(crate) fn cell_corner_nodes(c: CellKey, lattice_level: u32) -> [NodeKey; 4] {
+    let (lv, i, j) = c;
+    let s = 1u32 << (lattice_level - lv);
+    [
+        (i * s, j * s),
+        ((i + 1) * s, j * s),
+        ((i + 1) * s, (j + 1) * s),
+        (i * s, (j + 1) * s),
+    ]
+}
+
 /// Cartesian axis normal to a shared cell-face patch.
 ///
 /// Patch orientation is always positive: [`Self::X`] points from the
@@ -361,10 +381,7 @@ impl Quadtree {
     /// The cell's box `(lo, hi)` — exact dyadic f64.
     #[must_use]
     pub fn rect(&self, c: CellKey) -> ([f64; 2], [f64; 2]) {
-        let (lv, i, j) = c;
-        let h = 1.0 / f64::from(1u32 << lv);
-        let lo = [f64::from(i) * h, f64::from(j) * h];
-        (lo, [lo[0] + h, lo[1] + h])
+        cell_rect(c)
     }
 
     /// Cell side length.
@@ -377,14 +394,7 @@ impl Quadtree {
     /// left: (0,0), (1,0), (1,1), (0,1) in cell-local coordinates.
     #[must_use]
     pub fn corner_nodes(&self, c: CellKey) -> [NodeKey; 4] {
-        let (lv, i, j) = c;
-        let s = 1u32 << (self.max_level - lv);
-        [
-            (i * s, j * s),
-            ((i + 1) * s, j * s),
-            ((i + 1) * s, (j + 1) * s),
-            (i * s, (j + 1) * s),
-        ]
+        cell_corner_nodes(c, self.max_level)
     }
 
     /// A node's position — exact dyadic f64.

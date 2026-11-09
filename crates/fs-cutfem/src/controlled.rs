@@ -1,7 +1,8 @@
 //! Cooperatively interruptible solves of the canonical elasticity operator.
 //!
 //! Assembly, boundary conditions, Jacobi scaling and the true-Euclidean
-//! correction gate are the existing CutFEM mathematics. Only scheduling changes:
+//! correction and full material-strain gates are the existing CutFEM mathematics.
+//! Only scheduling changes:
 //! the caller can stop between bounded batches of CG iterations. An interruption
 //! never returns a field masquerading as a converged solution. Assembly and one
 //! matrix/vector operation are not preemptible; this is a work bound, not a
@@ -19,8 +20,8 @@ use fs_solver::op::LinearOp;
 /// Converged coefficients and nodal field from a controlled elasticity solve.
 ///
 /// Construction is private: only an explicitly recomputed Euclidean residual
-/// below the requested tolerance admits this value. Interrupted or exhausted
-/// solves cannot construct one.
+/// below the requested tolerance and the original material's full tensor-strain
+/// domain admit this value. Interrupted or exhausted solves cannot construct one.
 #[derive(Debug, Clone)]
 pub struct ControlledElasticitySolution {
     coefficients: Vec<f64>,
@@ -69,7 +70,8 @@ impl CutElasticityOperator {
     /// between calls to `control`. The callback receives the cumulative count
     /// across all correction passes. `Break(reason)` returns that exact reason
     /// without publishing a solution; `Continue(())` permits more work. Checks
-    /// also bracket setup, explicit residual verification, and publication.
+    /// also bracket setup, explicit residual verification, and publication,
+    /// and poll every cell during final material-strain admission.
     /// A callback must not mutate the operator or problem through side channels.
     ///
     /// An always-continuing callback follows the same arithmetic and correction
@@ -79,8 +81,10 @@ impl CutElasticityOperator {
     /// larger batches reduce that overhead at the cost of coarser interruption.
     ///
     /// # Errors
-    /// Refuses invalid controls, numerical failure, or exhaustion before the
-    /// *true* Euclidean residual meets `tol`. Cancellation is `Ok(Break(_))`,
+    /// Refuses invalid controls, numerical failure, exhaustion before the
+    /// *true* Euclidean residual meets `tol`, or a physical tensor-strain domain
+    /// exit, including relaxed thickness strain in plane stress and the cut-cell
+    /// extension. Cancellation is `Ok(Break(_))`,
     /// distinct from a failed PDE solve. This method does not assemble a mesh or
     /// promise interruption inside assembly, a sparse apply, or a reduction.
     pub fn solve_controlled<B>(
@@ -119,6 +123,11 @@ impl CutElasticityOperator {
                 });
             }
             if residual < tol {
+                if let ControlFlow::Break(reason) =
+                    self.admit_retained_strain_domain(&x, || control(total_iters))?
+                {
+                    return Ok(ControlFlow::Break(reason));
+                }
                 let compliance = self.algebraic_compliance(&x)?;
                 let nodal = self.nodal_values(&x);
                 if let ControlFlow::Break(reason) = control(total_iters) {
@@ -209,7 +218,9 @@ mod tests {
     #[test]
     fn batch_sizes_reproduce_the_canonical_solve_bits() {
         fixture(|solver| {
-            let body = |_: f64, _: f64| [0.0, -1.0];
+            // Keep this arithmetic/scheduling comparison within the physical
+            // small-strain material domain instead of loading E=1 beyond it.
+            let body = |_: f64, _: f64| [0.0, -0.001];
             let zero = |_: f64, _: f64| [0.0, 0.0];
             let reference = solver.solve(&body, &zero).expect("canonical solve");
             let operator = solver.assemble(&body, &zero).expect("canonical assembly");

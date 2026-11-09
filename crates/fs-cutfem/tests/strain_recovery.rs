@@ -2,15 +2,15 @@
 
 use fs_cutfem::elastic::ElasticPlane;
 use fs_cutfem::{
-    BoundaryTraction, CutElasticity, CutElasticityOperator, CutStabilizationScaling,
-    DesignBoxEdge, EdgeBand, HalfPlane, Quadtree,
+    BoundaryTraction, Circle, CutElasticity, CutElasticityOperator, CutFemError, CutSdf,
+    CutStabilizationScaling, DesignBoxEdge, EdgeBand, HalfPlane, Quadtree,
 };
 use fs_material::IsotropicElastic;
 use std::ops::ControlFlow;
 
 fn problem<'a>(
     grid: &'a Quadtree,
-    sdf: &'a HalfPlane,
+    sdf: &'a dyn CutSdf,
     material: &'a IsotropicElastic,
 ) -> CutElasticity<'a> {
     CutElasticity {
@@ -220,6 +220,162 @@ fn full_tensor_domain_includes_relaxed_thickness_and_both_shear_entries() {
 }
 
 #[test]
+fn physical_solves_refuse_domain_exit_with_cut_and_hanging_nodes() {
+    for graded in [false, true] {
+        let mut grid = Quadtree::with_room(2, 3);
+        if graded {
+            grid.refine_where(3, &|lo, _| lo[0] >= 0.5);
+        }
+        let sdf = HalfPlane {
+            normal: [1.0, 0.0],
+            offset: 0.83,
+        };
+        for (plane, poisson, extension) in [
+            (ElasticPlane::Strain, 0.3, 0.015),
+            (ElasticPlane::Stress, 0.49, 0.011),
+        ] {
+            let material = IsotropicElastic::new(12.0, poisson, 0.0125).unwrap();
+            let mut cut = problem(&grid, &sdf, &material);
+            cut.traction_free_interface = false;
+            cut.nitsche_beta = 80.0;
+            cut.stabilization_scaling = CutStabilizationScaling::LongitudinalModulus;
+            let transverse = match plane {
+                ElasticPlane::Strain => -poisson / (1.0 - poisson),
+                ElasticPlane::Stress => -poisson,
+            };
+            let modulus = match plane {
+                ElasticPlane::Strain => material.youngs / (1.0 - poisson * poisson),
+                ElasticPlane::Stress => material.youngs,
+            };
+            let thickness = if plane == ElasticPlane::Stress {
+                -poisson
+            } else {
+                0.0
+            };
+            let physical_norm =
+                extension * (1.0_f64 + transverse * transverse + thickness * thickness).sqrt();
+            assert!(physical_norm > material.strain_limit);
+            assert!(physical_norm * 0.5 < material.strain_limit);
+            if plane == ElasticPlane::Stress {
+                // This exit is invisible to an in-plane-only strain check.
+                assert!(extension * (1.0 + poisson * poisson).sqrt() < material.strain_limit);
+            }
+            let mut accepted = None;
+            for scale in [0.5, 1.0, 0.5] {
+                let strain = scale * extension;
+                let exact = |x: f64, y: f64| [strain * x, transverse * strain * y];
+                let traction = |_: f64, _: f64| [-modulus * strain, 0.0];
+                let boundary = BoundaryTraction::EdgeBand {
+                    support: EdgeBand::new(DesignBoxEdge::Left, 0.0, 1.0).unwrap(),
+                    value: &traction,
+                };
+                let zero = |_: f64, _: f64| [0.0; 2];
+                let operator = match plane {
+                    ElasticPlane::Strain => {
+                        cut.assemble_with_boundary_traction(&zero, &exact, boundary)
+                    }
+                    ElasticPlane::Stress => {
+                        cut.assemble_plane_stress_with_boundary_traction(&zero, &exact, boundary)
+                    }
+                }
+                .unwrap();
+                let ordinary = match plane {
+                    ElasticPlane::Strain => {
+                        cut.solve_with_boundary_traction(&zero, &exact, boundary)
+                    }
+                    ElasticPlane::Stress => {
+                        cut.solve_plane_stress_with_boundary_traction(&zero, &exact, boundary)
+                    }
+                };
+                let controlled =
+                    operator.solve_controlled(cut.solver_tol, cut.solver_max_iters, 7, |_| {
+                        ControlFlow::<()>::Continue(())
+                    });
+                if scale == 1.0 {
+                    for error in [ordinary.unwrap_err(), controlled.unwrap_err()] {
+                        assert!(matches!(
+                            error,
+                            CutFemError::InvalidElasticityInput { what }
+                                if what.contains("tensor strain magnitude")
+                        ));
+                    }
+                } else {
+                    let ordinary = ordinary.unwrap();
+                    let ControlFlow::Continue(controlled) = controlled.unwrap() else {
+                        panic!("unexpected cancellation")
+                    };
+                    assert_eq!(ordinary.coefficients(), controlled.coefficients());
+                    let ControlFlow::Continue(bound) = operator
+                        .admit_strain_domain(&grid, ordinary.coefficients(), || {
+                            ControlFlow::<()>::Continue(())
+                        })
+                        .unwrap()
+                    else {
+                        panic!("unexpected cancellation")
+                    };
+                    assert!((bound - scale * physical_norm).abs() < 1e-10);
+                    if let Some(previous) = &accepted {
+                        assert_eq!(ordinary.coefficients(), previous);
+                    } else {
+                        accepted = Some(ordinary.coefficients().to_vec());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn embedded_dirichlet_solves_reject_strain_exit_and_controlled_scan_can_cancel() {
+    let grid = Quadtree::uniform(3);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let material = IsotropicElastic::new(12.0, 0.3, 0.01).unwrap();
+    let mut cut = problem(&grid, &sdf, &material);
+    cut.traction_free_interface = false;
+    cut.nitsche_beta = 80.0;
+    cut.stabilization_scaling = CutStabilizationScaling::LongitudinalModulus;
+    let zero = |_: f64, _: f64| [0.0; 2];
+    let stretch = |x: f64, y: f64| [0.02 * x, 0.02 * y];
+    assert!(matches!(
+        cut.solve(&zero, &stretch),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+    assert!(matches!(
+        cut.solve_plane_stress(&zero, &stretch),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+
+    // Zero load is already converged. Once the three setup/residual callbacks
+    // have run, cancellation inside the cell scan must still return the exact
+    // stop reason instead of publishing a physical field.
+    let operator = cut.assemble(&zero, &zero).unwrap();
+    let mut calls = 0;
+    let cancelled = operator
+        .solve_controlled(1e-12, 100, 7, |iterations| {
+            assert_eq!(iterations, 0);
+            calls += 1;
+            if calls == 5 {
+                ControlFlow::Break("material scan cancelled")
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+    assert!(matches!(
+        cancelled,
+        ControlFlow::Break("material scan cancelled")
+    ));
+    assert_eq!(calls, 5);
+    assert!(matches!(
+        operator.solve_controlled(1e-12, 100, 7, |_| ControlFlow::<()>::Continue(())),
+        Ok(ControlFlow::Continue(_))
+    ));
+}
+
+#[test]
 fn solved_and_controlled_fields_recover_the_original_material_response() {
     let grid = Quadtree::uniform(2);
     let sdf = HalfPlane {
@@ -281,7 +437,10 @@ fn solved_and_controlled_fields_recover_the_original_material_response() {
             close(observed.stress[i], expected_stress[i]);
         }
         close(observed.energy_density, other.energy_density);
-        close(observed.energy_density, 0.5 * material.youngs * extension * extension);
+        close(
+            observed.energy_density,
+            0.5 * material.youngs * extension * extension,
+        );
         close(observed.stress[2], 0.0);
     }
     let wrong_lattice = Quadtree::uniform(3);
