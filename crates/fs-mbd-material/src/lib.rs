@@ -31,6 +31,8 @@ pub mod ellipsoid_flow;
 pub mod hydrostatic;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
 pub mod principal;
+/// Prescribed calibrated temperature clocks on the original rotor Maxwell branches.
+pub mod rotor_kinetics;
 
 /// Complete tensor equilibrium, Maxwell and Kelvin laws on native rigid graphs.
 pub mod spatial_relaxation;

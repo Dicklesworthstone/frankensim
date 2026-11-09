@@ -2375,3 +2375,54 @@ measured-material validation. The prerequisite native equilibrium/Gram increment
 also passed all eighteen focused and hereditary/kinetics regression groups.
 Pinned Rust formatting passed for the new adapter and test; the final test
 formatting change is whitespace only after the four-group run.
+
+## Prescribed temperature clocks for rotor resonance
+
+`rotor_kinetics::RotorTemperatureKinetics` binds an immutable original
+`MaxwellDampingBranch` bank and one existing WLF/Arrhenius `TemperatureShift`
+per branch. `try_new` evaluates prescribed absolute temperatures in original
+[segment][branch] order, retaining the temperatures and derived ratios while
+borrowing the original branches and calibrations. Every ratio is
+`tau(T)/tau(T_ref)`, evaluated from the original reference declaration without
+compounding, extrapolation, clamping or refitting. Original branch times must
+belong to their associated calibration's reference temperature, including any
+original constant reference multiplier.
+
+`floquet`, `prepare_cycle` and `prepare_power_cycle` reuse that same branch
+bank through the native rotor kinetics owner; `as_kinetics` exposes a borrowed,
+allocation-free schedule. Every stress, stiffness, strain direction and branch
+heat identity survives temperature switches. The same held effective time
+governs motion and integrated `sigma^2/(k tau)` heat. A rate switch introduces
+no branch storage jump or modulation work. Applied sources retain their common
+cycle phase and the original physical motion/work owners.
+
+Native segment/branch caps bound owned temperature/ratio storage before
+allocation (two f64 values per sample plus row metadata). Native admission
+checks positive representable effective times AND inverse times. Cancellation
+is polled before work, per sample and before publication; failure preserves
+borrowed inputs and publishes no partial schedule. Solver work retains its
+ordinary explicit `RotorFloquetBudget`.
+
+The rotor's segment C/K remain independently authored. Generic C can contain
+Kelvin, unrelated dampers or active bearings; this adapter does not infer a
+whole-material viscosity shift. It supplies prescribed Maxwell clocks, without
+thermal feedback, thermal expansion or a temperature-dependent stiffness law.
+Native branch heat stays separately available for an explicitly modeled thermal
+destination. Calibration accuracy and the branch-to-calibration association are
+caller declarations; a bare `TemperatureShift` is not a resolved material-card
+receipt. Smooth temperature histories still require segment refinement.
+
+All four new native integration groups pass: independent heterogeneous WLF/
+Arrhenius reference ratios with no compounding; analytic switched memory decay
+and heat with unchanged mechanical damping; hot/reference harmonic displacement,
+velocity, stress, source work and heat against the original scalar Maxwell
+dispersion formula; and support, shape, hard-cap, effective-clock and cancellation
+refusals. Together with the native kinetics increment and affected rotor
+regressions, this continuation has 33 focused passes (8 new plus 25 existing).
+
+The local Cargo fallback executes the actual material calibration declarations,
+constructor/evaluator/getters and original gas constant, plus the full new
+adapter and existing rotor/pHS/linear-algebra numerical paths. Only unrelated
+material/tensor/rigid/scheduler adapters are omitted from the bounded source
+selection. DSR/RCH are unavailable; this is not a full workspace or DSR gate,
+nor a measured-material accuracy or coupled thermal-feedback validation.
