@@ -10,6 +10,7 @@ fn ports(t: f64, viscosity: f64, head_scale: f64) -> RegionalCarreauDrive {
         boundaries: pressures(1000.0 + 10.0 * (t - 300.0).powi(2)).to_vec(),
         injections: Vec::new(),
         branch_heads: Some(vec![Pressure::new(head_scale * viscosity / 0.2)]),
+        branch_head_laws: None,
     }
 }
 

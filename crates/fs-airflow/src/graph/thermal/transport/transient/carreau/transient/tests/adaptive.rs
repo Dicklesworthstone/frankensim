@@ -2,6 +2,7 @@
 
 mod drive;
 mod feedback;
+mod head_laws;
 
 use super::super::adaptive::*;
 use super::*;
@@ -13,12 +14,15 @@ fn resolution() -> RegionalCarreauResolutionControls {
         maximum_native_steps: 4096,
         maximum_accepted_steps: 2048,
         maximum_total_branch_solves: 200_000,
+        maximum_total_head_evaluations: 400_000,
         absolute_cell_error_j: 0.002,
         relative_cell_error: 1e-4,
         absolute_velocity_error_m_s: 1e-4,
         relative_velocity_error: 1e-4,
         absolute_flow_error_m3_s: 1e-8,
         relative_flow_error: 1e-4,
+        absolute_transfer_error_j: 0.002,
+        relative_transfer_error: 1e-4,
         maximum_reversal_step_s: 0.002,
         maximum_cancelled_volume_m3: 1e-9,
     }
@@ -32,10 +36,48 @@ fn permissive() -> RegionalCarreauResolutionControls {
         relative_velocity_error: 0.0,
         absolute_flow_error_m3_s: 1e6,
         relative_flow_error: 0.0,
+        absolute_transfer_error_j: 1e6,
+        relative_transfer_error: 0.0,
         maximum_reversal_step_s: 1.0,
         maximum_cancelled_volume_m3: 1.0,
         ..resolution()
     }
+}
+
+/// Declare the original native inventory allowance for convergence fixtures;
+/// adaptive half-steps must not silently renew a smaller caloric step budget.
+fn inventory_with_substeps<'m>(
+    law: &'m Caloric,
+    temperatures: &[f64],
+    maximum: usize,
+) -> DepositionSimulation<'m> {
+    let base = inventory(law, temperatures);
+    DepositionSimulation::new(
+        base.cells()
+            .values()
+            .cloned()
+            .map(|cell| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell),
+            })
+            .collect(),
+        &[(MaterialId(1), law as &dyn ThermalLaw)],
+        DepositionBudget {
+            max_substeps: maximum,
+            ..base.budget()
+        },
+    )
+    .unwrap()
+    .advance_to(
+        0.0,
+        StepConfig {
+            max_dt_s: 1.0,
+            energy_tolerance_j: 1e-9,
+        },
+        || Ok(()),
+    )
+    .unwrap()
+    .0
 }
 
 fn initial_profile(
@@ -98,7 +140,7 @@ fn reference_rk4(
 fn g1_reversing_native_trajectory_converges_to_independent_radial_and_caloric_odes() {
     with_cx(|cx| {
         let law = Caloric;
-        let old = inventory(&law, &[330.0, 290.0, 300.0]);
+        let old = inventory_with_substeps(&law, &[330.0, 290.0, 300.0], 2048);
         let owner = model(cx, &old, 1, false);
         let state = initial_profile(&owner, cx);
         let initial = [1.25, 0.625, 330.0, 300.0, 290.0];

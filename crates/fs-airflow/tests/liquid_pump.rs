@@ -3,6 +3,8 @@
 mod speed;
 #[path = "liquid_pump/power_limit.rs"]
 mod power_limit;
+#[path = "liquid_pump/radial.rs"]
+mod radial;
 use fs_airflow::SourceProvenance;
 use fs_airflow::graph::thermal::medium::FlowHeatGeometry;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;

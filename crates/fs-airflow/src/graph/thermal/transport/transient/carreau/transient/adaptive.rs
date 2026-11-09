@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 
+use crate::graph::rheology::transient::head::FlowHeadSource;
 use fs_exec::Cx;
 use fs_qty::Pressure;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
@@ -34,10 +35,15 @@ pub struct RegionalCarreauResolutionControls {
     pub minimum_interval_s: f64,
     /// Includes discarded coarse/fine attempts and the terminal refused step.
     pub maximum_native_steps: usize,
+    /// Also constrained by the original thermal inventory's max_substeps over
+    /// the complete requested window, including all authored drive segments.
     pub maximum_accepted_steps: usize,
     /// All original branch solves, including discarded comparisons and every
     /// thermal residual. Each native step is clipped to the remaining limit.
     pub maximum_total_branch_solves: u64,
+    /// Every original equipment query across thermal trials and discarded
+    /// comparisons. Zero allows histories with no flow-dependent head sources.
+    pub maximum_total_head_evaluations: u64,
     pub absolute_cell_error_j: f64,
     /// Relative to interval energy CHANGES, independent of caloric datum.
     pub relative_cell_error: f64,
@@ -45,6 +51,11 @@ pub struct RegionalCarreauResolutionControls {
     pub relative_velocity_error: f64,
     pub absolute_flow_error_m3_s: f64,
     pub relative_flow_error: f64,
+    /// Separate per-branch viscous heat, held-head work and original equipment
+    /// work. Compare both signed transfer and total absolute half-step transfer
+    /// so opposed sources or work across time cannot hide by cancellation.
+    pub absolute_transfer_error_j: f64,
+    pub relative_transfer_error: f64,
     /// Longest retained substep with opposite endpoint flow signs.
     pub maximum_reversal_step_s: f64,
     /// Largest min(V+, V-) of a branch's native affine flow trajectory, per
@@ -65,6 +76,9 @@ pub struct RegionalCarreauResolutionWork {
     /// On terminal native failure its original remaining budget still bounds
     /// attempted work, but that failed owner's partial count is not inferred.
     pub completed_branch_solves: u64,
+    /// Same completed-native accounting and terminal remaining-budget bound
+    /// as branch solves, for original equipment source queries.
+    pub completed_head_evaluations: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +88,7 @@ pub struct RegionalCarreauResolutionEstimate {
     pub maximum_cell_difference_j: f64,
     pub maximum_velocity_difference_m_s: f64,
     pub maximum_flow_difference_m3_s: f64,
+    pub maximum_transfer_difference_j: f64,
     pub error_ratio: f64,
     pub maximum_reversal_step_s: f64,
     pub maximum_cancelled_volume_m3: f64,
@@ -86,6 +101,10 @@ pub struct RegionalCarreauDrive {
     pub boundaries: Vec<FixedPressure>,
     pub injections: Vec<FlowInjection>,
     pub branch_heads: Option<Vec<Pressure>>,
+    /// Original signed-flow head sources, one optional law per native branch.
+    /// They solve inside the original radial/pressure Jacobian; accepted
+    /// reports retain these exact shared sources and actual head work.
+    pub branch_head_laws: Option<Vec<Option<FlowHeadSource>>>,
 }
 
 /// The exact forcing used by one accepted native midpoint momentum interval.
@@ -202,6 +221,7 @@ pub fn advance_resolved<'m, T, E>(
         boundaries: boundaries.to_vec(),
         injections: injections.to_vec(),
         branch_heads: branch_heads.map(<[Pressure]>::to_vec),
+        branch_head_laws: None,
     };
     advance_resolved_with_drive(
         cx,
@@ -405,6 +425,10 @@ fn advance_with_driver<'m, T, E>(
             controls.absolute_flow_error_m3_s,
             controls.relative_flow_error,
         )
+        || !tolerances(
+            controls.absolute_transfer_error_j,
+            controls.relative_transfer_error,
+        )
         || !positive(controls.maximum_reversal_step_s)
         || !nonnegative(controls.maximum_cancelled_volume_m3)
     {
@@ -431,9 +455,12 @@ fn advance_with_driver<'m, T, E>(
     let mut drive_samples = Vec::new();
     let mut estimates = Vec::new();
     let mut proposed = controls.maximum_interval_s;
+    let maximum_accepted_steps = controls
+        .maximum_accepted_steps
+        .min(thermal.budget().max_substeps);
     while caloric.time_s() < target_s {
         checkpoint(cx)?;
-        if steps.len() + 2 > controls.maximum_accepted_steps {
+        if steps.len() + 2 > maximum_accepted_steps {
             return Err(limit("retained native step limit", work));
         }
         let start = caloric.time_s();
@@ -471,7 +498,7 @@ fn advance_with_driver<'m, T, E>(
                 "comparison interval is not representable",
             ));
         }
-        let (coarse, _) = native_step(
+        let (coarse, coarse_drive) = native_step(
             cx,
             &next,
             &caloric,
@@ -517,6 +544,7 @@ fn advance_with_driver<'m, T, E>(
             &coarse,
             &first.report,
             &second,
+            [&coarse_drive, &first_drive, &second_drive],
             controls,
         )?;
         let resolved = estimate.error_ratio <= 1.0
@@ -593,6 +621,12 @@ fn native_step<'m, T, E>(
         return Err(limit("total original branch solve limit", *work));
     }
     step.maximum_total_branch_solves = step.maximum_total_branch_solves.min(remaining);
+    let head_remaining = controls.maximum_total_head_evaluations - work.completed_head_evaluations;
+    step.hydraulics.head.maximum_source_evaluations = step
+        .hydraulics
+        .head
+        .maximum_source_evaluations
+        .min(head_remaining);
     let start_s = thermal.time_s();
     let sample_time_s = start_s + 0.5 * (target_s - start_s);
     if !(start_s < sample_time_s && sample_time_s < target_s) {
@@ -680,6 +714,12 @@ fn native_step<'m, T, E>(
                 ));
             }
             work.completed_branch_solves += result.report.total_branch_solves;
+            if result.report.total_head_evaluations > head_remaining {
+                return Err(RegionalCarreauResolutionError::Invalid(
+                    "original equipment work exceeded remaining trajectory limit",
+                ));
+            }
+            work.completed_head_evaluations += result.report.total_head_evaluations;
             Ok((result, sample))
         }
         Err(source) => Err(RegionalCarreauResolutionError::Step {
@@ -699,6 +739,7 @@ fn compare<T, E>(
     coarse: &TransientRegionalCarreauStep<'_, T>,
     first: &TransientRegionalCarreauReport<T>,
     fine: &TransientRegionalCarreauStep<'_, T>,
+    drives: [&RegionalCarreauDriveSample; 3],
     controls: RegionalCarreauResolutionControls,
 ) -> Result<RegionalCarreauResolutionEstimate, RegionalCarreauResolutionError<E>> {
     let mut estimate = RegionalCarreauResolutionEstimate {
@@ -707,6 +748,7 @@ fn compare<T, E>(
         maximum_cell_difference_j: 0.0,
         maximum_velocity_difference_m_s: 0.0,
         maximum_flow_difference_m3_s: 0.0,
+        maximum_transfer_difference_j: 0.0,
         error_ratio: 0.0,
         maximum_reversal_step_s: 0.0,
         maximum_cancelled_volume_m3: 0.0,
@@ -776,14 +818,47 @@ fn compare<T, E>(
                 estimate.maximum_velocity_difference_m_s.max(difference);
         }
     }
-    for ((old, a), b) in first
+    let transfers = [
+        (&coarse.report.hydraulics, drives[0]),
+        (&first.hydraulics, drives[1]),
+        (&fine.report.hydraulics, drives[2]),
+    ];
+    for (branch, ((old, a), b)) in first
         .hydraulics
         .branches
         .iter()
         .zip(&coarse.report.hydraulics.branches)
         .zip(&fine.report.hydraulics.branches)
+        .enumerate()
     {
         checkpoint(cx)?;
+        transfer(
+            &mut estimate,
+            transfers.map(|(flow, _)| flow.branches[branch].viscous_heat_j),
+            controls,
+        )?;
+        transfer(
+            &mut estimate,
+            transfers.map(|(flow, drive)| {
+                let head = drive
+                    .drive
+                    .branch_heads
+                    .as_ref()
+                    .map_or(0.0, |heads| heads[branch].value());
+                head * flow.branches[branch].midpoint_volume_flow_m3_s
+                    * flow.branches[branch].duration_s
+            }),
+            controls,
+        )?;
+        transfer(
+            &mut estimate,
+            transfers.map(|(flow, _)| {
+                flow.flow_heads[branch]
+                    .as_ref()
+                    .map_or(0.0, |head| head.work_j)
+            }),
+            controls,
+        )?;
         let difference = (b.final_volume_flow_m3_s - a.final_volume_flow_m3_s).abs();
         let scale = controls.absolute_flow_error_m3_s
             + controls.relative_flow_error
@@ -820,6 +895,27 @@ fn compare<T, E>(
         }
     }
     Ok(estimate)
+}
+
+fn transfer<E>(
+    estimate: &mut RegionalCarreauResolutionEstimate,
+    [coarse, first, second]: [f64; 3],
+    controls: RegionalCarreauResolutionControls,
+) -> Result<(), RegionalCarreauResolutionError<E>> {
+    let mut residual = crate::graph::Sum::default();
+    let error =
+        |_| RegionalCarreauResolutionError::Invalid("unrepresentable original transfer comparison");
+    for value in [coarse, -first, -second] {
+        residual.add(value).map_err(error)?;
+    }
+    let signed = residual.value().map_err(error)?.abs();
+    let fine_magnitude = first.abs() + second.abs();
+    let difference = signed.max((coarse.abs() - fine_magnitude).abs());
+    let scale = controls.absolute_transfer_error_j
+        + controls.relative_transfer_error * coarse.abs().max(fine_magnitude);
+    update(&mut estimate.error_ratio, difference, scale)?;
+    estimate.maximum_transfer_difference_j = estimate.maximum_transfer_difference_j.max(difference);
+    Ok(())
 }
 
 fn update<E>(

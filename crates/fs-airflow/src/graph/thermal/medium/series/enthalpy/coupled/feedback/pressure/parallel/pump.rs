@@ -21,6 +21,8 @@ pub mod power;
 pub mod speed;
 /// Electrical source limits at the actual calibrated pump/network operating point.
 pub mod source;
+/// Original pump curves in resolved radial Carreau pressure/head solves.
+pub mod radial;
 
 use power::{PumpDriveCurve, PumpPowerState};
 

@@ -28,6 +28,7 @@ use super::super::nonlinear::{
 };
 use super::{CarreauTransportExchange, RegionalCarreauTransport, thermal_checkpoint};
 use crate::graph::rheology::FlowInjection;
+use crate::graph::rheology::transient::head::{FlowHeadControls, FlowHeadError, FlowHeadSource};
 use crate::graph::rheology::transient::{
     TransientCarreauControls, TransientCarreauError, TransientCarreauGraph, TransientCarreauState,
     TransientCarreauStep, TransientCarreauWorkspace,
@@ -44,6 +45,8 @@ pub struct TransientRegionalCarreauTransport {
 /// Native accuracy controls and aggregate nonlinear work/energy bounds.
 #[derive(Clone, Copy, Debug)]
 pub struct TransientRegionalCarreauControls {
+    /// The head source-query limit also bounds the aggregate of all thermal
+    /// residuals, derivative probes and final acceptance for this interval.
     pub hydraulics: TransientCarreauControls,
     pub thermal: ImplicitTransportControls,
     /// Counts every native branch solve across all thermal residuals, numerical
@@ -95,6 +98,9 @@ pub struct TransientRegionalCarreauReport<T> {
     /// Native thermal and mechanical tolerances plus arithmetic roundoff.
     pub combined_energy_tolerance_j: f64,
     pub total_branch_solves: u64,
+    /// Original equipment queries across all completed thermal trials. A
+    /// terminal failed trial remains bounded by its clipped remaining budget.
+    pub total_head_evaluations: u64,
 }
 
 /// All physical owners advance together, or no replacement is returned.
@@ -290,6 +296,56 @@ impl TransientRegionalCarreauTransport {
             boundaries: boundaries.to_vec(),
             injections: injections.to_vec(),
             branch_heads: branch_heads.map(<[Pressure]>::to_vec),
+            branch_head_laws: None,
+        };
+        self.advance_with_resolved_drive(
+            cx,
+            thermal,
+            state,
+            workspace,
+            target_s,
+            controls,
+            energy_guess_j,
+            |_, _, _| Ok::<_, E>(&drive),
+            |cx, candidate, flow, _| exchange(cx, candidate, flow),
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Advance with original flow-dependent equipment sources held over this
+    /// interval. Every thermal trial solves the operating point against its own
+    /// prepared pipe viscosity. The actual head work remains mechanical; only
+    /// original radial viscous heat enters the caloric inventory. Use the
+    /// adaptive thermal-drive callback when the equipment source itself must
+    /// be prepared from the same candidate thermal endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_head_laws<'m, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        held_heads: Option<&[Pressure]>,
+        head_laws: &[Option<FlowHeadSource>],
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        exchange: impl Fn(
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
+            &TransientCarreauStep,
+        ) -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<
+        TransientRegionalCarreauStep<'m, T>,
+        ImplicitTransportError<TransientCarreauTransportError<E>>,
+    > {
+        let drive = RegionalCarreauDrive {
+            boundaries: boundaries.to_vec(),
+            injections: injections.to_vec(),
+            branch_heads: held_heads.map(<[Pressure]>::to_vec),
+            branch_head_laws: Some(head_laws.to_vec()),
         };
         self.advance_with_resolved_drive(
             cx,
@@ -352,6 +408,7 @@ impl TransientRegionalCarreauTransport {
         }
         self.regional.inventory.validate_storage(cx, thermal)?;
         let total_branch_solves = Cell::new(0_u64);
+        let total_head_evaluations = Cell::new(0_u64);
         let workspace = RefCell::new(workspace);
         let (next_thermal, thermal_report) = advance_endpoint_transport(
             cx,
@@ -384,15 +441,56 @@ impl TransientRegionalCarreauTransport {
                 })?;
                 thermal_checkpoint(cx)?;
                 let forcing = drive.borrow();
+                if forcing
+                    .branch_head_laws
+                    .as_ref()
+                    .is_some_and(|laws| laws.len() != source.pipes().len())
+                {
+                    return Err(ImplicitTransportError::Invalid(
+                        "one optional original equipment source per regional branch required",
+                    ));
+                }
+                let head_remaining = controls.hydraulics.head.maximum_source_evaluations
+                    - total_head_evaluations.get();
+                let first_head = forcing
+                    .branch_head_laws
+                    .as_ref()
+                    .and_then(|laws| laws.iter().position(Option::is_some));
+                if let Some(branch) = first_head {
+                    if head_remaining == 0 {
+                        return Err(momentum_error(TransientCarreauError::Head {
+                            branch,
+                            source: FlowHeadError::SourceBudget,
+                        }));
+                    }
+                }
                 let mut proposed = state.clone();
                 let hydraulic_controls = TransientCarreauControls {
                     maximum_branch_solves: controls.hydraulics.maximum_branch_solves.min(remaining),
+                    head: FlowHeadControls {
+                        maximum_source_evaluations: head_remaining,
+                        ..controls.hydraulics.head
+                    },
                     ..controls.hydraulics
                 };
                 let hydraulics = {
                     let mut scratch = workspace.borrow_mut();
-                    match forcing.branch_heads.as_deref() {
-                        Some(heads) => source.step_with_heads(
+                    match (first_head, forcing.branch_heads.as_deref()) {
+                        (Some(_), _) => source.step_with_head_laws(
+                            &mut proposed,
+                            &mut scratch,
+                            &forcing.boundaries,
+                            &forcing.injections,
+                            forcing.branch_heads.as_deref(),
+                            forcing
+                                .branch_head_laws
+                                .as_deref()
+                                .expect("source roster admitted"),
+                            duration_s,
+                            hydraulic_controls,
+                            cx,
+                        ),
+                        (None, Some(heads)) => source.step_with_heads(
                             &mut proposed,
                             &mut scratch,
                             &forcing.boundaries,
@@ -402,7 +500,7 @@ impl TransientRegionalCarreauTransport {
                             hydraulic_controls,
                             cx,
                         ),
-                        None => source.step(
+                        (None, None) => source.step(
                             &mut proposed,
                             &mut scratch,
                             &forcing.boundaries,
@@ -418,6 +516,13 @@ impl TransientRegionalCarreauTransport {
                     return Err(momentum_error(TransientCarreauError::BranchSolveBudget));
                 }
                 total_branch_solves.set(total_branch_solves.get() + hydraulics.branch_solves);
+                if hydraulics.head_evaluations > head_remaining {
+                    return Err(ImplicitTransportError::Invalid(
+                        "original equipment work exceeded remaining thermal budget",
+                    ));
+                }
+                total_head_evaluations
+                    .set(total_head_evaluations.get() + hydraulics.head_evaluations);
                 if proposed.accepted_time_s() != target_s {
                     return Err(ImplicitTransportError::Invalid(
                         "native momentum and thermal endpoint clocks disagree",
@@ -531,6 +636,7 @@ impl TransientRegionalCarreauTransport {
                     combined_energy_residual_j: combined,
                     combined_energy_tolerance_j: allowance,
                     total_branch_solves: total_branch_solves.get(),
+                    total_head_evaluations: total_head_evaluations.get(),
                 },
             },
             prepared.drive,

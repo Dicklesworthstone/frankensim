@@ -10,6 +10,7 @@ fn imposed(pressure: f64, head: f64, injection: f64) -> RegionalCarreauDrive {
             flow: VolumetricFlowRate::new(injection),
         }],
         branch_heads: Some(vec![Pressure::new(head)]),
+        branch_head_laws: None,
     }
 }
 
@@ -66,7 +67,7 @@ fn stream_exchange(
 fn g1_constant_drive_is_identical_to_held_entry_and_queries_once_per_native_attempt() {
     with_cx(|cx| {
         let law = Caloric;
-        let old = inventory(&law, &[300.0; 3]);
+        let old = inventory_with_substeps(&law, &[300.0; 3], 2048);
         let owner = model(cx, &old, 1, false);
         let state = owner.momentum().rest_state(&[None; 2], cx).unwrap();
         let held = imposed(4000.0, 300.0, 2e-6);
@@ -455,6 +456,7 @@ fn g4_invalid_events_late_drive_source_and_free_junction_injection_refuse_atomic
                         flow: VolumetricFlowRate::new(if time < 0.0625 { 0.0 } else { 1e-6 }),
                     }],
                     branch_heads: None,
+                    branch_head_laws: None,
                 })
             },
             |_, _, flow, _| Ok::<_, ()>(exchange(flow, 300.0)),
