@@ -24,9 +24,10 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
     /// must stay in the original source's declared domain.
     ///
     /// The original adaptive error/work/heat gates remain authoritative.
-    /// Body, supplied-traction and signed carried-kinetic exchanges enter the
-    /// separate transfer error norm; numerical upwind loss is reported without
-    /// being called heat. Generalized velocity-wall work remains unclaimed.
+    /// Body, native prescribed-wall/supplied-traction/backflow work and signed
+    /// carried-kinetic exchanges enter separate transfer-error channels with
+    /// signed and resolved-magnitude defects. Numerical upwind loss stays
+    /// separate; none of these observations adds a thermal source.
     /// No thermal inventory event is activated and no accepted prefix escapes
     /// source, native, accuracy, work or late cancellation failure.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]

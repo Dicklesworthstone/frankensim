@@ -251,12 +251,16 @@ fn decimal_velocity_events_reverse_original_streams_keep_left_limits_and_resume_
         }
         let mut temperatures = [298.0, 308.0];
         let mut heat = 0.0;
+        let mut wall_work = 0.0;
+        let mut previous_speed = speeds[0];
         for step in &report.steps {
             let source = &step.report.exchange.drive;
             assert_eq!(source.query, step.report.exchange.query);
             assert_eq!(source.query.time_s, step.end_s);
             let speed = speeds[source.query.segment];
             assert_eq!(source.velocity[0], speed);
+            wall_work += RHO * DEPTH * (speed - previous_speed) * speed;
+            previous_speed = speed;
             let first = mesh
                 .edges
                 .iter()
@@ -285,7 +289,12 @@ fn decimal_velocity_events_reverse_original_streams_keep_left_limits_and_resume_
         }
         near(report.external_stream_enthalpy_j, heat, 3e-7);
         near(report.stored_energy_change_j, heat, 3e-7);
-        assert_eq!(report.mechanical.unwrap().velocity_boundary_work_j, None);
+        near(
+            report.mechanical.unwrap().velocity_boundary_work_j.unwrap(),
+            wall_work,
+            3e-8,
+        );
+        near(wall_work, 0.078, 1e-12);
         let first = owner
             .advance_scheduled(
                 cx,
@@ -453,6 +462,109 @@ fn scheduled_thermal_actuator_and_original_buoyancy_close_independent_bdf_work_w
         near(report.thermal_balance_residual_j, 0.0, 1e-6);
         assert_eq!(old.time_s(), 0.0);
         assert!(previous.iter().all(|&v| v == 0.0));
+    });
+}
+
+#[test]
+fn prescribed_acceleration_work_refines_when_endpoint_velocity_and_temperature_agree() {
+    with_cx(|cx, _| {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let law = Caloric { datum: 1e5 };
+        let (old, cells) = inventory(&mesh, &law, &[300.0; 2], false);
+        let material = reference(0.4);
+        let owner = LaminarEnthalpy::new(
+            cx,
+            &system,
+            &material,
+            MaterialFluxNumerics {
+                linear_tolerance: 1e-12,
+                ..MaterialFluxNumerics::default()
+            },
+            &old,
+            map(&cells),
+            DEPTH,
+            2 * mesh.edges.len(),
+        )
+        .unwrap();
+        let (initial, acceleration, target) = (0.1, 0.5, 0.2);
+        let previous = moments(&mesh, &|_| [initial, 0.0]);
+        let solved = owner
+            .advance_scheduled(
+                cx,
+                &old,
+                target,
+                LaminarEnthalpyHistory {
+                    velocity_m_s: &previous,
+                    time_s: 0.0,
+                },
+                &[],
+                LaminarAdaptiveControls {
+                    initial_step_s: target,
+                    maximum_step_s: target,
+                    transfer_absolute_tolerance_j: 1e-5,
+                    ..accuracy()
+                },
+                |_, query, state| {
+                    let mut value = drive(&mesh, state, &cells, query, true);
+                    value.velocity = [initial + acceleration * query.time_s, 0.0];
+                    Ok::<_, ()>(value)
+                },
+                |_, t, _, _| Ok(source(t, 0.4)),
+                |_, _, _, _| Ok::<_, ()>(exchange(&mesh, law.h(300.0))),
+            )
+            .unwrap();
+        let report = solved.report();
+        assert!(report.work.rejected_comparisons > 0);
+        // The original imposed velocity gives identical coarse/fine endpoint
+        // states. Only the new prescribed-work channel requests refinement.
+        assert!(report.estimates.iter().all(|e| e.energy_error_ratio < 0.01
+            && e.temperature_error_ratio < 0.01
+            && e.velocity_error_ratio < 0.01));
+        assert!(
+            report
+                .estimates
+                .iter()
+                .any(|e| e.transfer_error_ratio > 0.2)
+        );
+        let (mut work, mut damping) = (0.0, 0.0);
+        for step in &report.steps {
+            let speed = initial + acceleration * step.end_s;
+            let increment = acceleration * (step.end_s - step.start_s);
+            let expected = RHO * DEPTH * increment * speed;
+            work += expected;
+            damping += 0.5 * RHO * DEPTH * increment * increment;
+            near(
+                step.report
+                    .mechanical
+                    .unwrap()
+                    .velocity_boundary_work_j
+                    .unwrap(),
+                expected,
+                2e-8,
+            );
+        }
+        let final_speed = initial + acceleration * target;
+        let kinetic_gain = 0.5 * RHO * DEPTH * (final_speed * final_speed - initial * initial);
+        near(work, kinetic_gain + damping, 1e-12);
+        assert!(damping > 0.0);
+        let mechanical = report.mechanical.unwrap();
+        near(mechanical.velocity_boundary_work_j.unwrap(), work, 3e-8);
+        near(mechanical.body_work_j, 0.0, 1e-12);
+        near(mechanical.imposed_traction_work_j, 0.0, 1e-12);
+        near(mechanical.outward_kinetic_energy_j, 0.0, 1e-10);
+        near(mechanical.backflow_resistance_work_j.unwrap(), 0.0, 1e-12);
+        near(report.stored_energy_change_j, 0.0, 1e-7);
+        near(report.bulk_viscous_heat_j, 0.0, 1e-12);
+        near(report.other_external_heat_j, 0.0, 1e-12);
+        near(report.thermal_balance_residual_j, 0.0, 1e-6);
+        let (error, divergence) = system
+            .velocity_error(&solved.flow().step.solution.discrete().x, &|_| {
+                [final_speed, 0.0]
+            });
+        assert!(error < 2e-8 && divergence < 2e-8);
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(previous, moments(&mesh, &|_| [initial, 0.0]));
     });
 }
 

@@ -198,7 +198,7 @@ fn ratio<E>(
     }
 }
 
-fn terms<T>(report: &LaminarEnthalpyReport<T>) -> [f64; 8] {
+fn terms<T>(report: &LaminarEnthalpyReport<T>) -> [f64; 10] {
     let mechanical = report.mechanical;
     [
         report.bulk_viscous_heat_j,
@@ -209,6 +209,12 @@ fn terms<T>(report: &LaminarEnthalpyReport<T>) -> [f64; 8] {
         mechanical.map_or(0.0, |m| m.body_work_j),
         mechanical.map_or(0.0, |m| m.imposed_traction_work_j),
         mechanical.map_or(0.0, |m| m.outward_kinetic_energy_j),
+        mechanical
+            .and_then(|m| m.velocity_boundary_work_j)
+            .unwrap_or(0.0),
+        mechanical
+            .and_then(|m| m.backflow_resistance_work_j)
+            .unwrap_or(0.0),
     ]
 }
 
@@ -246,21 +252,13 @@ impl Account {
             self.mechanical_seen = true;
             self.velocity_work_known &= mechanical.velocity_boundary_work_j.is_some();
             self.backflow_work_known &= mechanical.backflow_resistance_work_j.is_some();
-            for (slot, value) in [
-                mechanical.boundary_upwind_loss_j,
-                mechanical.velocity_boundary_work_j.unwrap_or(0.0),
-                mechanical.backflow_resistance_work_j.unwrap_or(0.0),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if !value.is_finite() {
-                    return Err(DepositionError::Arithmetic.into());
-                }
-                self.terms[8 + slot] = self.terms[8 + slot] + Dd::from_f64(value);
-                if !self.terms[8 + slot].to_f64().is_finite() {
-                    return Err(DepositionError::Arithmetic.into());
-                }
+            let numerical_loss = mechanical.boundary_upwind_loss_j;
+            if !numerical_loss.is_finite() {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            self.terms[10] = self.terms[10] + Dd::from_f64(numerical_loss);
+            if !self.terms[10].to_f64().is_finite() {
+                return Err(DepositionError::Arithmetic.into());
             }
         }
         Ok(())
@@ -316,9 +314,9 @@ impl Account {
             body_work_j: self.terms[5].to_f64(),
             imposed_traction_work_j: self.terms[6].to_f64(),
             outward_kinetic_energy_j: self.terms[7].to_f64(),
-            boundary_upwind_loss_j: self.terms[8].to_f64(),
-            velocity_boundary_work_j: self.velocity_work_known.then(|| self.terms[9].to_f64()),
-            backflow_resistance_work_j: self.backflow_work_known.then(|| self.terms[10].to_f64()),
+            boundary_upwind_loss_j: self.terms[10].to_f64(),
+            velocity_boundary_work_j: self.velocity_work_known.then(|| self.terms[8].to_f64()),
+            backflow_resistance_work_j: self.backflow_work_known.then(|| self.terms[9].to_f64()),
         });
         Ok((
             [

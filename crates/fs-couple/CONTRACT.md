@@ -14289,17 +14289,22 @@ boundary kinds and original finite receivers. Every source, native solve,
 heat, route, work or cancellation refusal leaves both input histories intact.
 
 The optional mechanical receipt independently evaluates additional body-force
-work with the original six-point triangle quadrature and accepted BDM basis,
-and supplied open-traction work with the original edge quadrature. Native
-retained boundary transport supplies signed outward carried kinetic energy and
+work with the original six-point triangle quadrature and accepted BDM basis.
+Accepted native reactions supply work conjugate to the actual prescribed
+velocity/Navier-slip wall data, supplied open-traction work and separate
+dissipative-backflow stress work. These retained powers use the same original
+boundary samples and endpoint material; no boundary callback is queried again.
+Their sign is positive into the fluid. All-velocity components use the returned
+zero pressure gauge, while traction components preserve their native datum.
+A velocity condition may carry throughflow and is not inferred to be a wall.
+Native retained transport supplies signed outward carried kinetic energy and
 separate numerical upwind loss. Extrusion depth and actual duration convert
-all observations to joules. Buoyancy retains its own source-density receipt;
-none of these mechanical quantities is deposited as heat. Generalized work
-on arbitrary prescribed-velocity/Navier-slip boundaries is explicitly None,
-since the original public reaction interface supplies rigid virtual work
-rather than that functional. Added dissipative-backflow stress work is likewise
-unclaimed when present. These selected exchanges do not certify complete
-mechanical energy or passivity.
+the SI per-depth observations to joules. Buoyancy keeps its independent
+source-density receipt. Physical Navier-slip heat follows its existing explicit
+fluid/wall partition exactly once; none of the mechanical observations or
+numerical losses is deposited as heat. These are discrete source exchanges,
+not pointwise traction estimates or complete mechanical energy/passivity
+certificates.
 
 Focused native regressions are authored for an endpoint-temperature actuator
 with an independent uniform-acceleration and linear-pressure solution, both
@@ -14502,17 +14507,17 @@ controller proposal. Original thermal inventory events remain subject to
 their independent native admission: mechanical events do not activate,
 consume or reinterpret thermal events.
 
-The shared physical comparison now checks selected mechanical body work,
-supplied traction work and signed carried kinetic energy separately from the
-existing bulk/slip/stream/other heat and buoyancy channels. Each channel checks
-both the signed coarse/fine defect and the defect between coarse magnitude and
-the sum of fine magnitudes, so opposing accounts or reversals cannot hide
-unresolved transfer behind net cancellation. Only accepted fine reports enter
-compensated totals. Numerical upwind loss remains a separate observation;
-unavailable generalized velocity-wall or dissipative backflow work remains
-explicitly unclaimed, and none of these mechanical/numerical accounts is
-deposited as heat. Final thermal storage is independently reconciled against
-the accepted original heat and stream exchanges.
+The shared physical comparison checks body work, generalized prescribed-fluid/
+slip-wall work, supplied traction work, dissipative-backflow stress work and
+signed carried kinetic energy separately from the existing bulk/slip/stream/
+other heat and buoyancy channels. Each channel checks both its signed
+coarse/fine defect and the defect between coarse magnitude and the sum of fine
+magnitudes, so opposing accounts or reversals cannot hide unresolved transfer
+behind cancellation. Only accepted fine reports enter compensated totals.
+Numerical upwind loss remains a separate observation and does not enter the
+physical work norm. No mechanical observation creates a heat source. Final
+thermal storage is independently reconciled against the accepted original
+heat and stream exchanges.
 
 All coarse, fine, rejected and terminal native calls share the original work
 ceilings. Material/drive/heat refusal, native physical failure and cancellation
@@ -14825,3 +14830,37 @@ and budget/cancellation refusals. Formatting, targeted API/accounting review
 and independent fixture endpoint arithmetic passed; full repository integration
 execution remains outstanding. The fixed-domain prescribed-motion limitations
 of the existing planar thermal endpoint remain unchanged.
+
+
+### Original generalized boundary work in coupled laminar evolution
+
+The driven endpoint now obtains supplied-traction, prescribed-velocity/
+Navier-slip wall and dissipative-backflow powers directly from the accepted
+native reaction owner. The original boundary quadrature, pressure reaction,
+endpoint viscosity, prescribed source trace and convective advector remain
+authoritative. Boundary callbacks are no longer resampled for reporting.
+The material owner supplies W/m with its original reference density; the
+coupler multiplies only by declared depth and actual interval duration.
+Mean-zero components explicitly retain their returned zero gauge and
+traction components retain their imposed datum.
+
+Both previously unknown work channels are present in native driven reports.
+They participate independently in the original adaptive signed and magnitude
+defects and accepted-only compensated totals. Numerical upwind loss remains
+outside the physical work norm. This observation occurs after private native
+thermal acceptance and never alters caloric coefficients, deposited energy
+or slip-heat routing. A failed power observation still rejects the complete
+candidate or adaptive window without publishing a prefix.
+
+A new prescribed-acceleration regression holds coarse/fine endpoint velocity
+and temperature equal while boundary source work alone requests refinement.
+It independently verifies accepted wall input equals kinetic gain plus the
+positive BDF damping defect, with no new thermal heat. The original decimal
+velocity-reversal regression now checks its independent 0.078 J prescribed
+input. A finite-slip coupling regression checks moving-wall source work,
+original bulk and relative-slip heat, explicit 25/75 percent fluid/wall
+partition and physical depth/time conversion; wall work is not deposited a
+second time. All six changed coupled Rust sources passed the pinned parser,
+formatter and rustfmt --check. Native FEM/thermal compilation and these
+integration test executions remain unverified; no numerical runtime pass is
+inferred from formatting or static review.

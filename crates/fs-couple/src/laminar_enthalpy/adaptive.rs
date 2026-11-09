@@ -44,7 +44,8 @@ pub struct LaminarAdaptiveControls {
     /// Euclidean physical BDM velocity error at every cell vertex [m/s].
     pub velocity_absolute_tolerance_m_s: f64,
     /// Applied separately to integrated bulk/slip/stream/other heat, buoyancy
-    /// work, and reported body/open-traction/carried-kinetic exchanges.
+    /// work, and reported body/prescribed-velocity/open-traction/backflow/
+    /// carried-kinetic exchanges. None is deposited as heat by this controller.
     /// Signed and resolved-magnitude defects are checked independently, so
     /// opposing accounts or reversals cannot hide behind net heat/work.
     pub transfer_absolute_tolerance_j: f64,
