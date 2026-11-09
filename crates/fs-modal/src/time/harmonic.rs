@@ -14,7 +14,9 @@ mod modulation;
 mod runtime;
 mod sensitivity;
 mod tones;
-pub use energy::{HarmonicForceFrame, PreparedHarmonicForce};
+pub use energy::{
+    HarmonicForceFrame, HarmonicPowerGradient, PreparedHarmonicForce, PreparedHarmonicPowerSensitivity,
+};
 pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
 pub use sensitivity::{

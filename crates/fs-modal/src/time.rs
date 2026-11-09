@@ -54,10 +54,11 @@ pub mod harmonic;
 pub use harmonic::{
     HarmonicForceFrame, HarmonicForceParameterSensitivity, HarmonicForcePhasePullback,
     HarmonicForcePullback, HarmonicForceSensitivityFrame, HarmonicForceTransition,
-    MAX_HARMONIC_TONES, ModalToneBudget, ModalTonePullback, ModalToneSensitivityBudget,
-    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
-    PreparedHarmonicForce, PreparedHarmonicForceSensitivity, PreparedModalHarmonic,
-    PreparedModalToneSensitivity, PreparedModalTones,
+    HarmonicPowerGradient, MAX_HARMONIC_TONES, ModalToneBudget, ModalTonePullback,
+    ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,
+    ModalToneSourceSensitivity, PreparedHarmonicForce, PreparedHarmonicForceSensitivity,
+    PreparedHarmonicPowerSensitivity, PreparedModalHarmonic, PreparedModalToneSensitivity,
+    PreparedModalTones,
 };
 
 /// Maximum number of modes admitted by one runtime model.

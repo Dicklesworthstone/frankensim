@@ -1,6 +1,10 @@
 //! Scalar harmonic motion with independently integrated work and viscous heat.
 
-use super::{HarmonicForceTransition, integrals::HarmonicIntegrals};
+pub use super::integrals::sensitivity::HarmonicPowerGradient;
+use super::{
+    HarmonicForceTransition, integrals::HarmonicIntegrals,
+    integrals::sensitivity::HarmonicIntegralSensitivity,
+};
 use crate::time::{ModalAcousticState, ModalAcousticTimeError};
 
 /// Endpoint and physical power integrals under one continuous force tone.
@@ -44,6 +48,43 @@ pub struct HarmonicForceFrame {
 pub struct PreparedHarmonicForce {
     motion: HarmonicForceTransition,
     integrals: HarmonicIntegrals,
+}
+
+/// Prepared derivatives of signed input work and positive viscous heat over a
+/// complete continuous-tone interval. The original energy cache is borrowed;
+/// its forward motion, heat square root and work form remain unchanged.
+///
+/// Preparation differentiates the existing short-interval power quadrature and
+/// its block composition. Queries allocate nothing and evaluate no transcendentals.
+/// State, force, k = omega^2, physical damping rate c, forcing frequency and
+/// initial phase are independent inputs. Duration and basis/mass changes are
+/// held fixed. This is a single coherent tone; simultaneous tones require their
+/// cross terms and cannot use a sum of independent heat gradients.
+pub struct PreparedHarmonicPowerSensitivity<'a> {
+    base: &'a PreparedHarmonicForce,
+    integrals: HarmonicIntegralSensitivity,
+}
+
+impl PreparedHarmonicPowerSensitivity<'_> {
+    /// Derivatives of each original physical power integral, including startup,
+    /// resonance and one-sided k=0/c=0 limits. The initial source quadratures
+    /// are held fixed for the local driving-frequency derivative. For several
+    /// accepted intervals also propagate the source-phase cotangents through
+    /// [`HarmonicForceTransition::pullback_force_phase`]. State cotangents pass
+    /// through the original motion pullback; local integral terms add to them.
+    ///
+    /// # Errors
+    /// Nonfinite inputs or unrepresentable physical derivatives; no partial
+    /// result is returned and the borrowed preparation remains reusable.
+    pub fn gradients(
+        &self,
+        state: ModalAcousticState,
+        cosine_force: f64,
+        sine_force: f64,
+    ) -> Result<HarmonicPowerGradient, ModalAcousticTimeError> {
+        self.integrals
+            .gradients(&self.base.integrals, state, cosine_force, sine_force)
+    }
 }
 
 impl PreparedHarmonicForce {
@@ -103,6 +144,19 @@ impl PreparedHarmonicForce {
     #[must_use]
     pub fn motion(&self) -> &HarmonicForceTransition {
         &self.motion
+    }
+
+    /// Cold-prepare analytic input-work and viscous-heat derivatives. The two
+    /// power integrals are differentiated independently; heat is never inferred
+    /// from a difference of large stored energies. A lossless trajectory has
+    /// exactly zero heat but retains its physical derivative with respect to c.
+    pub fn prepare_power_sensitivities(
+        &self,
+    ) -> Result<PreparedHarmonicPowerSensitivity<'_>, ModalAcousticTimeError> {
+        Ok(PreparedHarmonicPowerSensitivity {
+            base: self,
+            integrals: HarmonicIntegralSensitivity::prepare(&self.motion, &self.integrals)?,
+        })
     }
 
     /// Advance a supplied state and integrate signed work and positive heat.

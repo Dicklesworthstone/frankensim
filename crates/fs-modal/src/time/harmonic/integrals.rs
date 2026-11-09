@@ -4,6 +4,8 @@ use super::super::{ModalAcousticState, ModalAcousticTimeError};
 use super::{DampedTransition, HarmonicForceTransition, double_force, invalid, small_force};
 use fs_math::det;
 
+pub(super) mod sensitivity;
+
 type Matrix = [[f64; 4]; 4];
 
 pub(super) const NODES: [(f64, f64); 8] = [
@@ -133,18 +135,7 @@ impl HarmonicIntegrals {
         cosine_force: f64,
         sine_force: f64,
     ) -> Result<(f64, f64, f64, f64), ModalAcousticTimeError> {
-        let fc = self.duration * cosine_force;
-        let fs = self.duration * sine_force;
-        let restoring = (self.omega * state.displacement_m_sqrt_kg) * (self.omega * self.duration);
-        let x = [
-            state.velocity_m_sqrt_kg_per_s,
-            (fc - restoring) / self.scale,
-            fc / self.scale,
-            fs / self.scale,
-        ];
-        if !x.into_iter().all(f64::is_finite) {
-            return Err(invalid("harmonic power coordinates must be finite"));
-        }
+        let x = self.coordinates(state, cosine_force, sine_force)?;
         let mut heat = 0.0;
         let mut heat_scale = 0.0;
         for row in &self.heat_root {
@@ -176,6 +167,27 @@ impl HarmonicIntegrals {
             return Err(invalid("harmonic work and heat must be representable"));
         }
         Ok((work, work_allowance, heat, heat_allowance))
+    }
+
+    fn coordinates(
+        &self,
+        state: ModalAcousticState,
+        cosine_force: f64,
+        sine_force: f64,
+    ) -> Result<[f64; 4], ModalAcousticTimeError> {
+        let fc = self.duration * cosine_force;
+        let fs = self.duration * sine_force;
+        let restoring = (self.omega * state.displacement_m_sqrt_kg) * (self.omega * self.duration);
+        let x = [
+            state.velocity_m_sqrt_kg_per_s,
+            (fc - restoring) / self.scale,
+            fc / self.scale,
+            fs / self.scale,
+        ];
+        if !x.into_iter().all(f64::is_finite) {
+            return Err(invalid("harmonic power coordinates must be finite"));
+        }
+        Ok(x)
     }
 
     fn append_heat_row(&mut self, mut row: [f64; 4]) {

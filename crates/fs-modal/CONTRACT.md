@@ -974,6 +974,33 @@ for the simultaneous-tone owner. Analytic free-drag power integrals, tiny
 positive heat, negative DC source work, subdivision and bitwise bank agreement
 are exercised in `tests/harmonic_energy.rs`.
 
+`PreparedHarmonicForce::prepare_power_sensitivities` cold-prepares a borrowed
+`PreparedHarmonicPowerSensitivity`. Its `gradients` returns separate
+`HarmonicPowerGradient` entries for signed input work and viscous dissipation,
+with physical initial-state, cosine/sine force, stiffness k, damping rate c,
+forcing-frequency and common-phase derivatives. The original forward cache,
+heat square root and independently integrated work form remain unchanged.
+The derivative follows the original resolved Gaussian quadrature and exact
+block composition, including every term in the derivative of `Q + E^T Q E`.
+The balanced force-imbalance chart retains its fixed conditioning scale during
+differentiation; its physical k chain includes the initial-coordinate change.
+Heat differentiates `c*v^2` directly, so its right derivative at zero damping
+retains the integral of squared velocity even though the heat itself is zero.
+Neither power derivative is recovered from an endpoint-energy difference.
+
+Queries allocate nothing and evaluate no transcendental functions. Reverse
+trajectories add local power covectors to motion cotangents and propagate the
+shared source phase through `pullback_force_phase`. Duration, changing basis
+and mass normalization remain fixed. This is one coherent constant-envelope
+tone: independently differentiated single-tone heats do not replace simultaneous
+tone cross terms, and affine-envelope power derivatives are not supplied here.
+The derivatives are finite-arithmetic estimates, not rigorous error enclosures;
+nonfinite or unrepresentable queries refuse without mutating the preparation.
+G1/G3 checks in `tests/harmonic_power_sensitivities.rs` compare all physical
+partials with independently integrated variational ODEs, verify zero-loss/DC
+limits, differentiated energy balance, unequal-step source/state reverse
+chains, unit rescaling and reusable failure behavior.
+
 `time::PreparedModalHarmonic` connects that motion owner to the actual shared
 `ModalAcousticTimeModel::step_harmonic_into` runtime. Every retained mode has
 its own cosine/sine force at one prescribed frequency, including DC. The
