@@ -16,6 +16,9 @@ use fs_mbd::tangential_friction::hertz::rate_dependent::{
 use fs_mbd::tangential_friction::hertz::transient::HertzTransientControls;
 use fs_tribo::sliding_patch::rate_dependent::HertzFrictionQuadrature;
 
+/// Continuous drive, retained contact mode and original local-speed heat.
+pub mod driven;
+
 pub type RigidHertzRateHeatContact<'a> = RigidHertzHeatContact<'a, SourceThermalFriction>;
 pub type RigidHertzRateHeatError<E> =
     RigidHertzHeatError<E, RigidHertzRateTransientError, SourceHertzFrictionError>;

@@ -24,8 +24,8 @@ pub struct RigidHertzDrivenHeatControls {
 
 /// Publish the actual accepted mode, native pair and thermal state together.
 /// A resting mode is native mechanical state, not a velocity cutoff.
-pub struct HeatedRigidHertzDrivenMarch<'m, P> {
-    pub march: march::HeatedRigidHertzMarchCandidate<'m, P>,
+pub struct HeatedRigidHertzDrivenMarch<'m, P, F = SourceHertzWrench> {
+    pub march: march::HeatedRigidHertzMarchCandidate<'m, P, F>,
     pub mode_after: HertzDrivenMode,
 }
 

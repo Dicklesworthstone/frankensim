@@ -1,4 +1,7 @@
 //! G1/G3/G4: original temperature-resolved rate curves, real heat, and retry.
+#[path = "rate_dependent/driven.rs"]
+mod driven;
+
 use super::super::{bind_dry_interface_system_card, curve};
 use super::*;
 use fs_contact::interface_binding::thermal_friction::ThermalFrictionAxes;
@@ -267,24 +270,7 @@ fn sourced_affine_slide_and_spin_heat_match_independent_motion_and_thermal_roots
 // (3π/16) * 1F1(3/2;3;-(ωa/v0)^2). Its rapidly convergent beta-integral
 // series is independent of the production radial Gauss rule.
 fn stribeck_spin(theta: f64, dt: f64) -> f64 {
-    let torque = |w: f64| {
-        let z = w * radius() / (0.1 + 0.001 * theta);
-        let (mut term, mut sum) = (1.0, 1.0);
-        for n in 0..64 {
-            term *= -z * z * (n as f64 + 1.5) / ((n as f64 + 3.0) * (n as f64 + 1.0));
-            sum += term;
-            if term.abs() < 1e-18 {
-                break;
-            }
-        }
-        let mu_s = 0.8 - 0.005 * theta;
-        let mu_k = MU[0] - SLOPE[0] * theta;
-        let k = 0.3 + 0.005 * theta;
-        -mobility(true)
-            * 10.0
-            * (radius() * 3.0 * core::f64::consts::PI / 16.0 * (mu_k + (mu_s - mu_k) * sum)
-                + 0.4 * radius().powi(2) * k * w)
-    };
+    let torque = |w: f64| -mobility(true) * stribeck_spin_torque(theta, w);
     let h = dt / 800.0;
     let mut w = 3.0;
     for _ in 0..800 {
@@ -295,6 +281,23 @@ fn stribeck_spin(theta: f64, dt: f64) -> f64 {
         w += h * (a + 2.0 * b + 2.0 * c + d) / 6.0;
     }
     w
+}
+
+fn stribeck_spin_torque(theta: f64, w: f64) -> f64 {
+    let z = w * radius() / (0.1 + 0.001 * theta);
+    let (mut term, mut sum) = (1.0, 1.0);
+    for n in 0..64 {
+        term *= -z * z * (n as f64 + 1.5) / ((n as f64 + 3.0) * (n as f64 + 1.0));
+        sum += term;
+        if term.abs() < 1e-18 {
+            break;
+        }
+    }
+    let mu_s = 0.8 - 0.005 * theta;
+    let mu_k = MU[0] - SLOPE[0] * theta;
+    let k = 0.3 + 0.005 * theta;
+    10.0 * (radius() * 3.0 * core::f64::consts::PI / 16.0 * (mu_k + (mu_s - mu_k) * sum)
+        + 0.4 * radius().powi(2) * k * w)
 }
 
 #[test]

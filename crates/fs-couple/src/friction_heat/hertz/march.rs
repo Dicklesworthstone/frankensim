@@ -11,6 +11,9 @@ use super::*;
 use fs_contact::interface_binding::thermal_friction::rate_dependent::SourceHertzFrictionError;
 use fs_math::dd::Dd;
 use fs_mbd::tangential_friction::hertz::driven::{RigidHertzDrivenError, RigidHertzDrivenReport};
+use fs_mbd::tangential_friction::hertz::rate_dependent::driven::{
+    RigidHertzRateDrivenError, RigidHertzRateDrivenReport,
+};
 use fs_mbd::tangential_friction::hertz::rate_dependent::{
     RigidHertzRateTransientError, RigidHertzRateTransientReport,
 };
@@ -34,6 +37,7 @@ pub enum HertzHeatMarchMotion {
     Curved(RigidHertzTransientReport),
     RateDependent(RigidHertzRateTransientReport),
     Driven(RigidHertzDrivenReport),
+    RateDriven(RigidHertzRateDrivenReport),
 }
 impl HertzHeatMarchMotion {
     fn travel(&self, radius: f64) -> [f64; 3] {
@@ -46,7 +50,10 @@ impl HertzHeatMarchMotion {
             | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => {
                 (m.transient.slip_increment_m, m.transient.spin_increment_rad)
             }
-            Self::Driven(m) => (m.driven.slip_increment_m, m.driven.spin_increment_rad),
+            Self::Driven(m)
+            | Self::RateDriven(RigidHertzRateDrivenReport { mechanical: m, .. }) => {
+                (m.driven.slip_increment_m, m.driven.spin_increment_rad)
+            }
         };
         [slip[0], slip[1], radius * spin]
     }
@@ -55,6 +62,9 @@ impl HertzHeatMarchMotion {
             // Driven held-traction time resolution has a separate native
             // refinement control, not an embedded trajectory error estimate.
             Self::InvariantDirection(_) | Self::Driven(_) => [0.0; 2],
+            // Genuine Coulomb delegation declares unavailable adaptive
+            // estimates; its zero fields retain the independent time-step axis.
+            Self::RateDriven(m) => [m.estimated_scaled_travel_error_m, m.estimated_heat_error_j],
             Self::Curved(m)
             | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => [
                 m.transient.estimated_scaled_travel_error_m
@@ -69,7 +79,10 @@ impl HertzHeatMarchMotion {
     }
     fn external_work_j(&self) -> f64 {
         match self {
-            Self::Driven(m) => m.external_work_j,
+            Self::Driven(m)
+            | Self::RateDriven(RigidHertzRateDrivenReport { mechanical: m, .. }) => {
+                m.external_work_j
+            }
             _ => 0.0,
         }
     }
@@ -155,6 +168,7 @@ pub enum HertzHeatMarchError<E> {
     Curved(RigidHertzHeatError<E, RigidHertzTransientError>),
     RateDependent(RigidHertzHeatError<E, RigidHertzRateTransientError, SourceHertzFrictionError>),
     Driven(RigidHertzHeatError<E, RigidHertzDrivenError>),
+    RateDriven(RigidHertzHeatError<E, RigidHertzRateDrivenError, SourceHertzFrictionError>),
     Dynamics(DynamicsError),
     Cancelled,
     Budget(&'static str),

@@ -1,3 +1,30 @@
+## Driven full-curve Hertz friction with original thermal sources
+
+`friction_heat::hertz::rate_dependent::driven` connects the original local-speed
+Hertz initial-value trajectory to all selected `SourceThermalFriction` curve
+parameters. Each trial refreshes the same pinned claims at the solved common-face
+temperature and advances the captured body pair, held external wrenches and
+explicit contact mode. The existing finite-cell phase solve owns physical heat
+and source admission; motor work remains a separate mechanical supply.
+
+The original mode-aware full/two-half marcher carries accepted bodies, mode,
+caloric state and source receipts together. Native estimated travel and heat
+errors enter the existing local comparisons alongside whole-span independent
+mechanical, thermal and combined work balances. No parallel source model, thermal
+store or adaptive controller is introduced. Coarse/fine mode disagreement,
+source-domain failure, unresolved original-law events and late cancellation
+refuse without publishing any private candidate.
+
+Spatial pressure, mechanical integration and thermal-window errors remain
+independent axes. Geometry, normal load, radius, inertia, footprint and external
+drive stay held per phase. Genuine Coulomb retains its original event path and
+explicitly unavailable adaptive error estimates; other curves refuse unresolved
+driven zero-rate events. No automatic weakening-root selection or general
+nonconstant driven arrest is claimed. Direct tests compare exact affine motor
+and finite-cell roots, an independent Stribeck spin pressure integral, continuous
+feedback in both dry strength and speed slope with separate power integrals,
+original source identities, static cooling and atomic retry.
+
 ## Driven Hertz friction, finite-cell heat and retained contact mode
 
 `friction_heat::hertz::driven` proposes original two-body driven shear/spin
