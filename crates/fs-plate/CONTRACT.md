@@ -2768,3 +2768,29 @@ The three cases in
 compatibility, mixed-layer original-tensor stress and retained-heat behavior,
 and transverse-viscosity/resource refusal. Native execution is required before
 claiming numerical or complete runtime validation.
+
+### Dispersive loaded-assembly frequency curvature
+
+`PreparedAssemblyPortHarmonicResponse::solve_with_frequency_curvature`
+reuses the original coupled factor and native second-frequency solve. Complete
+original force/moment slopes and curvatures pass through the existing
+support/tie projection; both full complex load derivatives retain all mutual
+entries. Existing first-frequency physical recovery is shared unchanged.
+Second displacement/velocity fields, port flows and supported/slave reactions
+are then recovered through the same original maps. Independent source and
+signed boundary-work curvatures retain both cross terms and are checked
+against the native modal work and complete physical power balance. External
+work remains separate from symmetric glue heat.
+
+The returned source/load/glue power-curvature samples feed the shared actual
+power-resonance queries. Neither an unloaded modal frequency nor an assumed
+Lorentzian supplies a power maximum. Geometry, equilibrium, support/tie map,
+attachment, retained basis and active connection branch remain fixed. This
+adds neither a modal truncation certificate nor load storage/heat attribution.
+Physical recovery has explicit whole-request byte/projection-work limits
+in addition to native harmonic budgets, checked before allocation; cancellation
+or refusal leaves the original body and factor reusable.
+The full shell fixture in `harmonic/ports/tests/curvature.rs` compares the
+actual accepted one-mode shell and supported reactions with an independently
+differentiated scalar Maxwell equation. Its full equilibrium/eigen-window
+constructor is outside bounded numerical verification.

@@ -21,6 +21,8 @@ use fs_vfit::mimo::load::{MimoLoadError, PreparedMimoLoad};
 /// Exact joint motion and original MIMO history at the admitted source clock.
 pub mod transient;
 
+mod curvature;
+
 /// Source-band/admission, structural solve or cancellation refusal.
 #[derive(Debug)]
 pub enum AssemblyMimoHarmonicError {

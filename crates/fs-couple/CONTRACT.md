@@ -12120,3 +12120,23 @@ owners against independent complete equations, changing interfaces, DC,
 dilation and five-order balances. The original tetrahedral FE regression is
 also defined in `resonance_tests.rs`; the bounded native verification does not
 execute its full geometry/assembly dependency closure.
+
+### Source-bound shell radiation-load curvature
+
+`PreparedAssemblyMimoHarmonicResponse::solve_with_frequency_curvature`
+binds the original admitted continuous MIMO source to the loaded shell's
+complete physical curvature path. Source-owned analytic Z_s and Z_ss become
+Z_omega=-i*Z_s and Z_omegaomega=-Z_ss on the structural exp(-i*omega*t)
+axis. Source phase/curvature, real and conjugate poles and all mutual entries
+remain; no impedance is frozen, refitted or interpolated. The original source
+band, port ordering, pole history, clock and admission reports are unchanged.
+
+Three source matrices require 48*p*p additional bytes and work score
+1024*p*p*(expanded_order+1), reserved before evaluation and deducted from
+the native curvature allowance. Physical support/tie/port recovery retains
+its own complete budget. The source's independent validity/passivity class
+does not gain broadband authority from a local derivative.
+Focused native tests combine the actual admitted source and modal owners with
+an independently cleared Maxwell memory equation, its asymmetric physical
+power curve and maximum at sqrt(2), coherent source-phase invariance,
+history/report retention and band/resource/cancellation refusals.

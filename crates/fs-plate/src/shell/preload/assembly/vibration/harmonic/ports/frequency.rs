@@ -86,6 +86,16 @@ impl PreparedAssemblyPortHarmonicResponse<'_, '_, '_, '_> {
             controls,
             cx,
         )?;
+        self.recover_frequency(assembly, component_loads, component_load_derivatives, cx)
+    }
+
+    pub(super) fn recover_frequency(
+        &self,
+        assembly: AssemblyHarmonicFrequencyResponse,
+        component_loads: &[&[C64]],
+        component_load_derivatives: Option<&[&[C64]]>,
+        cx: &Cx<'_>,
+    ) -> Result<AssemblyPortHarmonicFrequencyResponse, String> {
         let load = assembly
             .modal
             .response

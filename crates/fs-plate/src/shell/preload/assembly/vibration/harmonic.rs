@@ -267,6 +267,18 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
                 cx,
             )
             .map_err(|e| e.to_string())?;
+        self.recover_frequency(modal, component_loads, component_load_derivatives, cx)
+    }
+
+    // The physical recovery is shared by first- and second-frequency solves.
+    // Both consume the same native factor response, without solving twice.
+    fn recover_frequency(
+        &self,
+        modal: HarmonicFrequencyResponse,
+        component_loads: &[&[C64]],
+        component_load_derivatives: Option<&[&[C64]]>,
+        cx: &Cx<'_>,
+    ) -> Result<AssemblyHarmonicFrequencyResponse, String> {
         let perturbation_displacements = self.expand(&modal.response.displacement, cx)?;
         let velocities = self.expand(&modal.response.velocity, cx)?;
         let displacement_derivatives = self.expand(&modal.displacement_derivative, cx)?;

@@ -10,6 +10,7 @@ use crate::shell::preload::assembly::vibration::{WindowPlan, eigen_windows};
 use crate::shell::preload::tests::reference_newton;
 use fs_exec::CancelGate;
 
+mod curvature;
 mod frequency;
 
 fn model_budget() -> AssemblyHarmonicBudget {

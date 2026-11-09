@@ -15,6 +15,8 @@ use fs_modal::harmonic::{
 
 mod frequency;
 pub use frequency::{AssemblyPortFrequencyBudget, AssemblyPortHarmonicFrequencyResponse};
+mod curvature;
+pub use curvature::{AssemblyPortCurvatureBudget, AssemblyPortHarmonicCurvatureResponse};
 
 /// One immutable physical attachment, in original component/DOF order.
 #[derive(Clone, Debug)]
