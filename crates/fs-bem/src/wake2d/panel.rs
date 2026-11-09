@@ -13,6 +13,8 @@ use fs_vpm::{VortexParticle, induced_velocity};
 
 mod adaptive;
 pub use adaptive::{PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport};
+mod incident;
+use incident::IncidentField;
 
 #[derive(Debug, Clone)]
 pub(super) struct PanelCoupling {
@@ -141,8 +143,14 @@ impl WakeSim {
     /// The original wake, angle, panel state and history survive any refusal.
     pub fn step_panel_coupled_at_angle(&mut self, alpha_chord: f64) -> Result<(), BemError> {
         self.admit_panel_incidence(alpha_chord)?;
-        self.advance_panels(alpha_chord, 1, None, &mut || false)
-            .map(|_| ())
+        self.advance_panels(
+            alpha_chord,
+            1,
+            None,
+            &mut IncidentField::uniform(),
+            &mut || false,
+        )
+        .map(|_| ())
     }
 
     /// Refine wake transport without emitting extra vortices or changing the
@@ -173,7 +181,75 @@ impl WakeSim {
         options: PanelWakeTransportOptions,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PanelWakeTransportReport, BemError> {
-        checkpoint(&mut cancelled)?;
+        self.advance_panel_transport(
+            alpha_chord,
+            options,
+            &mut IncidentField::uniform(),
+            &mut cancelled,
+        )
+    }
+
+    /// Advance the native coupled wake in a prescribed external velocity field.
+    ///
+    /// `incident_variation(point, time)` ADDS to the unit reference freestream
+    /// at `alpha_chord`. It is sampled at every panel midpoint and every wake
+    /// stage position, at the actual initial/midpoint/endpoint time. The same
+    /// field enters normal-flow and Kutta equations, Kelvin shedding and wake
+    /// convection. Exclude this body's induced field and its shed vortices:
+    /// those are already supplied by the native coupled owner.
+    ///
+    /// Coordinates are in the fixed local chord frame, lengths divided by the
+    /// reference chord `c`, velocities by one FIXED positive reference speed
+    /// `U_ref`, and absolute time by `c/U_ref`. Changing physical airspeed does
+    /// not change these scales or reset the clock. A dimensional field is
+    /// sampled at `x_world = x_le + c*R*point`, `t = time*c/U_ref`, transformed
+    /// into the chord frame and divided by `U_ref` before subtracting the base
+    /// freestream. Published circulation scales as `U_ref*c`; the reference
+    /// steady-circulation diagnostic still concerns the uniform base flow.
+    /// No unsteady pressure or force coefficient is inferred from circulation.
+    ///
+    /// Smooth prescribed potential-flow disturbances, such as uniform gusts
+    /// and irrotational strain, retain the model's incompressible attached-flow
+    /// interpretation. The callback is not a divergence/curl validator. Any
+    /// imposed vortical field and its sources remain external; Kelvin accounting
+    /// closes only the body and internally shed wake, not that external field.
+    /// The body and original packet-release placement remain fixed. Resolve
+    /// field variation with the existing transport refinement and split input
+    /// discontinuities at interval boundaries. Repeated queries at the same
+    /// position/time must return the same field during a step.
+    ///
+    /// A zero variation preserves the original arithmetic. The existing solve,
+    /// panel and vortex limits bound the number of samples; each callback is
+    /// checked for cancellation before and after invocation. Callback side
+    /// effects are outside the transaction; accepted wake/history/panel state
+    /// change only after the complete interval succeeds.
+    ///
+    /// # Errors
+    /// Original transport refusals, callback errors, nonfinite prescribed flow
+    /// or an unrepresentable total incident velocity. All refuse atomically.
+    pub fn step_panel_coupled_with_incident(
+        &mut self,
+        alpha_chord: f64,
+        options: PanelWakeTransportOptions,
+        mut incident_variation: impl FnMut([f64; 2], f64) -> Result<[f64; 2], BemError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PanelWakeTransportReport, BemError> {
+        self.advance_panel_transport(
+            alpha_chord,
+            options,
+            &mut IncidentField::new(&mut incident_variation),
+            &mut cancelled,
+        )
+    }
+
+    fn advance_panel_transport(
+        &mut self,
+        alpha_chord: f64,
+        options: PanelWakeTransportOptions,
+        incident: &mut IncidentField<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PanelWakeTransportReport, BemError> {
+        checkpoint(cancelled)?;
         self.admit_panel_incidence(alpha_chord)?;
         admit_substeps(self.dt, options.substeps)?;
         admit_displacement_fraction(options.max_displacement_fraction)?;
@@ -192,7 +268,8 @@ impl WakeSim {
             alpha_chord,
             options.substeps,
             options.max_displacement_fraction,
-            &mut cancelled,
+            incident,
+            cancelled,
         )
     }
 
@@ -216,8 +293,14 @@ impl WakeSim {
     }
 
     pub(super) fn step_panels(&mut self) -> Result<(), BemError> {
-        self.advance_panels(self.alpha, 1, None, &mut || false)
-            .map(|_| ())
+        self.advance_panels(
+            self.alpha,
+            1,
+            None,
+            &mut IncidentField::uniform(),
+            &mut || false,
+        )
+        .map(|_| ())
     }
 
     fn advance_panels(
@@ -225,6 +308,7 @@ impl WakeSim {
         alpha: f64,
         substeps: usize,
         max_displacement_fraction: Option<f64>,
+        incident: &mut IncidentField<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PanelWakeTransportReport, BemError> {
         // Fixed refinement admitted the complete count before preparation;
@@ -234,6 +318,7 @@ impl WakeSim {
             substeps,
             max_displacement_fraction,
             &mut budget,
+            incident,
             cancelled,
         )?;
         let report = candidate.report;
@@ -285,6 +370,7 @@ struct PreparedTransport<'a> {
     freestream: [f64; 2],
     core: f64,
     dt: f64,
+    start_time: f64,
     time: f64,
     previous_bound: f64,
     steady_gamma: f64,
@@ -345,6 +431,7 @@ impl<'a> PreparedTransport<'a> {
             freestream,
             core: fs_math::det::sqrt(wake.core2),
             dt: wake.dt,
+            start_time: wake.history.len() as f64 * wake.dt,
             time: (wake.history.len() as f64 + 1.0) * wake.dt,
             previous_bound: wake.history.last().map_or(0.0, |row| row.bound),
             steady_gamma,
@@ -356,6 +443,7 @@ impl<'a> PreparedTransport<'a> {
         substeps: usize,
         max_displacement_fraction: Option<f64>,
         budget: &mut CoupledSolveBudget,
+        incident: &mut IncidentField<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<TransportCandidate, BemError> {
         let started = budget.used;
@@ -366,6 +454,8 @@ impl<'a> PreparedTransport<'a> {
         let mut peak = 0.0_f64;
         let mut maximum_fraction = 0.0_f64;
         for step in 0..substeps {
+            let first_time = self.start_time + step as f64 * h;
+            let middle_time = self.start_time + (step as f64 + 0.5) * h;
             let first = self.workspace.solve(
                 self.panels,
                 &mut candidate,
@@ -373,6 +463,8 @@ impl<'a> PreparedTransport<'a> {
                 self.core,
                 self.previous_bound,
                 budget,
+                incident,
+                first_time,
                 cancelled,
             )?;
             for (i, (p, q)) in candidate.iter().zip(&mut self.midpoint).enumerate() {
@@ -383,6 +475,9 @@ impl<'a> PreparedTransport<'a> {
                     p.pos,
                     self.freestream,
                     self.core,
+                    incident,
+                    first_time,
+                    cancelled,
                 )?;
                 if step == 0 {
                     peak = peak.max(fs_math::det::sqrt(v[0].mul_add(v[0], v[1] * v[1])));
@@ -403,6 +498,8 @@ impl<'a> PreparedTransport<'a> {
                 self.core,
                 self.previous_bound,
                 budget,
+                incident,
+                middle_time,
                 cancelled,
             )?;
             for (i, (p, q)) in candidate.iter_mut().zip(&self.midpoint).enumerate() {
@@ -413,6 +510,9 @@ impl<'a> PreparedTransport<'a> {
                     q.pos,
                     self.freestream,
                     self.core,
+                    incident,
+                    middle_time,
+                    cancelled,
                 )?;
                 maximum_fraction = maximum_fraction.max(stage_fraction(
                     v,
@@ -433,6 +533,8 @@ impl<'a> PreparedTransport<'a> {
             self.core,
             self.previous_bound,
             budget,
+            incident,
+            self.time,
             cancelled,
         )?;
         if !self.time.is_finite() || !peak.is_finite() || !self.steady_gamma.is_finite() {
@@ -519,6 +621,8 @@ impl CouplingWorkspace {
         core: f64,
         previous_bound: f64,
         budget: &mut CoupledSolveBudget,
+        incident: &mut IncidentField<'_>,
+        time: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PanelState2d, BemError> {
         for (i, (vortex, particle)) in wake.iter().zip(&mut self.particles).enumerate() {
@@ -539,7 +643,8 @@ impl CouplingWorkspace {
                 checkpoint(cancelled)?;
             }
             let induced = induced_velocity(&self.particles[..retained], point, core);
-            self.incident[i] = [freestream[0] + induced[0], freestream[1] + induced[1]];
+            let external = incident.velocity(freestream, point, time, cancelled)?;
+            self.incident[i] = [external[0] + induced[0], external[1] + induced[1]];
             self.newborn[i] = induced_velocity(core::slice::from_ref(&unit), point, core);
         }
         checkpoint(cancelled)?;
@@ -551,6 +656,7 @@ impl CouplingWorkspace {
         Ok(state)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn velocity(
         &self,
         panels: &PreparedPanel2d,
@@ -558,12 +664,16 @@ impl CouplingWorkspace {
         point: [f64; 2],
         freestream: [f64; 2],
         core: f64,
+        incident: &mut IncidentField<'_>,
+        time: f64,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 2], BemError> {
         let body = panels.body_velocity(state, point)?;
         let wake = induced_velocity(&self.particles, point, core);
+        let external = incident.velocity(freestream, point, time, cancelled)?;
         let velocity = [
-            freestream[0] + body[0] + wake[0],
-            freestream[1] + body[1] + wake[1],
+            external[0] + body[0] + wake[0],
+            external[1] + body[1] + wake[1],
         ];
         if velocity.iter().any(|x| !x.is_finite()) {
             return Err(BemError::NonFiniteResult {

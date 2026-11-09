@@ -361,6 +361,32 @@ fixed-result parity, reused-trial work accounting, guard retries and refusal;
 the native modules check origin-independent error scaling and rollback on a
 body-contact candidate (G0/G3).
 
+### Prescribed incident velocity in the native panel wake
+
+`step_panel_coupled_with_incident` and `step_panel_coupled_adaptive_with_incident`
+add one external velocity variation to the held reference freestream. The same
+callback is sampled at actual panel/wake positions and absolute RK stage times
+inside the original boundary, Kutta/Kelvin and transport owners. Endpoint panel
+states include the endpoint field. Adaptive retries replay the same prescribed
+field; they do not advance an independent forcing clock. Zero variation retains
+the original arithmetic, solve counts and accepted results.
+
+The local chord frame and reference scales stay fixed: lengths use chord `c`,
+velocities use a positive `U_ref`, times use `c/U_ref`, and circulation uses
+`U_ref*c`. Changing airspeed does not renormalize state or time. The no-wake
+steady-circulation diagnostic remains tied to the uniform base reference flow;
+accepted total-field circulation is in the panel state and history. Existing
+release placement, shedding discretization and no-unsteady-pressure/load claims
+remain. Callback side effects are external; any failure withholds physical state.
+
+Smooth potential-flow disturbances support the original incompressible attached
+interpretation. The owner does not validate divergence/curl or evolve externally
+imposed vorticity; its Kelvin inventory concerns the body and internally shed
+wake only. The external field excludes this body's and wake's induced velocities.
+Regressions use uniform gusts and irrotational trace-free strain, reconstruct the
+accepted boundary independently, check changed circulation/shedding/trajectories,
+stage-time refinement/adaptive replay, exact zero-field parity and atomic refusal.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

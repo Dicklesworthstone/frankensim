@@ -1,7 +1,7 @@
 //! Bounded step doubling of one Kelvin-coupled shedding interval.
 
 use super::{
-    BemError, CoupledSolveBudget, PreparedTransport, TransportCandidate, WakeSim,
+    BemError, CoupledSolveBudget, IncidentField, PreparedTransport, TransportCandidate, WakeSim,
     admit_displacement_fraction, admit_substeps, checkpoint,
 };
 
@@ -83,10 +83,58 @@ impl WakeSim {
         options: PanelWakeAdaptiveOptions,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PanelWakeAdaptiveReport, BemError> {
-        checkpoint(&mut cancelled)?;
+        self.advance_panel_adaptive(
+            alpha_chord,
+            options,
+            &mut IncidentField::uniform(),
+            &mut cancelled,
+        )
+    }
+
+    /// Adapt the same native wake transport in a prescribed incident field.
+    ///
+    /// The callback and fixed reference scales have exactly the semantics of
+    /// [`Self::step_panel_coupled_with_incident`]. Every coarse/fine trial samples
+    /// the same field at its actual panel/wake positions and absolute stage
+    /// times. Retrying never advances a forcing clock or sheds another packet.
+    /// The callback must reproduce the field for repeated position/time queries;
+    /// its external side effects are not rolled back.
+    ///
+    /// The existing error estimate controls the smooth prescribed-field ODE's
+    /// temporal position error, not callback uncertainty, panel/core/shedding
+    /// error, external-vorticity evolution or unsteady pressure loads. The
+    /// original coupled-solve cap includes all trials, and their panel/vortex
+    /// ceilings bound the number of incident samples.
+    ///
+    /// # Errors
+    /// Original adaptive refusals plus callback/nonfinite-flow refusals. The
+    /// accepted wake, body solution and history survive every failed trial.
+    pub fn step_panel_coupled_adaptive_with_incident(
+        &mut self,
+        alpha_chord: f64,
+        options: PanelWakeAdaptiveOptions,
+        mut incident_variation: impl FnMut([f64; 2], f64) -> Result<[f64; 2], BemError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PanelWakeAdaptiveReport, BemError> {
+        self.advance_panel_adaptive(
+            alpha_chord,
+            options,
+            &mut IncidentField::new(&mut incident_variation),
+            &mut cancelled,
+        )
+    }
+
+    fn advance_panel_adaptive(
+        &mut self,
+        alpha_chord: f64,
+        options: PanelWakeAdaptiveOptions,
+        incident: &mut IncidentField<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PanelWakeAdaptiveReport, BemError> {
+        checkpoint(cancelled)?;
         self.admit_panel_incidence(alpha_chord)?;
         admit_options(self.dt, options)?;
-        let mut transport = PreparedTransport::new(self, alpha_chord, &mut cancelled)?;
+        let mut transport = PreparedTransport::new(self, alpha_chord, cancelled)?;
         let mut budget = CoupledSolveBudget::new(options.max_coupled_solves);
         let mut substeps = options.initial_substeps;
         let mut coarse = None;
@@ -94,12 +142,13 @@ impl WakeSim {
         let mut guard_refusals = 0;
         let mut rejected_comparisons = 0;
         loop {
-            checkpoint(&mut cancelled)?;
+            checkpoint(cancelled)?;
             let candidate = match transport.integrate(
                 substeps,
                 options.max_displacement_fraction,
                 &mut budget,
-                &mut cancelled,
+                incident,
+                cancelled,
             ) {
                 Ok(candidate) => candidate,
                 Err(BemError::InvalidScalar {
@@ -117,7 +166,7 @@ impl WakeSim {
             completed_trials += 1;
             if let Some(previous) = coarse.take() {
                 let (error, ratio) =
-                    compare(&transport, &previous, &candidate, options, &mut cancelled)?;
+                    compare(&transport, &previous, &candidate, options, cancelled)?;
                 if ratio <= 1.0 {
                     let report = PanelWakeAdaptiveReport {
                         substeps,
@@ -130,7 +179,7 @@ impl WakeSim {
                         max_displacement_fraction: candidate.report.max_displacement_fraction,
                     };
                     drop(transport);
-                    self.publish_panel_transport(candidate, &mut cancelled)?;
+                    self.publish_panel_transport(candidate, cancelled)?;
                     return Ok(report);
                 }
                 rejected_comparisons += 1;

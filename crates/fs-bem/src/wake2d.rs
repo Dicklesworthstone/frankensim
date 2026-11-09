@@ -177,6 +177,9 @@ impl WakeSim {
 
     /// Steady circulation scale. The original screen uses pressure-derived
     /// `Cl/2`; the panel-coupled mode uses the actual bound sheet circulation.
+    /// With a prescribed incident variation, this remains the no-wake steady
+    /// circulation of the uniform BASE reference flow. The accepted total-field
+    /// circulation is published in [`Self::panel_state`] and [`Self::history`].
     #[must_use]
     pub fn steady_circulation(&self) -> f64 {
         self.steady_gamma

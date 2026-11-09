@@ -20,18 +20,33 @@ fn circulation(wake: &WakeSim) -> f64 {
 }
 
 fn assert_boundary(wake: &WakeSim, panels: &PreparedPanel2d, alpha: f64, core: f64) {
+    assert_incident_boundary(wake, panels, alpha, core, |_, _| [0.0; 2]);
+}
+
+fn assert_incident_boundary(
+    wake: &WakeSim,
+    panels: &PreparedPanel2d,
+    alpha: f64,
+    core: f64,
+    variation: impl Fn([f64; 2], f64) -> [f64; 2],
+) {
     let particles: Vec<_> = wake
         .wake()
         .iter()
         .map(|vortex| vortex.as_particle())
         .collect();
     let freestream = [fs_math::det::cos(alpha), fs_math::det::sin(alpha)];
+    let time = wake.history().last().unwrap().t;
     let incident: Vec<_> = panels
         .midpoints()
         .iter()
         .map(|&point| {
             let u = fs_vpm::induced_velocity(&particles, point, core);
-            [freestream[0] + u[0], freestream[1] + u[1]]
+            let change = variation(point, time);
+            [
+                (freestream[0] + change[0]) + u[0],
+                (freestream[1] + change[1]) + u[1],
+            ]
         })
         .collect();
     // Independent ordinary solve from the entire accepted wake. This does
@@ -617,4 +632,280 @@ fn invalid_adaptive_options_preserve_the_existing_wake() {
             .is_err()
     );
     assert!(legacy.history().is_empty());
+}
+
+// Gradient of a smooth potential: spatial divergence and curl are both zero.
+// The reference speed remains fixed while the uniform gust changes in time.
+fn potential_variation(point: [f64; 2], time: f64) -> [f64; 2] {
+    [
+        0.2 * time + 0.08 * (point[0] - 0.5),
+        0.03 + 0.5 * time + 4.0 * time * time - 0.08 * point[1],
+    ]
+}
+
+#[test]
+fn zero_incident_variation_preserves_fixed_and_adaptive_arithmetic() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.04).unwrap();
+    for _ in 0..3 {
+        start.step().unwrap();
+    }
+    for substeps in [1, 4] {
+        let mut plain = start.clone();
+        let mut explicit = start.clone();
+        let expected = plain
+            .step_panel_coupled_with_transport(0.12, transport(substeps), || false)
+            .unwrap();
+        let actual = explicit
+            .step_panel_coupled_with_incident(
+                0.12,
+                transport(substeps),
+                |_, _| Ok([0.0, -0.0]),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_same_native_state(&plain, &explicit);
+    }
+    let mut plain = start.clone();
+    let mut explicit = start;
+    let expected = plain
+        .step_panel_coupled_adaptive(0.12, adaptive(1e-8), || false)
+        .unwrap();
+    let actual = explicit
+        .step_panel_coupled_adaptive_with_incident(
+            0.12,
+            adaptive(1e-8),
+            |_, _| Ok([0.0; 2]),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_same_native_state(&plain, &explicit);
+}
+
+#[test]
+fn spatial_gust_drives_panel_circulation_shedding_and_wake_at_actual_stage_times() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let (alpha, dt, core) = (0.08, 0.02, 0.04);
+    let mut start = WakeSim::new_panel_coupled(&foil, alpha, dt, core).unwrap();
+    start.step().unwrap();
+    let start_time = start.history().last().unwrap().t;
+    let mut sampled = Vec::new();
+    let mut forced = start.clone();
+    forced
+        .step_panel_coupled_with_incident(
+            alpha,
+            transport(2),
+            |point, time| {
+                sampled.push((point, time));
+                Ok(potential_variation(point, time))
+            },
+            || false,
+        )
+        .unwrap();
+    let expected_times: Vec<_> = (0..=4).map(|i| start_time + i as f64 * dt / 4.0).collect();
+    for &expected in &expected_times {
+        assert!(
+            sampled
+                .iter()
+                .any(|(_, time)| (*time - expected).abs() < 1e-17)
+        );
+    }
+    assert!(
+        sampled
+            .iter()
+            .all(|(_, time)| expected_times.iter().any(|t| (*time - t).abs() < 1e-17))
+    );
+    assert!(sampled.iter().any(|(point, _)| point[0] < 0.5));
+    assert!(sampled.iter().any(|(point, _)| point[0] > 1.0));
+    assert_incident_boundary(&forced, &panels, alpha, core, potential_variation);
+    assert_eq!(forced.history().len(), start.history().len() + 1);
+    assert_eq!(forced.wake().len(), start.wake().len() + 1);
+    for (old, next) in start.wake().iter().zip(forced.wake()) {
+        assert_eq!(old.gamma.to_bits(), next.gamma.to_bits());
+    }
+    let mut plain = start.clone();
+    plain
+        .step_panel_coupled_with_transport(alpha, transport(2), || false)
+        .unwrap();
+    assert!(position_difference(&forced, &plain) > 1e-5);
+    assert!(
+        (forced.panel_state().unwrap().bound_circulation
+            - plain.panel_state().unwrap().bound_circulation)
+            .abs()
+            > 1e-3
+    );
+    assert!(
+        (forced.wake().last().unwrap().gamma - plain.wake().last().unwrap().gamma).abs() > 1e-3
+    );
+    let mut frozen = start;
+    frozen
+        .step_panel_coupled_with_incident(
+            alpha,
+            transport(2),
+            |point, _| Ok(potential_variation(point, start_time)),
+            || false,
+        )
+        .unwrap();
+    assert!(position_difference(&forced, &frozen) > 1e-7);
+    assert!(
+        (forced.panel_state().unwrap().bound_circulation
+            - frozen.panel_state().unwrap().bound_circulation)
+            .abs()
+            > 1e-4
+    );
+}
+
+#[test]
+fn uniform_incident_variation_matches_the_existing_incidence_owner() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let (base, changed) = (0.08, 0.12);
+    let mut start = WakeSim::new_panel_coupled(&foil, base, 0.02, 0.04).unwrap();
+    start.step().unwrap();
+    let variation = [
+        fs_math::det::cos(changed) - fs_math::det::cos(base),
+        fs_math::det::sin(changed) - fs_math::det::sin(base),
+    ];
+    let mut reference = start.clone();
+    reference
+        .step_panel_coupled_with_transport(changed, transport(4), || false)
+        .unwrap();
+    let mut forced = start.clone();
+    forced
+        .step_panel_coupled_with_incident(base, transport(4), |_, _| Ok(variation), || false)
+        .unwrap();
+    assert!(position_difference(&forced, &reference) < 2e-13);
+    assert!(
+        (forced.panel_state().unwrap().bound_circulation
+            - reference.panel_state().unwrap().bound_circulation)
+            .abs()
+            < 2e-12
+    );
+    // This diagnostic is deliberately tied to the unmodified reference flow.
+    assert_eq!(
+        forced.steady_circulation().to_bits(),
+        start.steady_circulation().to_bits()
+    );
+}
+
+#[test]
+fn smooth_incident_transport_converges_and_adaptive_retries_replay_the_same_field() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let (alpha, dt, core) = (0.08, 0.02, 0.04);
+    let mut start = WakeSim::new_panel_coupled(&foil, alpha, dt, core).unwrap();
+    for _ in 0..3 {
+        start.step().unwrap();
+    }
+    let run = |substeps| {
+        let mut state = start.clone();
+        state
+            .step_panel_coupled_with_incident(
+                alpha,
+                transport(substeps),
+                |point, time| Ok(potential_variation(point, time)),
+                || false,
+            )
+            .unwrap();
+        state
+    };
+    let reference = run(128);
+    let results: Vec<_> = [1, 2, 4, 8].map(run).into_iter().collect();
+    let errors: Vec<_> = results
+        .iter()
+        .map(|state| position_difference(state, &reference))
+        .collect();
+    assert!(
+        errors[0] > 1e-9,
+        "nontrivial field transport error: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        assert!(
+            pair[1] < 0.4 * pair[0],
+            "second-order field convergence: {errors:?}"
+        );
+    }
+    let first_estimate = position_difference(&results[0], &results[1]) / 3.0;
+    let mut adaptive_state = start.clone();
+    let report = adaptive_state
+        .step_panel_coupled_adaptive_with_incident(
+            alpha,
+            adaptive(first_estimate / 64.0),
+            |point, time| Ok(potential_variation(point, time)),
+            || false,
+        )
+        .unwrap();
+    assert!(report.rejected_comparisons > 0);
+    assert!(report.max_error_ratio <= 1.0);
+    assert_same_native_state(&adaptive_state, &run(report.substeps));
+    assert_incident_boundary(&adaptive_state, &panels, alpha, core, potential_variation);
+    assert_eq!(adaptive_state.history().len(), start.history().len() + 1);
+    for (old, next) in start.wake().iter().zip(adaptive_state.wake()) {
+        assert_eq!(old.gamma.to_bits(), next.gamma.to_bits());
+    }
+}
+
+#[test]
+fn incident_callback_refusals_nonfinite_values_and_cancellation_are_atomic() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.04).unwrap();
+    start.step().unwrap();
+    let endpoint = 0.04;
+    for use_adaptive in [false, true] {
+        let mut state = start.clone();
+        let field = |point, time| {
+            if time >= endpoint {
+                Err(BemError::NonFiniteResult {
+                    operation: "test endpoint field refusal",
+                })
+            } else {
+                Ok(potential_variation(point, time))
+            }
+        };
+        let result = if use_adaptive {
+            state
+                .step_panel_coupled_adaptive_with_incident(0.08, adaptive(1e-6), field, || false)
+                .map(|_| ())
+        } else {
+            state
+                .step_panel_coupled_with_incident(0.08, transport(2), field, || false)
+                .map(|_| ())
+        };
+        assert!(matches!(
+            result,
+            Err(BemError::NonFiniteResult {
+                operation: "test endpoint field refusal"
+            })
+        ));
+        assert_same_native_state(&state, &start);
+    }
+    let mut state = start.clone();
+    assert!(matches!(
+        state.step_panel_coupled_with_incident(
+            0.08,
+            transport(2),
+            |_, _| Ok([0.0, f64::NAN]),
+            || false,
+        ),
+        Err(BemError::NonFiniteResult {
+            operation: "panel wake incident variation"
+        }),
+    ));
+    assert_same_native_state(&state, &start);
+    let stop = std::cell::Cell::new(false);
+    assert!(matches!(
+        state.step_panel_coupled_with_incident(
+            0.08,
+            transport(2),
+            |point, time| {
+                stop.set(time >= endpoint);
+                Ok(potential_variation(point, time))
+            },
+            || stop.get(),
+        ),
+        Err(BemError::Cancelled { .. }),
+    ));
+    assert_same_native_state(&state, &start);
 }
