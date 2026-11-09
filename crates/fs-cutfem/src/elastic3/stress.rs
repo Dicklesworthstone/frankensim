@@ -128,7 +128,61 @@ fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24]) -> [f64; 6] {
 }
 
 fn stress(cell: &Cell3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+    if cell.material.isotropic_bulk_shear().is_some() {
+        // Apply the native modes AFTER forming the physical strain. Summing
+        // large basis stresses first can erase an admitted weak bulk/shear mode.
+        return super::eigenstrain::material_stress(
+            cell,
+            cell.projected_mandel_strain(gradients, local),
+        );
+    }
     apply_stress_basis(&stress_basis(cell, gradients), local)
+}
+
+// Transpose the same native isotropic response in strain space before the
+// nodal scatter. The shear cotangent is divided by sqrt(2): observations expose
+// physical stress, while the material action is symmetric in Mandel coordinates.
+// B-bar keeps local deviatoric work and cell-average pressure work separate.
+fn isotropic_stress_transpose(
+    cell: &Cell3,
+    gradients: &[[f64; 3]; 8],
+    derivative: &[f64; 6],
+    bulk: f64,
+    shear: f64,
+) -> [f64; 24] {
+    use fs_material::elastic::isotropic_stress_from_moduli;
+    use fs_material::tensor::from_mandel;
+
+    let dual = from_mandel(derivative);
+    let projected = cell.kinematics.projected_moduli();
+    let stress = from_mandel(&isotropic_stress_from_moduli(
+        if projected.is_some() { 0.0 } else { bulk },
+        2.0 * shear,
+        &dual,
+    ));
+    let pressure = if projected.is_some() {
+        isotropic_stress_from_moduli(bulk, 0.0, &dual)[0]
+    } else {
+        0.0
+    };
+    let mut local = [0.0; 24];
+    for corner in 1..8 {
+        let g = gradients[corner];
+        let traction = [
+            stress[0] * g[0] + stress[3] * g[1] + stress[5] * g[2],
+            stress[3] * g[0] + stress[1] * g[1] + stress[4] * g[2],
+            stress[5] * g[0] + stress[4] * g[1] + stress[2] * g[2],
+        ];
+        for component in 0..3 {
+            let value = traction[component]
+                + projected.map_or(0.0, |(_, _, mean)| pressure * mean[corner][component]);
+            local[3 * corner + component] = value;
+            // Forward kinematics differentiates u_corner-u_0. Its exact
+            // algebraic transpose retains the same rigid-translation null mode.
+            local[component] -= value;
+        }
+    }
+    local
 }
 
 pub(super) fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
@@ -672,7 +726,8 @@ impl CutElasticity3 {
     /// `max_point_fields` bounds `point_count * (basis.len()+1)` before any
     /// output or local-family allocation. Baseline metadata and every direction
     /// use identical points, masks, tensors and stress arithmetic. Constitutive
-    /// basis stresses are prepared once per point and reused for all fields.
+    /// basis stresses are prepared once per point for general tensors. Explicit
+    /// isotropic laws apply their original bulk/shear modes to each field strain.
     ///
     /// Each source Mandel-strain component must satisfy
     /// `abs(epsilon_offset) + l2(epsilon_basis) <= source_ceiling`. Independent
@@ -718,8 +773,15 @@ impl CutElasticity3 {
                     local_basis.iter().copied(),
                     &mut checkpoint,
                 )?;
-                let constitutive = stress_basis(cell, &gradients);
-                let reference_stress = apply_stress_basis(&constitutive, &local_offset);
+                let constitutive = cell.material.isotropic_bulk_shear().is_none()
+                    .then(|| stress_basis(cell, &gradients));
+                let apply = |local: &[f64; 24]| {
+                    constitutive.as_ref().map_or_else(
+                        || stress(cell, &gradients, local),
+                        |basis| apply_stress_basis(basis, local),
+                    )
+                };
+                let reference_stress = apply(&local_offset);
                 let stress = reference_stress.map(|s| self.scales[id] * s);
                 if !reference_stress
                     .iter()
@@ -731,7 +793,7 @@ impl CutElasticity3 {
                 for (column, local) in result.basis_reference_stresses.iter_mut().zip(&local_basis)
                 {
                     poll(&mut checkpoint)?;
-                    let direction = apply_stress_basis(&constitutive, local);
+                    let direction = apply(local);
                     if direction.iter().any(|s| !s.is_finite()) {
                         return Err(ElasticityError3::Invalid("affine bulk stress overflow"));
                     }
@@ -814,20 +876,28 @@ impl CutElasticity3 {
                 let (_, gradients) = q1(cell.bounds, position);
                 let d = &derivatives[index];
                 index += 1;
-                let constitutive = stress_basis(cell, &gradients);
+                let isotropic = cell.material.isotropic_bulk_shear();
+                let constitutive = isotropic.is_none().then(|| stress_basis(cell, &gradients));
                 if let Some(local) = &local {
                     admit_material_strain(cell, &gradients, local)?;
-                    let value = apply_stress_basis(&constitutive, local);
+                    let value = constitutive.as_ref().map_or_else(
+                        || stress(cell, &gradients, local),
+                        |basis| apply_stress_basis(basis, local),
+                    );
                     scales[id] += d.iter().zip(value).map(|(a, b)| a * b).sum::<f64>();
                 }
+                let local_dual = if let Some((bulk, shear)) = isotropic {
+                    isotropic_stress_transpose(cell, &gradients, d, bulk, shear)
+                } else {
+                    let constitutive = constitutive.as_ref().expect("general tensor basis");
+                    std::array::from_fn(|i| d.iter().zip(constitutive[i]).map(|(a, b)| a * b).sum())
+                };
                 for i in 0..24 {
                     let node = cell.nodes[i / 3];
                     if self.fixed[node] {
                         continue;
                     }
-                    let b = constitutive[i];
-                    displacement[3 * node + i % 3] +=
-                        factor * d.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+                    displacement[3 * node + i % 3] += factor * local_dual[i];
                 }
             }
         }

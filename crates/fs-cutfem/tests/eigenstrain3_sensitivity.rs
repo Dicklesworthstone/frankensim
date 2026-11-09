@@ -180,6 +180,114 @@ fn observed(points: &[EigenstrainResponse3], derivatives: &[[f64; 6]]) -> f64 {
 }
 
 #[test]
+fn explicit_isotropic_free_strain_and_stress_transposes_preserve_weak_modes() {
+    // Both dense normal blocks lose a positive mode at these contrasts. The
+    // original source still owns its independently admitted K/G values.
+    let amplitude = 0.001;
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        for weak_bulk in [true, false] {
+            let (bulk, shear) = if weak_bulk { (2.0, 1e18) } else { (1e18, 2.0) };
+            let state = ElasticAcousticState::from_bulk_and_shear(
+                1000.0, bulk, shear, ContentHash([97; 32]), 0.1,
+            ).unwrap();
+            let mut callback = |_| poll();
+            let mut control = QuadratureControl3::new(
+                QuadratureOptions3::default(), &mut callback,
+            ).unwrap();
+            let mut op = CutElasticity3::build_with_material_field(
+                domain(), [1; 3], &Slab, ElasticMaterialField3::Uniform(&state),
+                &|p| p == [0.0; 3],
+                ElasticityOptions3 { formulation, ghost_gamma: 0.0, ..Default::default() },
+                &mut control,
+            ).unwrap();
+            op.set_scales(&[0.6]).unwrap();
+            let free = if weak_bulk {
+                [-amplitude, -amplitude, -amplitude, 0.0, 0.0, 0.0]
+            } else {
+                [-amplitude, amplitude, 0.0, 0.0, 0.0, 0.0]
+            };
+            let prepared = op.prepare_eigenstrain(&|_, _| Ok(free), 100_000, poll).unwrap();
+            let u = vec![0.0; op.n()];
+            let points = op.eigenstrain_response(&prepared, &u, 0.1, 100_000, poll).unwrap();
+            let expected = if weak_bulk {
+                [3.0 * bulk * amplitude, 3.0 * bulk * amplitude,
+                    3.0 * bulk * amplitude, 0.0, 0.0, 0.0]
+            } else {
+                [2.0 * shear * amplitude, -2.0 * shear * amplitude, 0.0, 0.0, 0.0, 0.0]
+            };
+            for point in &points {
+                for component in 0..6 {
+                    close(point.reference_stress[component], expected[component], 2e-13, 1e-16);
+                    close(point.stress[component], 0.6 * expected[component], 2e-13, 1e-16);
+                }
+            }
+            let derivatives: Vec<_> = points.iter().map(|point| {
+                if weak_bulk {
+                    [point.weight, point.weight, point.weight, 0.0, 0.0, 0.0]
+                } else {
+                    [point.weight, -point.weight, 0.0, 0.0, 0.0, 0.0]
+                }
+            }).collect();
+            let direction: Vec<_> = op.nodes().iter().flat_map(|p| {
+                [amplitude * p[0], 0.0, 0.0]
+            }).collect();
+            let volume: f64 = points.iter().map(|p| p.weight).sum();
+            let work = if weak_bulk { 3.0 * bulk } else { 2.0 * shear } * amplitude * volume;
+            let reference = op.reference_bulk_stress_pullback(&derivatives, poll).unwrap();
+            close(dot(&reference, &direction), work, 2e-12, 1e-15);
+            let thermal = op.eigenstrain_stress_pullback(
+                &prepared, &u, 0.1, &derivatives, poll,
+            ).unwrap();
+            close(dot(&thermal.displacement, &direction), 0.6 * work, 2e-12, 1e-15);
+            let expected_scale: f64 = points.iter().zip(&derivatives)
+                .map(|(_, d)| dot(d, &expected)).sum();
+            close(thermal.scales[0], expected_scale, 2e-12, 1e-15);
+        }
+    }
+}
+
+#[test]
+fn isotropic_stress_transpose_keeps_physical_shear_and_bbar_virtual_work() {
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        let state = ElasticAcousticState::from_bulk_and_shear(
+            1000.0, 13.0, 7.0, ContentHash([98; 32]), 0.1,
+        ).unwrap();
+        let mut callback = |_| poll();
+        let mut control = QuadratureControl3::new(
+            QuadratureOptions3::default(), &mut callback,
+        ).unwrap();
+        let op = CutElasticity3::build_with_material_field(
+            domain(), [1; 3], &Slab, ElasticMaterialField3::Uniform(&state),
+            &|p| p == [0.0; 3],
+            ElasticityOptions3 { formulation, ghost_gamma: 0.0, ..Default::default() },
+            &mut control,
+        ).unwrap();
+        let direction: Vec<_> = op.nodes().iter().flat_map(|&[x, y, z]| {
+            [0.002 * x * y, -0.003 * y * z, 0.001 * z * x]
+        }).collect();
+        let points = op.bulk_stress(&direction, 100_000, poll).unwrap();
+        let derivatives: Vec<_> = points.iter().map(|point| {
+            [0.3, -0.2, 0.5, 0.7, -0.9, 0.4].map(|v| v * point.weight)
+        }).collect();
+        let direct: f64 = points.iter().zip(&derivatives)
+            .map(|(point, d)| dot(&point.reference_stress, d)).sum();
+        let transpose = op.reference_bulk_stress_pullback(&derivatives, poll).unwrap();
+        close(dot(&transpose, &direction), direct, 2e-12, 1e-15);
+        let zero = vec![0.0; op.n()];
+        let family = op.affine_bulk_stress(&zero, &[&direction], 2 * points.len(), poll).unwrap();
+        for (basis, point) in family.basis_reference_stresses[0].iter().zip(points) {
+            assert_eq!(*basis, point.reference_stress);
+        }
+    }
+}
+
+#[test]
 fn full_tensor_thermal_stress_transposes_admit_elastic_strain_and_match_finite_differences() {
     let mut op = tensor_operator();
     let prepared = op

@@ -932,3 +932,13 @@ mode through cancellation between rounded dense tensor entries or a rounded
 mean. Stored C(T) matrices are retained, generic orthotropy is not fitted, and
 source domains remain mandatory. This improves numerical mode recovery; it does
 not establish conditioning or convergence for arbitrary cut-grid solves.
+
+Explicit isotropy also follows the native mode action in displacement-formulation
+free-strain recovery, cold bulk observations and affine stress families. Stress
+transposes apply the original constitutive modes to the physical-stress cotangent
+before scattering nodal forces. B-bar retains separate local deviatoric and mean
+pressure work; physical shear normalization and the rigid-translation transpose
+remain unchanged. Generic tensors retain their complete source matrix and are
+never fitted to isotropy. Extreme independent K/G regressions cover both weak
+bulk and weak shear response and adjoint work, without asserting that the dense
+assembled stiffness can resolve arbitrarily ill-conditioned global solves.

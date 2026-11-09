@@ -23,7 +23,7 @@ use std::sync::Arc;
 use fs_material::tensor::{from_mandel, to_mandel};
 use fs_solver::op::LinearOp;
 
-use super::material::{ReferenceMaterial3, engineering_strain};
+use super::material::engineering_strain;
 use super::strain_domain::FrobeniusStrainBall;
 use super::{Cell3, CutElasticity3, ElasticityError3, q1};
 
@@ -150,14 +150,7 @@ pub(in crate::elastic3) fn material_stress(cell: &Cell3, strain: [f64; 6]) -> [f
         .kinematics
         .projected_moduli()
         .map(|(bulk, shear, _)| (bulk, shear))
-        .or_else(|| match &cell.material {
-            ReferenceMaterial3::Legacy {
-                bulk,
-                lame: [_, shear],
-                ..
-            } => Some((*bulk, *shear)),
-            ReferenceMaterial3::Source(_) => None,
-        });
+        .or_else(|| cell.material.isotropic_bulk_shear());
     if let Some((bulk, shear)) = isotropic {
         return from_mandel(&fs_material::elastic::isotropic_stress_from_moduli(
             bulk,
