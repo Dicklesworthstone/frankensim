@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod finite;
+pub use finite::{FiniteReservoirBoundary, FiniteReservoirReport};
 mod profiles;
 pub use profiles::ReservoirFaceState;
 pub(super) use profiles::TimedSource;
@@ -76,6 +78,7 @@ pub(super) struct Reservoirs {
     outlets: [Option<PressureOutletBoundary>; 6],
     characteristic_outlets: [Option<(f64, f64)>; 6],
     stagnation: [Option<fs_gas::dynamics::Conserved>; 6],
+    finite: finite::FiniteReservoirs,
     pub(super) profiles: profiles::Profiles,
 }
 
@@ -85,6 +88,7 @@ pub(super) struct Reservoirs {
 pub(super) struct View<'a> {
     owner: &'a Reservoirs,
     staged_profiles: bool,
+    staged_finite: bool,
 }
 
 impl Reservoirs {
@@ -103,6 +107,7 @@ impl Reservoirs {
             outlets: [None; 6],
             characteristic_outlets: [None; 6],
             stagnation: [None; 6],
+            finite: finite::FiniteReservoirs::default(),
             profiles: profiles::Profiles::default(),
         };
         for side in BoundarySide::ALL {
@@ -220,6 +225,17 @@ impl Reservoirs {
             )?;
             candidate[slot] = Some(reservoir);
         }
+        if self
+            .finite
+            .accepted
+            .iter()
+            .zip(candidate)
+            .any(|(tank, law)| tank.is_some() && law.is_none())
+        {
+            return Err(Error::Invalid(
+                "finite reservoirs retain their compact gas law",
+            ));
+        }
         poll(cancelled)?;
         self.stagnation = candidate;
         Ok(())
@@ -251,6 +267,7 @@ impl Reservoirs {
         View {
             owner: self,
             staged_profiles: false,
+            staged_finite: false,
         }
     }
 
@@ -258,6 +275,7 @@ impl Reservoirs {
         View {
             owner: self,
             staged_profiles: true,
+            staged_finite: false,
         }
     }
 
@@ -267,6 +285,7 @@ impl Reservoirs {
             outlets: self.outlets,
             characteristic_outlets: self.characteristic_outlets,
             stagnation: self.stagnation,
+            finite: self.finite,
             profiles: self.profiles.try_clone(cancelled)?,
         })
     }
@@ -289,12 +308,27 @@ impl Reservoirs {
 }
 
 impl<'a> View<'a> {
+    pub(super) fn with_finite_trial(mut self) -> Self {
+        self.staged_finite = true;
+        self
+    }
+
+    pub(super) fn finite_volume(self, axis: usize, sign: f64) -> Option<f64> {
+        self.owner.finite.accepted[2 * axis + usize::from(sign > 0.0)].map(|tank| tank.volume_m3())
+    }
+
     pub(super) fn has_stagnation(self) -> bool {
         self.owner.has_stagnation()
     }
 
     pub(super) fn stagnation(self, axis: usize, sign: f64) -> Option<fs_gas::dynamics::Conserved> {
-        self.owner.stagnation[2 * axis + usize::from(sign > 0.0)]
+        let slot = 2 * axis + usize::from(sign > 0.0);
+        if self.staged_finite
+            && let Some(tank) = self.owner.finite.trial[slot]
+        {
+            return Some(tank.state());
+        }
+        self.owner.stagnation[slot]
     }
 
     pub(super) fn get_at(
@@ -305,6 +339,11 @@ impl<'a> View<'a> {
         cell: usize,
     ) -> Option<&'a AdmittedReservoir> {
         let slot = 2 * axis + usize::from(sign > 0.0);
+        if self.staged_finite
+            && let Some(state) = self.owner.finite.traces[slot].as_ref()
+        {
+            return Some(state);
+        }
         if let Some(state) = self.owner.states[slot].as_ref() {
             return Some(state);
         }
@@ -334,7 +373,14 @@ impl<'a> View<'a> {
             .owner
             .states
             .iter()
-            .flatten()
+            .enumerate()
+            .filter_map(|(slot, state)| {
+                if self.staged_finite {
+                    self.owner.finite.traces[slot].as_ref().or(state.as_ref())
+                } else {
+                    state.as_ref()
+                }
+            })
             .map(|state| {
                 (0..3)
                     .map(|axis| {
@@ -354,7 +400,8 @@ impl<'a> View<'a> {
             let axis = side.axis();
             let sign = side.sign();
             let slot = 2 * axis + usize::from(sign > 0.0);
-            let compact = self.owner.stagnation[slot];
+            let compact = self.stagnation(axis, sign);
+            let mut finite_rate = 0.0;
             let pressure_control = if let Some(outlet) = self.owner.outlets[slot] {
                 Some((outlet.pressure_pa, None))
             } else {
@@ -464,7 +511,16 @@ impl<'a> View<'a> {
                     + (shear[0].abs() + flux.signal_speed) / grid.spacing[a]
                     + (shear[1].abs() + flux.signal_speed) / grid.spacing[b];
                 rate = rate.max(local);
+                if let Some(volume) = self.finite_volume(axis, sign) {
+                    finite_rate += 0.5 * grid.face_area(side) * (flux.signal_speed / volume);
+                    if !finite_rate.is_finite() {
+                        return Err(Error::Invalid(
+                            "unrepresentable finite reservoir signal rate",
+                        ));
+                    }
+                }
             }
+            rate = rate.max(finite_rate);
         }
         Ok(rate)
     }

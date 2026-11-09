@@ -1072,6 +1072,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             .profiles
             .copy_accepted_from(&self.accepted.reservoirs.profiles, &mut cancelled)?;
         self.trial.reservoirs.profiles.publish();
+        self.trial.reservoirs.copy_finite_from(&self.accepted.reservoirs);
         let reservoirs = timed::stage(
             &mut self.trial.reservoirs,
             profiles.as_deref_mut(),
@@ -1112,6 +1113,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 timed::admit_interval(self.accepted.time, dt)?;
             }
             self.trial.states.copy_from_slice(&self.accepted.states);
+            self.trial.reservoirs.copy_finite_from(&self.accepted.reservoirs);
             self.trial.time = self.accepted.time;
             self.trial.last_step = self.accepted.last_step;
             self.trial

@@ -22,7 +22,10 @@ pub use moving::MeshMotion;
 pub mod inertial_walls;
 pub use inertial_walls::{InertialWallsError, SpatialInertialWallsStep};
 mod reservoir;
-pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceState};
+pub use reservoir::{
+    FiniteReservoirBoundary, FiniteReservoirReport, PressureOutletBoundary, ReservoirBoundary,
+    ReservoirFaceState,
+};
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
@@ -820,7 +823,7 @@ impl Euler3d {
                             &self.gas,
                             &self.grid,
                             self.boundaries,
-                            &self.reservoirs,
+                            &mut self.reservoirs,
                             &self.states,
                             &mut self.work,
                             dt,
@@ -883,6 +886,7 @@ impl Euler3d {
                     }
                     poll(&mut cancelled)?;
                     std::mem::swap(&mut self.states, &mut self.work.candidate);
+                    self.reservoirs.publish_finite();
                     if profiles.is_some() {
                         self.reservoirs.profiles.publish();
                     }

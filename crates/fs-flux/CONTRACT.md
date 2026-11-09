@@ -10311,3 +10311,50 @@ Targets/tolerances use m²/s per unit depth; multiply actual rates by declared d
 Port offsets are returned in Pa and retained in the same pressure-adjusted reactions; original traction and Open/OpenReservoir momentum semantics remain intact. Reference density only conditions the common equations.
 Every trial retains original donor admission, CFL/divergence/storage limits and cancellation. Refusal publishes no density, inventory, flow or controller state; frozen pressure responses are rebuilt when candidate coefficients change.
 Focused native regressions cover heterogeneous accelerating transport, exact accepted endpoint accounting, physical pressure/work under reference-density and depth changes, actual density-dependent inertance, reversed donors, port admission and atomic cancellation.
+
+## Finite compact tanks on volumetric gas boundaries
+
+`Euler3d::with_finite_reservoirs` converts selected existing stationary uniform
+reservoir bindings into independent finite rigid tanks. Each side shares one
+well-mixed plenum across its faces. Initial density, pressure, composition and
+energy reference come from the original field source; the original native gas
+`Plenum::exchange_candidate` owns inventory updates and caloric admission.
+No second EOS, fixed gamma or held-pressure approximation is introduced.
+
+Tank and field advance in the same SSP RK2 transaction. The first native face
+impulses form a full forward tank stage, whose evolved pressure drives the
+second residual. The accepted tank receives the exact opposite weighted mass
+and total-energy exchange of its field boundary. Incoming shear kinetic energy
+thermalizes. The same Cartesian momentum transfer is reported at the fixed
+tank support, which does no work; no extra enthalpy or pressure-work term is
+added. `finite_reservoir` exposes accepted storage and
+`finite_reservoir_report` exposes transfer and mass/energy roundoff residuals.
+
+Initial and stage CFL admission include the original compact-volume rate
+`0.5 * sum(area * signal_speed) / tank_volume`, so small tanks cannot evade
+stability control through large field cells. Source/positivity refusal uses
+the existing bounded retry owner without clipping or a new tolerance knob.
+Side transfers use deterministic compensated sums. Fixed six-side stage arrays
+and cached source traces add no warm stepping allocation. Empty bindings keep
+the existing native field path. Finite bindings retain their compact law.
+
+All accepted field cells, tank inventories, exterior caches, time, impulses and
+reports publish together after the final cancellation poll. Existing held body
+forcing and other-side timed profiles share this same transaction. Molecular
+split retries restore the accepted finite inventories and exterior caches with
+the accepted field; default zero open-face molecular exchange remains available.
+Explicit molecular bath exchange still refuses stagnation data. Moving-grid
+admission continues to refuse bound reservoirs.
+
+Six focused G0/G1/G4 regression groups cover filling/draining with all six
+orientations and both reconstruction orders, complete energy/support impulse,
+exact equilibrium and empty-binding parity, tiny-tank initial CFL, common-stage
+RK2 time refinement, final-poll rollback and native force/timed-profile work.
+All six groups passed in a bounded actual-source inviscid build, using the
+original gas/Plenum, reconstruction, hydrostatic preparation, moving-grid, RK,
+forcing and timed-profile code. The five source Plenum tests also passed.
+Molecular split retry integration was source-reviewed but not executed; full
+Cargo/workspace and DSR gates were not run. This owner does not resolve tank internal waves, mixing gradients,
+neck inertia, heat transfer, volume motion or one shared tank across multiple
+sides. Evolving-species Cartesian finite tanks remain a separate integration;
+the source mixture plenum candidate API is already available.

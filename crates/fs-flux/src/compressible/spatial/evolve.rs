@@ -5,7 +5,7 @@ pub(super) fn attempt(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     states: &[State],
     work: &mut Workspace,
     dt: f64,
@@ -30,11 +30,12 @@ pub(super) fn attempt(
         hydrostatic,
         cancelled,
     )?;
+    reservoirs.stage_finite(gas, grid, &work.boundary_trial, 2.0, cancelled)?;
     let second = rk_stage(
         gas,
         grid,
         boundaries,
-        reservoirs.accepted(),
+        reservoirs.accepted().with_finite_trial(),
         states,
         work,
         dt,
@@ -45,6 +46,7 @@ pub(super) fn attempt(
         hydrostatic,
         cancelled,
     )?;
+    reservoirs.stage_finite(gas, grid, &work.boundary_trial, 1.0, cancelled)?;
     Ok(combine(first, second))
 }
 
@@ -87,6 +89,7 @@ pub(super) fn attempt_with_reservoir_profiles(
         hydrostatic,
         cancelled,
     )?;
+    reservoirs.stage_finite(gas, grid, &work.boundary_trial, 2.0, cancelled)?;
     source.stage(&mut reservoirs.profiles, gas, grid, time + dt, cancelled)?;
     // The actual endpoint trace can be much faster or hotter than the start.
     // Its full unsplit exterior bound and the resulting native face-wave bound
@@ -94,13 +97,14 @@ pub(super) fn attempt_with_reservoir_profiles(
     let second_rate =
         reservoirs
             .staged()
+            .with_finite_trial()
             .maximum_rate(gas, grid, &work.stage, hydrostatic, cancelled)?;
     check_cfl::<Error>(second_rate * dt, cfl)?;
     let second = rk_stage(
         gas,
         grid,
         boundaries,
-        reservoirs.staged(),
+        reservoirs.staged().with_finite_trial(),
         states,
         work,
         dt,
@@ -111,6 +115,7 @@ pub(super) fn attempt_with_reservoir_profiles(
         hydrostatic,
         cancelled,
     )?;
+    reservoirs.stage_finite(gas, grid, &work.boundary_trial, 1.0, cancelled)?;
     let (mut stats, change) = combine(first, second);
     stats.rate = stats.rate.max(first_rate).max(second_rate);
     Ok((stats, change))
@@ -278,6 +283,7 @@ fn spatial(
         |k, axis, sign, slope| admissible(trace(k, axis, sign, slope)),
         cancelled,
     )?;
+    let mut finite_rates = [0.0; 6];
     // Every axis uses a contiguous, x-fast face lattice. Internal neighbours
     // consume the exact same stored flux; periodic endpoints share its bits.
     cartesian::faces::<Error, _>(grid, boundaries, cancelled, |face, cancelled| {
@@ -428,6 +434,16 @@ fn spatial(
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
+        if let cartesian::FaceKind::Boundary { sign, .. } = face.kind
+            && let Some(volume) = reservoirs.finite_volume(axis, sign)
+        {
+            let slot = 2 * axis + usize::from(sign > 0.0);
+            let area = grid.face_area(BoundarySide::ALL[slot]);
+            finite_rates[slot] += 0.5 * area * (f.signal_speed / volume);
+            if !finite_rates[slot].is_finite() {
+                return Err(Error::Invalid("unrepresentable finite reservoir stage rate"));
+            }
+        }
         stats.fallback += usize::from(f.used_hll_fallback);
         flux[face.index] = f;
         Ok(())
@@ -437,6 +453,7 @@ fn spatial(
         |axis, face| fluxes[axis][face].signal_speed,
         cancelled,
     )?;
+    stats.rate = finite_rates.into_iter().fold(stats.rate, f64::max);
     Ok(stats)
 }
 
