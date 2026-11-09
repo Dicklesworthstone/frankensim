@@ -257,6 +257,10 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
 trait DampingSource: Clone {
     type Error;
     fn links(&self) -> &[ViscousNetworkLink];
+    /// Explicit rate-only changes in the original Maxwell/Kelvin source basis.
+    fn relaxation_kinetics(&self) -> Option<relaxation::HeldRelaxationKinetics<'_>> {
+        None
+    }
     fn synchronize<E>(
         &mut self,
         thermal: &DepositionSimulation<'_>,
@@ -340,6 +344,16 @@ trait MechanicalAdvance: Clone {
         dt_s: f64,
         requested: &dyn Fn() -> bool,
     ) -> Result<MechanicalStep, E, S>;
+    fn step_with_source<E, S: DampingSource>(
+        &self,
+        input: RigidDampingThermalInput<'_>,
+        states: &[RigidBodyState],
+        source: &S,
+        dt_s: f64,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<MechanicalStep, E, S::Error> {
+        self.step(input, states, source.links(), dt_s, requested)
+    }
     fn accept<E, S>(&mut self, step: &mut MechanicalStep) -> Result<(), E, S> {
         if step.relaxation_memory.is_some() {
             return Err(RigidDampingThermalError::Invalid(
@@ -475,8 +489,8 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
             "mechanical and thermal endpoints must agree",
         ));
     }
-    // Native events at target_s have all finished. Synchronize the memoryless
-    // law to this exact endpoint before publishing either physical owner.
+    // Native events at target_s have all finished. Admit the source kinetics
+    // at this exact endpoint before publishing either physical owner.
     coupled
         .source
         .synchronize::<O::Error>(&thermal, &requested)?;
@@ -728,10 +742,10 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             .to_mut()
             .step_sources(thermal, start_s, dt_s, end_s, check)
             .map_err(RigidDampingThermalError::Observer)?;
-        let step = self.mechanics.step::<O::Error, S::Error>(
+        let step = self.mechanics.step_with_source::<O::Error, S>(
             self.input,
             &self.states,
-            self.source.links(),
+            &self.source,
             dt_s,
             self.requested,
         )?;

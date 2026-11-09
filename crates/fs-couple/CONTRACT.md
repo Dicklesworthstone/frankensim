@@ -12768,3 +12768,55 @@ current law, each body's finite-capacity storage and Fourier exchange, contact
 heat partitions and total supplied work. Native triangular regressions and
 the planar analytic thermal endpoint provide complementary checks. Integration
 execution and mesh/time/quadrature error bounds remain separate validation.
+
+## Calibrated spatial relaxation with finite temperature feedback
+
+`rigid_damping_heat::relaxation::temperature` feeds actual finite-cell
+temperatures into the original complete Kelvin/Maxwell graph. Its borrowed
+`CalibratedRelaxationDamping` binds the original connector forms, original
+branch factors/times/order and one existing material `TemperatureShift` per
+connector. WLF and Arrhenius coefficients, reference temperatures and support
+are supplied explicitly. Reusing shifted outputs as original calibration
+refuses when the bound source differs.
+
+The shared material convention is a_T=tau(T)/tau_ref. All original branch times
+and the original Kelvin viscosity of each thermorheologically simple connector
+receive that same factor. The low-level native held-kinetics bank keeps all
+elastic factors and memory coordinates unchanged. A change in rates therefore
+creates no stored-energy change, parameter work or independent heat impulse.
+Native physical dissipation still integrates Kelvin and Maxwell losses along
+the same complete coupled trajectory; original signed actuation remains
+separate. No history is reset or reinterpreted.
+
+Each connector names its original caloric CellId independently of heat routes.
+Shared cells are sampled once per synchronization, and unchanged connector
+temperatures reuse their admitted material coefficients. Same-time births
+complete before source sampling. Every actual native thermal interval freezes
+kinetics at its initial temperature; original material histories advance only
+when their matching mechanical/caloric/observer candidate accepts. After all
+final thermal events, the source admits both the calibration domain and all
+effective Kelvin forms, branch times and reciprocal rates without preparing a
+dense flow. Endpoint refusal discards the complete candidate.
+
+The candidate exposes original accepted bodies/history, finite thermal state,
+the shared energy report, actual endpoint temperatures and a_T values. Original
+reference laws are retained for continuation. Cached additional storage is
+linear in the already admitted connector and branch counts. There is no new
+constitutive law, eigensolve, thermodynamic state transfer or source fit.
+
+Temperature feedback is explicit and first order. Its max_dt_s refinement is
+independent of mechanical geometry refinement and tight energy balance.
+Vertical modulus shifts, thermal expansion, moisture calibration, entropy
+models and measured source qualification remain separate physical inputs.
+
+Verification: All five focused temperature-feedback groups passed natively:
+independent WLF/Arrhenius isothermal body/history/heat/work response;
+16/32/64-step self-heating refinement against an independent coupled physical
+ODE with nonlinear finite calorics; exact continuation across original thermal
+events; empty-memory parity with the existing calibrated Kelvin feedback;
+and final-endpoint calibration/reference/cancellation/observer refusals with
+unchanged original inputs and deterministic retry. All four fixed-history
+thermal regressions and four driven thermal regressions passed after the shared
+source dispatch changed. These runs execute the original TemperatureShift,
+MBD/pHS, caloric timeline and observer numerical owners in a bounded build.
+No full workspace or complete impact-host execution is claimed.
