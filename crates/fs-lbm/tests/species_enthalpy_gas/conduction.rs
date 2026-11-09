@@ -13,6 +13,7 @@ fn conduction_controls(scheme: ThermochemicalConductionScheme) -> Thermochemical
     ThermochemicalConductionControls {
         thermal,
         scheme,
+        conductivity: fs_lbm::conjugate::ThermochemicalConductivityModel::HeldAtOpening,
         maximum_caloric_queries: 100_000,
         maximum_enthalpy_defect_j: CONDUCTION_BUDGET_J,
     }

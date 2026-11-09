@@ -22,6 +22,7 @@ fn controls(scheme: ThermochemicalConductionScheme) -> ThermochemicalConductionC
     ThermochemicalConductionControls {
         thermal,
         scheme,
+        conductivity: fs_lbm::conjugate::ThermochemicalConductivityModel::HeldAtOpening,
         maximum_caloric_queries: 100_000,
         maximum_enthalpy_defect_j: HEAT_BUDGET_J,
     }

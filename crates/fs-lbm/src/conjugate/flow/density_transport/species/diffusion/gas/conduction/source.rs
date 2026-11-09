@@ -157,6 +157,13 @@ impl<'q, 'g> GasConductionCaloric<'q, 'g> {
         })
     }
 
+    /// Borrow the already-bound original model for source transport preparation.
+    /// Prepared conductivity owns its compact source lines, so this borrow never
+    /// escapes construction or creates a self-referential thermal field.
+    pub(super) fn original_law(&self) -> &GasEnthalpyLaw {
+        &self.law
+    }
+
     /// Largest actual native storage-inverse residual times this cell's mass.
     /// Rejected Newton probes consume work; their residual is a source-query
     /// diagnostic, never an external heat deposit or accepted physical history.

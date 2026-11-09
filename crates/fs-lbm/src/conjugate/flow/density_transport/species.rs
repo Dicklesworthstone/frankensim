@@ -23,6 +23,7 @@ pub use diffusion::{
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
     ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
+    ThermochemicalConductivityModel,
 };
 pub use diffusion::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,

@@ -24480,3 +24480,38 @@ equilibrium, infer a preceding loading path or relaxation duration, evolve
 temperature, or authorize a changing material source. Four focused regressions
 cover analytic plane elasticity in all ordered planes, original source binding,
 tensor-shear energy, and atomic domain/reset/cancellation refusals.
+
+### Original thermochemical conductivity intervals
+
+`thermochemical_gas::conductivity::PreparedThermochemicalConductivity`
+prepares selected original pure-species viscosity and conductivity paths
+through `ClaimSet::query_line_typed` on a complete continuous temperature
+bracket. It owns their receipts, canonical composition, material and pack
+identities, fixed pressure/auxiliary context and union of all source knots.
+Static source support, unchanged selection and positive values must hold
+through every interval; supported endpoints alone do not establish admission.
+
+Point queries reuse the original Wilke interaction and the same WMS sum as
+`ThermochemicalGasModel::evaluate`. No NASA inverse, EOS call, material-card
+selection or mixture fit is introduced per point. The normal original
+O(N^2) interaction and small evaluation receipts remain. Interval means
+integrate that actual mixture on each crossed source segment with bounded
+Gauss-7/Kronrod-15 quadrature, normalized to avoid overflowing an unnecessary
+dimensional integral. Reversed bounds use identical arithmetic; equal bounds
+query the original point.
+
+Absolute/relative mean tolerances, a complete-request subdivision allowance
+and fixed depth/stack cap admit the numerical error ESTIMATE. This is not a
+rigorous enclosure, empirical source uncertainty or physical heat deposit.
+The point checkpoint runs once per original mixture sample, allowing a caller
+to share cancellation/work authority across cells and solver stages.
+Preparation checkpoints surround the existing bounded synchronous source-line
+operations separately. Refusal returns no partial integral or updated state.
+
+Five tests compiled from the exact production quadrature leaf passed for
+crossed knots/reversal/equality, a steep endpoint layer, representable normalized
+means, controls/work/depth limits and cancellation. Four original-material
+regressions cover point parity, an independent nonlinear two-species integral,
+source holes/nonpositive paths/context, and query refusal. The latter tests
+were parsed and reviewed but remain unexecuted under the current dependency
+and storage constraints.

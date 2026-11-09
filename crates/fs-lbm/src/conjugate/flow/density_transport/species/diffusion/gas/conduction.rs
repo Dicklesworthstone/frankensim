@@ -1,8 +1,8 @@
 //! Original mixture enthalpy on the existing implicit voxel Fourier owner.
 //!
 //! Composition and carrier inventory are fixed for this heat interval. The
-//! source-resolved opening conductivity is explicitly held, while the original
-//! nonlinear caloric inverse is evaluated throughout the native heat solve.
+//! conductivity follows an explicit held or original-integral choice, while
+//! the original nonlinear caloric inverse drives the native heat solve.
 
 use super::{
     CancelGate, ChtError, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource, MaterialAdvectionStep,
@@ -15,12 +15,16 @@ use crate::conjugate::{
     advance_caloric_tensor_conduction_sdirk2,
 };
 
+mod conductivity;
+pub use conductivity::ThermochemicalConductivityModel;
+use conductivity::{GasConductionConductivity, GasConductivityBudget};
+
 mod conjugate;
 pub use conjugate::{ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell};
 mod source;
 use source::{GasConductionCaloric, GasConductionQueryBudget};
 
-/// Native caloric time formula with the supplied opening conductivity held.
+/// Native caloric time formula with the explicitly selected conductivity law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThermochemicalConductionScheme {
     BackwardEuler,
@@ -31,6 +35,8 @@ pub enum ThermochemicalConductionScheme {
 #[derive(Clone, Copy, Debug)]
 pub struct ThermochemicalConductionControls {
     pub scheme: ThermochemicalConductionScheme,
+    /// Original source integration or an explicitly held opening gas k.
+    pub conductivity: ThermochemicalConductivityModel,
     /// The native Newton, Krylov and backtracking ceilings apply to the entire
     /// heat interval, including both stages when SDIRK2 is selected.
     pub thermal: TensorNonlinearConfig,
@@ -71,6 +77,13 @@ impl ThermochemicalConductionAdvance {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermochemicalSpeciesConductionReport {
     pub caloric_queries: usize,
+    /// Actual source conductivity point queries across all cells and trials.
+    /// Zero when the opening conductivity is held.
+    pub conductivity_evaluations: usize,
+    /// Largest estimated absolute interval-mean k error [W/(m K)], including
+    /// discarded trials. This is a quadrature estimate, not a rigorous bound
+    /// or an additional physical heat/energy defect.
+    pub maximum_estimated_conductivity_error_w_m_k: f64,
     pub initial_caloric_defect_j: f64,
     pub endpoint_caloric_defect_j: f64,
     /// Sum over cells of their largest actual root residual times carrier mass.
@@ -201,6 +214,7 @@ fn conduction_report(
     endpoint_caloric_defect_j: f64,
     maximum_query_caloric_defect_j: f64,
     caloric_queries: usize,
+    conductivity_budget: &GasConductivityBudget<'_>,
     controls: &ThermochemicalConductionControls,
 ) -> Result<ThermochemicalSpeciesConductionReport, ChtError> {
     let endpoint_caloric_defect_j = admitted_defect(
@@ -220,6 +234,9 @@ fn conduction_report(
         admitted_defect(defect.value, controls.maximum_enthalpy_defect_j)?;
     Ok(ThermochemicalSpeciesConductionReport {
         caloric_queries,
+        conductivity_evaluations: conductivity_budget.evaluations(),
+        maximum_estimated_conductivity_error_w_m_k: conductivity_budget
+            .maximum_estimated_error_w_m_k(),
         initial_caloric_defect_j,
         endpoint_caloric_defect_j,
         maximum_query_caloric_defect_j,
@@ -233,14 +250,20 @@ impl MaterialAdvectionStep {
     ///
     /// The existing native tensor-caloric owner advances m*h with immutable
     /// carrier mass, exact original T(h,Y), and original dT/dh=1/Cp. The opening
-    /// prepared gas image supplies one held isotropic conductivity per cell.
-    /// Cp is never replaced by a constant, and zero molecular species D does
+    /// prepared gas image supplies the original opening conductivity. The
+    /// selected model either holds it or integrates the same original WMS
+    /// k(T,Y) through every crossed pure-source interval. Cp is never replaced
+    /// by a constant, and zero molecular species D does
     /// not disable heat conduction. All returned heat is already included in h.
     ///
-    /// Composition, source context and conductivity are held for this interval.
-    /// Repeated calls refresh original k(T,Y); a temperature-dependent k has
-    /// first-order freezing error even when the held-law solve uses SDIRK2.
-    /// This entry does not claim an original nonlinear Kirchhoff integral.
+    /// Composition and source context remain fixed. HeldAtOpening retains
+    /// first-order conductivity-freezing error, including with SDIRK2.
+    /// SourceIntegral prepares the original species mu/k source lines once
+    /// and integrates their WMS mixture within explicit quadrature tolerances.
+    /// Its original endpoint k supplies the native Kirchhoff tangent. Smooth
+    /// SDIRK2 order requires resolving the remaining source and heat tolerances;
+    /// unresolved source corners require temporal refinement. The integral
+    /// error is an estimate, not a certified enclosure.
     /// The same authored ThermalSetup is used at both SDIRK2 stage times.
     /// Its original flux/temperature/film/source/contact/sink admissions apply.
     /// Fixed cell temperatures derive their unique h from the SAME gas law.
@@ -282,6 +305,7 @@ impl MaterialAdvectionStep {
             }
         }
         let budget = GasConductionQueryBudget::new(controls.maximum_caloric_queries, gate)?;
+        let conductivity_budget = GasConductivityBudget::new(controls.conductivity, gate)?;
         // The original preparation admits shapes, canonical species partition,
         // carrier topology, caloric branch and complete source transport.
         let initial =
@@ -304,11 +328,15 @@ impl MaterialAdvectionStep {
                 .transport(cell)
                 .ok_or_else(|| invalid("gas conduction lost its original fluid transport"))?
                 .thermal_conductivity_w_m_k();
-            tensors.push(ConductivityTensor::new([
-                [k, 0.0, 0.0],
-                [0.0, k, 0.0],
-                [0.0, 0.0, k],
-            ])?);
+            tensors.push(GasConductionConductivity::new(
+                &calorics[cell],
+                [
+                    source.controls.minimum_temperature_k,
+                    source.controls.maximum_temperature_k,
+                ],
+                k,
+                &conductivity_budget,
+            )?);
         }
         drop(initial);
         let mut prescribed = reserved(setup.fixed_temperature.len())?;
@@ -366,6 +394,7 @@ impl MaterialAdvectionStep {
             state.absolute_caloric_residual_j(),
             maximum_query_caloric_defect_j,
             caloric_queries,
+            &conductivity_budget,
             &controls,
         )?;
         poll(gate)?;

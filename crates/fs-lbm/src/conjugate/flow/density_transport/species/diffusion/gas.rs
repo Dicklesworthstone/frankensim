@@ -36,6 +36,7 @@ pub use conduction::{
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,
     ThermochemicalConjugateConductionStep, ThermochemicalSolidConductionCell,
+    ThermochemicalConductivityModel,
 };
 mod diffusivity;
 pub use diffusivity::GasSpeciesDiffusivity;

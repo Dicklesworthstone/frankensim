@@ -2992,14 +2992,17 @@ Newton iteration. Formation energy remains in h; Fourier heat is deposited
 once through the native stored-energy update. Zero species diffusivity does
 not suppress this independent heat mechanism.
 
-Each opening complete material state supplies a held isotropic conductivity.
+Gas conductivity follows the explicit `ThermochemicalConductivityModel` in
+the heat controls. `HeldAtOpening` preserves the opening isotropic source value
+and its first-order freezing error. `SourceIntegral` prepares continuously
+supported original species viscosity/conductivity paths and integrates their
+actual Wilke/WMS mixture throughout the nonlinear solve. The original endpoint
+k supplies the native Kirchhoff tangent, without a second dk/dT term.
 Endpoint preparation refreshes temperature, conductivity and diffusivity for
-continuation. Temperature-dependent conductivity therefore retains first-order
-freezing error even when the held-law interval uses SDIRK2; this entry does not
-invent a nonlinear mixture Kirchhoff integral. Both SDIRK stages use the same
-authored thermal setup. Original heat-flux, face-temperature, film, source,
-contact and sink semantics apply. Fixed cell temperatures derive prescribed h
-from the same gas law and must satisfy the native inverse-consistency tolerance.
+continuation. Both SDIRK stages use the same authored thermal setup. Original
+heat-flux, face-temperature, film, source, contact and sink semantics apply.
+Fixed cell temperatures derive prescribed h from the same gas law and must
+satisfy the native inverse-consistency tolerance.
 
 One immutable caloric model is constructed per cell per interval. Trial
 queries reuse its original source law without cloning material tables or
@@ -3216,8 +3219,9 @@ within the absolute joule allowance. Bindings, source refusal, work limits,
 energy failure and cancellation return no partial gas or solid state.
 Occupancy, reference masses and gas composition remain fixed during the
 interval. Crossing an admitted latent chart does not infer moving walls,
-expansion, mass transfer or a new phase geometry. Opening gas conductivity
-remains held in this entry; each supplied solid law keeps its original k(T).
+expansion, mass transfer or a new phase geometry. Gas conductivity follows the
+same explicit held/source-integral choice as the gas-only entry; each supplied
+solid law keeps its original k(T).
 
 Focused original-path regressions cover graded unequal-mass gas/solid heat
 exchange, finite interface resistance, latent storage and crossing, prescribed
@@ -3225,3 +3229,43 @@ plateau energy, original solid mass binding and transactional refusals.
 Pinned syntax/scoped-format checks passed. Native integration compilation and
 execution remain unverified under the previously documented runner/storage
 limitation.
+
+### Original nonlinear gas conductivity through the native heat owner
+
+`ThermochemicalConductivityModel::SourceIntegral` supplies the native
+`TensorConductivityLaw` from the same cell's already-bound original caloric
+model and source context. Prepared pure-species viscosity and conductivity
+lines retain every original knot, selected claim, material identity and fixed
+auxiliary condition. They are constructed once per cell, outside Newton.
+Every point reuses the existing original Wilke interaction and WMS summation;
+neither mixture-k interpolation nor a midpoint sample substitutes for an
+interval integral. Both gas-only and mixed gas/solid entries use this path.
+
+The material owner splits at every crossed source knot and evaluates bounded
+embedded Gauss-7/Kronrod-15 means in normalized coordinates. Its absolute and
+relative tolerances have conductivity units; the returned error is a numerical
+estimate, not an enclosure or source uncertainty. The estimate does not enter
+the physical joule account as heat. Complete original source support is required
+over the declared caloric bracket, including interiors; gaps, nonpositive paths
+and changing source selections refuse rather than extrapolate.
+
+One point-evaluation allowance spans every fluid cell, face integral, Newton
+trial and stage. Preparation uses separate cancellation checkpoints around
+bounded original line queries. Each mean retains a shared subdivision limit
+across its source segments and a fixed depth/stack cap. The report includes
+actual conductivity evaluations and the largest estimated absolute mean error
+over accepted and discarded queries. Native nonlinear/linear tolerances,
+gas caloric-query limits and physical energy admission remain independent.
+The original WMS interaction retains O(N^2) species work and its normal small
+receipts per point; no performance benchmark or allocation-free query is claimed.
+
+The source-integral choice removes the held-k approximation within this
+fixed-composition, prescribed-pressure model. Smooth SDIRK2 temporal behavior
+still requires resolving caloric, spatial, nonlinear and quadrature errors;
+unresolved source or phase corners require refinement. Five tests of the actual
+production quadrature leaf compiled and passed. Four original-material and
+three native spatial regression groups are authored, covering original point
+parity, nonlinear means and source gaps, analytic graded heat with crossed
+conductivity knots, formation-reference covariance, constant-k BE/SDIR parity
+and transactional work/source/cancellation refusal. Pinned parsing passed;
+the full material and native spatial tests remain unexecuted.

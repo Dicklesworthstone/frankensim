@@ -15,6 +15,9 @@
 
 mod temperature;
 
+/// Original temperature-dependent Wilke/WMS conductivity and interval means.
+pub mod conductivity;
+
 /// Conservative density/energy reconstruction and closed-volume gas heating.
 pub mod energy;
 /// Explicit nonideal mechanical/phase binding over the same canonical species.
@@ -334,17 +337,12 @@ impl ThermochemicalGasModel {
         ).map_err(|error| failure("viscosity mixture", error))?
             .evaluate().map_err(|error| failure("Wilke evaluation", error))?;
         let fractions = self.thermodynamics.mole_composition().fractions();
-        // These immutable evaluated denominators are the L1 Wilke operation's
-        // actual outputs, NOT a second interaction formula or conductivity ratio.
-        let mut conductivity = 0.0;
-        for ((material, &fraction), &bits) in resolved.iter().zip(fractions)
-            .zip(viscosity.receipt().denominator_bits()) {
-            let pure = material.property(THERMAL_CONDUCTIVITY_PROPERTY)
-                .ok_or_else(|| invalid("missing resolved species conductivity"))?.value_si();
-            let contribution = fraction * (pure / f64::from_bits(bits));
-            if !positive(contribution) { return Err(invalid("WMS conductivity contribution is unrepresentable")); }
-            conductivity += contribution;
-        }
+        let conductivity = wms_conductivity(
+            resolved.iter().map(|material| material.property(THERMAL_CONDUCTIVITY_PROPERTY)
+                .map(|property| property.value_si())
+                .ok_or_else(|| invalid("missing resolved species conductivity"))),
+            fractions, viscosity.receipt().denominator_bits(),
+        )?;
         let density = eos.mass_density().value();
         let gas_constant = eos.specific_gas_constant().value();
         let sound_speed = fs_math::det::sqrt(gamma * gas_constant * temperature.value());
@@ -371,6 +369,31 @@ impl ThermochemicalGasModel {
             source_packs: self.source_packs.clone(),
         })
     }
+}
+
+
+// These immutable denominators are the L1 Wilke operation's actual outputs.
+// Share precisely the original WMS operation with prepared source integration;
+// neither a new interaction formula nor an averaged-conductivity model belongs here.
+fn wms_conductivity(
+    pure_values: impl IntoIterator<Item = Result<f64, MaterialError>>,
+    fractions: &[f64], denominator_bits: &[u64],
+) -> Result<f64, MaterialError> {
+    let mut conductivity = 0.0;
+    let mut pure_values = pure_values.into_iter();
+    if fractions.len() != denominator_bits.len() {
+        return Err(invalid("WMS source arrays differ"));
+    }
+    for (&fraction, &bits) in fractions.iter().zip(denominator_bits) {
+        let pure = pure_values.next().ok_or_else(|| invalid("missing WMS pure source"))??;
+        let contribution = fraction * (pure / f64::from_bits(bits));
+        if !positive(contribution) { return Err(invalid("WMS conductivity contribution is unrepresentable")); }
+        conductivity += contribution;
+    }
+    if pure_values.next().is_some() || !positive(conductivity) {
+        return Err(invalid("WMS conductivity is unrepresentable"));
+    }
+    Ok(conductivity)
 }
 
 /// Immutable common state retaining its original thermodynamic and material sources.

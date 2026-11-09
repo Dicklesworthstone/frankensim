@@ -1,12 +1,13 @@
 //! Explicit solid inventories on the same original gas/Fourier heat equation.
 
 use super::{
-    CancelGate, ChtError, ConductivityTensor, GasConductionCaloric, GasConductionQueryBudget,
-    GasSpeciesEnthalpyField, GasSpeciesEnthalpySource, MaterialAdvectionStep, SolidMaterial,
-    TensorCaloricLaw, TensorCaloricStorage, TensorConductivityLaw, ThermalSetup,
-    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
-    ThermochemicalSpeciesConductionReport, VoxelDomain, admit_interval, admitted_defect,
-    advance_native, conduction_report, gas_query_defect, invalid, poll, poll_every, reserved,
+    CancelGate, ChtError, GasConductionCaloric, GasConductionConductivity,
+    GasConductionQueryBudget, GasConductivityBudget, GasSpeciesEnthalpyField,
+    GasSpeciesEnthalpySource, MaterialAdvectionStep, SolidMaterial, TensorCaloricLaw,
+    TensorCaloricStorage, TensorConductivityLaw, ThermalSetup, ThermochemicalConductionAdvance,
+    ThermochemicalConductionControls, ThermochemicalSpeciesConductionReport, VoxelDomain,
+    admit_interval, admitted_defect, advance_native, conduction_report, gas_query_defect, invalid,
+    poll, poll_every, reserved,
 };
 
 /// Original caloric and conductivity owners for one stationary solid voxel.
@@ -100,12 +101,13 @@ impl MaterialAdvectionStep {
     /// Conduct gas and explicit solid inventories through ONE native heat solve.
     ///
     /// Fluid cells use the unchanged original gas T(h,Y), dT/dh=1/Cp, accepted
-    /// carrier mass and source-resolved opening isotropic k. Each solid supplies
+    /// carrier mass and explicitly selected original isotropic k. Each solid supplies
     /// its own original caloric law, fixed reference mass, previous energy and
     /// tensor conductivity law. Source-backed solid k(T) retains its actual
-    /// interval integral; gas k is held for this interval just as in the
-    /// gas-only entry. SDIRK2 order applies to the held-gas-k problem, not to an
-    /// inferred evolving gas conductivity.
+    /// interval integral. Gas k is either held at its opening value or follows
+    /// the same source-integral model as the gas-only entry. Held gas k keeps
+    /// first-order freezing error; original-integral quadrature has an explicit
+    /// error estimate and a shared point-query ceiling across the whole solve.
     ///
     /// The native storage coordinate advances m*(e-e0), including zero dT/de
     /// on a sharp latent plateau. The same physical interface heat enters the
@@ -155,6 +157,7 @@ impl MaterialAdvectionStep {
         let cells = domain.cell_count();
         let fluid_cells = cells - solid_cells.len();
         let budget = GasConductionQueryBudget::new(controls.maximum_caloric_queries, gate)?;
+        let conductivity_budget = GasConductivityBudget::new(controls.conductivity, gate)?;
         let initial = source.prepare(
             domain,
             self,
@@ -184,11 +187,15 @@ impl MaterialAdvectionStep {
                     .transport(cell)
                     .ok_or_else(|| invalid("conjugate heat lost its original fluid transport"))?
                     .thermal_conductivity_w_m_k();
-                tensors.push(ConductivityTensor::new([
-                    [k, 0.0, 0.0],
-                    [0.0, k, 0.0],
-                    [0.0, 0.0, k],
-                ])?);
+                tensors.push(GasConductionConductivity::new(
+                    &calorics[calorics.len() - 1],
+                    [
+                        source.controls.minimum_temperature_k,
+                        source.controls.maximum_temperature_k,
+                    ],
+                    k,
+                    &conductivity_budget,
+                )?);
                 mass.push(self.mass_kg[cell]);
                 previous_energy.push(gas_specific_enthalpy_j_kg[cell]);
             } else {
@@ -296,6 +303,7 @@ impl MaterialAdvectionStep {
             state.absolute_caloric_residual_j(),
             maximum_query_caloric_defect_j,
             caloric_queries,
+            &conductivity_budget,
             &controls,
         )?;
         poll(gate)?;
