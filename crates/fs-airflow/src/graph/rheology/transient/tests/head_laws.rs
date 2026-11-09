@@ -1,5 +1,7 @@
 //! Independent annular momentum and nonlinear equipment-source regressions.
 
+mod power;
+
 use super::super::head::{FlowHeadLaw, FlowHeadResponse};
 use super::*;
 
@@ -33,6 +35,7 @@ impl FlowHeadLaw for Cubic {
         Ok(FlowHeadResponse {
             pressure: Pressure::new(self.pressure(q)),
             pressure_slope_pa_s_m3: self.slope(q),
+            power: None,
         })
     }
 }

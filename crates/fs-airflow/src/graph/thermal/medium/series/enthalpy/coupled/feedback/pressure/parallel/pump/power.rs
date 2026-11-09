@@ -10,6 +10,10 @@
 use super::{PumpOperatingError, SourceProvenance};
 use fs_qty::{Power, VolumetricFlowRate};
 
+// The source evaluator and native head owner use the same original value
+// types. Preserve the established public pump API without a second schema.
+pub use crate::graph::rheology::transient::head::power::{PumpLossRouting, PumpPowerState};
+
 /// One equipment point at the head curve's fixed speed and pump-inlet flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PumpPowerPoint {
@@ -19,19 +23,6 @@ pub struct PumpPowerPoint {
     pub shaft_input: Power,
     /// Electrical power consumed by the drive, including its losses.
     pub electrical_input: Power,
-}
-
-/// Authored fractions of the two distinct losses delivered to the well-mixed
-/// coolant reservoir. The complements leave to unmodelled external surroundings.
-/// Neither fraction includes hydraulic work, whose later dissipation belongs
-/// to the original network. Zero means an externally cooled component; one
-/// represents complete thermal coupling to the inventory, e.g. immersion.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PumpLossRouting {
-    /// Fraction of shaft input minus hydraulic output heating the inventory.
-    pub pump_to_reservoir: f64,
-    /// Fraction of electrical input minus shaft input heating the inventory.
-    pub drive_to_reservoir: f64,
 }
 
 /// Independently sourced equipment data, with no extrapolation or scaling.
@@ -195,25 +186,6 @@ impl PumpDriveCurve {
             surroundings_heat_w: surroundings,
         })
     }
-}
-
-/// Actual equipment consumption and separated losses at one admitted state.
-/// Electrical input = hydraulic output + reservoir heat + surroundings heat.
-/// The existing network owns hydraulic output and its eventual dissipation.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PumpPowerState {
-    /// Mechanical input delivered to the pump shaft.
-    pub shaft_input_w: f64,
-    /// Total electrical input consumed by the drive.
-    pub electrical_input_w: f64,
-    /// Shaft input minus hydraulic output, never negative.
-    pub pump_loss_w: f64,
-    /// Electrical input minus shaft input, never negative.
-    pub drive_loss_w: f64,
-    /// Explicitly routed pump and drive heat entering the finite inventory.
-    pub reservoir_heat_w: f64,
-    /// Remaining pump and drive heat delivered to unmodelled surroundings.
-    pub surroundings_heat_w: f64,
 }
 
 fn valid_domain((lo, hi): (f64, f64)) -> bool {

@@ -49,6 +49,7 @@ impl FlowHeadLaw for PreparedEquipment {
         Ok(FlowHeadResponse {
             pressure: Pressure::new(self.original.pressure(q, self.viscosity)),
             pressure_slope_pa_s_m3: -2e6 - 12e15 * q * q,
+            power: None,
         })
     }
 }

@@ -6745,3 +6745,11 @@ and couple the profile to actual reciprocal body/gas energy. They were parsed
 and reviewed but remain uncompiled and unexecuted in this environment. The
 exact numerical fin module's ten tests, including six nonlinear groups, were
 compiled and executed successfully; that is not a full fs-airflow/DSR pass.
+
+### Original equipment power retained by native head evaluations
+
+The existing `PumpPowerState` and `PumpLossRouting` value types now have one neutral owner in `graph::rheology::transient::head::power`; their established `pump::power` paths re-export the same types and preserve every field. `FlowHeadResponse::power` optionally retains the original evaluator's power state and its original loss partition. `RadialPumpHead` supplies that value from the same already-budgeted head/drive evaluation. Accepted heads therefore carry actual shaft/electrical input and separated losses without another source query.
+
+Native admission checks each nonnegative pump/drive power channel against actual `H(Q)Q`, and each routed heat channel against its original fraction. Roundoff allowances scale only the same compared channel: large through-power or an unrelated loss cannot conceal invented small heat. Head-only and signed recovering sources remain valid with no power data; no efficiency or heat is inferred. Authored nonzero shutoff input/losses remain possible when hydraulic work and pipe dissipation are zero.
+
+Verification: the actual standalone production power leaf compiled with the pinned compiler, and its large-throughput/small-heat regression passed (1 test). Original native graph regressions for accepted zero/nonzero-flow power, exact query counts and failed-partition rollback, plus original pump adapter receipt assertions, were authored and formatter-parsed but not executed after loss of the prior numerical dependency projection. Full Cargo/native runtime integration remains unverified. This native slice retains values; explicit regional heat destinations are supplied by the subsequent thermal composition.

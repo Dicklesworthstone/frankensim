@@ -12,6 +12,7 @@ use fs_material::liquid::ResolvedLiquidState;
 use fs_qty::{Pressure, VolumetricFlowRate};
 
 use super::{PumpHeadCurve, PumpOperatingError, PumpSupplyState};
+use crate::graph::rheology::transient::head::power::FlowHeadPowerReceipt;
 use crate::graph::rheology::transient::head::{FlowHeadLaw, FlowHeadResponse, FlowHeadSource};
 
 /// Source-preserving adapter for a fixed prepared equipment/material state.
@@ -71,8 +72,8 @@ impl RadialPumpHead {
     }
 
     /// Original hydraulic and optional shaft/electrical supply at the actual
-    /// solved flow. Additional motor/pump loss deposition remains an explicitly
-    /// authored thermal exchange, separate from native pipe viscous heat.
+    /// solved flow. Native accepted head responses already retain this same
+    /// evaluation's power state; consumers need not query again to route losses.
     pub fn supply(&self, flow: VolumetricFlowRate) -> Result<PumpSupplyState, PumpOperatingError> {
         self.curve.evaluate(&self.inlet, flow)
     }
@@ -112,6 +113,14 @@ impl FlowHeadLaw for RadialPumpHead {
         Ok(FlowHeadResponse {
             pressure: Pressure::new(supply.available_pressure_pa),
             pressure_slope_pa_s_m3: slope,
+            power: supply.drive_power.map(|state| FlowHeadPowerReceipt {
+                state,
+                routing: self
+                    .curve
+                    .drive_curve()
+                    .expect("original supply has drive data")
+                    .routing(),
+            }),
         })
     }
 }

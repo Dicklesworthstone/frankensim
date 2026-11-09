@@ -58,6 +58,7 @@ fn original_pump_and_material_are_retained_with_exact_knot_tangents() {
         let response = FlowHeadLaw::evaluate(pump.as_ref(), VolumetricFlowRate::new(q)).unwrap();
         close(response.pressure.value(), pressure, 1e-11);
         close(response.pressure_slope_pa_s_m3, slope, 1e-7);
+        assert_eq!(response.power, None);
         assert_eq!(
             pump.supply(VolumetricFlowRate::new(q)).unwrap(),
             original
@@ -113,6 +114,13 @@ fn optional_original_drive_support_and_power_refusals_are_not_bypassed() {
     for q in [2e-6, 5e-6, 8e-6] {
         let actual = pump.supply(VolumetricFlowRate::new(q)).unwrap();
         assert!(actual.drive_power.is_some());
+        let retained = pump
+            .evaluate(VolumetricFlowRate::new(q))
+            .unwrap()
+            .power
+            .unwrap();
+        assert_eq!(retained.state, actual.drive_power.unwrap());
+        assert_eq!(retained.routing, original.drive_curve().unwrap().routing());
         assert_eq!(
             actual,
             original

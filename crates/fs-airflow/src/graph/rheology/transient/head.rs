@@ -6,12 +6,19 @@
 
 use super::*;
 
+/// Original equipment input/loss values shared with the pump source owner.
+pub mod power;
+use power::FlowHeadPowerReceipt;
+
 /// The original source's pressure rise and its local slope in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlowHeadResponse {
     pub pressure: Pressure,
     /// dH/dQ [Pa s/m3]. Must be finite and nonpositive.
     pub pressure_slope_pa_s_m3: f64,
+    /// The same original evaluation's optional input powers and authored loss
+    /// partition. Head-only sources leave this absent; no efficiency is inferred.
+    pub power: Option<FlowHeadPowerReceipt>,
 }
 
 /// A pure, bounded original equipment law. Implementations own their source
@@ -152,6 +159,11 @@ fn query(
             branch,
             FlowHeadError::Invalid("finite nonincreasing original pressure-head response required"),
         ));
+    }
+    if let Some(power) = response.power {
+        power
+            .validate(response.pressure.value() * flow)
+            .map_err(|reason| refusal(branch, FlowHeadError::Invalid(reason)))?;
     }
     Ok(response)
 }
