@@ -221,6 +221,56 @@ impl FrozenGas {
         .map(SpatialFaceFlux::from)
     }
 
+    /// Incoming acoustic characteristic with both outgoing shear velocities.
+    ///
+    /// Reference velocity is signed along the supplied normal axis. The
+    /// source-owned condition of [`Self::characteristic_outlet_flux`] admits
+    /// pressure, entropy and the complete transported kinetic energy. This
+    /// local one-dimensional closure does not claim nonreflection of oblique
+    /// waves or shocks. Backflow and unsupported original-source paths refuse.
+    pub fn characteristic_outlet_spatial_flux(
+        &self,
+        state: SpatialConserved,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        let primitive = self.spatial_primitive(state, &mut cancelled)?;
+        self.trace_characteristic_outlet(
+            state,
+            primitive,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed path to [`Self::characteristic_outlet_spatial_flux`].
+    /// Avoids reinverting energy while retaining both shear precision checks.
+    pub fn characteristic_outlet_spatial_flux_from_primitive(
+        &self,
+        state: SpatialPrimitive,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.spatial_state_at(state)?;
+        self.trace_characteristic_outlet(
+            state,
+            primitive,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
     /// Exact thermally perfect shock/rarefaction at a stationary adiabatic slip
     /// wall. `outward_normal` is -1 or +1 along the supplied normal axis. There
     /// is no mass, tangential momentum or energy transfer through this wall.

@@ -1,5 +1,24 @@
 # fs-gas contract
 
+## Planar and volumetric acoustic pressure outlets
+
+The frozen and evolving-mixture gas owners expose characteristic outlet fluxes
+for both conserved and reconstructed planar/three-dimensional traces. They use
+the same original-caloric incoming-characteristic solve as the 1-D outlet,
+with reference pressure and reference velocity signed along the supplied normal
+axis. The outgoing entropy, composition and each shear velocity are retained;
+species, momentum, pressure work and every kinetic-energy component cross the
+same face. Shared outgoing-flux assembly avoids a second constitutive closure
+and allocates no heap workspace. Full caloric precision, source-domain limits,
+sonic sampling, supersonic causality, backflow refusal and cancellation remain
+binding. Mixture output publishes atomically, including late cancellation.
+
+Focused G1/G3 regressions check exact outgoing simple waves, dimensional
+reduction, both normal orientations, variable source Cp, absent species,
+both shear energies and sonic/supersonic regimes. These are local smooth
+normal-wave conditions; they do not guarantee nonreflection for oblique waves,
+shocks or interactions with transverse composition/entropy gradients.
+
 ## Adiabatic throttling with original phase enthalpy
 
 `material::phase_throttle::throttle_adiabatic_mixture_stream` closes the steady

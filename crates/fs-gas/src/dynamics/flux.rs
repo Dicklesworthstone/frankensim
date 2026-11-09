@@ -383,6 +383,56 @@ impl FrozenGas {
         .map(NormalFaceFlux::from)
     }
 
+    /// Incoming acoustic characteristic retaining outgoing planar shear.
+    ///
+    /// Reference velocity is signed along the supplied normal axis. The
+    /// original interior isentrope and caloric source determine the face
+    /// pressure; this is the local one-dimensional smooth-wave condition of
+    /// [`Self::characteristic_outlet_flux`], not an oblique-wave or shock
+    /// nonreflection guarantee. Backflow and unsupported source paths refuse.
+    pub fn characteristic_outlet_normal_flux(
+        &self,
+        state: NormalConserved,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let primitive = self.normal_primitive(state, &mut cancelled)?;
+        self.trace_characteristic_outlet(
+            state,
+            primitive,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed path to [`Self::characteristic_outlet_normal_flux`].
+    /// Retains complete kinetic-energy precision without a second caloric inversion.
+    pub fn characteristic_outlet_normal_flux_from_primitive(
+        &self,
+        state: NormalPrimitive,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.normal_state_at(state)?;
+        self.trace_characteristic_outlet(
+            state,
+            primitive,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
     fn trace_pressure_outlet<const N: usize, Q: Trace<N>>(
         &self,
         state: Q,
@@ -393,6 +443,37 @@ impl FrozenGas {
     ) -> Result<NumericalFlux<N>, Error> {
         let (face, signal) =
             self.pressure_outlet_state(primitive, outward_normal, backpressure, cancelled)?;
+        self.trace_outgoing_flux(state, face, signal, cancelled)
+    }
+
+    fn trace_characteristic_outlet<const N: usize, Q: Trace<N>>(
+        &self,
+        state: Q,
+        primitive: Primitive,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
+        let (face, signal) = self.characteristic_outlet_state(
+            primitive,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            cancelled,
+        )?;
+        self.trace_outgoing_flux(state, face, signal, cancelled)
+    }
+
+    /// Shared physical transport after either pressure boundary has admitted
+    /// its axial face state. Every outgoing tangent retains the same velocity.
+    fn trace_outgoing_flux<const N: usize, Q: Trace<N>>(
+        &self,
+        state: Q,
+        face: Primitive,
+        signal: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
         let normal = self.conserved(face.density, face.velocity, face.pressure)?;
         let old = state.array();
         let mut values = [0.0; N];

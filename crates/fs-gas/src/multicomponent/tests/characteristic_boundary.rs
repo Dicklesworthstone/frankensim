@@ -31,6 +31,210 @@ fn variable_source(formation: f64) -> MixtureGas {
     ])
 }
 
+#[test]
+fn g3_multidimensional_characteristic_outlets_retain_species_shear_and_full_energy() {
+    let gas = variable_source(1e18);
+    for densities in [[1.0, 0.0], [0.0, 2.0], [0.2, 0.8]] {
+        for normal in [-1.0, 1.0] {
+            for (speed, reference_pressure) in [(0.3, 0.9), (0.3, 0.001), (3.0, 1e40)] {
+                let velocity = normal * speed;
+                let axial = gas.conserved(&densities, velocity, 1.0).unwrap();
+                let mut expected = [0.0; 4];
+                let axial_report = gas
+                    .characteristic_outlet_flux(
+                        axial.as_cell(),
+                        normal,
+                        reference_pressure,
+                        normal * 0.3,
+                        &mut expected,
+                        || false,
+                    )
+                    .unwrap();
+                let mass_flux = expected[0] + expected[1];
+                for shear in [[0.0, 0.0], [2.0, -3.0], [-3.0, 2.0]] {
+                    let planar = NormalPrimitive {
+                        partial_densities: &densities,
+                        normal_velocity: velocity,
+                        transverse_velocity: shear[0],
+                        pressure: 1.0,
+                    };
+                    let spatial = SpatialPrimitive {
+                        partial_densities: &densities,
+                        normal_velocity: velocity,
+                        transverse_velocity: shear,
+                        pressure: 1.0,
+                    };
+                    let mut q2 = [0.0; 5];
+                    let mut q3 = [0.0; 6];
+                    gas.normal_conserved_into(planar, &mut q2).unwrap();
+                    gas.spatial_conserved_into(spatial, &mut q3).unwrap();
+                    let mut f2 = [0.0; 5];
+                    let mut f3 = [0.0; 6];
+                    for reconstructed in [false, true] {
+                        let report2 = if reconstructed {
+                            gas.characteristic_outlet_normal_flux_from_primitive(
+                                planar,
+                                normal,
+                                reference_pressure,
+                                normal * 0.3,
+                                &mut f2,
+                                || false,
+                            )
+                        } else {
+                            gas.characteristic_outlet_normal_flux(
+                                NormalCell {
+                                    partial_densities: &q2[..2],
+                                    normal_momentum: q2[2],
+                                    transverse_momentum: q2[3],
+                                    energy: q2[4],
+                                },
+                                normal,
+                                reference_pressure,
+                                normal * 0.3,
+                                &mut f2,
+                                || false,
+                            )
+                        }
+                        .unwrap();
+                        let report3 = if reconstructed {
+                            gas.characteristic_outlet_spatial_flux_from_primitive(
+                                spatial,
+                                normal,
+                                reference_pressure,
+                                normal * 0.3,
+                                &mut f3,
+                                || false,
+                            )
+                        } else {
+                            gas.characteristic_outlet_spatial_flux(
+                                SpatialCell {
+                                    partial_densities: &q3[..2],
+                                    normal_momentum: q3[2],
+                                    transverse_momentum: [q3[3], q3[4]],
+                                    energy: q3[5],
+                                },
+                                normal,
+                                reference_pressure,
+                                normal * 0.3,
+                                &mut f3,
+                                || false,
+                            )
+                        }
+                        .unwrap();
+                        for i in 0..3 {
+                            close(f2[i], expected[i]);
+                            close(f3[i], expected[i]);
+                        }
+                        close(f2[3], mass_flux * shear[0]);
+                        close(f3[3], mass_flux * shear[0]);
+                        close(f3[4], mass_flux * shear[1]);
+                        close(f2[4], expected[3] + 0.5 * mass_flux * shear[0].powi(2));
+                        close(
+                            f3[5],
+                            expected[3]
+                                + 0.5 * mass_flux * (shear[0].powi(2) + shear[1].powi(2)),
+                        );
+                        close(report2.signal_speed, axial_report.signal_speed);
+                        close(report3.signal_speed, axial_report.signal_speed);
+                        for i in 0..2 {
+                            if densities[i] == 0.0 {
+                                assert_eq!(f2[i], 0.0);
+                                assert_eq!(f3[i], 0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_multidimensional_characteristic_refusals_preserve_complete_output() {
+    let gas = variable_source(0.0);
+    let original = [17.0; 6];
+    let mut output = original;
+    let primitive = SpatialPrimitive {
+        partial_densities: &[0.4, 0.6],
+        normal_velocity: 0.3,
+        transverse_velocity: [2.0, -3.0],
+        pressure: 1.0,
+    };
+    for (normal, pressure, velocity) in [(0.0, 1.0, 0.3), (1.0, 0.0, 0.3), (1.0, 1.0, -0.3)] {
+        assert!(
+            gas.characteristic_outlet_spatial_flux_from_primitive(
+                primitive,
+                normal,
+                pressure,
+                velocity,
+                &mut output,
+                || false,
+            )
+            .is_err()
+        );
+        assert_eq!(output, original);
+    }
+    for invalid in [
+        SpatialPrimitive {
+            normal_velocity: -0.3,
+            ..primitive
+        },
+        SpatialPrimitive {
+            transverse_velocity: [f64::NAN, 0.0],
+            ..primitive
+        },
+        SpatialPrimitive {
+            transverse_velocity: [1e20, 0.0],
+            ..primitive
+        },
+    ] {
+        assert!(
+            gas.characteristic_outlet_spatial_flux_from_primitive(
+                invalid,
+                1.0,
+                1.0,
+                0.3,
+                &mut output,
+                || false,
+            )
+            .is_err()
+        );
+        assert_eq!(output, original);
+    }
+    // Inject cancellation after the complete characteristic solve reaches
+    // its final publication checkpoint, not just at API entry.
+    let mut calls = 0;
+    gas.characteristic_outlet_spatial_flux_from_primitive(
+        primitive,
+        1.0,
+        0.9,
+        0.3,
+        &mut output,
+        || {
+            calls += 1;
+            false
+        },
+    )
+    .unwrap();
+    output = original;
+    let mut actual = 0;
+    assert_eq!(
+        gas.characteristic_outlet_spatial_flux_from_primitive(
+            primitive,
+            1.0,
+            0.9,
+            0.3,
+            &mut output,
+            || {
+                actual += 1;
+                actual == calls
+            },
+        ),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(output, original);
+}
+
 // Independent integration for Cp(T)=a+b*T with gas constant r, at fixed Y.
 fn acoustic_integral(temperature: f64, a: f64, b: f64, r: f64) -> f64 {
     let panels = 512;

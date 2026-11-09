@@ -8,6 +8,67 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g3_planar_characteristic_outlet_transports_shear_through_each_acoustic_regime() {
+    for cp in [0.0, 0.4] {
+        let gas = gas(cp, 1e18);
+        for normal in [-1.0, 1.0] {
+            // Smooth subsonic discharge, sonic expansion and supersonic
+            // causality share the existing independently verified axial law.
+            for (speed, reference_pressure) in [(0.4, 0.9), (0.4, 0.01), (3.0, 1e40)] {
+                let velocity = normal * speed;
+                let axial = gas.conserved(1.0, velocity, 1.0).unwrap();
+                let reference = gas
+                    .characteristic_outlet_flux(
+                        axial,
+                        normal,
+                        reference_pressure,
+                        normal * 0.2,
+                        || false,
+                    )
+                    .unwrap();
+                for tangent in [-3.0, 0.0, 2.0] {
+                    let primitive = NormalPrimitive {
+                        density: 1.0,
+                        normal_velocity: velocity,
+                        transverse_velocity: tangent,
+                        pressure: 1.0,
+                    };
+                    let state = gas.normal_conserved(1.0, velocity, tangent, 1.0).unwrap();
+                    for flux in [
+                        gas.characteristic_outlet_normal_flux(
+                            state,
+                            normal,
+                            reference_pressure,
+                            normal * 0.2,
+                            || false,
+                        )
+                        .unwrap(),
+                        gas.characteristic_outlet_normal_flux_from_primitive(
+                            primitive,
+                            normal,
+                            reference_pressure,
+                            normal * 0.2,
+                            || false,
+                        )
+                        .unwrap(),
+                    ] {
+                        close(flux.mass, reference.mass);
+                        close(flux.normal_momentum, reference.momentum);
+                        close(flux.transverse_momentum, reference.mass * tangent);
+                        close(
+                            flux.energy,
+                            reference.energy + 0.5 * reference.mass * tangent * tangent,
+                        );
+                        close(flux.signal_speed, reference.signal_speed);
+                        assert!(!flux.used_hll_fallback);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn g3_pressure_outlet_transports_planar_shear_energy_and_reconstruction_consistently() {
     let gas = gas(0.4, 1e18);
     for normal in [-1.0, 1.0] {

@@ -8,6 +8,99 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g1_spatial_characteristic_outlet_passes_simple_acoustic_waves_and_shear_contacts() {
+    let gas = gas(0.0, -1e18);
+    let c0 = 1.4_f64.sqrt();
+    for normal in [-1.0, 1.0] {
+        for temperature in [0.95_f64, 1.0, 1.05] {
+            // Exact gamma=1.4 outgoing simple wave: p=T^3.5, rho=T^2.5,
+            // u-u_ref=5(c-c_ref). Shear velocities are arbitrary outgoing
+            // contact data and must not alter the pressure characteristic.
+            let density = temperature.powf(2.5);
+            let pressure = temperature.powf(3.5);
+            let velocity = normal * (0.4 + 5.0 * c0 * (temperature.sqrt() - 1.0));
+            for tangents in [[0.0, 0.0], [2.0, -3.0], [-3.0, 2.0]] {
+                let primitive = SpatialPrimitive {
+                    density,
+                    normal_velocity: velocity,
+                    transverse_velocity: tangents,
+                    pressure,
+                };
+                let state = conserved(&gas, primitive);
+                let expected = [
+                    state.normal_momentum,
+                    state.normal_momentum * velocity + pressure,
+                    state.transverse_momentum[0] * velocity,
+                    state.transverse_momentum[1] * velocity,
+                    (state.energy + pressure) * velocity,
+                ];
+                for flux in [
+                    gas.characteristic_outlet_spatial_flux(
+                        state,
+                        normal,
+                        1.0,
+                        normal * 0.4,
+                        || false,
+                    )
+                    .unwrap(),
+                    gas.characteristic_outlet_spatial_flux_from_primitive(
+                        primitive,
+                        normal,
+                        1.0,
+                        normal * 0.4,
+                        || false,
+                    )
+                    .unwrap(),
+                ] {
+                    for (actual, reference) in components(flux).into_iter().zip(expected) {
+                        close(actual, reference);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_spatial_characteristic_outlet_refuses_backflow_and_lost_caloric_precision() {
+    let gas = gas(0.0, 0.0);
+    let primitive = trace([1.0, 0.4, 2.0, -3.0, 1.0]);
+    assert_eq!(
+        gas.characteristic_outlet_spatial_flux_from_primitive(primitive, 1.0, 1.0, 0.4, || true),
+        Err(Error::Cancelled)
+    );
+    for invalid in [
+        SpatialPrimitive {
+            normal_velocity: -0.4,
+            ..primitive
+        },
+        SpatialPrimitive {
+            transverse_velocity: [f64::NAN, 0.0],
+            ..primitive
+        },
+        SpatialPrimitive {
+            transverse_velocity: [1e20, 0.0],
+            ..primitive
+        },
+    ] {
+        assert!(
+            gas.characteristic_outlet_spatial_flux_from_primitive(
+                invalid, 1.0, 1.0, 0.4, || false,
+            )
+            .is_err()
+        );
+    }
+    for (normal, pressure, velocity) in [(0.0, 1.0, 0.4), (1.0, 0.0, 0.4), (1.0, 1.0, -0.4)] {
+        assert!(
+            gas.characteristic_outlet_spatial_flux_from_primitive(
+                primitive, normal, pressure, velocity, || false,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn g3_pressure_outlet_retains_both_shear_components_and_full_spatial_work() {
     let gas = gas(0.4, -1e18);
     for normal in [-1.0, 1.0] {
