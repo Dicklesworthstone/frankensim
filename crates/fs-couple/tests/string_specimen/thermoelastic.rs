@@ -248,4 +248,5 @@ fn electrical_transport_drives_the_same_thermoelastic_state_and_retained_sound()
     });
 }
 
+#[path = "thermoelastic/expansion.rs"]
 mod expansion;

@@ -423,4 +423,5 @@ fn original_enthalpy_network_conducts_relaxation_heat_on_the_mechanical_clock() 
     );
 }
 
+#[path = "material_relaxation_heat/exponential.rs"]
 mod exponential;
