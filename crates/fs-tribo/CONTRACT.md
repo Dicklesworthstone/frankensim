@@ -1,5 +1,27 @@
 # CONTRACT: fs-tribo
 
+## Continuous Hertz sliding and spin through arrest
+
+`sliding_patch::contact::relaxation` integrates the original pressure-resolved
+Hertz force/spin wrench through exact finite arrest when the complete
+radius-scaled mobility preserves the incoming slip/spin direction. One kinetic
+law evaluation supplies the moving phase. Its duration ends at the actual stop;
+stationary dwell adds neither impulse nor heat, and static capacity does not
+capture moving motion early. The report retains actual integrated slip, spin,
+impulses, physical loss and stopping time.
+
+The allocation-free mechanics are shared with
+`adhesive::spinning::relaxation`, preserving its existing public types, error
+variants and arithmetic. Original full-matrix impulse work independently checks
+the integrated physical loss. Geometry, normal load, coefficients and inertia
+are held over this unforced trajectory; curved velocity paths and pose
+integration require their surrounding owners.
+
+`tests/hertz_relaxation.rs` covers pure sliding/spin, the closed-form combined
+Hertz rim response with off-diagonal mobility, time splitting, stopped dwell,
+zero capacity and bounded refusal. The existing `adhesive_relaxation` tests
+retain the shared owner's prior behavior.
+
 ## Pressure-fed sliding Reynolds films
 
 `resistive_film::shear::pressure::PressureDrivenShearedFilm` composes prescribed

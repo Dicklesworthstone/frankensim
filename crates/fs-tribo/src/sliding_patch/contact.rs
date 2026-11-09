@@ -17,6 +17,8 @@ use crate::TriboError;
 pub mod impulse;
 /// Simultaneous original Hertz patches with full cross-contact response.
 pub mod multiple;
+/// Continuous slip/spin on invariant directions, including finite arrest.
+pub mod relaxation;
 
 type Vector = [f64; 3];
 type Matrix = [[f64; 3]; 3];
