@@ -10,6 +10,9 @@ use fs_phs::circuit::inductance::InductorFluxCurve;
 use fs_phs::linear_exact::LinearSplitBudget;
 use fs_phs::{PhsError, PreparedStepError, SolveBudget, StepWorkspace};
 
+#[path = "converter_inductance/power_load.rs"]
+mod power_load;
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         actual.is_finite() && expected.is_finite() && (actual - expected).abs() <= tolerance,

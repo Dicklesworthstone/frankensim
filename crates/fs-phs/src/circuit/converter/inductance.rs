@@ -26,6 +26,10 @@ use crate::{
 };
 use fs_math::dd::Dd;
 
+/// Regulated demand solved together with saturated winding and both finite buses.
+pub mod power_load;
+pub use power_load::NonlinearPowerLoadedStep;
+
 /// Explicit native solve limits and independent physical-energy allowances.
 /// Defaults are strict: no allowance is raised to accept a trial. Small charge
 /// increments on a charged bus can require an explicit absolute allowance for
@@ -240,6 +244,34 @@ impl PreparedNonlinearAveragedBuckBoost {
             &mut voltage,
             &mut cancelled,
         )?;
+        let terminal_work_j: [f64; 2] =
+            core::array::from_fn(|i| product([self.duration_s, terminal_current_a[i], voltage[i]]));
+        let record = self.account_interval(
+            initial,
+            &candidate,
+            &voltage,
+            terminal_work_j,
+            terminal_work_j.map(f64::abs),
+            native,
+        )?;
+        poll(&mut cancelled)?;
+        next.copy_from_slice(&candidate);
+        discrete_bus_voltage_v.copy_from_slice(&voltage);
+        Ok(record)
+    }
+
+    // Both ordinary and regulated-load steps retain these SAME original source,
+    // capacitor, bridge and five conduction accounts. Terminal scales include
+    // actual source/export work before cancellation, never background storage.
+    fn account_interval(
+        &self,
+        initial: &[f64; 3],
+        candidate: &[f64; 3],
+        voltage: &[f64; 2],
+        terminal_work_j: [f64; 2],
+        terminal_work_scale_j: [f64; 2],
+        native: PreparedStepRecord,
+    ) -> Result<NonlinearConverterStep, PreparedStepError> {
         let c = &self.converter;
         let h = self.duration_s;
         let magnetic_energy_change_j = c
@@ -259,8 +291,6 @@ impl PreparedNonlinearAveragedBuckBoost {
                 / Dd::from_f64(c.bus_capacitance_f[i]))
             .to_f64()
         });
-        let terminal_work_j: [f64; 2] =
-            core::array::from_fn(|i| product([h, terminal_current_a[i], voltage[i]]));
         let joules = c
             .effective_resistance_ohm
             .map(|r| product([h, r, discrete_current_a, discrete_current_a]));
@@ -292,7 +322,7 @@ impl PreparedNonlinearAveragedBuckBoost {
             bus_energy_change_j[0].abs(),
             bus_energy_change_j[1].abs(),
         ]);
-        let supply_scale = sum(terminal_work_j.map(f64::abs));
+        let supply_scale = sum(terminal_work_scale_j);
         let accounts = [
             (
                 sum([magnetic_energy_change_j, heat, -exchange[0], -exchange[1]]),
@@ -308,7 +338,7 @@ impl PreparedNonlinearAveragedBuckBoost {
                 sum([
                     bus_energy_change_j[0].abs(),
                     exchange[0].abs(),
-                    terminal_work_j[0].abs(),
+                    terminal_work_scale_j[0],
                 ]),
             ),
             (
@@ -316,7 +346,7 @@ impl PreparedNonlinearAveragedBuckBoost {
                 sum([
                     bus_energy_change_j[1].abs(),
                     exchange[1].abs(),
-                    terminal_work_j[1].abs(),
+                    terminal_work_scale_j[1],
                 ]),
             ),
             (sum([stored, -native.delta_h]), stored_scale),
@@ -343,9 +373,6 @@ impl PreparedNonlinearAveragedBuckBoost {
             )
             .into());
         }
-        poll(&mut cancelled)?;
-        next.copy_from_slice(&candidate);
-        discrete_bus_voltage_v.copy_from_slice(&voltage);
         Ok(NonlinearConverterStep {
             native,
             magnetic_energy_change_j,

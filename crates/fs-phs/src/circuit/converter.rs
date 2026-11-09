@@ -40,7 +40,7 @@ pub mod terminals;
 
 pub use inductance::{
     NonlinearAveragedBuckBoost, NonlinearConverterControls, NonlinearConverterStep,
-    PreparedNonlinearAveragedBuckBoost,
+    NonlinearPowerLoadedStep, PreparedNonlinearAveragedBuckBoost,
 };
 
 /// Five distinct heat owners, in the same order as [`ConductionHeat::joules`].

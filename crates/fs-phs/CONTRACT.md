@@ -3478,3 +3478,30 @@ discrete-effort accounts, not continuous-time averages or RMS-current integrals.
 Conduction uses `dt R I_discrete^2` with each original duty-weighted resistance.
 Saturation adds no PWM ripple, switching loss, hysteresis, core-loss or thermal
 law. Source interpolation and time refinement remain separate accuracy duties.
+
+### Regulated demand with the same saturated winding
+
+`PreparedNonlinearAveragedBuckBoost::step_power_loaded_controlled` admits optional
+`RegulatedPowerLoad` commands at both buses in the SAME native nonlinear step.
+The existing bipolar constant-power/current-limit/foldback law and its branch
+derivative are reused, together with the original winding's exact discrete
+current derivative. Load current is solved at the accepted discrete voltage;
+there is no previous-voltage current command or additional integrator. Commands
+can change while the original flux and both bus charges continue.
+
+`NonlinearPowerLoadedStep` retains the complete magnetic/capacitor/conduction
+receipt and separately reports held-current source work, exported load work and
+curtailed demand. Terminal work and native supply are source work minus export.
+All exported load work leaves the converter; native dissipation remains exactly
+the same five conduction owners. Both ordinary and loaded paths share the same
+independent magnetic, bus, native and full-stage work gates. Loaded terminal
+allowances use actual source and exported transfers before their cancellation.
+The declared strict energy allowances are unchanged.
+
+Authored load voltage support is checked at initial, discrete and final efforts,
+including explicitly zero-power loads; missing loads have no voltage-domain
+restriction beyond representability. Every support, solve, account or cancellation
+refusal publishes neither output buffer. Callbacks and accounts allocate no
+per-step storage. Discrete quadrature, source interpolation and averaging limits
+remain unchanged; convergence does not certify continuous-time overshoot,
+stability, nonlinear-root uniqueness or regulator bandwidth.
