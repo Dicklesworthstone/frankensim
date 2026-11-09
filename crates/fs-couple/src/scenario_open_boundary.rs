@@ -5,6 +5,9 @@
 //! same transaction as collision, streaming and measured reservoir transport.
 //! Interpolation, physical admission and fluid stepping retain their owners.
 
+/// Scenario reservoirs in the native joint flow/heat transaction.
+pub mod thermal;
+
 use crate::scenario_pressure::{
     PressureBoundary3, PressureSample3, ScenarioPressureError,
     prepare_pressure_faces3_with_checkpoint,

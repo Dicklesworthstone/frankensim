@@ -1,5 +1,8 @@
 //! G0/G3: one control-time transaction reaches both native boundary operators.
 
+#[path = "scenario_open_boundary/thermal.rs"]
+mod thermal;
+
 use fs_couple::scenario_open_boundary::lattice3;
 use fs_couple::scenario_open_boundary::{
     BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, rebind_open_faces3,

@@ -12,7 +12,7 @@ pub mod buoyancy;
 mod forced;
 
 use super::{
-    EquilibriumLattice3, Face3, FaceBoundary3, GridError3, OpenBoundaryGrid3,
+    BoundarySpec3, EquilibriumLattice3, Face3, FaceBoundary3, FacePlan, GridError3, OpenBoundaryGrid3,
     OpenBoundaryMomentumTransport3, macro_cell,
 };
 use crate::thermal::open::{
@@ -49,6 +49,25 @@ impl<E: core::fmt::Debug> std::error::Error for OpenThermalError3<E> {}
 pub struct OpenThermalStep3 {
     pub momentum: OpenBoundaryMomentumTransport3,
     pub heat: ThermalOpenBalance3,
+}
+
+/// Borrowed diffusion law for a joint boundary/flow/heat interval.
+/// The original thermal carrier owns both kernels and their admission.
+#[derive(Debug, Clone, Copy)]
+pub enum OpenThermalDiffusion3<'a> {
+    /// Hold the carrier's tau, or supply one scalar tau per native cell.
+    Relaxation(Option<&'a [f64]>),
+    /// Full tensor diffusion in the original fixed Cartesian grid axes.
+    Tensor(DiffusivityField<'a, 3>),
+}
+
+impl<'a> OpenThermalDiffusion3<'a> {
+    fn parts(self) -> (Option<&'a [f64]>, Option<DiffusivityField<'a, 3>>) {
+        match self {
+            Self::Relaxation(values) => (values, None),
+            Self::Tensor(values) => (None, Some(values)),
+        }
+    }
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
@@ -119,6 +138,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         self.step_serial_with_thermal_impl(
             thermal,
             cx,
+            self.plan,
             collisions,
             heat_per_step,
             thermal_relaxation,
@@ -155,6 +175,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         self.step_serial_with_thermal_impl(
             thermal,
             cx,
+            self.plan,
             collisions,
             heat_per_step,
             None,
@@ -163,11 +184,40 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         )
     }
 
+    /// Apply proposed reservoir/wall targets in the original joint heat step.
+    ///
+    /// Targets drive this interval's momentum reconstruction but publish only
+    /// with both population fields, heat/flux histories, finite walls and clocks.
+    /// Refusal during the closing thermal half-kick retains the old controls.
+    /// Native boundary kinds and retained spatial profiles keep their ownership;
+    /// thermal reservoir data and source units remain explicitly caller-owned.
+    /// Scalar and tensor diffusion use the same existing thermal transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_serial_with_thermal_and_open_boundaries(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        cx: &Cx<'_>,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        diffusion: OpenThermalDiffusion3<'_>,
+        origin: [f64; 3],
+    ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
+        let plan = self.prepare_open_boundaries(boundaries, &mut || {
+            cx.checkpoint().map_err(|_| GridError3::Cancelled)
+        })?;
+        let (relaxation, tensor) = diffusion.parts();
+        self.step_serial_with_thermal_impl(
+            thermal, cx, plan, collisions, heat_per_step, relaxation, tensor, origin,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn step_serial_with_thermal_impl(
         &mut self,
         thermal: &mut ThermalOpenField3,
         cx: &Cx<'_>,
+        plan: FacePlan,
         collisions: Option<&[L::Collision]>,
         heat_per_step: &[f64],
         thermal_relaxation: Option<&[f64]>,
@@ -188,7 +238,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             )
             .into());
         }
-        self.admit_thermal_faces(thermal.boundaries())?;
+        self.admit_thermal_faces_with_plan(plan, thermal.boundaries())?;
         for cell in 0..self.grid.f.len() {
             if cell % 64 == 0 {
                 poll()?;
@@ -204,7 +254,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         } else {
             thermal.begin_step(heat_per_step, thermal_relaxation, poll)?
         };
-        let (momentum, step) = self.stage_serial_with_plan(cx, self.plan, collisions, origin)?;
+        let (momentum, step) = self.stage_serial_with_plan(cx, plan, collisions, origin)?;
         for cell in 0..self.grid.next.len() {
             if cell % 64 == 0 {
                 poll()?;
@@ -225,6 +275,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         poll()?;
         core::mem::swap(&mut self.grid.f, &mut self.grid.next);
         self.grid.completed_steps = step;
+        self.plan = plan;
         self.publish_wall_exchange();
         thermal.publish(step, heat);
         Ok(OpenThermalStep3 { momentum, heat })
@@ -234,8 +285,23 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         &self,
         thermal: ThermalOpenBoundaries3,
     ) -> Result<(), OpenThermalError3<L::Error>> {
+        self.admit_thermal_faces_with_plan(self.plan, thermal)
+    }
+
+    fn admit_thermal_faces_with_plan(
+        &self,
+        plan: FacePlan,
+        thermal: ThermalOpenBoundaries3,
+    ) -> Result<(), OpenThermalError3<L::Error>> {
         for face in Face3::ALL {
-            if self.wall_face_moves(face)
+            // A changed uniform target has already refused retained profiles
+            // in prepare_open_boundaries. Unchanged faces retain their trace.
+            let moving = if plan.boundaries.face(face) == self.plan.boundaries.face(face) {
+                self.wall_face_moves(face)
+            } else {
+                matches!(plan.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
+            };
+            if moving
                 && matches!(
                     thermal.faces[face as usize],
                     ThermalOpenFace3::Wall(crate::thermal::boundary::ThermalWall::FiniteSolid(_))
@@ -247,7 +313,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 .into());
             }
             match (
-                self.plan.boundaries.face(face),
+                plan.boundaries.face(face),
                 thermal.faces[face as usize],
             ) {
                 (FaceBoundary3::Periodic, ThermalOpenFace3::Periodic)

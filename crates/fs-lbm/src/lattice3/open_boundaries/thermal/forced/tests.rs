@@ -264,6 +264,58 @@ fn g3_late_cancel_or_heat_refusal_preserves_forces_heat_and_finite_walls_for_exa
 }
 
 #[test]
+fn proposed_reservoirs_publish_only_with_finite_walls_and_closing_heat() {
+    let (mut expected, mut expected_heat) = channel();
+    let cells = expected.populations().len();
+    let mut faces = crate::d3q19::Face3::ALL.map(|f| expected.boundaries().face(f));
+    faces[0] = FaceBoundary3::Velocity { velocity: [0.035, 0.0, 0.0] };
+    faces[1] = FaceBoundary3::Pressure { density: RHO + 0.001 };
+    let targets = BoundarySpec3::new(faces);
+    let endpoint = vec![[0.0002, 0.0, -0.0001]; cells];
+    let source = vec![0.001; cells];
+    let mut expected_endpoint = endpoint.clone();
+    let plan = expected.inner.prepare_open_boundaries(targets, &mut || Ok(())).unwrap();
+    let mut polls = 0;
+    expected.step_with_thermal_plan_poll(&mut expected_heat, plan, Some(&mut expected_endpoint),
+        None, &source, None, None, [0.0; 3], &mut || { polls += 1; Ok(()) }).unwrap();
+    assert_eq!(expected.boundaries(), targets);
+    for cancel in [false, true] {
+        let (mut actual, mut heat) = channel();
+        let old_targets = actual.boundaries(); let before = accepted(&actual, &heat);
+        let plan = actual.inner.prepare_open_boundaries(targets, &mut || Ok(())).unwrap();
+        let mut supplied_endpoint = endpoint.clone(); let mut seen = 0;
+        let refused_heat = vec![0.96; cells];
+        let result = actual.step_with_thermal_plan_poll(&mut heat, plan, Some(&mut supplied_endpoint),
+            None, if cancel { &source } else { &refused_heat }, None, None, [0.0; 3], &mut || {
+                seen += 1;
+                if cancel && seen == polls { Err(GridError3::Cancelled) } else { Ok(()) }
+            });
+        if cancel { assert!(matches!(result, Err(OpenThermalError3::Flow(GridError3::Cancelled)))); }
+        else { assert!(matches!(result, Err(OpenThermalError3::Thermal(ThermalOpenError3::Temperature { .. })))); }
+        // Real momentum was staged before the closing heat/cancellation gate.
+        assert_ne!(actual.inner.grid.next, actual.inner.grid.f);
+        assert_eq!(accepted(&actual, &heat), before); assert_eq!(actual.boundaries(), old_targets);
+        assert_eq!(supplied_endpoint, endpoint);
+        actual.step_with_thermal_plan_poll(&mut heat, plan, Some(&mut supplied_endpoint), None,
+            &source, None, None, [0.0; 3], &mut || Ok(())).unwrap();
+        assert_eq!(accepted(&actual, &heat), accepted(&expected, &expected_heat));
+        assert_eq!(actual.boundaries(), targets); assert_eq!(supplied_endpoint, expected_endpoint);
+    }
+
+    let (mut actual, mut heat) = channel();
+    let before = accepted(&actual, &heat); let old_targets = actual.boundaries();
+    let mut faces = crate::d3q19::Face3::ALL.map(|f| old_targets.face(f));
+    faces[2] = FaceBoundary3::Wall { velocity: [0.0, 0.0, 0.001] };
+    faces[3] = faces[2];
+    let moving = actual.inner.prepare_open_boundaries(BoundarySpec3::new(faces), &mut || Ok(())).unwrap();
+    assert!(matches!(actual.step_with_thermal_plan_poll(&mut heat, moving, None, None, &source,
+        None, None, [0.0; 3], &mut || Ok(())),
+        Err(OpenThermalError3::Thermal(ThermalOpenError3::Invalid(
+            "moving finite-wall storage requires solid heat advection")))));
+    assert_eq!(accepted(&actual, &heat), before); assert_eq!(actual.boundaries(), old_targets);
+}
+
+#[test]
 fn g3_held_and_unchanged_endpoint_forces_agree_with_uniform_or_local_tensor_diffusion() {
     let (mut held, mut held_heat) = channel();
     let (mut advanced, mut advanced_heat) = channel();

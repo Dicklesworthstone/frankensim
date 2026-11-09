@@ -4648,3 +4648,25 @@ changing tensor/skeleton/Forchheimer endpoints and common boosts, complete
 reservoir/wall/voxel/periodic balance, serial/pooled equality, held-law bit
 parity, invalid seams/laws and temporal budgets, actual thermal force epochs,
 finite-wall heat balance and late cancellation/refusal with deterministic retry.
+
+## Proposed boundary targets in native flow/heat publication
+
+Both `OpenBoundaryGrid3` and `ForcedOpenBoundaryGrid3` provide
+`step_serial_with_thermal_and_open_boundaries`. The existing boundary admission
+prepares targets without publishing them; the original collision, streaming,
+force-aware reconstruction and D3Q7 heat operators use one shared final gate.
+`OpenThermalDiffusion3` selects the original borrowed scalar or tensor law.
+The forced entry holds its current field or swaps an explicit endpoint buffer
+only after acceptance. Existing thermal entrypoints use the same implementation.
+
+Proposed wall targets participate in thermal ownership admission, including the
+moving-finite-storage refusal. Retained profiles, finite wall/conduction history,
+heat flux history, actual opening/endpoint velocities and separated momentum/heat
+accounts keep their original semantics. Scratch may change after refusal; accepted
+controls, physical fields, sources and counters do not. No heat is inferred from
+body force or mechanical wall work, and the original temporal-order limits remain.
+
+A focused native regression stages real momentum before closing-heat/final-cancel
+refusal, checks unchanged finite walls and force buffers, then reproduces an exact
+retry. Coupled tests exercise both lattices and diffusion families. Pinned parsing
+and scoped diff checks passed; these tests were not compiled or executed here.

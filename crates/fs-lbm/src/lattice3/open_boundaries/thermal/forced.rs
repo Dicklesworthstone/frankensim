@@ -6,7 +6,8 @@
 
 use super::super::forcing::ForcedOpenBoundaryGrid3;
 use super::{
-    DiffusivityField, EquilibriumLattice3, GridError3, OpenThermalError3, OpenThermalStep3,
+    BoundarySpec3, DiffusivityField, EquilibriumLattice3, FacePlan, GridError3,
+    OpenThermalDiffusion3, OpenThermalError3, OpenThermalStep3,
     ThermalOpenBoundaries3, ThermalOpenError3, ThermalOpenField3, ThermalOpenLimits3, macro_cell,
 };
 use fs_exec::Cx;
@@ -170,10 +171,58 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
         )
     }
 
+    /// Advance proposed reservoirs, force epochs and heat in one transaction.
+    ///
+    /// None holds the accepted spatial force without copying. Some supplies
+    /// its endpoint buffer, which receives the old accepted force only after
+    /// full thermal acceptance, as in advance_serial_with_thermal. Scalar and
+    /// tensor diffusion preserve their existing kernels, physical velocity
+    /// epochs, wall histories and separate thermal/momentum accounts. A late
+    /// heat or cancellation refusal also retains the previous boundary targets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_serial_with_thermal_and_open_boundaries(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        cx: &Cx<'_>,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        forces_at_end: Option<&mut Vec<[f64; 3]>>,
+        heat_per_step: &[f64],
+        diffusion: OpenThermalDiffusion3<'_>,
+        origin: [f64; 3],
+    ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
+        let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
+        let plan = self.inner.prepare_open_boundaries(boundaries, &mut poll)?;
+        let (relaxation, tensor) = diffusion.parts();
+        self.step_with_thermal_plan_poll(
+            thermal, plan, forces_at_end, collisions, heat_per_step, relaxation,
+            tensor, origin, &mut poll,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn step_with_thermal_poll(
         &mut self,
         thermal: &mut ThermalOpenField3,
+        forces_at_end: Option<&mut Vec<[f64; 3]>>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
+        origin: [f64; 3],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<OpenThermalStep3, OpenThermalError3<L::Error>> {
+        self.step_with_thermal_plan_poll(
+            thermal, self.inner.plan, forces_at_end, collisions, heat_per_step,
+            thermal_relaxation, diffusion, origin, poll,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_thermal_plan_poll(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        plan: FacePlan,
         forces_at_end: Option<&mut Vec<[f64; 3]>>,
         collisions: Option<&[L::Collision]>,
         heat_per_step: &[f64],
@@ -192,7 +241,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
             )
             .into());
         }
-        self.inner.admit_thermal_faces(thermal.boundaries())?;
+        self.inner.admit_thermal_faces_with_plan(plan, thermal.boundaries())?;
         for cell in 0..self.inner.grid.f.len() {
             if cell % 64 == 0 {
                 poll()?;
@@ -220,7 +269,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
             .as_deref()
             .map_or(self.forces.as_slice(), Vec::as_slice);
         let (momentum, step) = self.inner.stage_serial_with_forces(
-            self.inner.plan,
+            plan,
             collisions,
             Some(&self.forces),
             Some(endpoint),
@@ -255,6 +304,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
             self.inner.grid.completed_steps = step;
             self.inner.publish_wall_exchange();
         }
+        self.inner.plan = plan;
         thermal.publish(step, heat);
         Ok(OpenThermalStep3 { momentum, heat })
     }

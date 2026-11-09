@@ -14954,3 +14954,23 @@ bar, full rigid and two-body heat/momentum arithmetic checks passed, as did
 pinned formatting and bounded exact-production typechecks with dependency
 stubs. Six native and two complete-heat integration regressions were authored;
 the full dependency-backed repository tests remain unexecuted.
+
+## Scenario reservoir controls with native flow and heat
+
+`scenario_open_boundary::thermal::{step_serial, step_forced_serial}` samples the
+existing typed velocity/pressure controls into the original joint momentum/D3Q7
+thermal transaction. Uniform force, retained spatial force and authored endpoint
+force use their native physical velocity epochs. Scalar relaxation and full tensor
+diffusion share this route. Selected spatial profiles still refuse uniform updates;
+unselected profiles remain active. No preliminary control rebind is published.
+
+Targets, populations, force buffers, heat/flux histories, finite walls, receipts
+and counters publish only after the closing thermal gate. Endpoint force buffers
+remain unchanged on refusal. Heat inputs retain the original thermal carrier's
+explicit lattice/reference-capacity units; momentum material scaling does not
+infer thermal data, mechanical heating, buoyancy or compressible enthalpy.
+
+Focused regressions cover D3Q19/D3Q27 original-owner reduction, scalar/tensor and
+held/changing-force paths, independent momentum/heat balances, late heat refusal,
+retry and profile ownership. Pinned Rust parsing and scoped diff checks passed;
+Cargo typechecking and executable regressions were unavailable in this session.
