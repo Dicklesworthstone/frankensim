@@ -4,9 +4,9 @@
 use super::AffineLoadSpace3;
 use super::constraints::{AffineLoadSpaceConstraints3, ReferenceAffineLoadSpaceConstraints3};
 use super::design::{
-    AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignIteration3,
-    AffineLoadSpaceDesignOptions3, AffineLoadSpaceDesignPoint3, AffineLoadSpaceGradientCheck3,
-    admit_model, physical_feasible,
+    AffineLoadSpaceDesign3, AffineLoadSpaceDesignCheckpoint3, AffineLoadSpaceDesignGoal3,
+    AffineLoadSpaceDesignIteration3, AffineLoadSpaceDesignOptions3, AffineLoadSpaceDesignPoint3,
+    AffineLoadSpaceGradientCheck3, admit_model, physical_feasible,
 };
 use super::response::AffineResponseLimits3;
 use super::response::reference::{self, ReferenceAffineResponseLimits3};
@@ -39,6 +39,16 @@ impl Default for AffineLoadSpaceRefitOptions3 {
     }
 }
 
+/// Checked finer study and literal parent-inherited raw controls, before any
+/// new optimizer or gradient experiment. The native physical regions, filter,
+/// material identity and acceleration recipe have already been preserved.
+/// A caller can now run the existing design owner in durable bounded slices;
+/// this seed is not itself an optimized or physically feasible design.
+pub struct AffineLoadSpaceRefitSeed3<O: AdaptiveSdf3Elasticity> {
+    pub study: CutDensityStudy3<O>,
+    pub inherited_rho: Vec<f64>,
+}
+
 /// An uninstalled grid and its complete admitted optimization prefix.
 /// Initial, latest accepted, best feasible and freshly rechecked fields are
 /// distinct: the optimizer's final KKT report belongs to `accepted` only.
@@ -58,6 +68,12 @@ pub struct AffineLoadSpaceRefit3<O: AdaptiveSdf3Elasticity> {
     pub accepted: Option<AffineLoadSpaceDesignPoint3>,
     pub best: Option<AffineLoadSpaceDesignPoint3>,
     pub history: Vec<AffineLoadSpaceDesignIteration3>,
+    /// Exact same-grid AL continuation state, including its original gradient
+    /// experiment and feasible archive. Present whenever a design was admitted,
+    /// even if later updates or the fresh physical recheck stopped. Rebuild the
+    /// actual grid/laws and use AffineLoadSpaceDesign3::restore_with_constraints;
+    /// do not replay from inherited_rho or transfer this state to another grid.
+    pub checkpoint: Option<AffineLoadSpaceDesignCheckpoint3>,
     pub outcome: Result<ProjectedAlReport, ProjectedAlError<EvaluationStop>>,
     /// Fresh COMPLETE affine-envelope solve after a completed AL allowance.
     /// A failure leaves `best` intact but does not authorize grid promotion.
@@ -203,9 +219,58 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<F>, AffineLoadSpaceRefitError3> {
+        let AffineLoadSpaceRefitSeed3 {
+            study,
+            inherited_rho,
+        } = self.prepare_affine_load_space_refit_with_constraints(
+            operator,
+            rho,
+            basis.len(),
+            policy,
+            goal,
+            options,
+            constraints,
+            control,
+        )?;
+        study.solve_reference_affine_load_space_with_constraints(
+            &inherited_rho,
+            dead,
+            basis,
+            policy,
+            goal,
+            options,
+            constraints,
+            control,
+        )
+    }
+
+    /// Prepare the SAME native refit used by the bounded one-shot entry point,
+    /// without starting optimization. This permits per-accepted-point retention
+    /// through AffineLoadSpaceDesign3, followed by its exact checkpoint restore.
+    /// Raw controls and protected regions inherit through the checked transfer;
+    /// fine self-weight is rebuilt from the original material acceleration.
+    ///
+    /// basis_count admits the declared load-space dimension before invoking any
+    /// acceleration callback; dead/basis/observation laws are assembled by the
+    /// later design owner on this actual grid. Constraints may use reference
+    /// means normalized to the candidate's own cut volumes. accepted_steps is
+    /// unused here. No objective, gradient, line search or feasibility claim is
+    /// produced, and every failure leaves the source study unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_affine_load_space_refit_with_constraints<F: AdaptiveSdf3Elasticity>(
+        &self,
+        operator: F,
+        rho: &[f64],
+        basis_count: usize,
+        policy: &AffineLoadSpace3,
+        goal: AffineLoadSpaceDesignGoal3,
+        options: AffineLoadSpaceRefitOptions3,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefitSeed3<F>, AffineLoadSpaceRefitError3> {
         control.checkpoint("sdf3-affine-refit-start")?;
         self.require_material_body_recipe("sdf3-affine-refit-material-recipe")?;
-        admit_reference(self, rho, basis.len(), policy, goal, options)?;
+        admit_reference(self, rho, basis_count, policy, goal, options)?;
         constraints.admit(self)?;
         if let Some(family) = constraints.responses {
             reference::admit(&operator, family)?;
@@ -257,23 +322,17 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         admit_reference(
             &candidate,
             &inherited_rho,
-            basis.len(),
+            basis_count,
             policy,
             goal,
             options,
         )?;
         constraints.admit(&candidate)?;
         self.inherit_material_acceleration(&mut candidate, control)?;
-        candidate.solve_reference_affine_load_space_with_constraints(
-            &inherited_rho,
-            dead,
-            basis,
-            policy,
-            goal,
-            options,
-            constraints,
-            control,
-        )
+        Ok(AffineLoadSpaceRefitSeed3 {
+            study: candidate,
+            inherited_rho,
+        })
     }
 
     /// Initial-grid and refitted-grid fitting share this exact owner. Assemble
@@ -394,8 +453,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     limits,
                     options: family.options,
                 });
-        let (mut gradient_check, mut initial, mut accepted, mut best, mut recheck) =
-            (None, None, None, None, None);
+        let (mut gradient_check, mut initial, mut accepted, mut best, mut recheck, mut checkpoint) =
+            (None, None, None, None, None, None);
         let mut history = Vec::new();
         let outcome = {
             let attempt = AffineLoadSpaceDesign3::new_with_constraints(
@@ -431,6 +490,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                             })
                         }));
                     }
+                    checkpoint = Some(session.checkpoint());
                     outcome
                 }
             }
@@ -446,6 +506,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             accepted,
             best,
             history,
+            checkpoint,
             outcome,
             recheck,
             options,

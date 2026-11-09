@@ -16,6 +16,9 @@ mod material_domain;
 #[path = "material_affine_load_space_sdf3/grid_response_normalization.rs"]
 mod grid_response_normalization;
 
+#[path = "material_affine_load_space_sdf3/refit_resume.rs"]
+mod refit_resume;
+
 use fs_ascent::quadratic_ball::QuadraticBallBranch;
 use fs_blake3::ContentHash;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
