@@ -29,8 +29,8 @@ pub use complex::{ScreenComplexLimits, ScreenComplexOperator, ScreenComplexValue
 mod molecular;
 pub use molecular::{
     MolecularScreenIllumination, MolecularScreenIlluminationLimits, MolecularScreenPortLimits,
-    MolecularScreenVelocityPortSolution, PreparedMolecularScreenIlluminationReceivers,
-    PreparedMolecularScreenReceivers,
+    MolecularScreenPower, MolecularScreenVelocityPortSolution,
+    PreparedMolecularScreenIlluminationReceivers, PreparedMolecularScreenReceivers,
 };
 
 /// A conforming indexed, oriented open two-manifold. Every component must have

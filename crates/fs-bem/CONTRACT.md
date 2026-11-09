@@ -1843,6 +1843,55 @@ resource/source-clearance/cancellation boundaries. They are authored and syntax
 checked; native execution remains blocked by the existing unavailable runner
 and missing sibling dependency.
 
+#### Local sheet absorption with molecular loading and illumination
+
+`solve_molecular_velocity_ports_with_local_admittance` and
+`solve_molecular_illumination_with_local_admittance` extend those SAME owners
+with one physical nodal sheet admittance Y [m/(Pa s)] at the original frequency.
+The law is `v_total = v_drive - Y*jump`, with finite Re(Y)>=0 at every original
+vertex, including free edges. The immutable result copies Y. Material
+relaxation remains solely in k(omega); the boundary term is
+`H(k)+i*rho*omega*M_Y`, never `H+i*k*M_Y` or a complex sound-speed
+normalization. The cubic P1 mass form integrates Y and both basis factors at
+the original triangle quadrature points. It is assembled once in a single
+sample pass, retaining symmetry, all original self/mutual ports, and one
+factorization for mechanical and blocked incident columns. Zero Y skips
+operator additions and preserves rigid field arithmetic exactly.
+
+Incoming analytic pressure has no sheet jump. Its blocked forcing is therefore
+the original weak incident normal velocity, with no closed-wall `-Y*p_incident`
+term. The existing generalized blocked forces and total pressure/Euler-velocity
+receivers inherit the same sheet law automatically. Actual complex motion and
+blocked fields combine before observing or squaring. This retains incident/
+motion and cross-port interference, including a moving sheet that follows the
+incident fluid velocity and creates no jump or sheet absorption.
+
+`MolecularScreenPower` separates signed mechanical work, irreversible sheet
+heat `0.5*integral Re(Y)*|jump|^2`, and net work from the two sheet faces into
+the surrounding fluid. Conductance is integrated directly, preserving zero
+loss and high-Q loss under global phase changes. Fluid work equals mechanical
+work minus sheet heat; it retains bulk molecular loss and outgoing energy
+together. Under illumination it can be negative: sound may feed sheet heat
+and structural motion. External emitters' own work is outside this sheet
+surface, and the decomposition is not an independent continuum-error bound,
+a distant radiation-power measurement, or a separate bulk-heat integral.
+
+The original source, frequency, geometry, cancellation and spatial/growth
+limits remain. The port jump extent includes the additional copied Y row;
+workspace also counts coherent-jump heat scratch, and complete work admission
+includes the single sheet assembly. Active or nonlocal sheet laws, independent
+coatings on both faces, wall thermal layers, backing cavities and mean flow
+remain outside this extension. Authored Y owns its homogenization and
+frequency dependence; no porous material or causal realization is inferred.
+
+Four focused G0/G1/G3 regressions cover the original lossless Robin reduction,
+zero-law identity, independent exact cubic P1 mass and work closure in a
+relaxing gas, coherent incident-driven structural work and transparent motion,
+matched total p/u receivers, and high-Q/phase/resource refusals. Native
+source-core verification and its dependency exclusions are reported with the
+implementation; this does not claim full workspace or measured-acoustics
+qualification.
+
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.

@@ -182,7 +182,7 @@ fn empty_reservoir_recovers_original_real_screen_reaction_and_jumps() {
     let omega = 650.0;
     let k = material.source().relaxing_wavenumber(omega).unwrap();
     assert_eq!(k.im, 0.0);
-    let owner = PreparedScreen::new(&surface, 6.0, options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, options(1), || false).unwrap();
     let rows = velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let controls = limits(&surface);
@@ -240,7 +240,7 @@ fn molecular_ports_use_real_momentum_with_full_coherent_work_and_mutual_loading(
     let surface = surface();
     let material = exterior(true);
     let omega = 650.0;
-    let owner = PreparedScreen::new(&surface, 6.0, options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, options(1), || false).unwrap();
     let rows = velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let solved = owner
@@ -343,7 +343,7 @@ fn molecular_ports_use_real_momentum_with_full_coherent_work_and_mutual_loading(
 fn molecular_screen_refuses_unadmitted_sources_resources_and_cancelled_batches() {
     let surface = surface();
     let material = exterior(true);
-    let owner = PreparedScreen::new(&surface, 6.0, options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, options(1), || false).unwrap();
     let rows = velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let omega = 650.0;

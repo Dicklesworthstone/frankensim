@@ -16,6 +16,8 @@ pub use receivers::PreparedMolecularScreenIlluminationReceivers;
 pub struct MolecularScreenIlluminationLimits {
     /// Port/motion jump limits retain their original meaning. Its total work
     /// ceiling now admits BOTH motion and blocked columns with one H/LU.
+    /// A retained local sheet adds one original nodal Y row to the port jump
+    /// extent and its physical weak assembly to the same work/workspace limits.
     pub boundary: MolecularScreenPortLimits,
     /// Complete independent incident cases, in 1..=256; no case is truncated.
     pub maximum_incident_cases: usize,
@@ -31,7 +33,9 @@ pub struct MolecularScreenIlluminationLimits {
     /// Full logical live payload: max(original solve payload, declared operator
     /// workspace) plus 16*c*(vertices+ports)+64*n+32*(vertices+ports)+24*t
     /// +256*c+4096. n is active pressure count, c cases, t all source terms.
-    /// This includes retained incident owners, blocked jumps/forces, source
+    /// With a local sheet, the original solve payload includes its copied Y
+    /// row and coherent-jump heat scratch. This includes retained incident
+    /// owners, blocked jumps/forces, source
     /// position scratch, complex weak drive and later total-jump/work scratch.
     /// Geometry ownership and separately admitted receiver rows/outputs,
     /// allocator metadata and thread stacks are excluded.
@@ -72,9 +76,59 @@ impl<'s> PreparedScreen<'s> {
         rows: &[&[[f64; 3]]],
         incidents: &[IncidentField<'i>],
         limits: MolecularScreenIlluminationLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularScreenIllumination<'p, 's, 'i>, MolecularError> {
+        self.solve_molecular_illumination_boundary(
+            source, omega, rows, None, incidents, limits, cancelled,
+        )
+    }
+
+    /// Coherent acoustic illumination AND structural motion of a passive,
+    /// locally reacting sheet in the original relaxing gas. Y [m/(Pa*s)] has
+    /// one value per original vertex with Re(Y)>=0 and is copied into motion.
+    ///
+    /// One H(k)+i*rho*omega*M_Y and LU serve every mechanical and blocked
+    /// incident column. Incident pressure is continuous across the sheet, so
+    /// only its normal velocity drives the jump equation: no closed-wall
+    /// -Y*p_incident term or second incident pressure force is added.
+    /// Blocked forces, total p/u receivers and coherent sheet heat retain the
+    /// SAME law, frequency, gas and original structural coordinate basis.
+    /// Sheet homogenization/dispersion belongs to the supplied Y law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_molecular_illumination_with_local_admittance<'p, 'i>(
+        &'p self,
+        source: &MolecularExterior,
+        omega: f64,
+        rows: &[&[[f64; 3]]],
+        admittance_m_per_pa_s: &[C64],
+        incidents: &[IncidentField<'i>],
+        limits: MolecularScreenIlluminationLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularScreenIllumination<'p, 's, 'i>, MolecularError> {
+        self.solve_molecular_illumination_boundary(
+            source,
+            omega,
+            rows,
+            Some(admittance_m_per_pa_s),
+            incidents,
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_molecular_illumination_boundary<'p, 'i>(
+        &'p self,
+        source: &MolecularExterior,
+        omega: f64,
+        rows: &[&[[f64; 3]]],
+        local_admittance: Option<&[C64]>,
+        incidents: &[IncidentField<'i>],
+        limits: MolecularScreenIlluminationLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularScreenIllumination<'p, 's, 'i>, MolecularError> {
         poll(&mut cancelled)?;
+        self.admit_molecular_local_admittance(local_admittance)?;
         let cases = incidents.len();
         if cases == 0
             || cases > limits.maximum_incident_cases
@@ -103,11 +157,12 @@ impl<'s> PreparedScreen<'s> {
             self.facets.len() as u128,
         );
         let samples: u128 = self.samples.iter().map(|row| row.len() as u128).sum();
-        let base_work = self.molecular_velocity_port_work(rows.len())? as u128;
+        let base_work =
+            self.molecular_port_boundary_work(rows.len(), local_admittance.is_some())? as u128;
         let total_work =
             base_work + 128 * c * n * n + 256 * c * samples + 64 * c * v + 64 * c * p * v;
         let base_bytes = self
-            .molecular_port_payload(rows.len())?
+            .molecular_port_boundary_payload(rows.len(), local_admittance.is_some())?
             .max(limits.boundary.operator.maximum_workspace_bytes as u128);
         let bytes =
             base_bytes + 16 * c * (v + p) + 64 * n + 32 * (v + p) + 24 * terms + 256 * c + 4096;
@@ -176,6 +231,7 @@ impl<'s> PreparedScreen<'s> {
                 omega,
                 rows,
                 limits.boundary,
+                local_admittance,
                 Some(&prepared[0]),
                 |pairing, h, lu, rho_omega, cancelled| {
                     let mut blocked = Vec::with_capacity(cases);
@@ -299,6 +355,36 @@ impl<'p, 's, 'i> MolecularScreenIllumination<'p, 's, 'i> {
         poll(&mut cancelled)?;
         Ok(jump)
     }
+    /// Coherent mechanical work and sheet heat of the total blocked+motion
+    /// pressure jump. Mechanical work is supplied against the fluid reaction;
+    /// it can be negative when incident sound drives the structure. Net work
+    /// into the gas is mechanical work minus sheet heat, including the two
+    /// faces and all incident/motion cross terms. External emitters' own work,
+    /// molecular volume heat and distant radiation are not separately inferred.
+    pub fn power(
+        &self,
+        case: usize,
+        rates: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularScreenPower, HelmholtzError> {
+        let jump = self.total_pressure_jump(case, rates, &mut cancelled)?;
+        let mut mechanical = Sum::default();
+        for (row, &rate) in self.pairing.iter().zip(rates) {
+            poll(&mut cancelled)?;
+            let effort = self
+                .motion
+                .prepared
+                .molecular_jump_effort(row, &jump, &mut cancelled)?;
+            mechanical.add(rate.conj() * effort);
+        }
+        let mechanical = mechanical.value();
+        if !finite(mechanical) {
+            return Err(bad("illuminated molecular sheet work overflows"));
+        }
+        let sheet = self.motion.sheet_power_from_jump(&jump, &mut cancelled)?;
+        MolecularScreenPower::new(0.5 * mechanical.re, sheet)
+    }
+
     /// Direct -G*total_jump projection, in the original source coordinates.
     /// Its signed work can be negative: incident sound can drive the structure.
     /// Temporary total jump and modal output fit the admitted boundary payload.

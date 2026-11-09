@@ -13,6 +13,9 @@
 use super::*;
 use crate::helmholtz::molecular::{MolecularError, MolecularExterior, PreparedMolecularIncident};
 
+mod admittance;
+pub use admittance::MolecularScreenPower;
+
 mod receivers;
 pub use receivers::PreparedMolecularScreenReceivers;
 mod incident;
@@ -24,13 +27,15 @@ pub use incident::{
 /// Whole source-batch limits in addition to the original geometry admission.
 #[derive(Debug, Clone, Copy)]
 pub struct MolecularScreenPortLimits {
-    /// Complete impedance/jump extents; maximum_work admits the ENTIRE
+    /// Complete impedance/jump extents, including one original nodal row when
+    /// a physical local sheet admittance is retained. maximum_work admits the ENTIRE
     /// values assembly, LU, source solves, residuals and work projection.
     pub ports: ScreenPortLimits,
     /// One H, its centered growth chart and values-only assembly scratch.
     pub operator: ScreenComplexValueLimits,
     /// Live solve payload after assembly: H+LU, exact weak pairing, all jumps,
-    /// impedance, RHS/solution/pivot vectors and blocked-LU descriptors.
+    /// impedance, RHS/solution/pivot vectors and blocked-LU descriptors. A
+    /// local sheet adds its copied Y row and one coherent-jump heat scratch.
     /// Assembly scratch has its separate nonoverlapping `operator` bound.
     /// Excludes geometry/source ownership, later receiver output, allocator
     /// metadata and thread stacks; these are not process RSS ceilings.
@@ -48,6 +53,7 @@ pub struct MolecularScreenVelocityPortSolution<'p, 's> {
     impedance: Vec<C64>,
     maximum_backward_residual: f64,
     frequency_work: u64,
+    local_admittance: Option<Vec<C64>>,
 }
 
 impl<'s> PreparedScreen<'s> {
@@ -96,6 +102,7 @@ impl<'s> PreparedScreen<'s> {
             rows,
             limits,
             None,
+            None,
             |_, _, _, _, _| Ok(()),
             cancelled,
         )
@@ -111,6 +118,7 @@ impl<'s> PreparedScreen<'s> {
         omega: f64,
         rows: &[&[[f64; 3]]],
         limits: MolecularScreenPortLimits,
+        local_admittance: Option<&[C64]>,
         prepared_incident: Option<&PreparedMolecularIncident<'_>>,
         mut finish: impl FnMut(
             Vec<Vec<f64>>,
@@ -137,14 +145,17 @@ impl<'s> PreparedScreen<'s> {
             )
             .into());
         }
-        let frequency_work = self.molecular_velocity_port_work(ports)?;
+        self.admit_molecular_local_admittance(local_admittance)?;
+        let frequency_work =
+            self.molecular_port_boundary_work(ports, local_admittance.is_some())?;
         let entries = ports
             .checked_mul(ports)
             .ok_or_else(|| bad("molecular screen impedance extent overflows"))?;
         let jumps = ports
-            .checked_mul(self.surface.vertices.len())
+            .checked_add(usize::from(local_admittance.is_some()))
+            .and_then(|rows| rows.checked_mul(self.surface.vertices.len()))
             .ok_or_else(|| bad("molecular screen jump extent overflows"))?;
-        let bytes = self.molecular_port_payload(ports)?;
+        let bytes = self.molecular_port_boundary_payload(ports, local_admittance.is_some())?;
         if entries > count.maximum_matrix_entries
             || jumps > count.maximum_jump_entries
             || frequency_work > count.maximum_work
@@ -180,7 +191,15 @@ impl<'s> PreparedScreen<'s> {
         }
         // Assembly scratch is released before weak source columns or LU exist.
         // The value-only specialization keeps the original real-axis H bits.
-        let h = self.complex_matrix(k, limits.operator, &mut cancelled)?;
+        let mut h = self.complex_matrix(k, limits.operator, &mut cancelled)?;
+        let local_admittance = if let Some(admittance) = local_admittance {
+            self.add_molecular_sheet(&mut h, rho_omega, admittance, &mut cancelled)?;
+            let mut owned = zeroed(admittance.len(), C64::ZERO)?;
+            owned.copy_from_slice(admittance);
+            Some(owned)
+        } else {
+            None
+        };
         let weak = self.velocity_port_pairing(
             rows,
             count.maximum_jump_entries,
@@ -232,6 +251,7 @@ impl<'s> PreparedScreen<'s> {
                 impedance,
                 maximum_backward_residual,
                 frequency_work,
+                local_admittance,
             },
             extra,
         ))
@@ -377,8 +397,10 @@ impl MolecularScreenVelocityPortSolution<'_, '_> {
         Ok(efforts)
     }
 
-    /// Signed cycle-mean work entering the exterior, .5 Re(rate^H Z rate).
-    /// Gas absorption and outgoing radiation are not split or counted twice.
+    /// Signed cycle-mean mechanical work, .5 Re(rate^H Z rate). A retained
+    /// sheet law includes its absorption as well as net work into the fluid.
+    /// [`Self::power`] separates those two channels; exterior molecular heat
+    /// and outgoing radiation are not split or counted twice.
     pub fn boundary_work_w(
         &self,
         rates: &[C64],

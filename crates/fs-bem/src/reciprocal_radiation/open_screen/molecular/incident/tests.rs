@@ -114,7 +114,7 @@ fn empty_reservoir_incident_drive_recovers_original_rigid_screen_and_force_pairi
         amplitude_pa: C64::new(0.7, -0.2),
     };
     let field = IncidentField::PlaneWave(plane);
-    let owner = PreparedScreen::new(&surface, 6.0, fixture::options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, fixture::options(1), || false).unwrap();
     let rows = fixture::velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let actual = owner
@@ -209,7 +209,7 @@ fn relaxing_screen_keeps_physical_weak_drive_and_coherent_total_receivers() {
         IncidentField::Sources(&finite),
         IncidentField::Sources(&all),
     ];
-    let owner = PreparedScreen::new(&surface, 6.0, fixture::options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, fixture::options(1), || false).unwrap();
     let rows = fixture::velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let actual = owner
@@ -328,7 +328,7 @@ fn relaxing_screen_keeps_physical_weak_drive_and_coherent_total_receivers() {
 fn source_clearance_whole_batch_limits_cancellation_and_replay_remain_owned() {
     let surface = fixture::surface();
     let gas = fixture::exterior(true);
-    let owner = PreparedScreen::new(&surface, 6.0, fixture::options(1), || false).unwrap();
+    let owner = PreparedScreen::new(&surface, 2.0, fixture::options(1), || false).unwrap();
     let rows = fixture::velocity_rows(&surface);
     let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
     let plane = IncidentField::PlaneWave(PlaneWave {
