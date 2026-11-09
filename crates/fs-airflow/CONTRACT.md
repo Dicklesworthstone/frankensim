@@ -6544,3 +6544,38 @@ fixed-speed and prescribed-flow films supply the native wall-window callback
 through their original isochoric coefficient API. Reference source identity,
 bulk-density velocity, full-area and disabled body-node radiation rules remain
 unchanged; no additional storage or independently integrated heat is added.
+
+## Adaptive droplet evaporation throughout a connected finite gas network
+
+The sourced droplet chamber transport adaptive module advances the complete
+original gas map and its named droplet cloud over one positive physical duration.
+Each trial calls the original transport-then-chamber owner: every declared
+pressure, diffusive, porous, membrane, dusty-gas, layered dusty-gas and effusion
+path samples its actual incoming gas state, then the original droplet films
+sample the transported atmosphere. Phase-only and reciprocal sensible-heat
+entry points share this controller and retain original source applicability.
+
+One coarse interval is compared with two original fine intervals. The shared
+material norm includes every gas node's temperature, total mass and union of
+species inventories, plus each droplet's caloric state, mass and geometry.
+An empty droplet population still evolves and refines the network. Only accepted
+fine intervals contribute to the common material physical-window account; the
+returned endpoint retains only the last fine source/transport receipts.
+
+Original phase step-size limits, species withdrawal and typed nozzle/porous/
+membrane equilibrium-crossing refusals may reduce the span. Other source,
+caloric, conservation and cancellation errors stay terminal with their original
+payload and attempted clock. Comparison, reduction and parcel/species ceilings
+bound work. Explicit immutable trial maps and reusable source-row buffers avoid
+hidden physical history; a failed request publishes no partial state.
+
+Four regression groups compare exact manually composed fine steps, refinement
+against 256 original intervals, remote-only transport with no droplets, and
+bounded retry/cancellation/source refusal. Independent final gas/liquid mass,
+species and energy checks accompany the physical scenarios. Compilation,
+runtime tests and rustfmt could not run after the execution workspace disconnected.
+
+This remains first-order split evolution with local error estimates, fixed
+volumes, positive droplet seeds and prescribed relative speed/heat coefficients.
+It adds no dry-out event, droplet dynamics, external reservoir, or coupled
+entropy/passivity certificate.

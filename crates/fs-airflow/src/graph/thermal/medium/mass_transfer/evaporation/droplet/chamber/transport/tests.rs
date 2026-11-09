@@ -1,4 +1,7 @@
 //! Actual nozzle transport feeds one sourced droplet cloud and one closed budget.
+#[path = "adaptive/tests.rs"]
+mod adaptive;
+
 use super::*;
 use crate::graph::thermal::medium::mass_transfer::{
     evaporation::droplet::{
