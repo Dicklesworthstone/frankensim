@@ -5074,3 +5074,11 @@ factor. This is exact algebraic elimination of the admitted discretization,
 not a continuum error certificate, new thermoviscous closure, transient engine,
 azimuthal-mode extension, molecular-relaxation combination, or a performance
 claim across machines.
+
+## Positive short-window duct interference
+
+Port-response observations and native interior-field spectrum observations share one bounded temporal factor for each admitted original source bank. The native rad/s clock is retained. Real waveforms retain their full carrier and sum-frequency terms; proper factors retain the physical peak normalization inside each product. The same projected pressure and volume-flow modes supply both nonnegative self moments and signed pressure-times-flow power. Only the deterministic bank contributes a mean, obtained from the real constant mode. Interior particle velocity and intensity retain the original local area conversions.
+
+The factor admits 3–64 proper tones or 3–32 actual-real tones within the shared short uniform-window domain, with at most 17 modes. Other observations retain the original pair kernels. Existing supplied-line/squared-line caps remain structural source bounds, and the bounded temporal scratch adds no heap allocation to the query. Cancellation discards the local result and leaves the prepared owner reusable. This does not certify relative accuracy at arbitrary coherent nulls or change the original network, propagation, material, source or probe owners.
+
+`tests/network_short_band.rs` covers real means and fourth/sixth-order nulls, native high-carrier proper factors, independent-source power, negative directed work, representable extreme proper power, cancellation and original source caps. An additional focused execution exercised the actual interior spectral preparation/contraction/observation path with explicit source-to-field fixtures, including DD source cancellation, three local areas, quadrature flow and mixed statistics; the full network/material solver suite was not executed for this change.

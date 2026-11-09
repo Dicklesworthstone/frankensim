@@ -6,6 +6,7 @@
 //! No frequency-bin bandwidth, random phase or stationary spectrum is inferred.
 
 use super::*;
+use crate::network::observation::band;
 
 /// Maximum frequency-specific native loaded solves in one prepared spectrum.
 pub const MAX_FIELD_FREQUENCIES: usize = 256;
@@ -324,6 +325,8 @@ pub struct NetworkFieldExposureLimits {
     /// Two complex source contractions per probe/source/supplied line.
     pub maximum_transfer_products: usize,
     /// Probes times the sum of squared line counts over all mean/factor banks.
+    /// Short-band queries also use the shared allocation-free factor, bounded
+    /// by 64 tones and 17 temporal modes per projection.
     pub maximum_probe_frequency_pairs: usize,
     /// Logical numerical heap payload: retained DD fields/vector headers,
     /// grouping indices, query accumulators and complete returned moments.
@@ -513,24 +516,37 @@ impl<'a> PreparedNetworkFieldExposure<'a> {
         let probes = self.spectrum.locations().len();
         let mut sums = storage(probes)?;
         sums.resize(probes, [Dd::ZERO; 5]);
-        for line in &self.mean.lines {
-            poll(&mut cancelled, 0)?;
-            let dc = window
-                .product_kernel(line.omega, 0.0)
-                .map_err(window_error)?;
-            for (index, (sum, f)) in sums.iter_mut().zip(&line.fields).enumerate() {
-                if index % 64 == 0 {
-                    poll(&mut cancelled, index)?;
-                }
-                sum[0] = sum[0]
-                    + dc.mean_real_product_parts_dd([f[0], f[1]], [Dd::ONE, Dd::ZERO])
-                        .map_err(window_error)?;
-                sum[1] = sum[1]
-                    + dc.mean_real_product_parts_dd([f[2], f[3]], [Dd::ONE, Dd::ZERO])
-                        .map_err(window_error)?;
+        for (bank_index, bank) in core::iter::once(&self.mean).chain(self.factors.iter()).enumerate() {
+            if band::accumulate(
+                window,
+                bank.lines.iter().map(|line| line.omega),
+                |line, probe| bank.lines[line].fields[probe],
+                bank.statistics == NetworkFieldFactorStatistics::ProperComplex,
+                bank_index == 0,
+                &mut sums,
+                &mut cancelled,
+            )? {
+                continue;
             }
-        }
-        for bank in core::iter::once(&self.mean).chain(self.factors.iter()) {
+            if bank_index == 0 {
+                for line in &bank.lines {
+                    poll(&mut cancelled, 0)?;
+                    let dc = window
+                        .product_kernel(line.omega, 0.0)
+                        .map_err(window_error)?;
+                    for (index, (sum, f)) in sums.iter_mut().zip(&line.fields).enumerate() {
+                        if index % 64 == 0 {
+                            poll(&mut cancelled, index)?;
+                        }
+                        sum[0] = sum[0]
+                            + dc.mean_real_product_parts_dd([f[0], f[1]], [Dd::ONE, Dd::ZERO])
+                                .map_err(window_error)?;
+                        sum[1] = sum[1]
+                            + dc.mean_real_product_parts_dd([f[2], f[3]], [Dd::ONE, Dd::ZERO])
+                                .map_err(window_error)?;
+                    }
+                }
+            }
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
                     poll(&mut cancelled, i)?;

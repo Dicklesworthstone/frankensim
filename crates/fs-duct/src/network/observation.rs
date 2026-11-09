@@ -11,6 +11,8 @@ use crate::DuctError;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct, WindowError};
 use fs_math::{c64::C64, dd::Dd};
 
+pub(super) mod band;
+
 /// Bound the uninterruptible in-place grouping sort.
 pub const MAX_OBSERVATION_LINES: usize = 4096;
 /// Empty factors also count against this bound.
@@ -40,6 +42,8 @@ pub struct NetworkObservationLimits {
     /// Port count times the sum of SQUARED supplied line counts per bank.
     /// This conservative bound is checked before allocation; equal-frequency
     /// coalescing reduces the actual observation work.
+    /// Admitted short bands additionally use a fixed, allocation-free temporal
+    /// factor with at most 64 tones and 17 modes per projection.
     pub maximum_port_frequency_pairs: usize,
     /// Logical heap payload: prepared fields, line/factor headers, owned labels
     /// and clock, grouping indices, query accumulators and one returned result.
@@ -263,8 +267,10 @@ impl PreparedNetworkObservation {
         self.observe_window_cancellable(window, || false)
     }
 
-    /// Shared kernels are prepared once per frequency pair and reused at all
-    /// ports. No network solve, time sampling or carrier-cycle average occurs.
+    /// A shared positive temporal factor or analytic pair kernels are prepared
+    /// once per bank/window and reused at all ports. Real fields retain their
+    /// carrier-sum terms; proper factors retain their declared half-power law.
+    /// No network solve, time sampling or carrier-cycle average occurs.
     /// Cancelled/nonfinite/negative-self-moment results publish nothing and leave
     /// the prepared owner reusable. No relative error bound at arbitrary nulls
     /// or interval enclosure is claimed.
@@ -278,17 +284,30 @@ impl PreparedNetworkObservation {
         let mut sums = storage(n)?;
         sums.resize(n, [Dd::ZERO; 5]);
         let mut completed = 0usize;
-        for line in &self.mean.lines {
-            poll(&mut cancelled, completed)?;
-            let phase = window.mean_phase(line.omega).map_err(window_error)?;
-            for (sum, field) in sums.iter_mut().zip(&line.fields) {
-                sum[0] = sum[0] + real_mean([field[0], field[1]], phase);
-                sum[1] = sum[1] + real_mean([field[2], field[3]], phase);
-            }
-            completed += 1;
-        }
         for (bank_index, bank) in core::iter::once(&self.mean).chain(self.factors.iter()).enumerate() {
             poll(&mut cancelled, completed)?;
+            if band::accumulate(
+                window,
+                bank.lines.iter().map(|line| line.omega),
+                |line, port| bank.lines[line].fields[port],
+                bank_index != 0,
+                bank_index == 0,
+                &mut sums,
+                &mut cancelled,
+            )? {
+                continue;
+            }
+            if bank_index == 0 {
+                for line in &bank.lines {
+                    poll(&mut cancelled, completed)?;
+                    let phase = window.mean_phase(line.omega).map_err(window_error)?;
+                    for (sum, field) in sums.iter_mut().zip(&line.fields) {
+                        sum[0] = sum[0] + real_mean([field[0], field[1]], phase);
+                        sum[1] = sum[1] + real_mean([field[2], field[3]], phase);
+                    }
+                    completed += 1;
+                }
+            }
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
                     poll(&mut cancelled, completed)?;
