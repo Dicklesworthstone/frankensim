@@ -1262,3 +1262,52 @@ independent quadrature near the admission boundary, complex Hermitian and
 shared-modal identities, large-epoch/common-carrier invariance, work counts,
 large amplitudes, weighted subnormal power, boundary fallback and refusals.
 This targeted execution does not replace the unavailable full Cargo/DSR gate.
+
+### Native angular clocks and actual real fields without allocation
+
+The native-rad/s `prepare_uniform_band_rad_s` and
+`uniform_band_mode_count_rad_s` retain source-authored angular frequencies
+without a rounded conversion through hertz. The Hz and rad/s `_in` preparation
+methods borrow `UniformHarmonicBandWorkspace`, whose fixed numerical payload
+is 19,456 bytes. Its `UniformHarmonicBandRef` shares the cached owner's basis
+builder, projection and contractions. Changing windows can therefore prepare
+one factor and project several pressure, velocity, electric, magnetic or
+reservoir components without heap allocation. Scratch can change on refusal;
+a later successful preparation overwrites every admitted entry.
+
+The explicit `prepare_uniform_real_band_hz` and `_rad_s` constructors, with
+their corresponding preflight and `_in` forms, evaluate actual real-peak
+fields. Admission requires 3 through 32 original tones and
+`max(abs(omega)) * duration / 2 <= 0.5`; Hz uses its original cycle clock.
+The absolute carrier remains. Even temporal modes retain the rotated real
+amplitude and odd modes its imaginary amplitude. This is the conjugate-pair
+frequency expansion evaluated by parity, preserving both sum- and
+difference-frequency terms without duplicating sources or halving tiny
+amplitudes. At least `min(2 * tones, 17)` modes are retained. The mode-zero
+real coefficient is the actual window mean. One/two-tone, wider-band and
+nonuniform-window queries retain the existing pair-kernel fallback.
+
+Real factors return full real products. Analytic factors with explicitly
+proper complex peak statistics use positive scale 0.5 through
+`mode_cross_parts_dd_scaled`, `mean_square_parts_dd_scaled` or
+`mean_cross_parts_dd_scaled`. The scale enters each modal weight before
+multiplication, preserving finite half-power when the unscaled squared norm
+would overflow. Weights below one scale the larger operand to preserve tiny
+cross operands; weights at least one scale the smaller operand. Positive
+finite scale admission uses existing error variants. Signed cross moments
+remain signed; this representation adds no clipping, inferred independence,
+carrier-period average or new underflow-refusal policy.
+
+The existing bounds on retained modes, modal-tail power and floating accuracy
+remain. Work methods count original source columns, including the optimized
+real path. Source-pair caps in consumers remain structural admission bounds;
+the additional modal work is separately bounded by 64 source columns and
+17 modes, with cancellation polled around preparation and projection leaves.
+
+Five additional regressions bring the actual harmonic-window/spectrum native
+suite to 77 passing tests. They exercise native-angular proper and actual-real
+fourth-order nulls, real field means, independent real-time quadrature with
+sum tones, source-clock preservation at a large epoch, fixed/cached equivalence,
+workspace reuse after refusal, finite proper power for amplitude 1.5e154,
+and subnormal real/cross components. The full workspace Cargo/DSR gate remains
+unavailable.

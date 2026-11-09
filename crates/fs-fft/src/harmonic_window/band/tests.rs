@@ -1,6 +1,8 @@
 use super::*;
 use crate::harmonic_window::HarmonicWindowProfile;
 
+mod physical;
+
 fn field(real: f64, imaginary: f64) -> [Dd; 2] {
     [Dd::from_f64(real), Dd::from_f64(imaginary)]
 }

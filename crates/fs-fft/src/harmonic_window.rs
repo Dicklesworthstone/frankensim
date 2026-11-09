@@ -15,6 +15,7 @@ mod band;
 pub use band::{
     MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
     PreparedUniformHarmonicBand,
+    UniformHarmonicBandRef, UniformHarmonicBandWorkspace,
 };
 mod spectrum;
 pub use spectrum::{
