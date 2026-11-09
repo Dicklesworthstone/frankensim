@@ -7,6 +7,9 @@ use super::{
 };
 use crate::ns::{FluxParams, FluxSystem};
 
+#[path = "navier_stokes/forcing.rs"]
+mod forcing;
+
 /// Explicit treatment of convective momentum at an open traction boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenBoundaryPolicy {

@@ -10870,3 +10870,40 @@ EOS/port/Plenum sources. Full reactive/molecular orchestration and the complete
 workspace were not executed; their narrow clone/reset edits were reviewed and
 Rust-parsed. These compact tanks retain the original estimated-model scope:
 no internal tank waves, finite mixing time or discrete entropy theorem.
+
+
+## Coherent cell material forces in native laminar BDF1 flow
+
+`MaterialFluxSystem::bdf1_navier_stokes_mixed_rheology_with_cell_forces`
+resolves an original material and additional physical force density [N/m³]
+together at each actual native objective-shear state. The original
+`RheologyField` cache prepares all cell responses before the original volume
+quadrature; no coordinate search, constitutive clone or fallback source is
+published. The returned source force is constant on its original triangle.
+A separately supplied held spatial force is added once, and the same retained
+reference density scales inertia, both forces, viscosity, traction and pressure.
+
+Cell identity now reaches the private original load quadrature directly.
+Original held-force entries adapt their existing callback without changing
+their public API or physical treatment. The existing mixed BDF1 owner still
+admits histories/boundaries, iterates convection and rheology, and independently
+reassembles its accepted nonlinear residual. That final reassembly prepares
+both the accepted viscosity AND the accepted force; constrained boundary
+reactions retain the complete original volume load. The returned tuple contains
+the original physical flow/material endpoint and exact accepted cell forces in
+triangle order. No force work is automatically deposited as material heat.
+
+This entry adds no density evolution, EOS, material model, thermal law or new
+timestep scheme. Original source, changed-density, nonfinite-force, boundary,
+history and nonlinear refusals return no replacement history. Three authored
+native regression groups cover independent hydrostatic cell pressures and
+constraint resultants, nonzero cavity circulation against the original spatial
+load entry with original Carreau rheology, and late source/nonfinite-load refusal.
+
+Bounded source-linked compilation used genuine native BDM/material sources and
+original numerical dependencies. It reached this new entry and identified two
+concrete API/type errors, both corrected to the original error variants. A
+complete native artifact or test execution was not obtained because unrelated
+local module dependencies were missing/stale; these new tests remain unexecuted.
+The executor then became unavailable; final formatter checks and corrected
+native integration execution remain pending.

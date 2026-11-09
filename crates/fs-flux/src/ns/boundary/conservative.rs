@@ -184,7 +184,7 @@ impl<'a, 'm, const N: usize> PreparedDensityMomentum<'a, 'm, N> {
         self.system.assemble_stokes_admitted_conservative(
             self.params,
             &|cell, point| dynamic_viscosity(cell, point) / self.controls.reference_density_kg_m3,
-            &|_| [0.0; 2],
+            &|_, _| [0.0; 2],
             &self.admitted,
             None,
             self.inv_dt,

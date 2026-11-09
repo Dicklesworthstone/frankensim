@@ -12,6 +12,9 @@ use crate::ns::boundary::{
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
+#[path = "navier_stokes/forcing.rs"]
+mod forcing;
+
 /// Physical endpoint conditions on the original FEEC boundary edges.
 #[derive(Clone, Copy)]
 pub enum MaterialNavierStokesBoundary<'a> {

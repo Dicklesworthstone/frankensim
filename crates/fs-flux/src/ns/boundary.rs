@@ -679,7 +679,7 @@ impl<'m> FluxSystem<'m> {
         self.assemble_stokes_admitted_conservative(
             params,
             viscosity,
-            force,
+            &|_, point| force(point),
             admitted,
             resistance,
             inv_dt,
@@ -696,7 +696,7 @@ impl<'m> FluxSystem<'m> {
         &'a self,
         params: FluxParams,
         viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
-        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        force: &dyn Fn(usize, [f64; 2]) -> [f64; 2],
         admitted: &AdmittedBoundary,
         resistance: Option<super::porous::CellResistance<'_>>,
         inv_dt: f64,
@@ -722,8 +722,8 @@ impl<'m> FluxSystem<'m> {
             }
         };
         let bad_force = Cell::new(false);
-        let checked_force = |point| {
-            let value = force(point);
+        let checked_force = |cell, point| {
+            let value = force(cell, point);
             if value.iter().all(|entry| entry.is_finite()) {
                 value
             } else {

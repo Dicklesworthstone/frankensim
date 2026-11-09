@@ -567,7 +567,7 @@ impl<'m> FluxSystem<'m> {
         self.assemble_operator_with_inertia(
             params,
             viscosity,
-            f,
+            &|_, point| f(point),
             g,
             advect,
             inv_dt,
@@ -588,7 +588,7 @@ impl<'m> FluxSystem<'m> {
         &self,
         params: FluxParams,
         viscosity: Option<&dyn Fn(usize, [f64; 2]) -> f64>,
-        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        f: &dyn Fn(usize, [f64; 2]) -> [f64; 2],
         g: &dyn Fn([f64; 2]) -> [f64; 2],
         advect: Option<&[f64]>,
         inv_dt: f64,
@@ -718,7 +718,7 @@ impl<'m> FluxSystem<'m> {
                 let mut fi = 0.0;
                 for (q, w) in tri_quad(p, area) {
                     let v = eval_basis(basis, i, q);
-                    let fv = f(q);
+                    let fv = f(t, q);
                     fi += w * (fv[0] * v[0] + fv[1] * v[1]);
                 }
                 rhs[gi] += fi;
