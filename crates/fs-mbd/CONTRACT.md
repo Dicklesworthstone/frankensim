@@ -670,6 +670,44 @@ physical mode identities, and no forced-response peak, flexible-shaft continuum
 or Floquet certificate is inferred. Speed-dependent bearing coefficients require
 a newly supplied physical operating point, not just another sample speed.
 
+`rotordynamics::resonance` supplies the separate forced-response path.
+`harmonic_response_with_derivative` differentiates the original full
+`K - omega^2 M + i omega (C + Omega G)` equilibrium, retaining independent
+forcing-frequency, shaft-speed and complex-force derivatives. The native
+row-equilibrated LU is reused for the tangent; the original physical force
+rows independently check both solves. Velocity derivatives include the
+derivative of `i omega`, including at DC and for negative frequencies.
+No damping, gyro coupling, source phase or nonsymmetric bearing coefficient
+is removed, and no finite difference or modal truncation is introduced.
+
+`RotorOperatingPoint::driven_resonance` and `survey_driven_resonances` pass
+these actual responses and analytic tangents to the existing `fs-phs`
+resonance owner. They retain its evaluation budgets, cancellation, isolated
+peak/bracket requirements and grid-resolution limitations. Fixed signed
+physical displacement/velocity receivers retain interference; their peaks
+may differ from one another and from the free poles. Optional half-power
+width and response Q belong to that observable and are not decay or material
+loss estimates. Shared `exp(+i omega t)` phasors need no conjugation.
+`RotorBearingModel::synchronous_response_with_derivative` follows
+`omega = order * Omega` with the total shaft-speed derivative, including
+the additional `i omega G` contribution. `RigidRotor` exposes
+`unbalance_response_with_derivative` and `unbalance_resonance`; both retain
+the original station phase/moment maps and `F = U Omega^2`, including
+`F' = 2 U Omega`. Zero speed retains zero source and derivative. Peak
+searches use positive shaft speeds and interpret returned frequency/width
+as that same 1x speed. They compare steady operating points, not a spin-up
+trajectory. The independent Jeffcott oracle in `rotor_unbalance_resonance`
+distinguishes the source-dependent peak from both a fixed-force peak and
+the natural frequency, and checks both analytic half-height crossings.
+The original constant-coefficient linearization remains: a particular
+solution does not establish decay of unstable homogeneous transients, and
+varying bearings/preload/material state requires its own coefficient model.
+G1/G3 tests in `rotor_resonance` cover analytic signed-frequency/source-phase
+tangents, complete nonsymmetric/gyroscopic direction derivatives, distinct
+displacement and velocity peaks, analytic linewidth, both whirl peaks, and
+original binary detuning under coordinate rescaling. G4 cases retain
+singular, budget, malformed-receiver and cancellation refusals.
+
 `rotordynamics::periodic::periodic_floquet` forms the homogeneous period map
 for 1–256 declared constant-coefficient portions of a physical cycle. Signed
 spin and original full M/G are identical across the cycle; full C/K may change,

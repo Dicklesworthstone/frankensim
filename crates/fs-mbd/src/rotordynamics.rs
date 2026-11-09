@@ -13,7 +13,7 @@
 //! synchronous-crossing brackets retain their explicit limitations. Changing bearings, preload or spin requires the caller's
 //! actual new coefficients; a fixed-matrix speed sweep does not infer them.
 
-use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
+use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_la::factor::cholesky;
 use fs_math::c64::C64;
 use fs_modal::{ModalError, quadratic_eigenvalues_with_cancel};
@@ -26,6 +26,9 @@ pub mod periodic;
 
 /// Actual time-domain motion and impulse response at a fixed shaft speed.
 pub mod transient;
+
+/// Original forced-response tangents, observed peaks and synchronous unbalance.
+pub mod resonance;
 
 /// Small dense operating-point bound; the quadratic companion has twice this size.
 pub const MAX_ROTOR_DOFS: usize = 32;
@@ -692,8 +695,21 @@ impl RotorOperatingPoint<'_> {
         frequency_rad_s: f64,
         force: &[C64],
         relative_tolerance: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<RotorHarmonicResponse, RotorError> {
+        self.harmonic_response_factored(frequency_rad_s, force, relative_tolerance, cancelled)
+            .map(|(response, _, _)| response)
+    }
+
+    // Retain the very same equilibrated factor for analytic tangent solves.
+    // Original-coordinate response and power checks still run before reuse.
+    fn harmonic_response_factored(
+        &self,
+        frequency_rad_s: f64,
+        force: &[C64],
+        relative_tolerance: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(RotorHarmonicResponse, LuComplex, [f64; MAX_ROTOR_DOFS]), RotorError> {
         poll(&mut cancelled)?;
         let m = self.model;
         let w = frequency_rad_s;
@@ -709,6 +725,7 @@ impl RotorOperatingPoint<'_> {
             ));
         }
         let mut matrix = vec![C64::ZERO; m.n * m.n];
+        let mut row_scales = [0.0; MAX_ROTOR_DOFS];
         let mut displacement = force.to_vec();
         for i in 0..m.n {
             poll(&mut cancelled)?;
@@ -731,6 +748,7 @@ impl RotorOperatingPoint<'_> {
             if row_scale == 0.0 {
                 return Err(LuComplexError::Singular { index: i }.into());
             }
+            row_scales[i] = row_scale;
             for entry in &mut matrix[i * m.n..(i + 1) * m.n] {
                 *entry = C64::new(entry.re / row_scale, entry.im / row_scale);
             }
@@ -794,19 +812,23 @@ impl RotorOperatingPoint<'_> {
                 - mean_inertial_power_w,
         )?;
         poll(&mut cancelled)?;
-        Ok(RotorHarmonicResponse {
-            spin_rad_s: self.spin_rad_s,
-            frequency_rad_s: w,
-            displacement,
-            velocity,
-            relative_residual,
-            mean_input_power_w,
-            mean_velocity_force_power_w,
-            mean_stiffness_force_power_w,
-            mean_gyroscopic_power_w,
-            mean_inertial_power_w,
-            mean_power_residual_w,
-        })
+        Ok((
+            RotorHarmonicResponse {
+                spin_rad_s: self.spin_rad_s,
+                frequency_rad_s: w,
+                displacement,
+                velocity,
+                relative_residual,
+                mean_input_power_w,
+                mean_velocity_force_power_w,
+                mean_stiffness_force_power_w,
+                mean_gyroscopic_power_w,
+                mean_inertial_power_w,
+                mean_power_residual_w,
+            },
+            factor,
+            row_scales,
+        ))
     }
 }
 
