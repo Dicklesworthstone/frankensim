@@ -1,5 +1,7 @@
 use super::*;
 
+mod body_force;
+
 // Solve in physical pressure/volume-flow coordinates. No scattering,
 // transformer waves or hybrid condensation is used by this oracle.
 fn physical_source_closure(

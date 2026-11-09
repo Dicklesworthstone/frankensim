@@ -1576,6 +1576,36 @@ Three focused native tests pass: original nonorthogonal trace map and fields wit
 This is modal Galerkin total-normal-traction/flow continuity, not full pointwise conforming P2 trace continuity. Nonmatching mortar meshes refuse. The LNS thermal interface is insulated; cuts through important thermal/viscous layers retain a separate physical model error. Interface placement, retained-mode convergence and geometric refinement remain explicit obligations. The default preparation's cp parameter affects only LNS; the molecular preparation below supplies the source's complex K to the pressure region as well. These conditions agree with the normal-stress/normal-acceleration and adiabatic assumptions described in COMSOL 6.3, Acoustic–Thermoviscous Acoustic Boundary (https://doc.comsol.com/6.3/doc/com.comsol.help.aco/aco_ug_multiphysics_couplings.14.12.html). IRP M2.4-W1c/.95 remains open for its full conforming and slit/tube/overlap qualifications.
 
 
+### Original distributed momentum sources across the hybrid
+
+`PreparedHybrid::response_with_volume_sources` carries the existing
+`ThermoviscousBodyForceSource` through both original loaded regions. Force
+amplitudes [N] multiply the source's original signed Cartesian density [m^-3],
+including zero-resultant distributions and the complete moving-wall lifting.
+External incident waves, structural forces and volume/surface heat sources are
+coherent drives of the same reciprocal interface closure.
+
+The existing native combined-source response supplies one affine outgoing offset;
+the retained interface factor closes its return waves, then each original owner
+recovers its full field. Source shapes, material coefficients and passive
+scattering are unchanged during warm response. Original body-force work enters
+`HybridPower::source_input_w` once, alongside structural and thermal source work.
+The native fluid reaction retains the physical body load. Signed source work,
+external port work, internal transfer and every physical loss remain distinct;
+no scattering norm defect supplies heat or fitted damping.
+
+The existing wall/heat-only method delegates with an empty force slice. Exact
+source identity, force-count limits, finite amplitudes and cancellation retain
+their original admission. Two new regression cases and the extended original
+moving-wall case specify independent physical Z/Y closure on nonorthogonal
+traces, complete fields, signed source/emission work, coherent forcing, internal
+reference invariance, sealed excitation, binding and replay. These definitions
+have not been compiled or executed in the disconnected environment.
+
+This extension retains the existing modal interface's spatial and thermal
+limitations. It does not provide full pointwise P2 Helmholtz/LNS trace continuity,
+nonmatching mortar, mean-flow sound generation or an inferred body-force law.
+
 ## Molecular compression across both hybrid acoustic regions
 
 The original pressure multiport now offers `prepare_scattering_with_bulk_modulus(frequency_hz, K, references, cancelled)` with finite Re(K)>0 and Im(K)>=0 in exp(+i omega t). It assembles `K_FE - rho omega^2/K M_FE` on the original pressure basis and geometric mass, reusing the same spatial port loads and loaded LU. The original real-medium preparation keeps its existing arithmetic. `PreparedInteriorScattering::bulk_dissipation_w` independently evaluates `-omega Im(1/K) p* M_FE p / 2`, checks cancellation per row, and adds neither a dense matrix nor a fitted attenuation/loss clip.

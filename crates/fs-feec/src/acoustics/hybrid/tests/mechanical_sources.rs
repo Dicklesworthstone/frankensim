@@ -182,4 +182,74 @@ fn nonzero_wall_force_reaches_helmholtz_and_closes_original_source_work() {
     assert!(power.interface_residual_w().abs() < 2e-9 * scale);
     assert!((source_work - emitted - power.dissipated_w()).abs() < 2e-8 * scale);
     assert!(power.balance_residual_w().abs() < 2e-8 * scale);
+
+    // The same original fixture now carries simultaneous distributed momentum,
+    // structural force and volume heat. The body load reaches the wall through
+    // its original full-vector lifting and must enter the fluid reaction once.
+    let volume = size.iter().product::<f64>();
+    let body = l.volume_force_source(
+        4,
+        &mut |_, point| Ok::<_, ThermoviscousError>([
+            0.0,
+            (1.0 + point[1] / size[1]) / volume,
+            0.2 * (2.0 * point[2] / size[2] - 1.0) / volume,
+        ]),
+        &mut || false,
+    ).unwrap();
+    let heat = l.volume_heat_source(
+        4, &mut |_, _| Ok(1.0 / volume), &mut || false,
+    ).unwrap();
+    let forces = [(&body, C64::new(0.0003, -0.0002))];
+    let heats = [(&heat, C64::new(0.0003, 0.0001))];
+    let mixed = prepared.response_with_volume_sources(
+        &[C64::ZERO; 2], &[force], &forces, &heats, &|| false,
+    ).unwrap();
+    let free = unloaded.response_with_volume_sources(
+        &[C64::ZERO; 2], &[force], &forces, &heats, &mut || false,
+    ).unwrap();
+    let mut mixed_oracle = [
+        C64::ZERO,
+        C64::ZERO,
+        -free.inward_flow_m3_s[0],
+        -free.inward_flow_m3_s[1].scale(lr[1]),
+    ];
+    lu_complex_with_cancel(&a, 4, || false).unwrap()
+        .solve_with_cancel(&mut mixed_oracle, || false).unwrap();
+    let expected = unloaded.response_with_volume_sources(
+        &mixed_oracle[2..], &[force], &forces, &heats, &mut || false,
+    ).unwrap();
+    for (observed, reference) in [
+        (&mixed.thermoviscous.pressure_pa, &expected.pressure_pa),
+        (&mixed.thermoviscous.temperature_k, &expected.temperature_k),
+        (&mixed.thermoviscous.inward_flow_m3_s, &expected.inward_flow_m3_s),
+        (
+            &mixed.thermoviscous.moving_wall.modal_velocity_m_sqrt_kg_per_s,
+            &expected.moving_wall.modal_velocity_m_sqrt_kg_per_s,
+        ),
+        (
+            &mixed.thermoviscous.moving_wall.fluid_force_n_per_sqrt_kg,
+            &expected.moving_wall.fluid_force_n_per_sqrt_kg,
+        ),
+    ] {
+        let scale = reference.iter().map(|z| z.abs()).fold(1e-30_f64, f64::max);
+        assert!(observed.iter().zip(reference)
+            .all(|(a, b)| (*a - *b).abs() < 2e-8 * scale));
+    }
+    let u = mixed.thermoviscous.moving_wall.modal_velocity_m_sqrt_kg_per_s[0];
+    let reaction = mixed.thermoviscous.moving_wall.fluid_force_n_per_sqrt_kg[0];
+    assert!(relative(force + reaction, structural_impedance * u) < 2e-8);
+    let p = mixed.power;
+    assert!(p.thermoviscous.body_force_work_w.abs() > 0.0);
+    assert!(p.thermoviscous.heat_source_work_w.abs() > 0.0);
+    let original_work = 0.5 * (force.conj() * u).re
+        + p.thermoviscous.heat_source_work_w + p.thermoviscous.body_force_work_w;
+    let scale = original_work.abs() + p.external_input_w.abs() + p.dissipated_w();
+    assert!((p.source_input_w - original_work).abs() < 2e-9 * scale);
+    assert!(p.interface_residual_w().abs() < 2e-9 * scale);
+    assert!(p.balance_residual_w().abs() < 2e-8 * scale);
+    let delegated = prepared.response_with_volume_sources(
+        &[C64::ZERO; 2], &[force], &[], &[], &|| false,
+    ).unwrap();
+    assert_eq!(delegated.helmholtz.amplitudes, actual.helmholtz.amplitudes);
+    assert_eq!(delegated.thermoviscous.pressure_pa, actual.thermoviscous.pressure_pa);
 }

@@ -28,7 +28,7 @@
 //! All fields use exp(+i omega t). Real-reference power coordinates also retain
 //! reactive traces; they are not conventional evanescent traveling waves.
 //!
-//! Internal mechanical and spatial heat sources contribute b_source to the
+//! Original body forces, structural drives and spatial heat sources contribute b_source to the
 //! original loaded relation b=S a+b_source. Their outgoing waves participate
 //! in the SAME reciprocal interface closure; the passive S matrix is unchanged.
 
@@ -37,6 +37,7 @@ use super::helmholtz::multiport::{
     InteriorMultiport, InteriorPortResponse, PhysicalTrace, PreparedInteriorScattering,
 };
 use super::helmholtz::{AcousticFeError, Medium};
+use super::thermoviscous::body_force::ThermoviscousBodyForceSource;
 use super::thermoviscous::heat_source::ThermoviscousHeatSource;
 use super::thermoviscous::{
     PreparedThermoviscousScattering, ThermoviscousError, ThermoviscousFe, ThermoviscousField,
@@ -468,7 +469,7 @@ pub struct PreparedHybrid<'a, 'c> {
 #[derive(Debug, Clone, Copy)]
 pub struct HybridPower {
     pub external_input_w: f64,
-    /// Signed work of original structural forces and spatial heat sources.
+    /// Signed work of original body forces, structural forces and spatial heat sources.
     /// Port work, including the internal interface, is excluded.
     pub source_input_w: f64,
     pub helmholtz_interface_w: f64,
@@ -633,6 +634,34 @@ impl PreparedHybrid<'_, '_> {
         heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<HybridResponse, HybridError> {
+        self.response_with_volume_sources(incident, wall_forces, &[], heat_sources, cancelled)
+    }
+
+    /// Propagate original distributed body forces through both complete regions.
+    ///
+    /// Force amplitudes [N] multiply the source's original vector density
+    /// [m^-3]. Signed, zero-resultant and independently phased profiles retain
+    /// their full weak momentum load, including the moving-wall lifting.
+    /// Structural drives and volume/surface heat amplitudes [W] remain live in
+    /// this SAME loaded closure. Original sources must belong to the resolved
+    /// owner; count, finite-value and cancellation admission is unchanged.
+    ///
+    /// One combined native source solve supplies the affine outgoing waves;
+    /// the existing interface factor closes their reciprocal return. Final
+    /// fields reuse both original factors. Body-force work and the corrected
+    /// fluid-to-wall reaction come from that same native resolved solution.
+    /// No source sampling, density scaling, new factorization or source-wise
+    /// incoherent power sum is introduced. Full P2 pointwise interface
+    /// continuity, mean-flow acoustics and a force-production model are not
+    /// inferred; the original modal cut and placement limitations remain.
+    pub fn response_with_volume_sources(
+        &self,
+        incident: &[C64],
+        wall_forces: &[C64],
+        force_sources: &[(&ThermoviscousBodyForceSource<'_, '_>, C64)],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<HybridResponse, HybridError> {
         poll(cancelled)?;
         if incident.len() != self.external.len() || incident.iter().any(|&z| !finite(z)) {
             return Err(HybridError::InvalidInput(
@@ -641,14 +670,19 @@ impl PreparedHybrid<'_, '_> {
         }
         let mut source = vec![C64::ZERO; self.nh];
         source.extend(
-            self.l
-                .source_outgoing(wall_forces, heat_sources, &mut || cancelled())?,
+            self.l.source_outgoing_with_volume_sources(
+                wall_forces,
+                force_sources,
+                heat_sources,
+                &mut || cancelled(),
+            )?,
         );
         let all = self.complete_incident_with_sources(incident, Some(&source), cancelled)?;
         let h = self.h.response(&all[..self.nh], cancelled)?;
-        let l = self.l.response_with_sources(
+        let l = self.l.response_with_volume_sources(
             &all[self.nh..],
             wall_forces,
+            force_sources,
             heat_sources,
             &mut || cancelled(),
         )?;
@@ -695,7 +729,9 @@ impl PreparedHybrid<'_, '_> {
         let m = self.interface.helmholtz_modes.len();
         let power = HybridPower {
             external_input_w: work(&self.external),
-            source_input_w: l.moving_wall.external_input_w + l.power.heat_source_work_w,
+            source_input_w: l.moving_wall.external_input_w
+                + l.power.heat_source_work_w
+                + l.power.body_force_work_w,
             helmholtz_interface_w: work(&self.internal[..m]),
             thermoviscous_interface_w: work(&self.internal[m..]),
             helmholtz_wall: self
