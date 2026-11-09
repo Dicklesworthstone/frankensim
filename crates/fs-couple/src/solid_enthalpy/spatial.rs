@@ -21,6 +21,8 @@
 //! heat, and deformation does not silently change the transport geometry.
 
 mod conductivity;
+/// Reciprocal material heat on the original nodal enthalpy and equilibrium.
+pub mod thermoelastic;
 /// Native nodal heat and continuing pressure-driven modal motion.
 pub mod motion;
 mod source;

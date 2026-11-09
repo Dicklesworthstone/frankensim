@@ -47,6 +47,8 @@ mod motion;
 mod radiation;
 #[path = "spatial_solid_enthalpy/reference_inventory.rs"]
 mod reference_inventory;
+#[path = "spatial_solid_enthalpy/thermoelastic.rs"]
+mod thermoelastic;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
