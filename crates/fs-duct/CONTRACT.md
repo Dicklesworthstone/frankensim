@@ -5503,3 +5503,74 @@ with separate contact heat on both gas walls, the opaque 4096-cell limit,
 perfect/isolating contact limits, original source/state/refusal behavior and
 early/late cancellation. Synthetic material data establish constitutive
 and numerical checks; no experimental material qualification is inferred.
+
+### Circular bores with regular-axis conjugate thermal walls
+
+`fluid::circular::CircularSection` extends the original resolved radial
+gas/solid wall calculation to an actual circular disk. It retains the axis
+at `r=0` as a free gas coordinate, with the natural regularity condition
+and zero physical boundary measure. There is one no-slip material boundary
+at the authored outer radius. No artificial inner cylinder, small-hole
+limit, hydraulic radius, replacement Bessel fit or independent radial
+solver is introduced. The public `AnnularSection` constructor continues
+to require two strictly positive ordered radii.
+
+The disk uses a declared uniform radial P1 mesh and the original exact
+radius-weighted stiffness, mass, load and gradient-work forms. The same
+native O(N) tridiagonal diffusion solve includes the free axis coordinate;
+high-frequency complementary variables retain weak gradients and the
+actual axis contribution to the area mean. Its algebraic residual uses
+the original row term scale with a smallest-normal denominator at
+underflowed tails; physical fields and dissipation are unchanged by that
+numerical safeguard. This is a finite-element approximation, so even
+the first-cell derivative at the axis converges by radial refinement
+rather than being overwritten with a fabricated exact value. The
+diagnostic circular shear number uses the actual radius.
+
+`prepare_thermal_wall_fields` and
+`prepare_molecular_thermal_wall_fields` bind the original gas or
+`RelaxationState` to one explicit isothermal, insulated, finite-capacity,
+homogeneous-solid, or layered-solid outer wall. They reuse the same
+conjugate gas/solid thermal equation and evaluate the original dynamic Cp
+once. Actual solid sources, samples, shell meshes, interlayer resistances,
+bath, frequency and background temperature remain with the existing
+prepared owners. Material walls must contact the gas at their inner face
+at precisely the same radius, temperature and frequency. Gas/solid
+contact remains perfect; no gas accommodation or contact coefficient
+is inferred.
+
+`PreparedCircularThermalWalls` exposes the original source, section,
+wave, stable native `TwoPort`, mean thermal response and residuals,
+original local gas velocity/temperature/gradients, the one physical
+wall observation, homogeneous or layer-selected solid fields, and
+actual interlayer contact observations. Positive integrated gas shear,
+gas conduction, molecular relaxation, solid conduction, interlayer
+contact and bath-exchange loss remain separate scalar channels.
+Solid storage retains its original reversible thermal meaning and is
+not relabeled as absorption. Local, wall, contact and integrated queries
+remain O(1), allocation-free and require no material reevaluation.
+
+Geometry admits a finite positive radius and 2--4096 radial cells with
+representable disk area. Preparation retains the original explicit
+transverse-phase, cell-diffusion-phase, residual and byte admissions;
+gas preparation requires `320*(elements+1)+4096` logical payload bytes
+in addition to separately prepared solid owners. Geometry and numerical
+preparation poll cancellation before allocation, at bounded radial
+intervals and around the native solve. Admission is not a continuum
+mesh-error or empirical material certificate. The owner remains linear,
+fully developed, axisymmetric, plane-pressure, no-slip continuum
+acoustics with a rigid mechanical wall and uniform background.
+It adds no mean flow, axial heat diffusion, rarefaction, thermoelastic
+motion, end correction or higher acoustic transverse modes.
+
+Eight G1/G3 regression groups in `tests/circular_thermal_walls.rs`
+cover Poiseuille center velocity, flow and viscous work; mesh convergence
+to the original exact cylindrical Bessel owner; independent regular
+cylindrical-series molecular thermal solutions; a regular-gas plus
+two-material dimensional ODE/contact reference; direct physical disk
+quadrature and complete independent acoustic power balance; regular-axis
+gradient convergence; empty-reservoir and thermal-boundary limits; and
+geometry, source, mesh, budget, contact-face and cancellation refusals.
+The existing homogeneous and layered annular wall tests also exercise
+the shared radial arithmetic. Solid data in these tests are explicitly
+synthetic constitutive fixtures, not experimental material authority.

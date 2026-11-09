@@ -5355,6 +5355,27 @@ chromatic geometry, steady absorbing coatings, and work/clipping/cancellation
 refusals. The changed Rust passed parser and source/API review; the full
 renderer integration fixtures were not executed in this editing environment.
 
+`motion_vectors::compute_sequential_motion_vectors` consumes that conditional
+projection for the original stable local material-point correspondence.
+It holds the actual wavelength and normalized pupil/ghost draw fixed across
+previous, current and next camera/object frames. The current converged tangent
+seeds both target frames; each target uses its own native lens prescription.
+The original time ordering, object/geometry/pose identities, normals,
+camera-cut handling, target-minus-current displacement and beauty raster
+arithmetic are shared with the optical-centre motion owner.
+
+The explicit trace budget applies to each inverse. Reusing the same current
+frame as an unused endpoint reuses its accepted projection without another
+lens trace. Behind-camera endpoints remain categorical; clipped or unresolved
+local inverses return typed errors. The result is neither a pupil average nor
+a visibility certificate. Original target observations and reprojection
+validation remain necessary for sample reuse. No query allocation is added.
+
+Two native correspondence fixtures cover chromatic full-ray reconstruction,
+pixel signs, cuts, behind-camera points, identity refusal and per-frame work
+limits. They were parsed and independently source/API reviewed; they were not
+executed in this editing environment.
+
 The film convention is sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers
 irradiance from a radiometric scene. Exposure, ISO and QE remain explicit.

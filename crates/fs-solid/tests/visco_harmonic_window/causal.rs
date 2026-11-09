@@ -1,5 +1,6 @@
 //! Retained original solid memory against independent real Maxwell histories.
 
+#[path = "causal/held_thermal.rs"]
 mod held_thermal;
 
 use super::*;

@@ -2,8 +2,9 @@
 //!
 //! Motion here means the screen displacement of one admitted local material
 //! point under explicit rigid object and camera transforms. It is a rendering
-//! derivative, not a measured mechanical velocity. Projection uses the camera
-//! optical centre so aperture samples cannot masquerade as object motion.
+//! derivative, not a measured mechanical velocity. The original projection
+//! uses the camera optical centre. Native sequential-lens motion fixes one
+//! wavelength and pupil draw across the reference frames.
 
 use core::fmt;
 
@@ -16,6 +17,11 @@ use crate::camera::{
     AnimatedCamera, CameraError, CutSide, OpticalCenterProjection, PhysicalCamera,
 };
 use crate::instances::{GeometryInstance, InstanceHit, InstanceSurfaceFeature, RigidTransform};
+
+#[cfg(feature = "tracer")]
+mod sequential;
+#[cfg(feature = "tracer")]
+pub use sequential::compute_sequential_motion_vectors;
 
 /// Bit-affecting semantics for feature selection, projection, and motion-vector
 /// direction. Increment when any result bit or categorical outcome can change.
@@ -440,7 +446,7 @@ pub enum MotionEndpoint {
 pub struct MotionVectorSample {
     /// Stable categorical identity for AOVs and target validation.
     pub identity: StableHitIdentity,
-    /// Current center-projection in the exact beauty raster convention.
+    /// Current projection in the exact beauty raster convention.
     pub current: RasterProjection,
     /// Current-to-previous projection.
     pub previous: MotionEndpoint,
@@ -481,6 +487,28 @@ pub fn compute_motion_vectors(
     next: &MotionFrame,
     raster: RasterSize,
 ) -> Result<MotionVectorComputation, MotionVectorError> {
+    compute_motion_vectors_with(
+        sample,
+        previous,
+        current,
+        next,
+        raster,
+        |frame, point, raster| project_world(frame.camera(), point, raster),
+    )
+}
+
+fn compute_motion_vectors_with(
+    sample: PrimarySurfaceSample,
+    previous: &MotionFrame,
+    current: &MotionFrame,
+    next: &MotionFrame,
+    raster: RasterSize,
+    mut project: impl FnMut(
+        &MotionFrame,
+        Point3,
+        RasterSize,
+    ) -> Result<ProjectedWorldPoint, MotionVectorError>,
+) -> Result<MotionVectorComputation, MotionVectorError> {
     if previous.absolute_time_s > current.absolute_time_s
         || current.absolute_time_s > next.absolute_time_s
     {
@@ -508,14 +536,27 @@ pub fn compute_motion_vectors(
     };
 
     let current_world = current.object_to_world.transform_point(surface.local_point);
-    let current_projection = project_world(current.camera(), current_world, raster)?;
+    let current_projection = project(current, current_world, raster)?;
     let ProjectedWorldPoint::InFront(current_projection) = current_projection else {
         return Err(MotionVectorError::CurrentPointBehindCamera);
     };
 
-    let previous_endpoint =
-        project_endpoint(surface, previous, current, current_projection, raster)?;
-    let next_endpoint = project_endpoint(surface, next, current, current_projection, raster)?;
+    let previous_endpoint = project_endpoint(
+        surface,
+        previous,
+        current,
+        current_projection,
+        raster,
+        &mut project,
+    )?;
+    let next_endpoint = project_endpoint(
+        surface,
+        next,
+        current,
+        current_projection,
+        raster,
+        &mut project,
+    )?;
     let geometric_normal_world = current
         .object_to_world
         .transform_vector(sample.geometric_normal_local);
@@ -543,6 +584,11 @@ fn project_endpoint(
     current_frame: &MotionFrame,
     current_projection: RasterProjection,
     raster: RasterSize,
+    project: &mut impl FnMut(
+        &MotionFrame,
+        Point3,
+        RasterSize,
+    ) -> Result<ProjectedWorldPoint, MotionVectorError>,
 ) -> Result<MotionEndpoint, MotionVectorError> {
     if target_frame.shot_id != current_frame.shot_id {
         return Ok(MotionEndpoint::CameraCut {
@@ -553,7 +599,7 @@ fn project_endpoint(
     let target_world = target_frame
         .object_to_world
         .transform_point(surface.local_point);
-    match project_world(target_frame.camera(), target_world, raster)? {
+    match project(target_frame, target_world, raster)? {
         ProjectedWorldPoint::BehindCamera { signed_depth_m } => {
             Ok(MotionEndpoint::BehindCamera { signed_depth_m })
         }
@@ -581,30 +627,35 @@ fn project_world(
             Ok(ProjectedWorldPoint::BehindCamera { signed_depth_m })
         }
         OpticalCenterProjection::InFront { ndc_xy, depth_m } => {
-            let width = f64::from(raster.width);
-            let height = f64::from(raster.height);
-            // Keep operation order identical to the beauty raster convention;
-            // `midpoint` is not guaranteed to preserve these established bits.
-            #[allow(clippy::manual_midpoint)]
-            let pixel_xy = [
-                (ndc_xy[0] + 1.0) * 0.5 * width,
-                (1.0 - ndc_xy[1]) * 0.5 * height,
-            ];
-            if pixel_xy.iter().any(|coordinate| !coordinate.is_finite()) {
-                return Err(MotionVectorError::InvalidProjection);
-            }
-            let in_frame = pixel_xy[0] >= 0.0
-                && pixel_xy[0] < width
-                && pixel_xy[1] >= 0.0
-                && pixel_xy[1] < height;
-            Ok(ProjectedWorldPoint::InFront(RasterProjection {
-                ndc_xy,
-                pixel_xy,
-                depth_m,
-                in_frame,
-            }))
+            raster_projection(ndc_xy, depth_m, raster)
         }
     }
+}
+
+fn raster_projection(
+    ndc_xy: [f64; 2],
+    depth_m: f64,
+    raster: RasterSize,
+) -> Result<ProjectedWorldPoint, MotionVectorError> {
+    let width = f64::from(raster.width);
+    let height = f64::from(raster.height);
+    // Preserve the established beauty raster arithmetic for both projectors.
+    #[allow(clippy::manual_midpoint)]
+    let pixel_xy = [
+        (ndc_xy[0] + 1.0) * 0.5 * width,
+        (1.0 - ndc_xy[1]) * 0.5 * height,
+    ];
+    if pixel_xy.iter().any(|coordinate| !coordinate.is_finite()) {
+        return Err(MotionVectorError::InvalidProjection);
+    }
+    let in_frame =
+        pixel_xy[0] >= 0.0 && pixel_xy[0] < width && pixel_xy[1] >= 0.0 && pixel_xy[1] < height;
+    Ok(ProjectedWorldPoint::InFront(RasterProjection {
+        ndc_xy,
+        pixel_xy,
+        depth_m,
+        in_frame,
+    }))
 }
 
 /// Target-frame frontmost observation at the reprojected coordinate.
@@ -798,6 +849,9 @@ pub enum MotionVectorError {
     InvalidObservation,
     /// Camera admission/evaluation/projection refused.
     Camera(CameraError),
+    /// The selected native wavelength/pupil projection was unresolved.
+    #[cfg(feature = "tracer")]
+    SequentialProjection(crate::camera::SequentialProjectionError),
     /// Animated instance evaluation refused.
     AnimatedInstance(AnimatedInstanceError),
     /// Execution scope requested cancellation.
@@ -879,6 +933,9 @@ fn subtract2(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tracer")]
+    mod sequential;
+
     use asupersync::types::Budget;
     use fs_alloc::{ArenaConfig, ArenaPool};
     use fs_blake3::hash_domain;
