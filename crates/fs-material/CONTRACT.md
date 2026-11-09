@@ -17349,6 +17349,59 @@ sorption heat, evolving site capacity or hydraulic feedback is inferred.
 Newton convergence and residual budgets do not certify global convergence,
 temporal error, or experimental validity of the caller's material sources.
 
+### Source-qualified longitudinal mechanical dispersion in porous liquid
+
+`LiquidSaturationCandidate::with_solute_dispersion` prepares one exact hydraulic
+interval for the original free, linear-sorbing or source-Langmuir solute owner.
+A distinct original constitutive card supplies nonnegative longitudinal
+dispersivity alpha_L [m], with typed speed, saturation, porosity and physical
+transport-scale support. Calibration scale is independent of numerical cell
+width. Additional original conditions remain explicit caller-owned context;
+consistency with hydraulic temperature/chemistry not retained in the candidate
+is not inferred. No material name, molecular diffusivity or tortuosity supplies
+a hidden dispersivity.
+
+Each adjacent cell uses its actual endpoint water fraction theta and the same
+accepted face volume divided by interval duration: v_face=|q_face|/theta.
+The bulk half-cell coefficient is theta*D_molecular/tau + alpha_L*|q_face|.
+Molecular and mechanical contributions add before original half-cell series
+and boundary-film assembly. Mechanical dispersion is never divided by tau.
+Opposing faces remain separate, so converging/diverging water does not erase
+physical mixing through a signed cell-average cancellation. The original
+molecular-only calls retain their original resistance/arithmetic/allocation
+path; zero-alpha and stagnant prepared intervals retain molecular flux and
+inventory arithmetic exactly.
+
+The returned nested `diffusive_face_amount_mol_m2` is explicitly the total
+gradient-driven molecular-plus-mechanical transfer. No separately conserved
+mechanism split is invented at heterogeneous interfaces. Advection and every
+aqueous/bound conservation gate remain original. Preparation retains both
+face speeds, both mechanical coefficients and actual cell coordinates with
+borrowed original source bindings. It consumes the existing source-point and
+memory budgets before allocation; its retained arrays also count inside the
+subsequent whole transport memory cap. The consuming interval moves its arrays
+into the result without a deep clone; source qualification clones no cards or
+query points. Failure/cancellation publishes no partial constituent state.
+
+Eight new authored G1/G3/G4 groups passed with exact production numerical/source
+owners and genuine native dependencies: zero-alpha/stagnation parity, opposed
+faces and tortuosity independence, heterogeneous series/film/reflection oracles,
+a three-level advecting Gaussian, linear and Langmuir combined balances,
+source/unit/scale refusals, and cumulative payload/work/cancellation limits.
+The Gaussian checks both the continuous profile's first-order refinement and
+the independent discrete variance, separating physical dispersion from donor-cell
+and backward-Euler broadening. All prior 52 porous/aqueous-owner tests also
+passed (60 total), with empty compiler stderr. Four changed Rust files passed
+the pinned formatter check. This bounded run does not type-check the full
+hydraulic adapter or replace the blocked fs-material/workspace gate.
+
+This is one-dimensional longitudinal dispersion for passive dilute constituents
+on the candidate's time-frozen water interval, using endpoint storage. Explicit
+and implicit hydraulic candidates retain their own chosen flux time level.
+Unresolved within-interval changes/reversals require smaller water intervals.
+No transverse/tensor dispersion, turbulent mixing, evolving calibration,
+charged-species migration, experimental accuracy or global error bound follows.
+
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
 `AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control
