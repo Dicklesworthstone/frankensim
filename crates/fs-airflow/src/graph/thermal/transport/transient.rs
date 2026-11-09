@@ -533,6 +533,7 @@ fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
     poll(cx).map_err(|_| DepositionError::Cancelled)
 }
 
+pub mod carreau;
 pub mod coupled;
 pub mod distributed;
 pub mod implicit;

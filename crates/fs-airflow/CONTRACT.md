@@ -509,6 +509,59 @@ cover startup, coastdown and recovering heads; a simultaneous pressure/storage
 oracle separates compliance energy from heat. Zero-flow cooling, the balanced
 steady limit, original-workspace continuation and atomic retry are also tested.
 
+## Regional enthalpy transport through original Carreau networks
+
+With `transient-transport`,
+`graph::thermal::transport::transient::carreau::RegionalCarreauTransport`
+couples native regional thermal storage and conservative enthalpy transport
+to the original quasi-steady Carreau pressure network. Each real pipe section
+has one distinct native fluid cell; each hydraulic junction has additional,
+explicit finite mixing inventory. Pipe length and volume must match the original
+centreline length and `pi R^2 L`, and incident pipe endpoints agree at junctions.
+All fluid masses equal the declared fixed reference density times their volumes.
+The original registered enthalpy material, declared caloric identity, complete
+geometry and masses remain pinned. Native wall/solid cells may coexist outside
+the fluid map; no heat capacity, material source or junction volume is inferred.
+
+Every native backward-Euler trial resolves each pipe's OWN current cell
+temperature through the original caloric law, prepares its unchanged original
+Carreau-Yasuda source and physical rate ceiling, and solves the original network.
+Its actual signed volume rates drive native junction-to-pipe-to-junction mass
+transport. Native donor selection reverses with flow and retains heated fluid
+already stored in each pipe. External streams attach explicitly to junctions;
+pressure datums supply no implicit mass or donor enthalpy. The native roundoff
+mass-closure gate remains stricter than an arbitrarily loose hydraulic tolerance.
+
+Each original accepted steady profile's nonnegative viscous `dp*Q` is deposited
+once in its own pipe cell. Reservoir/injection pressure work and constitutive
+or continuity residual work remain in the original hydraulic report and are
+never added again as heat. Internal enthalpy transfer stays internal; native
+net external stream enthalpy is reported separately. Caller-owned wall links,
+ambient coefficients and additional sources enter that same original residual.
+The existing nonlinear implicit driver is shared with prescribed-flow transport;
+it owns bounded endpoint evaluations, native caloric inversion, cancellation,
+independent final evaluation and local/global energy acceptance. Refused source,
+inventory, stream, work or cancellation proposals publish no changed state.
+
+This is transient regional heat with quasi-steady developed laminar momentum.
+Each authored section is thermally well mixed, and its endpoint flow represents
+the full implicit interval. Time and spatial refinement remain required;
+momentum history, radial thermal gradients, entrance effects, buoyancy, expansion
+and the instant of flow reversal are outside this owner. The immutable graph
+accessor is the original template; accepted profiles and temperatures are in
+the returned endpoint report. The retained-radial-history thermal owner remains
+the separate explicit one-inventory model described above.
+
+Six focused regressions cover independent serial Poiseuille/Arrhenius and
+finite-inventory energy roots, reverse flushing with nonlinear heat capacity
+and a large enthalpy datum, original nonlinear Carreau feedback, the zero-flow
+heat limit and parity with prescribed-flow stepping, strict admission/work
+refusals and cancellation after an actual hydraulic solve. All 54 tests in the
+source-linked Carreau/thermal battery passed with original material, radial,
+advection, backward-Euler, checked-CG and Newton/Krylov numerical code. The
+execution context and unrelated module namespaces were isolated to avoid the
+unavailable full dependency build; this is not a full-crate/runtime test pass.
+
 ## Steady shear-thinning hydraulic networks
 
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`

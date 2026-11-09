@@ -66,7 +66,7 @@ impl<E> From<TransientTransportError> for ImplicitTransportError<E> {
 }
 impl<E: core::fmt::Debug> core::fmt::Display for ImplicitTransportError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "implicit prescribed-flow heat transport: {self:?}")
+        write!(f, "implicit graph enthalpy transport: {self:?}")
     }
 }
 impl<E: core::fmt::Debug> std::error::Error for ImplicitTransportError<E> {}
@@ -101,142 +101,179 @@ impl GraphEnthalpyTransport {
     {
         if let Some(frozen) = self.freeze_scheduled_interval(cx, thermal, target_s)? {
             return frozen.advance_implicit_with_heat(
-                cx, thermal, target_s, controls, energy_guess_j, resolve,
+                cx,
+                thermal,
+                target_s,
+                controls,
+                energy_guess_j,
+                resolve,
             );
         }
-        thermal_checkpoint(cx)?;
-        controls
-            .solver
-            .validate()
-            .map_err(ImplicitTransportError::Solver)?;
         self.validate_storage(cx, thermal)?;
-        if !(1..=MAX_DISTRIBUTED_FLUID_CELLS).contains(&controls.maximum_cells)
-            || thermal.cells().is_empty()
-            || thermal.cells().len() > controls.maximum_cells
-            || !(1..=1024).contains(&controls.maximum_newton_iterations)
-            || !(1..=1_000_000).contains(&controls.maximum_endpoint_evaluations)
-            || !positive(controls.energy_scale_j)
-            || !positive(controls.finite_difference_step)
-            || !nonnegative(controls.cell_tolerance_j)
-            || !nonnegative(controls.total_tolerance_j)
-        {
-            return Err(ImplicitTransportError::Invalid(
-                "bounded original thermal inventory, scales and physical residual limits required",
-            ));
-        }
-        // Admit the fixed mass graph and any prepared reconstruction before
-        // entering the source callback, including initially stationary flow.
+        // Admit the fixed graph before any source callback, including rest.
         self.endpoint_transport(cx, thermal)?;
-        let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
-        let count = step.cell_ids().len();
-        if energy_guess_j.len() != count || energy_guess_j.iter().any(|v| !v.is_finite()) {
+        advance_endpoint_transport(
+            cx,
+            thermal,
+            target_s,
+            controls,
+            energy_guess_j,
+            |cx, candidate| {
+                let advected = self.endpoint_transport(cx, candidate)?;
+                let heat = resolve(cx, candidate).map_err(ImplicitTransportError::Resolve)?;
+                combine_endpoint_heat(cx, advected, heat)
+            },
+        )
+    }
+}
+
+/// Shared original backward-Euler/Newton endpoint driver. The caller owns the
+/// actual mass topology and source admission; this function owns the common
+/// energy solve, work budget, cancellation and final native energy acceptance.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_endpoint_transport<'m, T, E>(
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: ImplicitTransportControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+    ) -> Result<TransportStepCoefficients<T>, ImplicitTransportError<E>>,
+) -> Result<(DepositionSimulation<'m>, ImplicitTransportReport<T>), ImplicitTransportError<E>> {
+    thermal_checkpoint(cx)?;
+    controls
+        .solver
+        .validate()
+        .map_err(ImplicitTransportError::Solver)?;
+    if !(1..=MAX_DISTRIBUTED_FLUID_CELLS).contains(&controls.maximum_cells)
+        || thermal.cells().is_empty()
+        || thermal.cells().len() > controls.maximum_cells
+        || !(1..=1024).contains(&controls.maximum_newton_iterations)
+        || !(1..=1_000_000).contains(&controls.maximum_endpoint_evaluations)
+        || !positive(controls.energy_scale_j)
+        || !positive(controls.finite_difference_step)
+        || !nonnegative(controls.cell_tolerance_j)
+        || !nonnegative(controls.total_tolerance_j)
+    {
+        return Err(ImplicitTransportError::Invalid(
+            "bounded original thermal inventory, scales and physical residual limits required",
+        ));
+    }
+    let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
+    let count = step.cell_ids().len();
+    if energy_guess_j.len() != count || energy_guess_j.iter().any(|v| !v.is_finite()) {
+        return Err(ImplicitTransportError::Invalid(
+            "complete finite cell-energy guess required",
+        ));
+    }
+    let evaluations = Cell::new(0usize);
+    let evaluate = |x: &[f64]| {
+        thermal_checkpoint(cx)?;
+        if evaluations.get() == controls.maximum_endpoint_evaluations {
+            return Err(ImplicitTransportError::WorkBudget {
+                performed: evaluations.get(),
+                maximum: controls.maximum_endpoint_evaluations,
+            });
+        }
+        evaluations.set(evaluations.get() + 1);
+        let energies: Vec<_> = x.iter().map(|v| v * controls.energy_scale_j).collect();
+        if energies.iter().any(|value| !value.is_finite()) {
             return Err(ImplicitTransportError::Invalid(
-                "complete finite cell-energy guess required",
+                "unrepresentable cell-energy coordinates",
             ));
         }
-        let evaluations = Cell::new(0usize);
-        let evaluate = |x: &[f64]| {
-            thermal_checkpoint(cx)?;
-            if evaluations.get() == controls.maximum_endpoint_evaluations {
-                return Err(ImplicitTransportError::WorkBudget {
-                    performed: evaluations.get(),
-                    maximum: controls.maximum_endpoint_evaluations,
-                });
-            }
-            evaluations.set(evaluations.get() + 1);
-            let energies: Vec<_> = x.iter().map(|v| v * controls.energy_scale_j).collect();
-            if energies.iter().any(|value| !value.is_finite()) {
-                return Err(ImplicitTransportError::Invalid(
-                    "unrepresentable cell-energy coordinates",
-                ));
-            }
-            let energies = step.resolvable_increments_j(&energies);
-            step.evaluate_with_transport(
-                &energies,
-                |candidate| {
-                    let advected = self.endpoint_transport(cx, candidate)?;
-                    let BoundaryStepCoefficients { bulk, boundaries } =
-                        resolve(cx, candidate).map_err(ImplicitTransportError::Resolve)?;
-                    thermal_checkpoint(cx)?;
-                    let StepCoefficients {
-                        mut sources_w,
-                        conductances_w_k,
-                        payload,
-                    } = bulk;
-                    for (id, watts) in advected.heat.bulk.sources_w {
-                        thermal_checkpoint(cx)?;
-                        let value = sources_w.entry(id).or_insert(0.0);
-                        *value += watts;
-                        if !value.is_finite() {
-                            return Err(ImplicitTransportError::Invalid(
-                                "combined endpoint source is nonfinite",
-                            ));
-                        }
-                    }
-                    Ok(TransportStepCoefficients {
-                        heat: BoundaryStepCoefficients {
-                            bulk: StepCoefficients {
-                                sources_w,
-                                conductances_w_k,
-                                payload,
-                            },
-                            boundaries,
-                        },
-                        transfers: advected.transfers,
-                    })
-                },
-                || thermal_checkpoint(cx),
-            )
-        };
-        let difference =
-            FallibleFiniteDifference::new(count, controls.finite_difference_step, |x: &[f64]| {
-                let trial = evaluate(x)?;
-                Ok(trial
-                    .residual_j()
-                    .iter()
-                    .map(|v| v / controls.energy_scale_j)
-                    .collect())
-            })
-            .map_err(difference_error)?;
-        let guess = energy_guess_j
-            .iter()
-            .map(|v| v / controls.energy_scale_j)
-            .collect();
-        let initialized = NewtonKrylovState::new(&difference, guess, controls.solver);
-        if let Some(error) = difference.take_failure() {
-            return Err(difference_error(error));
-        }
-        let mut solver = initialized.map_err(ImplicitTransportError::Solver)?;
-        let run =
-            solver.run_controlled(&difference, controls.maximum_newton_iterations, &mut || {
-                difference.has_failed() || cx.checkpoint().is_err()
-            });
-        if let Some(error) = difference.take_failure() {
-            return Err(difference_error(error));
-        }
-        thermal_checkpoint(cx)?;
-        if !run.report.converged {
-            return Err(ImplicitTransportError::NotConverged(run.report));
-        }
-        let final_trial = evaluate(&solver.x)?;
-        let maximum_cell_residual_j = final_trial.maximum_cell_residual_j();
-        let (next, heat, thermal) = final_trial.accept(
-            controls.cell_tolerance_j,
-            controls.total_tolerance_j,
+        let energies = step.resolvable_increments_j(&energies);
+        step.evaluate_with_transport(
+            &energies,
+            |candidate| resolve(cx, candidate),
             || thermal_checkpoint(cx),
-        )?;
-        thermal_checkpoint(cx)?;
-        Ok((
-            next,
-            ImplicitTransportReport {
-                heat,
-                thermal,
-                maximum_cell_residual_j,
-                endpoint_evaluations: evaluations.get(),
-                nonlinear: run.report,
-            },
-        ))
+        )
+    };
+    let difference =
+        FallibleFiniteDifference::new(count, controls.finite_difference_step, |x: &[f64]| {
+            let trial = evaluate(x)?;
+            Ok(trial
+                .residual_j()
+                .iter()
+                .map(|v| v / controls.energy_scale_j)
+                .collect())
+        })
+        .map_err(difference_error)?;
+    let guess = energy_guess_j
+        .iter()
+        .map(|v| v / controls.energy_scale_j)
+        .collect();
+    let initialized = NewtonKrylovState::new(&difference, guess, controls.solver);
+    if let Some(error) = difference.take_failure() {
+        return Err(difference_error(error));
     }
+    let mut solver = initialized.map_err(ImplicitTransportError::Solver)?;
+    let run = solver.run_controlled(&difference, controls.maximum_newton_iterations, &mut || {
+        difference.has_failed() || cx.checkpoint().is_err()
+    });
+    if let Some(error) = difference.take_failure() {
+        return Err(difference_error(error));
+    }
+    thermal_checkpoint(cx)?;
+    if !run.report.converged {
+        return Err(ImplicitTransportError::NotConverged(run.report));
+    }
+    let final_trial = evaluate(&solver.x)?;
+    let maximum_cell_residual_j = final_trial.maximum_cell_residual_j();
+    let (next, heat, thermal) = final_trial.accept(
+        controls.cell_tolerance_j,
+        controls.total_tolerance_j,
+        || thermal_checkpoint(cx),
+    )?;
+    thermal_checkpoint(cx)?;
+    Ok((
+        next,
+        ImplicitTransportReport {
+            heat,
+            thermal,
+            maximum_cell_residual_j,
+            endpoint_evaluations: evaluations.get(),
+            nonlinear: run.report,
+        },
+    ))
+}
+
+/// Keep advective transfers internal and merge only the native external-stream
+/// enthalpy into nonadvective heat. Neither contribution is installed twice.
+pub(super) fn combine_endpoint_heat<T, E>(
+    cx: &Cx<'_>,
+    advected: TransportStepCoefficients<()>,
+    heat: BoundaryStepCoefficients<T>,
+) -> Result<TransportStepCoefficients<T>, ImplicitTransportError<E>> {
+    let BoundaryStepCoefficients { bulk, boundaries } = heat;
+    let StepCoefficients {
+        mut sources_w,
+        conductances_w_k,
+        payload,
+    } = bulk;
+    for (id, watts) in advected.heat.bulk.sources_w {
+        thermal_checkpoint(cx)?;
+        let value = sources_w.entry(id).or_insert(0.0);
+        *value += watts;
+        if !value.is_finite() {
+            return Err(ImplicitTransportError::Invalid(
+                "combined endpoint source is nonfinite",
+            ));
+        }
+    }
+    Ok(TransportStepCoefficients {
+        heat: BoundaryStepCoefficients {
+            bulk: StepCoefficients {
+                sources_w,
+                conductances_w_k,
+                payload,
+            },
+            boundaries,
+        },
+        transfers: advected.transfers,
+    })
 }
 
 fn difference_error<E>(
