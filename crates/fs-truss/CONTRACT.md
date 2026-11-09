@@ -593,3 +593,51 @@ combined K/shape scaling, refitted compression signs, catalog resistance,
 original indexing after pruning, unchanged tension/mass semantics, invalid
 geometry and cancellation. Body-load regressions check shape-dependent converged
 sections and independent original K through the actual self-weight rebuild.
+
+## Prestress-aware isolated eigenvalue design adjoints
+
+`elastic::modal::sensitivity::PreparedModalDesign` binds immutable borrowed
+ground, load case, areas, moduli and reference inertia to one original modal
+pencil. Repeated derivative queries reuse its accepted compatible equilibrium,
+original free-coordinate map, consistent mass and sparse tangent. Each query
+uses the native window owner and exactly one original matrix-free elastic
+adjoint; no eigensolver/Krylov iteration is differentiated.
+
+One requested window must contain exactly one inertia-counted eigenvalue, with
+its original-pencil residual interval strictly inside the window. Empty windows,
+multiple modes, repeated eigenvalues and unresolved endpoint overlap refuse.
+Signed lambda = omega² remains signed. This provides local derivatives of an
+isolated eigenvalue, not a unique derivative at a crossing or a full-spectrum
+stability assertion.
+
+For mass-normalized phi, let `a = B^T phi`, `c = (T^T phi)^2/L`,
+`K_e,ff z_f = [B diag(EA/L) c]_f`, and `d = B^T z`.
+With elastic engineering strain e, direct stiffness and actual compatible
+preload contribute `E a²/L + E e(c-d)` to the area derivative and
+`A a²/L + A e(c-d)` to the modulus derivative. Stress-free strain contributes
+`-EA(c-d)`. The actual reference mass contributes `-lambda phi^T M_theta phi`,
+including original off-diagonal consistent member mass, every Cartesian
+translation and optional isotropic joint mass. Nodal-load and imposed-motion
+covectors are `z_f` and `g_c-K_cf z_f`; they include preload redistribution.
+
+Outputs retain original node/member order, with None for removed-member
+activation derivatives. Free/support covectors retain their physical zero
+components. Load variations must retain solvable compatible equilibrium when
+unloaded axial mechanisms exist. The caller composes source-temperature,
+self-weight/body-load, density/area, geometry or other design chain rules;
+material state, geometry, support flags and topology are frozen here. These
+are derivatives of the declared initial-stress approximation, not finite
+deformation, follower forces, catalog snapping or nonlinear collapse.
+
+A separate explicit sensitivity payload allowance covers gradient arrays and
+the original compatible-adjoint workspace/history; native WindowPlan admission
+still governs spectral factors/vectors. Checkpoints bound source, sparse and
+recovery loops. Neither failed isolation nor failed/cancelled adjoint work
+publishes a derivative. The returned native mode interval and adjoint residual
+are numerical diagnostics, not error enclosures on the gradients.
+
+G1/G3 regressions in the existing elastic_modal target cover analytic member/
+joint-mass derivatives, rotated thermally stressed and settled redundant members
+against independent input differences, off-diagonal consistent mass, actual
+original-pencil residuals and signed unstable eigenvalues. G4 cases refuse
+nonisolated windows, insufficient payload/iterations and cancellation.

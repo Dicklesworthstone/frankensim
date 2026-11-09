@@ -20,6 +20,9 @@ use fs_exec::Cx;
 use fs_modal::{ModalError, MultiSliceReport, SliceOptions, WindowPlan};
 use fs_sparse::{Coo, Csr};
 
+/// Isolated eigenvalue design adjoints with compatible preload redistribution.
+pub mod sensitivity;
+
 /// Maximum free translational dimension admitted before equilibrium/assembly.
 pub const HARD_MAX_MODAL_FREE_DOFS: usize = 100_000;
 /// Combined triplet cap bounds native deterministic COO sorting/storage.

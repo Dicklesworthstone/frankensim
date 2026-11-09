@@ -458,3 +458,437 @@ fn g4_inertia_work_and_cancellation_refuse_without_a_partial_pencil_or_spectrum(
         ));
     });
 }
+// G1: sizing sensitivities retain actual mass and use one isolated native mode.
+#[test]
+fn g1_axial_mode_design_derivatives_include_member_and_joint_mass() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, _| {
+        let (ground, case) = bar(cx, false);
+        let areas = [0.5];
+        let young = [12.0];
+        let density = [3.0];
+        let joints = [5.0, 2.0];
+        let design = PreparedModalDesign::try_new(
+            &ground,
+            &case,
+            &areas,
+            &young,
+            ElasticImposedState::default(),
+            ModalInertia {
+                member_density_kg_m3: &density,
+                joint_mass_kg: Some(&joints),
+            },
+            ModalAssemblyControls::default(),
+            cx,
+        )
+        .unwrap();
+        let (plan, options) = window_plan(vec![(0.5, 1.5)]);
+        let result = design
+            .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+            .unwrap();
+        // K=3, M=1+2=3, lambda=1. The member's area affects both K and M.
+        near(result.eigenvalue_s2, 1.0);
+        let member = result.members[0].unwrap();
+        near(member.area_derivative, 4.0 / 3.0);
+        near(member.young_modulus_derivative, 1.0 / 12.0);
+        near(member.density_derivative, -1.0 / 9.0);
+        assert_eq!(member.stress_free_strain_derivative, 0.0);
+        near(result.joint_mass_derivative[1], -1.0 / 3.0);
+        assert_eq!(result.joint_mass_derivative[0], 0.0);
+        assert_eq!(result.load_gradient, vec![[0.0; 2]; 2]);
+        assert_eq!(result.adjoint_iterations, 0);
+        // Reusing the same prepared design repeats no physical equilibrium.
+        let again = design
+            .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+            .unwrap();
+        assert_eq!(result.members, again.members);
+        assert_eq!(design.pencil().equilibrium().iterations, 0);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transverse_eigenvalue(
+    ground: &GroundStructure,
+    case: &LayoutCase,
+    areas: &[f64],
+    young: &[f64],
+    strain: &[f64],
+    motion: &[[f64; 2]],
+    density: &[f64],
+    joints: &[f64],
+    angle: f64,
+    _cx: &Cx<'_>,
+) -> f64 {
+    // Independent series-spring equilibrium, followed by exact transverse
+    // geometric stiffness. Orthogonal member families retain these principal
+    // directions under every tested physical-input perturbation.
+    let axial = [angle.cos(), angle.sin()];
+    let project = |v: [f64; 2]| v[0] * axial[0] + v[1] * axial[1];
+    let lengths = ground.lengths();
+    let kl = young[0] * areas[0] / lengths[0];
+    let kr = young[1] * areas[1] / lengths[1];
+    let left = project(motion[0]) + lengths[0] * strain[0];
+    let right = project(motion[2]) - lengths[1] * strain[1];
+    let center = (project(case.loads()[1]) + kl * left + kr * right) / (kl + kr);
+    let nl = kl * (center - left);
+    let nr = kr * (right - center);
+    let stiffness = young[2] * areas[2] / lengths[2] + nl / lengths[0] + nr / lengths[1];
+    let mass = density
+        .iter()
+        .zip(areas)
+        .zip(lengths)
+        .map(|((&rho, &area), &length)| rho * area * length / 3.0)
+        .sum::<f64>()
+        + joints[1];
+    stiffness / mass
+}
+
+fn derivative_near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 3e-5 * expected.abs().max(1e-5),
+        "{actual:e} != {expected:e}",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g3_prestress_design_adjoint_matches_load_thermal_support_and_inertia_differences() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, _| {
+        for angle in [0.0_f64, 0.37] {
+            let (s, c) = angle.sin_cos();
+            let rotate = |p: [f64; 2]| [c * p[0] - s * p[1], s * p[0] + c * p[1]];
+            let ground = GroundStructure::try_from_parts(
+                &[[-2.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, -1.0]].map(rotate),
+                &[(0, 1), (1, 2), (1, 3)],
+                &[2.0, 1.0, 1.0],
+                GroundLimits::default(),
+                cx,
+            )
+            .unwrap();
+            let case = LayoutCase::try_new(
+                vec![[true; 2], [false; 2], [true; 2], [true; 2]],
+                vec![[0.0; 2], rotate([30.0, 0.005]), [0.0; 2], [0.0; 2]],
+                4,
+            )
+            .unwrap();
+            let areas = [1.1, 0.9, 1.3];
+            let young = [2e6, 1e6, 100.0];
+            let strain = [1e-5, 2e-5, 0.0];
+            let motion = [[-1e-5, 0.0], [0.0; 2], [4e-5, 0.0], [0.0, 2e-6]].map(rotate);
+            let density = [3.0, 6.0, 9.0];
+            let joints = [0.2, 0.7, 0.3, 0.5];
+            let design = PreparedModalDesign::try_new(
+                &ground,
+                &case,
+                &areas,
+                &young,
+                ElasticImposedState {
+                    member_stress_free_strain: Some(&strain),
+                    prescribed_displacements_m: Some(&motion),
+                },
+                ModalInertia {
+                    member_density_kg_m3: &density,
+                    joint_mass_kg: Some(&joints),
+                },
+                ModalAssemblyControls::default(),
+                cx,
+            )
+            .unwrap();
+            let expected = transverse_eigenvalue(
+                &ground, &case, &areas, &young, &strain, &motion, &density, &joints, angle, cx,
+            );
+            assert!(expected > 0.0);
+            let (plan, options) = window_plan(vec![(0.5 * expected, 1.5 * expected)]);
+            let result = design
+                .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+                .unwrap();
+            near(result.eigenvalue_s2, expected);
+            let mode = &result.spectrum.reports[0].modes[0];
+            let kphi = action(design.pencil().tangent(), &mode.phi);
+            let mphi = action(design.pencil().mass(), &mode.phi);
+            let residual = kphi
+                .iter()
+                .zip(mphi)
+                .fold(0.0_f64, |r, (k, m)| r.hypot(k - mode.lambda * m));
+            assert!(residual < 1e-7 * mode.lambda.abs());
+            assert!(result.adjoint_relative_equilibrium_residual < 1e-9);
+            assert!(result.load_gradient[1].iter().any(|v| v.abs() > 1e-3));
+            assert!(
+                result.members[0]
+                    .unwrap()
+                    .stress_free_strain_derivative
+                    .abs()
+                    > 1e4
+            );
+            for index in 0..3 {
+                let derivative = result.members[index].unwrap();
+                for field in 0..4 {
+                    let mut ap = areas;
+                    let mut am = areas;
+                    let mut ep = young;
+                    let mut em = young;
+                    let mut sp = strain;
+                    let mut sm = strain;
+                    let mut rp = density;
+                    let mut rm = density;
+                    let (step, predicted) = match field {
+                        0 => {
+                            let h = 1e-5 * areas[index];
+                            ap[index] += h;
+                            am[index] -= h;
+                            (h, derivative.area_derivative)
+                        }
+                        1 => {
+                            let h = 1e-5 * young[index];
+                            ep[index] += h;
+                            em[index] -= h;
+                            (h, derivative.young_modulus_derivative)
+                        }
+                        2 => {
+                            sp[index] += 1e-9;
+                            sm[index] -= 1e-9;
+                            (1e-9, derivative.stress_free_strain_derivative)
+                        }
+                        _ => {
+                            let h = 1e-5 * density[index];
+                            rp[index] += h;
+                            rm[index] -= h;
+                            (h, derivative.density_derivative)
+                        }
+                    };
+                    let difference = (transverse_eigenvalue(
+                        &ground, &case, &ap, &ep, &sp, &motion, &rp, &joints, angle, cx,
+                    ) - transverse_eigenvalue(
+                        &ground, &case, &am, &em, &sm, &motion, &rm, &joints, angle, cx,
+                    )) / (2.0 * step);
+                    derivative_near(predicted, difference);
+                }
+            }
+            for node in 0..4 {
+                let mut plus = joints;
+                let mut minus = joints;
+                let step = 1e-5;
+                plus[node] += step;
+                minus[node] -= step;
+                let difference = (transverse_eigenvalue(
+                    &ground, &case, &areas, &young, &strain, &motion, &density, &plus, angle, cx,
+                ) - transverse_eigenvalue(
+                    &ground, &case, &areas, &young, &strain, &motion, &density, &minus, angle, cx,
+                )) / (2.0 * step);
+                derivative_near(result.joint_mass_derivative[node], difference);
+                for axis in 0..2 {
+                    let mut plus = if node == 1 {
+                        case.loads().to_vec()
+                    } else {
+                        motion.to_vec()
+                    };
+                    let mut minus = plus.clone();
+                    let step = if node == 1 { 1e-3 } else { 1e-9 };
+                    plus[node][axis] += step;
+                    minus[node][axis] -= step;
+                    let (difference, predicted) = if node == 1 {
+                        let cp = LayoutCase::try_new(case.supported().to_vec(), plus, 4).unwrap();
+                        let cm = LayoutCase::try_new(case.supported().to_vec(), minus, 4).unwrap();
+                        (
+                            (transverse_eigenvalue(
+                                &ground, &cp, &areas, &young, &strain, &motion, &density, &joints,
+                                angle, cx,
+                            ) - transverse_eigenvalue(
+                                &ground, &cm, &areas, &young, &strain, &motion, &density, &joints,
+                                angle, cx,
+                            )) / (2.0 * step),
+                            result.load_gradient[node][axis],
+                        )
+                    } else {
+                        (
+                            (transverse_eigenvalue(
+                                &ground, &case, &areas, &young, &strain, &plus, &density, &joints,
+                                angle, cx,
+                            ) - transverse_eigenvalue(
+                                &ground, &case, &areas, &young, &strain, &minus, &density, &joints,
+                                angle, cx,
+                            )) / (2.0 * step),
+                            result.prescribed_displacement_gradient[node][axis],
+                        )
+                    };
+                    derivative_near(predicted, difference);
+                }
+            }
+            let no_iterations = ModalSensitivityControls {
+                elastic: fs_truss::elastic::ElasticControls {
+                    maximum_iterations: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert!(matches!(
+                design.solve_window(&plan, &options, no_iterations, cx),
+                Err(TrussModalError::Elastic(ElasticError::NotConverged { .. }))
+            ));
+        }
+    });
+}
+
+#[test]
+fn g1_consistent_off_diagonal_mass_sizing_derivative_matches_the_exact_pencil() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, _| {
+        let ground = GroundStructure::try_from_parts(
+            &[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+            &[(0, 1), (1, 2)],
+            &[1.0; 2],
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let case = LayoutCase::try_new(
+            vec![[true; 2], [false, true], [false, true]],
+            vec![[0.0; 2]; 3],
+            3,
+        )
+        .unwrap();
+        let areas = [0.5, 0.8];
+        let young = [12.0, 19.0];
+        let density = [3.0, 5.0];
+        let exact = |a: &[f64], rho: &[f64]| {
+            let k0 = young[0] * a[0];
+            let k1 = young[1] * a[1];
+            let m0 = rho[0] * a[0];
+            let m1 = rho[1] * a[1];
+            let aa = (m0 + m1) * m1 / 9.0 - m1 * m1 / 36.0;
+            let bb = (k0 + k1) * m1 / 3.0 + k1 * (m0 + m1) / 3.0 + k1 * m1 / 3.0;
+            let cc = k0 * k1;
+            2.0 * cc / (bb + (bb * bb - 4.0 * aa * cc).sqrt())
+        };
+        let expected = exact(&areas, &density);
+        let design = PreparedModalDesign::try_new(
+            &ground,
+            &case,
+            &areas,
+            &young,
+            ElasticImposedState::default(),
+            ModalInertia {
+                member_density_kg_m3: &density,
+                joint_mass_kg: None,
+            },
+            ModalAssemblyControls::default(),
+            cx,
+        )
+        .unwrap();
+        let (plan, options) = window_plan(vec![(0.5 * expected, 1.5 * expected)]);
+        let result = design
+            .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+            .unwrap();
+        near(result.eigenvalue_s2, expected);
+        for index in 0..2 {
+            let mut plus = areas;
+            let mut minus = areas;
+            plus[index] += 1e-5;
+            minus[index] -= 1e-5;
+            derivative_near(
+                result.members[index].unwrap().area_derivative,
+                (exact(&plus, &density) - exact(&minus, &density)) / 2e-5,
+            );
+            let mut plus = density;
+            let mut minus = density;
+            plus[index] += 1e-5;
+            minus[index] -= 1e-5;
+            derivative_near(
+                result.members[index].unwrap().density_derivative,
+                (exact(&areas, &plus) - exact(&areas, &minus)) / 2e-5,
+            );
+        }
+    });
+}
+
+#[test]
+fn g4_signed_mode_derivatives_refuse_nonisolated_windows_budgets_and_cancellation() {
+    use fs_truss::elastic::modal::sensitivity::{ModalSensitivityControls, PreparedModalDesign};
+    with_cx(|cx, gate| {
+        let (ground, case) = bar(cx, true);
+        let areas = [0.5];
+        let young = [12.0];
+        let density = [3.0];
+        // The unloaded transverse mechanism remains in the original pencil.
+        let design = PreparedModalDesign::try_new(
+            &ground,
+            &case,
+            &areas,
+            &young,
+            ElasticImposedState::default(),
+            ModalInertia {
+                member_density_kg_m3: &density,
+                joint_mass_kg: None,
+            },
+            ModalAssemblyControls::default(),
+            cx,
+        )
+        .unwrap();
+        let (plan, options) = window_plan(vec![(2.0, 4.0)]);
+        let no_bytes = ModalSensitivityControls {
+            maximum_bytes: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            design.solve_window(&plan, &options, no_bytes, cx),
+            Err(TrussModalError::Elastic(ElasticError::Construction(
+                TrussConstructionError::WorkBudget { .. }
+            )))
+        ));
+        let (cluster, _) = window_plan(vec![(-1.0, 4.0)]);
+        assert!(
+            design
+                .solve_window(&cluster, &options, ModalSensitivityControls::default(), cx)
+                .is_err()
+        );
+        let (empty, _) = window_plan(vec![(4.0, 5.0)]);
+        assert!(
+            design
+                .solve_window(&empty, &options, ModalSensitivityControls::default(), cx)
+                .is_err()
+        );
+        let (multiple, _) = window_plan(vec![(1.0, 2.0), (2.0, 4.0)]);
+        assert!(
+            design
+                .solve_window(&multiple, &options, ModalSensitivityControls::default(), cx)
+                .is_err()
+        );
+        let compressed =
+            LayoutCase::try_new(case.supported().to_vec(), vec![[0.0; 2], [-0.02, 0.0]], 2)
+                .unwrap();
+        let negative = PreparedModalDesign::try_new(
+            &ground,
+            &compressed,
+            &areas,
+            &young,
+            ElasticImposedState::default(),
+            ModalInertia {
+                member_density_kg_m3: &density,
+                joint_mass_kg: None,
+            },
+            ModalAssemblyControls::default(),
+            cx,
+        )
+        .unwrap();
+        let (negative_window, _) = window_plan(vec![(-0.015, -0.005)]);
+        let response = negative
+            .solve_window(
+                &negative_window,
+                &options,
+                ModalSensitivityControls::default(),
+                cx,
+            )
+            .unwrap();
+        near(response.eigenvalue_s2, -0.01);
+        near(response.members[0].unwrap().area_derivative, 0.02);
+        near(response.members[0].unwrap().density_derivative, 0.01 / 3.0);
+        near(response.load_gradient[1][0], 0.5);
+        gate.request();
+        assert!(
+            design
+                .solve_window(&plan, &options, ModalSensitivityControls::default(), cx)
+                .is_err()
+        );
+    });
+}
