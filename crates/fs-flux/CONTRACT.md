@@ -8648,6 +8648,55 @@ the exact pinned `asupersync` dependency received `SIGKILL`, before reaching
 was produced; the interrupted dependency build is not evidence that the adapter
 compiles. DSR and RCH were unavailable, and the full workspace was not validated.
 
+### Locally nonisothermal phase separation with interfacial energy
+
+`miscibility::nonisothermal::phase_field` admits the original nonconvex binary
+liquid law with positive, constant energetic square-gradient coefficient.
+It retains the same rigid volumes, equal fixed partial molar volumes, paired
+inventories, original caloric sources and optional original molecular
+diffusivity. Every cell has its own supported temperature; both species remain
+strictly positive. The existing convex, zero-gradient owner keeps its admission.
+
+Each canonical edge stores `kappa A/(2 d) (x_left-x_right)^2`. Half belongs to
+each endpoint's local energy. Entropy is the original homogeneous entropy:
+constant energetic kappa contributes no entropy. The molecular entropy force
+therefore uses the FULL incident stencil weighted by
+`kappa A/(2 d) (1/T_left+1/T_right)`, including temperatures of neighbors that
+do not exchange species on the current face. This is an explicit discrete
+energy localization, not an inferred temperature for an unresolved interface.
+
+A canonical face freezes its original transport coefficients and temperatures
+during a bounded scalar convex-split solve. Original ideal logarithms, negative
+chi and the full weighted graph gradient are implicit; positive chi is explicit.
+The deterministic logarithm matches the original thermodynamic kernel. Paired
+energy transport carries the original divided partial enthalpy and authored
+reciprocal heat of transport once. Every cell incident to a changed interface
+then recovers its actual temperature from its original caloric inverse and its
+own half-edge energy increment, including neighbors with unchanged inventories.
+The same implicit Fourier kernel as the convex local-temperature owner supplies
+heat conduction. Sparse incident patches reuse scratch across faces; no global
+matrix or full-mesh scan is performed inside a composition root.
+
+Before publication, the complete interval checks both component inventories,
+cell capacities, homogeneous enthalpy PLUS interfacial energy, and original bulk
+entropy. This frozen-temperature split is first order and is not unconditionally
+entropy stable. A temperature-domain, energy or entropy refusal requires a
+smaller interval; an isothermal free-energy decrease never overrides the actual
+thermal account. The owner has no flow-advection operation because interfacial
+transport and mechanical work require a consistent momentum coupling.
+
+Seven focused regressions cover spinodal growth, a neighbor's thermal response
+without species transfer, an independent entropy-gradient finite difference at
+fixed local energies, Fourier convergence with excess heat capacity, unequal
+volumes and temperature-dependent original calorics, zero-gradient refusal and
+late cancellation/replay. These validate the stated discrete model; they do not
+supply nucleation kinetics, variable-kappa calorics, unequal partial molar
+volumes, mechanical backreaction or an experimental accuracy claim.
+
+The complete focused numerical suite passed 83 unit tests on the pinned Rust
+compiler using original sources. This excludes the material adapter and full
+workspace/DSR validation.
+
 ### Compatible molecular stress with variable viscosity
 
 Frozen-composition planar and spatial molecular owners sample the original

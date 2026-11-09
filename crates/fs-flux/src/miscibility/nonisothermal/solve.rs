@@ -134,10 +134,9 @@ pub(super) fn step(
             ));
         }
         if heat_mobility > 0.0 {
-            if let Some(root) = pair_root(
-                &field,
+            if let Some((transfer, iterations, thermal_iterations)) = transfer_heat(
+                &mut field,
                 [i, j],
-                Mode::Heat,
                 duration_s,
                 heat_mobility,
                 controls,
@@ -146,11 +145,10 @@ pub(super) fn step(
             )? {
                 let mut energy = Sum::default();
                 energy.add(transferred_energy_j[face])?;
-                energy.add(root.transfer)?;
+                energy.add(transfer)?;
                 transferred_energy_j[face] = energy.value()?;
-                root_iterations += root.iterations as u64;
-                caloric_iterations += root.caloric_iterations as u64;
-                apply_pair(&mut field, [i, j], root.pair);
+                root_iterations += iterations as u64;
+                caloric_iterations += thermal_iterations as u64;
             }
         }
     }
@@ -196,6 +194,35 @@ fn apply_pair(field: &mut BinaryNonisothermalField, cells: [usize; 2], pair: Pai
         field.state.fractions[cells[k]] = pair.fractions[k];
         field.temperatures[cells[k]] = pair.states[k].temperature();
     }
+}
+
+/// Shared fixed-composition Fourier kernel. Interface energy is unchanged, so
+/// the local-temperature phase owner uses this same original caloric solve.
+pub(super) fn transfer_heat(
+    field: &mut BinaryNonisothermalField,
+    cells: [usize; 2],
+    duration: f64,
+    mobility: f64,
+    controls: BinaryNonisothermalSolve,
+    thermal: BinaryLiquidTransportSolveV1,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<(f64, usize, usize)>> {
+    let Some(root) = pair_root(
+        field,
+        cells,
+        Mode::Heat,
+        duration,
+        mobility,
+        controls,
+        thermal,
+        cancelled,
+    )?
+    else {
+        return Ok(None);
+    };
+    let receipt = (root.transfer, root.iterations, root.caloric_iterations);
+    apply_pair(field, cells, root.pair);
+    Ok(Some(receipt))
 }
 
 fn pair_root(

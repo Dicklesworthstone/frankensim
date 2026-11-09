@@ -24,7 +24,7 @@ quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
 # Observe the original coherent atmosphere on source-owned physical gas faces.
 experimental-mann-inflow = ["experimental-compressible", "dep:fs-atmo", "dep:fs-math"]
-experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty"]
+experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty", "dep:fs-math"]
 experimental-miscibility-material = ["experimental-miscibility", "dep:fs-material"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
 experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-math", "dep:fs-thermochem"]

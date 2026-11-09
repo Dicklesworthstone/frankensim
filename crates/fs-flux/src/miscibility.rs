@@ -11,7 +11,9 @@
 //! [`temperature`] retain the evolving field and its original sources. The
 //! [`thermal`] owner additionally closes adiabatic diffusion with one evolving
 //! uniform temperature. The [`nonisothermal`] owner couples local heat and
-//! species transport for convex, zero-gradient-energy liquids. Momentum,
+//! species transport for convex, zero-gradient-energy liquids; its
+//! [`nonisothermal::phase_field`] owner additionally resolves local thermal
+//! demixing with energetic interfaces. Momentum,
 //! wetting/contact-line motion and nucleation rates are not included. Prescribed incompressible
 //! volume-flow transport is available through [`advection`].
 //!

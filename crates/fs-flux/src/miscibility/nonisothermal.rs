@@ -6,6 +6,8 @@
 //! recovery. This lane requires kappa=0, positive common species support and a
 //! convex homogeneous law throughout the declared temperature interval. It does
 //! not assign a local temperature to unresolved square-gradient interfacial energy.
+//! The distinct [`phase_field`] owner admits nonconvex liquids with positive
+//! energetic square-gradient cost and explicit local interface-energy accounting.
 //!
 //! A canonical face sweep splits the positive Onsager block into its chemical
 //! rank-one part and Fourier part. Both use bounded implicit scalar solves.
@@ -35,6 +37,8 @@ use std::sync::Arc;
 pub mod adaptive;
 /// Conservative stirring with original parcel enthalpy and local temperature recovery.
 pub mod advection;
+/// Local-temperature demixing with constant energetic square-gradient cost.
+pub mod phase_field;
 mod solve;
 /// Atomic advection, molecular diffusion and heat exchange over one physical interval.
 pub mod transport;
