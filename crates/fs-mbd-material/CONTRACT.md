@@ -2230,3 +2230,37 @@ two zero-slip endpoints, held-path parity, shared-force-endpoint composition,
 late cancellation, and physical drive-scale refusal independent of subdivision.
 Synthetic fixture agreement is numerical model
 evidence, not measured-material validation.
+
+### Authored force histories on the heated-sphere timeline
+
+`HeatedRigidBody::advance_creeping_sphere_exact_affine` and its composed-observer
+entry consume `HeatedCreepingAffineForce` on the actual current-to-target call
+window. Each accepted thermal interval samples that immutable affine history
+at its original start and accepted stop times. Authored endpoint values are
+retained exactly; compensated interpolation supplies interior samples.
+Subdivision and retries preserve the same physical force-variation timescale.
+Continuation supplies the next real force endpoints, rather than restarting
+the earlier ramp.
+
+The existing material sphere owns the simultaneous force/drag flow, buoyancy,
+complete-path Reynolds bound and source-history diffusion gate. Existing
+thermal expansion and principal-frame transfer then update radius, inertia
+and Navier coefficients at conserved world momentum. Updated-radius snapshots
+also recheck the physical drive timescale. The same common publication path
+commits thermal, mechanical and composed-observer histories together.
+
+`HeatedCreepingAudit::applied_work_j` retains signed external-force work
+separately from viscous heat, maintained-background work, configuration work
+and numerical defects. The combined energy residual subtracts that work once.
+The audit also reports the maximum drive-diffusion ratio and complete-path
+translation Reynolds bound, including updated endpoints; its original
+body-relaxation diffusion ratio keeps its meaning.
+
+Original unforced methods retain zero external-force work. Surrounding-fluid
+conduction keeps its existing unforced APIs and Peclet checks: this extension
+does not infer whole-path thermal-advection admission. Exactness concerns each
+frozen-radius motion interval; thermal/geometry splitting still requires
+refinement. Existing source fixtures cover expanding Navier geometry with
+independent velocity/work/heat integrals, thermal partition and true-endpoint
+continuation, composed heat ownership, zero-force parity, and rollback after
+a late source-history regime failure.
