@@ -136,7 +136,7 @@ fn gradient(report: &JsonValue, spec: &Spec) -> Result<AffineLoadSpaceGradientCh
     }
     let check = AffineLoadSpaceGradientCheck3 {
         params: spec.schedule[0],
-        goal: GOAL,
+        goal: config.goal,
         options: config.options.gradient_check,
         constraints: config.constraint_policy(),
         baseline_objective: real(data, "baseline_objective")?,

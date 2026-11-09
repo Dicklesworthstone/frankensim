@@ -40,6 +40,7 @@ pub use nonlinear::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use nonlinear::{
+    IsotropicPhaseConductivity, TensorCaloricConductivity, TensorCaloricConductivityPoint,
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
     TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,
     TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,

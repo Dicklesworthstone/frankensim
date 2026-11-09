@@ -33,20 +33,25 @@ pub struct ConductionMotion<'a> {
     pub normal_flux_density_t: &'a [f64],
 }
 
+// Prepared once per frozen conductivity operator and motion snapshot. The
+// terminal owner groups this same weak load; trace and electrode recovery use
+// exactly the same native current, heat, force and work calculations.
+pub(super) struct PreparedMotion<'a> {
+    motion: ConductionMotion<'a>,
+    field_v_m: Vec<[f64; 2]>,
+    pub(super) load_a: Vec<f64>,
+    has_field: bool,
+}
+
 impl<C: PlanarConductorMaterial> PlanarConduction<C> {
-    /// Solve charge continuity with `J = Sigma (-grad(V) + u x B)` using the
-    /// existing SPD conductivity operator, including rotated anisotropic data.
-    /// Velocity/field changes only rebuild the weak load, not the Hodge matrix.
+    /// Solve charge continuity with J=Sigma(-grad(V)+u cross B) on the original
+    /// SPD conductivity operator. Unloaded boundaries insulate TOTAL current.
     ///
-    /// Boundary conventions and anchoring are identical to
-    /// [`Self::solve_with_current_traces`]. An unconnected conductor needs only
-    /// its voltage reference trace: the free potential screens a conservative
-    /// motional field without an invented closed-circuit braking current.
-    ///
-    /// Finite contacts retain their stationary surface law only when both
-    /// adjacent original cells have zero prescribed velocity. Moving bulk away
-    /// from those surfaces is admitted; moving/sliding interfaces still refuse.
-    /// Contact heat is separate from bulk heat and has no mechanical work.
+    /// A voltage reference alone lets the free potential screen conservative
+    /// motional fields without inventing a closed-circuit braking current.
+    /// Both original cells adjacent to a finite electrical contact must remain
+    /// stationary; remote moving bulk is admitted. Stationary contact heat has
+    /// no mechanical work. Geometry and occupancy remain fixed snapshots.
     pub fn solve_with_motion(
         &self,
         boundary_voltage_v: &[(usize, f64)],
@@ -57,6 +62,102 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     ) -> Result<MovingConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
         self.validate_controls(boundary_voltage_v.len(), controls)?;
+        let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
+        let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
+        let prepared = self.prepare_motion(motion, cancelled)?;
+        let mut rhs: Vec<_> = applied.iter().map(|load| load.unwrap_or(0.0)).collect();
+        if prepared.has_field {
+            for (right, &motional) in rhs.iter_mut().zip(&prepared.load_a) {
+                *right = finite(*right + motional)?;
+            }
+        }
+        let solved = scalar_potential::solve_relative(
+            &self.stiffness,
+            &rhs,
+            &prescribed,
+            controls.linear,
+            cancelled,
+        )?;
+        self.recover_moving_field(
+            solved.relative,
+            solved.references,
+            &prescribed,
+            applied,
+            &prepared,
+            controls,
+            solved.report,
+            cancelled,
+        )
+    }
+
+    /// Solve direct ideal voltage/current/floating/mixed electrodes under
+    /// prescribed motion with one actual-amplitude grouped sparse solve.
+    ///
+    /// Total current constrains an electrode's reaction; its local injection
+    /// remains a result of the original bulk/contact field. Zero-current
+    /// electrodes float and may transfer current between their separate traces.
+    /// The native motional weak load is identified together with the stiffness,
+    /// never represented by a voltage probe or scaled accepted field.
+    ///
+    /// The terminal report retains physical voltage drops beneath any common
+    /// bias and independently pairs authored current with those solved drops.
+    /// Native conductor-frame heat plus signed Lorentz output equals that
+    /// signed supply, including generation and zero-current motional voltage.
+    /// Extra preparation workspace is 3*vertices + 2*triangles scalar/index
+    /// values beyond the stationary terminal bound, admitted before allocation.
+    /// The stationary-contact and fixed-planar-geometry restrictions remain.
+    pub fn solve_terminals_with_motion(
+        &self,
+        terminals: &[&[usize]],
+        control: super::terminals::ConductionTerminalControl<'_>,
+        limits: super::terminals::ConductionTerminalLimits,
+        motion: ConductionMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        (
+            MovingConductionField<'_, C>,
+            super::terminals::ConductionTerminalReport,
+        ),
+        ConductionError,
+    > {
+        self.solve_terminals_core(
+            terminals,
+            control,
+            limits,
+            Some(motion),
+            controls,
+            cancelled,
+            |relative, references, prescribed, report, prepared, cancelled| {
+                self.recover_moving_field(
+                    relative,
+                    references,
+                    prescribed,
+                    vec![None; self.mesh.vertices().len()],
+                    prepared.ok_or(ConductionError::Invalid(
+                        "native terminal motion preparation is absent",
+                    ))?,
+                    controls,
+                    report,
+                    &mut || cancelled(),
+                )
+            },
+        )
+    }
+}
+
+impl<C: super::PlanarOhmicResponse> PlanarConduction<C> {
+    pub(super) fn prepare_motion<'m>(
+        &self,
+        motion: ConductionMotion<'m>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMotion<'m>, ConductionError> {
+        poll(cancelled)?;
+        if !matches!(self.mesh.metric(), super::Metric2::Planar { .. }) {
+            return Err(ConductionError::Invalid(
+                "planar motion requires the original planar metric",
+            ));
+        }
         let cells = self.mesh.faces().len();
         if motion.velocity_m_s.len() != cells || motion.normal_flux_density_t.len() != cells {
             return Err(ConductionError::Invalid(
@@ -78,11 +179,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 }
             }
         }
-        let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
-        let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
-        let mut motional_field = Vec::with_capacity(cells);
-        let mut motional_load = vec![0.0; self.mesh.vertices().len()];
-        let mut has_motional_field = false;
+        let mut field_v_m = Vec::with_capacity(cells);
+        let mut load_a = vec![0.0; self.mesh.vertices().len()];
+        let mut has_field = false;
         for (cell, face) in self.mesh.faces().iter().enumerate() {
             poll(cancelled)?;
             let [ux, uy] = motion.velocity_m_s[cell];
@@ -91,11 +190,11 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             finite(uy)?;
             finite(b)?;
             let m = [finite(uy * b)?, finite(-ux * b)?];
-            motional_field.push(m);
+            field_v_m.push(m);
             if m == [0.0; 2] {
                 continue;
             }
-            has_motional_field = true;
+            has_field = true;
             let gradients = gradients(face.map(|v| self.mesh.vertices()[v as usize]))
                 .map_err(|_| ConductionError::Invalid("invalid conductor cell gradient"))?;
             let current = self.conductivity[cell].current_density_a_m2(m);
@@ -114,26 +213,35 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             load[0] = finite(-finite(load[1] + load[2])?)?;
             for local in 0..3 {
                 let vertex = face[local] as usize;
-                motional_load[vertex] = finite(motional_load[vertex] + load[local])?;
+                load_a[vertex] = finite(load_a[vertex] + load[local])?;
             }
         }
-        let motion_field = has_motional_field.then_some(motional_field.as_slice());
-        let motion_load = has_motional_field.then_some(motional_load.as_slice());
-        let mut rhs: Vec<_> = applied.iter().map(|load| load.unwrap_or(0.0)).collect();
-        if let Some(load) = motion_load {
-            for (right, &motional) in rhs.iter_mut().zip(load) {
-                *right = finite(*right + motional)?;
-            }
-        }
-        let solved = scalar_potential::solve_relative(
-            &self.stiffness,
-            &rhs,
-            &prescribed,
-            controls.linear,
-            cancelled,
-        )?;
-        let response = self.cell_response_with_motion(&solved.relative, motion_field, cancelled)?;
-        let contact_response = self.contact_response(&solved.relative, cancelled)?;
+        Ok(PreparedMotion {
+            motion,
+            field_v_m,
+            load_a,
+            has_field,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn recover_moving_field(
+        &self,
+        relative: Vec<f64>,
+        references: Vec<f64>,
+        prescribed: &[Option<f64>],
+        applied: Vec<Option<f64>>,
+        prepared: &PreparedMotion<'_>,
+        controls: ConductionControls,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MovingConductionField<'_, C>, ConductionError> {
+        let motion = prepared.motion;
+        let cells = self.mesh.faces().len();
+        let motion_field = prepared.has_field.then_some(prepared.field_v_m.as_slice());
+        let motion_load = prepared.has_field.then_some(prepared.load_a.as_slice());
+        let response = self.cell_response_with_motion(&relative, motion_field, cancelled)?;
+        let contact_response = self.contact_response(&relative, cancelled)?;
         let mut contact_power_w = 0.0;
         for contact in &contact_response {
             poll(cancelled)?;
@@ -146,7 +254,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         let mut mechanical_power_w = 0.0;
         let mut electrical_power_w = 0.0;
         let mut work_pairing_residual_w = 0.0;
-        for (cell, &m) in motional_field.iter().enumerate() {
+        for (cell, &m) in prepared.field_v_m.iter().enumerate() {
             poll(cancelled)?;
             let e = response.electric_field_v_m[cell];
             let j = response.current_density_a_m2[cell];
@@ -169,8 +277,8 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             cell_mechanical_power_w.push(mechanical);
         }
         let boundary = self.boundary_response(
-            &solved.relative,
-            &prescribed,
+            &relative,
+            prescribed,
             &applied,
             motion_load,
             finite(electrical_power_w + contact_power_w)?,
@@ -193,20 +301,20 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 },
             });
         }
-        let mut voltage = Vec::with_capacity(solved.relative.len());
-        for v in 0..solved.relative.len() {
+        let mut voltage = Vec::with_capacity(relative.len());
+        for v in 0..relative.len() {
             poll(cancelled)?;
             voltage.push(match prescribed[v] {
                 Some(value) => value,
-                None => finite(solved.references[v] + solved.relative[v])?,
+                None => finite(references[v] + relative[v])?,
             });
         }
         poll(cancelled)?;
         Ok(MovingConductionField {
             problem: self,
             voltage_v: voltage,
-            relative_voltage_v: solved.relative,
-            reference_voltage_v: solved.references,
+            relative_voltage_v: relative,
+            reference_voltage_v: references,
             velocity_m_s: motion.velocity_m_s.to_vec(),
             normal_flux_density_t: motion.normal_flux_density_t.to_vec(),
             response,
@@ -222,7 +330,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             nodal_applied_current_a: applied,
             work_pairing_residual_w,
             power_balance_residual_w,
-            report: solved.report,
+            report,
         })
     }
 }

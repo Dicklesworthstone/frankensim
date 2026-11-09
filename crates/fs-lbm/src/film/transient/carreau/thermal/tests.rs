@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 #[path = "tests/adaptive.rs"]
 mod adaptive;
 
+#[path = "tests/feedback.rs"]
+mod feedback;
+
 const IDS: [CellId; 2] = [CellId(20), CellId(3)];
 const SPEC: TransientCarreauFilmSpec = TransientCarreauFilmSpec {
     density_kg_m3: 1.0,
@@ -593,3 +596,4 @@ fn mapping_source_budgets_and_late_cancellation_preserve_both_original_states() 
         reference.flow().velocities_m_s()
     );
 }
+

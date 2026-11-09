@@ -1,5 +1,8 @@
 //! G1/G3/G4: actual grouped-electrode solves, without terminal probe fields.
 //! Manufactured layers test current transfer and local work, not measured data.
+#[path = "terminals/motion.rs"]
+mod motion;
+
 use super::*;
 use fs_em::conduction::{
     axisymmetric::AxisymmetricConduction,

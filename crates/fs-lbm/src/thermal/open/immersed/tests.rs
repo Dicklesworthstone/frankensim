@@ -2,7 +2,7 @@ use super::*;
 use crate::thermal::boundary::ThermalWall;
 use crate::thermal::open::{ThermalOpenBalance3, ThermalOpenBoundaries3};
 
-fn fixture(solid_cells: &[usize], source: f64, varying: bool) -> ThermalOpenField3 {
+pub(super) fn fixture(solid_cells: &[usize], source: f64, varying: bool) -> ThermalOpenField3 {
     let dims = [5, 4, 3];
     let mut solid = vec![false; 60];
     for &cell in solid_cells {
@@ -48,7 +48,7 @@ fn fixture(solid_cells: &[usize], source: f64, varying: bool) -> ThermalOpenFiel
     field
 }
 
-fn step(field: &mut ThermalOpenField3) -> ThermalOpenBalance3 {
+pub(super) fn step(field: &mut ThermalOpenField3) -> ThermalOpenBalance3 {
     let heat = [0.0; 60];
     let candidate = field
         .begin_step::<ThermalOpenError3>(&heat, None, || Ok(()))
@@ -59,10 +59,10 @@ fn step(field: &mut ThermalOpenField3) -> ThermalOpenBalance3 {
     field.publish(field.completed_steps() + 1, balance);
     balance
 }
-fn near(a: f64, b: f64, tolerance: f64) {
+pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.17e} != {b:.17e}");
 }
-fn fluid_heat(field: &ThermalOpenField3) -> f64 {
+pub(super) fn fluid_heat(field: &ThermalOpenField3) -> f64 {
     field.populations().iter().flatten().sum()
 }
 

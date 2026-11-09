@@ -24,7 +24,8 @@ use fs_duct::network::NetworkMedia;
 mod prepared;
 mod molecular;
 pub use molecular::{
-    MolecularRadiatingFieldRequest, MolecularRadiatingNetwork, PreparedMolecularRadiatingFields,
+    MolecularExteriorMaterial, MolecularRadiatingFieldRequest, MolecularRadiatingNetwork,
+    PreparedMolecularRadiatingFields,
 };
 pub use prepared::{
     PreparedRadiatingSourceControl,
@@ -71,6 +72,8 @@ pub enum ExteriorNetworkError {
     Bem(HelmholtzError),
     /// Original harmonic field or microphone-observation refusal.
     Observation(fs_bem::observation_transfers::TransferError),
+    /// Original relaxing exterior material, boundary or observation refusal.
+    MolecularExterior(fs_bem::observation_transfers::molecular::MolecularObservationError),
     /// Requested cancellation, without a partial response.
     Cancelled,
 }
@@ -83,6 +86,13 @@ impl From<fs_bem::observation_transfers::TransferError> for ExteriorNetworkError
     fn from(e:fs_bem::observation_transfers::TransferError)->Self {
         if matches!(e,fs_bem::observation_transfers::TransferError::Cancelled) { Self::Cancelled }
         else { Self::Observation(e) }
+    }
+}
+impl From<fs_bem::observation_transfers::molecular::MolecularObservationError>
+    for ExteriorNetworkError
+{
+    fn from(error: fs_bem::observation_transfers::molecular::MolecularObservationError) -> Self {
+        Self::MolecularExterior(error)
     }
 }
 impl core::fmt::Display for ExteriorNetworkError {

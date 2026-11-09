@@ -240,4 +240,21 @@ impl CellCoordinate for CaloricStage<'_, '_> {
     fn storage_tangent(&self, cell: usize) -> f64 {
         self.storage.coefficient_kg_s[cell]
     }
+
+    fn conductivity_point(
+        &self,
+        cell: usize,
+        value: f64,
+        temperature_k: f64,
+    ) -> Result<Option<super::super::material::TensorCaloricConductivityPoint>, ChtError> {
+        let law = self.storage.input.laws[cell];
+        Ok(Some(
+            super::super::material::TensorCaloricConductivityPoint {
+                specific_energy_j_kg: self.specific_energy(cell, value)?,
+                temperature_k,
+                storage_basis: law.storage_basis(),
+                caloric_identity: law.caloric_identity(),
+            },
+        ))
+    }
 }

@@ -52,6 +52,35 @@ normal evolution is claimed. Focused tests cover static common-motion work,
 powered spin/arrest, thermal breakaway and discrete-mode disagreement,
 independent coupled motion/power/caloric refinement, and atomic retry.
 
+## Scenario temperature instruments on accepted finite-cell heat
+
+`scenario_sensor::TemperatureSensorObserver` connects original compiled scenario
+instruments to `DepositionSimulation` through its existing `DepositionObserver`
+contract. An explicit entity-labelled state-slot map selects distinct active
+persistent cell IDs. Quantity, entity and dimension admission prevent pressure
+rows, unrelated entities, duplicate cells and map-order changes from silently
+becoming temperature probes. The caller still owns geometric correspondence and
+patch weights; this adapter does not infer a point location or camera footprint.
+
+Every native accepted substep supplies its original caloric-law temperatures,
+physical duration and endpoint clock. The scenario's shared mount operator and
+declared instantaneous/first-order response evolve on an affine reconstruction
+of those temperatures. The same original law supplies temperatures through
+latent-heat plateaus. Original boundary/contact events preserve sensor memory.
+The observer adds no heat, conductance or time restriction and composes with
+other physical owners through `CoupledObservers` on the same thermal timeline.
+
+Initial response is explicit. Stale clocks or starting temperatures, invalid
+support, material refusal and cancellation abort the existing thermal candidate
+and its cloned instrument history. Cell sampling and field evaluation poll at
+most every 256 entries; event checks retain the original bounded synchronous
+event-hook semantics. Storage is linear in the admitted sensor state dimension,
+with no growing history log. This is a passive observation of finite-cell heat,
+not thermal sensor back-reaction, continuum sampling accuracy, stochastic noise,
+calibration validation or a transient assimilation of uncertain sensor memory.
+`tests/scenario_sensor.rs` exercises real heating, mount bias, lag, patch probes,
+source-event timing, native-clock rounding, restart, phase plateaus and rollback.
+
 ## Canonical magnetic scenario boundaries
 
 `scenario_magnetic::magnetic_flux_boundary_at` and `solve_magnetic_flux3`
@@ -13082,6 +13111,63 @@ routing with transport/events, and source/clock/late refusal/retry/cancellation
 isolation. Native execution and shared-helper type checking were unavailable
 when this extension was authored; no runtime validation is inferred.
 
+## Original relaxing exterior in the loaded molecular network
+
+`MolecularRadiatingNetwork::prepare_fields_with_exterior_material` uses an
+explicit `MolecularExteriorMaterial` with the original borrowed RelaxationState,
+declared angular-frequency band, native BEM formulation and native assembly/
+response limits. The complete GasState must match the existing exterior record.
+A sound-speed/density pair or equal source labels cannot stand in for that law.
+The original regional interior gases, material-wall Arc owners, source clock,
+generator impedances, probes, geometry and opening reference planes are retained.
+
+The existing `MolecularBemObservation::prepare_response` computes the full
+self/mutual opening impedance and finite receiver p/u bank together. Unit-integral
+1/area normal-velocity traces retain pressure/volume-flow coordinates. Native
+complex K(omega), the decaying Green function and q = i*rho*omega*v remain in
+one original solver; k times equilibrium sound speed never replaces omega in
+the velocity trace. At most 32 network openings fit one original 256-field BEM
+batch. There is one native assembly/factorization for this exterior basis and
+one original loaded molecular network factorization for all source coordinates.
+
+The paired interior/exterior result retains the original native response and
+an exact bounded clone of the already solved port bank. Coherent drives,
+independent source statistics, directional microphones, source control and
+recorded Welch bins reuse its matched harmonic observer. No second boundary
+solve, additional attenuation filter, material query or opening-power
+independence assumption is introduced. The existing field allowance admits
+three additional opening-work matrices and their original panel projection;
+ComplexOptions and MolecularResponseLimits independently bound native work.
+
+`PreparedRadiatingNetwork::exterior_material` exposes the exact borrowed source,
+band and formulation; `molecular_exterior` exposes the same native response.
+Its source inputs are actual outward opening flows in boundary-label order,
+not generator amplitudes. Existing `exterior_surface_power_w` is signed opening
+boundary work already included in the graph external-load account. In a relaxing
+exterior it includes molecular absorption and outgoing energy; it is neither
+a second dissipation debit nor power on an arbitrarily distant sphere. No
+automatic thermal receiver is inferred. Lossless `far_field` stays unavailable,
+and the native harmonic owner's radiation-momentum refusal remains intact.
+
+Stationary Welch-band composition additionally requires the exact same original
+exterior source object, declared band and boundary formulation. It refuses
+ordinary/relaxing mixtures or numerically identical but distinct source objects,
+including at silent bins. Domain, storage, work, geometry, loading or cancellation
+refusal publishes no partial paired result and leaves the original owners usable.
+The default nondispersive exterior path keeps its existing owners and semantics.
+
+This remains a held homogeneous molecular-compression exterior with inviscid
+momentum, rigid panels outside the declared openings and original spatial
+quadrature. Exterior shear/thermal diffusion, mean flow, distributed wall
+radiation, startup and evolving materials are not added. Three focused native
+regressions in `driving_point/network/radiation/tests/prepared/molecular/fields/exterior.rs`
+cover independent combined-velocity BEM loading/fields and material-wall work,
+empty-reservoir and measured-coherence limits, and gas/domain/budget/cancellation
+and stationary-source identity. Synthetic source fixtures are numerical tests,
+not empirical validation. Whitespace checks reported no errors. Native tests,
+Rust compilation and rustfmt parsing were not executed because the original
+compiler/toolchain was unavailable; source review is not runtime proof.
+
 ## Molecular duct fields and sound under the same full exterior load
 
 `RadiatingNetwork::bind_molecular_with_compliant_walls` binds original molecular
@@ -14157,8 +14243,8 @@ finite links remain internal exchange, and their existing closed-balance gate
 is retained. Other graph electrical bindings refuse without an owner for their
 work. MaterialNetwork conveniences use the same respective endpoint paths.
 
-Planar motion uses held boundary voltage/distributed-current traces; 3D also
-supports the native direct grouped voltage/current/floating/mixed electrodes.
+Planar and 3D motion accept held boundary voltage/distributed-current traces
+and native direct grouped voltage/current/floating/mixed electrodes.
 Original electrical-contact adjacent cells must remain stationary, even with
 zero motional EMF. Motion elsewhere remains a prescribed fixed-domain snapshot:
 occupancy and geometry must stay represented by the original cells. These
@@ -14716,3 +14802,26 @@ sources with optional conduction/electrical feature registrations excluded.
 The normal fs-couple Cargo feature graph and full workspace gate remain
 unverified because the async runtime dependency exceeds the environment's
 8 GiB memory limit. This is not a whole-fluid total-energy certificate.
+
+
+### Planar moving terminal controls through finite heat
+
+MovingConductionResponseDrive extends the existing planar thermal endpoint to
+direct grouped voltage, total-current, floating and mixed electrodes alongside
+original traces. Every thermal proposal refreshes the original bulk/contact
+sources and solves the actual native moving electrode problem. Ordered terminal
+observations stay in the accepted moving source report; no accepted nonlinear
+field is rescaled or independently reconstructed.
+
+Terminal supply uses independently authored native electrode work. Signed
+Lorentz output is subtracted from that supply, and only local conductor-frame
+Joule/contact heat enters the original finite receivers, once. Complete heat
+provider samples/errors, source/phase admission, contact partitions, cumulative
+native work limits and atomic continuation remain shared. Current controls
+retain motional voltage offsets and permit generation; zero total current may
+sustain open-circuit voltage without heat. Focused regressions define two-step
+current/mixed electrothermal feedback, trace/voltage parity, floating operation
+and budget/cancellation refusals. Formatting, targeted API/accounting review
+and independent fixture endpoint arithmetic passed; full repository integration
+execution remains outstanding. The fixed-domain prescribed-motion limitations
+of the existing planar thermal endpoint remain unchanged.

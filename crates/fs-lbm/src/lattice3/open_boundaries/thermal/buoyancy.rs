@@ -506,6 +506,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
             .set_immersed_orthotropic_thermal_voxels(voxels, controls)
     }
 
+    /// Bind original material sensible/latent storage before an independent
+    /// immersed body's first accepted exchange. The same native heat/flow
+    /// transaction and actual reflected-temperature buoyancy admission remain
+    /// authoritative; a conducting voxel graph is explicitly unsupported.
+    pub fn set_immersed_body_caloric(
+        &mut self,
+        body: usize,
+        curve: std::sync::Arc<fs_material::phase::EquilibriumEnthalpyPhaseCurve>,
+        binding: crate::thermal::open::immersed::caloric::ImmersedCaloricBinding3,
+        controls: crate::thermal::open::immersed::caloric::ImmersedCaloricControls3,
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal.set_immersed_body_caloric(body, curve, binding, controls)
+    }
+
     /// Change the heat supplied to one whole immersed body without detaching
     /// thermal, momentum or buoyancy history.
     pub fn set_immersed_body_heat(

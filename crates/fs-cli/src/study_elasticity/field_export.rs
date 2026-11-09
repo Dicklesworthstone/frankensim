@@ -306,7 +306,15 @@ fn selected<'a>(driver: &str, design: &'a J) -> Result<std::result::Result<&'a J
                 _ => return Err(bad("retained selected design lacks its feasibility state")),
             }
             let selection = design.str_field("selected_design");
+            let compliance_incumbent = driver == AFFINE_LOAD_SPACE3_DRIVER
+                && selection == Some("least-compliance-feasible")
+                && design.get("goal").is_some_and(|goal| {
+                    goal.str_field("kind") == Some("worst-compliance")
+                        && goal.get("volume_limit_fraction").and_then(J::as_f64)
+                            .is_some_and(|v| v.is_finite() && v > 0.0 && v <= 1.0)
+                });
             let recognized = selection == Some("last-accepted")
+                || compliance_incumbent
                 || selection
                     == Some(if is_load_space(driver) {
                         "least-material-feasible"

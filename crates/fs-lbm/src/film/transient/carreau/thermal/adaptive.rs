@@ -9,8 +9,11 @@ use fs_conduction::enthalpy::StepConfig;
 use fs_conduction::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
 
 /// One actual native interval within an authored continuous source segment.
-/// A closing event belongs to this segment's left limit. Drive queries use
-/// midpoint_s; heat queries see the actual endpoint candidate and endpoint_s.
+/// A closing event belongs to this segment's left limit. Prescribed drives
+/// sample midpoint_s once per native interval. Thermal-feedback drives instead
+/// see each actual endpoint caloric candidate, with the same midpoint_s kept
+/// as the interval's mechanical sample time. Heat queries see that endpoint
+/// candidate and endpoint_s in both modes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalFilmQuery {
     pub start_s: f64,
@@ -71,7 +74,7 @@ pub struct ThermalFilmTimeError {
 }
 
 #[derive(Debug)]
-pub struct ThermalFilmAdaptiveReport<T> {
+pub struct ThermalFilmAdaptiveReport<T, D = ()> {
     pub time_s: f64,
     pub duration_s: f64,
     pub comparisons: usize,
@@ -84,8 +87,15 @@ pub struct ThermalFilmAdaptiveReport<T> {
     pub suggested_dt_s: f64,
     /// Includes coarse, rejected and failed original thermal trials.
     pub endpoint_evaluations: usize,
+    /// Actual prescribed-midpoint or thermal-candidate drive queries, including
+    /// discarded comparisons. Native derivative probes never resample a
+    /// prescribed callback, but do resolve endpoint thermal feedback.
+    pub drive_evaluations: usize,
     pub momentum_material_evaluations: u64,
     pub last_exchange: Option<T>,
+    /// One exact accepted sample per retained native fine step, in time order.
+    /// Discarded nonlinear/coarse samples and their payloads are not retained.
+    pub drive_samples: Vec<ThermalFilmDriveSample<D>>,
     pub transported_volume_per_width_m2: f64,
     /// In original film_cells() order; only accepted fine-step deposits.
     pub deposited_cell_heat_j: Vec<f64>,
@@ -288,6 +298,110 @@ impl<'m> ThermalCarreauFilm<'m> {
         ) -> Result<ThermalFilmExchange<T>, E>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ThermalFilmAdaptiveReport<T>, ThermalFilmAdaptiveError<E>> {
+        self.advance_adaptive_with(
+            target_s,
+            source_events_s,
+            controls,
+            adaptive,
+            |candidate, query, guess, check, work| {
+                check()?;
+                work.query_drive(controls.maximum_drive_evaluations)?;
+                let forcing = drive(query).map_err(ThermalFilmError::Source)?;
+                check()?;
+                let mut report = candidate.advance_metered(
+                    query,
+                    forcing,
+                    limits,
+                    momentum,
+                    controls,
+                    guess,
+                    |thermal, cells| resolve(query, thermal, cells),
+                    || check().is_err(),
+                    work,
+                )?;
+                // The callback was sampled once before the original thermal
+                // solve, not once per derivative probe inside that solve.
+                report.drive_evaluations = 1;
+                Ok(report)
+            },
+            cancelled,
+        )
+    }
+
+    /// Scheduled adaptive thermomechanical feedback using this SAME native
+    /// solver and controller. Each original thermal residual and derivative
+    /// probe resolves its own mechanical drive from its actual caloric state;
+    /// the heat callback sees exactly that sample and its owned source payload.
+    /// Every trial restarts the accepted physical history. Only accepted fine
+    /// samples are returned, with explicit midpoint and thermal endpoint times.
+    ///
+    /// Callbacks must be repeatable and free of physical side effects. Endpoint
+    /// feedback remains first order; no lagged, extrapolated or fitted source
+    /// is substituted. Work, viscous heat, support, time/error gates, event
+    /// semantics and full-window rollback are identical to advance_adaptive.
+    /// The original drive ceiling spans all native trials in the whole window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive_with_thermal_drive<T, D, E>(
+        &mut self,
+        target_s: f64,
+        source_events_s: &[f64],
+        limits: FilmStepLimits,
+        momentum: TransientCarreauControls,
+        controls: ThermalFilmControls,
+        adaptive: ThermalFilmAdaptiveControls,
+        drive: impl Fn(
+            ThermalFilmQuery,
+            &DepositionSimulation<'m>,
+            &[CellId],
+        ) -> Result<ThermalFilmDrive<D>, E>,
+        resolve: impl Fn(
+            ThermalFilmQuery,
+            &DepositionSimulation<'m>,
+            &[CellId],
+            &ThermalFilmDriveSample<D>,
+        ) -> Result<ThermalFilmExchange<T>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThermalFilmAdaptiveReport<T, D>, ThermalFilmAdaptiveError<E>> {
+        self.advance_adaptive_with(
+            target_s,
+            source_events_s,
+            controls,
+            adaptive,
+            |candidate, query, guess, check, work| {
+                candidate.advance_resolved_metered(
+                    query,
+                    limits,
+                    momentum,
+                    controls,
+                    guess,
+                    |thermal, cells| drive(query, thermal, cells),
+                    |thermal, cells, sample| resolve(query, thermal, cells, sample),
+                    || check().is_err(),
+                    work,
+                    true,
+                )
+            },
+            cancelled,
+        )
+    }
+
+    /// One controller for both source modes; only the original interval ingress
+    /// varies. All state, error, event and physical-account code stays shared.
+    fn advance_adaptive_with<T, D, E>(
+        &mut self,
+        target_s: f64,
+        source_events_s: &[f64],
+        controls: ThermalFilmControls,
+        adaptive: ThermalFilmAdaptiveControls,
+        native: impl Fn(
+            &mut Self,
+            ThermalFilmQuery,
+            &[f64],
+            &dyn Fn() -> Result<(), DepositionError>,
+            &ThermalFilmWork,
+        ) -> Result<ThermalFilmReport<T, D>, ThermalFilmError<E>>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThermalFilmAdaptiveReport<T, D>, ThermalFilmAdaptiveError<E>> {
         let checkpoint = RefCell::new(cancelled);
         let stopped = Cell::new(false);
         let check = || {
@@ -323,6 +437,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             || !(2..=2_000_000).contains(&adaptive.maximum_accepted_steps)
             || self.thermal.cells().len() > controls.maximum_thermal_cells
             || !(1..=1_000_000).contains(&controls.maximum_thermal_cells)
+            || controls.maximum_drive_evaluations > 1_000_000
             || source_events_s.len() > adaptive.maximum_trials
             || source_events_s.iter().any(|t| !t.is_finite() || *t < 0.0)
             || source_events_s.windows(2).any(|w| w[0] >= w[1])
@@ -347,8 +462,10 @@ impl<'m> ThermalCarreauFilm<'m> {
             last_error: None,
             suggested_dt_s: adaptive.initial_dt_s,
             endpoint_evaluations: 0,
+            drive_evaluations: 0,
             momentum_material_evaluations: 0,
             last_exchange: None,
+            drive_samples: Vec::new(),
             transported_volume_per_width_m2: 0.0,
             deposited_cell_heat_j: vec![0.0; self.cells.len()],
             other_cell_heat_j: self.thermal.cells().keys().map(|id| (*id, 0.0)).collect(),
@@ -433,18 +550,7 @@ impl<'m> ThermalCarreauFilm<'m> {
                     segment,
                 };
                 check().map_err(ThermalFilmError::from)?;
-                let forcing = drive(query).map_err(ThermalFilmError::Source)?;
-                candidate.advance_metered(
-                    endpoint,
-                    forcing,
-                    limits,
-                    momentum,
-                    controls,
-                    &guess,
-                    |thermal, cells| resolve(query, thermal, cells),
-                    || check().is_err(),
-                    &work,
-                )
+                native(candidate, query, &guess, &check, &work)
             };
             let attempted = (|| {
                 let c = run(&mut coarse, end)?;
@@ -499,6 +605,8 @@ impl<'m> ThermalCarreauFilm<'m> {
                 }
             }
             report.last_exchange = Some(b.exchange);
+            report.drive_samples.push(a.drive);
+            report.drive_samples.push(b.drive);
             report.accepted_steps += 2;
             core::mem::swap(&mut next, &mut fine);
             span = ((end - start)
@@ -579,6 +687,7 @@ impl<'m> ThermalCarreauFilm<'m> {
         report.time_s = next.thermal.time_s();
         report.suggested_dt_s = span;
         report.endpoint_evaluations = work.endpoints.get();
+        report.drive_evaluations = work.drives.get();
         report.momentum_material_evaluations = work.materials.get();
         check()?;
         *self = next;
@@ -586,7 +695,7 @@ impl<'m> ThermalCarreauFilm<'m> {
     }
 }
 
-fn channels<T>(report: &ThermalFilmReport<T>, area: f64) -> [f64; 7] {
+fn channels<T, D>(report: &ThermalFilmReport<T, D>, area: f64) -> [f64; 7] {
     let flow = report.flow.flow;
     [
         area * flow.body_work_j_m2,
@@ -600,13 +709,13 @@ fn channels<T>(report: &ThermalFilmReport<T>, area: f64) -> [f64; 7] {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compare<T>(
+fn compare<T, D>(
     old: &ThermalCarreauFilm<'_>,
     coarse: &ThermalCarreauFilm<'_>,
     fine: &ThermalCarreauFilm<'_>,
-    c: &ThermalFilmReport<T>,
-    a: &ThermalFilmReport<T>,
-    b: &ThermalFilmReport<T>,
+    c: &ThermalFilmReport<T, D>,
+    a: &ThermalFilmReport<T, D>,
+    b: &ThermalFilmReport<T, D>,
     correction: f64,
     controls: ThermalFilmAdaptiveControls,
 ) -> Result<ThermalFilmTimeError, DepositionError> {

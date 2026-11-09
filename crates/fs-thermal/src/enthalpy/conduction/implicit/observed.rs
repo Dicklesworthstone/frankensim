@@ -68,6 +68,12 @@ fn restore_sources(thermal: &mut DepositionSimulation<'_>, authored: Vec<(CellId
     }
 }
 
+#[derive(Clone, Copy)]
+enum ObservedMethod {
+    BackwardEuler,
+    Sdirk2,
+}
+
 impl ImplicitConductionChain<'_> {
     /// Advance native conduction/cooling implicitly with prescribed or lagged
     /// external heat and conservative internal transfers. The original source
@@ -108,6 +114,61 @@ impl ImplicitConductionChain<'_> {
         target_s: f64,
         controls: ImplicitConductionControls,
         workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, O, ImplicitConductionReport),
+        ImplicitConductionObservedError<O::Error>,
+    > {
+        self.advance_observed_with_method(
+            thermal, observer, target_s, controls, workspace, ObservedMethod::BackwardEuler, checkpoint,
+        )
+    }
+
+    /// Advance native SDIRK2 conduction with transactional external heat owners.
+    ///
+    /// The source/transfer hooks see the accepted start state. One preparation
+    /// supplies the actual whole-interval mean heat to both native stages; their
+    /// positive quadrature weights integrate that heat exactly once. `step` runs
+    /// once only after both stages pass the original energy/domain gates. A
+    /// retry recomputes interval heat without resetting the source work budget.
+    /// No observer history is advanced or published at the internal stage time.
+    ///
+    /// Source timestep restrictions, exact transitions, authored boundary events
+    /// and unsupported conductance hooks follow [`Self::advance_observed_to`].
+    /// The complete window must satisfy [`Self::advance_sdirk2_to`]'s fixed-cell
+    /// event admission before any observer work. The same native stage solve,
+    /// entropy accounting and sparse/direct linear owner remain authoritative.
+    ///
+    /// SDIRK2 is second order for its admitted thermal endpoint laws. Holding
+    /// state-dependent observed forcing or explicit transfers at the start can
+    /// reduce the coupled method to first order; retain the source owner's CFL
+    /// and independently refine the coupled time grid. An interval heat mean
+    /// does not supply a source tangent or imply strong coupling.
+    pub fn advance_sdirk2_observed_to<'m, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        observer: &O,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, O, ImplicitConductionReport),
+        ImplicitConductionObservedError<O::Error>,
+    > {
+        self.advance_observed_with_method(
+            thermal, observer, target_s, controls, workspace, ObservedMethod::Sdirk2, checkpoint,
+        )
+    }
+
+    fn advance_observed_with_method<'m, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        observer: &O,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        method: ObservedMethod,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
         (DepositionSimulation<'m>, O, ImplicitConductionReport),
@@ -123,6 +184,9 @@ impl ImplicitConductionChain<'_> {
             workspace.cells(),
         )?;
         self.admit(thermal, &mut checkpoint)?;
+        if matches!(method, ObservedMethod::Sdirk2) {
+            self.admit_sdirk2_window(thermal, target_s, &mut checkpoint)?;
+        }
         let mut next = thermal.clone();
         let mut observers = Events {
             conduction: self.conduction.clone(),
@@ -239,16 +303,17 @@ impl ImplicitConductionChain<'_> {
                     visited += 1;
                     combined.add(&next, id, watts)
                 })?;
-                match self.solve_step_with_sources(
-                    &next,
-                    end,
-                    &combined,
-                    &transfers,
-                    controls,
-                    workspace,
-                    &mut report,
-                    &mut checkpoint,
-                ) {
+                let trial = match method {
+                    ObservedMethod::BackwardEuler => self.solve_step_with_sources(
+                        &next, end, &combined, &transfers, controls, workspace,
+                        &mut report, &mut checkpoint,
+                    ),
+                    ObservedMethod::Sdirk2 => self.solve_sdirk2_step_with_sources(
+                        &next, end, &combined, &transfers, controls, workspace,
+                        &mut report, &mut checkpoint,
+                    ),
+                };
+                match trial {
                     Ok((accepted, energy, entropy, maximum)) => {
                         source
                             .step(
@@ -269,6 +334,7 @@ impl ImplicitConductionChain<'_> {
                     }
                     Err(
                         error @ (ImplicitConductionError::NotConverged { .. }
+                        | ImplicitConductionError::EntropyDecrease { .. }
                         | ImplicitConductionError::KrylovNotConverged { .. }
                         | ImplicitConductionError::Linear(TridiagonalError::Singular {
                             ..

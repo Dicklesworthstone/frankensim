@@ -8,7 +8,8 @@ use crate::circuit_enthalpy::{
     contacts::heat::{HeatAssembly, HeatNetworkError, closed_balance},
 };
 use fs_em::conduction::{
-    motion::ConductionMotion, response::motion::MovingConductionResponseReport,
+    motion::ConductionMotion,
+    response::{motion::MovingConductionResponseReport, terminals::ConductionTerminalDrive},
 };
 use fs_exec::Cx;
 
@@ -21,6 +22,24 @@ pub struct MovingConductionDrive<'a> {
     pub motion: ConductionMotion<'a>,
 }
 
+/// Original held controls for moving nonlinear conduction and finite heat.
+/// Direct terminals enforce total current and equipotentiality on their
+/// original exterior traces; zero-current electrodes may transfer current
+/// locally. Source laws are evaluated at every actual trial field.
+#[derive(Clone, Copy, Debug)]
+pub enum MovingConductionResponseDrive<'a> {
+    Field(MovingConductionDrive<'a>),
+    Terminals {
+        drive: ConductionTerminalDrive<'a>,
+        motion: ConductionMotion<'a>,
+    },
+}
+impl<'a> From<MovingConductionDrive<'a>> for MovingConductionResponseDrive<'a> {
+    fn from(drive: MovingConductionDrive<'a>) -> Self {
+        Self::Field(drive)
+    }
+}
+
 /// The accepted native source/field state and its independent work accounts.
 /// Positive mechanical work leaves the electrical/thermal system. Electrical
 /// supply may be negative during generation; it is never deposited as heat.
@@ -28,6 +47,8 @@ pub struct MovingConductionDrive<'a> {
 pub struct MovingConductionResponseThermalStep {
     pub start_s: f64,
     pub end_s: f64,
+    /// Native fields and source closure, including ordered direct-electrode
+    /// observations in `field.terminals` when terminal controls are used.
     pub field: MovingConductionResponseReport,
     pub contacts: Vec<contacts::ConductionContactHeat>,
     pub heat_j: f64,
@@ -97,13 +118,16 @@ impl ConductionThermalNetwork<'_> {
     /// not evolve induction, momentum, advection or a moving surface-work law.
     /// Contact-adjacent cells must have zero velocity, as enforced by the
     /// native owner. Each stationary contact retains its original heat split.
+    /// Direct grouped voltage/current/floating/mixed electrodes use one native
+    /// field solve per constitutive trial. Their independently authored source
+    /// work and motional voltage offset remain in the accepted terminal report.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_moving_response_candidate<'t>(
+    pub fn step_moving_response_candidate<'t, 'd>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &PlanarConductionResponse,
-        drive: MovingConductionDrive<'_>,
+        drive: impl Into<MovingConductionResponseDrive<'d>>,
         contact_bindings: &[contacts::ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -126,7 +150,7 @@ impl ConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            drive,
+            drive.into(),
             contact_bindings,
             assembly,
             field_controls,
@@ -149,7 +173,7 @@ impl ConductionThermalNetwork<'_> {
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &PlanarConductionResponse,
-        drive: MovingConductionDrive<'_>,
+        drive: MovingConductionResponseDrive<'_>,
         contact_bindings: &[contacts::ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -235,32 +259,52 @@ impl ConductionThermalNetwork<'_> {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
                 };
-                let candidate = problem
-                    .solve_with_motion_and_materials_and_contacts_candidate(
-                        sources,
-                        contact_sources,
-                        drive.boundary_voltage_v,
-                        drive.current_traces,
-                        drive.motion,
-                        assembly,
-                        field_controls,
-                        bounded,
-                        &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(|error| match error {
-                        ConductionResponseError::FieldBudget { .. } => {
-                            CircuitEnthalpyError::CircuitBudget
-                        }
-                        ConductionResponseError::NotConverged { .. }
-                            if bounded.maximum_iterations < response.maximum_iterations =>
-                        {
-                            CircuitEnthalpyError::CircuitBudget
-                        }
-                        other => map_conduction_error(response_error(other)),
-                    })?;
+                let candidate = match drive {
+                    MovingConductionResponseDrive::Field(drive) => problem
+                        .solve_with_motion_and_materials_and_contacts_candidate(
+                            sources,
+                            contact_sources,
+                            drive.boundary_voltage_v,
+                            drive.current_traces,
+                            drive.motion,
+                            assembly,
+                            field_controls,
+                            bounded,
+                            &mut || (*cancel.borrow_mut())(),
+                        ),
+                    MovingConductionResponseDrive::Terminals { drive, motion } => problem
+                        .solve_terminals_with_motion_and_materials_and_contacts_candidate(
+                            sources,
+                            contact_sources,
+                            drive,
+                            motion,
+                            assembly,
+                            field_controls,
+                            bounded,
+                            remaining,
+                            &mut || (*cancel.borrow_mut())(),
+                        ),
+                }
+                .map_err(|error| match error {
+                    ConductionResponseError::FieldBudget { .. } => {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
+                    ConductionResponseError::NotConverged { .. }
+                        if bounded.maximum_iterations < response.maximum_iterations =>
+                    {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
+                    other => map_conduction_error(response_error(other)),
+                })?;
                 let (next, field) = candidate.into_parts();
                 let heat_j = finite(dt * field.field.power_w)?;
-                let terminal_work_j = finite(dt * field.motion.terminal_power_w)?;
+                let terminal_power_w = field
+                    .terminals
+                    .as_ref()
+                    .map_or(field.motion.terminal_power_w, |terminals| {
+                        terminals.supplied_power_w
+                    });
+                let terminal_work_j = finite(dt * terminal_power_w)?;
                 let mechanical_work_j = finite(dt * field.motion.mechanical_power_w)?;
                 let net_supplied_work_j = finite(terminal_work_j - mechanical_work_j)?;
                 if (field.field.power_w > 0.0 && heat_j == 0.0)
@@ -332,7 +376,10 @@ fn heat_error<E: From<HeatNetworkError>>(
 /// source sees the same proposed endpoint as the original electrical response.
 /// Conductor-frame bulk loss and stationary electrical-contact loss enter their
 /// finite receiving cells once; terminal work and Lorentz output stay separate.
-/// The complete source sample and typed errors are retained.
+/// The complete source sample and typed errors are retained. Direct grouped
+/// voltage/current/floating/mixed electrodes and original boundary traces share
+/// this endpoint; terminal current controls determine their actual nonlinear
+/// voltage including motional EMF, without rescaling an accepted field.
 ///
 /// The original fixed-occupancy, source-pin, confined-phase and field-independent
 /// caloric/thermal-source requirements apply. Contact-adjacent triangles must
@@ -341,13 +388,13 @@ fn heat_error<E: From<HeatNetworkError>>(
 /// report.non_electrical_heat_j - dt * report.source.as_ref().radiation_net_power_w().
 /// Cancellation, source refusal or a failed energy gate accepts neither owner.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn step_moving_conduction_response_candidate<'t, A: HeatAssembly + ?Sized>(
+pub fn step_moving_conduction_response_candidate<'t, 'd, A: HeatAssembly + ?Sized>(
     heat: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
     problem: &PlanarConductionResponse,
-    drive: MovingConductionDrive<'_>,
+    drive: impl Into<MovingConductionResponseDrive<'d>>,
     contact_bindings: &[contacts::ConductionContactThermal<'_>],
     regions: &[ConductionRegion],
     volume_tolerance_m3: f64,
@@ -431,7 +478,7 @@ pub fn step_moving_conduction_response_candidate<'t, A: HeatAssembly + ?Sized>(
         thermal,
         target_s,
         problem,
-        drive,
+        drive.into(),
         contact_bindings,
         assembly,
         field_controls,

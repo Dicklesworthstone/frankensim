@@ -27,6 +27,9 @@ use super::{
 };
 use crate::{MAX_MODES, fetch_mass_consistent::ExponentialDensityProfile};
 
+/// Conservative face averages on a complete, nonuniform inlet subdivision.
+pub mod finite_volume;
+
 /// Fixed, nondegenerate parallelogram in the original Mann physical frame.
 /// The ordered half edges define its normal by their right-handed cross product.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -129,6 +129,36 @@ dilated volume. Under self-weight this does not establish erosion as the worst
 manufacturing realization. The example uses numerical demonstration inputs
 and makes the same limited linear-elastic claims as the robust example above.
 
+## Worst-case stiffness with a material-volume budget
+
+`bracket-3d-affine-compliance.fsim` uses the same native self-weight, uncertain
+load ball, strength, signed responses and grid-refinement workflow to minimize
+worst compliance subject to a **dilated-volume fraction cap**. It declares
+objective `compliance` in joules and optimizer `affine-load-space-simp`.
+The ordered optimizer fields add `volume-fraction` and `compliance-reference-j`
+in place of the minimum-material mode's `compliance-limit-j`.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-compliance.fsim stiffness.db --budget 2
+frankensim --json study --resume study-<receipt-hash> stiffness.db --budget 2
+frankensim --json report study-<receipt-hash> stiffness.db
+```
+
+The compliance reference normalizes the objective and its gradients. It is
+**not a compliance cap**: a design can exceed that reference while satisfying
+its material-volume, strength and signed-response requirements. The native
+feasible archive selects the lowest-compliance accepted design, reported as
+`least-compliance-feasible`; VTU exports that design's actual physical fields.
+Reports retain both physical objective values in joules and normalized values
+used by the optimizer. An infeasible initial material inventory is allowed;
+only designs passing all original constraints enter the feasible archive.
+
+Resume, candidate rechecks and optional finer-grid redesign retain the same
+declared objective and volume cap. Grid assessment separately gates compliance
+objective change with `compliance-change-tolerance` and absolute volume-fraction
+change with `inventory-change-tolerance`. The example remains a numerical
+linear-elastic demonstration, without a continuum stiffness or optimality claim.
+
 ## Joint compliance and strength with uncertain loads
 
 `bracket-3d-affine-strength.fsim` adds a physical stress allowable to the

@@ -522,6 +522,120 @@ fn implicit_source_controls() -> implicit::ImplicitConductionControls {
         ..implicit::ImplicitConductionControls::default() }
 }
 
+fn observed_sdirk_network() -> (DepositionSimulation<'static>,
+    crate::enthalpy::conduction::ConductionObserver<'static>) {
+    use crate::enthalpy::conduction::{ConductionObserver, ConductiveLink};
+    let thermal = initial(true).advance_to(0.0, config(), || Ok(())).unwrap().0;
+    let conduction = ConductionObserver::new(&thermal,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)],
+        &[ConductiveLink { link_id: 7, half_distances_m: [0.5; 2],
+            contact_resistance_m2_k_w: 0.0 }], &[], || Ok(())).unwrap();
+    (thermal, conduction)
+}
+
+#[test]
+fn observed_sdirk_combines_physical_interval_heat_once_on_chain_and_graph() {
+    let (thermal, conduction) = observed_sdirk_network();
+    let chain = implicit::ImplicitConductionChain::new(&thermal, &conduction,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)], || Ok(())).unwrap();
+    let graph = implicit::ImplicitConductionGraph::new(&thermal, &conduction,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)],
+        implicit::ImplicitConductionLinearControls::default(), || Ok(())).unwrap();
+    let sources = CoupledObservers::new(Producer::new(1, 2.0), IntervalProducer::new(2.0, 0.0));
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, accepted, report) = chain.advance_sdirk2_observed_to(&thermal, &sources,
+        1.0, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    // G=1 and capacities [2,4] give D'=2-(3/4)D, where D=T1-T2.
+    // Solve the two original SDIRK equations independently in this coordinate.
+    let gamma = 1.0-core::f64::consts::FRAC_1_SQRT_2;
+    let first = 2.0*gamma/(1.0+0.75*gamma);
+    let second = ((1.0-gamma)*(2.0-0.75*first)+2.0*gamma)/(1.0+0.75*gamma);
+    let h1 = (4.0+4.0*second)/3.0;
+    near(next.cells()[&CellId(1)].specific_h_j_kg, h1);
+    near(next.cells()[&CellId(2)].specific_h_j_kg, 4.0-h1);
+    near(report.energy.external_heat_j, 4.0);
+    near(report.energy.residual_j, 0.0);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(accepted.first.grid, vec![(0.0, 1.0)]);
+    assert_eq!(accepted.second.prepared, vec![(0.0, 1.0, 1.0, 0.0)]);
+    assert_eq!(accepted.second.accepted, 1);
+    assert!(report.entropy.has_unclassified_sources);
+    let (sparse, accepted_sparse, sparse_report) = graph.advance_sdirk2_observed_to(
+        &thermal, &sources, 1.0, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    for id in [CellId(1), CellId(2)] {
+        near(sparse.cells()[&id].specific_h_j_kg, next.cells()[&id].specific_h_j_kg);
+    }
+    near(sparse_report.energy.external_heat_j, report.energy.external_heat_j);
+    assert_eq!(accepted_sparse.second.prepared, accepted.second.prepared);
+    assert!(sources.first.grid.is_empty());
+    assert!(sources.second.prepared.is_empty());
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn observed_sdirk_keeps_flow_cfl_source_transitions_and_boundary_events() {
+    use crate::enthalpy::advection::{Advected, MassFlow};
+    use crate::enthalpy::conduction::{ConductionObserver, ConductiveLink};
+    let thermal = interval_initial().advance_to(0.0, config(), || Ok(())).unwrap().0;
+    let conduction = ConductionObserver::new(&thermal, &[(MaterialId(1), &A)],
+        &[ConductiveLink { link_id: 7, half_distances_m: [0.5; 2],
+            contact_resistance_m2_k_w: 0.0 }], &[], || Ok(())).unwrap();
+    let chain = implicit::ImplicitConductionChain::new(&thermal, &conduction,
+        &[(MaterialId(1), &A)], || Ok(())).unwrap();
+    let sources = Advected::new(CoupledObservers::new(
+        TransitionSource::new(0.02), IntervalProducer::new(1.0, 0.0)),
+        vec![MassFlow { id: 10, a: CellId(1), b: CellId(2), kg_s: 10.0 },
+            MassFlow { id: 11, a: CellId(2), b: CellId(1), kg_s: 10.0 }], 2).unwrap();
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, accepted, report) = chain.advance_sdirk2_observed_to(&thermal, &sources,
+        0.2, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    let owners = accepted.inner();
+    assert_eq!(owners.first.intervals.len(), report.energy.substeps);
+    assert_eq!(owners.second.accepted, report.energy.substeps);
+    assert_eq!(owners.second.prepared.len(), report.energy.substeps);
+    assert!(owners.first.intervals.iter().any(|&(_, _, end)| end == 0.02));
+    assert!(owners.first.intervals.iter().any(|&(_, _, end)| end == 0.035));
+    assert!(owners.first.intervals.iter().all(|&(_, dt, _)| dt <= 0.08));
+    assert_eq!(owners.first.intervals.last().unwrap().2, 0.2);
+    assert_eq!(report.energy.events, 1);
+    near(report.energy.external_heat_j, 2.0*0.02+6.0*0.18+0.2);
+    near(report.energy.residual_j, 0.0);
+    assert!(next.cells()[&CellId(2)].specific_h_j_kg > 0.0);
+    assert_eq!(sources.audit(), Default::default());
+    assert!(sources.inner().second.prepared.is_empty());
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn observed_sdirk_refusal_and_cancellation_preserve_all_accepted_histories() {
+    let (thermal, conduction) = observed_sdirk_network();
+    let chain = implicit::ImplicitConductionChain::new(&thermal, &conduction,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)], || Ok(())).unwrap();
+    let mut source = IntervalProducer::new(4.0, 0.0);
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(2).unwrap();
+    source.fail_accept = Some(1);
+    assert!(matches!(chain.advance_sdirk2_observed_to(&thermal, &source, 1.0,
+        implicit_source_controls(), &mut workspace, || Ok(())),
+        Err(implicit::ImplicitConductionObservedError::Observer(DepositionError::InvalidInput(_)))));
+    assert!(source.prepared.is_empty());
+    source.fail_accept = None;
+    let mut polls = 0;
+    chain.advance_sdirk2_observed_to(&thermal, &source, 1.0, implicit_source_controls(),
+        &mut workspace, || { polls += 1; Ok(()) }).unwrap();
+    for stop in [1, polls/2, polls] {
+        let mut seen = 0;
+        assert!(chain.advance_sdirk2_observed_to(&thermal, &source, 1.0,
+            implicit_source_controls(), &mut workspace, || {
+                seen += 1;
+                if seen == stop { Err(DepositionError::Cancelled) } else { Ok(()) }
+            }).is_err());
+        assert!(source.prepared.is_empty());
+        assert_eq!(source.accepted, 0);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert!(thermal.cells().values().all(|cell| cell.specific_h_j_kg == 0.0));
+    }
+}
+
 struct EndpointPower(f64);
 impl implicit::source::ImplicitHeatSourceLaw for EndpointPower {
     fn caloric_law(&self) -> &dyn ThermalLaw { &A }

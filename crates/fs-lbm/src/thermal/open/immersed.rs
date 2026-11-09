@@ -13,12 +13,16 @@
 //! conduction graph resolves temperature differences between nodes, including
 //! fully buried solid nodes without fluid interfaces. The independent-body
 //! path remains appropriate when internal gradients can be neglected. Moving
-//! geometry and nonlinear caloric properties are not represented. There is no
+//! geometry is not represented. Independent bodies can bind an original
+//! material enthalpy chart through `caloric`, retaining sensible and latent
+//! storage in the same native transaction. There is no
 //! empirical convection coefficient: surrounding fluid heat transport remains
 //! the original D3Q7 field driven by native flow.
 
 /// Reciprocal solid conduction on the original immersed thermal nodes.
 pub mod conduction;
+/// Source-owned sensible and latent storage on independent immersed bodies.
+pub mod caloric;
 /// Cartesian voxel geometry and material preparation for immersed conduction.
 pub mod voxel;
 
@@ -43,10 +47,15 @@ pub struct ImmersedThermalBody3<'a> {
 /// Accepted body state and its independently measured last heat account.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImmersedThermalBodyState3 {
-    /// Original storage, held source and common resistance declaration.
+    /// Original held source and common resistance declaration. Heat capacity
+    /// owns storage only when `caloric` is None; a bound enthalpy chart replaces
+    /// C*dT, and this original capacity is then inactive declaration data.
     /// The resolved interface law uses `surface_resistance` below, which may
     /// additionally include a direction-dependent solid half-cell path.
     pub solid: FiniteThermalWall,
+    /// Original material state and fixed mass when source enthalpy owns storage.
+    /// `solid.temperature` is its derived native-temperature coordinate.
+    pub caloric: Option<caloric::ImmersedCaloricState3>,
     /// Total bulk-to-surface resistance for x, y and z normal links, excluding
     /// the fluid half cell. Uniform body declarations repeat `solid.resistance`.
     pub surface_resistance: [f64; 3],
@@ -70,6 +79,7 @@ struct Body {
     heat: Sum,
     conducted: Sum,
     trial_exchange: FiniteThermalWallExchange,
+    caloric: Option<caloric::CaloricBody3>,
 }
 
 struct Link {
@@ -294,6 +304,7 @@ impl ThermalOpenField3 {
             prepared.bodies.push(Body {
                 accepted: ImmersedThermalBodyState3 {
                     solid: declaration.solid,
+                    caloric: None,
                     surface_resistance: resistance,
                     interface_links: prepared.links.len() - start,
                     last_exchange: None,
@@ -306,6 +317,7 @@ impl ThermalOpenField3 {
                 heat: Sum::default(),
                 conducted: Sum::default(),
                 trial_exchange: FiniteThermalWallExchange::default(),
+                caloric: None,
             });
         }
         prepared
@@ -421,6 +433,20 @@ impl ImmersedBodies3 {
                 if !conductance.is_finite() || conductance <= 0.0 {
                     return Err(invalid("unrepresentable immersed interface conductance").into());
                 }
+                if let Some(caloric) = &mut body.caloric {
+                    let old = body.accepted.caloric.expect("bound caloric state");
+                    body.trial_temperature = caloric
+                        .solve(
+                            i,
+                            old,
+                            solid.heat_per_step,
+                            conductance,
+                            body.trace_reference + body.mean_trace.total(),
+                            limits,
+                            &mut poll,
+                        )?;
+                    continue;
+                }
                 // Normalize by the larger coefficient. Never form C + sum K;
                 // the bounded ratio also preserves a tiny capacity or exchange
                 // coefficient without constructing an overflowing reciprocal.
@@ -490,15 +516,22 @@ impl ImmersedBodies3 {
                 poll()?;
             }
             let solid = body.accepted.solid;
+            let stored_change = body.caloric.as_ref().map_or_else(
+                || solid.heat_capacity * (body.trial_temperature - solid.temperature),
+                |caloric| caloric.stored_change(body.accepted.caloric.expect("bound caloric state")),
+            );
             let mut exchange = FiniteThermalWallExchange {
                 heat_in: body.heat.total(),
-                stored_change: solid.heat_capacity * (body.trial_temperature - solid.temperature),
+                stored_change,
                 source: solid.heat_per_step,
                 conducted_in: body.conducted.total(),
                 ..FiniteThermalWallExchange::default()
             };
             let defect = exchange.defect();
-            if !defect.is_finite() || defect.abs() > tolerance {
+            let body_tolerance = body.caloric.as_ref().map_or(tolerance, |caloric| {
+                tolerance.min(caloric.balance_tolerance())
+            });
+            if !defect.is_finite() || defect.abs() > body_tolerance {
                 return Err(ThermalOpenError3::Balance { defect }.into());
             }
             total_defect.add(defect);
@@ -538,6 +571,9 @@ impl ImmersedBodies3 {
     }
     pub(super) fn publish(&mut self) {
         for body in &mut self.bodies {
+            if let Some(caloric) = &body.caloric {
+                body.accepted.caloric = Some(caloric.trial_state());
+            }
             body.accepted.solid.temperature = body.trial_temperature;
             body.accepted.last_exchange = Some(body.trial_exchange);
         }

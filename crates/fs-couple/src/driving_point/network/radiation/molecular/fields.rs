@@ -60,7 +60,7 @@ impl MolecularRadiatingNetwork<'_> {
         request: &MolecularRadiatingFieldRequest<'p>,
         gate: &CancelGate,
     ) -> Result<PreparedMolecularRadiatingFields<'p>, ExteriorNetworkError> {
-        self.prepare_fields_inner(request, None, gate)
+        self.prepare_fields_inner(request, None, None, gate)
     }
 
     /// Also prepare the existing angular observation from the SAME unit-opening
@@ -73,13 +73,33 @@ impl MolecularRadiatingNetwork<'_> {
         radiation: PreparedRadiationOptions,
         gate: &CancelGate,
     ) -> Result<PreparedMolecularRadiatingFields<'p>, ExteriorNetworkError> {
-        self.prepare_fields_inner(request, Some((directions, radiation)), gate)
+        self.prepare_fields_inner(request, Some((directions, radiation)), None, gate)
+    }
+
+    /// Close the same interior fields against the original complex-K exterior.
+    /// The complete mutual opening load and finite receiver p/u come from one
+    /// native molecular BEM response. The original graph is factored once with
+    /// that load; coherence, microphones and measured Welch bins reuse its
+    /// actual outward flows without another attenuation or boundary solve.
+    ///
+    /// The source must retain the model's explicit exterior gas record. Native
+    /// material, band, formulation, assembly and response budgets all apply.
+    /// No lossless far-field/radiation-momentum observation is exposed for this
+    /// absorbing medium. Boundary work is already debited at the graph ports.
+    pub fn prepare_fields_with_exterior_material<'p>(
+        &'p self,
+        request: &MolecularRadiatingFieldRequest<'p>,
+        exterior: MolecularExteriorMaterial<'p>,
+        gate: &CancelGate,
+    ) -> Result<PreparedMolecularRadiatingFields<'p>, ExteriorNetworkError> {
+        self.prepare_fields_inner(request, None, Some(exterior), gate)
     }
 
     fn prepare_fields_inner<'p>(
         &'p self,
         request: &MolecularRadiatingFieldRequest<'p>,
         angular: Option<(&[[f64; 3]], PreparedRadiationOptions)>,
+        exterior: Option<MolecularExteriorMaterial<'p>>,
         gate: &CancelGate,
     ) -> Result<PreparedMolecularRadiatingFields<'p>, ExteriorNetworkError> {
         let (radiating, interior) = self.model.prepare_sources_with_network(
@@ -90,6 +110,7 @@ impl MolecularRadiatingNetwork<'_> {
             request.scalar_loads,
             angular,
             true,
+            exterior,
             |boundary| {
                 let native = MolecularNetworkFieldRequest {
                     omega: request.omega,

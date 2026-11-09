@@ -118,6 +118,10 @@ pub enum ThermalOpenError3 {
     Allocation,
     Wall(ThermalWallError),
     Conduction(WallConductionError),
+    Caloric {
+        body: usize,
+        source: immersed::caloric::ImmersedCaloricError3,
+    },
     Temperature {
         cell: usize,
         value: f64,

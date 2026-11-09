@@ -21,6 +21,18 @@ pub(super) trait CellCoordinate {
     fn storage_rate(&self, cell: usize, value: f64) -> Result<StorageRate, ChtError>;
 
     fn storage_tangent(&self, cell: usize) -> f64;
+
+    /// Constitutive energy is absolute in the original chart, never the
+    /// centered Newton increment. Kelvin-only coordinates provide no energy.
+    #[cfg(feature = "enthalpy-coupling")]
+    fn conductivity_point(
+        &self,
+        _cell: usize,
+        _value: f64,
+        _temperature_k: f64,
+    ) -> Result<Option<super::material::TensorCaloricConductivityPoint>, ChtError> {
+        Ok(None)
+    }
 }
 
 pub(super) struct KelvinCoordinate<'a, 'b> {

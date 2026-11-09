@@ -19,6 +19,8 @@ use fs_material::state_point::{
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
+mod exterior;
+
 struct CountedWall {
     material: LocalMaterialWall,
     calls: AtomicUsize,

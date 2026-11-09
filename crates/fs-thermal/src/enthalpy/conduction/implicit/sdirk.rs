@@ -22,7 +22,7 @@ impl ImplicitConductionChain<'_> {
     // Check the complete requested window BEFORE an adaptive controller can
     // process events. Source/bath/native-Robin jumps preserve prepared bindings;
     // a later geometry or law-owned coefficient change must not admit a prefix.
-    fn admit_sdirk2_window(
+    pub(super) fn admit_sdirk2_window(
         &self,
         thermal: &DepositionSimulation<'_>,
         target_s: f64,
@@ -87,23 +87,41 @@ impl ImplicitConductionChain<'_> {
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
     {
+        self.solve_sdirk2_step_with_sources(
+            thermal, target_s, &SourcePowers::default(), &[], controls, workspace, report, checkpoint,
+        )
+    }
+
+    // Observer-owned start powers, whole-interval means and transfers are held
+    // through both native stages. Only the enclosing observed driver prepares
+    // or accepts physical source history; an internal stage is not a substep.
+    pub(super) fn solve_sdirk2_step_with_sources<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        sources: &SourcePowers,
+        transfers: &[HeatTransfer],
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        report: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError> {
         let dt = finite(target_s - thermal.time_s)?;
         let implicit_dt_s = finite(GAMMA * dt)?;
         let stage_time_s = finite(thermal.time_s + implicit_dt_s)?;
         if !positive(implicit_dt_s) || stage_time_s <= thermal.time_s || stage_time_s >= target_s {
             return Err(DepositionError::Arithmetic.into());
         }
-        // No generated contributions replace each cell's authored power.
-        // Native StageHeat carries it and any attached endpoint advection with
+        // Generated contributions add to each cell's authored power.
+        // Native StageHeat carries them and any attached endpoint advection with
         // the same quadrature as conduction, including external stream energy
         // and unclassified at-cell entropy. Reconstructed faces and their
         // tangents are evaluated at each trial, never frozen at the first stage.
-        let sources = SourcePowers::default();
         let first = self.solve_stage(
             thermal,
             stage_time_s,
-            &sources,
-            &[],
+            sources,
+            transfers,
             Some(StageQuadrature {
                 implicit_dt_s,
                 earlier: None,
@@ -139,8 +157,8 @@ impl ImplicitConductionChain<'_> {
         let second = self.solve_stage(
             thermal,
             target_s,
-            &sources,
-            &[],
+            sources,
+            transfers,
             Some(StageQuadrature {
                 implicit_dt_s,
                 earlier: Some(&carried),
@@ -186,8 +204,9 @@ impl ImplicitConductionChain<'_> {
     /// endpoint enthalpy with the original flow, continuity and caloric admission;
     /// rates/inlet enthalpies are fixed unless a continuous advection schedule
     /// is attached; scheduled values use each stage's actual time.
-    /// External observers, moving mass and all other scheduled events through
-    /// the target refuse before stage work. Boundary events retain
+    /// External observer histories use [`Self::advance_sdirk2_observed_to`].
+    /// Moving mass and all other scheduled events through the target refuse
+    /// before stage work. Boundary events retain
     /// authored order and the same whole-call nonlinear and accepted-step budgets.
     ///
     /// Both stages use the SAME original enthalpy storage. Internal first-stage

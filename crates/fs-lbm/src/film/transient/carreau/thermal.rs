@@ -37,6 +37,10 @@ pub struct ThermalFilmControls {
     pub maximum_newton_iterations: usize,
     /// Residuals, derivative probes and independent final evaluation.
     pub maximum_endpoint_evaluations: usize,
+    /// Actual mechanical-drive callback queries across this entire call,
+    /// including derivative probes and discarded adaptive comparisons. A held
+    /// FilmDrive value consumes no query. Zero admits only paths with no query.
+    pub maximum_drive_evaluations: usize,
     /// Whole-call budget for native momentum constitutive evaluations.
     /// Temperature preparation and caloric queries are bounded separately by
     /// the endpoint/cell counts. Trials do not renew this aggregate budget.
@@ -56,6 +60,7 @@ impl Default for ThermalFilmControls {
             maximum_thermal_cells: 65_536,
             maximum_newton_iterations: 32,
             maximum_endpoint_evaluations: 4096,
+            maximum_drive_evaluations: 4096,
             maximum_momentum_material_evaluations: 16_777_216,
             energy_scale_j: 1.0,
             finite_difference_step: 1e-5,
@@ -86,6 +91,26 @@ pub struct ThermalFilmExchange<T> {
     pub heat: BoundaryStepCoefficients<T>,
 }
 
+/// Original mechanical source evaluated at one native thermal candidate.
+/// The payload may retain the source identity or a prepared source receipt;
+/// the numerical owner neither clones nor reconstructs it.
+#[derive(Debug)]
+pub struct ThermalFilmDrive<D> {
+    pub drive: FilmDrive,
+    pub payload: D,
+}
+
+/// The exact mechanical sample that produced an accepted native interval.
+#[derive(Debug)]
+pub struct ThermalFilmDriveSample<D = ()> {
+    pub query: adaptive::ThermalFilmQuery,
+    /// None for a held/prescribed source. Some(endpoint_s) identifies actual
+    /// endpoint caloric feedback, with midpoint_s retained separately.
+    pub thermal_time_s: Option<f64>,
+    pub drive: FilmDrive,
+    pub payload: D,
+}
+
 /// Refused proposals change neither accepted physical state.
 #[derive(Debug)]
 pub enum ThermalFilmError<E> {
@@ -93,9 +118,11 @@ pub enum ThermalFilmError<E> {
     Film(TransientCarreauError),
     Thermal(DepositionError),
     Source(E),
+    Drive(E),
     Solver(NewtonError),
     NotConverged(NewtonReport),
     EndpointBudget,
+    DriveBudget,
     MaterialBudget,
     CombinedEnergy { residual_j: f64, tolerance_j: f64 },
 }
@@ -140,12 +167,14 @@ pub struct ThermalCarreauFilm<'m> {
 
 /// Physical exchanges and separate algebraic defects for one interval.
 #[derive(Debug)]
-pub struct ThermalFilmReport<T> {
+pub struct ThermalFilmReport<T, D = ()> {
     pub flow: TransientCarreauStep,
     pub thermal: EnergyAudit,
     pub exchange: T,
+    pub drive: ThermalFilmDriveSample<D>,
     pub nonlinear: NewtonReport,
     pub endpoint_evaluations: usize,
+    pub drive_evaluations: usize,
     pub momentum_material_evaluations: u64,
     pub maximum_cell_residual_j: f64,
     pub deposited_viscous_heat_j: f64,
@@ -169,9 +198,10 @@ pub struct ThermalFilmReport<T> {
     pub combined_energy_residual_j: f64,
 }
 
-struct Endpoint<T> {
+struct Endpoint<T, D> {
     flow: TransientCarreauStep,
     exchange: T,
+    drive: ThermalFilmDriveSample<D>,
     deposited_heat_j: f64,
     other_heat_j: f64,
     other_cell_heat_j: BTreeMap<CellId, f64>,
@@ -181,7 +211,18 @@ struct Endpoint<T> {
 #[derive(Default)]
 struct ThermalFilmWork {
     endpoints: Cell<usize>,
+    drives: Cell<usize>,
     materials: Cell<u64>,
+}
+
+impl ThermalFilmWork {
+    fn query_drive<E>(&self, maximum: usize) -> Result<(), ThermalFilmError<E>> {
+        if self.drives.get() >= maximum {
+            return Err(ThermalFilmError::DriveBudget);
+        }
+        self.drives.set(self.drives.get() + 1);
+        Ok(())
+    }
 }
 
 /// Forward the actual endpoint overrides to the original thermal rate owner.
@@ -450,7 +491,12 @@ impl<'m> ThermalCarreauFilm<'m> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<ThermalFilmReport<T>, ThermalFilmError<E>> {
         self.advance_metered(
-            target_s,
+            adaptive::ThermalFilmQuery {
+                start_s: self.thermal.time_s(),
+                midpoint_s: self.thermal.time_s() + 0.5 * (target_s - self.thermal.time_s()),
+                endpoint_s: target_s,
+                segment: 0,
+            },
             drive,
             limits,
             momentum,
@@ -465,7 +511,7 @@ impl<'m> ThermalCarreauFilm<'m> {
     #[allow(clippy::too_many_arguments)]
     fn advance_metered<T, E>(
         &mut self,
-        target_s: f64,
+        query: adaptive::ThermalFilmQuery,
         drive: FilmDrive,
         limits: FilmStepLimits,
         momentum: TransientCarreauControls,
@@ -475,7 +521,93 @@ impl<'m> ThermalCarreauFilm<'m> {
         cancelled: impl FnMut() -> bool,
         work: &ThermalFilmWork,
     ) -> Result<ThermalFilmReport<T>, ThermalFilmError<E>> {
+        self.advance_resolved_metered(
+            query,
+            limits,
+            momentum,
+            controls,
+            energy_guess_j,
+            |_, _| Ok(ThermalFilmDrive { drive, payload: () }),
+            |candidate, cells, _| resolve(candidate, cells),
+            cancelled,
+            work,
+            false,
+        )
+    }
+
+    /// Resolve body acceleration, wall speed and surface traction against EACH
+    /// original native caloric candidate, including derivative probes and the
+    /// independent final acceptance evaluation. Every candidate restarts the
+    /// same accepted velocity history. Source/heat callbacks must be repeatable
+    /// and free of physical side effects; discarded queries earn no work/heat.
+    ///
+    /// The drive callback sees the actual endpoint caloric state and the exact
+    /// interval query (segment zero for this unscheduled entry). The heat
+    /// callback sees that SAME drive and its owned source payload. It must not
+    /// deposit mechanical work or duplicate native viscous heat. Endpoint-held
+    /// feedback retains the original first-order coupled composition, support
+    /// and independent energy gates. Only the final accepted sample is retained.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_thermal_drive<T, D, E>(
+        &mut self,
+        target_s: f64,
+        limits: FilmStepLimits,
+        momentum: TransientCarreauControls,
+        controls: ThermalFilmControls,
+        energy_guess_j: &[f64],
+        drive: impl Fn(
+            adaptive::ThermalFilmQuery,
+            &DepositionSimulation<'m>,
+            &[CellId],
+        ) -> Result<ThermalFilmDrive<D>, E>,
+        resolve: impl Fn(
+            &DepositionSimulation<'m>,
+            &[CellId],
+            &ThermalFilmDriveSample<D>,
+        ) -> Result<ThermalFilmExchange<T>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThermalFilmReport<T, D>, ThermalFilmError<E>> {
+        let query = adaptive::ThermalFilmQuery {
+            start_s: self.thermal.time_s(),
+            midpoint_s: self.thermal.time_s() + 0.5 * (target_s - self.thermal.time_s()),
+            endpoint_s: target_s,
+            segment: 0,
+        };
+        self.advance_resolved_metered(
+            query,
+            limits,
+            momentum,
+            controls,
+            energy_guess_j,
+            |candidate, cells| drive(query, candidate, cells),
+            resolve,
+            cancelled,
+            &ThermalFilmWork::default(),
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_resolved_metered<T, D, E>(
+        &mut self,
+        query: adaptive::ThermalFilmQuery,
+        limits: FilmStepLimits,
+        momentum: TransientCarreauControls,
+        controls: ThermalFilmControls,
+        energy_guess_j: &[f64],
+        drive: impl Fn(&DepositionSimulation<'m>, &[CellId]) -> Result<ThermalFilmDrive<D>, E>,
+        resolve: impl Fn(
+            &DepositionSimulation<'m>,
+            &[CellId],
+            &ThermalFilmDriveSample<D>,
+        ) -> Result<ThermalFilmExchange<T>, E>,
+        cancelled: impl FnMut() -> bool,
+        work: &ThermalFilmWork,
+        thermal_drive: bool,
+    ) -> Result<ThermalFilmReport<T, D>, ThermalFilmError<E>> {
+        let target_s = query.endpoint_s;
         let opening_endpoints = work.endpoints.get();
+        let opening_drives = work.drives.get();
         let opening_materials = work.materials.get();
         let (next, report) = {
             let checkpoint = RefCell::new(cancelled);
@@ -497,6 +629,7 @@ impl<'m> ThermalCarreauFilm<'m> {
                 || self.thermal.cells().len() > controls.maximum_thermal_cells
                 || !(1..=1024).contains(&controls.maximum_newton_iterations)
                 || !(1..=1_000_000).contains(&controls.maximum_endpoint_evaluations)
+                || controls.maximum_drive_evaluations > 1_000_000
                 || controls.maximum_momentum_material_evaluations == 0
                 || !same_positive(controls.energy_scale_j, controls.energy_scale_j)
                 || !same_positive(
@@ -531,117 +664,135 @@ impl<'m> ThermalCarreauFilm<'m> {
             let material_evaluations = &work.materials;
             let cells = &self.cells;
             let area = self.area;
-            let evaluate =
-                |x: &[f64]| -> Result<BackwardEulerTrial<'m, Endpoint<T>>, ThermalFilmError<E>> {
-                    check()?;
-                    if evaluations.get() >= controls.maximum_endpoint_evaluations {
-                        return Err(ThermalFilmError::EndpointBudget);
-                    }
-                    evaluations.set(evaluations.get() + 1);
-                    let energy = x
-                        .iter()
-                        .map(|v| finite(v * controls.energy_scale_j))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let energy = step.resolvable_increments_j(&energy);
-                    step.evaluate_with_boundary_conductances(
-                        &energy,
-                        |candidate| {
-                            let exchange =
-                                resolve(candidate, cells).map_err(ThermalFilmError::Source)?;
-                            let mut temperatures = temperatures.borrow_mut();
-                            face_temperatures(
-                                candidate,
-                                cells,
-                                exchange.boundary_temperatures_k,
-                                &mut temperatures,
-                                &check,
-                            )?;
-                            let mut flow = trial.borrow_mut();
-                            flow.set_face_temperatures(&temperatures, || check().is_err())?;
-                            // Reset only accepted history; preceding thermal trials
-                            // are never a starting state. Private geometry/source
-                            // identities are fixed by new(); scratch is reusable.
-                            for i in 0..cells.len() {
-                                if i % 128 == 0 {
-                                    check()?;
-                                }
-                                flow.flow.velocity[i] = accepted.flow.velocity[i];
-                            }
-                            flow.flow.time = accepted.flow.time;
-                            let remaining = controls.maximum_momentum_material_evaluations
-                                - material_evaluations.get();
-                            if remaining == 0 {
-                                return Err(ThermalFilmError::MaterialBudget);
-                            }
-                            let budget = TransientCarreauControls {
-                                maximum_material_evaluations: momentum
-                                    .maximum_material_evaluations
-                                    .min(remaining),
-                                ..momentum
-                            };
-                            let mut heat = heat.borrow_mut();
-                            let mechanical =
-                                flow.step_with_heat(dt, drive, limits, budget, &mut heat, || {
-                                    check().is_err()
-                                })?;
-                            material_evaluations
-                                .set(material_evaluations.get() + mechanical.material_evaluations);
-                            if flow.accepted_time_s() != target_s {
-                                return Err(ThermalFilmError::Invalid(
-                                    "thermal and momentum endpoint clocks differ",
-                                ));
-                            }
-                            let BoundaryStepCoefficients {
-                                mut bulk,
-                                boundaries,
-                            } = exchange.heat;
-                            let rates = candidate.power_balance_observed(
-                                &EndpointRates {
-                                    sources: &bulk.sources_w,
-                                    links: &bulk.conductances_w_k,
-                                    boundaries: &boundaries,
-                                },
-                                || check(),
-                            )?;
-                            let other = finite(dt * rates.external_power_w)?;
-                            let other_cells = rates
-                                .net_power_w
-                                .into_iter()
-                                .map(|(id, rate)| Ok((id, finite(dt * rate)?)))
-                                .collect::<Result<BTreeMap<_, _>, DepositionError>>()?;
-                            let mut deposited = Dd::from_f64(0.0);
-                            for (&cell, &q) in cells.iter().zip(heat.iter()) {
+            let evaluate = |x: &[f64]| -> Result<
+                BackwardEulerTrial<'m, Endpoint<T, D>>,
+                ThermalFilmError<E>,
+            > {
+                check()?;
+                if evaluations.get() >= controls.maximum_endpoint_evaluations {
+                    return Err(ThermalFilmError::EndpointBudget);
+                }
+                evaluations.set(evaluations.get() + 1);
+                let energy = x
+                    .iter()
+                    .map(|v| finite(v * controls.energy_scale_j))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let energy = step.resolvable_increments_j(&energy);
+                step.evaluate_with_boundary_conductances(
+                    &energy,
+                    |candidate| {
+                        if thermal_drive {
+                            work.query_drive(controls.maximum_drive_evaluations)?;
+                        }
+                        let resolved = drive(candidate, cells).map_err(ThermalFilmError::Drive)?;
+                        check()?;
+                        let sample = ThermalFilmDriveSample {
+                            query,
+                            thermal_time_s: thermal_drive.then_some(candidate.time_s()),
+                            drive: resolved.drive,
+                            payload: resolved.payload,
+                        };
+                        let exchange =
+                            resolve(candidate, cells, &sample).map_err(ThermalFilmError::Source)?;
+                        let mut temperatures = temperatures.borrow_mut();
+                        face_temperatures(
+                            candidate,
+                            cells,
+                            exchange.boundary_temperatures_k,
+                            &mut temperatures,
+                            &check,
+                        )?;
+                        let mut flow = trial.borrow_mut();
+                        flow.set_face_temperatures(&temperatures, || check().is_err())?;
+                        // Reset only accepted history; preceding thermal trials
+                        // are never a starting state. Private geometry/source
+                        // identities are fixed by new(); scratch is reusable.
+                        for i in 0..cells.len() {
+                            if i % 128 == 0 {
                                 check()?;
-                                let joules = finite(area * q)?;
-                                let watts = finite(joules / dt)?;
-                                if joules < 0.0
-                                    || (q != 0.0 && joules == 0.0)
-                                    || (joules != 0.0 && watts == 0.0)
-                                {
-                                    return Err(DepositionError::Arithmetic.into());
-                                }
-                                deposited = deposited + Dd::from_f64(finite(dt * watts)?);
-                                let source = bulk.sources_w.entry(cell).or_insert(0.0);
-                                *source = finite(*source + watts)?;
                             }
-                            Ok::<_, ThermalFilmError<E>>(BoundaryStepCoefficients {
-                                bulk: StepCoefficients {
-                                    sources_w: bulk.sources_w,
-                                    conductances_w_k: bulk.conductances_w_k,
-                                    payload: Endpoint {
-                                        flow: mechanical,
-                                        exchange: bulk.payload,
-                                        deposited_heat_j: finite(deposited.to_f64())?,
-                                        other_heat_j: other,
-                                        other_cell_heat_j: other_cells,
-                                    },
+                            flow.flow.velocity[i] = accepted.flow.velocity[i];
+                        }
+                        flow.flow.time = accepted.flow.time;
+                        let remaining = controls.maximum_momentum_material_evaluations
+                            - material_evaluations.get();
+                        if remaining == 0 {
+                            return Err(ThermalFilmError::MaterialBudget);
+                        }
+                        let budget = TransientCarreauControls {
+                            maximum_material_evaluations: momentum
+                                .maximum_material_evaluations
+                                .min(remaining),
+                            ..momentum
+                        };
+                        let mut heat = heat.borrow_mut();
+                        let mechanical = flow.step_with_heat(
+                            dt,
+                            sample.drive,
+                            limits,
+                            budget,
+                            &mut heat,
+                            || check().is_err(),
+                        )?;
+                        material_evaluations
+                            .set(material_evaluations.get() + mechanical.material_evaluations);
+                        if flow.accepted_time_s() != target_s {
+                            return Err(ThermalFilmError::Invalid(
+                                "thermal and momentum endpoint clocks differ",
+                            ));
+                        }
+                        let BoundaryStepCoefficients {
+                            mut bulk,
+                            boundaries,
+                        } = exchange.heat;
+                        let rates = candidate.power_balance_observed(
+                            &EndpointRates {
+                                sources: &bulk.sources_w,
+                                links: &bulk.conductances_w_k,
+                                boundaries: &boundaries,
+                            },
+                            || check(),
+                        )?;
+                        let other = finite(dt * rates.external_power_w)?;
+                        let other_cells = rates
+                            .net_power_w
+                            .into_iter()
+                            .map(|(id, rate)| Ok((id, finite(dt * rate)?)))
+                            .collect::<Result<BTreeMap<_, _>, DepositionError>>()?;
+                        let mut deposited = Dd::from_f64(0.0);
+                        for (&cell, &q) in cells.iter().zip(heat.iter()) {
+                            check()?;
+                            let joules = finite(area * q)?;
+                            let watts = finite(joules / dt)?;
+                            if joules < 0.0
+                                || (q != 0.0 && joules == 0.0)
+                                || (joules != 0.0 && watts == 0.0)
+                            {
+                                return Err(DepositionError::Arithmetic.into());
+                            }
+                            deposited = deposited + Dd::from_f64(finite(dt * watts)?);
+                            let source = bulk.sources_w.entry(cell).or_insert(0.0);
+                            *source = finite(*source + watts)?;
+                        }
+                        Ok::<_, ThermalFilmError<E>>(BoundaryStepCoefficients {
+                            bulk: StepCoefficients {
+                                sources_w: bulk.sources_w,
+                                conductances_w_k: bulk.conductances_w_k,
+                                payload: Endpoint {
+                                    flow: mechanical,
+                                    exchange: bulk.payload,
+                                    drive: sample,
+                                    deposited_heat_j: finite(deposited.to_f64())?,
+                                    other_heat_j: other,
+                                    other_cell_heat_j: other_cells,
                                 },
-                                boundaries,
-                            })
-                        },
-                        || check(),
-                    )
-                };
+                            },
+                            boundaries,
+                        })
+                    },
+                    || check(),
+                )
+            };
             let difference = FallibleFiniteDifference::new(
                 count,
                 controls.finite_difference_step,
@@ -684,7 +835,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             )?;
             let native = endpoint.flow.flow;
             let kinetic = finite(area * native.kinetic_energy_change_j_m2)?;
-            let work = finite(
+            let mechanical_work_j = finite(
                 (Dd::from_f64(native.body_work_j_m2)
                     + Dd::from_f64(native.wall_work_j_m2)
                     + Dd::from_f64(native.surface_work_j_m2))
@@ -701,7 +852,7 @@ impl<'m> ThermalCarreauFilm<'m> {
             let combined = finite(
                 (Dd::from_f64(audit.stored_energy_change_j) + Dd::from_f64(kinetic)
                     - Dd::from_f64(endpoint.other_heat_j)
-                    - Dd::from_f64(work))
+                    - Dd::from_f64(mechanical_work_j))
                 .to_f64(),
             )?;
             if combined.abs() > controls.combined_energy_tolerance_j {
@@ -714,8 +865,10 @@ impl<'m> ThermalCarreauFilm<'m> {
                 flow: endpoint.flow,
                 thermal: audit,
                 exchange: endpoint.exchange,
+                drive: endpoint.drive,
                 nonlinear: result.report,
                 endpoint_evaluations: evaluations.get() - opening_endpoints,
+                drive_evaluations: work.drives.get() - opening_drives,
                 momentum_material_evaluations: material_evaluations.get() - opening_materials,
                 maximum_cell_residual_j,
                 deposited_viscous_heat_j: endpoint.deposited_heat_j,
@@ -726,7 +879,7 @@ impl<'m> ThermalCarreauFilm<'m> {
                     .collect::<Result<Vec<_>, _>>()?,
                 heat_partition_residual_j: partition,
                 kinetic_energy_change_j: kinetic,
-                mechanical_work_j: work,
+                mechanical_work_j,
                 other_heat_j: endpoint.other_heat_j,
                 other_cell_heat_j: endpoint.other_cell_heat_j,
                 combined_energy_residual_j: combined,

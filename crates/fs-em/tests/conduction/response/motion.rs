@@ -1,4 +1,7 @@
 //! Original nonlinear moving laws and independently reduced signed work.
+#[path = "motion/terminals.rs"]
+mod terminals;
+
 use super::*;
 use fs_em::conduction::motion::ConductionMotion;
 

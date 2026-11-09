@@ -31,6 +31,107 @@ fn circulating<O>(inner: O, rate: f64) -> Advected<O> {
     .unwrap()
 }
 
+fn observed_sdirk_amplification(decay_dt: f64) -> f64 {
+    let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+    (1.0 + (2.0 * gamma - 1.0) * decay_dt) / (1.0 + gamma * decay_dt).powi(2)
+}
+
+#[test]
+fn g1_observed_sdirk_interval_heat_uses_one_physical_preparation_and_acceptance() {
+    let law = Law { nonlinear_k: false, plateau: false };
+    let (thermal, conduction) = setup(&law, &[400.0], Some(300.0), vec![]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal, &conduction, &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(), || Ok(()),
+    ).unwrap();
+    let source = Forcing { constant_w: 3.0, interval_w: 5.0, ramp_w_s: 2.0,
+        maximum_evaluations: 1, ..Forcing::default() };
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    for graph_path in [false, true] {
+        let (next, accepted, report) = if graph_path {
+            graph.advance_sdirk2_observed_to(
+                &thermal, &source, 1.0, controls(1.0), &mut workspace, || Ok(()),
+            )
+        } else {
+            chain.advance_sdirk2_observed_to(
+                &thermal, &source, 1.0, controls(1.0), &mut workspace, || Ok(()),
+            )
+        }.unwrap();
+        // The held mean is 9 W: equilibrium 309 K, with the independent
+        // affine SDIRK stability function acting on the original 91 K excess.
+        let expected = 309.0 + 91.0 * observed_sdirk_amplification(1.0);
+        near(next.temperature_k(CellId(0)).unwrap(), expected, 1e-10);
+        near(report.energy.external_heat_j, expected - 400.0, 1e-9);
+        near(report.energy.residual_j, 0.0, 1e-9);
+        assert_eq!(accepted.energy_j, 9.0);
+        assert_eq!(accepted.accepted, [(0.0, 1.0, 6.0)]);
+        assert_eq!(accepted.begins, 1);
+        assert_eq!(accepted.evaluations, 1);
+        assert_eq!(accepted.transfer_evaluations, 1);
+        assert_eq!(report.energy.substeps, 1);
+        assert!(report.entropy.has_unclassified_sources);
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(source.energy_j, 0.0);
+    assert!(source.accepted.is_empty());
+}
+
+#[test]
+fn g1_observed_sdirk_uses_original_pairwise_flow_and_preserves_explicit_cfl() {
+    let law = Law { nonlinear_k: false, plateau: false };
+    let (thermal, conduction) = setup(&law, &[400.0, 200.0], None, vec![]);
+    let graph = ImplicitConductionGraph::new(
+        &thermal, &conduction, &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(), || Ok(()),
+    ).unwrap();
+    let flow = circulating((), 0.02).with_entropy_audit();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, accepted, report) = graph.advance_sdirk2_observed_to(
+        &thermal, &flow, 8.0, controls(10.0), &mut workspace, || Ok(()),
+    ).unwrap();
+    // The held flow gives dD/dt = -2*D - 8, so the affine equilibrium
+    // contrast is -4 K. Internal transfer power is never external supply.
+    let contrast = -4.0 + 204.0 * observed_sdirk_amplification(16.0);
+    near(next.temperature_k(CellId(0)).unwrap(), 300.0 + 0.5 * contrast, 1e-10);
+    near(next.temperature_k(CellId(1)).unwrap(), 300.0 - 0.5 * contrast, 1e-10);
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.stored_energy_change_j, 0.0, 1e-9);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(accepted.audit().substeps, 1);
+    near(accepted.audit().transported_mass_kg, 0.32, 1e-15);
+    near(accepted.audit().maximum_courant, 0.16, 1e-15);
+    near(accepted.entropy_audit().unwrap().advective_balance_residual_j_k, 0.0, 1e-12);
+    let fast = circulating((), 2.0);
+    let (_, accepted, report) = graph.advance_sdirk2_observed_to(
+        &thermal, &fast, 0.5, controls(10.0), &mut workspace, || Ok(()),
+    ).unwrap();
+    assert!(report.energy.substeps > 1);
+    assert!(accepted.audit().maximum_courant <= 0.8);
+    assert_eq!(flow.audit().substeps, 0);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn g3_empty_observed_sdirk_is_the_original_native_stage_path() {
+    let law = Law { nonlinear_k: false, plateau: false };
+    let (thermal, conduction) = setup(&law, &[400.0, 200.0], None, vec![]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (native, native_report) = chain.advance_sdirk2_to(
+        &thermal, 1.0, controls(0.5), &mut workspace, || Ok(()),
+    ).unwrap();
+    let (observed, (), observed_report) = chain.advance_sdirk2_observed_to(
+        &thermal, &(), 1.0, controls(0.5), &mut workspace, || Ok(()),
+    ).unwrap();
+    assert_eq!(observed.cells(), native.cells());
+    assert_eq!(observed_report, native_report);
+}
+
 struct ShiftedLaw {
     base: Law,
     datum: f64,

@@ -2,7 +2,8 @@
 //!
 //! Beams are incoherent or phase averaged: their absorption hazards add. Each
 //! original cell has one ground/singlet/triplet inventory, even when several
-//! directed paths cross it or traverse the cells in opposite orders. Molecular
+//! directed paths cross it, traverse cells in opposite orders, or return to a
+//! previously visited cell. Every visit retains its original path order. Molecular
 //! depths are cross section times segment length divided by ORIGINAL cell
 //! volume, per ground emitter. Cell averaging and quasistatic photon flight are
 //! the same physical closure as [`super::pump_column`].
@@ -24,7 +25,8 @@ use super::pump_column::{
 use super::saturation::{SaturableSingletTripletPlan, SaturableSingletTripletStep};
 use super::{SingletTripletDecay, SingletTripletError, finite, nonnegative, positive_product};
 
-/// One original cell visited once by this beam. Different beams may share it.
+/// One ordered traversal of an original cell. Later segments and other paths
+/// may revisit it; every occurrence shares that cell's single population.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SaturablePumpSegment<const B: usize> {
     pub cell_index: usize,
@@ -139,7 +141,6 @@ impl<const B: usize> SaturablePumpBeams<B> {
         let mut visits = vec![Vec::new(); models.len()];
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); models.len()];
         let mut indegree = vec![0usize; models.len()];
-        let mut last_visit = vec![None; models.len()];
         for (beam, path) in paths.iter().enumerate() {
             poll(&mut cancelled)?;
             if !path
@@ -153,12 +154,9 @@ impl<const B: usize> SaturablePumpBeams<B> {
             for (ordinal, segment) in path.segments.iter().enumerate() {
                 poll(&mut cancelled)?;
                 let index = segment.cell_index;
-                if index >= models.len() || last_visit[index] == Some(beam) {
-                    return Err(SingletTripletError::Invalid(
-                        "pump beam cell index or repeated cell",
-                    ));
+                if index >= models.len() {
+                    return Err(SingletTripletError::Invalid("pump beam cell index"));
                 }
-                last_visit[index] = Some(beam);
                 if !segment
                     .optical_depth_per_ground
                     .iter()

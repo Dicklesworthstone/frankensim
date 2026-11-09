@@ -3,7 +3,7 @@ use super::super::grid_refinement::Policy;
 use super::*;
 use fs_solver::LinearOp;
 
-const SCOPE: &str = "One bounded native refit inherits raw design controls and protected regions, rebuilds self-weight on the finer grid, and starts a separate optimizer with its own declared update and evaluation allowances. Geometry, Krylov and wall work remain cumulative. Until a completed candidate passes a fresh complete-load-family physical recheck, the selected design and its field export remain the immutable source design. Promotion does not establish cross-grid material descent or continuum feasibility; the promoted design receives its own enriched-grid assessment. Iteration histories, gradient audits and stopping diagnostics belong to their respective working grids.";
+const SCOPE: &str = "One bounded native refit inherits raw design controls and protected regions, rebuilds self-weight on the finer grid, and starts a separate optimizer with its own declared update and evaluation allowances. Geometry, Krylov and wall work remain cumulative. Until a completed candidate passes a fresh complete-load-family physical recheck, the selected design and its field export remain the immutable source design. Promotion does not establish cross-grid objective descent or continuum feasibility; the promoted design receives its own enriched-grid assessment. Iteration histories, gradient audits and stopping diagnostics belong to their respective working grids.";
 
 fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-grid-refinement-output", message)
@@ -92,6 +92,10 @@ pub(super) fn source(
     let Some(context) = &state.refinement else {
         return Ok(None);
     };
+    let config = spec.affine_load_space
+        .ok_or_else(|| invalid("missing source affine design goal"))?;
+    let expected_goal = document(goal_model(config).as_bytes())?;
+    let (objective, objective_unit) = objective_metadata(config.goal);
     let old = load(
         ledger,
         &format!("study-{}", context.source_receipt.to_hex()),
@@ -118,7 +122,7 @@ pub(super) fn source(
     let fields = document(design.as_bytes())?;
     let selection = report
         .str_field("selected_design")
-        .filter(|s| matches!(*s, "least-material-feasible" | "last-accepted"))
+        .filter(|s| *s == feasible_selection(config.goal) || *s == "last-accepted")
         .ok_or_else(|| invalid("missing retained source selection"))?
         .to_owned();
     let feasible = boolean(&report, "selected_feasible")?;
@@ -127,7 +131,11 @@ pub(super) fn source(
     if report.str_field("driver") != Some(AFFINE_LOAD_SPACE3_DRIVER)
         || report.str_field("study_id") != old.value.str_field("study_id")
         || report.str_field("producer") != old.value.str_field("producer")
+        || report.str_field("objective") != Some(objective)
+        || report.str_field("objective_unit") != Some(objective_unit)
+        || report.get("goal") != Some(&expected_goal)
         || fields.str_field("schema") != Some("sdf3-affine-load-space-design.v1")
+        || fields.get("goal") != Some(&expected_goal)
         || fields.str_field("selected_design") != Some(selection.as_str())
         || old.value.str_field("selected_design") != Some(selection.as_str())
         || boolean(&fields, "selected_feasible")? != feasible
@@ -213,16 +221,28 @@ impl Source {
         Ok(html)
     }
 
-    pub(super) fn assessment_html(&self) -> Result<String> {
+    pub(super) fn assessment_html(&self, config: Config) -> Result<String> {
         let assessment = field(&self.report, "grid_assessment")?;
         let result = field(assessment, "result")?;
         let coarse = field(result, "coarse")?;
         let fine = field(result, "fine")?;
+        let requirement = match config.goal {
+            AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => format!(
+                "The dilated volume cap is {:.8e}; coarse and fine volume fractions are {:.8e} and {:.8e}. The {:.8e} J compliance reference is a numerical normalization scale, not a physical upper bound.",
+                real(coarse, "volume_limit_fraction")?,
+                real(coarse, "dilated_volume_fraction")?,
+                real(fine, "dilated_volume_fraction")?,
+                real(coarse, "compliance_reference_j")?,
+            ),
+            AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => format!(
+                "The original physical compliance cap is {:.8e} J.",
+                real(coarse, "compliance_limit_j")?,
+            ),
+        };
         Ok(format!(
-            "<h2>Selected source grid assessment</h2><p>The original complete-family assessment is checked and unresolved. Its coarse and fine worst compliance values are {:.8e} J and {:.8e} J against the original cap {:.8e} J; joint constraints are {:.8e} and {:.8e}. The whole-family normalized compliance-model change is {:.8e}. This unchanged assessment belongs to the retained source design; the working candidate has not replaced it. All original signed-bound rows, sampled-strength evidence and inventory changes remain in the retained report JSON.</p>",
+            "<h2>Selected source grid assessment</h2><p>The original complete-family assessment is checked and unresolved. Its coarse and fine worst compliance values are {:.8e} J and {:.8e} J; joint constraints are {:.8e} and {:.8e}. {requirement} The whole-family normalized compliance-model change is {:.8e}. This unchanged assessment belongs to the retained source design; the working candidate has not replaced it. All original signed-bound rows, sampled-strength evidence, objective and inventory changes remain in the retained report JSON.</p>",
             real(coarse, "worst_compliance_j")?,
             real(fine, "worst_compliance_j")?,
-            real(coarse, "compliance_limit_j")?,
             real(coarse, "joint_constraint")?,
             real(fine, "joint_constraint")?,
             real(result, "normalized_model_change")?,
@@ -285,8 +305,14 @@ pub(super) fn render(
         ));
     }
     let source_selected = field(&source.report, "selected")?;
+    let goal = goal_model(config);
+    let (objective, objective_unit) = objective_metadata(config.goal);
+    let source_objective = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => source.compliance,
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => source.volume,
+    };
     let source_grid = format!(
-        "{{\"cells\":{},\"physical_nodes\":{},\"iterations_completed\":{},\"target_iterations\":{},\"optimization_status\":{},\"optimizer_work\":{},\"iterations_artifact\":{},\"selected_feasible\":{},\"dilated_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"joint_constraint\":{:.17e},\"assessment_status\":\"checked\",\"assessment_passed\":false}}",
+        "{{\"objective\":{objective:?},\"objective_unit\":{objective_unit:?},\"objective_value\":{source_objective:.17e},\"cells\":{},\"physical_nodes\":{},\"iterations_completed\":{},\"target_iterations\":{},\"optimization_status\":{},\"optimizer_work\":{},\"iterations_artifact\":{},\"selected_feasible\":{},\"dilated_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"joint_constraint\":{:.17e},\"assessment_status\":\"checked\",\"assessment_passed\":false}}",
         source.cells,
         source.nodes,
         integer(&source.receipt, "iterations_completed")?,
@@ -318,7 +344,7 @@ pub(super) fn render(
         .as_ref()
         .map_or_else(|| "null".into(), |reason| quoted(reason));
     let json = format!(
-        "{base},\"policy\":{},\"selected_generation\":{selected_generation},\"last_accepted_generation\":{generation},\"gradient_check_generation\":{generation},\"source_grid\":{source_grid},\"working_grid\":{working_grid},\"working_selected\":{working_selected},\"fresh_recheck\":{recheck},\"failure\":{failure},\"history_scope\":\"working-grid-only\",\"physical_budget_scope\":\"cumulative-across-source-candidate-assessments-and-restoration\",\"no_claim\":{}}}",
+        "{base},\"goal\":{goal},\"policy\":{},\"selected_generation\":{selected_generation},\"last_accepted_generation\":{generation},\"gradient_check_generation\":{generation},\"source_grid\":{source_grid},\"working_grid\":{working_grid},\"working_selected\":{working_selected},\"fresh_recheck\":{recheck},\"failure\":{failure},\"history_scope\":\"working-grid-only\",\"physical_budget_scope\":\"cumulative-across-source-candidate-assessments-and-restoration\",\"no_claim\":{}}}",
         policy(p),
         quoted(SCOPE),
     );

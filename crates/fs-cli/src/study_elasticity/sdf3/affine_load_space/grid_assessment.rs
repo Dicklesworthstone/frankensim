@@ -16,6 +16,15 @@ pub(crate) struct Policy {
     pub inventory_tolerance: f64,
 }
 impl Policy {
+    /// The optimized functional and the separately retained inventory have
+    /// different units and change gates in a fixed-volume stiffness design.
+    pub(super) fn objective_tolerance(self, goal: AffineLoadSpaceDesignGoal3) -> f64 {
+        match goal {
+            AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => self.compliance_tolerance,
+            AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => self.inventory_tolerance,
+        }
+    }
+
     pub(crate) fn validate(self, spec: &Spec) -> Result<()> {
         let fine_leaves = spec
             .level
@@ -85,20 +94,22 @@ pub(super) struct Outcome {
     pub geometry: QuadratureWork3,
 }
 impl Outcome {
-    pub(super) fn passed(&self, policy: Policy) -> bool {
+    pub(super) fn passed(&self, policy: Policy, goal: AffineLoadSpaceDesignGoal3) -> bool {
         self.status == "checked"
             && self.report.as_ref().is_some_and(|r| {
-                r.stable_and_feasible_with_constraint_tolerances(
-                    policy.compliance_tolerance,
-                    policy.response_tolerance,
-                    policy.stress_tolerance,
-                ) && r.inventory.as_ref().is_some_and(|i| {
-                    i.volume_change.is_finite()
-                        && i.volume_change >= 0.0
-                        && i.volume_change <= policy.inventory_tolerance
-                }) && r
-                    .objective_change()
-                    .is_some_and(|v| v <= policy.inventory_tolerance)
+                r.goal == Some(goal)
+                    && r.stable_and_feasible_with_constraint_tolerances(
+                        policy.compliance_tolerance,
+                        policy.response_tolerance,
+                        policy.stress_tolerance,
+                    )
+                    && r.inventory.as_ref().is_some_and(|i| {
+                        i.volume_change.is_finite()
+                            && i.volume_change >= 0.0
+                            && i.volume_change <= policy.inventory_tolerance
+                    })
+                    && r.objective_change()
+                        .is_some_and(|v| v <= policy.objective_tolerance(goal))
             })
     }
 }
@@ -211,7 +222,7 @@ pub(super) fn run(
                         &basis,
                         config.options.robustness,
                         &load_policy,
-                        GOAL,
+                        config.goal,
                         ReferenceAffineLoadSpaceConstraints3 {
                             responses: coarse,
                             stress: config.stress,
@@ -298,7 +309,9 @@ pub(super) fn attach(
     );
     state.status = if out.status != "checked" {
         out.status
-    } else if state.optimization_status == "completed" && !out.passed(policy) {
+    } else if state.optimization_status == "completed"
+        && !spec.affine_load_space.is_some_and(|config| out.passed(policy, config.goal))
+    {
         "grid-unresolved"
     } else {
         state.optimization_status

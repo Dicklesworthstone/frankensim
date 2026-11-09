@@ -4492,3 +4492,122 @@ stationary transport, before any wall entry, with `native cell mass routes do
 not close to roundoff`; that untouched baseline path is not claimed green.
 Full Cargo/workspace validation remains outside this focused execution because
 the async runtime dependency exceeds the environment's 8 GiB memory limit.
+
+## Original phase-dependent conductivity on native caloric tensor cells
+
+`TensorConductivityLaw::caloric_conductivity` is an optional original-energy
+constitutive route. Its `TensorCaloricConductivityPoint` contains the absolute
+specific energy (including its original datum), recovered temperature, storage
+basis and original caloric identity. Returning `None` retains the existing
+interval-integrated K(T) route and its original inverse-query behavior.
+Returning `Some(TensorCaloricConductivity)` explicitly selects cellwise K(e)
+on the existing HMM geometry, with a physical SPD tensor and finite symmetric
+analytic dK/de. The derivative may be negative or indefinite. A Kelvin-only
+entry never invents an energy or a phase fraction for this route.
+
+Every cell/face link uses that trial cell's tensor. The original heat is
+`q_f = -sum_g M_fg(K(e_c)) * (T_g - T_c)`, and the native Newton column is
+`dq_f/de_c = B_f(K) * dT/de - sum_g M_fg(dK/de) * (T_g - T_c)`.
+This retains phase-dependent transport even on an exactly isothermal latent
+plateau. Face unknowns remain Kelvin and contacts retain the two original
+half-cell resistances plus the authored contact. Signed cell derivatives are
+not clamped; condensation still requires a finite positive total local
+diagonal including physical storage and sinks. A nonpositive diagonal is a
+bounded refusal, not a claim that every nonlinear state is solvable. No face
+enthalpy, apparent heat capacity, duplicate latent inventory or new heat owner
+is introduced. Backward Euler, SDIRK2, adaptive, radiating and electrothermal
+caloric entries inherit this route through their shared spatial owner.
+
+`IsotropicPhaseConductivity` borrows one original `PreparedPhaseConductivity`
+without copying or resampling its paths. Constructing the view explicitly
+declares isotropy. It admits strictly positive retained conductivity, checks
+the original enthalpy basis and caloric identity, and preserves original
+source support and analytic derivatives. It also implements caloric storage:
+using the same view for storage retains restricted bounds and the source's
+selected one-sided dT/dh at an endpoint. Original density and entropy remain
+with the original caloric curve. Kelvin-only queries are refused because
+temperature alone cannot select latent inventory. The hot path uses the
+prepared owner's bounded interval lookup, without table allocation or source
+selection. This cellwise K(h) model does not claim an exact Kelvin Kirchhoff
+integral or replace the separate material P1 transport owner. Geometry and
+reference mass remain fixed; no expansion or moving geometric fronts are
+inferred.
+
+All 19 tests in the two actual numerical leaf modules pass with the pinned
+Rust compiler. They include full-tensor analytic/finite-difference Jacobians,
+latent and sensible derivatives, zero-dK/de parity, and signed Schur recovery
+against a complete independent 7-by-7 solve. Four new integration groups
+cover constant-Kelvin phase heating and datum shifts, BE refinement, spatial
+contact transfer with independent BE/SDIRK equations, source/cancellation
+refusals, and an actual MaterialCard/prepared-source solve crossing a latent
+conductivity knot. Their independent scalar references and pinned parser
+checks pass. The integration groups have not yet executed in a full native
+fs-lbm build; numerical-leaf execution is not integration-build evidence.
+
+### Thermal feedback in resolved film mechanics
+
+`ThermalCarreauFilm::advance_with_thermal_drive` and `advance_adaptive_with_thermal_drive` resolve body acceleration, wall velocity and surface traction against every actual original caloric endpoint candidate, including derivative probes and the independent final evaluation. Each proposal restarts the same accepted momentum history. Heat/interface resolution receives the exact candidate drive and its owned source payload. The accepted report retains that sample, its interval query, explicit thermal endpoint time and unchanged payload; the adaptive report retains only accepted fine-step samples in chronological order. Payloads need not implement Clone.
+
+The prescribed `advance` path retains its held drive, and prescribed `advance_adaptive` still samples its source exactly once per native interval at the authored midpoint. Thermal derivative probes do not multiply prescribed callback queries. All modes share the original nonlinear residual and adaptive controller. A separate drive-query ceiling and actual count span the complete operation, including discarded comparisons and failed queries; existing endpoint, material and original native-step ceilings remain independent. Callbacks must remain repeatable and free of physical side effects.
+
+Original body, wall and surface work remain separate signed mechanical exchanges. Only the original resolved viscous loss enters caloric storage; source payloads cannot replace physical accounting. Endpoint-held feedback retains the existing first-order coupled composition, event/left-limit semantics, local state and transfer error indicators, original source/rate/support limits and independent energy gates. A source, budget, physical or cancellation refusal publishes no partial window. No actuator model, thermal expansion, changing mass or new constitutive fit is inferred.
+
+Four G1/G3/G4 regression groups are authored for an independent one-cell momentum/heat root with the original positive Arrhenius viscosity, transient refinement against continuous equations across a scheduled reversal, exact prescribed/feedback parity and callback counts, and late query-budget/source/cancellation rollback with retained source identity. Independent scalar reference calculations and pinned Rust 2024 parsing/format checks passed. The new Rust tests remain uncompiled and unexecuted because the prior bounded material/solver build setup was lost with the execution environment; no full-crate Cargo or runtime result is claimed.
+## Material enthalpy in original immersed-body convection
+
+`ThermalOpenField3::set_immersed_body_caloric` and the matching
+`BoussinesqOpenGrid3` method bind one newly installed independent immersed
+body to its original immutable `EquilibriumEnthalpyPhaseCurve`. Explicit
+fixed mass, enthalpy span, temperature origin/scale and fluid-cell capacity
+convert the SAME native thermal coordinate to SI. Binding must reproduce
+the installed initial temperature exactly; rebinding, post-exchange binding
+and any conducting body/voxel graph are refused before mutation.
+All caloric bodies bound to one field must share identical temperature
+origin/scale and reference fluid-cell capacity, preserving one physical
+interpretation of the shared native fluid traces and summed heat.
+
+The original body now retains one accepted `ImmersedCaloricState3`, including
+the actual material/phase identity. Its native temperature is a derived cache;
+the initial fixed capacity is inactive declaration data when this state is
+present. The retained Arc preserves the original curve and source receipts.
+The original material query supplies exact affine-Cp sensible calorics and
+isothermal latent plateaus without fitting, extrapolation, phase smoothing or
+an artificial apparent heat capacity. Fixed mass never follows chart density.
+
+The same post-collision interface traces enter one bounded backward-Euler
+balance in specific enthalpy. Safeguarded Newton/bisection uses the original
+T(h) derivative, including exactly zero on a latent plateau. Only the required
+side of the admitted source bracket is queried; a bulk-fluid temperature
+outside the solid material span does not demand an irrelevant material query.
+Actual reflected incoming-minus-outgoing heat and actual representable
+m*(h_new-h_old) independently pass the original local and joint fluid/solid
+balance checks, as well as the authored physical caloric tolerance. Source
+heat is counted once; no latent-heat source is added. Cancellation is polled
+at each bounded iteration/source bracket and the original streaming work.
+Native populations, clocks, caloric state and receipts publish together only
+after success. There is no per-step allocation or new thermal trajectory.
+
+This capability is for isothermal retained bodies with fixed geometry and
+fixed authored interface resistance, including a lumped phase-change store.
+It does not remove the obstacle when liquid fraction grows, model liquid
+motion, resolve internal gradients, update k(T), infer volume from density,
+or close expansion/pressure work. Those approximations require caller
+justification. Spatial nonlinear caloric voxel graphs and the developing
+channel Nusselt benchmark remain outside this delivery.
+
+Twenty-eight original immersed-owner tests passed in a bounded scalar source
+projection, including eight new groups: constant-capacity parity and actual
+original affine-Cp calorics against an independent quadratic, exact melting
+and freezing plateaus and phase crossings, SI/native energy closure,
+source-domain/work/representability refusal, and cancellation with exact retry.
+The projection compiled complete original fs-blake3, fs-obs, fs-math,
+fs-sparse, fs-qty, fs-evidence, fs-ivl and fs-matdb dependencies. The original
+material phase core, source ingress, source-receipt types, caloric derivatives
+and identity methods were retained, omitting only unrelated phase children.
+The exercised native scalar kernels, immersed owner, sparse paths and tests
+were original. The unused native buoyancy wrapper and tensor constructors
+were omitted; the retained unused tensor carrier/shape methods used the
+thermal-owner error alias and no tensor was constructed. Full Cargo and the
+public Boussinesq wrapper remain uncompiled in this environment. These tests
+establish local implementation behavior, not spatial convergence, empirical
+PCM validation or a complete multiphysics pressure-work account.

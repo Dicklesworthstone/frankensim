@@ -391,6 +391,27 @@ impl<'a> ImplicitConductionGraph<'a> {
             .advance_observed_to(thermal, observer, target_s, controls, workspace, checkpoint)
     }
 
+    /// Native SDIRK2 stages with one transactional observed interval. The chain
+    /// entry point documents held source/transfer quadrature, observer history,
+    /// retry and fixed-window admission. Both stages share this graph's original
+    /// sparse residual, tangent and whole-call linear work budget.
+    pub fn advance_sdirk2_observed_to<'m, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        observer: &O,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, O, ImplicitConductionReport),
+        ImplicitConductionObservedError<O::Error>,
+    > {
+        self.inner.advance_sdirk2_observed_to(
+            thermal, observer, target_s, controls, workspace, checkpoint,
+        )
+    }
+
     /// Advance with the original enthalpy/temperature/phase step-doubling owner.
     /// All coarse, fine and rejected trials share one Krylov iteration budget.
     pub fn advance_adaptive_to<'m>(

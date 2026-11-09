@@ -248,6 +248,8 @@ pub mod scenario_magnetic;
 pub mod scenario_pressure;
 /// Atomic mixed velocity-inlet and pressure-outlet control updates.
 pub mod scenario_open_boundary;
+/// Scenario instrument response on the original accepted finite-cell heat path.
+pub mod scenario_sensor;
 pub mod scenario_velocity;
 pub mod scenario_wall_velocity;
 pub mod selector;
