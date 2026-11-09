@@ -44,6 +44,9 @@ pub mod adaptive;
 /// Source-owned spatial mechanical drives resolved at the actual thermal endpoint.
 pub mod drive;
 
+/// Original RCR/inertance ports resolved at the same thermal endpoint.
+pub mod windkessel;
+
 /// Source-density buoyancy on the same coupled native thermal/momentum owner.
 pub mod boussinesq;
 use boussinesq::LaminarBuoyancyReport;
@@ -344,20 +347,38 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             duration_s,
             controls.momentum,
             |point, reference| {
-                if cx.checkpoint().is_err() {
-                    return Err(material_error("coupled flow/enthalpy operation cancelled"));
-                }
-                let temperature = temperatures[point.cell];
-                let source = resolve_material(point, temperature, self.flow.material())?;
-                let material = thermal_source(source, temperature)?;
-                if material.state.transport().density_kg_m3() != reference.density_kg_m3() {
-                    return Err(material_error(
-                        "original fixed-density thermal flow must retain reference density",
-                    ));
-                }
-                Ok(material)
+                self.resolve_laminar_material(
+                    cx,
+                    point,
+                    temperatures[point.cell],
+                    reference,
+                    resolve_material,
+                )
             },
         )
+    }
+
+    // The original thermal source and density admission are shared by every
+    // fixed-density endpoint, including dynamically loaded hydraulic ports.
+    fn resolve_laminar_material<G: ThermalFluidTransport>(
+        &self,
+        cx: &Cx<'_>,
+        point: MaterialFluxRheologyPoint,
+        temperature: f64,
+        reference: &FluidTransportState,
+        resolve_material: &impl Fn(MaterialFluxRheologyPoint, f64, &F) -> Result<G, MaterialError>,
+    ) -> Result<LaminarThermalMaterial<G>, MaterialError> {
+        if cx.checkpoint().is_err() {
+            return Err(material_error("coupled flow/enthalpy operation cancelled"));
+        }
+        let source = resolve_material(point, temperature, self.flow.material())?;
+        let material = thermal_source(source, temperature)?;
+        if material.state.transport().density_kg_m3() != reference.density_kg_m3() {
+            return Err(material_error(
+                "original fixed-density thermal flow must retain reference density",
+            ));
+        }
+        Ok(material)
     }
 
     // Held inputs retain their existing entry point and original routes.

@@ -4,6 +4,7 @@ mod adaptive;
 mod buoyancy;
 mod driven;
 mod scheduled;
+mod windkessel;
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
