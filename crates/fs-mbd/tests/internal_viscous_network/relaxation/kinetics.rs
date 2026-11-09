@@ -45,7 +45,7 @@ fn g3_identity_kinetics_is_the_original_full_tensor_source_bit_for_bit() {
         assert_eq!(source.effective_damping(e), Some(&links[e].viscous.damping));
         assert_eq!(
             source.effective_relaxation_time_s(e, 0),
-            Some(links[e].branches[0].relaxation_time_s())
+            Some(links[e].branches[0].relaxation_time_s().unwrap())
         );
     }
     assert_eq!(source.effective_damping(3), None);
@@ -83,7 +83,7 @@ fn g1_nonuniform_kelvin_and_maxwell_shifts_match_the_original_physical_ode() {
         link.viscous.damping = link.viscous.damping.scaled(viscosity[e]).unwrap();
         link.branches[0] = SpatialRelaxationBranch::from_gram_rows(
             *links[e].branches[0].gram_rows(),
-            links[e].branches[0].relaxation_time_s() * times[e][0],
+            links[e].branches[0].relaxation_time_s().unwrap() * times[e][0],
         )
         .unwrap();
         link
@@ -154,7 +154,7 @@ fn g1_nonuniform_kelvin_and_maxwell_shifts_match_the_original_physical_ode() {
         );
         assert_eq!(
             source.effective_relaxation_time_s(e, 0),
-            Some(shifted[e].branches[0].relaxation_time_s())
+            Some(shifted[e].branches[0].relaxation_time_s().unwrap())
         );
     }
     assert_eq!(links, original);
@@ -250,7 +250,7 @@ fn g1_rate_changes_continue_each_original_history_without_storage_reset_or_doubl
     for e in 0..2 {
         let mut heat = 0.0;
         for b in 0..memory[e].len() {
-            let original_tau = links[e].branches[b].relaxation_time_s();
+            let original_tau = links[e].branches[b].relaxation_time_s().unwrap();
             let clock =
                 0.1 / (original_tau * first_times[e][b]) + 0.3 / (original_tau * next_times[e][b]);
             assert_eq!(

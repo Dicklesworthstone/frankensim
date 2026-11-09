@@ -74,7 +74,7 @@ fn g1_calibrated_isothermal_kinetics_match_independent_shifted_body_history_and_
         near(out.shift_factors()[0], factor, 4e-15);
         assert_eq!(out.temperatures_k(), [300.0]);
         assert_eq!(out.law_evaluations(), 1);
-        assert_eq!(fixture.branches[0][0].relaxation_time_s(), 0.2);
+        assert_eq!(fixture.branches[0][0].relaxation_time_s(), Some(0.2));
         assert_eq!(fixture.memory[0][0][0], 0.6);
         near(out.report().combined_energy_residual_j, 0.0, 1e-10);
     }

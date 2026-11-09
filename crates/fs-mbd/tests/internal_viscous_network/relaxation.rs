@@ -2,6 +2,8 @@
 
 #[path = "relaxation/kinetics.rs"]
 mod kinetics;
+#[path = "relaxation/equilibrium.rs"]
+mod equilibrium;
 use super::*;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     driven::{DrivenViscousNetworkLimits, PreparedDrivenViscousNetwork},
@@ -321,12 +323,12 @@ fn rhs(
         }
         for i in 0..6 {
             out[18 + 6 * e + i] = (0..6).map(|j| l[i][j] * s[j]).sum::<f64>()
-                - y[18 + 6 * e + i] / branch.relaxation_time_s();
+                - y[18 + 6 * e + i] / branch.relaxation_time_s().unwrap();
         }
         out[36 + e] = (0..6)
             .map(|i| {
                 viscous[i] * s[i]
-                    + y[18 + 6 * e + i] * y[18 + 6 * e + i] / branch.relaxation_time_s()
+                    + y[18 + 6 * e + i] * y[18 + 6 * e + i] / branch.relaxation_time_s().unwrap()
             })
             .sum();
         out[39 + e] = (0..6).map(|i| efforts[e][i] * s[i]).sum();

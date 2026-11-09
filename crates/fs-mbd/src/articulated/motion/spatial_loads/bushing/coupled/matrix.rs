@@ -43,6 +43,8 @@ pub struct PassiveBushingMatrix {
     native: [[f64; 6]; 6],
     scales: [f64; 6],
     gram: [[f64; 6]; 6],
+    // Explicit source factors stay in physical coordinates without a round trip.
+    physical_gram: bool,
     diagonal: bool,
     reconstruction_residual: f64,
 }
@@ -177,8 +179,80 @@ impl PassiveBushingMatrix {
             native,
             scales,
             gram,
+            physical_gram: false,
             diagonal,
             reconstruction_residual,
+        })
+    }
+
+    /// Admit an original physical Gram factor without refactorization.
+    ///
+    /// Rows map the six work-conjugate SI coordinates to energy/loss amplitudes.
+    /// All rows, cross terms and exact free directions survive. The native form
+    /// is their compensated product L^T L; no pivot, eigenspace, clipping or
+    /// diagonal approximation is introduced. Explicit physical scales remain
+    /// admission/reporting data and never change these original factor entries.
+    pub fn from_gram_rows(
+        rows: [[f64; 6]; 6],
+        scales: BushingCoordinateScales,
+    ) -> Result<Self, BushingMatrixError> {
+        use fs_math::dd::Dd;
+        if [scales.translation_m, scales.rotation_rad]
+            .into_iter()
+            .any(|x| !x.is_finite() || x <= 0.0)
+            || rows.iter().flatten().any(|x| !x.is_finite())
+        {
+            return Err(BushingMatrixError(
+                "finite original factors and positive physical scales required",
+            ));
+        }
+        let scales = [
+            scales.translation_m,
+            scales.translation_m,
+            scales.translation_m,
+            scales.rotation_rad,
+            scales.rotation_rad,
+            scales.rotation_rad,
+        ];
+        let mut native = [[0.0; 6]; 6];
+        for i in 0..6 {
+            for j in 0..=i {
+                let value = rows
+                    .iter()
+                    .fold(Dd::ZERO, |sum, row| {
+                        sum + Dd::from_f64(row[i]) * Dd::from_f64(row[j])
+                    })
+                    .to_f64();
+                let scaled = value * scales[i] * scales[j];
+                if !value.is_finite() || !scaled.is_finite() || (value != 0.0 && scaled == 0.0) {
+                    return Err(BushingMatrixError(
+                        "original factor form or congruence is unrepresentable",
+                    ));
+                }
+                native[i][j] = value;
+                native[j][i] = value;
+            }
+            if native[i][i] == 0.0 && rows.iter().any(|row| row[i] != 0.0) {
+                return Err(BushingMatrixError(
+                    "nonzero original factor has unrepresentable stiffness",
+                ));
+            }
+            for row in &rows {
+                let scaled = row[i] * scales[i];
+                if !scaled.is_finite() || (row[i] != 0.0 && scaled == 0.0) {
+                    return Err(BushingMatrixError(
+                        "original factor congruence is unrepresentable",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            native,
+            scales,
+            gram: core::array::from_fn(|i| core::array::from_fn(|j| rows[j][i])),
+            physical_gram: true,
+            diagonal: false,
+            reconstruction_residual: 0.0,
         })
     }
 
@@ -221,6 +295,7 @@ impl PassiveBushingMatrix {
                 native: [[0.0; 6]; 6],
                 scales: self.scales,
                 gram: [[0.0; 6]; 6],
+                physical_gram: self.physical_gram,
                 diagonal: true,
                 reconstruction_residual: 0.0,
             });
@@ -252,7 +327,11 @@ impl PassiveBushingMatrix {
                 continue;
             }
             for j in 0..6 {
-                let value = next.gram[i][j] / diagonal_roots[i];
+                let value = if next.physical_gram {
+                    product(next.gram[i][j], self.scales[i])? / diagonal_roots[i]
+                } else {
+                    next.gram[i][j] / diagonal_roots[i]
+                };
                 if !value.is_finite() || (next.gram[i][j] != 0.0 && value == 0.0) {
                     return Err(BushingMatrixError("scaled passive factor is unresolved"));
                 }
@@ -302,7 +381,9 @@ impl PassiveBushingMatrix {
         let mut result = [[0.0; 6]; 6];
         for i in 0..6 {
             for j in 0..6 {
-                let value = if self.diagonal {
+                let value = if self.physical_gram {
+                    self.gram[i][j]
+                } else if self.diagonal {
                     if i == j {
                         fs_math::det::sqrt(self.native[i][i])
                     } else {
@@ -328,7 +409,23 @@ impl PassiveBushingMatrix {
         if value.iter().any(|x| !x.is_finite()) {
             return Err(BushingMatrixError("finite native strain/rate required"));
         }
-        let (effort, quadratic) = if self.diagonal {
+        let (effort, quadratic) = if self.physical_gram {
+            use fs_math::dd::Dd;
+            let modes = core::array::from_fn::<_, 6, _>(|j| {
+                (0..6).fold(Dd::ZERO, |sum, i| {
+                    sum + Dd::from_f64(self.gram[i][j]) * Dd::from_f64(value[i])
+                })
+            });
+            let force = core::array::from_fn(|i| {
+                (0..6)
+                    .fold(Dd::ZERO, |sum, j| {
+                        sum + Dd::from_f64(self.gram[i][j]) * modes[j]
+                    })
+                    .to_f64()
+            });
+            let quadratic = modes.iter().fold(Dd::ZERO, |sum, mode| sum + *mode * *mode);
+            (force, quadratic.to_f64())
+        } else if self.diagonal {
             let force = core::array::from_fn::<_, 6, _>(|i| self.native[i][i] * value[i]);
             let quadratic = (value[0] * force[0] + value[1] * force[1] + value[2] * force[2])
                 + (value[3] * force[3] + value[4] * force[4] + value[5] * force[5]);

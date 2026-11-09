@@ -10221,3 +10221,51 @@ Focused regression fixtures compare both analytic bases with an independent
 absolute-velocity ODE and power quadrature, compose actual force/bath
 endpoints, check Galilean heat/impulse/work transformations, resolve tiny-drag
 heat, retain exact forced co-acceleration, and exercise interior-slip admission.
+
+### Complete lossless equilibrium on the spatial material-memory graph
+
+SpatialMemoryEvolution distinguishes a finite positive Maxwell time from an
+explicit Equilibrium channel. SpatialRelaxationBranch::from_equilibrium_gram_rows
+retains all six authored factor rows L and complete elastic amplitudes a. The
+same native work port gives a'=L*s, wrench=L^T*a and storage=|a|^2/2; its resistance
+and positive heat rows are exactly zero. No infinite/large surrogate time,
+rest displacement, Log(R) spring or material coefficient is inferred. Initial
+equilibrium memory is supplied explicitly, and moving geometry retains the
+existing objective corotated rate-law semantics.
+
+Equilibrium and Maxwell channels share the original simultaneous full-graph
+pHS flow, held drive, native wrench transport and independently gated kinetic,
+memory, work and heat accounts. Every channel remains in the complete state
+and resource bounds. Exactly witnessed null-stress equilibrium histories
+superpose unchanged, including beside tiny relaxing histories; they generate
+no heat and are never dropped or projected into a replacement basis.
+
+The typed evolution getter retains the physical distinction. The original
+relaxation_time_s getter now returns Some(finite_time) for Maxwell and None
+for equilibrium. Prepared effective_evolution distinguishes a lossless channel
+from an absent index; effective_relaxation_time_s returns only finite Maxwell
+times. HeldRelaxationKinetics still requires a finite positive time ratio for
+each original channel, but leaves Equilibrium exactly lossless. Kelvin scales
+and Maxwell times retain their prior coefficient admission. A kinetic update
+does not change equilibrium factors, stored energy or complete history.
+
+PassiveBushingMatrix::from_gram_rows admits an explicitly supplied physical
+factor without a second semidefinite factorization. The compensated full
+L^T*L supplies its native SI matrix; original physical rows and coordinate
+scales remain retained, including dependent/zero directions and weak positive
+rows. Finite coefficients, physical congruence and representability are
+checked in fixed-size allocation-free work. Existing matrix constructors keep
+their original arithmetic. Scaling a factor-authored form preserves those
+same physical directions rather than refactoring its rounded matrix.
+
+Verification: Four focused additions passed natively: exact lossless forced
+oscillation with signed work and zero heat; complete equilibrium/Maxwell/Kelvin
+recoil against an independent forced ODE and exact-clock continuation; strong
+lossless null history beside tiny Maxwell memory/heat with shifted kinetics
+and atomic retry; and unchanged original Kelvin factor rows under physical
+scaling, including dependent and weak directions. All fourteen pre-existing
+fixed/moving hereditary and kinetics groups also passed (18/18 total). These
+bounded isolated builds execute the actual native MBD/time, pHS and linear
+algebra numerical owners with no numerical substitutes; they are not a full
+workspace build. Existing thermal getter assertions were adapted to the typed
+finite-time API without changing thermal mechanics or heat routing.

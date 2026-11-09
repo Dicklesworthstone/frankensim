@@ -28,7 +28,7 @@ fn g1_moving_held_kinetics_matches_original_effective_laws_and_is_atomic() {
         link.viscous.damping = link.viscous.damping.scaled(viscosity[e]).unwrap();
         link.branches[0] = SpatialRelaxationBranch::from_gram_rows(
             *links[e].branches[0].gram_rows(),
-            links[e].branches[0].relaxation_time_s() * times[e][0],
+            links[e].branches[0].relaxation_time_s().unwrap() * times[e][0],
         )
         .unwrap();
         link

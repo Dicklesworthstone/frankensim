@@ -138,8 +138,8 @@ fn history_rhs(
         out.body.h[b] = out.body.h[b].add(q[b].rotate_world_to_body(rb.cross(force).add(couple)));
         for c in 0..6 {
             out.memory[e][c] = (0..6).map(|j| l[c][j] * twist[j]).sum::<f64>()
-                - s.memory[e][c] / branch.relaxation_time_s();
-            out.body.heat[e] += s.memory[e][c] * s.memory[e][c] / branch.relaxation_time_s();
+                - s.memory[e][c] / branch.relaxation_time_s().unwrap();
+            out.body.heat[e] += s.memory[e][c] * s.memory[e][c] / branch.relaxation_time_s().unwrap();
             out.work[e] += efforts[e][c] * twist[c];
         }
     }

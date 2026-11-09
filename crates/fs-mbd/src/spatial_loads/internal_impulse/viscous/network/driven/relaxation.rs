@@ -1,7 +1,8 @@
 //! Generalized Maxwell histories on the complete native spatial graph.
 //!
-//! Each original branch supplies six material-frame Gram rows L and a positive
-//! time tau. Its COMPLETE elastic memory a obeys a' = L s - a/tau,
+//! Each original channel supplies six material-frame Gram rows L and an explicit
+//! Maxwell time or lossless equilibrium mode. COMPLETE elastic memory obeys
+//! a' = L s - rate*a (rate=1/tau for Maxwell, exactly zero for equilibrium),
 //! wrench = L^T a, storage = |a|^2/2 and heat rate = |a|^2/tau.
 //! The original body kinetic coordinates y obey
 //! y' = B(f - C B^T y - sum L^T a), s = B^T y.
@@ -10,8 +11,10 @@
 //! including uncoupled rows and equal-time branches, survives.
 //!
 //! This is an explicitly authored corotated rate law on the native wrench
-//! port. It supplies no equilibrium spring, rest geometry, fitted coefficient,
-//! strain validity bound, contact constraint or measured-material claim.
+//! port. An equilibrium channel stores the integral of THIS material rate;
+//! it is not an inferred finite-rotation/rest-geometry spring. Geometry, source
+//! strain validity, contact constraints and measured-material claims belong
+//! to the consuming material owner.
 
 use super::super::super::PassiveBushingMatrix;
 use super::{
@@ -40,29 +43,86 @@ use fs_phs::{
     },
 };
 
-/// One original PSD spatial stiffness factor and relaxation time.
+/// Physical evolution of one original elastic energy coordinate bank.
+/// Equilibrium is exactly lossless; it is never represented by an infinite
+/// or artificially long Maxwell time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpatialMemoryEvolution {
+    Maxwell { relaxation_time_s: f64 },
+    Equilibrium,
+}
+impl SpatialMemoryEvolution {
+    /// A finite positive Maxwell clock, or no relaxation clock for equilibrium.
+    pub const fn relaxation_time_s(self) -> Option<f64> {
+        match self {
+            Self::Maxwell { relaxation_time_s } => Some(relaxation_time_s),
+            Self::Equilibrium => None,
+        }
+    }
+    pub fn relaxation_rate_per_s(self) -> f64 {
+        match self {
+            Self::Maxwell { relaxation_time_s } => relaxation_time_s.recip(),
+            Self::Equilibrium => 0.0,
+        }
+    }
+    fn scaled(self, scale: f64) -> Result<Self, RelaxationNetworkError> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(RelaxationNetworkError::Invalid(
+                "held memory time scales must be finite and positive",
+            ));
+        }
+        match self {
+            Self::Equilibrium => Ok(Self::Equilibrium),
+            Self::Maxwell { relaxation_time_s } => {
+                let time = relaxation_time_s * scale;
+                let rate = time.recip();
+                if !time.is_finite() || time <= 0.0 || !rate.is_finite() || rate <= 0.0 {
+                    return Err(RelaxationNetworkError::Invalid(
+                        "held Maxwell time scales require positive representable times and rates",
+                    ));
+                }
+                Ok(Self::Maxwell {
+                    relaxation_time_s: time,
+                })
+            }
+        }
+    }
+}
+
+/// One original PSD spatial stiffness factor and explicit memory evolution.
 /// L maps [translation m; rotation rad] to elastic energy coordinates [sqrt(J)].
 /// Thus its actual stiffness is L^T L, with native work-conjugate SI units.
 /// The factor, not a refactorization or eigenspace, defines the history basis.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpatialRelaxationBranch {
     gram_rows: [[f64; 6]; 6],
-    relaxation_time_s: f64,
+    evolution: SpatialMemoryEvolution,
 }
 impl SpatialRelaxationBranch {
     pub fn from_gram_rows(
         gram_rows: [[f64; 6]; 6],
         relaxation_time_s: f64,
     ) -> Result<Self, RelaxationNetworkError> {
-        let rate = relaxation_time_s.recip();
-        if gram_rows.iter().flatten().any(|x| !x.is_finite())
-            || !relaxation_time_s.is_finite()
-            || relaxation_time_s <= 0.0
-            || !rate.is_finite()
-            || rate <= 0.0
-        {
+        let evolution = SpatialMemoryEvolution::Maxwell { relaxation_time_s }.scaled(1.0)?;
+        Self::with_evolution(gram_rows, evolution)
+    }
+
+    /// Declare an original equilibrium factor. Its full six-coordinate memory
+    /// obeys a'=L*s, exerts L^T*a, stores |a|^2/2 and generates exactly zero heat.
+    /// Initial elastic displacement/history must be supplied explicitly.
+    pub fn from_equilibrium_gram_rows(
+        gram_rows: [[f64; 6]; 6],
+    ) -> Result<Self, RelaxationNetworkError> {
+        Self::with_evolution(gram_rows, SpatialMemoryEvolution::Equilibrium)
+    }
+
+    fn with_evolution(
+        gram_rows: [[f64; 6]; 6],
+        evolution: SpatialMemoryEvolution,
+    ) -> Result<Self, RelaxationNetworkError> {
+        if gram_rows.iter().flatten().any(|x| !x.is_finite()) {
             return Err(RelaxationNetworkError::Invalid(
-                "finite original Gram rows and positive representable relaxation rate required",
+                "finite original Gram rows required",
             ));
         }
         // Admit the actual authored stiffness without changing its factor.
@@ -81,7 +141,7 @@ impl SpatialRelaxationBranch {
         }
         Ok(Self {
             gram_rows,
-            relaxation_time_s,
+            evolution,
         })
     }
 
@@ -102,8 +162,15 @@ impl SpatialRelaxationBranch {
     pub const fn gram_rows(&self) -> &[[f64; 6]; 6] {
         &self.gram_rows
     }
-    pub const fn relaxation_time_s(&self) -> f64 {
-        self.relaxation_time_s
+    pub const fn evolution(&self) -> SpatialMemoryEvolution {
+        self.evolution
+    }
+    /// Finite Maxwell time; equilibrium has no relaxation clock.
+    pub const fn relaxation_time_s(&self) -> Option<f64> {
+        self.evolution.relaxation_time_s()
+    }
+    pub fn relaxation_rate_per_s(&self) -> f64 {
+        self.evolution.relaxation_rate_per_s()
     }
 
     /// Initialize a physically specified elastic displacement in THIS factor
@@ -129,7 +196,7 @@ impl SpatialRelaxationBranch {
     }
 }
 
-/// Original link, Kelvin viscosity and distinct Maxwell branch sources.
+/// Original link, Kelvin viscosity and distinct Maxwell/equilibrium factors.
 /// An empty branch list reproduces the original driven viscous graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelaxationNetworkLink {
@@ -150,6 +217,7 @@ pub struct HeldRelaxationKinetics<'a> {
     /// Finite nonnegative multipliers on original Kelvin viscosity.
     pub viscosity_scales: &'a [f64],
     /// Positive time ratios tau/tau_ref in original [link][branch] order.
+    /// A lossless equilibrium channel remains lossless under every admitted ratio.
     pub relaxation_time_scales: &'a [Vec<f64>],
 }
 impl HeldRelaxationKinetics<'_> {
@@ -162,7 +230,7 @@ impl HeldRelaxationKinetics<'_> {
         for (e, link) in links.iter().enumerate() {
             self.damping(e, &link.viscous.damping)?;
             for (branch, source) in link.branches.iter().enumerate() {
-                self.relaxation_time(e, branch, source.relaxation_time_s)?;
+                self.evolution(e, branch, source.evolution)?;
             }
         }
         Ok(())
@@ -194,27 +262,13 @@ impl HeldRelaxationKinetics<'_> {
             .scaled(self.viscosity_scales[connector])
             .map_err(|error| connector_error(connector, error.into()))?)
     }
-    fn relaxation_time(
+    fn evolution(
         &self,
         connector: usize,
         branch: usize,
-        reference_s: f64,
-    ) -> Result<f64, RelaxationNetworkError> {
-        let scale = self.relaxation_time_scales[connector][branch];
-        let time = reference_s * scale;
-        let rate = time.recip();
-        if !scale.is_finite()
-            || scale <= 0.0
-            || !time.is_finite()
-            || time <= 0.0
-            || !rate.is_finite()
-            || rate <= 0.0
-        {
-            return Err(RelaxationNetworkError::Invalid(
-                "held Maxwell time scales require positive representable times and rates",
-            ));
-        }
-        Ok(time)
+        reference: SpatialMemoryEvolution,
+    ) -> Result<SpatialMemoryEvolution, RelaxationNetworkError> {
+        reference.scaled(self.relaxation_time_scales[connector][branch])
     }
 }
 
@@ -329,7 +383,7 @@ struct Scratch {
 // vanishes because that response lies in range(L). Cache its scalar law once.
 struct PreparedMemory {
     rows: [[f64; 6]; 6],
-    relaxation_time_s: f64,
+    evolution: SpatialMemoryEvolution,
     decay: f64,
     heat_fraction: f64,
     separable: bool,
@@ -494,15 +548,17 @@ impl PreparedRelaxationNetwork {
             branch_counts.push(link.branches.len());
             for (b, branch) in link.branches.iter().enumerate() {
                 poll(&mut cancelled)?;
-                let relaxation_time_s = match kinetics {
-                    Some(kinetics) => kinetics.relaxation_time(e, b, branch.relaxation_time_s)?,
-                    None => branch.relaxation_time_s,
+                let evolution = match kinetics {
+                    Some(kinetics) => kinetics.evolution(e, b, branch.evolution)?,
+                    None => branch.evolution,
                 };
-                let distance = duration_s * relaxation_time_s.recip();
-                let separable = duration_s > 0.0 && distance > 0.0 && distance.is_finite();
+                let distance = duration_s * evolution.relaxation_rate_per_s();
+                let separable = duration_s > 0.0
+                    && distance.is_finite()
+                    && (distance > 0.0 || evolution == SpatialMemoryEvolution::Equilibrium);
                 memories.push(PreparedMemory {
                     rows: branch.gram_rows,
-                    relaxation_time_s,
+                    evolution,
                     decay: if separable { det::exp(-distance) } else { 1.0 },
                     heat_fraction: if separable {
                         -det::expm1(-2.0 * distance)
@@ -573,7 +629,9 @@ impl PreparedRelaxationNetwork {
                 }
                 for branch in &link.branches {
                     poll(&mut cancelled)?;
-                    let rate = memories[(memory - body_n) / 6].relaxation_time_s.recip();
+                    let rate = memories[(memory - body_n) / 6]
+                        .evolution
+                        .relaxation_rate_per_s();
                     let root = det::sqrt(rate);
                     for a in 0..6 {
                         let index = memory + a;
@@ -684,14 +742,24 @@ impl PreparedRelaxationNetwork {
         self.links.get(connector).map(|link| &link.geometry.damping)
     }
 
-    /// Actual held relaxation time in original connector/branch order.
-    /// No allocation or numerical preparation occurs.
-    pub fn effective_relaxation_time_s(&self, connector: usize, branch: usize) -> Option<f64> {
+    /// Actual held memory law in original connector/channel order.
+    pub fn effective_evolution(
+        &self,
+        connector: usize,
+        branch: usize,
+    ) -> Option<SpatialMemoryEvolution> {
         if branch >= *self.branch_counts.get(connector)? {
             return None;
         }
         let offset: usize = self.branch_counts[..connector].iter().sum();
-        Some(self.memories[offset + branch].relaxation_time_s)
+        Some(self.memories[offset + branch].evolution)
+    }
+
+    /// Actual finite Maxwell time; None for equilibrium or an absent channel.
+    /// Use effective_evolution to distinguish these cases.
+    pub fn effective_relaxation_time_s(&self, connector: usize, branch: usize) -> Option<f64> {
+        self.effective_evolution(connector, branch)?
+            .relaxation_time_s()
     }
 
     pub const fn duration_s(&self) -> f64 {
@@ -768,11 +836,13 @@ impl PreparedRelaxationNetwork {
                     self.scratch.initial[offset..offset + 6].fill(0.0);
                     self.scratch.null_initial[offset - body_n..offset - body_n + 6]
                         .copy_from_slice(branch);
-                    for &value in branch {
-                        self.scratch.null_heat[e] = self.scratch.null_heat[e]
-                            + Dd::from_f64(value)
-                                * Dd::from_f64(value)
-                                * Dd::from_f64(0.5 * prepared.heat_fraction);
+                    if prepared.heat_fraction != 0.0 {
+                        for &value in branch {
+                            self.scratch.null_heat[e] = self.scratch.null_heat[e]
+                                + Dd::from_f64(value)
+                                    * Dd::from_f64(value)
+                                    * Dd::from_f64(0.5 * prepared.heat_fraction);
+                        }
                     }
                     finite(self.scratch.null_heat[e].to_f64())?;
                 } else {
