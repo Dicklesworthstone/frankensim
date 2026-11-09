@@ -5,6 +5,7 @@
 //! This module supplies boundary heat and receipts, not another integrator.
 
 use super::super::Sum;
+use super::finite_reservoir::FiniteReservoir;
 use super::{
     SolubilityCaloricErrorV1, SolubilityThermalKineticControlsV1,
     SolubilityThermalKineticOutcomeV1, SolubilityThermalKineticStateV1,
@@ -60,6 +61,7 @@ impl SolubilityThermalKineticsV1 {
             controls,
             cancelled,
         )
+        .map(|(balance, _)| balance)
     }
 }
 
@@ -67,6 +69,7 @@ impl SolubilityThermalKineticsV1 {
 pub(super) enum WindowHeat {
     Uniform(f64),
     Reservoir(Reservoir),
+    Finite(FiniteReservoir),
 }
 
 #[derive(Clone, Copy)]
@@ -102,19 +105,19 @@ impl Reservoir {
 /// Independent sum of actual accepted endpoint-power contributions. Keeping
 /// its compensation in trials prevents many small heat increments disappearing
 /// into a large accumulated receipt before the final energy comparison.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct HeatReceipt {
     main: f64,
     correction: f64,
 }
 impl HeatReceipt {
-    fn from_value(value: f64) -> Self {
+    pub(super) fn from_value(value: f64) -> Self {
         Self {
             main: value,
             correction: 0.0,
         }
     }
-    fn add(self, value: f64) -> Result<Self, SolubilityCaloricErrorV1> {
+    pub(super) fn add(self, value: f64) -> Result<Self, SolubilityCaloricErrorV1> {
         let mut sum = Sum {
             main: self.main,
             correction: self.correction,
@@ -131,6 +134,29 @@ impl HeatReceipt {
             correction: self.correction,
         }
         .value()
+    }
+    pub(super) fn subtract(self, other: Self) -> Result<Self, SolubilityCaloricErrorV1> {
+        self.add(-other.main)?.add(-other.correction)
+    }
+    pub(super) fn divided_by(self, divisor: f64) -> Result<f64, SolubilityCaloricErrorV1> {
+        self.shifted_quotient(divisor, 0.0)
+    }
+    pub(super) fn shifted_quotient(
+        self,
+        divisor: f64,
+        offset: f64,
+    ) -> Result<f64, SolubilityCaloricErrorV1> {
+        let mut sum = Sum::default();
+        sum.add(offset)?;
+        sum.add(checked(
+            self.main / divisor,
+            "reservoir temperature increment",
+        )?)?;
+        sum.add(checked(
+            self.correction / divisor,
+            "reservoir temperature correction",
+        )?)?;
+        sum.value()
     }
     /// Required prefix heat relative to independently evaluated bath enthalpy.
     fn offset(self, baseline: f64) -> Result<f64, SolubilityCaloricErrorV1> {
@@ -149,6 +175,10 @@ pub(super) enum StageHeat {
     Prescribed(f64),
     Reservoir {
         source: Reservoir,
+        prefix: HeatReceipt,
+    },
+    Finite {
+        source: FiniteReservoir,
         prefix: HeatReceipt,
     },
 }
@@ -172,6 +202,12 @@ impl StageHeat {
                 sum.add(source.heat(duration, endpoint)?)?;
                 sum.value()
             }
+            Self::Finite { source, prefix } => {
+                let mut sum = Sum::default();
+                sum.add(prefix.offset(baseline)?)?;
+                sum.add(source.heat(prefix, duration, endpoint)?)?;
+                sum.value()
+            }
         }
     }
 
@@ -184,6 +220,9 @@ impl StageHeat {
             Self::Prescribed(target) => HeatReceipt::from_value(target),
             Self::Reservoir { source, prefix } => {
                 prefix.add(source.heat(duration, state.temperature)?)?
+            }
+            Self::Finite { source, prefix } => {
+                prefix.add(source.heat(prefix, duration, state.temperature)?)?
             }
         };
         Ok(StageResult { state, heat })

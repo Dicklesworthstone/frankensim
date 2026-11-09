@@ -43,6 +43,9 @@ use std::sync::Arc;
 mod heat_transfer;
 use heat_transfer::{HeatReceipt, StageHeat, StageResult, WindowHeat};
 
+mod finite_reservoir;
+pub use finite_reservoir::{SensibleHeatReservoirV1, SolubilityThermalReservoirOutcomeV1};
+
 pub mod interaction;
 pub use interaction::SolubilityThermalInteractionV1;
 
@@ -263,6 +266,7 @@ impl SolubilityThermalKineticsV1 {
             controls,
             cancelled,
         )
+        .map(|(balance, _)| balance)
     }
 
     fn advance_with_source(
@@ -272,14 +276,14 @@ impl SolubilityThermalKineticsV1 {
         heat_source: WindowHeat,
         controls: SolubilityThermalKineticControlsV1,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<SolubilityThermalKineticOutcomeV1, SolubilityCaloricErrorV1> {
+    ) -> Result<(SolubilityThermalKineticOutcomeV1, HeatReceipt), SolubilityCaloricErrorV1> {
         poll(&mut cancelled)?;
         self.admit(
             initial,
             duration,
             match heat_source {
                 WindowHeat::Uniform(heat) => heat,
-                WindowHeat::Reservoir(_) => 0.0,
+                WindowHeat::Reservoir(_) | WindowHeat::Finite(_) => 0.0,
             },
             controls,
         )?;
@@ -332,6 +336,13 @@ impl SolubilityThermalKineticsV1 {
                     };
                     (heat, heat)
                 }
+                WindowHeat::Finite(source) => {
+                    let heat = StageHeat::Finite {
+                        source,
+                        prefix: accepted_heat,
+                    };
+                    (heat, heat)
+                }
             };
             let trial = (|| -> Result<_, SolubilityCaloricErrorV1> {
                 let full = self.stage(
@@ -355,6 +366,10 @@ impl SolubilityThermalKineticsV1 {
                 let fine_heat = match heat_source {
                     WindowHeat::Uniform(_) => full_heat,
                     WindowHeat::Reservoir(source) => StageHeat::Reservoir {
+                        source,
+                        prefix: middle.heat,
+                    },
+                    WindowHeat::Finite(source) => StageHeat::Finite {
                         source,
                         prefix: middle.heat,
                     },
@@ -382,7 +397,10 @@ impl SolubilityThermalKineticsV1 {
                 }
                 Err(error) => return Err(error),
             };
-            let error = temporal_error(&full.state, &fine.state, count, controls);
+            let mut error = temporal_error(&full.state, &fine.state, count, controls);
+            if let WindowHeat::Finite(source) = heat_source {
+                error = error.max(source.temporal_error(full.heat, fine.heat, controls)?);
+            }
             if error > 1.0 {
                 rejected_steps += 1;
                 interval = half_interval(h, controls.minimum_step.value()).ok_or(
@@ -422,7 +440,7 @@ impl SolubilityThermalKineticsV1 {
                     "thermal kinetic window residual",
                 )?,
             ),
-            WindowHeat::Reservoir(_) => (
+            WindowHeat::Reservoir(_) | WindowHeat::Finite(_) => (
                 accepted_heat.value()?,
                 accepted_heat.residual(enthalpy_change_j)?,
             ),
@@ -444,17 +462,20 @@ impl SolubilityThermalKineticsV1 {
             }
         };
         poll(&mut cancelled)?;
-        Ok(SolubilityThermalKineticOutcomeV1 {
-            final_state,
-            duration,
-            heat_input_j,
-            enthalpy_change_j,
-            energy_residual_j,
-            accepted_steps,
-            rejected_steps,
-            root_iterations,
-            maximum_accepted_error_norm,
-        })
+        Ok((
+            SolubilityThermalKineticOutcomeV1 {
+                final_state,
+                duration,
+                heat_input_j,
+                enthalpy_change_j,
+                energy_residual_j,
+                accepted_steps,
+                rejected_steps,
+                root_iterations,
+                maximum_accepted_error_norm,
+            },
+            accepted_heat,
+        ))
     }
 
     fn owns(&self, state: &SolubilityThermalKineticStateV1) -> bool {
@@ -568,7 +589,7 @@ impl SolubilityThermalKineticsV1 {
             StageHeat::Prescribed(target) => {
                 Some(checked(target - baseline, "thermal kinetic stage heat")?)
             }
-            StageHeat::Reservoir { .. } => None,
+            StageHeat::Reservoir { .. } | StageHeat::Finite { .. } => None,
         };
         // Interacting phase evolution freezes the stage's initial temperature.
         // The subsequent heat solve changes only T, so the source-qualified

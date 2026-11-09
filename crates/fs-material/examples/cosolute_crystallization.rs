@@ -6,6 +6,8 @@
 //! Add `-- --jacket` for the same bath cooled/heated through a finite thermal
 //! conductance to a prescribed jacket temperature. Heat then follows the
 //! evolving bath temperature and is solved inside the original time integrator.
+//! Add `-- --finite-jacket` to retain the coolant's finite sensible heat store:
+//! coolant and solution temperatures evolve with equal/opposite transferred heat.
 //! Values are authored demonstration coefficients, not measurements for a named
 //! substance. The second species has zero phase-transfer conductance, so its
 //! dissolved stock changes neither during crystallization nor during imposed
@@ -28,7 +30,10 @@ use fs_thermochem::{
             IdealSolubilityV1,
             caloric::{
                 SolubilityCaloricComponentV1, SolubilityCaloricModelV1, SolubilityCaloricSolveV1,
-                kinetics::{SolubilityThermalKineticControlsV1, SolubilityThermalKineticsV1},
+                kinetics::{
+                    SensibleHeatReservoirV1, SolubilityThermalKineticControlsV1,
+                    SolubilityThermalKineticsV1,
+                },
             },
             kinetics::{PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1},
         },
@@ -113,11 +118,14 @@ fn advance(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|argument| argument == "--finite-jacket") {
+        return thermal_demo(ThermalMode::FiniteJacket);
+    }
     if std::env::args().any(|argument| argument == "--jacket") {
-        return thermal_demo(true);
+        return thermal_demo(ThermalMode::Jacket);
     }
     if std::env::args().any(|argument| argument == "--heat") {
-        return thermal_demo(false);
+        return thermal_demo(ThermalMode::SuppliedHeat);
     }
     let mut ideal = initial()?;
     let original_virial = Arc::new(VirialSolutionModel::new(
@@ -164,7 +172,13 @@ enum ThermalDrive {
     },
 }
 
-fn thermal_demo(jacket: bool) -> Result<(), Box<dyn std::error::Error>> {
+enum ThermalMode {
+    SuppliedHeat,
+    Jacket,
+    FiniteJacket,
+}
+
+fn thermal_demo(mode: ThermalMode) -> Result<(), Box<dyn std::error::Error>> {
     let original = initial()?;
     let reference_t = Temperature::new(300.0);
     let knots = |capacity| {
@@ -225,8 +239,11 @@ fn thermal_demo(jacket: bool) -> Result<(), Box<dyn std::error::Error>> {
         temperature_absolute_tolerance_k: 1e-7,
         maximum_attempts: 8192,
     };
+    if matches!(mode, ThermalMode::FiniteJacket) {
+        return finite_thermal_demo(bath, &thermal, controls);
+    }
     let mut elapsed = 0.0;
-    let schedule = if jacket {
+    let schedule = if matches!(mode, ThermalMode::Jacket) {
         // The prescribed reservoir represents a controlled jacket. Its heat
         // capacity, coolant flow and control-system power are not inferred.
         [
@@ -303,6 +320,58 @@ fn thermal_demo(jacket: bool) -> Result<(), Box<dyn std::error::Error>> {
             balance.energy_residual_j(),
             balance.accepted_steps(),
         );
+    }
+    Ok(())
+}
+
+fn finite_thermal_demo(
+    mut bath: KineticSolubilitySolution,
+    thermal: &SolubilityThermalKineticsV1,
+    controls: SolubilityThermalKineticControlsV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "stage,contact_time_s,solution_temperature_K,coolant_temperature_K,dissolved_mol,solid_mol,cosolute_mol,window_heat_into_solution_J,solution_enthalpy_change_J,coolant_enthalpy_change_J,closed_energy_residual_J,coolant_energy_since_preparation_J,accepted_steps"
+    );
+    // Each block connects a newly prepared finite coolant charge. Within a
+    // block, all four windows retain that SAME reservoir's original reference
+    // and accumulated energy. The solution and its particle stocks continue
+    // across both blocks; replacing coolant is an explicit apparatus action.
+    for (label, initial_coolant_k) in [("finite_cooling", 292.0), ("finite_heating", 310.0)] {
+        let mut coolant = SensibleHeatReservoirV1::new(
+            Temperature::new(initial_coolant_k),
+            4000.0, // Complete explicitly authored coolant heat capacity [J/K].
+        )?;
+        let mut elapsed = 0.0;
+        for seconds in [30.0, 120.0, 300.0, 900.0] {
+            let step = bath.advance_with_finite_heat_reservoir(
+                thermal,
+                Time::new(seconds),
+                &coolant,
+                25.0, // Complete fixed contact conductance [W/K].
+                controls,
+                || false,
+            )?;
+            let (next_bath, outcome) = step.into_parts();
+            let coolant_change = outcome.reservoir_enthalpy_change_j();
+            let closed_residual = outcome.closed_system_energy_residual_j();
+            let (balance, next_coolant) = outcome.into_parts();
+            bath = next_bath;
+            coolant = next_coolant;
+            elapsed += seconds;
+            let phase = bath.last_steps()[0].state();
+            println!(
+                "{label},{elapsed:.3},{:.9},{:.9},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{coolant_change:.12e},{closed_residual:.12e},{:.12e},{}",
+                bath.solution().temperature_k(),
+                coolant.temperature().value(),
+                phase.dissolved().value(),
+                phase.solid().value(),
+                bath.solution().solute_moles()[1],
+                balance.heat_input_j(),
+                balance.enthalpy_change_j(),
+                coolant.energy_change_j(),
+                balance.accepted_steps(),
+            );
+        }
     }
     Ok(())
 }

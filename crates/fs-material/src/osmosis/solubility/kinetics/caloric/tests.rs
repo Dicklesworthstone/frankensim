@@ -866,3 +866,319 @@ fn heat_transfer_retains_exact_sources_zero_contact_limit_and_atomic_cancellatio
         accepted
     );
 }
+
+#[test]
+fn finite_reservoir_tracks_two_body_cooling_and_retains_heat_across_windows() {
+    let thermal = model(0.0, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let original = material(&thermal, 0.5, 1e-100);
+    let reservoir = SensibleHeatReservoirV1::new(Temperature::new(280.0), 1000.0).unwrap();
+    let capacity = 1e-3 / MOLAR_VOLUME * SOLVENT_CP + 0.5 * SOLUTE_CP;
+    let duration = 60.0;
+    let conductance = 40.0;
+    let total_capacity = capacity + reservoir.heat_capacity_j_k();
+    let equilibrium = (capacity * 300.0 + reservoir.heat_capacity_j_k() * 280.0) / total_capacity;
+    let difference = 20.0
+        * (-conductance * (1.0 / capacity + 1.0 / reservoir.heat_capacity_j_k()) * duration).exp();
+    let expected_solution =
+        equilibrium + reservoir.heat_capacity_j_k() / total_capacity * difference;
+    let expected_reservoir = equilibrium - capacity / total_capacity * difference;
+    let mut control = controls();
+    control.initial_step = Time::new(0.25);
+    control.maximum_step = Time::new(0.25);
+    control.relative_tolerance = 1e-3;
+    let whole = original
+        .advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(duration),
+            &reservoir,
+            conductance,
+            control,
+            || false,
+        )
+        .unwrap();
+    let temperature = whole.solution().solution().temperature_k();
+    let final_reservoir = whole.balance().reservoir();
+    near(temperature, expected_solution, 0.02);
+    near(
+        final_reservoir.temperature().value(),
+        expected_reservoir,
+        0.02,
+    );
+    assert!(temperature > final_reservoir.temperature().value());
+    assert!(final_reservoir.temperature().value() > 280.0);
+    assert_eq!(
+        whole.solution().last_steps()[0].state(),
+        original.last_steps()[0].state()
+    );
+    assert_eq!(
+        whole.solution().last_steps()[0].state().solid().value(),
+        1e-100
+    );
+    let solution_heat = capacity * (temperature - 300.0);
+    let reservoir_heat =
+        reservoir.heat_capacity_j_k() * (final_reservoir.temperature().value() - 280.0);
+    near(solution_heat + reservoir_heat, 0.0, 2e-7);
+    near(
+        whole.balance().balance().heat_input_j(),
+        solution_heat,
+        1e-7,
+    );
+    near(
+        whole.balance().reservoir_enthalpy_change_j(),
+        reservoir_heat,
+        1e-7,
+    );
+    assert!(
+        whole.balance().closed_system_energy_residual_j().abs() <= control.root.energy_tolerance_j
+    );
+
+    // Pass the ORIGINAL accepted reservoir value onward. Reinitializing from
+    // its displayed temperature would discard its compensated energy datum.
+    let mut continued = original.clone();
+    let mut finite = reservoir.clone();
+    let mut delivered = 0.0;
+    for _ in 0..6 {
+        let next = continued
+            .advance_with_finite_heat_reservoir(
+                &thermal,
+                Time::new(10.0),
+                &finite,
+                conductance,
+                control,
+                || false,
+            )
+            .unwrap();
+        let (material, balance) = next.into_parts();
+        delivered += balance.balance().heat_input_j();
+        finite = balance.reservoir().clone();
+        continued = material;
+    }
+    near(continued.solution().temperature_k(), temperature, 1e-7);
+    near(
+        finite.temperature().value(),
+        final_reservoir.temperature().value(),
+        1e-7,
+    );
+    assert_eq!(
+        finite.reference_temperature(),
+        reservoir.reference_temperature()
+    );
+    near(finite.energy_change_j(), -delivered, 2e-7);
+    near(
+        reservoir.enthalpy_change_j(&finite).unwrap(),
+        finite.energy_change_j(),
+        1e-10,
+    );
+    assert_eq!(reservoir.temperature(), Temperature::new(280.0));
+    assert_eq!(reservoir.energy_change_j(), 0.0);
+    assert_eq!(original.solution().temperature_k(), 300.0);
+}
+
+#[test]
+fn finite_reservoir_grows_particles_with_the_complete_original_nonideal_heat() {
+    let fixed = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let thermal = SolubilityThermalKineticsV1::new(
+        fixed.caloric().clone(),
+        vec![
+            fixed.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.2))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let family = thermal_family(&thermal, 0.003);
+    let original = material(&thermal, 0.6, 0.2)
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
+    let reservoir = SensibleHeatReservoirV1::new(Temperature::new(285.0), 2000.0).unwrap();
+    let first = original
+        .advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(40.0),
+            &reservoir,
+            80.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let endpoint = first.solution();
+    let phase = endpoint.last_steps()[0].state();
+    let temperature = endpoint.solution().temperature_k();
+    assert!(temperature < 300.0 && temperature > first.balance().reservoir().temperature().value());
+    assert!(first.balance().reservoir().temperature().value() > 285.0);
+    assert!(phase.dissolved().value() < 0.6 && phase.solid().value() > 0.2);
+    assert_eq!(
+        phase.total_solute(),
+        original.last_steps()[0].state().total_solute()
+    );
+    assert_eq!(endpoint.models(), original.models());
+    assert!(
+        endpoint.models()[0]
+            .conductance_at(phase.solid())
+            .unwrap()
+            .value()
+            > 1e-4
+    );
+    assert!(Arc::ptr_eq(
+        endpoint.thermal_nonideal_source().unwrap(),
+        &family
+    ));
+    assert_eq!(
+        endpoint.solution().solute_moles()[0],
+        phase.dissolved().value()
+    );
+    assert_eq!(phase, &first.balance().balance().final_state().phases()[0]);
+
+    let extra = |t: f64, dissolved: f64| {
+        let c = 0.003;
+        let b = 1e-5 + c * (1.0 / t - 1.0 / 300.0);
+        let saturation = 600.0 * (DISSOLUTION_ENTHALPY / R * (1.0 / 300.0 - 1.0 / t)).exp();
+        0.5 * R * c * dissolved * dissolved / 1e-3
+            + dissolved * saturation * (b * DISSOLUTION_ENTHALPY - R * c)
+    };
+    let solution_heat = (1e-3 / MOLAR_VOLUME * SOLVENT_CP
+        + phase.total_solute().value() * SOLUTE_CP)
+        * (temperature - 300.0)
+        + DISSOLUTION_ENTHALPY * (phase.dissolved().value() - 0.6)
+        + extra(temperature, phase.dissolved().value())
+        - extra(300.0, 0.6);
+    let reservoir_heat = 2000.0 * (first.balance().reservoir().temperature().value() - 285.0);
+    near(solution_heat + reservoir_heat, 0.0, 5e-7);
+    near(
+        first.balance().balance().enthalpy_change_j(),
+        solution_heat,
+        5e-7,
+    );
+    near(
+        first.balance().reservoir_enthalpy_change_j(),
+        reservoir_heat,
+        2e-7,
+    );
+    assert!(
+        first.balance().closed_system_energy_residual_j().abs()
+            <= controls().root.energy_tolerance_j
+    );
+
+    let second = endpoint
+        .advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(10.0),
+            first.balance().reservoir(),
+            80.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        second.solution().thermal_nonideal_source().unwrap(),
+        &family
+    ));
+    assert_eq!(second.solution().models(), original.models());
+    assert_eq!(
+        second.balance().reservoir().reference_temperature(),
+        Temperature::new(285.0)
+    );
+    let all_solution_heat =
+        first.balance().balance().heat_input_j() + second.balance().balance().heat_input_j();
+    near(
+        reservoir
+            .enthalpy_change_j(second.balance().reservoir())
+            .unwrap(),
+        -all_solution_heat,
+        2e-7,
+    );
+    assert_eq!(original.last_steps()[0].state().solid(), Amount::new(0.2));
+    assert_eq!(reservoir.energy_change_j(), 0.0);
+}
+
+#[test]
+fn finite_reservoir_keeps_source_zero_contact_and_late_cancellation_atomic() {
+    let thermal = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let family = thermal_family(&thermal, 0.003);
+    let original = material(&thermal, 0.15, 1.5)
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
+    let reservoir = SensibleHeatReservoirV1::new(Temperature::new(293.0), 5000.0).unwrap();
+    let before = original.clone();
+    let reservoir_before = reservoir.clone();
+    let foreign_source: Arc<dyn SolubilityThermalInteractionV1> = Arc::new((*family).clone());
+    let foreign = thermal.with_interactions(foreign_source).unwrap();
+    assert!(matches!(
+        original.advance_with_finite_heat_reservoir(
+            &foreign,
+            Time::new(0.5),
+            &reservoir,
+            30.0,
+            controls(),
+            || false,
+        ),
+        Err(KineticSolubilityHeatError::SourceMismatch)
+    ));
+    let adiabatic = original
+        .advance_with_heat(&thermal, Time::new(0.5), 0.0, controls(), || false)
+        .unwrap();
+    let isolated = original
+        .advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(0.5),
+            &reservoir,
+            0.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(isolated.solution(), adiabatic.solution());
+    assert_eq!(isolated.balance().balance(), adiabatic.balance());
+    assert_eq!(isolated.balance().reservoir(), &reservoir);
+    assert_eq!(isolated.balance().reservoir_enthalpy_change_j(), 0.0);
+
+    let mut calls = 0;
+    let accepted = original
+        .advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(0.5),
+            &reservoir,
+            30.0,
+            controls(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(calls > 1);
+    let mut observed = 0;
+    assert!(matches!(
+        original.advance_with_finite_heat_reservoir(
+            &thermal,
+            Time::new(0.5),
+            &reservoir,
+            30.0,
+            controls(),
+            || {
+                observed += 1;
+                observed == calls
+            },
+        ),
+        Err(KineticSolubilityHeatError::Caloric(
+            SolubilityCaloricErrorV1::Cancelled
+        ))
+    ));
+    assert_eq!(observed, calls);
+    assert_eq!(original, before);
+    assert_eq!(reservoir, reservoir_before);
+    assert_eq!(
+        original
+            .advance_with_finite_heat_reservoir(
+                &thermal,
+                Time::new(0.5),
+                &reservoir,
+                30.0,
+                controls(),
+                || false,
+            )
+            .unwrap(),
+        accepted
+    );
+}

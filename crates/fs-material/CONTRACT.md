@@ -14445,6 +14445,29 @@ recooling. Its CSV output includes jacket temperature/conductance, actual phase
 stocks, conditional saturation, pressure, supplied heat and energy residual.
 All heat-transfer and interaction coefficients are authored demonstration data.
 
+### Finite coolant storage during soluble-phase evolution
+
+`KineticSolubilitySolution::advance_with_finite_heat_reservoir` couples its
+actual phase owner to an explicit `SensibleHeatReservoirV1` and contact
+conductance. It retains the SAME source checks and endpoint reconstruction as
+the prescribed-heat and prescribed-temperature methods. The new
+`KineticSolubilityReservoirStep` returns the accepted material together with
+the original core reservoir outcome, including equal/opposite supplied heat,
+both actual endpoint temperatures and the closed-system energy residual.
+
+The finite reservoir has a declared constant complete heat capacity, not an
+inferred coolant mass, composition or phase transition. Its compensated energy
+inventory and original reference travel with the returned reservoir across
+windows. Solvent and solute remain in the solution; heat crosses the contact.
+Nonideal excess/reference calorics and evolving crystal surface area remain
+on the original material/thermochemical owners.
+
+`cargo run -p fs-material --example cosolute_crystallization -- --finite-jacket`
+first connects a cold finite coolant charge, then explicitly replaces it with
+a hot one. Each contact continues through four windows with the same reservoir
+energy inventory. Output includes both temperatures, phase stocks, each body's
+enthalpy change, cumulative coolant energy and the closed energy residual.
+
 ## Shared cavitation coefficients and frozen mixture acoustics
 
 `cavitation` owns a checked immutable liquid state at one explicit absolute

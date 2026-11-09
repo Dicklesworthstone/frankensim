@@ -522,6 +522,34 @@ Focused cases compare sensible cooling against the independent exponential
 solution, verify first-order refinement and actual boundary heat, and exercise
 particle growth, nonideal source retention and transactional refusals.
 
+### Finite sensible heat reservoirs on the original thermal timeline
+
+`SensibleHeatReservoirV1` declares a positive constant complete heat capacity
+`C [J/K]` and an original positive reference temperature. It retains a
+compensated energy inventory relative to that reference. Published temperature
+is derived from this inventory; continuing a window must pass the returned
+reservoir, not reconstruct its energy from a rounded endpoint temperature.
+The constant-C constitutive law is explicit and supplies no material-dependent
+heat-capacity curve, reservoir phase change or mechanical work.
+
+`SolubilityThermalKineticsV1::advance_with_finite_heat_reservoir` uses the SAME
+thermal stages and adaptive timeline. With `kappa=G*h`, elimination of the
+reservoir endpoint gives the implicit heat into the solution as
+`Q_stage=kappa/(1+kappa/C)*(T_reservoir,start-T_solution,end)`.
+The reservoir receives exactly the opposite accepted heat. Both capacities
+participate in the transient; finite storage is not approximated by holding
+the starting reservoir temperature fixed over the window. The effective
+contact term is nonnegative, preserving the monotone scalar caloric root.
+
+The original full/two-half error includes the reservoir temperature as well
+as solution temperature and both phase inventories. Rejected/coarse exchanges
+never enter either accepted energy store. The returned
+`SolubilityThermalReservoirOutcomeV1` retains the original thermal balance,
+final reservoir, its direct energy increment and the independent closed-system
+energy residual. Repeated windows preserve the original reservoir datum and
+small heat increments. All original solution/source/work/cancellation limits
+remain binding; finite reservoir storage introduces no second phase solver.
+
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a
