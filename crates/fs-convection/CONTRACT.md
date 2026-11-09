@@ -494,8 +494,9 @@ None.
   admitted nor approachable: the `Pe >= 0.2` floor forces `Pr >= 0.2` at
   `Re = 1`, where the card still returns roughly twice that value. No test
   constrains it.
-- Cylinder crossflow is an isolated-pin baseline. Tube-bank and heatsink-array
-  interference require separate cards and validation.
+- Cylinder crossflow is an isolated-pin baseline. The separate `tube_bank`
+  owner below supplies a bounded bare-tube array mean; short-pin, finned and
+  general heatsink-array interference still require separate models/validation.
 - The Robin integration test proves the coefficient-to-conduction seam on a
   small deterministic fixture. It is not conjugate CFD and does not promote
   the correlation prediction beyond its model evidence. A downstream
@@ -542,6 +543,40 @@ requires both the retained cases CSV and an explicit effective wall coefficient.
 Its h=10 W/(m² K) illustration produces geometric upper-layer-rise ratio
 1.314403236 and combined log scatter 0.086888962; this is an uncalibrated
 comparison, not a validation pass. No parameter is fitted to the observations.
+
+## Bare tube-bank crossflow
+
+`tube_bank::evaluate` implements the inline and staggered `Re_max` 1e3--2e5
+rows of Zukauskas (1987), reproduced in the official
+[Flownex CS-052](https://support.flownex.com/hc/en-us/articles/28978533677980)
+Tables 1--2 and Eqs. (2), (7)--(9). The physical geometry computes maximum-gap
+Re from **approach-speed** Re and outside diameter. Staggered banks compare
+the transverse passage with the two diagonal passages and require at least
+two rows; a single row has no longitudinal neighbors to justify the source's
+pitch-ratio dependence. Layout is explicit even at equal pitches.
+
+The Nusselt mean is `F C Re_max^m Pr^0.36 (Pr/Pr_surface)^0.25`, with
+`(C,m)=(0.27,0.63)` inline and `(0.35 (S_T/S_L)^0.2,0.6)` staggered.
+`F` retains the published finite-row table; missing integer rows use disclosed
+linear interpolation, and 16 or more rows use one. Bulk transport uses the
+mean fluid temperature and wall Pr uses the **same fluid** at wall temperature.
+The admitted Pr/Pr_surface box is [0.7,500]; transverse pitch/D is [1.25,2.5],
+longitudinal pitch/D is [1,2.5], inline contact refuses and staggered S_T/S_L
+above two refuses. The pitch and wall-Pr boxes are implementation policies,
+not claimed jointly validated source ranges. This API is separate from the
+original single-body catalog and does not silently turn cylinder cards into
+array cards. Model discrepancy is explicitly unbounded, not a guessed band.
+
+The typed coefficient and original evidence lower into the existing Robin
+boundary using the retained outside diameter. The bank mean requires an
+appropriate effective bulk reference; applying inlet temperature to an entire
+appreciably warming stream overpredicts heat transfer. No finite-fluid storage
+or energy balance, pressure-drop model, local row coefficient, bypass, fins,
+short-pin end correction, or natural/mixed-convection blend is supplied.
+Scalar work is bounded, deterministic and uses the existing math owner.
+Focused G0/G1/G3 tests check independent 60-digit formula values, geometric
+mass continuity, finite-row effects, admissibility and actual Robin lowering;
+they establish implementation accuracy, not experimental validation.
 
 ## Finite developing circular-duct sections
 

@@ -29,6 +29,10 @@ pub use mixed::{
 pub mod sphere;
 pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 
+/// Bare tube-bank crossflow with bulk/wall material states and physical gap speed.
+pub mod tube_bank;
+pub use tube_bank::{MaterialTubeBankConvection, MaterialTubeBankError, evaluate_tube_bank_from_material};
+
 /// Circular tubes with source-resolved bulk properties and explicit wall corrections.
 pub mod tube;
 pub use tube::{

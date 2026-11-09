@@ -24,6 +24,9 @@ mod sensitivity;
 /// Finite sections of the original mean flat-plate and duct relations.
 pub mod developing;
 
+/// Bare inline/staggered tube-bank crossflow with physical gap velocities.
+pub mod tube_bank;
+
 pub use natural::{HorizontalPlateFacing, NaturalConvectionGeometry};
 
 /// Source-bearing compartment-fire correlations and public-data comparisons.

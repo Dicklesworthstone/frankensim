@@ -1534,6 +1534,26 @@ and native energy closure do not establish empirical accuracy, turbulence
 resolution or temporal order. Focused regressions cover both viscosity-ratio
 directions, original source queries, reciprocal enthalpy feedback and refusal.
 
+### Material-backed bare tube-bank crossflow
+
+`medium::convection::evaluate_tube_bank_from_material` connects the original
+`fs-convection::tube_bank` mean to gas/liquid transport and conduction Robin
+boundaries. The caller supplies the same fluid at mean-bulk and wall
+temperatures plus explicit inline/staggered geometry and approach speed.
+Each source is sampled once and retained. Bulk density/viscosity give Reynolds,
+bulk Cp/viscosity/conductivity give Pr and dimensional h, and the wall-fluid
+snapshot supplies only Pr_surface. The shared geometry computes the actual
+maximum-gap speed, including diagonal constrictions; source/domain refusals
+and unquantified discrepancy remain unchanged. Robin lowering rereads neither
+material and uses the retained bulk conductivity and outside diameter.
+
+The generic transport seam cannot prove common composition/pressure identity.
+The caller retains that obligation and the bank mean's effective bulk reference;
+this API supplies no finite-stream heat balance, pressure loss, short-pin or
+finned-surface correction. Its focused material regression checks distinct
+bulk/wall snapshots against independent formula arithmetic, source identity,
+gap Reynolds, stagnation refusal and the actual Robin coefficient.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid
