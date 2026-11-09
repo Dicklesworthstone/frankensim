@@ -1,4 +1,7 @@
 //! G1/G3/G4: sourced motor-driven rate curves, actual work/heat and thermal time.
+#[path = "driven/events.rs"]
+mod events;
+
 use super::*;
 use fs_couple::friction_heat::hertz::rate_dependent::driven::*;
 use fs_mbd::Wrench;
@@ -112,7 +115,9 @@ fn sourced_affine_motor_spin_matches_exponential_motion_and_independent_caloric_
         assert!(3.0 < expected[0] && expected[0] < expected[4]);
         assert!(native.external_work_j > out.heat.dissipated_j);
         assert_eq!(native.driven.mode, HertzDrivenMode::Sliding);
-        assert!(out.mechanical.adaptive_error_estimates_available);
+        assert!(
+            out.mechanical.adaptive_error_estimates_available || out.mechanical.exact_invariant
+        );
         close(out.combined_energy_residual_j, 0.0);
         for (i, t) in thermal_response(dt, theta).0.into_iter().enumerate() {
             close(

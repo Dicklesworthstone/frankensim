@@ -42,8 +42,10 @@ pub struct RigidHertzRateDrivenHeatControls {
 /// motion and thermal windows have independent refinement controls. Source
 /// parameter support alone does not validate a chosen curve over unmeasured
 /// speeds, and a converged coupled root does not establish its uniqueness.
-/// The original law refuses unresolved nonconstant-rate arrest events. Its
-/// genuine Coulomb delegation retains the existing driven event/time semantics.
+/// Admitted invariant affine paths retain their original exact arrest,
+/// subsequent static hold or reversal. Their native event clock/bracket stays
+/// attached to the candidate. Other unresolved rate-law events still refuse;
+/// genuine Coulomb retains its established driven event/time semantics.
 #[allow(clippy::too_many_arguments)]
 pub fn propose_rigid_hertz_rate_driven_heat<'m, P, E>(
     bodies: &[RigidBodyState],
@@ -116,12 +118,16 @@ pub fn propose_rigid_hertz_rate_driven_heat<'m, P, E>(
 ///
 /// The existing Hertz full/two-half controller retains only original physical
 /// fine states. It independently compares each body and cell, travel, friction
-/// heat, external work and endpoint mode. A later source, mechanical, thermal,
+/// heat, external work, endpoint mode and whether a driven arrest occurred.
+/// A later source, mechanical, thermal,
 /// numerical, budget or cancellation refusal returns no accepted mutation.
 /// Local estimates do not certify a global bound; each inner discretization
 /// remains an independent refinement axis. Available inner travel/heat estimates
-/// also enter the comparison. Genuine Coulomb delegation reports unavailable
-/// adaptive estimates and requires its own held-traction step refinement.
+/// also enter the comparison, including their contribution to native drive
+/// work. Analytic invariant paths declare their exact formula separately from
+/// adaptive estimates. Delegated curved Coulomb motion requires independent
+/// held-traction step refinement. Source variation still needs thermal-window
+/// refinement; a native exact event time is conditional on its held source.
 /// The phase's physical scope applies.
 #[allow(clippy::too_many_arguments)]
 pub fn propose_rigid_hertz_rate_driven_heat_march<'m, P, E>(

@@ -57,14 +57,24 @@ impl HertzHeatMarchMotion {
         };
         [slip[0], slip[1], radius * spin]
     }
-    fn uncertainty(&self, radius: f64) -> [f64; 2] {
+    // Travel, friction heat and supplied mechanical work, respectively.
+    fn uncertainty(&self, radius: f64) -> [f64; 3] {
         match self {
             // Driven held-traction time resolution has a separate native
             // refinement control, not an embedded trajectory error estimate.
-            Self::InvariantDirection(_) | Self::Driven(_) => [0.0; 2],
-            // Genuine Coulomb delegation declares unavailable adaptive
-            // estimates; its zero fields retain the independent time-step axis.
-            Self::RateDriven(m) => [m.estimated_scaled_travel_error_m, m.estimated_heat_error_j],
+            Self::InvariantDirection(_) | Self::Driven(_) => [0.0; 3],
+            Self::RateDriven(m) => {
+                let travel = m.estimated_scaled_travel_error_m;
+                // The original native supply is analytic free-body work plus
+                // g dot (travel-free_travel), with g=W^-1*a. This estimate
+                // cannot disappear through coarse/fine work cancellation.
+                let work = if travel == 0.0 {
+                    0.0
+                } else {
+                    norm(m.mechanical.driven.driving_scaled_wrench_n) * travel
+                };
+                [travel, m.estimated_heat_error_j, work]
+            }
             Self::Curved(m)
             | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => [
                 m.transient.estimated_scaled_travel_error_m
@@ -74,7 +84,17 @@ impl HertzHeatMarchMotion {
                         radius * m.transient.tail_spin_bound_rad,
                     ]),
                 m.transient.estimated_heat_error_j,
+                0.0,
             ],
+        }
+    }
+    fn has_driven_arrest(&self) -> bool {
+        match self {
+            Self::Driven(m)
+            | Self::RateDriven(RigidHertzRateDrivenReport { mechanical: m, .. }) => {
+                m.driven.first_arrest_time_s.is_some()
+            }
+            _ => false,
         }
     }
     fn external_work_j(&self) -> f64 {
@@ -126,6 +146,9 @@ pub struct HertzHeatMarchDefect {
     pub external_mechanical_work_j: f64,
     /// Different retained modes imply different future constitutive branches.
     pub mode_disagreement: bool,
+    /// Coarse/fine driven histories disagree whether an arrest occurred, even
+    /// when a subsequent reversal leaves both endpoints in the sliding mode.
+    pub arrest_disagreement: bool,
     pub normalized: f64,
 }
 pub struct HertzHeatMarchPhase<P, F = SourceHertzWrench> {
@@ -573,11 +596,14 @@ fn compare<P, E, F, H: PartialEq>(
 ) -> Result<HertzHeatMarchDefect, HertzHeatMarchError<E>> {
     let mut out = HertzHeatMarchDefect {
         mode_disagreement: coarse.history != fine.history,
+        arrest_disagreement: coarse.receipt.mechanical.has_driven_arrest()
+            != (first.receipt.mechanical.has_driven_arrest()
+                || fine.receipt.mechanical.has_driven_arrest()),
         ..HertzHeatMarchDefect::default()
     };
-    if out.mode_disagreement {
-        // No velocity cutoff can erase static/kinetic hysteresis. The finite
-        // floor uses the existing bounded refinement/refusal path.
+    if out.mode_disagreement || out.arrest_disagreement {
+        // Neither a velocity cutoff nor a matching final mode can erase a
+        // distinct driven history. Use the existing bounded refinement path.
         out.normalized = 2.0;
     }
     let mut scale = |error: f64, absolute: f64, change: f64| {
@@ -642,10 +668,10 @@ fn compare<P, E, F, H: PartialEq>(
     let a = first.receipt.mechanical.travel(radius);
     let b = fine.receipt.mechanical.travel(radius);
     let f = core::array::from_fn(|i| a[i] + b[i]);
-    let mut uncertainty = [0.0; 2];
+    let mut uncertainty = [0.0; 3];
     for phase in [&coarse.receipt, &first.receipt, &fine.receipt] {
         let u = phase.mechanical.uncertainty(radius);
-        for i in 0..2 {
+        for i in 0..3 {
             uncertainty[i] += u[i];
         }
     }
@@ -661,7 +687,7 @@ fn compare<P, E, F, H: PartialEq>(
     scale(out.dissipated_j, tolerance.dissipated_j, c.max(f))?;
     let c = coarse.receipt.mechanical.external_work_j();
     let f = first.receipt.mechanical.external_work_j() + fine.receipt.mechanical.external_work_j();
-    out.external_mechanical_work_j = (c - f).abs();
+    out.external_mechanical_work_j = (c - f).abs() + uncertainty[2];
     scale(
         out.external_mechanical_work_j,
         tolerance.dissipated_j,
