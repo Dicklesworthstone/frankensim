@@ -1,0 +1,24 @@
+frankensim-shell-assembly-options-v1
+# The Esteso 1964 guitar body with African mahogany (Khaya) for the back and both rib strips, for the B string, wall triangle 139, on
+# data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12-bridge-plan-drawn-khaya.tsv: the table is the
+# rosewood table with the pack name of the `back`, `rib-treble` and `rib-bass` component rows changed to `mahogany`, and nothing else.
+# The other options are those of esteso-h12-b-saddle.assembly, unchanged, and one line is added: `pack mahogany` names the Khaya pack
+# (data/matdb/seed-v1/guitar-mahogany-african-fpl-gtr282-laudares2023-shell, ledger row laudares-2023-khaya-mahogany-shell-pack). The bridge wall stays rosewood.
+# The comment lines that follow are those of esteso-h12-b-saddle.assembly; the table they name is the rosewood one.
+# The Esteso 1964 guitar body with its bridge wall at the drawn bridge's centre, data/instruments/geometry/
+# guitar-esteso-1964-zimmer2024/shell-assembly-h12-bridge-plan-drawn.tsv (its meta row "bridge_model"). The other options are those of
+# esteso-h12-b.assembly, unchanged.
+window-hz 15 2000
+projection-work 549755813888
+reference-thickness-m 0.0025
+pack spruce @body
+pack rosewood guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk
+pack cedar guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk
+pack mahogany guitar-mahogany-african-fpl-gtr282-laudares2023-shell.fsmatpk
+# bridge-component and bridge-direction are required by the options format; they apply to `bridge X Y` rows only.
+bridge-component top
+bridge-direction 0 0 1
+# The B string meets the bridge at its saddle crest, x = 327.67 mm in the table's frame (the plan's printed saddle
+# slot, read by SilentBluff for owner order 13380): a rigid, massless arm of -9.67 mm along x from the wall's top
+# edge at the string's y = 17.55 mm (wall triangle 139), along the top normal. No saddle mass or compliance is added.
+bridge-triangle bridge 139 0.0 0.6734519479607086 0.3265480520392913 0 0 1 -0.00967 0 0

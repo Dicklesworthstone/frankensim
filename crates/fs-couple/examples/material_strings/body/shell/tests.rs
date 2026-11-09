@@ -1679,7 +1679,7 @@ fn esteso_profile(strings: &[(f64, f64)]) -> (Profile, super::super::shell::asse
 /// The performance body record's thickness [m]; every part's own thickness is written as a ratio to it.
 const ESTESO_REFERENCE_THICKNESS_M: f64 = 0.0025;
 
-/// The three guitar shell packs, built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
+/// The four guitar shell packs (spruce, rosewood, cedar, and the African mahogany of a Khaya back and ribs), built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
 fn esteso_pack(name: &str) -> NormalizedPack {
     let bytes: &[u8] = match name {
         "guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk" =>
@@ -1688,9 +1688,44 @@ fn esteso_pack(name: &str) -> NormalizedPack {
             include_bytes!("../../packs/guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk"),
         "guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk" =>
             include_bytes!("../../packs/guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk"),
+        "guitar-mahogany-african-fpl-gtr282-laudares2023-shell.fsmatpk" =>
+            include_bytes!("../../packs/guitar-mahogany-african-fpl-gtr282-laudares2023-shell.fsmatpk"),
         _ => return pack(name, 1.0, None),
     };
     NormalizedPack::from_bytes(bytes).unwrap()
+}
+
+/// The Khaya (African mahogany) back-and-rib pack resolves through `esteso_pack` and carries what its ledger row
+/// (laudares-2023-khaya-mahogany-shell-pack) names: eta_L = 0.0312 / pi (Laudares et al. 2023, Table 6, untreated control), E_L = 1.10 x the
+/// Handbook's 9700 MPa bending MOE, and the L-direction viscosity eta_L Q11 / omega_ref with omega_ref = 2 pi 200 rad/s.
+#[test]
+fn khaya_pack_carries_the_ledgers_measured_eta_l_and_the_handbook_stiffness() {
+    let pack = esteso_pack("guitar-mahogany-african-fpl-gtr282-laudares2023-shell.fsmatpk");
+    let scalar = |name: &str| -> f64 {
+        let mut hits = pack.claims().claims_ordered().filter(|(_, claim)| claim.key.name() == name);
+        let (_, claim) = hits.next().unwrap_or_else(|| panic!("the Khaya pack has no claim {name}"));
+        assert!(hits.next().is_none(), "the Khaya pack has two claims for {name}");
+        let PropertyValue::Scalar { value, .. } = claim.value else { panic!("{name} is not a scalar") };
+        value
+    };
+    let close = |a: f64, b: f64, what: &str| assert!((a - b).abs() <= 1e-6 * b.abs(), "{what}: {a} against {b}");
+    let eta_l = 0.0312 / std::f64::consts::PI;
+    close(scalar("loss_factor_1"), eta_l, "eta_L");
+    close(scalar("young_modulus_1"), 9700e6 * 1.10, "E_L");
+    let (e1, e2, nu12) = (scalar("young_modulus_1"), scalar("young_modulus_2"), scalar("poisson_ratio_12"));
+    let q11 = e1 / (1.0 - nu12 * (nu12 * e2 / e1));
+    let omega_ref = 2.0 * std::f64::consts::PI * 200.0;
+    close(scalar("constant_loss_reference_omega"), omega_ref, "omega_ref");
+    close(scalar("plane_stress_viscosity_11"), eta_l * q11 / omega_ref, "L viscosity");
+    // Against the rosewood pack it replaces on the classical card: Khaya is lighter, and more lossy along the grain (0.0099 against 0.0048).
+    let rosewood = esteso_pack("guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk");
+    let rose = |name: &str| -> f64 {
+        let (_, claim) = rosewood.claims().claims_ordered().find(|(_, claim)| claim.key.name() == name).unwrap();
+        let PropertyValue::Scalar { value, .. } = claim.value else { panic!("{name} is not a scalar") };
+        value
+    };
+    assert!(scalar("density") < rose("density"));
+    assert!(scalar("loss_factor_1") > rose("loss_factor_1"));
 }
 
 /// The guitar E4 cost rung of bead .358: the Esteso body (`esteso_profile`) with 128 retained modes and its own cavity row
