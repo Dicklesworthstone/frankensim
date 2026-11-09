@@ -35,7 +35,8 @@ use fs_math::det;
 use std::sync::Arc;
 
 /// Owned finite-band emitter with one temperature per original physical film
-/// or one uniform temperature for an explicitly incoherent bulk glass slab.
+/// or authored depth interval of an explicitly incoherent bulk glass slab.
+/// The original slab constructor retains one uniform temperature.
 ///
 /// The selected outgoing half space is exactly vacuum (`eta = 1`), consistent
 /// with the existing thermal renderer's exterior-air approximation. Radiance
@@ -52,10 +53,17 @@ use std::sync::Arc;
 pub struct CoatingThermalEmission {
     films: Arc<[Film]>,
     exit: Exit,
+    slab_profile: Option<Arc<[SlabTemperature]>>,
     source_identity: ContentHash,
     identity: ContentHash,
     optical_identity: ContentHash,
     wavelength_bounds_nm: (f64, f64),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SlabTemperature {
+    end_depth_m: f64,
+    temperature_k: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +206,82 @@ impl CoatingThermalEmission {
         )
     }
 
+    /// Resolve emission from a homogeneous optical slab with a nonuniform
+    /// temperature profile. Each positive-width depth interval is internally
+    /// in local thermal equilibrium at its own supplied temperature. Boundaries
+    /// are measured from the selected observed VACUUM face, in increasing order,
+    /// and must partition the complete normal thickness exactly.
+    ///
+    /// The native positive absorption integral weights each interval's Planck
+    /// source, including every incoherent reflection. These are thermal cells,
+    /// not new optical films: no fictitious interface or averaged temperature
+    /// enters. The original glass optics remain homogeneous and explicitly
+    /// frozen over the whole profile. Temperature-dependent index/absorption,
+    /// internal radiative heat exchange and thermal feedback are not inferred.
+    /// To observe the other side, supply its physical opposite index and order
+    /// the same temperature intervals from that observed face.
+    pub fn try_depth_resolved_incoherent_slab(
+        glass: DielectricGlass,
+        thickness_m: f64,
+        end_depths_m: &[f64],
+        temperatures_k: &[f64],
+        opposite_ior: DielectricIor,
+        source_identity: ContentHash,
+    ) -> Result<Self, CoatingEmissionError> {
+        if end_depths_m.is_empty()
+            || end_depths_m.len() > MAX_COHERENT_STACK_LAYERS
+            || end_depths_m.len() != temperatures_k.len()
+        {
+            return Err(CoatingEmissionError::LayerTemperatures);
+        }
+        let mut result = Self::try_incoherent_slab(
+            glass,
+            thickness_m,
+            temperatures_k[0],
+            opposite_ior,
+            source_identity,
+        )?;
+        let mut start = 0.0;
+        for (&end, &temperature) in end_depths_m.iter().zip(temperatures_k) {
+            if !end.is_finite() || end <= start || end > thickness_m {
+                return Err(DielectricError::InvalidAbsorption.into());
+            }
+            validate_temperature(temperature, result.wavelength_bounds_nm.0)?;
+            start = end;
+        }
+        if start != thickness_m {
+            return Err(DielectricError::InvalidAbsorption.into());
+        }
+        // Optical response caches retain the physical partition, but do not
+        // need rebuilding when only its temperatures change. Bind the native
+        // homogeneous law directly, without its isothermal emission identity.
+        let mut optical = DomainHasher::new("org.frankensim.render.depth-resolved-slab-optics.v1");
+        optical.update(result.optical_identity.as_bytes());
+        optical.update(&(end_depths_m.len() as u64).to_le_bytes());
+        for &end in end_depths_m {
+            optical.update(&end.to_bits().to_le_bytes());
+        }
+        result.optical_identity = optical.finalize();
+        let mut identity =
+            DomainHasher::new("org.frankensim.render.depth-resolved-slab-emission.v1");
+        identity.update(result.optical_identity.as_bytes());
+        for &temperature in temperatures_k {
+            identity.update(&temperature.to_bits().to_le_bytes());
+        }
+        result.identity = identity.finalize();
+        result.slab_profile = Some(
+            end_depths_m
+                .iter()
+                .zip(temperatures_k)
+                .map(|(&end_depth_m, &temperature_k)| SlabTemperature {
+                    end_depth_m,
+                    temperature_k,
+                })
+                .collect(),
+        );
+        Ok(result)
+    }
+
     fn prepare(
         layers: &[CoatingLayer<'_>],
         temperatures: &[f64],
@@ -322,6 +406,7 @@ impl CoatingThermalEmission {
         Ok(Self {
             films,
             exit,
+            slab_profile: None,
             source_identity,
             identity: hash.finalize(),
             optical_identity: optical_hash.finalize(),
@@ -502,12 +587,51 @@ impl CoatingThermalEmission {
                 opposite_ior,
                 ..
             } => {
-                let work = slab_power(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
-                result.films[0] = work.absorbed;
-                result.total = work.absorbed;
-                Ok(result)
+                let (_, absorption) =
+                    self.slab_work(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
+                Ok(absorption)
             }
         })
+    }
+
+    fn slab_work(
+        &self,
+        glass: DielectricGlass,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+        wavelength_nm: f64,
+        cosine: f64,
+    ) -> Result<(ReciprocalPortPower, ReciprocalLayerAbsorption), CoatingEmissionError> {
+        let prepared = glass.prepare_incoherent_slab_absorption_between(
+            wavelength_nm,
+            thickness_m,
+            cosine,
+            1.0,
+            opposite_ior.eval(wavelength_nm)?,
+        )?;
+        let optical = prepared.optical();
+        let powers = [optical.perpendicular, optical.parallel];
+        let port = ReciprocalPortPower {
+            reflected: powers.map(|power| power.reflectance),
+            transmitted: powers.map(|power| power.transmittance),
+            absorbed: powers.map(|power| power.absorptance),
+        };
+        let mut absorption = ReciprocalLayerAbsorption {
+            films: [[0.0; 2]; MAX_COHERENT_STACK_LAYERS],
+            film_count: self.film_count(),
+            substrate: None,
+            total: port.absorbed,
+        };
+        if let Some(profile) = &self.slab_profile {
+            let mut start = 0.0;
+            for (fraction, cell) in absorption.films.iter_mut().zip(profile.iter()) {
+                *fraction = prepared.absorption_between(start, cell.end_depth_m)?;
+                start = cell.end_depth_m;
+            }
+        } else {
+            absorption.films[0] = port.absorbed;
+        }
+        Ok((port, absorption))
     }
 
     fn evaluate_layers(
@@ -570,11 +694,23 @@ impl CoatingThermalEmission {
                 temperature_k,
                 opposite_ior,
             } => {
-                let work = slab_power(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
+                let (work, absorption) =
+                    self.slab_work(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
                 sample.reflected = work.reflected;
                 sample.transmitted = work.transmitted;
                 sample.absorbed = work.absorbed;
-                sample.films[0] = emission(temperature_k, wavelength_nm, work.absorbed)?;
+                if let Some(profile) = &self.slab_profile {
+                    for ((slot, cell), fraction) in sample
+                        .films
+                        .iter_mut()
+                        .zip(profile.iter())
+                        .zip(absorption.films)
+                    {
+                        *slot = emission(cell.temperature_k, wavelength_nm, fraction)?;
+                    }
+                } else {
+                    sample.films[0] = emission(temperature_k, wavelength_nm, work.absorbed)?;
+                }
             }
         }
         // Positive compensated sums retain smaller emitting layers without
@@ -629,11 +765,14 @@ impl CoatingThermalEmission {
     }
 
     /// Number of original thermal film channels, including lossless films.
-    /// An incoherent homogeneous slab retains one channel even when transparent.
+    /// An incoherent slab retains its explicit thermal depth partition, or one
+    /// channel for the original isothermal constructor, even when transparent.
     #[must_use]
     pub fn film_count(&self) -> usize {
         match self.exit {
-            Exit::IncoherentSlab { .. } => 1,
+            Exit::IncoherentSlab { .. } => {
+                self.slab_profile.as_ref().map_or(1, |cells| cells.len())
+            }
             _ => self.films.len(),
         }
     }
@@ -642,7 +781,10 @@ impl CoatingThermalEmission {
     #[must_use]
     pub fn film_temperature_k(&self, index: usize) -> Option<f64> {
         match self.exit {
-            Exit::IncoherentSlab { temperature_k, .. } => (index == 0).then_some(temperature_k),
+            Exit::IncoherentSlab { temperature_k, .. } => self.slab_profile.as_ref().map_or_else(
+                || (index == 0).then_some(temperature_k),
+                |cells| cells.get(index).map(|cell| cell.temperature_k),
+            ),
             _ => self.films.get(index).map(|film| film.temperature_k),
         }
     }

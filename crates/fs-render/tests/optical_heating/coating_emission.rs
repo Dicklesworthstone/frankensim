@@ -104,6 +104,101 @@ fn near(a: f64, b: f64) {
 }
 
 #[test]
+fn depth_resolved_slab_observes_native_cells_without_averaging_or_debiting_heat() {
+    use fs_render::dielectric::{BeerLambertAbsorption, DielectricGlass, GlassProvenance};
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.0).unwrap(),
+        BeerLambertAbsorption::try_constant(40.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let mut cells = vec![cell(11, 1.0, 1.0, 20.0), cell(12, 2.0, 1.0, 5.0)];
+    cells[0].specific_h_j_kg = 100.0;
+    cells[1].specific_h_j_kg = 1000.0;
+    let native = thermal(cells, &HOT, vec![]);
+    let vacuum: DielectricIor = CauchyIor::try_constant(1.0).unwrap().into();
+    let prepare = |state: &DepositionSimulation<'_>| {
+        NativeCoatingEmission::try_depth_resolved_incoherent_slab(
+            state,
+            &[receiver(11), receiver(12)],
+            glass,
+            0.02,
+            &[0.005, 0.02],
+            vacuum,
+            SOURCE,
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let energy = native.energy_j();
+    let before = prepare(&native);
+    let frozen = before.emitter().evaluate(550.0, 0.7).unwrap();
+    for (i, (a, b)) in [(0.0_f64, 0.005_f64), (0.005, 0.02)]
+        .into_iter()
+        .enumerate()
+    {
+        // Matched interfaces: independently integrate exp(-alpha*z/cosine).
+        let absorbed = (-40.0 * a / 0.7).exp() * -(-40.0 * (b - a) / 0.7).exp_m1();
+        let temperature = native.temperature_k(CellId(11 + i as u64)).unwrap();
+        for mode in frozen.film_radiance_w_m2_sr_nm()[i] {
+            near(mode, absorbed * blackbody(temperature, 550.0) / 2.0);
+        }
+    }
+    assert_eq!(native.energy_j(), energy);
+    let (heated, _) = native.advance_to(0.2, config(0.1), || Ok(())).unwrap();
+    let after = prepare(&heated);
+    assert_ne!(before.identity(), after.identity());
+    assert_eq!(
+        before.emitter().optical_identity(),
+        after.emitter().optical_identity()
+    );
+    assert_ne!(
+        frozen.stokes(),
+        after.emitter().evaluate(550.0, 0.7).unwrap().stokes()
+    );
+    assert_eq!(before.emitter().evaluate(550.0, 0.7).unwrap(), frozen);
+    let mut foreign = receiver(12);
+    foreign.material_id = MaterialId(8);
+    assert!(
+        NativeCoatingEmission::try_depth_resolved_incoherent_slab(
+            &native,
+            &[receiver(11), foreign],
+            glass,
+            0.02,
+            &[0.005, 0.02],
+            vacuum,
+            SOURCE,
+            || Ok(()),
+        )
+        .is_err()
+    );
+    let mut polls = 0;
+    assert!(matches!(
+        NativeCoatingEmission::try_depth_resolved_incoherent_slab(
+            &native,
+            &[receiver(11), receiver(12)],
+            glass,
+            0.02,
+            &[0.005, 0.02],
+            vacuum,
+            SOURCE,
+            || {
+                polls += 1;
+                if polls == 3 {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        ),
+        Err(NativeCoatingEmissionError::Binding(
+            SurfaceHeatingError::Thermal(DepositionError::Cancelled)
+        ))
+    ));
+    assert_eq!(native.energy_j(), energy);
+    assert_eq!(prepare(&native).identity(), before.identity());
+}
+
+#[test]
 fn independent_native_film_and_substrate_states_determine_emitted_stokes() {
     let mut cells: Vec<_> = (0..3)
         .map(|i| cell(11 + i as u64, (i + 1) as f64, 1.0, [20.0, 5.0, 10.0][i]))

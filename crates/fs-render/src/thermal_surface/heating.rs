@@ -21,6 +21,8 @@ mod response;
 pub use response::SurfacePowerResponse;
 /// Coherent coating absorption assigned to separate native thermal receivers.
 pub mod coating;
+/// Depth-resolved incoherent bulk-glass absorption on existing native cells.
+pub mod slab_depth;
 pub use coating::{
     CoatedSurfaceIlluminationSource, CoatedSurfacePowerResponse, SurfaceHeatingReceiver,
     TransmittingSurfaceIlluminationSource, TransmittingSurfacePowerResponse,

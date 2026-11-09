@@ -239,6 +239,51 @@ impl NativeCoatingEmission {
         Self::finish(thermal.time_s(), emitter, resolver, &mut checkpoint)
     }
 
+    /// Observe the actual native temperature of every thermal depth interval in
+    /// one optically homogeneous slab. Receivers and increasing normal-depth
+    /// endpoints are ordered from the selected observed vacuum face. They must
+    /// cover the full thickness; no receiver temperature is averaged.
+    ///
+    /// The supplied glass and opposite-medium laws are explicitly frozen over
+    /// every receiver's declared temperature support. Each receiver retains its
+    /// original active cell and material identity. This is an immutable emission
+    /// snapshot: it neither deposits illumination nor debits radiative cooling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_depth_resolved_incoherent_slab(
+        thermal: &DepositionSimulation<'_>,
+        receivers: &[SurfaceHeatingReceiver],
+        glass: DielectricGlass,
+        thickness_m: f64,
+        end_depths_m: &[f64],
+        opposite_ior: DielectricIor,
+        source_identity: ContentHash,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, NativeCoatingEmissionError> {
+        checkpoint()?;
+        if receivers.is_empty()
+            || receivers.len() > MAX_COHERENT_STACK_LAYERS
+            || receivers.len() != end_depths_m.len()
+        {
+            return Err(CoatingEmissionError::LayerTemperatures.into());
+        }
+        let mut resolver = Resolver::new(thermal.time_s(), 0, source_identity);
+        resolver.hash.update(&[4]);
+        let mut temperatures = Vec::with_capacity(receivers.len());
+        for receiver in receivers {
+            checkpoint()?;
+            temperatures.push(resolver.receiver(thermal, *receiver)?);
+        }
+        let emitter = CoatingThermalEmission::try_depth_resolved_incoherent_slab(
+            glass,
+            thickness_m,
+            end_depths_m,
+            &temperatures,
+            opposite_ior,
+            source_identity,
+        )?;
+        Self::finish(thermal.time_s(), emitter, resolver, &mut checkpoint)
+    }
+
     /// Refresh original dielectric claims at the receiver's actual temperature
     /// before preparing its incoherent slab emission. The complete source is
     /// resolved once here, outside spectral/angular quadrature, and its identity

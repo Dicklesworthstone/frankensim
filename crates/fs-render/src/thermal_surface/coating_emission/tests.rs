@@ -56,6 +56,172 @@ fn planck_si(temperature_k: f64, wavelength_nm: f64) -> f64 {
 }
 
 #[test]
+fn g1_depth_resolved_slab_emits_original_local_temperatures() {
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.5).unwrap(),
+        BeerLambertAbsorption::try_constant(40.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let depths = [0.005, 0.02];
+    let temperatures = [1500.0, 2500.0];
+    let emitter = CoatingThermalEmission::try_depth_resolved_incoherent_slab(
+        glass,
+        0.02,
+        &depths,
+        &temperatures,
+        vacuum(),
+        ContentHash([93; 32]),
+    )
+    .unwrap();
+    let sample = emitter.evaluate(550.0, 1.0).unwrap();
+    assert_eq!(emitter.film_count(), 2);
+    assert_eq!(emitter.film_temperature_k(1), Some(2500.0));
+    assert_eq!(emitter.film_temperature_k(2), None);
+    // Independent normal-incidence Fresnel and forward/backward Beer series.
+    let reflectance = (0.5_f64 / 2.5).powi(2);
+    let entering =
+        (1.0 - reflectance) / (1.0 - reflectance.powi(2) * (-2.0_f64 * 40.0 * 0.02).exp());
+    let mut expected = 0.0;
+    let mut start = 0.0;
+    for (i, &end) in depths.iter().enumerate() {
+        let absorbed = entering
+            * -(-40.0 * (end - start)).exp_m1()
+            * ((-40.0 * start).exp() + reflectance * (-40.0 * (0.04 - end)).exp());
+        let radiance = absorbed * planck_si(temperatures[i], 550.0);
+        for mode in sample.film_radiance_w_m2_sr_nm()[i] {
+            close(mode, radiance / 2.0);
+        }
+        expected += radiance;
+        start = end;
+    }
+    close(sample.stokes().i, expected);
+    let average = CoatingThermalEmission::try_incoherent_slab(
+        glass,
+        0.02,
+        2250.0,
+        vacuum(),
+        ContentHash([93; 32]),
+    )
+    .unwrap();
+    assert!(
+        (sample.stokes().i / average.evaluate(550.0, 1.0).unwrap().stokes().i - 1.0).abs() > 0.1
+    );
+    // Reversing the actual hot/cold profile changes directional emission,
+    // while the homogeneous optical R/T/A remains unchanged.
+    let reverse = CoatingThermalEmission::try_depth_resolved_incoherent_slab(
+        glass,
+        0.02,
+        &[0.015, 0.02],
+        &[2500.0, 1500.0],
+        vacuum(),
+        ContentHash([93; 32]),
+    )
+    .unwrap()
+    .evaluate(550.0, 1.0)
+    .unwrap();
+    assert!(reverse.stokes().i > sample.stokes().i);
+    assert_eq!(
+        reverse.reciprocal_absorbed_fraction(),
+        sample.reciprocal_absorbed_fraction()
+    );
+}
+
+#[test]
+fn g3_depth_partition_retains_isothermal_emission_and_temperature_only_cache_identity() {
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.5).unwrap(),
+        BeerLambertAbsorption::try_constant(40.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let other: DielectricIor = CauchyIor::try_constant(1.33).unwrap().into();
+    let prepare = |depths: &[f64], temperatures: &[f64]| {
+        CoatingThermalEmission::try_depth_resolved_incoherent_slab(
+            glass,
+            0.02,
+            depths,
+            temperatures,
+            other,
+            ContentHash([94; 32]),
+        )
+        .unwrap()
+    };
+    let depths = [0.001, 0.008, 0.02];
+    let partitioned = prepare(&depths, &[1500.0; 3]);
+    let uniform = CoatingThermalEmission::try_incoherent_slab(
+        glass,
+        0.02,
+        1500.0,
+        other,
+        ContentHash([94; 32]),
+    )
+    .unwrap();
+    for cosine in [1.0, 0.5, 0.01] {
+        let result = partitioned.evaluate(550.0, cosine).unwrap();
+        let reference = uniform.evaluate(550.0, cosine).unwrap();
+        for pol in 0..2 {
+            close(
+                result.polarized_radiance_w_m2_sr_nm()[pol],
+                reference.polarized_radiance_w_m2_sr_nm()[pol],
+            );
+        }
+        let work = partitioned
+            .reciprocal_layer_absorption(550.0, cosine)
+            .unwrap();
+        for pol in 0..2 {
+            close(
+                work.films[..3].iter().map(|value| value[pol]).sum(),
+                work.total[pol],
+            );
+        }
+    }
+    let warmer = prepare(&depths, &[1400.0, 1600.0, 1700.0]);
+    assert_eq!(warmer.optical_identity(), partitioned.optical_identity());
+    assert_ne!(warmer.identity(), partitioned.identity());
+    assert_ne!(
+        prepare(&[0.002, 0.008, 0.02], &[1500.0; 3]).optical_identity(),
+        partitioned.optical_identity()
+    );
+}
+
+#[test]
+fn g0_depth_emission_refuses_incomplete_or_unsupported_profiles() {
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.5).unwrap(),
+        BeerLambertAbsorption::try_constant(0.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let prepare = |depths: &[f64], temperatures: &[f64]| {
+        CoatingThermalEmission::try_depth_resolved_incoherent_slab(
+            glass,
+            0.02,
+            depths,
+            temperatures,
+            vacuum(),
+            ContentHash([95; 32]),
+        )
+    };
+    for (depths, temperatures) in [
+        (vec![], vec![]),
+        (vec![0.01, 0.02], vec![1500.0]),
+        (vec![0.0, 0.02], vec![1500.0; 2]),
+        (vec![0.01], vec![1500.0]),
+        (vec![0.02, 0.01], vec![1500.0; 2]),
+        (vec![f64::NAN], vec![1500.0]),
+        (vec![0.02], vec![f64::NAN]),
+        (vec![0.02], vec![0.0]),
+        (
+            vec![0.02; MAX_COHERENT_STACK_LAYERS + 1],
+            vec![1500.0; MAX_COHERENT_STACK_LAYERS + 1],
+        ),
+    ] {
+        assert!(prepare(&depths, &temperatures).is_err());
+    }
+    let transparent = prepare(&[0.01, 0.02], &[1500.0, 2500.0]).unwrap();
+    assert_eq!(transparent.evaluate(550.0, 0.7).unwrap().stokes().i, 0.0);
+    assert!(transparent.evaluate(300.0, 0.7).is_err());
+}
+
+#[test]
 fn incoherent_slab_retains_one_physical_receiver_and_directional_kirchhoff_emission() {
     let glass = DielectricGlass::new(
         CauchyIor::try_constant(1.5).unwrap(),

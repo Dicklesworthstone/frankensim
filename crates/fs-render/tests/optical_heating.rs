@@ -51,6 +51,9 @@ mod coating;
 #[path = "optical_heating/transmitting_coating.rs"]
 mod transmitting_coating;
 
+#[path = "optical_heating/slab_depth.rs"]
+mod slab_depth;
+
 #[path = "optical_heating/fluorescence.rs"]
 mod fluorescence;
 #[path = "optical_heating/luminescence.rs"]

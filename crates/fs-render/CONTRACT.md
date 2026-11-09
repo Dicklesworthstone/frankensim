@@ -2372,6 +2372,36 @@ independent bounce integrals, additive partitions, metre scaling and opaque
 skin localization. Optical coefficients remain homogeneous and frozen; no
 thermal storage, within-slab material variation or coherent profile is inferred.
 
+`SlabDepthPowerResponse` in `thermal_surface::heating::slab_depth` compiles
+complete authored normal-depth partitions into the original spectral R/T/A
+account. Reverse illumination changes traversal while retaining authored cell
+order. `SurfaceOpticalHeating::try_new_slab_depths` assigns those positive
+fractions to existing native thermal cells and reuses scheduled intercepted
+watts, receiver material/temperature checks, source accounting and rollback.
+Depth intervals may share a receiver; incident, reflected and transmitted
+energy are still counted once per physical source. Receiver mapping and cell
+volumes are caller-authored; generic receivers do not certify slab geometry.
+Explicit per-response and whole-source binding ceilings bound storage;
+preparation polls cancellation.
+Focused G1/G3/G4 tests cover independent local heat, weak-loss enthalpy,
+reversed localization, finite ramp schedules, shared receivers and atomic
+refusals. Optics remain homogeneous and frozen on declared receiver support;
+only prompt thermalized absorption is deposited, with no inferred cooling.
+
+`CoatingThermalEmission::try_depth_resolved_incoherent_slab` observes one
+temperature per authored slab depth interval. Its outgoing s/p radiance sums
+each interval's reciprocal absorption times its own Planck source, retaining
+the original homogeneous Fresnel/Beer owner without an averaged temperature or
+invented internal optical interfaces. The native constructor snapshots each
+bound thermal receiver's actual temperature and material. Depths are ordered
+from the observed vacuum face; at most 64 intervals are admitted, with no
+allocation during spectral/angular queries. Temperature refreshes preserve
+optical cache identity while changing emission identity. Independent local
+Beer/Planck controls, isothermal reduction, reversed temperature profiles,
+snapshot immutability and domain/cancellation refusals cover this path.
+This remains finite-band outgoing appearance at frozen homogeneous optics;
+internal radiative exchange, net cooling and thermal geometry are not inferred.
+
 `CoatingThermalEmission::try_incoherent_slab` retains one uniform-temperature
 bulk-glass receiver and the original finite-band phase/absorption laws. Native
 slab s/p absorptance supplies reciprocal emissivity; transmitted power remains
