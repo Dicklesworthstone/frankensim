@@ -10071,3 +10071,13 @@ hereditary groups also passed (14/14 total). These bounded isolated runs use
 the actual native MBD/time, pHS and linear-algebra numerical sources without
 numerical substitutes; they are not a full workspace build. Pinned Rust
 formatting passed for the two modified modules and two new test files.
+
+## Forced response about an affine-constrained equilibrium
+
+`ConstrainedQuadraticModel::prepare_forced_response` reuses the original admitted equilibrium, allowed-coordinate map, native joint mass, and original allowed-direction stiffness and velocity tangents. It prepares the original general quadratic forced-response factor for peak phasors with the `exp(-i omega t)` convention, including DC. Physical joint forcing is reduced by `N^T`; physical displacement is lifted by `N`. Signed stiffness and nonsymmetric or gyroscopic velocity terms remain unchanged. This local particular response does not establish transient decay, nonlinear stability, or finite-amplitude joint-limit reachability.
+
+Reaction increments are recovered using the original QR owner with the admitted physical row and coordinate scaling, then replayed through the original `A^T` action in original row order. Publication separately checks the complete physical force balance, original affine position and velocity tolerances, and the caller's explicit bound on average ideal-reaction power. Reported reactions are increments about the mean equilibrium, and the signed input, inertia, velocity, stiffness, and reaction powers refer to the actual published physical phasors. Constraint multipliers never receive artificial mass or damping.
+
+A fully locked mechanism has a legitimate empty reduced response and recovers support forces without probing fictitious dynamic directions. Repeated loads reuse the native dynamic and reaction factors. Singular resonance, unrepresentable arithmetic, exceeded work or payload bounds, violated physical residuals, and cancellation refuse publication without changing the source model. The existing modal and unconstrained response APIs retain their admission rules.
+
+Five original-mechanism regressions and one additional native modal power regression were authored and independently source-reviewed. They remain uncompiled and unexecuted during the executor outage.

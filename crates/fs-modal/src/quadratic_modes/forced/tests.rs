@@ -118,3 +118,18 @@ fn independent_physical_balance_and_late_cancellation_refuse_atomically() {
     assert!(original(&m,&c,&k,1).into_forced_response(2.0,tiny,||false).is_err());
     assert_eq!(m,[2.0]);assert_eq!(c,[3.0]);assert_eq!(k,[8.0]);
 }
+
+#[test]
+fn disjoint_large_force_rate_entries_do_not_erase_small_actual_work() {
+    let big=2.0_f64.powi(500);let small=2.0_f64.powi(-500);
+    let f=[C64::from_re(big),C64::ZERO,C64::from_re(small)];
+    let v=[C64::ZERO,C64::from_re(big),C64::from_re(small)];
+    let z=[C64::ZERO;3];
+    let balance=evaluate_harmonic_balance(&f,&z,&z,&f,&z,&v,1e-12,||false).unwrap();
+    assert_eq!(balance.average_input_power_w,2.0_f64.powi(-1001));
+    assert_eq!(balance.average_velocity_power_w,2.0_f64.powi(-1001));
+    assert_eq!(balance.power_balance_residual_w,0.0);
+    // Both very large and very small products are now active. Their normalized
+    // span cannot be represented; refusal is required rather than silent loss.
+    assert!(evaluate_harmonic_balance(&f,&z,&z,&f,&z,&f,1e-12,||false).is_err());
+}

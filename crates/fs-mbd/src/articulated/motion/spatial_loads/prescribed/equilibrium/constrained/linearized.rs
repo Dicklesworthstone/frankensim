@@ -6,6 +6,9 @@
 //! nor fitted damping enter the existing fs-modal pencil. Affine rows have no
 //! curvature term; configuration-dependent constraints need their own owner.
 
+/// Physical forcing and original ideal reactions on this admitted local pencil.
+pub mod forced;
+
 use super::ConstrainedArticulatedEquilibrium;
 use super::super::{EquilibriumBushings, SpatialMotionLoads};
 use super::super::linearized::{
@@ -118,7 +121,7 @@ pub fn prepare<'a>(
     {
         return Err(ConstrainedLinearizationError::Invalid("explicit bounded row/nullspace controls required"));
     }
-    admit_constraints(rows, &equilibrium.state.joint_position,
+    let admitted_rows = admit_constraints(rows, &equilibrium.state.joint_position,
         &equilibrium.state.joint_velocity, &mut cancelled)?;
     let mobility = PreparedJointConstraints::prescribed_trial(model,
         &equilibrium.state.joint_position, rows,
@@ -185,6 +188,9 @@ pub fn prepare<'a>(
     Ok(ConstrainedArticulatedLinearization {
         original, subspace, mean_reaction: reaction, reciprocal_condition,
         difference: controls.difference,
+        rows: rows.to_vec(), coordinate_scales: controls.coordinate_scales.to_vec(),
+        mean_position_residuals: admitted_rows.position,
+        minimum_scaled_qr_diagonal: constrained.minimum_scaled_qr_diagonal,
     })
 }
 
@@ -204,6 +210,10 @@ pub struct ConstrainedArticulatedLinearization<'a> {
     mean_reaction: Vec<f64>,
     reciprocal_condition: f64,
     difference: CentralDifferenceControls,
+    rows: Vec<JointConstraint>,
+    coordinate_scales: Vec<f64>,
+    mean_position_residuals: Vec<f64>,
+    minimum_scaled_qr_diagonal: f64,
 }
 
 impl ConstrainedArticulatedLinearization<'_> {
@@ -303,6 +313,12 @@ impl ConstrainedArticulatedLinearization<'_> {
             stiffness_disagreement: vec![0.0; r*r],
             velocity_disagreement: vec![0.0; r*r],
             source_evaluations: 0, maximum_stencil_distortion: 0.0,
+            original_mass: Vec::new(),
+            original_stiffness_lift: vec![0.0; self.subspace.physical_dimension()*r],
+            original_velocity_lift: vec![0.0; self.subspace.physical_dimension()*r],
+            rows: self.rows.clone(), coordinate_scales: self.coordinate_scales.clone(),
+            mean_position_residuals: self.mean_position_residuals.clone(),
+            minimum_scaled_qr_diagonal: self.minimum_scaled_qr_diagonal,
         };
         if r == 0 {
             poll(&mut cancelled)?;
@@ -310,6 +326,7 @@ impl ConstrainedArticulatedLinearization<'_> {
         }
         let mass = self.original.mass_matrix(&mut cancelled)?;
         result.mass = self.subspace.symmetric_congruence(&mass, &mut cancelled)?;
+        result.original_mass = mass;
         result.source_evaluations = 1;
         let mut direction = vec![0.0; r];
         for column in 0..r {
@@ -329,6 +346,13 @@ impl ConstrainedArticulatedLinearization<'_> {
                 result.source_evaluations += value.original.residual_evaluations;
                 result.maximum_stencil_distortion = result.maximum_stencil_distortion
                     .max(value.original.maximum_stencil_distortion);
+                // Retain the same native allowed-direction force columns for
+                // complete physical reaction recovery; never probe locked DOFs.
+                let physical = if rate { &mut result.original_velocity_lift }
+                    else { &mut result.original_stiffness_lift };
+                for (row, &effort) in value.original.effort.iter().enumerate() {
+                    physical[row*r+column] = effort;
+                }
                 let (matrix, errors) = if rate {
                     (&mut result.velocity, &mut result.velocity_disagreement)
                 } else {
@@ -358,6 +382,13 @@ pub struct ConstrainedQuadraticModel {
     velocity_disagreement: Vec<f64>,
     source_evaluations: usize,
     maximum_stencil_distortion: f64,
+    original_mass: Vec<f64>,
+    original_stiffness_lift: Vec<f64>,
+    original_velocity_lift: Vec<f64>,
+    rows: Vec<JointConstraint>,
+    coordinate_scales: Vec<f64>,
+    mean_position_residuals: Vec<f64>,
+    minimum_scaled_qr_diagonal: f64,
 }
 impl ConstrainedQuadraticModel {
     pub fn dimension(&self) -> usize { self.subspace.dimension() }

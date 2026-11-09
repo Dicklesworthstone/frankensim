@@ -347,3 +347,6 @@ fn forged_public_equilibrium_fields_and_original_manifold_violations_refuse() {
     assert_eq!(retry.velocity_operator(), expected.velocity_operator());
     assert_eq!(root, original);
 }
+
+#[path = "constrained_linearized/forced.rs"]
+mod forced;

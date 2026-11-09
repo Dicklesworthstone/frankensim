@@ -138,17 +138,26 @@ pub fn evaluate_harmonic_balance(
 }
 
 fn mean_power(force:&[C64],rate:&[C64],cancelled:&mut impl FnMut()->bool)->Result<f64,E> {
-    let ef=force.iter().filter_map(|&z|exponent(z)).max().unwrap_or(0);
-    let ev=rate.iter().filter_map(|&z|exponent(z)).max().unwrap_or(0);
+    // Normalize actual nonzero products. Independent vector maxima may occupy
+    // disjoint coordinates and erase a perfectly representable physical work.
+    let pairs=||force.iter().zip(rate).flat_map(|(f,v)|[(f.re,v.re),(f.im,v.im)]);
+    let largest=pairs().filter(|(a,b)|*a!=0.0 && *b!=0.0)
+        .map(|(a,b)|quadratic_fraction(a).1+quadratic_fraction(b).1).max();
+    let Some(largest)=largest else {poll(cancelled)?;return Ok(0.0);};
     let mut sum=Dd::ZERO;
-    for (&f,&v) in force.iter().zip(rate) {
+    for (a,b) in pairs() {
         poll(cancelled)?;
-        let f=scale_complex(f,-ef)?;
-        let v=scale_complex(v,-ev)?;
-        sum=sum+Dd::from_f64(f.re)*Dd::from_f64(v.re)
-            +Dd::from_f64(f.im)*Dd::from_f64(v.im);
+        if a==0.0 || b==0.0 {continue;}
+        let ea=quadratic_fraction(a).1;
+        let eb=quadratic_fraction(b).1;
+        let product=Dd::from_f64(scale(a,-ea)?)*Dd::from_f64(scale(b,-eb)?);
+        let term=product*Dd::from_f64(scale(1.0,ea+eb-largest)?);
+        if term==Dd::ZERO {
+            return Err(E::Invalid("active physical power product underflow"));
+        }
+        sum=sum+term;
     }
-    Ok(scale((sum*Dd::from_f64(0.5)).to_f64(),ef+ev)?)
+    Ok(scale(sum.to_f64(),largest-1)?)
 }
 
 /// Source-coordinate displacement/velocity plus the independent full force account.
