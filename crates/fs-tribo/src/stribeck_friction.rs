@@ -649,8 +649,9 @@ impl StribeckLoadLine {
             .map(|(step, _)| step)
     }
 
-    /// The same step under a caller's bisection budget. Returns the step and
-    /// the bisections its roots took; every root is resolved to adjacent
+    /// The same step under a caller's root-trial budget. Returns the step and
+    /// the nonlinear trials its roots took. Safeguarded Newton proposals stay
+    /// inside the original branch bracket; acceptance still requires adjacent
     /// floats, so a budget too small for that refuses.
     ///
     /// # Errors
@@ -725,10 +726,34 @@ impl StribeckLoadLine {
                     return Ok(root);
                 }
             }
-            bisect_crossing(
+            let mut slope_available = true;
+            sliding_crossing(
                 lo,
                 hi,
-                |v| residual(v).map(|r| r < 0.0),
+                speed,
+                |v| {
+                    if !slope_available {
+                        return Ok((residual(v)?, f64::NAN));
+                    }
+                    // Share the expensive exponential/power between value and
+                    // slope. A slope may be unrepresentable even though the
+                    // original traction is valid: retain bisection in that
+                    // case rather than narrowing the admitted physical law.
+                    let (mu, slope) = match self.law.kinetic_coefficient_and_slope(v) {
+                        Ok(sample) => sample,
+                        Err(_) => {
+                            slope_available = false;
+                            spend_iteration(&bisections, max_bisections)?;
+                            return Ok((residual(v)?, f64::NAN));
+                        }
+                    };
+                    let r = v - speed + mobility * (self.kinetic_junction_n + mu * self.normal_n);
+                    if !r.is_finite() {
+                        return Err(ImplicitFrictionError::InvalidInput("contact_residual"));
+                    }
+                    Ok((r, 1.0 + mobility * (self.normal_n * slope)))
+                },
+                residual,
                 &bisections,
                 max_bisections,
             )
@@ -863,25 +888,70 @@ fn spend_iteration(used: &core::cell::Cell<usize>, maximum: usize) -> Result<(),
     Ok(())
 }
 
-/// Bisect the original predicate to adjacent floats, with an actual work cap.
-fn bisect_crossing(
+/// Safeguarded Newton on the original stable branch. Every endpoint uses the
+/// original residual; acceptance still needs adjacent floats. An unavailable or
+/// unhelpful derivative selects ordinary bisection.
+fn sliding_crossing(
     mut lo: f64,
     mut hi: f64,
-    mut below: impl FnMut(f64) -> Result<bool, SetValuedError>,
+    scale_m_s: f64,
+    mut sample: impl FnMut(f64) -> Result<(f64, f64), SetValuedError>,
+    mut residual: impl FnMut(f64) -> Result<f64, SetValuedError>,
     used: &core::cell::Cell<usize>,
     maximum: usize,
 ) -> Result<f64, SetValuedError> {
+    let mut x = lo + 0.5 * (hi - lo);
+    let mut previous_step = hi - lo;
+    let mut polished = false;
     loop {
         let mid = lo + 0.5 * (hi - lo);
         if mid <= lo || mid >= hi {
             return Ok(hi);
         }
         spend_iteration(used, maximum)?;
-        if below(mid)? {
-            lo = mid;
+        let (value, derivative) = sample(x)?;
+        if value < 0.0 {
+            lo = x;
         } else {
-            hi = mid;
+            hi = x;
         }
+        if !polished
+            && value.abs() <= 16.0 * f64::EPSILON * scale_m_s
+            && derivative.is_finite()
+            && derivative > 0.0
+        {
+            polished = true;
+            // Cancellation in v-v_free+mF can leave a wide sign bracket after
+            // Newton has reached the root. Probe a roundoff-sized neighborhood;
+            // this radius is not a root-acceptance tolerance, including at folds.
+            let radius = (16.0 * f64::EPSILON * x.abs())
+                .max(16.0 * f64::EPSILON * (scale_m_s / derivative))
+                .max(x.next_up() - x);
+            for probe in [lo.max(x - radius), hi.min(x + radius)] {
+                if probe > lo && probe < hi {
+                    spend_iteration(used, maximum)?;
+                    if residual(probe)? < 0.0 {
+                        lo = probe;
+                    } else {
+                        hi = probe;
+                    }
+                }
+            }
+        }
+        let proposal = x - value / derivative;
+        let width = hi - lo;
+        let next = if derivative > 0.0
+            && proposal.is_finite()
+            && proposal > lo
+            && proposal < hi
+            && (proposal - x).abs() < 0.5 * previous_step
+        {
+            proposal
+        } else {
+            lo + 0.5 * width
+        };
+        previous_step = (next - x).abs();
+        x = next;
     }
 }
 
@@ -967,6 +1037,128 @@ mod set_valued_contact_tests {
             characteristic_speed: speed,
             viscous_per_speed: viscous,
         }
+    }
+
+    /// G1: the independent quadratic root and the original scalar residual
+    /// remain satisfied; fewer expensive law trials do not relax acceptance.
+    #[test]
+    fn sliding_newton_retains_physical_roots_with_fewer_law_trials() {
+        let hyperbolic = fs_tribo::FrictionLaw::Hyperbolic {
+            static_mu: 0.8,
+            kinetic_mu: 0.4,
+            characteristic_speed: 1.0,
+        };
+        let line = StribeckLoadLine::new(&hyperbolic, 1.0, 22.5).unwrap();
+        let previous = ContactBranch::SlidingHigh { positive: true };
+        let (step, used) = line.step_within(17.0, previous, 128).unwrap();
+        // det-ok: independently derived v^2 - 7v + 1 = 0.
+        let expected = (7.0 + 45.0_f64.sqrt()) / 2.0;
+        assert!((step.relative_velocity_m_s - expected).abs() < 2e-13);
+        assert_eq!((step.roots, step.selected), (3, 2));
+        assert_eq!(step.branch, previous);
+        assert!(used < 24, "hyperbolic nonlinear trials: {used}");
+
+        for (law, normal, mobility, free, branch) in [
+            (law(0.8, 0.4, 0.04, 0.0), 3.9, 0.2, 0.5, previous),
+            (
+                law(0.8, 0.4, 0.04, 0.2),
+                3.9,
+                0.2,
+                1.0,
+                ContactBranch::Fresh,
+            ),
+            (
+                fs_tribo::FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13(),
+                0.5,
+                0.2,
+                0.2,
+                ContactBranch::Fresh,
+            ),
+        ] {
+            let line = StribeckLoadLine::new(&law, normal, mobility).unwrap();
+            let (step, used) = line.step_within(free, branch, 128).unwrap();
+            let (a, b) = line.critical_slips_m_s();
+            let (mut lo, mut hi) = match step.branch {
+                ContactBranch::SlidingHigh { .. } => (b, free),
+                ContactBranch::SlidingLow { .. } => (0.0, a.min(free)),
+                other => panic!("fixture must slide: {other:?}"),
+            };
+            // Independent value-only bisection is the pre-acceleration cost
+            // baseline. It uses the same physical bracket and same final rule.
+            let mut baseline = 0;
+            loop {
+                let v = lo + 0.5 * (hi - lo);
+                if v <= lo || v >= hi {
+                    break;
+                }
+                baseline += 1;
+                if v - free + mobility * normal * law.kinetic_coefficient(v).unwrap() < 0.0 {
+                    lo = v;
+                } else {
+                    hi = v;
+                }
+            }
+            assert!((step.relative_velocity_m_s - hi).abs() <= 64.0 * f64::EPSILON * free);
+            assert!(used * 2 < baseline, "{law:?}: {used} vs {baseline} trials");
+            let v = step.relative_velocity_m_s;
+            assert!(
+                (step.traction_n - normal * law.kinetic_coefficient(v).unwrap()).abs()
+                    <= 128.0 * f64::EPSILON * step.traction_n.abs().max(1.0)
+            );
+            assert!(step.traction_n * v >= 0.0);
+            assert_eq!(line.step_within(free, branch, used).unwrap().0, step);
+            assert!(matches!(
+                line.step_within(free, branch, used - 1),
+                Err(ImplicitFrictionError::NoConvergence)
+            ));
+            eprintln!("sliding root trials: {law:?}: Newton {used}, bisection {baseline}");
+        }
+    }
+
+    /// G1/G4: a flat root or unavailable tangent cannot become convergence,
+    /// and a caller's exhausted trial budget is respected before more work.
+    #[test]
+    fn sliding_newton_falls_back_without_changing_root_or_budget() {
+        for derivative in [0.0, f64::NAN, f64::INFINITY, -1.0] {
+            let used = core::cell::Cell::new(0);
+            let root = sliding_crossing(
+                0.0,
+                1.0,
+                1.0,
+                |v| Ok((v - 0.3, derivative)),
+                |v| Ok(v - 0.3),
+                &used,
+                128,
+            )
+            .unwrap();
+            assert_eq!(root, 0.3);
+            let limited = core::cell::Cell::new(0);
+            assert!(matches!(
+                sliding_crossing(
+                    0.0,
+                    1.0,
+                    1.0,
+                    |v| Ok((v - 0.3, derivative)),
+                    |v| Ok(v - 0.3),
+                    &limited,
+                    used.get() - 1,
+                ),
+                Err(ImplicitFrictionError::NoConvergence)
+            ));
+            assert_eq!(limited.get(), used.get() - 1);
+        }
+        let used = core::cell::Cell::new(0);
+        let root = sliding_crossing(
+            0.0,
+            1.0,
+            1.0,
+            |v| Ok(((v - 0.25).powi(3), 3.0 * (v - 0.25).powi(2))),
+            |v| Ok((v - 0.25).powi(3)),
+            &used,
+            128,
+        )
+        .unwrap();
+        assert_eq!(root, 0.25);
     }
 
     fn adhesive_line(

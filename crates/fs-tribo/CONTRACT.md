@@ -320,11 +320,14 @@ slip; no reversible or thermal storage is invented. Preparation, refused trials
 and numerical iterations never advance accepted history. A complete candidate
 alone may be committed by its surrounding mechanical transaction.
 
-Gaussian critical points use safeguarded Newton proposals inside the original
-monotone predicate brackets. Every narrowed endpoint is checked, and termination
-still requires adjacent floating-point values. Preparation probes and selected
-root bisections share the explicit step iteration budget, enforced before each
-update. Exact matching load and mobility reuse a prepared line. Optional bounded
+Gaussian critical points and nonlinear sliding roots use safeguarded Newton
+proposals inside the original branch brackets. Shared analytic slopes reuse the
+coefficient's exponential/power evaluation; unavailable or unhelpful slopes fall
+back to the original value-only bisection. Every narrowed endpoint is checked,
+and termination still requires adjacent floating-point values. Preparation probes
+and selected-root trials share the explicit step iteration budget, enforced
+before each update, including derivative-refusal retries. Exact matching load
+and mobility reuse a prepared line. Optional bounded
 `prepare_state` returns a zero-motion candidate and preparation count for difficult
 near-fold or changing-load cases; ordinary first sliding steps need no separate
 preparation call.
