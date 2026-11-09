@@ -3,9 +3,10 @@
 //! The original aperture law supplies transmitted species and their source
 //! molecular energies. The default fully accommodating wall re-emits a wall-hit
 //! molecule with that species' molecular energy at the wall temperature. An
-//! optional per-collision accommodation probability retains the full repeated-
-//! collision thermal history. Returned molecules also exchange heat with their
-//! original reservoir; a conductance multiplier alone misses both effects.
+//! optional common or species-specific per-collision accommodation probability
+//! retains the full repeated-collision thermal history. Returned molecules also
+//! exchange heat with their original reservoir; a conductance multiplier alone
+//! misses both effects.
 //!
 //! The model assumes stationary Maxwellian reservoirs, collisionless flight,
 //! velocity-independent diffuse reflection, equilibrated reservoir internal modes,
@@ -25,12 +26,84 @@ pub use geometry::{
 pub mod vacuum;
 
 use super::{
-    ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, R, SpeciesId, invalid, poll,
-    positive, positive_product_ratio, signed_product, source_error, valid_provenance,
+    ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, MAX_EFFUSIVE_SPECIES, R,
+    SpeciesId, invalid, poll, positive, positive_product_ratio, signed_product, source_error,
+    valid_provenance,
 };
 use fs_math::dd::Dd;
 use fs_qty::Temperature;
 use fs_thermochem::Nasa9StandardStateModelV1;
+use std::sync::Arc;
+
+/// Explicit species/surface qualification for a constant thermal-accommodation
+/// probability. The coefficient has the same collision and internal-mode
+/// meaning as [`DiffuseMolecularChannel::with_thermal_accommodation`].
+///
+/// These authored data do not replace or infer an original caloric source. A
+/// channel binds a complete table to its existing immutable gas catalog, and
+/// every row's qualification must cover the channel's whole admitted domain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeciesThermalAccommodation {
+    species: SpeciesId,
+    coefficient: f64,
+    provenance: String,
+}
+
+impl SpeciesThermalAccommodation {
+    pub fn try_new(
+        species: SpeciesId,
+        coefficient: f64,
+        provenance: impl Into<String>,
+    ) -> Result<Self, GasEnergyError> {
+        let provenance = provenance.into();
+        if !coefficient.is_finite()
+            || !(0.0..=1.0).contains(&coefficient)
+            || !valid_provenance(&provenance)
+        {
+            return Err(invalid(
+                "species thermal accommodation needs a finite probability and bounded explicit surface qualification",
+            ));
+        }
+        Ok(Self {
+            species,
+            coefficient,
+            provenance,
+        })
+    }
+
+    pub fn species(&self) -> &SpeciesId {
+        &self.species
+    }
+    pub const fn coefficient(&self) -> f64 {
+        self.coefficient
+    }
+    pub fn provenance(&self) -> &str {
+        &self.provenance
+    }
+}
+
+/// One canonical original species' qualification and its resolved heat weights.
+/// All rows retained by a channel share that channel's SAME final mass geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedSpeciesThermalAccommodation {
+    qualification: SpeciesThermalAccommodation,
+    accommodation: MolecularAccommodation,
+}
+
+impl ResolvedSpeciesThermalAccommodation {
+    pub fn qualification(&self) -> &SpeciesThermalAccommodation {
+        &self.qualification
+    }
+    pub fn accommodation(&self) -> &MolecularAccommodation {
+        &self.accommodation
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ChannelAccommodation {
+    Common(MolecularAccommodation, String),
+    Species(Arc<[ResolvedSpeciesThermalAccommodation]>),
+}
 
 /// Original gas-qualified entrance mouths plus a finite diffuse-wall channel.
 ///
@@ -41,7 +114,7 @@ use fs_thermochem::Nasa9StandardStateModelV1;
 pub struct DiffuseMolecularChannel {
     mouth: EffusiveInterface,
     geometry: CylindricalMolecularGeometry,
-    accommodation: Option<(MolecularAccommodation, String)>,
+    accommodation: Option<ChannelAccommodation>,
 }
 
 impl DiffuseMolecularChannel {
@@ -79,11 +152,12 @@ impl DiffuseMolecularChannel {
     /// material property. A real surface needs independent constitutive data.
     ///
     /// Repeated collisions give each path weight `1-(1-alpha)^N`; multiplying
-    /// the fully accommodating heat by alpha would miss that history. The
+    /// the fully accommodating heat by alpha would miss that history.
     /// Interior coefficients refine geometry and heat weights together; exact
     /// zero/unit coefficients retain the supplied geometry and its estimates.
     /// Construction performs the solve once; subsequent caloric/flux sampling
     /// reuses its immutable probabilities without further geometric solves.
+    /// This replaces any previously authored species-specific table.
     pub fn with_thermal_accommodation(
         mut self,
         coefficient: f64,
@@ -102,7 +176,64 @@ impl DiffuseMolecularChannel {
             self.geometry
                 .resolve_thermal_accommodation(coefficient, controls, &mut cancelled)?;
         self.geometry = geometry;
-        self.accommodation = Some((accommodation, provenance));
+        self.accommodation = Some(ChannelAccommodation::Common(accommodation, provenance));
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Bind a distinct thermal-accommodation probability to EVERY original gas
+    /// species, including species currently absent from the reservoir mixture.
+    ///
+    /// Input order is immaterial. Missing, duplicate and foreign species are
+    /// refused rather than receiving an inferred coefficient. Every probability
+    /// is resolved together on one shared mass geometry; different species can
+    /// never silently use different conductance estimates. Equal coefficients
+    /// reuse the geometry owner's solve. This replaces any common coefficient.
+    pub fn with_species_thermal_accommodation(
+        mut self,
+        mut qualifications: Vec<SpeciesThermalAccommodation>,
+        controls: ClausingControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, GasEnergyError> {
+        poll(&mut cancelled)?;
+        let components = self.mouth.gas_catalog().thermodynamics().components();
+        if !(1..=MAX_EFFUSIVE_SPECIES).contains(&qualifications.len())
+            || qualifications.len() != components.len()
+        {
+            return Err(invalid(
+                "species thermal accommodation must cover the bounded original gas catalog exactly once",
+            ));
+        }
+        qualifications.sort_by(|a, b| a.species.cmp(&b.species));
+        if !qualifications
+            .iter()
+            .map(|row| &row.species)
+            .eq(components.iter().map(|source| source.species()))
+        {
+            return Err(invalid(
+                "species thermal accommodation must cover each original gas species exactly once",
+            ));
+        }
+        let coefficients: Vec<_> = qualifications.iter().map(|row| row.coefficient).collect();
+        let (geometry, responses) = self.geometry.resolve_thermal_accommodation_batch(
+            &coefficients,
+            controls,
+            &mut cancelled,
+        )?;
+        self.geometry = geometry;
+        self.accommodation = Some(ChannelAccommodation::Species(
+            qualifications
+                .into_iter()
+                .zip(responses)
+                .map(
+                    |(qualification, accommodation)| ResolvedSpeciesThermalAccommodation {
+                        qualification,
+                        accommodation,
+                    },
+                )
+                .collect::<Vec<_>>()
+                .into(),
+        ));
         poll(&mut cancelled)?;
         Ok(self)
     }
@@ -114,18 +245,45 @@ impl DiffuseMolecularChannel {
         &self.geometry
     }
 
-    /// Resolved partial-accommodation weights; None retains full accommodation.
+    /// Common resolved weights, when a common coefficient was authored. None
+    /// means either default full accommodation or an explicit species table;
+    /// inspect [`Self::species_thermal_accommodation`] to distinguish the latter.
     pub fn thermal_accommodation(&self) -> Option<&MolecularAccommodation> {
-        self.accommodation.as_ref().map(|(model, _)| model)
+        match &self.accommodation {
+            Some(ChannelAccommodation::Common(model, _)) => Some(model),
+            _ => None,
+        }
     }
+    /// Qualification of the common coefficient, absent in species-table mode.
     pub fn thermal_accommodation_provenance(&self) -> Option<&str> {
-        self.accommodation
-            .as_ref()
-            .map(|(_, source)| source.as_str())
+        match &self.accommodation {
+            Some(ChannelAccommodation::Common(_, source)) => Some(source),
+            _ => None,
+        }
     }
 
-    fn heat_probabilities(&self) -> [f64; 2] {
-        match self.thermal_accommodation() {
+    /// The complete table in canonical original-species order, when authored.
+    pub fn species_thermal_accommodation(&self) -> Option<&[ResolvedSpeciesThermalAccommodation]> {
+        match &self.accommodation {
+            Some(ChannelAccommodation::Species(rows)) => Some(rows.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn heat_probabilities(&self, species: &SpeciesId) -> Result<[f64; 2], GasEnergyError> {
+        let model = match &self.accommodation {
+            Some(ChannelAccommodation::Common(model, _)) => Some(model),
+            Some(ChannelAccommodation::Species(rows)) => {
+                let index = rows
+                    .binary_search_by(|row| row.qualification.species.cmp(species))
+                    .map_err(|_| {
+                        invalid("channel species is missing its original accommodation")
+                    })?;
+                Some(&rows[index].accommodation)
+            }
+            None => None,
+        };
+        Ok(match model {
             Some(model) => [
                 model.reflected_heat_probability(),
                 model.transmitted_heat_probability(),
@@ -134,13 +292,14 @@ impl DiffuseMolecularChannel {
                 self.geometry.reflected_probability(),
                 self.geometry.wall_transmitted_probability(),
             ],
-        }
+        })
     }
 
-    fn wall_heat_active(&self) -> bool {
-        self.heat_probabilities()
+    fn wall_heat_active_for_species(&self, species: &SpeciesId) -> Result<bool, GasEnergyError> {
+        Ok(self
+            .heat_probabilities(species)?
             .into_iter()
-            .any(|weight| weight > 0.0)
+            .any(|weight| weight > 0.0))
     }
 
     /// Preserve both the original mouth qualification and the full channel's
@@ -162,11 +321,11 @@ impl DiffuseMolecularChannel {
     /// sampling another molecular beam or spending inventory.
     ///
     /// The original gas, collision and species sources remain authoritative.
-    /// Only species present in this parcel need a caloric path from the gas
-    /// temperature to the wall temperature. An absent catalog species does not
-    /// narrow an active source's wall range. A zero-length or exactly elastic
-    /// channel admits its gas but never queries an inactive thermal wall;
-    /// callers skip geometrically closed channels entirely.
+    /// Only thermally active species present in this parcel need a caloric path
+    /// from the gas temperature to the wall temperature. An absent or exactly
+    /// elastic catalog species does not narrow an active source's wall range.
+    /// A zero-length or exactly elastic channel admits its gas but never queries
+    /// an inactive thermal wall; callers skip geometrically closed channels.
     pub fn admit_wall_for_parcel(
         &self,
         parcel: &ClosedGasParcel,
@@ -174,20 +333,21 @@ impl DiffuseMolecularChannel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), GasEnergyError> {
         self.admit_parcel(parcel, &mut cancelled)?;
-        if !self.wall_heat_active() {
-            return poll(&mut cancelled);
-        }
-        self.admit_wall_temperature(wall_temperature_k)?;
         let temperature = Temperature::new(parcel.state().state().temperature);
         let mixture = parcel.model().thermodynamics();
+        let mut wall_admitted = false;
         for (species, &fraction) in mixture
             .components()
             .iter()
             .zip(mixture.mole_composition().fractions())
         {
             poll(&mut cancelled)?;
-            if fraction == 0.0 {
+            if fraction == 0.0 || !self.wall_heat_active_for_species(species.species())? {
                 continue;
+            }
+            if !wall_admitted {
+                self.admit_wall_temperature(wall_temperature_k)?;
+                wall_admitted = true;
             }
             let _ = self
                 .original_species(species.species())?
@@ -276,9 +436,6 @@ impl DiffuseMolecularChannel {
         // A closed mouth or zero-length channel never queries an inactive wall.
         if transmitted.species.is_empty() || self.geometry.length_m() == 0.0 {
             return Ok(result);
-        }
-        if self.wall_heat_active() {
-            self.admit_wall_temperature(wall_temperature_k)?;
         }
         let temperatures = gases.map(|gas| gas.state().state().temperature);
         let mut heat = [Dd::ZERO; 2];
@@ -373,7 +530,7 @@ impl DiffuseMolecularChannel {
             }
         };
         let reflected_mass_kg = scaled(self.geometry.reflected_probability())?;
-        let [reflected_heat, transmitted_heat] = self.heat_probabilities();
+        let [reflected_heat, transmitted_heat] = self.heat_probabilities(original.species())?;
         // Elastic diffuse scattering still returns a GROSS molecular inventory.
         // Only its thermal exchange vanishes; never discard the return budget.
         if reflected_heat == 0.0 && transmitted_heat == 0.0 {
@@ -383,6 +540,7 @@ impl DiffuseMolecularChannel {
                 heat_into_transmitted_j: 0.0,
             });
         }
+        self.admit_wall_temperature(wall_temperature_k)?;
         let accommodated_return_mass_kg = scaled(reflected_heat)?;
         let accommodated_mass_kg = scaled(transmitted_heat)?;
         let molar_mass = original.molar_mass().value();

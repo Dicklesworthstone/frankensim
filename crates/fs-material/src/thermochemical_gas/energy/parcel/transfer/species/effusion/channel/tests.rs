@@ -3,6 +3,8 @@
 use super::super::tests::{interface, near, pure};
 use super::*;
 
+mod species_accommodation;
+
 const AREA: f64 = 1e-10;
 const DIAMETER: f64 = 1e-9;
 

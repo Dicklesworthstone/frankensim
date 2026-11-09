@@ -159,9 +159,6 @@ impl DiffuseMolecularChannel {
             poll(&mut cancelled)?;
             return Ok(result);
         }
-        if self.wall_heat_active() {
-            self.admit_wall_temperature(wall_temperature_k)?;
-        }
         let temperature = gas.state().state().temperature;
         let (mut into_gas, mut into_escaped) = (Dd::ZERO, Dd::ZERO);
         for row in &transmitted.species {

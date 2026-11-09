@@ -23089,3 +23089,12 @@ All nine focused original prepared/floating-point-floor regressions passed,
 including the retained-coordinate test and the existing strict heat-increment
 refusals. The native cavitation source subset passed 82 tests. These are
 focused numerical checks, not full workspace/DSR or experimental validation.
+
+
+## Species-specific molecular channel thermal accommodation
+
+A `DiffuseMolecularChannel` may bind a complete canonical species-to-coefficient/provenance table to its immutable original gas catalog, within the existing 32-species effusion bound. Missing, duplicate, foreign, invalid-probability and unqualified rows are refused. Original caloric, transport and source-pack admission remains authoritative. Common and species-specific coefficient modes are explicit and mutually exclusive; changing the mode replaces the prior qualification.
+
+All distinct per-collision coefficients resolve through one shared Clausing kernel and mass solution on each refinement grid. Duplicate coefficients reuse thermal work. Refinement accepts only when the common mass transmission and both heat probabilities for every distinct interior coefficient meet their estimates. Responses preserve input order; exact zero remains elastic, and coefficient one uses the final shared geometry. Numerical reports distinguish authored batch size, distinct interior thermal solves, shared work, and each response's heat estimates. Storage remains linear in ring count plus bounded coefficient count.
+
+Species-specific weights change only thermal exchange. Transmission and gross reflected species inventories remain geometric. Held-wall, finite-wall, vacuum and trajectory consumers share the existing original-source caloric owner. Absent species and present exactly elastic species do not query inactive wall calorics; thermally active species and accepted endpoints retain their original support checks. No thermodynamic storage, material source or species coefficient is inferred. Coefficients remain authored constant total-energy accommodation laws for stationary diffuse walls within their qualified domains.

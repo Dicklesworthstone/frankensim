@@ -30,7 +30,11 @@ fn point(t: f64) -> QueryPoint {
         .unwrap()
 }
 /// Explicitly authored isochoric C_vol=A+B*T; no measurement claim.
-pub(super) fn material(a: f64, b: f64, span: [f64; 2]) -> PreparedVolumetricThermalTransport {
+pub(in super::super) fn material(
+    a: f64,
+    b: f64,
+    span: [f64; 2],
+) -> PreparedVolumetricThermalTransport {
     let capacity = PropertyKey::new(
         "isochoric-volumetric-capacity",
         VOLUMETRIC_HEAT_CAPACITY_DIMS,
@@ -525,6 +529,155 @@ fn channel_for_catalog(
         .unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn species_specific_accommodation_drives_closed_and_vacuum_finite_walls() {
+    use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::channel::SpeciesThermalAccommodation;
+    use crate::thermochemical_gas::{ThermochemicalGasModel, tests::point as gas_point};
+    use fs_qty::SpeciesId;
+    use fs_thermochem::{
+        Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
+        mixture::FrozenIdealGasMixtureModelV1,
+    };
+    let narrow = gas_with_caloric_span("A", 400.0, [200.0, 600.0]);
+    let wide = gas_with_caloric_span("B", 400.0, [200.0, 1800.0]);
+    let catalog = ThermochemicalGasModel::new(
+        FrozenIdealGasMixtureModelV1::new(
+            vec![
+                narrow.model().thermodynamics().components()[0].clone(),
+                wide.model().thermodynamics().components()[0].clone(),
+            ],
+            Composition::new(CompositionBasis::MoleFraction, vec![0.5, 0.5]).unwrap(),
+        )
+        .unwrap(),
+        vec![
+            narrow.model().transport_materials()[0].clone(),
+            wide.model().transport_materials()[0].clone(),
+        ],
+        None,
+    )
+    .unwrap();
+    let mixture =
+        ClosedGasParcel::new(catalog.clone(), gas_point(400.0, 100_000.0), 0.001).unwrap();
+    let path = channel_for_catalog(&catalog, 1e-8)
+        .with_species_thermal_accommodation(
+            [("A", 0.0), ("B", 1.0)]
+                .into_iter()
+                .map(|(name, alpha)| {
+                    SpeciesThermalAccommodation::try_new(
+                        SpeciesId::new(name).unwrap(),
+                        alpha,
+                        "synthetic species-specific energy accommodation",
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            ClausingControls::default(),
+            || false,
+        )
+        .unwrap();
+    let source = material(1e6, 0.0, [200.0, 1800.0]);
+    let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let walls = BTreeMap::from([(
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
+    )]);
+    let gases = BTreeMap::from([(0, mixture.clone()), (1, mixture.clone())]);
+    let mut solve = endpoints(&gases);
+    for control in solve.values_mut() {
+        control.maximum_temperature_k = 600.0;
+    }
+    let closed = step_candidate(
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        0.001,
+        &solve,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    // A and B have equal molar masses and cp=5R/2. Half of the incident
+    // molecules are elastic A; only B transfers heat to or from this wall.
+    let incident_b =
+        0.001 * 1e-6 * 50_000.0 / (2.0 * core::f64::consts::PI * 0.028 * R * 400.0).sqrt();
+    let tau = path.geometry().transmission_probability();
+    let returned = incident_b * path.geometry().reflected_probability() * 2.0 * R * 500.0;
+    let transmitted = incident_b * path.geometry().wall_transmitted_probability() * 2.0 * R * 500.0;
+    let n0 = mixture.mass_kg() / 0.028;
+    for id in [0, 1] {
+        near(
+            closed.parcels()[&id].state().state().temperature,
+            400.0 + (returned + transmitted) / (1.5 * R * n0),
+            3e-8,
+        );
+    }
+    near(
+        closed.step().wall_energy_change_j,
+        -2.0 * (returned + transmitted),
+        1e-9,
+    );
+    near(
+        closed.walls()[&9].temperature_k(),
+        900.0 - 2.0 * (returned + transmitted),
+        1e-9,
+    );
+    assert!(closed.walls()[&9].temperature_k() > 600.0);
+    assert!(closed.step().energy_residual_j.abs() <= controls().exchange.energy_tolerance_j);
+    let reflected = &closed.step().channels[0].wall.reflected_species;
+    assert_eq!(reflected.len(), 2);
+    assert_eq!(reflected[0].mass_kg, reflected[1].mass_kg);
+    assert!(reflected[0].mass_kg[0] > 0.0);
+
+    let vacuum_gases = BTreeMap::from([(0, mixture)]);
+    let vacuum_solve = BTreeMap::from([(0, solve[&0])]);
+    let escaped = vacuum::step_candidate(
+        &vacuum_gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[vacuum::FiniteVacuumChannelLink {
+            id: 7,
+            parcel: 0,
+            channel: &path,
+            area_m2: 1e-6,
+            wall: 9,
+        }],
+        0.001,
+        &vacuum_solve,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let n_out = 2.0 * incident_b * tau;
+    near(
+        escaped.parcels()[&0].state().state().temperature,
+        (1.5 * R * n0 * 400.0 - n_out * 2.0 * R * 400.0 + returned) / (1.5 * R * (n0 - n_out)),
+        3e-8,
+    );
+    near(
+        escaped.step().gas.audit.escaped_energy_j,
+        n_out * 2.0 * R * 400.0 + transmitted,
+        1e-11,
+    );
+    near(
+        escaped.step().wall_energy_change_j,
+        -returned - transmitted,
+        1e-9,
+    );
+    assert!(escaped.walls()[&9].temperature_k() > 600.0);
+    assert!(escaped.step().energy_residual_j.abs() <= controls().exchange.energy_tolerance_j);
+    let escaped_species = &escaped.step().gas.outlets[0].escaped_species;
+    assert_eq!(escaped_species.len(), 2);
+    near(
+        escaped_species[0].mass_kg,
+        escaped_species[1].mass_kg,
+        1e-18,
+    );
+    assert_eq!(walls[&9].temperature_k(), 900.0);
 }
 
 #[test]

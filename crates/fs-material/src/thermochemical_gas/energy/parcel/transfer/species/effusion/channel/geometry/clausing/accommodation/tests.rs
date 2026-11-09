@@ -1,5 +1,7 @@
 use super::*;
 
+mod batch;
+
 fn geometry(h: f64) -> CylindricalMolecularGeometry {
     CylindricalMolecularGeometry::try_new(1.0, h, 100.0 * h.max(1.0), "test collision support")
         .unwrap()

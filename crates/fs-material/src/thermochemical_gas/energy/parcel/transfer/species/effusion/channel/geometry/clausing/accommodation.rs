@@ -9,7 +9,10 @@
 //! For A=I-W, B=I-(1-alpha)W, w=A^-1 eR and y=B^-1 eL, the incident-normalized
 //! transmitted heat weight is 4*delta*alpha*y'w. Replacing w by 1-w gives the
 //! returned heat weight. These resolvents account for arbitrarily many hits.
+//! Species may supply different coefficients. They share the geometric kernel
+//! and mass solution, with joint refinement and one active thermal solve at a time.
 
+use super::super::super::super::MAX_EFFUSIVE_SPECIES;
 use super::{
     ClausingControls, ClausingResolution, CylindricalMolecularGeometry, GasEnergyError, Grid,
     GridSolution, compensated, conjugate_gradient, invalid, poll, positive,
@@ -52,7 +55,12 @@ pub struct AccommodationResolution {
     pub controls: ClausingControls,
     pub rings: usize,
     pub refinements: usize,
-    /// All mass and thermal CG steps over every attempted grid.
+    /// Authored coefficient count, including duplicates and exact endpoints.
+    pub batch_size: usize,
+    /// Distinct coefficients strictly between zero and one solved on each grid.
+    pub thermal_coefficients: usize,
+    /// All shared mass and distinct thermal CG steps over every attempted grid.
+    /// This is the same batch total in each resolved coefficient's report.
     pub iterations: usize,
     pub symmetric_residual_l1: f64,
     pub antisymmetric_residual_l1: f64,
@@ -65,30 +73,53 @@ pub struct AccommodationResolution {
 }
 
 pub(in super::super) fn resolve(
-    mut geometry: CylindricalMolecularGeometry,
+    geometry: CylindricalMolecularGeometry,
     coefficient: f64,
     controls: ClausingControls,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<(CylindricalMolecularGeometry, MolecularAccommodation), GasEnergyError> {
+    let (geometry, mut responses) = resolve_batch(geometry, &[coefficient], controls, cancelled)?;
+    let response = responses
+        .pop()
+        .ok_or_else(|| invalid("accommodation scalar response was not resolved"))?;
+    Ok((geometry, response))
+}
+
+pub(in super::super) fn resolve_batch(
+    mut geometry: CylindricalMolecularGeometry,
+    coefficients: &[f64],
+    controls: ClausingControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(CylindricalMolecularGeometry, Vec<MolecularAccommodation>), GasEnergyError> {
     poll(&mut cancelled)?;
     controls.validate()?;
-    if !coefficient.is_finite() || !(0.0..=1.0).contains(&coefficient) {
+    if coefficients.is_empty() || coefficients.len() > MAX_EFFUSIVE_SPECIES {
+        return Err(invalid(
+            "accommodation batch exceeds effusive species bounds",
+        ));
+    }
+    if coefficients
+        .iter()
+        .any(|coefficient| !coefficient.is_finite() || !(0.0..=1.0).contains(coefficient))
+    {
         return Err(invalid(
             "thermal accommodation coefficient must be finite and in [0,1]",
         ));
     }
-    let mut response = MolecularAccommodation {
-        coefficient,
-        transmitted_heat_probability: 0.0,
-        reflected_heat_probability: 0.0,
-        resolution: None,
-    };
-    if coefficient == 0.0 || coefficient == 1.0 || geometry.length_m == 0.0 {
-        if coefficient == 1.0 {
-            response.transmitted_heat_probability = geometry.wall_transmitted;
-            response.reflected_heat_probability = geometry.reflected;
-        }
-        return Ok((geometry, response));
+    // Canonical solve order makes work and results independent of species order.
+    let mut distinct: Vec<_> = coefficients
+        .iter()
+        .copied()
+        .filter(|coefficient| *coefficient > 0.0 && *coefficient < 1.0)
+        .collect();
+    distinct.sort_by(f64::total_cmp);
+    distinct.dedup();
+    if distinct.is_empty() || geometry.length_m == 0.0 {
+        let responses = coefficients
+            .iter()
+            .map(|&coefficient| exact_response(&geometry, coefficient))
+            .collect();
+        return Ok((geometry, responses));
     }
     let target =
         0.01 * (controls.absolute_tolerance + controls.relative_tolerance * geometry.transmission);
@@ -102,7 +133,7 @@ pub(in super::super) fn resolve(
     let mut refinements = 0;
     let mut iterations = 0;
     let mut mass_iterations = 0;
-    let mut previous: Option<(GridSolution, HeatSolution)> = None;
+    let mut previous: Option<(GridSolution, Vec<HeatSolution>)> = None;
     loop {
         let grid = Grid::new(h, rings, &mut cancelled)?;
         let mass = grid.solve(
@@ -111,32 +142,40 @@ pub(in super::super) fn resolve(
             geometry.wall_hit,
             &mut cancelled,
         )?;
-        let heat = solve_heat(
-            &grid,
-            &mass,
-            coefficient,
-            controls.maximum_iterations,
-            target,
-            &mut cancelled,
-        )?;
         mass_iterations += mass.iterations;
-        iterations += mass.iterations + heat.iterations;
-        if let Some((old_mass, old_heat)) = previous {
+        iterations += mass.iterations;
+        let mut heat = Vec::with_capacity(distinct.len());
+        for &coefficient in &distinct {
+            poll(&mut cancelled)?;
+            let response = solve_heat(
+                &grid,
+                &mass,
+                coefficient,
+                controls.maximum_iterations,
+                target,
+                &mut cancelled,
+            )?;
+            iterations += response.iterations;
+            heat.push(response);
+        }
+        if let Some((old_mass, old_heat)) = &previous {
             let mass_change = (mass.wall_transmitted - old_mass.wall_transmitted).abs();
             let mass_error = mass_change + mass.linear_estimate + old_mass.linear_estimate;
-            let transmitted_change = (heat.transmitted - old_heat.transmitted).abs();
-            let reflected_change = (heat.reflected - old_heat.reflected).abs();
-            let transmitted_error =
-                transmitted_change + heat.linear_estimate + old_heat.linear_estimate;
-            let reflected_error =
-                reflected_change + heat.linear_estimate + old_heat.linear_estimate;
             let transmission = geometry.direct + mass.wall_transmitted;
             let tolerance =
                 |value: f64| controls.absolute_tolerance + controls.relative_tolerance * value;
             if refinements >= 2
                 && mass_error <= tolerance(transmission)
-                && transmitted_error <= tolerance(heat.transmitted)
-                && reflected_error <= tolerance(heat.reflected)
+                && heat.iter().zip(old_heat).all(|(current, old)| {
+                    (current.transmitted - old.transmitted).abs()
+                        + current.linear_estimate
+                        + old.linear_estimate
+                        <= tolerance(current.transmitted)
+                        && (current.reflected - old.reflected).abs()
+                            + current.linear_estimate
+                            + old.linear_estimate
+                            <= tolerance(current.reflected)
+                })
             {
                 poll(&mut cancelled)?;
                 geometry.transmission = transmission;
@@ -153,23 +192,56 @@ pub(in super::super) fn resolve(
                     previous_linear_solve_estimate: old_mass.linear_estimate,
                     estimated_absolute_error: mass_error,
                 });
-                response.transmitted_heat_probability = heat.transmitted;
-                response.reflected_heat_probability = heat.reflected;
-                response.resolution = Some(AccommodationResolution {
-                    controls,
-                    rings,
-                    refinements,
-                    iterations,
-                    symmetric_residual_l1: heat.residuals[0],
-                    antisymmetric_residual_l1: heat.residuals[1],
-                    transmitted_grid_change: transmitted_change,
-                    reflected_grid_change: reflected_change,
-                    linear_solve_estimate: heat.linear_estimate,
-                    previous_linear_solve_estimate: old_heat.linear_estimate,
-                    transmitted_error_estimate: transmitted_error,
-                    reflected_error_estimate: reflected_error,
-                });
-                return Ok((geometry, response));
+                let resolved: Vec<_> = distinct
+                    .iter()
+                    .zip(heat.iter().zip(old_heat))
+                    .map(|(&coefficient, (current, old))| {
+                        let transmitted_change = (current.transmitted - old.transmitted).abs();
+                        let reflected_change = (current.reflected - old.reflected).abs();
+                        MolecularAccommodation {
+                            coefficient,
+                            transmitted_heat_probability: current.transmitted,
+                            reflected_heat_probability: current.reflected,
+                            resolution: Some(AccommodationResolution {
+                                controls,
+                                rings,
+                                refinements,
+                                batch_size: coefficients.len(),
+                                thermal_coefficients: distinct.len(),
+                                iterations,
+                                symmetric_residual_l1: current.residuals[0],
+                                antisymmetric_residual_l1: current.residuals[1],
+                                transmitted_grid_change: transmitted_change,
+                                reflected_grid_change: reflected_change,
+                                linear_solve_estimate: current.linear_estimate,
+                                previous_linear_solve_estimate: old.linear_estimate,
+                                transmitted_error_estimate: transmitted_change
+                                    + current.linear_estimate
+                                    + old.linear_estimate,
+                                reflected_error_estimate: reflected_change
+                                    + current.linear_estimate
+                                    + old.linear_estimate,
+                            }),
+                        }
+                    })
+                    .collect();
+                let responses = coefficients
+                    .iter()
+                    .map(|&coefficient| {
+                        if coefficient == 0.0 || coefficient == 1.0 {
+                            Ok(exact_response(&geometry, coefficient))
+                        } else {
+                            distinct
+                                .binary_search_by(|value| value.total_cmp(&coefficient))
+                                .ok()
+                                .and_then(|index| resolved.get(index).cloned())
+                                .ok_or_else(|| {
+                                    invalid("accommodation batch response was not resolved")
+                                })
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok((geometry, responses));
             }
         }
         previous = Some((mass, heat));
@@ -178,6 +250,26 @@ pub(in super::super) fn resolve(
         }
         rings *= 2;
         refinements += 1;
+    }
+}
+
+fn exact_response(
+    geometry: &CylindricalMolecularGeometry,
+    coefficient: f64,
+) -> MolecularAccommodation {
+    MolecularAccommodation {
+        coefficient,
+        transmitted_heat_probability: if coefficient == 1.0 {
+            geometry.wall_transmitted
+        } else {
+            0.0
+        },
+        reflected_heat_probability: if coefficient == 1.0 {
+            geometry.reflected
+        } else {
+            0.0
+        },
+        resolution: None,
     }
 }
 

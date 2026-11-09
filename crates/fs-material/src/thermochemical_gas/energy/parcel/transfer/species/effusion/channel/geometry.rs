@@ -155,6 +155,21 @@ impl CylindricalMolecularGeometry {
         clausing::accommodation::resolve(self, coefficient, controls, cancelled)
     }
 
+    /// Resolve one to `MAX_EFFUSIVE_SPECIES` energy-accommodation coefficients
+    /// on a shared Clausing grid and mass solution. Results preserve input order;
+    /// identical coefficients share thermal solves. Refinement must satisfy both
+    /// heat weights for every coefficient and the common mass-transmission law.
+    /// Pure endpoint batches preserve the supplied geometry. In a mixed batch,
+    /// coefficient one uses the final refined geometry's wall-path probabilities.
+    pub fn resolve_thermal_accommodation_batch(
+        self,
+        coefficients: &[f64],
+        controls: ClausingControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Vec<MolecularAccommodation>), GasEnergyError> {
+        clausing::accommodation::resolve_batch(self, coefficients, controls, cancelled)
+    }
+
     /// `None` identifies the original Santeler approximation. A retained report
     /// identifies the actual ring refinement used for these probabilities.
     pub const fn resolution(&self) -> Option<&ClausingResolution> {
