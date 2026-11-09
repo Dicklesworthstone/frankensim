@@ -35,7 +35,8 @@ fn g1_rough_diffuse_native_beam_and_reciprocal_connection_share_angular_response
                 let source = PolarizationFrame::try_new(wi.scale(-1.0), reference_axis(wi)).unwrap();
                 let response = input.evaluate_rough_diffuse_connection(normal, surface, rho,
                     source, Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap()).unwrap();
-                assert!((sample.beam.power().i - 2.0*core::f64::consts::PI*response.factor).abs() < 2e-13);
+                let expected_power = 2.0 * response.factor * normal.dot(wi) / sample.pdf_solid_angle;
+                assert!((sample.beam.power().i - expected_power).abs() < 2e-13);
                 assert!((sample.pdf_solid_angle-response.pdf).abs() < 2e-14);
                 assert_eq!(sample.beam.power().q, 0.0);
                 assert_eq!(sample.beam.power().u, 0.0);
@@ -46,6 +47,9 @@ fn g1_rough_diffuse_native_beam_and_reciprocal_connection_share_angular_response
                     .evaluate_rough_diffuse_connection(normal, surface, rho, input.frame(),
                         Stokes::unpolarized(1.0)).unwrap();
                 assert!((response.factor-reversed.factor).abs() < 2e-14);
+                let reverse_pdf = crate::tracer::rough_diffuse_pdf(surface, normal, wi,
+                    input.ray().dir.scale(-1.0));
+                assert!((reversed.pdf - reverse_pdf).abs() < 2e-14);
             }
         }
     }
@@ -111,6 +115,9 @@ fn g0_diffuse_rejects_invalid_draws_and_preserves_positive_underflow_as_an_error
                 incoming.sample_depolarizing_diffuse(normal, 0.5, draw),
                 Err(BeamError::InvalidDiffuseSample)
             );
+            assert_eq!(incoming.sample_rough_diffuse(normal,
+                RoughDiffuseSurface::try_new(0.8).unwrap(), 0.5, draw),
+                Err(BeamError::InvalidDiffuseSample));
         }
     }
     for normal in [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)] {

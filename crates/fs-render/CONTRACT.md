@@ -113,10 +113,25 @@ angular power integrals; native scalar/polarized controls exercise shared use.
   facets absorb on additional returns, and zero roughness is exactly the
   existing Lambertian law. Scalar camera/BDPT, calibrated photometric and
   native polarized camera/connection paths evaluate the same angular law at
-  the original wavelength. Cosine sampling and its matched PDF retain full
-  support; a single path weight above one is not an integrated energy gain.
+  the original wavelength. Native sampling mixes the cosine hemisphere with
+  a view-aligned uniform-elevation, cosine-azimuth lobe. The unchanged BRDF's
+  positive grazing term determines the mixture mass; the cosine component
+  retains full support. Two original random coordinates select both the branch
+  and direction without allocation or rejection. Scalar, thermal and polarized
+  paths use the same proposal. Reciprocal connections and BDPT evaluate the
+  actual view-conditioned reverse density, which need not equal the forward
+  density. Zero roughness retains the original Lambertian samples and PDFs.
+  Material identities bind sampling semantics version 2 for replay/checkpoints.
+  A single path weight above one is not an integrated energy gain.
   G0/G1/G3 checks cover admission, reciprocity, exact limits, independent
   projected-angle white/colored furnace quadrature and native consumers.
+  Actual-source focused tests integrate the proposal mass and sampling moments
+  independently and retain white/colored furnace means. For roughness 1 and
+  view cosines 0.1 and 0.01, second-moment quadrature gives approximately 8.8x
+  and 18x lower variance per path than cosine-only reflection, for facet
+  albedos 0.4 and 1.0; refinement changes the new moments by less than 4.6e-7.
+  This measures constant-illumination estimator variance, not wall-clock speed
+  or a universal improvement under arbitrary directional illumination.
   This is the analytic approximation of Portsmouth, Kutz and Hill,
   <https://jcgt.org/published/0014/01/06/>; it does not infer specimen
   calibration, subsurface transport, coherent diffraction, polarization

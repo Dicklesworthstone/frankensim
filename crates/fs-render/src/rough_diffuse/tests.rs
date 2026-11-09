@@ -98,6 +98,110 @@ fn integrated_reflectance(surface: RoughDiffuseSurface, mu_o: f64, rho: f64) -> 
 }
 
 #[test]
+fn g1_reflection_proposal_has_full_support_and_normalized_directional_mass() {
+    for roughness in [0.0, 0.25, 1.0] {
+        let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+        for mu_o in [1e-6, 0.1, 0.6, 1.0] {
+            let angular = |mu_i: f64| {
+                let radius = ((1.0 - mu_i * mu_i) * (1.0 - mu_o * mu_o)).sqrt();
+                let pdf = |phi: f64| surface.pdf_admitted(mu_o, mu_i, radius * phi.cos());
+                2.0 * (integrate(pdf, 0.0, PI / 2.0, 4) + integrate(pdf, PI / 2.0, PI, 4))
+            };
+            assert!((integrate(angular, 0.0, 1.0, 4) - 1.0).abs() < 3e-14);
+            for mu_i in [1e-12, 0.2, 0.9] {
+                let radius = ((1.0_f64 - mu_i * mu_i) * (1.0 - mu_o * mu_o)).sqrt();
+                // Backward azimuths retain positive cosine mass even when
+                // the added retroreflection proposal has no support there.
+                assert!(surface.pdf_admitted(mu_o, mu_i, -radius) > 0.0);
+                if roughness == 0.0 || mu_o == 1.0 {
+                    assert_eq!(surface.pdf_admitted(mu_o, mu_i, radius), mu_i / PI);
+                }
+            }
+        }
+    }
+    let surface = RoughDiffuseSurface::try_new(1.0).unwrap();
+    assert!((surface.pdf_admitted(0.1, 0.8, 0.2)
+        - surface.pdf_admitted(0.8, 0.1, 0.2)).abs() > 0.05);
+}
+
+#[test]
+fn g1_reflection_samples_match_distribution_moments_and_colored_furnace() {
+    const RADIAL_COUNT: usize = 1024;
+    const AZIMUTH_COUNT: usize = 128;
+    for (roughness, mu_o) in [(0.0, 0.2), (0.25, 0.1), (1.0, 0.01), (1.0, 1.0)] {
+        let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+        let probability = surface.grazing_proposal_probability(mu_o);
+        let mut direction_mean = [0.0; 3];
+        let mut power_mean = [0.0; 2];
+        for row in 0..RADIAL_COUNT {
+            for column in 0..AZIMUTH_COUNT {
+                let wi = surface.sample_local(mu_o,
+                    [(row as f64 + 0.5) / RADIAL_COUNT as f64,
+                        (column as f64 + 0.5) / AZIMUTH_COUNT as f64]);
+                assert!((wi.iter().map(|x| x * x).sum::<f64>() - 1.0).abs() < 2e-14);
+                assert!(wi[2] > 0.0);
+                let projected = (1.0 - mu_o * mu_o).sqrt() * wi[0];
+                let pdf = surface.pdf_admitted(mu_o, wi[2], projected);
+                assert!(pdf.is_finite() && pdf > 0.0);
+                for axis in 0..3 {
+                    direction_mean[axis] += wi[axis] / (RADIAL_COUNT * AZIMUTH_COUNT) as f64;
+                }
+                for (lane, rho) in [0.4, 1.0].into_iter().enumerate() {
+                    let weight = surface.brdf(wi[2], mu_o, projected, rho).unwrap() * wi[2] / pdf;
+                    assert!(weight.is_finite() && weight >= 0.0);
+                    power_mean[lane] += weight / (RADIAL_COUNT * AZIMUTH_COUNT) as f64;
+                }
+            }
+        }
+        // Independent analytic moments of cosine and uniform-elevation /
+        // cosine-azimuth distributions, not reconstructed sampling formulas.
+        assert!((direction_mean[0] - probability * PI * PI / 16.0).abs() < 0.0015);
+        assert!(direction_mean[1].abs() < 2e-14);
+        assert!((direction_mean[2] - ((1.0-probability)*2.0/3.0 + probability*0.5)).abs() < 0.0015);
+        for (lane, rho) in [0.4, 1.0].into_iter().enumerate() {
+            let reference = surface.directional_reflectance(mu_o, rho).unwrap();
+            assert!((power_mean[lane] - reference).abs() < 0.003,
+                "roughness={roughness}, cosine={mu_o}, albedo={rho}: {} vs {reference}", power_mean[lane]);
+        }
+    }
+}
+
+fn proposal_second_moment(surface: RoughDiffuseSurface, mu_o: f64, rho: f64,
+    mixture: bool, panels: usize) -> f64 {
+    let polar = |mu_i: f64| {
+        let radius = ((1.0 - mu_i * mu_i) * (1.0 - mu_o * mu_o)).sqrt();
+        let angular = |phi: f64| {
+            let projected = radius * phi.cos();
+            let flux = surface.brdf(mu_i, mu_o, projected, rho).unwrap() * mu_i;
+            let pdf = if mixture { surface.pdf_admitted(mu_o, mu_i, projected) } else { mu_i / PI };
+            flux * flux / pdf
+        };
+        2.0 * (integrate(angular, 0.0, PI/2.0, 8) + integrate(angular, PI/2.0, PI, 8))
+    };
+    integrate(polar, 0.0, mu_o, panels) + integrate(polar, mu_o, 1.0, panels)
+}
+
+#[test]
+fn g2_equal_path_count_grazing_reflection_variance_is_reduced() {
+    let surface = RoughDiffuseSurface::try_new(1.0).unwrap();
+    for rho in [0.4, 1.0] {
+        for mu_o in [0.1, 0.01] {
+            let mean = integrated_reflectance(surface, mu_o, rho);
+            let reference = surface.directional_reflectance(mu_o, rho).unwrap();
+            assert!((mean - reference).abs() < 3e-7);
+            let old = proposal_second_moment(surface, mu_o, rho, false, 64) - mean * mean;
+            let new = proposal_second_moment(surface, mu_o, rho, true, 64) - mean * mean;
+            let coarse = proposal_second_moment(surface, mu_o, rho, true, 32) - mean * mean;
+            assert!((new - coarse).abs() < 2e-6);
+            println!("cosine={mu_o}, albedo={rho}, mean={mean:.9}, old_variance={old:.9}, mixture_variance={new:.9}, variance_ratio={:.3}, refinement={:.3e}",
+                old / new, (new - coarse).abs());
+            assert!(new > 0.0 && old > 6.0 * new,
+                "cosine={mu_o}, albedo={rho}, old variance={old}, mixture variance={new}");
+        }
+    }
+}
+
+#[test]
 fn g1_rough_diffuse_white_furnace_and_colored_energy_match_projected_quadrature() {
     for r in [0.0, 0.02, 0.4, 1.0] {
         let surface = RoughDiffuseSurface::try_new(r).unwrap();
@@ -187,3 +291,4 @@ fn g0_absorptance_retains_weak_loss_and_exact_limits() {
         );
     }
 }
+

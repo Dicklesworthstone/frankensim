@@ -15,6 +15,9 @@ use fs_math::det;
 const C1: f64 = 0.5 - 2.0 / (3.0 * PI);
 const C2: f64 = 2.0 / 3.0 - 28.0 / (15.0 * PI);
 
+/// Native reflection proposal version, independent of the unchanged EON BRDF.
+pub const ROUGH_DIFFUSE_SAMPLING_SEMANTICS_VERSION: u32 = 2;
+
 /// Validated isotropic rough diffuse surface, evaluated without allocations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RoughDiffuseSurface {
@@ -73,6 +76,56 @@ impl RoughDiffuseSurface {
 
     pub const fn roughness(self) -> f64 {
         self.roughness
+    }
+
+    // At grazing views the positive FON term has nonzero projected flux as
+    // mu_i tends to zero. A cosine-only proposal therefore has large weights.
+    // Bound that term by (rho*A/pi)*roughness*sin(theta_o)*max(cos(phi),0).
+    // Mix the normalized densities mu_i/pi and max(cos(phi),0)/2 using their
+    // envelope masses 1 and 2*roughness*sin(theta_o)/pi. The cosine component
+    // retains support for the full BRDF, including its multiple-return term.
+    pub(crate) fn grazing_proposal_probability(self, mu_o: f64) -> f64 {
+        let sine = ((1.0 - mu_o) * (1.0 + mu_o)).max(0.0).sqrt();
+        let mass = (2.0 / PI) * self.roughness * sine;
+        mass / (1.0 + mass)
+    }
+
+    /// Matching solid-angle density, conditional on the original outgoing
+    /// direction. Reciprocity of the BRDF does not make this PDF symmetric.
+    pub(crate) fn pdf_admitted(self, mu_o: f64, mu_i: f64, projected_dot: f64) -> f64 {
+        if mu_o <= 0.0 || mu_i <= 0.0 { return 0.0; }
+        let probability = self.grazing_proposal_probability(mu_o);
+        let cosine_pdf = mu_i / PI;
+        if probability == 0.0 { return cosine_pdf; }
+        let radius = (((1.0 - mu_o) * (1.0 + mu_o))
+            * ((1.0 - mu_i) * (1.0 + mu_i))).max(0.0).sqrt();
+        // At the isolated pole azimuth has no meaning; choose one common
+        // density convention for sampling, connections and reverse queries.
+        let azimuth_cosine = if radius > 0.0 {
+            (projected_dot / radius).clamp(0.0, 1.0)
+        } else { 0.0 };
+        (1.0 - probability) * cosine_pdf + probability * (0.5 * azimuth_cosine)
+    }
+
+    /// Unit local direction with +X along the outgoing tangential direction.
+    /// Admitted samples lie in [0,1); branch selection reuses the first
+    /// coordinate, so the native paths retain exactly two random dimensions.
+    pub(crate) fn sample_local(self, mu_o: f64, samples: [f64; 2]) -> [f64; 3] {
+        let probability = self.grazing_proposal_probability(mu_o);
+        let (cosine, radius, sine_phi, cosine_phi) = if samples[0] < probability {
+            let cosine = 1.0 - samples[0] / probability;
+            let radius = ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+            // Uniform elevation and a cosine azimuth on [-pi/2,pi/2].
+            // Its inverse CDF needs no trigonometric evaluation.
+            let sine_phi = 2.0 * samples[1] - 1.0;
+            let cosine_phi = 2.0 * (samples[1] * (1.0 - samples[1])).sqrt();
+            (cosine, radius, sine_phi, cosine_phi)
+        } else {
+            let radial_squared = (samples[0] - probability) / (1.0 - probability);
+            let phi = core::f64::consts::TAU * samples[1];
+            ((1.0 - radial_squared).sqrt(), radial_squared.sqrt(), det::sin(phi), det::cos(phi))
+        };
+        [radius * cosine_phi, radius * sine_phi, cosine]
     }
 
     /// BRDF [1/sr] for unit directions pointing away from the surface.

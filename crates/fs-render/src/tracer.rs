@@ -1163,6 +1163,7 @@ impl Material {
             Self::RoughDiffuse { reflectance, surface } => {
                 hasher.update(&[12]);
                 hasher.update(b"energy-preserving-oren-nayar.v1");
+                hasher.update(&crate::rough_diffuse::ROUGH_DIFFUSE_SAMPLING_SEMANTICS_VERSION.to_le_bytes());
                 update_material_scalar(&mut hasher, surface.roughness());
                 hasher.update(&[reflectance.knots().len() as u8]);
                 for &(wavelength_nm, value) in reflectance.knots() {
@@ -1176,6 +1177,7 @@ impl Material {
             }
             Self::RoughDiffuseThermal { surface } => {
                 hasher.update(&[13]);
+                hasher.update(&crate::rough_diffuse::ROUGH_DIFFUSE_SAMPLING_SEMANTICS_VERSION.to_le_bytes());
                 hasher.update(surface.identity().as_bytes());
             }
             Self::Ggx { reflectance, alpha } => {
@@ -17645,6 +17647,45 @@ mod aspheric_lens_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn rough_diffuse_proposals_share_thermal_paths_and_reverse_densities() {
+        use super::*;
+        use crate::rough_diffuse::RoughDiffuseSurface;
+        use crate::spectral::SpectralReflectance;
+        use crate::thermal_surface::RoughDiffuseThermalSurface;
+        let reflectance = SpectralReflectance::table(&[(380.0, 0.4), (780.0, 0.4)]).unwrap();
+        let plain = Material::SpectralDiffuse { reflectance };
+        for normal in [Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(1.0, -2.0, 3.0)] {
+            let normal = normal.scale(1.0 / normal.norm());
+            let wo = to_world_all_sphere(normal, [(1.0_f64 - 0.02 * 0.02).sqrt(), 0.0, 0.02]);
+            let wo = wo.scale(1.0 / wo.norm());
+            for roughness in [0.0, 0.6, 1.0] {
+                let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+                let material = Material::RoughDiffuse { reflectance, surface };
+                let thermal = Material::RoughDiffuseThermal { surface:
+                    RoughDiffuseThermalSurface::try_new(1200.0, reflectance, surface,
+                        ContentHash([71; 32])).unwrap() };
+                for draw in [[0.0, 0.2], [0.12, 0.1], [0.7, 0.8], [0.9999999, 0.33]] {
+                    let sample = bsdf_sample(&material, normal, wo, draw[0], draw[1], None).unwrap();
+                    assert_eq!(Some(sample), bsdf_sample(&thermal, normal, wo, draw[0], draw[1], None));
+                    let (wi, pdf) = sample;
+                    assert!(finite_unit_direction(wi) && normal.dot(wi) > 0.0);
+                    assert!((pdf - bsdf_pdf(&material, normal, wo, wi, None)).abs() < 2e-12);
+                    let reverse = bsdf_pdf(&material, normal, wi, wo, None);
+                    let mu_i = normal.dot(wi).clamp(0.0, 1.0);
+                    let mu_o = normal.dot(wo).clamp(0.0, 1.0);
+                    let projected = (-mu_i).mul_add(mu_o, wi.dot(wo));
+                    assert!((reverse - surface.pdf_admitted(mu_i, mu_o, projected)).abs() < 2e-12);
+                    if roughness == 0.0 {
+                        assert_eq!(Some(sample), bsdf_sample(&plain, normal, wo, draw[0], draw[1], None));
+                        assert_eq!(reverse, bsdf_pdf(&plain, normal, wi, wo, None));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rough_diffuse_native_bsdf_sampling_spectra_and_identity() {
         use super::*;
         use crate::rough_diffuse::RoughDiffuseSurface;
@@ -23251,10 +23292,10 @@ fn bsdf_pdf(
     match mat {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
-        | Material::RoughDiffuse { .. }
-        | Material::RoughDiffuseThermal { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => cos_i / PI,
+        Material::RoughDiffuse { surface, .. } => rough_diffuse_pdf(*surface, n, wo, wi),
+        Material::RoughDiffuseThermal { surface } => rough_diffuse_pdf(surface.reflection(), n, wo, wi),
         Material::CoatedDiffuse { coating, .. } => coated_diffuse::pdf(*coating, n, wo, wi),
         Material::Ggx { alpha, .. } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
@@ -23332,12 +23373,16 @@ fn bsdf_sample(
     match mat {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
-        | Material::RoughDiffuse { .. }
-        | Material::RoughDiffuseThermal { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);
             (pdf > 0.0).then_some((wi, pdf))
+        }
+        Material::RoughDiffuse { surface, .. } => {
+            sample_rough_diffuse_reflection(*surface, n, wo, [u1, u2])
+        }
+        Material::RoughDiffuseThermal { surface } => {
+            sample_rough_diffuse_reflection(surface.reflection(), n, wo, [u1, u2])
         }
         Material::Ggx { alpha, .. } => sample_ggx_vndf_reflection(n, wo, *alpha, u1, u2),
         Material::Conductor { surface, .. } => {
@@ -23372,6 +23417,48 @@ fn bsdf_sample(
         // as smooth dielectric/conductor events do above their continuous path.
         Material::CoatedDiffuse { .. } | Material::Dielectric { .. } => None,
     }
+}
+
+pub(crate) fn rough_diffuse_pdf(
+    surface: crate::rough_diffuse::RoughDiffuseSurface,
+    normal: Vec3,
+    wo: Vec3,
+    wi: Vec3,
+) -> f64 {
+    if surface.roughness() == 0.0 {
+        let mu_i = normal.dot(wi);
+        return if mu_i > 0.0 && normal.dot(wo) > 0.0 { mu_i / PI } else { 0.0 };
+    }
+    let mu_o = normal.dot(wo).clamp(0.0, 1.0);
+    let mu_i = normal.dot(wi).clamp(0.0, 1.0);
+    surface.pdf_admitted(mu_o, mu_i, (-mu_o).mul_add(mu_i, wo.dot(wi)))
+}
+
+// Shared by scalar camera/light walks and native polarized reflection. The
+// EON law stays unchanged; only its view-conditioned importance proposal and
+// matching forward/reverse solid-angle densities change.
+pub(crate) fn sample_rough_diffuse_reflection(
+    surface: crate::rough_diffuse::RoughDiffuseSurface,
+    normal: Vec3,
+    wo: Vec3,
+    samples: [f64; 2],
+) -> Option<(Vec3, f64)> {
+    let mu_o = normal.dot(wo).clamp(0.0, 1.0);
+    if mu_o <= 0.0 || samples.iter().any(|u| !(0.0..1.0).contains(u)) {
+        return None;
+    }
+    if surface.grazing_proposal_probability(mu_o) == 0.0 {
+        let (wi, pdf) = cosine_sample(normal, samples[0], samples[1]);
+        return (pdf > 0.0).then_some((wi, pdf));
+    }
+    let bitangent = normalized_cross(normal, wo)?;
+    let tangent = cross(bitangent, normal);
+    let local = surface.sample_local(mu_o, samples);
+    let wi = vec_add(vec_add(tangent.scale(local[0]), bitangent.scale(local[1])),
+        normal.scale(local[2]));
+    let wi = wi.scale(1.0 / wi.norm());
+    let pdf = rough_diffuse_pdf(surface, normal, wo, wi);
+    (pdf.is_finite() && pdf > 0.0 && finite_unit_direction(wi)).then_some((wi, pdf))
 }
 
 /// Duff et al.'s cancellation-free all-sphere basis, shared by diffuse and

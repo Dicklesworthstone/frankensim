@@ -19,34 +19,46 @@ use super::connection::{SurfaceConnectionResponse, checked_product, normalized_c
 pub struct DiffuseBeamSample {
     /// Reflected, fully depolarized beam in its original surrounding medium.
     pub beam: PolarizedBeam,
-    /// Cosine-weighted hemisphere density relative to the geometric normal.
+    /// Matching reflection density relative to the geometric normal.
     pub pdf_solid_angle: f64,
 }
 
 impl PolarizedBeam {
     /// Sample reciprocal EON reflection with a depolarizing diffuse-facet law.
-    /// The original cosine proposal remains normalized and allocation-free.
-    /// Throughput is pi times the angular BRDF, which can exceed one for an
-    /// individual sample; its hemispherical mean remains passive. No index
+    /// The native view-conditioned mixture retains full support, uses the same
+    /// two random coordinates and allocates nothing. Throughput is BRDF times
+    /// projected cosine divided by its matching density, which can exceed one
+    /// for an individual sample; its hemispherical mean remains passive. No index
     /// change, coating, surface displacement or hidden material fit is added.
     pub fn sample_rough_diffuse(
         self, normal: Vec3, surface: RoughDiffuseSurface,
         facet_albedo: f64, samples: [f64; 2],
     ) -> Result<DiffuseBeamSample, BeamError> {
-        if !(0.0..=1.0).contains(&facet_albedo) { return Err(BeamError::InvalidDiffuseSample); }
+        if !(0.0..=1.0).contains(&facet_albedo)
+            || samples.iter().any(|u| !(0.0..1.0).contains(u)) {
+            return Err(BeamError::InvalidDiffuseSample);
+        }
         if surface.roughness() == 0.0 {
             return self.sample_depolarizing_diffuse(normal, facet_albedo, samples);
         }
         let normal = self.incident_normal(normal)?;
         let wo = self.frame.direction.scale(-1.0);
-        let mut sample = self.sample_depolarizing_diffuse(normal, 1.0, samples)?;
-        let wi = sample.beam.frame.direction;
+        let (wi, pdf_solid_angle) = crate::tracer::sample_rough_diffuse_reflection(
+            surface, normal, wo, samples,
+        ).ok_or(BeamError::NumericalRange)?;
         let mu_o = normal.dot(wo).clamp(0.0, 1.0);
         let mu_i = normal.dot(wi).clamp(0.0, 1.0);
         let projected = (-mu_o).mul_add(mu_i, wo.dot(wi));
-        let factor = core::f64::consts::PI * surface.eval_admitted(mu_i, mu_o, projected, facet_albedo);
-        sample.beam.power = Stokes::unpolarized(checked_product(self.power.i, factor)?);
-        Ok(sample)
+        let factor = surface.eval_admitted(mu_i, mu_o, projected, facet_albedo)
+            * (mu_i / pdf_solid_angle);
+        Ok(DiffuseBeamSample {
+            beam: Self {
+                frame: PolarizationFrame::try_new(wi, reference_axis(wi))?,
+                power: Stokes::unpolarized(checked_product(self.power.i, factor)?),
+                ..self
+            },
+            pdf_solid_angle,
+        })
     }
 
     /// Evaluate the same depolarizing EON law for an original source-arrival
@@ -66,7 +78,8 @@ impl PolarizedBeam {
         let mu_o = normal.dot(wo).clamp(0.0, 1.0);
         let projected = (-mu_o).mul_add(mu_i, wo.dot(wi));
         let factor = surface.eval_admitted(mu_i.min(1.0), mu_o, projected, facet_albedo);
-        SurfaceConnectionResponse::checked(factor, mu_i / core::f64::consts::PI, DielectricEvent::Reflection)
+        let pdf = crate::tracer::rough_diffuse_pdf(surface, normal, wo, wi);
+        SurfaceConnectionResponse::checked(factor, pdf, DielectricEvent::Reflection)
     }
 
     /// Sample a two-sided ideal depolarizing Lambertian reflector.
