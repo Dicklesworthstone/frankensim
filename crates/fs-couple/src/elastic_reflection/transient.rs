@@ -3,15 +3,16 @@
 //! Inputs and outputs are REAL instantaneous modal velocities, not peak phasors.
 //! For Cartesian incident characteristics `a`, wall velocity `w` and outgoing
 //! characteristics `b=w-a`, instantaneous powers are `a^T D a` and `b^T D b`,
-//! with `D=diag(rho*cs,rho*cs,rho*cp)`. There is no cycle-average factor 1/2.
+//! with the original positive characteristic impedance D. Native Christoffel
+//! modes diagonalize D for anisotropic solids. There is no averaging factor 1/2.
 //!
 //! Six original principal displacement/velocity coordinates evolve through the
 //! native exact held-input quadratic flow. Its cached trajectory integrals keep
 //! original pin heat separate from outgoing-wave energy. Numerical energy
 //! defects are never assigned to resistance. Warm steps use fixed-size scratch.
 //!
-//! This is a stationary, locally reacting, linear support on a lossless isotropic
-//! half-space at normal incidence. It retains causal support memory, not an
+//! This is a stationary, locally reacting, linear support on a lossless elastic
+//! half-space at normal wavevector incidence. It retains causal support memory, not an
 //! oblique convolution, resolved coating, moving surface or spatial wave history.
 //! Original strain admission bounds this interval's incoming/emitted waves;
 //! previously emitted fields elsewhere in the half-space remain caller-owned.
@@ -19,6 +20,7 @@
 use super::OrientedOscillatorSupport;
 use fs_material::MaterialError;
 use fs_material::elastic::acoustic::ElasticAcousticState;
+use fs_material::elastic::acoustic::interface::normal::NormalElasticCharacteristic;
 use fs_material::elastic::acoustic::interface::surface::{
     ElasticSurfaceCondition, IsotropicElasticSurface,
 };
@@ -103,6 +105,7 @@ type Result<T> = core::result::Result<T, TransientElasticReflectionError>;
 pub struct TransientElasticSupportState<'a> {
     material: &'a ElasticAcousticState,
     support: OrientedOscillatorSupport,
+    surface_to_material: [[f64; 3]; 3],
     time_s: f64,
     displacement_m: [f64; 3],
     velocity_m_s: [f64; 3],
@@ -161,7 +164,8 @@ impl TransientElasticReflectionWork {
 pub struct TransientElasticReflectionFrame {
     pub time_s: f64,
     pub duration_s: f64,
-    /// Held REAL instantaneous P, SV, SH velocities [m/s].
+    /// Held REAL instantaneous modal velocities [m/s], in the prepared owner's
+    /// channel order: legacy P/SV/SH or native ascending-speed quasi-modes.
     pub incoming_velocity_m_s: [f64; 3],
     pub initial_reflected_velocity_m_s: [f64; 3],
     pub final_reflected_velocity_m_s: [f64; 3],
@@ -192,6 +196,10 @@ pub struct PreparedTransientElasticReflection<'a> {
     material: &'a ElasticAcousticState,
     support: OrientedOscillatorSupport,
     rotation: [f64; 9],
+    surface_to_material: [[f64; 3]; 3],
+    incoming_polarizations: [[f64; 3]; 3],
+    reflected_polarizations: [[f64; 3]; 3],
+    principal_to_modes: [[f64; 3]; 3],
     impedance: [f64; 3],
     root_mass: [f64; 3],
     root_stiffness: [f64; 3],
@@ -227,6 +235,87 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
+        let surface =
+            IsotropicElasticSurface::new(material, ElasticSurfaceCondition::TractionFree)?
+                .prepare_incidence_cancellable(ElasticMode::P, 1.0, cancelled)?;
+        let modes = [ElasticMode::P, ElasticMode::Sv, ElasticMode::Sh];
+        let incoming = modes.map(|mode| {
+            surface
+                .incoming_mode(mode)
+                .expect("normal-incidence modes are propagating")
+        });
+        let reflected = modes.map(|mode| surface.reflected_mode(mode));
+        Self::prepare_modes(
+            material,
+            support,
+            duration_s,
+            limits,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            incoming,
+            reflected,
+            cancelled,
+        )
+    }
+
+    /// Retain the original anisotropic Christoffel modes and physical frame.
+    /// Input/output channels follow the characteristic's native ascending-speed
+    /// order and SAME-polarization two-way convention, not legacy P/S labels.
+    /// Normal wavevectors may carry energy laterally in an anisotropic solid.
+    pub fn prepare_normal_characteristic(
+        characteristic: &NormalElasticCharacteristic<'a>,
+        support: OrientedOscillatorSupport,
+        duration_s: f64,
+    ) -> Result<Self> {
+        Self::prepare_normal_characteristic_controlled(
+            characteristic,
+            support,
+            duration_s,
+            TransientElasticReflectionLimits::default(),
+            &mut || false,
+        )
+    }
+
+    pub fn prepare_normal_characteristic_controlled(
+        characteristic: &NormalElasticCharacteristic<'a>,
+        support: OrientedOscillatorSupport,
+        duration_s: f64,
+        limits: TransientElasticReflectionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        let incoming = core::array::from_fn(|mode| {
+            characteristic
+                .incoming_mode(mode)
+                .expect("three native normal modes")
+        });
+        let reflected = core::array::from_fn(|mode| {
+            characteristic
+                .reflected_mode(mode)
+                .expect("three native normal modes")
+        });
+        Self::prepare_modes(
+            characteristic.state(),
+            support,
+            duration_s,
+            limits,
+            characteristic.surface_to_material(),
+            incoming,
+            reflected,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_modes(
+        material: &'a ElasticAcousticState,
+        support: OrientedOscillatorSupport,
+        duration_s: f64,
+        limits: TransientElasticReflectionLimits,
+        surface_to_material: [[f64; 3]; 3],
+        incoming: [ElasticWaveTrace; 3],
+        reflected: [ElasticWaveTrace; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.energy_balance_tolerance.is_finite()
@@ -243,23 +332,21 @@ impl<'a> PreparedTransientElasticReflection<'a> {
             // and nonnegative resistance. No frequency response is fitted here.
             wall_specific_impedance(pin, 1.0)?;
         }
-        let surface =
-            IsotropicElasticSurface::new(material, ElasticSurfaceCondition::TractionFree)?
-                .prepare_incidence_cancellable(ElasticMode::P, 1.0, cancelled)?;
-        let modes = [ElasticMode::P, ElasticMode::Sv, ElasticMode::Sh];
-        let incoming = modes.map(|mode| {
-            surface
-                .incoming_mode(mode)
-                .expect("normal-incidence modes are propagating")
-        });
-        let reflected = modes.map(|mode| surface.reflected_mode(mode));
-        let impedance = [1, 2, 0].map(|mode| 2.0 * incoming[mode].normal_power_factor_pa_s_m);
+        let impedance = incoming.map(|wave| 2.0 * wave.normal_power_factor_pa_s_m);
         if impedance.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err(invalid(
                 "normal characteristic impedances are unrepresentable",
             ));
         }
         let rotation = support.principal_to_surface().matrix().m;
+        let incoming_polarizations = incoming.map(|wave| wave.velocity.map(|v| v.re));
+        let reflected_polarizations = reflected.map(|wave| wave.velocity.map(|v| v.re));
+        let principal_to_modes: [[f64; 3]; 3] = core::array::from_fn(|mode| {
+            core::array::from_fn(|axis| {
+                sum((0..3)
+                    .map(|cart| incoming_polarizations[mode][cart] * rotation[3 * cart + axis]))
+            })
+        });
         let root_mass = pins.map(|pin| det::sqrt(pin.surface_density));
         let root_stiffness = pins.map(|pin| det::sqrt(pin.stiffness_per_area));
         // Energy-scaled ORIGINAL coordinates [sqrt(K)x, sqrt(M)v]. Q=I;
@@ -290,8 +377,10 @@ impl<'a> PreparedTransientElasticReflection<'a> {
             }
             heat[6 * (3 + axis) + 3 + axis] = loss;
             for other in axis..3 {
-                let value = sum((0..3).map(|cart| {
-                    rotation[3 * cart + axis] * impedance[cart] * rotation[3 * cart + other]
+                let value = sum((0..3).map(|mode| {
+                    principal_to_modes[mode][axis]
+                        * impedance[mode]
+                        * principal_to_modes[mode][other]
                 })) / root_mass[axis]
                     / root_mass[other];
                 if axis == other && value <= 0.0 {
@@ -303,9 +392,9 @@ impl<'a> PreparedTransientElasticReflection<'a> {
                 r[6 * (3 + axis) + 3 + other] = total;
                 r[6 * (3 + other) + 3 + axis] = total;
             }
-            for cart in 0..3 {
-                g[3 * (3 + axis) + cart] =
-                    (impedance[cart] / root_mass[axis]) * (2.0 * rotation[3 * cart + axis]);
+            for mode in 0..3 {
+                g[3 * (3 + axis) + mode] =
+                    (impedance[mode] / root_mass[axis]) * (2.0 * principal_to_modes[mode][axis]);
             }
         }
         if q.iter()
@@ -345,6 +434,10 @@ impl<'a> PreparedTransientElasticReflection<'a> {
             material,
             support,
             rotation,
+            surface_to_material,
+            incoming_polarizations,
+            reflected_polarizations,
+            principal_to_modes,
             impedance,
             root_mass,
             root_stiffness,
@@ -364,6 +457,20 @@ impl<'a> PreparedTransientElasticReflection<'a> {
     }
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+    /// Columns define the physical surface frame in the original material axes.
+    pub const fn surface_to_material(&self) -> [[f64; 3]; 3] {
+        self.surface_to_material
+    }
+    /// Outer index is the input channel; inner index is surface Cartesian x/y/z.
+    pub const fn incoming_polarizations_surface(&self) -> [[f64; 3]; 3] {
+        self.incoming_polarizations
+    }
+    pub const fn reflected_polarizations_surface(&self) -> [[f64; 3]; 3] {
+        self.reflected_polarizations
+    }
+    pub const fn mode_impedances_pa_s_m(&self) -> [f64; 3] {
+        self.impedance
     }
     pub fn workspace(&self) -> TransientElasticReflectionWorkspace {
         Default::default()
@@ -390,6 +497,7 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         let state = TransientElasticSupportState {
             material: self.material,
             support: self.support,
+            surface_to_material: self.surface_to_material,
             time_s,
             displacement_m: principal_displacement_m,
             velocity_m_s: principal_velocity_m_s,
@@ -441,11 +549,7 @@ impl<'a> PreparedTransientElasticReflection<'a> {
                 "held interval must advance the finite physical clock",
             ));
         }
-        let a = [
-            incoming_velocity_m_s[1],
-            incoming_velocity_m_s[2],
-            incoming_velocity_m_s[0],
-        ];
+        let a = incoming_velocity_m_s;
         let initial = self.energy(state)?;
         let incoming_power = sum((0..3).map(|axis| {
             let root = det::sqrt(self.impedance[axis]) * a[axis];
@@ -478,6 +582,7 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         let candidate = TransientElasticSupportState {
             material: self.material,
             support: self.support,
+            surface_to_material: self.surface_to_material,
             time_s,
             displacement_m: core::array::from_fn(|axis| {
                 workspace.endpoint[axis] / self.root_stiffness[axis]
@@ -494,7 +599,8 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         }));
         let integrated_principal = core::array::from_fn(|i| workspace.integrals[2 + i]);
         let integrated_wall = self.rotate(integrated_principal);
-        let supplied = sum((0..3).map(|i| 2.0 * self.impedance[i] * a[i] * integrated_wall[i]));
+        let integrated_modal = self.principal_modes(integrated_principal);
+        let supplied = sum((0..3).map(|i| 2.0 * self.impedance[i] * a[i] * integrated_modal[i]));
         let outgoing = sum([workspace.integrals[1], -supplied, incoming_work]);
         let heat = workspace.integrals[0];
         let scale = initial
@@ -532,7 +638,11 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         let initial_wall = self.rotate(state.velocity_m_s);
         let final_wall = self.rotate(candidate.velocity_m_s);
         let mean_wall = integrated_wall.map(|value| value / self.duration_s);
-        let traction = core::array::from_fn(|i| self.impedance[i] * (final_wall[i] - 2.0 * a[i]));
+        let final_modal = self.principal_modes(candidate.velocity_m_s);
+        let traction = self.modal_surface(core::array::from_fn(|mode| {
+            self.impedance[mode] * (final_modal[mode] - 2.0 * a[mode])
+        }));
+        let incoming_surface = self.modal_surface(a);
         if initial_wall
             .into_iter()
             .chain(final_wall)
@@ -548,9 +658,9 @@ impl<'a> PreparedTransientElasticReflection<'a> {
             time_s,
             duration_s: self.duration_s,
             incoming_velocity_m_s,
-            initial_reflected_velocity_m_s: reflected_modes(initial_wall, a),
-            final_reflected_velocity_m_s: reflected_modes(final_wall, a),
-            mean_reflected_velocity_m_s: reflected_modes(mean_wall, a),
+            initial_reflected_velocity_m_s: self.reflected_modes(initial_wall, incoming_surface),
+            final_reflected_velocity_m_s: self.reflected_modes(final_wall, incoming_surface),
+            mean_reflected_velocity_m_s: self.reflected_modes(mean_wall, incoming_surface),
             support_velocity_m_s: final_wall,
             support_traction_pa: traction,
             interval_strain_norm_bound,
@@ -563,9 +673,12 @@ impl<'a> PreparedTransientElasticReflection<'a> {
     }
 
     fn validate(&self, state: &TransientElasticSupportState<'_>) -> Result<()> {
-        if !core::ptr::eq(self.material, state.material) || self.support != state.support {
+        if !core::ptr::eq(self.material, state.material)
+            || self.support != state.support
+            || self.surface_to_material != state.surface_to_material
+        {
             return Err(invalid(
-                "support state belongs to another original material or support",
+                "support state belongs to another original material, support or surface frame",
             ));
         }
         Ok(())
@@ -577,6 +690,26 @@ impl<'a> PreparedTransientElasticReflection<'a> {
         })
     }
 
+    fn principal_modes(&self, principal: [f64; 3]) -> [f64; 3] {
+        core::array::from_fn(|mode| {
+            sum((0..3).map(|axis| self.principal_to_modes[mode][axis] * principal[axis]))
+        })
+    }
+
+    fn modal_surface(&self, modal: [f64; 3]) -> [f64; 3] {
+        core::array::from_fn(|cart| {
+            sum((0..3).map(|mode| self.incoming_polarizations[mode][cart] * modal[mode]))
+        })
+    }
+
+    fn reflected_modes(&self, wall: [f64; 3], incoming: [f64; 3]) -> [f64; 3] {
+        core::array::from_fn(|mode| {
+            sum((0..3).map(|cart| {
+                self.reflected_polarizations[mode][cart] * (wall[cart] - incoming[cart])
+            }))
+        })
+    }
+
     fn admit_strain(&self, incoming: [f64; 3], energy_bound: f64) -> Result<f64> {
         if !energy_bound.is_finite() || energy_bound < 0.0 {
             return Err(invalid(
@@ -584,16 +717,21 @@ impl<'a> PreparedTransientElasticReflection<'a> {
             ));
         }
         let energy_root = core::f64::consts::SQRT_2 * det::sqrt(energy_bound);
-        let wall_bounds: [f64; 3] = core::array::from_fn(|row| {
+        let wall_bounds: [f64; 3] = core::array::from_fn(|mode| {
             let inverse_mass_norm = (0..3).fold(0.0, |norm, axis| {
-                det::hypot(norm, self.rotation[3 * row + axis] / self.root_mass[axis])
+                let projected = sum((0..3).map(|cart| {
+                    self.reflected_polarizations[mode][cart] * self.rotation[3 * cart + axis]
+                }));
+                det::hypot(norm, projected / self.root_mass[axis])
             });
             energy_root * inverse_mass_norm
         });
-        let reflected_bounds = [wall_bounds[2], wall_bounds[0], wall_bounds[1]];
+        let incoming_surface = self.modal_surface(incoming);
         let bound = sum((0..3).map(|mode| {
+            let incoming_projection = sum((0..3)
+                .map(|cart| self.reflected_polarizations[mode][cart] * incoming_surface[cart]));
             self.incoming_strain[mode] * incoming[mode].abs()
-                + self.reflected_strain[mode] * (reflected_bounds[mode] + incoming[mode].abs())
+                + self.reflected_strain[mode] * (wall_bounds[mode] + incoming_projection.abs())
         }));
         if !bound.is_finite() || bound > self.material.maximum_absolute_mandel_strain() {
             return Err(invalid(
@@ -608,13 +746,6 @@ fn strain_norm(wave: ElasticWaveTrace) -> f64 {
     wave.strain_mandel_s_m
         .iter()
         .fold(0.0, |norm, value| det::hypot(norm, value.abs()))
-}
-fn reflected_modes(wall: [f64; 3], incoming: [f64; 3]) -> [f64; 3] {
-    [
-        incoming[2] - wall[2],
-        wall[0] - incoming[0],
-        wall[1] - incoming[1],
-    ]
 }
 fn energy_square(root: f64, amplitude: f64) -> Result<f64> {
     let value = root * (core::f64::consts::FRAC_1_SQRT_2 * amplitude);

@@ -9,6 +9,8 @@ use fs_phs::{WallPin, wall_specific_impedance};
 
 #[path = "elastic_reflection/coating.rs"]
 mod coating;
+#[path = "elastic_reflection/normal.rs"]
+mod normal;
 #[path = "elastic_reflection/oriented.rs"]
 mod oriented;
 #[path = "elastic_reflection/transient.rs"]

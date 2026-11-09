@@ -7287,13 +7287,42 @@ lossless pins emit this energy without creating fictitious heat.
 The source-domain check bounds incoming/emitted strain throughout the interval
 using the passive envelope `H(t) <= H(initial) + incoming wave energy`, rather
 than checking only endpoints. Refusal or cancellation preserves accepted
-motion and time. This remains a stationary local boundary at normal incidence
-in a lossless isotropic solid; oblique history kernels, resolved coating time
+motion and time. This remains a stationary local boundary at normal wavevector
+incidence in a lossless solid; oblique history kernels, resolved coating time
 propagation and previously emitted spatial fields belong to their own owners.
 Five focused regression definitions cover the analytic pulse and causal tail,
 rotated interval composition, lossless radiation, transactional/source/budget
 refusals and interval-wide strain admission. Native execution is reported
 separately from formula, source and formatter checks.
+
+### Original anisotropic modes in harmonic and causal support reflection
+
+`elastic_reflection::NormalOscillatorSupportedSurface` binds the material's
+`NormalElasticCharacteristic` to the original three principal `WallPin` laws.
+The native full-tensor Christoffel modes retain their ascending-speed order,
+polarizations, strain domain and checked material/surface frame. No isotropic
+projection or shear/longitudinal relabeling substitutes for that source. The
+same polarization describes each mode in both propagation directions; the
+legacy P/SV/SH API keeps its original direction-dependent convention.
+
+Harmonic preparation reuses the native passive tensor boundary solve. Actual
+surface motion feeds the existing principal-coordinate displacement and pin
+storage evaluator, with support work remaining the sole dissipative account.
+`PreparedTransientElasticReflection::prepare_normal_characteristic` connects
+those same incoming characteristics to the existing exact held-input pHS flow.
+Modal projections form the original radiation impedance and forcing directly;
+the six physical support coordinates and fixed-size warm workspace are shared
+with the isotropic path. Source identity, support values and surface frame bind
+accepted motion; compatible physical states may pass between channel bases.
+
+Anisotropic energy may walk laterally even when the wavevector is normal. This
+boundary retains the original local normal work and material-frame strain,
+without claiming finite-aperture transport or an oblique anisotropic solution.
+Four focused G1/G3/G4 regression definitions compare a mixed-polarization SPD
+tensor against independent 70-digit Cartesian harmonic and direct physical
+transient references, recover the legacy isotropic fields and memory, and check
+transactional frame binding and cancellation. Native test execution is reported
+separately from these references and source/formatter checks.
 
 ## Compact outlet reaction from an impedance wall
 
