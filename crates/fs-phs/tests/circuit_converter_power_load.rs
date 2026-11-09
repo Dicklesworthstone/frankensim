@@ -5,6 +5,9 @@ use fs_phs::circuit::converter::power_load::{
 use fs_phs::circuit::converter::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters};
 use fs_phs::{PreparedStepError, SolveBudget};
 
+#[path = "circuit_converter_power_load/voltage.rs"]
+mod voltage;
+
 fn parameters() -> BuckBoostParameters {
     BuckBoostParameters {
         inductance_h: 0.02,

@@ -522,6 +522,36 @@ changed-source power ODEs, tiny regenerative currents about 24 V, refusal of
 unresolved storage changes including a `1e16 V` datum, exact unloaded
 equilibrium, and cancellation/retry at every exposed checkpoint.
 
+### Regulated loads behind finite voltage-source impedance
+
+`PreparedPowerLoadedBuckBoost::step_voltage_driven_controlled` joins two held
+ideal voltage sources through authored positive terminal resistances to the same
+regulated-load equation. The signed source law is
+`I_source=(V_source-V_bus)/R`; its exact incremental conductance and the existing
+constant-power/current-limit/foldback tangent enter the original three-state
+Newton solve together. Neither source sag nor delivered load current is
+evaluated at a lagged voltage. Existing held-current steps share this owner.
+
+`VoltagePowerLoadedStep` separates accepted source currents, signed ideal-source
+work, the two physical `dt*R*I_source²` heats, actual exported load work, and
+curtailment. The converter record retains net bus-source work minus load work
+and its five original conduction owners only. Converter, each source/resistor,
+and full storage/heat/work balances gate publication. Zero source voltage is a
+passive resistor termination; either source may receive regenerated energy.
+Both power direction and actual load curtailment remain explicit.
+
+The source has finite impedance, not finite energy capacity. This remains a
+frozen averaged stage with numerical discrete-effort/midpoint quadrature, not the
+separate exact linear voltage-driven propagator or a switching-device model.
+Zero/nonfinite/unrepresentable resistance, unsupported initial/final or discrete
+load voltage, exhausted native work budget, nonfinite account, or cancellation
+publishes neither output buffer. Convergence and closure do not establish root
+uniqueness, stability, or time-step accuracy. Warm calls reuse the same fixed-size
+workspace without allocation. Focused regressions include independent forward/
+reverse operating points, a transient constant-power capacitor quadratic, bipolar
+startup foldback/current limiting, finite-bus regeneration with physical series
+heat, nearly cancelling source/load currents, and refusal/cancellation/retry.
+
 ## Physical acoustic terminal flow
 
 `acoustic_outlet::acoustic_chain_with_outlet_flow` returns the original loaded

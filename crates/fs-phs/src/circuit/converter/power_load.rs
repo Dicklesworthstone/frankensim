@@ -204,6 +204,53 @@ pub struct PowerLoadedStep {
     pub curtailed_load_energy_j: [f64; 2],
 }
 
+/// Joint finite-impedance voltage supply and regulated demand on both buses.
+#[derive(Clone, Debug)]
+pub struct VoltagePowerLoadedStep {
+    /// Native NET bus work after load withdrawal; only the five internal
+    /// converter paths belong to its conduction heat and native dissipation.
+    pub converter: ConverterStep,
+    pub loads: [PowerLoadPoint; 2],
+    /// Accepted source branch currents, positive INTO the buses [A].
+    pub source_current_a: [f64; 2],
+    /// Signed work leaving each held ideal voltage source [J]. Negative means
+    /// regeneration into that source; a zero-volt resistive termination is zero.
+    pub source_work_j: [f64; 2],
+    /// Physical series-resistor heat, I_source² R dt, separate from converter
+    /// heat and exported load work [J]. This is never a Norton shunt loss.
+    pub terminal_resistor_heat_j: [f64; 2],
+    pub load_work_j: [f64; 2],
+    pub curtailed_load_energy_j: [f64; 2],
+}
+
+#[derive(Clone, Copy)]
+struct VoltageSources {
+    voltage_v: [f64; 2],
+    resistance_ohm: [f64; 2],
+    conductance_s: [f64; 2],
+}
+impl VoltageSources {
+    fn new(voltage_v: [f64; 2], resistance_ohm: [f64; 2]) -> Result<Self, PhsError> {
+        let conductance_s = resistance_ohm.map(|r| 1.0 / r);
+        if voltage_v.iter().any(|v| !v.is_finite())
+            || resistance_ohm.iter().any(|r| !positive(*r))
+            || conductance_s.iter().any(|g| !positive(*g))
+        {
+            return Err(invalid(
+                "regulated voltage supply requires finite voltages and positive representable terminal resistances",
+            ));
+        }
+        Ok(Self {
+            voltage_v,
+            resistance_ohm,
+            conductance_s,
+        })
+    }
+    fn current_a(self, port: usize, bus_voltage_v: f64) -> f64 {
+        (self.voltage_v[port] - bus_voltage_v) / self.resistance_ohm[port]
+    }
+}
+
 /// Original three-state converter plus one reusable nonlinear solve workspace.
 /// Loads are held commands passed to each step, so changing demand never resets
 /// the converter's original flux/charges or introduces parameter-storage work.
@@ -298,8 +345,74 @@ impl PreparedPowerLoadedBuckBoost {
         loads: &[Option<RegulatedPowerLoad>; 2],
         next: &mut [f64; 3],
         discrete_bus_voltage_v: &mut [f64; 2],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PowerLoadedStep, PreparedStepError> {
+        let step = self.step_driven_controlled(
+            initial,
+            terminal_current_a,
+            None,
+            loads,
+            next,
+            discrete_bus_voltage_v,
+            cancelled,
+        )?;
+        Ok(PowerLoadedStep {
+            converter: step.converter,
+            loads: step.loads,
+            source_work_j: step.source_work_j,
+            load_work_j: step.load_work_j,
+            curtailed_load_energy_j: step.curtailed_load_energy_j,
+        })
+    }
+
+    /// Solve finite-resistance voltage sources and both regulated demands in
+    /// the SAME original converter equation. Each signed source current is
+    /// (V_source - V_bus)/R, with its exact -1/R tangent; source sag, reverse
+    /// power and load negative incremental conductance are solved jointly.
+    /// Zero source voltage supplies an ordinary passive resistive termination.
+    ///
+    /// Source voltages are held ideal sources behind finite impedance, not
+    /// finite-energy reservoirs. R must be positive; an ideal zero-resistance
+    /// voltage constraint is not approximated. Source currents are not clipped.
+    /// Original L/C storage and all five internal heat owners remain unchanged.
+    /// Load and terminal-resistor work use the accepted discrete voltage and
+    /// midpoint quadrature, not exact continuous RMS integrals. Existing domain,
+    /// budget, root-uniqueness limits and transactional output guarantees apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_voltage_driven_controlled(
+        &mut self,
+        initial: &[f64; 3],
+        source_voltage_v: &[f64; 2],
+        terminal_resistance_ohm: &[f64; 2],
+        loads: &[Option<RegulatedPowerLoad>; 2],
+        next: &mut [f64; 3],
+        discrete_bus_voltage_v: &mut [f64; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<VoltagePowerLoadedStep, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let sources = VoltageSources::new(*source_voltage_v, *terminal_resistance_ohm)?;
+        self.step_driven_controlled(
+            initial,
+            &[0.0; 2],
+            Some(sources),
+            loads,
+            next,
+            discrete_bus_voltage_v,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_driven_controlled(
+        &mut self,
+        initial: &[f64; 3],
+        terminal_current_a: &[f64; 2],
+        voltage_sources: Option<VoltageSources>,
+        loads: &[Option<RegulatedPowerLoad>; 2],
+        next: &mut [f64; 3],
+        discrete_bus_voltage_v: &mut [f64; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<VoltagePowerLoadedStep, PreparedStepError> {
         poll(&mut cancelled)?;
         for p in 0..2 {
             load_point(loads[p], initial[p + 1] * self.inverse_storage[p + 1])?;
@@ -312,10 +425,19 @@ impl PreparedPowerLoadedBuckBoost {
             let mut power = [0.0; 2];
             for p in 0..2 {
                 let point = load_point(loads[p], effort[p + 1]).ok()?;
-                out[p + 1] = point.current_a;
-                power[p] = point.delivered_power_w;
+                let source_current =
+                    voltage_sources.map_or(0.0, |source| source.current_a(p, effort[p + 1]));
+                out[p + 1] = point.current_a - source_current;
+                // Contract the SAME rounded net flow used by Newton. Subtracting
+                // separately rounded source/load powers can fabricate a defect
+                // when these much larger branch currents nearly cancel.
+                power[p] = effort[p + 1] * out[p + 1];
+                if !out[p + 1].is_finite() || !power[p].is_finite() {
+                    return None;
+                }
             }
-            // The load is an external work receiver, not converter heat.
+            // Both branches cross the converter boundary. Physical source
+            // resistor heat is accounted separately, never as converter heat.
             Some(NonlinearPortPower {
                 supplied_power_w: -sum(power),
                 dissipated_power_w: 0.0,
@@ -340,7 +462,9 @@ impl PreparedPowerLoadedBuckBoost {
                 let Ok(point) = load_point(loads[p], effort[p + 1]) else {
                     return false;
                 };
-                out[p + 1] = point.incremental_conductance_s * de[p + 1];
+                let source_conductance =
+                    voltage_sources.map_or(0.0, |source| source.conductance_s[p]);
+                out[p + 1] = (point.incremental_conductance_s + source_conductance) * de[p + 1];
             }
             out.iter().all(|v| v.is_finite())
         };
@@ -369,15 +493,33 @@ impl PreparedPowerLoadedBuckBoost {
         let load_work_j: [f64; 2] = points.map(|p| self.duration_s * p.delivered_power_w);
         let curtailed_load_energy_j: [f64; 2] =
             points.map(|p| self.duration_s * p.curtailed_power_w);
-        let source_work_j: [f64; 2] =
-            core::array::from_fn(|p| (self.duration_s * voltage[p]) * terminal_current_a[p]);
+        let source_current_a: [f64; 2] = core::array::from_fn(|p| {
+            voltage_sources.map_or(terminal_current_a[p], |source| {
+                source.current_a(p, voltage[p])
+            })
+        });
+        let bus_source_work_j: [f64; 2] =
+            core::array::from_fn(|p| (self.duration_s * voltage[p]) * source_current_a[p]);
+        let source_work_j: [f64; 2] = core::array::from_fn(|p| {
+            let source_voltage = voltage_sources.map_or(voltage[p], |source| source.voltage_v[p]);
+            (self.duration_s * source_voltage) * source_current_a[p]
+        });
+        let terminal_resistor_heat_j: [f64; 2] = core::array::from_fn(|p| {
+            voltage_sources.map_or(0.0, |source| {
+                let amplitude = (det::sqrt(source.resistance_ohm[p]) * source_current_a[p])
+                    * det::sqrt(self.duration_s);
+                amplitude * amplitude
+            })
+        });
         let terminal_work_j: [f64; 2] =
-            core::array::from_fn(|p| sum([source_work_j[p], -load_work_j[p]]));
+            core::array::from_fn(|p| sum([bus_source_work_j[p], -load_work_j[p]]));
         let joules = self.model.effective_resistance_ohm.map(|r| {
             let integrated_amplitude = (det::sqrt(r) * effort[0]) * det::sqrt(self.duration_s);
             integrated_amplitude * integrated_amplitude
         });
         let scale = sum(source_work_j.map(f64::abs))
+            .max(sum(bus_source_work_j.map(f64::abs)))
+            .max(sum(terminal_resistor_heat_j))
             .max(sum(load_work_j))
             .max(native.delta_h.abs())
             .max(native.dissipated);
@@ -387,7 +529,34 @@ impl PreparedPowerLoadedBuckBoost {
             sum([native.delta_h, native.dissipated, -sum(terminal_work_j)]),
             sum([native.supplied, -sum(terminal_work_j)]),
             sum(joules.into_iter().chain([-native.dissipated])),
+            sum([native.delta_h, native.dissipated]
+                .into_iter()
+                .chain(terminal_resistor_heat_j)
+                .chain(load_work_j)
+                .chain(source_work_j.map(|work| -work))),
         ];
+        for p in 0..2 {
+            let terminal_scale = source_work_j[p]
+                .abs()
+                .max(bus_source_work_j[p].abs())
+                .max(terminal_resistor_heat_j[p]);
+            let terminal_allowance = self.controls.absolute_energy_tolerance_j
+                + self.controls.relative_energy_tolerance * terminal_scale;
+            let residual = sum([
+                source_work_j[p],
+                -terminal_resistor_heat_j[p],
+                -bus_source_work_j[p],
+            ]);
+            if !terminal_allowance.is_finite()
+                || !residual.is_finite()
+                || residual.abs() > terminal_allowance
+            {
+                return Err(invalid(
+                    "regulated voltage source work and physical terminal resistor heat do not close",
+                )
+                .into());
+            }
+        }
         if !scale.is_finite()
             || !allowance.is_finite()
             || candidate
@@ -396,6 +565,9 @@ impl PreparedPowerLoadedBuckBoost {
                 .chain(&joules)
                 .chain(&load_work_j)
                 .chain(&source_work_j)
+                .chain(&source_current_a)
+                .chain(&bus_source_work_j)
+                .chain(&terminal_resistor_heat_j)
                 .chain(&curtailed_load_energy_j)
                 .chain(&terminal_work_j)
                 .any(|v| !v.is_finite())
@@ -411,14 +583,16 @@ impl PreparedPowerLoadedBuckBoost {
         poll(&mut cancelled)?;
         next.copy_from_slice(&candidate);
         discrete_bus_voltage_v.copy_from_slice(&voltage);
-        Ok(PowerLoadedStep {
+        Ok(VoltagePowerLoadedStep {
             converter: ConverterStep {
                 native,
                 terminal_work_j,
                 conduction: ConductionHeat { joules },
             },
             loads: points,
+            source_current_a,
             source_work_j,
+            terminal_resistor_heat_j,
             load_work_j,
             curtailed_load_energy_j,
         })
