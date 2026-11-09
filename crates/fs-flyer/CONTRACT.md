@@ -157,8 +157,30 @@ This observer requires ordinary physically consistent rigid inertia and loads
 evaluated at the same accepted state, not a predictor/corrector mixture. Rotor
 carriers, added mass, articulated joints and impulses need their coupled owner;
 no reaction solve, finite impact acceleration, sensor calibration or historical
-pilot gain is inferred. The reduced lifecycle's declared zero-heave cue remains
-unchanged; the explicit six-DOF bridge does not add an extra aerodynamic solve.
+pilot gain is inferred. The explicit six-DOF bridge does not add an extra
+aerodynamic solve.
+
+### Lifecycle acceleration acquisition
+
+The reduced `SimLoop` acquires physical COM body-down specific force from its
+own longitudinal owner. Airborne acquisition uses the accepted interval START
+loads with their original incidence; midpoint forces are never paired with the
+published endpoint. Rail acquisition uses the constrained interval acceleration,
+including support, tow, rolling friction and the no-reverse stopping impulse.
+The cue is relative to supported trim, `-g cos(theta_trim)`, in body FRD m/s².
+Reduced roll/yaw motion does not bank the sensor or translation frame.
+
+The registered six-tick heave delay permits current acquisition after control:
+the perception output reads the old delayed sample first; an authenticated,
+move-only channel/tick/slot token fills the current future-only slot after the
+physics interval is accepted. Zero delay refuses before lifecycle mutation.
+Failed loads do not publish a physical sample. No extra force solve, hidden
+cache, additional latency or checkpoint field is introduced. Existing saved
+history is preserved on restore, including older zero-heave samples.
+`heave_cue_sample` and `perceived_cues` expose raw and delayed observations
+without advancing state or randomness. Registered pilot gains and the frozen
+snapshot payload remain unchanged. G0/G1 tests cover six-tick timing, force
+limits, actual rail/start-load acquisition, checkpoint continuation and refusal.
 
 ## Section pressure forces and moments through stall
 

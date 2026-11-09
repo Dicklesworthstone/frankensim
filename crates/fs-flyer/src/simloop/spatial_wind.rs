@@ -1065,12 +1065,14 @@ impl SimLoop {
     /// Already-unloaded states take the ordinary airborne path before this
     /// method is reached. Loaded ticks retain discrete constraint/tow timing;
     /// no within-tick support-loss localization is claimed.
+    /// Returns the interval's constrained forward acceleration, including tow,
+    /// rolling friction and the no-reverse stopping impulse, for perception.
     pub(super) fn advance_rail_motion(
         &mut self,
         loads: &crate::aircraft::ForceBuildup,
         [forward, upward]: [f64; 2],
         dt: f64,
-    ) {
+    ) -> f64 {
         let mass = self.design.gross_mass_kg;
         let weight = mass * motion::GRAVITY_MPS2;
         let normal = (weight - upward).max(0.0);
@@ -1079,6 +1081,8 @@ impl SimLoop {
             _ => 0.0,
         };
         let mut next = self.current_flight_motion();
+        let forward_acceleration = ((forward + tow - super::RAIL_MU * normal) / mass)
+            .max(-next.longitudinal.ground_mps[0] / dt);
         next.longitudinal.ground_mps[0] = (next.longitudinal.ground_mps[0]
             + dt * (forward + tow - super::RAIL_MU * normal) / mass)
             .max(0.0);
@@ -1089,6 +1093,7 @@ impl SimLoop {
         if self.x_m > self.spec.rail_length_m {
             self.phase = super::Phase::Ended(super::TerminalEvent::RailEndWithoutLift);
         }
+        forward_acceleration
     }
 }
 

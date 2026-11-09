@@ -19,6 +19,8 @@ use fs_math::det;
 use fs_mbd::PreparedRigidPointMotion;
 use fs_rand::{Stream, StreamKey};
 
+mod deferred;
+
 /// The perception baseline rate [Hz] (plan Round-5 decision).
 pub const PERCEPTION_HZ: f64 = 120.0;
 
@@ -214,8 +216,8 @@ impl PerceptionModelSpec {
     /// The same per-cue delay, filter, gain, remnant and checkpoint owner then
     /// processes all six values. No extra aerodynamic solve or time step occurs.
     ///
-    /// This explicit six-DOF path does not change the reduced `SimLoop`'s
-    /// declared zero-heave cue or add an uncalibrated pilot feedback gain.
+    /// The reduced `SimLoop` acquires its COM heave cue through its own
+    /// longitudinal force/constraint owner. Neither path adds a pilot gain.
     ///
     /// # Errors
     /// `perception-motion-invalid` for invalid point/gravity or unrepresentable
@@ -324,19 +326,7 @@ impl PerceptionModelSpec {
         let dt = 1.0 / PERCEPTION_HZ;
         // Tick-addressed remnant: draw index = tick * DRAWS_PER_TICK,
         // one normal per cue, in cue order (frozen causal order).
-        let mut stream = Stream::resume(fs_rand::StreamCheckpoint {
-            checkpoint_version: fs_rand::STREAM_CHECKPOINT_VERSION,
-            stream_semantics_version: fs_rand::STREAM_SEMANTICS_VERSION,
-            key: self.stream_key,
-            index: state.tick * DRAWS_PER_TICK,
-        })
-        .map_err(|e| Refusal {
-            code: "perception-stream-invalid",
-            message: format!("{e:?}"),
-            ranked_repairs: vec![
-                "stream checkpoint arithmetic overflow — tick out of range".into(),
-            ],
-        })?;
+        let mut stream = self.remnant_stream(state.tick)?;
         let mut values = [0.0f64; N_CUES];
         for i in 0..N_CUES {
             let c = &self.cues[i];
@@ -366,6 +356,22 @@ impl PerceptionModelSpec {
         };
         state.tick += 1;
         Ok(out)
+    }
+
+    fn remnant_stream(&self, tick: u64) -> Result<Stream, Refusal> {
+        Stream::resume(fs_rand::StreamCheckpoint {
+            checkpoint_version: fs_rand::STREAM_CHECKPOINT_VERSION,
+            stream_semantics_version: fs_rand::STREAM_SEMANTICS_VERSION,
+            key: self.stream_key,
+            index: tick * DRAWS_PER_TICK,
+        })
+        .map_err(|e| Refusal {
+            code: "perception-stream-invalid",
+            message: format!("{e:?}"),
+            ranked_repairs: vec![
+                "stream checkpoint arithmetic overflow — tick out of range".into(),
+            ],
+        })
     }
 
     /// Checkpoint the state (rings + filters + tick are the complete

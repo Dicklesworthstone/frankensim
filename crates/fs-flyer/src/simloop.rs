@@ -46,8 +46,10 @@ use fs_atmo::ou::{OuMode, STATIONARY_ANCHOR_TICK, StationaryOuPath};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
+mod heave;
 pub(crate) mod motion;
 mod spatial_wind;
+pub use heave::HeaveCueSample;
 use spatial_wind::SpatialWindState;
 pub use spatial_wind::{MaterialAirSample, SpatialWindSpec, SpatialWindSpectrum};
 
@@ -952,6 +954,8 @@ impl SimLoop {
                 warp_cmd_rad: 0.0,
             },
         };
+        self.perception
+            .admit_deferred_heave(&self.perception_state, self.tick)?;
         let dt = 1.0 / PERCEPTION_HZ;
         self.tick += 1;
         let mut gust_w = if self.spatial_wind.is_some() {
@@ -974,13 +978,15 @@ impl SimLoop {
         let w2 = self.w * self.w;
         let v_air = (u2 + w2).sqrt().max(0.1);
         // Perception + control.
-        let wdot_est = 0.0; // heave cue at the reduced tier (declared)
-        let cues = self.perception.step(
+        // Heave is strictly delayed: acquire its current-start physical sample
+        // after control/load evaluation, into the reserved future-only slot.
+        let (cues, pending_heave) = self.perception.step_with_deferred_heave(
             &mut self.perception_state,
+            self.tick - 1,
             pack_cues(
                 self.theta - self.tick0.trim.alpha_rad,
                 self.q,
-                wdot_est,
+                0.0,
                 self.lateral_state.phi_rad,
                 self.lateral_state.p_rad_s,
                 self.lateral_state.r_rad_s,
@@ -1074,10 +1080,16 @@ impl SimLoop {
         {
             self.phase = Phase::Airborne;
         }
+        let reference_heave = self.heave_reference();
+        let mut acquired_heave = None;
         match self.phase {
             Phase::OnRail => {
                 self.warm_slip = Some(b.coupled.w_slip);
-                self.advance_rail_motion(&b, rail_forces.expect("rail loads prepared"), dt);
+                let forward_acceleration =
+                    self.advance_rail_motion(&b, rail_forces.expect("rail loads prepared"), dt);
+                acquired_heave = Some(
+                    heave::rail_specific_force(self.theta, forward_acceleration) - reference_heave,
+                );
             }
             Phase::Airborne => {
                 match self.advance_airborne_motion(&b, alpha_clamped, dc_eff, gust_w, dt) {
@@ -1130,6 +1142,16 @@ impl SimLoop {
                         if let Err(refusal) = lateral_result {
                             self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
                             self.envelope_refusal = Some(refusal);
+                        } else {
+                            // b and alpha_clamped belong to the accepted START,
+                            // before motion publication, not the midpoint loads.
+                            acquired_heave = Some(
+                                motion::nongravity_acceleration(
+                                    [b.force_n[0], b.force_n[2]],
+                                    alpha_clamped,
+                                    self.design.gross_mass_kg,
+                                )[1] - reference_heave,
+                            );
                         }
                         if self.h_m <= 0.0 && !matches!(self.phase, Phase::Ended(_)) {
                             self.h_m = 0.0;
@@ -1145,6 +1167,13 @@ impl SimLoop {
         }
         if let Some(spatial_gust) = self.finish_spatial_tick()? {
             gust_w = spatial_gust;
+        }
+        if let Some(raw_heave) = acquired_heave {
+            self.perception.complete_heave_sample(
+                &mut self.perception_state,
+                pending_heave,
+                raw_heave,
+            )?;
         }
         // Chain the digest.
         let out = self.state_out(gust_w, assist_active, assist_dc);
