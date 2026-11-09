@@ -15,6 +15,9 @@ use fs_mbd::articulated::{
 };
 use std::cell::Cell;
 
+#[path = "partitioned_articulated/actuation.rs"]
+mod actuation;
+
 const ZERO_IMPEDANCE: JointImpedance = JointImpedance {
     damping: 0.0,
     stiffness: 0.0,

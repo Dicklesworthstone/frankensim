@@ -32,6 +32,10 @@ pub mod stops;
 #[path = "articulated/contact.rs"]
 pub mod contact;
 
+/// Inductive voltage actuation through the same coupled body/joint midpoint.
+#[path = "articulated/actuation.rs"]
+pub mod actuation;
+
 /// Link cap for the compact aircraft coupling lane, including fixed links.
 pub const MAX_ARTICULATED_LINKS: usize = 256;
 

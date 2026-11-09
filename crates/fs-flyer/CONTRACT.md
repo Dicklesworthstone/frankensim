@@ -462,6 +462,43 @@ momentum and angular momentum errors all converge at second order in that free
 trajectory. No exact finite-step nonlinear conservation, impact, joint-stop or
 closed-loop constraint claim is made by this smooth coupled lane.
 
+### Inductive actuation in the native articulated acceleration solve
+
+`partitioned::articulated::actuation::step_with_voltage_drives` advances
+continuing winding currents together with the original free-body, joint and
+aerodynamic-memory states. Each declared revolute/helical coordinate reuses
+`fs-mbd`'s `RotorWindingMotor`, reciprocal Kt=Ke, source capabilities and
+directional bridge law. Native links own all actuator/control inertia; the
+adapter adds no fictitious rotor or separate scalar acceleration.
+
+For the full duration dt, the winding midpoint is
+`i_mid = (2 L i0 + dt V - dt K omega_mid)/(2 L + dt R)`.
+Its constant effort and positive electrical damping enter the ORIGINAL
+dry/fluid joint mass solve, retaining body recoil, serial coupling and every
+fluid cross block. The caller's link-origin aerodynamic wrenches and hinge
+loads are evaluated at that same native stage. Accepted stage rates are
+retained without another aerodynamic callback or a differenced-position
+approximation. Authored passive impedance is admitted before motor damping.
+
+Held terminal voltage saturates at the declared voltage cap. Actual endpoint
+current, speed and source-power capabilities admit the reconstructed segment;
+infeasibility refuses the entire borrowed-state step instead of clipping
+current or magnetic storage. Returned receipts independently account for
+L i_mid delta(i), V i_mid dt, actual motor/joint work, midpoint R i_mid² dt,
+separate source draw/return and bridge heat through current reversals. The
+actual winding equation and electrical balance are checked before publication.
+`into_state` carries the accepted current and original native motion forward.
+
+The focused `partitioned_articulated::actuation` regressions provide independent
+winding/mechanical Cayley oracles, stiff and lossless electrical limits, two
+fluid-bearing driven rotors with shared recoil, actual applied hinge loads,
+voltage saturation, bidirectional source losses and atomic capability refusals.
+These are authored native tests; execution status is reported separately.
+Heat/work retain midpoint accuracy; linear-current endpoint checks are not a
+continuous-time peak certificate. Shared batteries, switching/thermal/magnetic
+nonlinearities, contact/event composition and the reduced historical canard
+lifecycle are outside this smooth native actuation owner.
+
 ### Simultaneous contacts with complete articulated fluid inertia
 
 `partitioned::articulated::impact::resolve` resets a caller-located event on one

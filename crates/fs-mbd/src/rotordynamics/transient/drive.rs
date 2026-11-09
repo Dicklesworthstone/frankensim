@@ -402,7 +402,13 @@ impl RotorMidpoint<'_> {
 }
 
 impl RotorCurrentDrive {
-    fn admit(
+    /// Validate this original motor/bridge law, its numerical source controls,
+    /// and a finite command for a mechanical owner with `n` coordinates.
+    ///
+    /// This checks parameter and coordinate compatibility only. Actual speed,
+    /// terminal voltage, current and source-power limits must also be checked
+    /// on the mechanical owner's accepted state and electrical reconstruction.
+    pub fn admit(
         self,
         n: usize,
         control: RotorDrivePowerControl,
@@ -438,11 +444,13 @@ impl RotorCurrentDrive {
         Ok(())
     }
 
-    pub(in crate::rotordynamics) fn admit_speed(
-        self,
-        speed_rad_s: f64,
-    ) -> Result<(), RotorDriveError> {
-        if speed_rad_s < self.minimum_speed_rad_s || speed_rad_s > self.maximum_speed_rad_s {
+    /// Admit a finite actual shaft rate against this motor's declared domain.
+    /// Validate the static motor parameters with [`Self::admit`] first.
+    pub fn admit_speed(self, speed_rad_s: f64) -> Result<(), RotorDriveError> {
+        if !speed_rad_s.is_finite()
+            || speed_rad_s < self.minimum_speed_rad_s
+            || speed_rad_s > self.maximum_speed_rad_s
+        {
             return Err(RotorDriveError::SpeedDomain {
                 speed_rad_s,
                 minimum_speed_rad_s: self.minimum_speed_rad_s,
@@ -464,15 +472,37 @@ impl RotorCurrentDrive {
         )
     }
 
-    pub(in crate::rotordynamics) fn source_power(
-        self,
-        terminal_power: f64,
-    ) -> Result<f64, RotorError> {
+    /// Apply the original bidirectional bridge law to signed terminal power [W].
+    /// Positive output is source draw; negative output is source return. Static
+    /// efficiencies must first pass [`Self::admit`]. Nonfinite arithmetic refuses.
+    pub fn source_power(self, terminal_power: f64) -> Result<f64, RotorError> {
         finite(if terminal_power >= 0.0 {
             terminal_power / self.motoring_efficiency
         } else {
             terminal_power * self.regenerative_efficiency
         })
+    }
+
+    /// Positive and negative-magnitude averages of an affine terminal-power path.
+    ///
+    /// Both endpoints must be finite. The original reversal integration is
+    /// shared with the current and voltage owners, so opposite-signed transfers
+    /// are retained separately instead of netted. Multiply these averages by
+    /// the physical duration, applying the declared bridge efficiencies, to get
+    /// separate source draw and return. This is not a bound on nonlinear peaks.
+    pub fn directional_average(
+        initial_terminal_power_w: f64,
+        final_terminal_power_w: f64,
+    ) -> Result<(f64, f64), RotorDriveError> {
+        if !initial_terminal_power_w.is_finite() || !final_terminal_power_w.is_finite() {
+            return Err(RotorDriveError::Invalid(
+                "finite terminal-power endpoints required",
+            ));
+        }
+        Ok(directional_average(
+            initial_terminal_power_w,
+            final_terminal_power_w,
+        ))
     }
 }
 
