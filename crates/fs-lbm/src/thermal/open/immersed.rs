@@ -19,6 +19,8 @@
 
 /// Reciprocal solid conduction on the original immersed thermal nodes.
 pub mod conduction;
+/// Cartesian voxel geometry and material preparation for immersed conduction.
+pub mod voxel;
 
 use super::{
     D3Q7, FiniteThermalWallExchange, Sum, ThermalOpenError3, ThermalOpenFace3, ThermalOpenField3,

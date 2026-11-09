@@ -1,12 +1,14 @@
 //! A finite heated block cooled by native D3Q19 flow and D3Q7 heat transport.
 //!
-//! Run: cargo run -p fs-lbm --example immersed_body_cooling -- 400 0.025
+//! Run: cargo run -p fs-lbm --example immersed_body_cooling -- 400 0.025 resolved
+//! Use `lumped` as the last argument to impose an isothermal solid interior.
 //!
 //! All coordinates are lattice units. theta=(T-T_inlet)/delta_T, the fluid
 //! cell heat capacity is one, and the block's TOTAL capacity is 40. The
 //! transverse directions are periodic; this is a repeated-cell demonstration,
 //! not an isolated-body correlation or a grid-converged heat-transfer claim.
-//! The block is internally isothermal with a declared surface resistance.
+//! The default resolves all 27 solid voxels with conductivity 0.2 and a
+//! surface-contact resistance of 0.5. Only the interior core receives heat.
 
 use std::error::Error;
 
@@ -16,13 +18,14 @@ use fs_lbm::lattice3::open_boundaries::OpenBoundaryGrid3;
 use fs_lbm::lattice3::{D3q19, Grid3, GridBudget3};
 use fs_lbm::thermal::boundary::{FiniteThermalWall, ThermalWall};
 use fs_lbm::thermal::open::immersed::ImmersedThermalBody3;
+use fs_lbm::thermal::open::immersed::voxel::ImmersedThermalVoxel3;
 use fs_lbm::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3, ThermalOpenLimits3};
 
-fn simulate(cx: &Cx<'_>, steps: usize, speed: f64) -> Result<(), Box<dyn Error>> {
+fn simulate(cx: &Cx<'_>, steps: usize, speed: f64, resolved: bool) -> Result<(), Box<dyn Error>> {
     let dims = [24, 10, 10];
     let cells = dims.into_iter().product();
     let is_solid =
-        |[x, y, z]: [usize; 3]| (8..10).contains(&x) && (4..6).contains(&y) && (4..6).contains(&z);
+        |[x, y, z]: [usize; 3]| (8..11).contains(&x) && (4..7).contains(&y) && (4..7).contains(&z);
     let grid = Grid3::<D3q19, 19>::try_new_equilibrium(
         dims,
         CollisionModel3::Bgk { tau: 0.9 },
@@ -69,38 +72,74 @@ fn simulate(cx: &Cx<'_>, steps: usize, speed: f64) -> Result<(), Box<dyn Error>>
             ])
         })
         .collect();
-    thermal.set_immersed_thermal_bodies(
-        &[ImmersedThermalBody3 {
-            solid_cells: &body_cells,
-            solid: FiniteThermalWall {
+    let (body_count, heated_node) = if resolved {
+        let core = 9 + dims[0] * 5 + dims[0] * dims[1] * 5;
+        let voxels: Vec<_> = body_cells
+            .iter()
+            .map(|&cell| ImmersedThermalVoxel3 {
+                cell,
                 temperature: 1.0,
-                heat_capacity: 40.0,
-                resistance: 0.5,
-                heat_per_step: 0.02,
-            },
-        }],
-        128 * 1024,
-    )?;
+                heat_capacity: 40.0 / body_cells.len() as f64,
+                conductivity: 0.2,
+                contact_resistance: 0.5,
+                heat_per_step: if cell == core { 0.02 } else { 0.0 },
+            })
+            .collect();
+        let mapping = thermal.set_immersed_thermal_voxels(&voxels, Default::default())?;
+        (
+            mapping.cells().len(),
+            mapping.node_for_cell(core).ok_or("missing heated core")?,
+        )
+    } else {
+        thermal.set_immersed_thermal_bodies(
+            &[ImmersedThermalBody3 {
+                solid_cells: &body_cells,
+                solid: FiniteThermalWall {
+                    temperature: 1.0,
+                    heat_capacity: 40.0,
+                    resistance: 0.5,
+                    heat_per_step: 0.02,
+                },
+            }],
+            128 * 1024,
+        )?;
+        (1, 0)
+    };
     let heat = vec![0.0; cells];
     let mut worst_defect = 0.0_f64;
     println!("# lattice units; total block capacity=40; source=0.02 until halfway, then zero");
-    println!("step,body_theta,maximum_fluid_theta,body_heat_into_fluid,combined_defect");
+    println!("# resolved solid={resolved}; thermal nodes={body_count}");
+    println!(
+        "step,mean_body_theta,min_body_theta,max_body_theta,maximum_fluid_theta,body_heat_into_fluid,combined_defect"
+    );
     for step in 1..=steps {
         if step == steps / 2 + 1 {
-            thermal.set_immersed_body_heat(0, 0.0)?;
+            thermal.set_immersed_body_heat(heated_node, 0.0)?;
         }
         let receipt =
             flow.step_serial_with_thermal(&mut thermal, cx, None, &heat, None, [0.0; 3])?;
         worst_defect = worst_defect.max(receipt.heat.combined_defect.abs());
         if step == 1 || step == steps || step % 20 == 0 {
-            let body = thermal.immersed_body(0).ok_or("missing finite block")?;
-            let exchange = body.last_exchange.ok_or("missing block heat balance")?;
+            let mut body_heat = 0.0;
+            let mut mean = 0.0;
+            let mut minimum = f64::INFINITY;
+            let mut maximum_body = f64::NEG_INFINITY;
+            for node in 0..body_count {
+                let body = thermal.immersed_body(node).ok_or("missing solid node")?;
+                body_heat += body
+                    .last_exchange
+                    .ok_or("missing solid heat balance")?
+                    .heat_in;
+                mean += body.solid.temperature * (body.solid.heat_capacity / 40.0);
+                minimum = minimum.min(body.solid.temperature);
+                maximum_body = maximum_body.max(body.solid.temperature);
+            }
             let maximum = (0..cells)
                 .filter_map(|cell| thermal.temperature(cell))
                 .fold(f64::NEG_INFINITY, f64::max);
             println!(
-                "{step},{:.9},{maximum:.9},{:.9e},{:.3e}",
-                body.solid.temperature, exchange.heat_in, receipt.heat.combined_defect
+                "{step},{mean:.9},{minimum:.9},{maximum_body:.9},{maximum:.9},{body_heat:.9e},{:.3e}",
+                receipt.heat.combined_defect
             );
         }
     }
@@ -110,11 +149,18 @@ fn simulate(cx: &Cx<'_>, steps: usize, speed: f64) -> Result<(), Box<dyn Error>>
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    if arguments.len() > 2 {
-        return Err("usage: immersed_body_cooling [STEPS=400] [INLET_SPEED=0.025]".into());
+    if arguments.len() > 3 {
+        return Err(
+            "usage: immersed_body_cooling [STEPS=400] [INLET_SPEED=0.025] [resolved|lumped]".into(),
+        );
     }
     let steps: usize = arguments.first().map_or(Ok(400), |s| s.parse())?;
     let speed: f64 = arguments.get(1).map_or(Ok(0.025), |s| s.parse())?;
+    let resolved = match arguments.get(2).map_or("resolved", String::as_str) {
+        "resolved" => true,
+        "lumped" => false,
+        _ => return Err("solid model must be resolved or lumped".into()),
+    };
     if !(2..=10_000).contains(&steps) || !speed.is_finite() || !(0.0..=0.05).contains(&speed) {
         return Err("need 2..10000 steps and an inlet speed in [0,0.05] lattice units".into());
     }
@@ -133,6 +179,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        simulate(&cx, steps, speed)
+        simulate(&cx, steps, speed, resolved)
     })
 }

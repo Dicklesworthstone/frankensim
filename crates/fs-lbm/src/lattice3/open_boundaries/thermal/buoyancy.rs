@@ -334,6 +334,17 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             .set_immersed_thermal_network(nodes, links, maximum_storage_bytes, controls)
     }
 
+    /// Prepare spatial solid conduction from the original native voxel geometry.
+    /// Each selected voxel retains one capacity/source, with the same joint
+    /// thermal, momentum and buoyancy publication as a manually authored graph.
+    pub fn set_immersed_thermal_voxels(
+        &mut self,
+        voxels: &[crate::thermal::open::immersed::voxel::ImmersedThermalVoxel3],
+        controls: crate::thermal::open::immersed::voxel::ImmersedVoxelControls3,
+    ) -> Result<crate::thermal::open::immersed::voxel::ImmersedVoxelMap3, ThermalOpenError3> {
+        self.thermal.set_immersed_thermal_voxels(voxels, controls)
+    }
+
     /// Change the heat supplied to one whole immersed body without detaching
     /// thermal, momentum or buoyancy history.
     pub fn set_immersed_body_heat(

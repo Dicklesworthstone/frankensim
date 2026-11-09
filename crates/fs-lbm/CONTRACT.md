@@ -119,6 +119,38 @@ cover independent two-node balances including stiff coupling, heat release
 from a fully buried core through an exposed shell, whole-capacity equilibrium,
 late cancellation/exact retry and graph admission.
 
+### Cartesian material voxels on the immersed network
+
+`set_immersed_thermal_voxels` prepares the same native thermal network directly
+from selected original solid cells. Each voxel retains its own fixed capacity,
+temperature, isotropic conductivity and external source. Neighboring selected
+voxels share the harmonic conductance of their two half cells; the fluid-facing
+resistance adds the solid half-cell path to an explicitly authored contact
+resistance. Interior solid contacts are ideal. No temperature or heat inventory
+is maintained by the returned cell-to-node mapping.
+
+The installer uses canonical native cell order, the original periodic axes and
+actual Cartesian faces. Distinct periodic faces between the same two nodes add
+in parallel; self-neighbors carry no heat. Unselected solid neighbors and
+nonperiodic exterior solid faces insulate. The geometry preparation has its own
+payload bound in addition to retained node/interface and sparse-factor bounds.
+All installation checks precede replacement of the accepted network. The same
+entry point is exposed through `BoussinesqOpenGrid3`.
+
+Four executed native tests cover the independent heterogeneous two-cell balance,
+half-solid surface resistance, periodic parallel faces and input-order invariance,
+a sourced 3x3x3 solid with a buried center, and transactional topology/budget
+refusal. Together with the graph, body and original owner tests, 38 native
+tests passed against the actual sparse solver. Momentum-wrapper and complete
+Cargo integration remain separate verification obligations. Spatial/time
+refinement, nonlinear caloric laws, rotated anisotropy and subcell surface
+accuracy are not established by these local balances.
+
+The `immersed_body_cooling` example now accepts `resolved` (default) or `lumped`
+solid treatment on the same native flow geometry. The resolved case applies
+heat to the interior voxel and reports capacity-weighted mean, minimum and
+maximum solid temperatures alongside actual fluid heat and combined balance.
+
 ## Spatial finite-wall conduction on native thermal slabs
 
 `ThermalLbm::set_wall_conduction` and `ThermalLbm3::set_wall_conduction` prepare authored reciprocal conductances between existing finite wall cells. The original wall values remain the only physical solid temperature/storage owner. The shared sparse LDLT factor is prepared with diagonal scaling and explicit node/link/factor bounds; each subsequent boundary solve reuses retained workspace. Unconnected wall links retain their original scalar law.
