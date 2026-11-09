@@ -10,6 +10,15 @@ use fs_material::phase::EquilibriumPhaseState;
 use fs_material::phase::mushy::MushyPhaseLaw;
 use fs_material::phase::transport::ResolvedPhaseTransportState;
 
+mod viscous;
+pub use viscous::ImplicitConjugateViscousResistiveThermalVolumeMomentumStep;
+
+type ImplicitResistanceHeatReceipt = (
+    Vec<f64>,
+    Vec<ThermalVolumeSolidEndpoint>,
+    ImplicitConjugateThermalVolumeReport,
+);
+
 /// Work across ALL caloric trials, including rejected resistance guesses.
 /// Per-direction Krylov cycles and per-trial Newton/backtrack limits retain
 /// their native meanings; residual and Krylov ceilings cover the whole call.
@@ -171,54 +180,20 @@ impl FlowField {
                 gate,
                 resolve,
                 |heat| {
-                    let mut remaining = solve;
-                    remaining.maximum_residual_evaluations = solve
-                        .maximum_residual_evaluations
-                        .saturating_sub(work.residual_evaluations);
-                    remaining.linear.maximum_iterations = solve
-                        .linear
-                        .maximum_iterations
-                        .saturating_sub(work.linear_iterations);
-                    if remaining.maximum_residual_evaluations == 0
-                        || remaining.linear.maximum_iterations == 0
-                    {
-                        return Err(refuse("implicit resistance whole-call heat work exhausted"));
-                    }
-                    let prepared = self.prepare_implicit_conjugate_heat(
+                    self.prepare_resistive_implicit_heat_trial(
                         domain,
                         conductivity,
                         baths,
                         solids,
                         contacts,
-                        CoexistenceVolumeInput {
-                            net_enthalpy_increment_j: &heat,
-                            ..input.volume
-                        },
-                        ConductiveThermalVolumeControls {
-                            volume: controls.resistance.thermal.volume,
-                            max_conductive_faces: controls.max_conductive_faces,
-                        },
-                        remaining,
+                        input.volume,
+                        &heat,
+                        controls,
+                        solve,
+                        &mut work,
                         workspace,
                         gate,
-                    )?;
-                    let native = &prepared.report.solve;
-                    for (count, added) in [
-                        (&mut work.heat_trials, 1),
-                        (&mut work.nonlinear_iterations, native.nonlinear_iterations),
-                        (&mut work.linear_iterations, native.linear_iterations),
-                        (&mut work.residual_evaluations, native.residual_evaluations),
-                    ] {
-                        *count = count
-                            .checked_add(added)
-                            .ok_or_else(|| refuse("implicit resistance work count overflow"))?;
-                    }
-                    let (combined, increments, solid_endpoints, report) = prepared.into_conjugate();
-                    Ok((
-                        combined,
-                        report.conduction.absolute_enthalpy_defect_j,
-                        (increments, solid_endpoints, report),
-                    ))
+                    )
                 },
             )?;
         let native = &evolution.evolution;
@@ -245,6 +220,72 @@ impl FlowField {
             report,
             work,
         })
+    }
+
+    /// Shared original-inventory solve and whole-call accounting for native
+    /// resistance owners, with or without a preceding molecular stress stage.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_resistive_implicit_heat_trial(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: CoexistenceVolumeInput<'_>,
+        heat: &[f64],
+        controls: ConductiveResistiveThermalVolumeMomentumControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        work: &mut ImplicitResistanceHeatWork,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<(Vec<f64>, f64, ImplicitResistanceHeatReceipt), ChtError> {
+        let mut remaining = solve;
+        remaining.maximum_residual_evaluations = solve
+            .maximum_residual_evaluations
+            .saturating_sub(work.residual_evaluations);
+        remaining.linear.maximum_iterations = solve
+            .linear
+            .maximum_iterations
+            .saturating_sub(work.linear_iterations);
+        if remaining.maximum_residual_evaluations == 0 || remaining.linear.maximum_iterations == 0 {
+            return Err(refuse("implicit resistance whole-call heat work exhausted"));
+        }
+        let prepared = self.prepare_implicit_conjugate_heat(
+            domain,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            CoexistenceVolumeInput {
+                net_enthalpy_increment_j: heat,
+                ..input
+            },
+            ConductiveThermalVolumeControls {
+                volume: controls.resistance.thermal.volume,
+                max_conductive_faces: controls.max_conductive_faces,
+            },
+            remaining,
+            workspace,
+            gate,
+        )?;
+        let native = &prepared.report.solve;
+        for (count, added) in [
+            (&mut work.heat_trials, 1),
+            (&mut work.nonlinear_iterations, native.nonlinear_iterations),
+            (&mut work.linear_iterations, native.linear_iterations),
+            (&mut work.residual_evaluations, native.residual_evaluations),
+        ] {
+            *count = count
+                .checked_add(added)
+                .ok_or_else(|| refuse("implicit resistance work count overflow"))?;
+        }
+        let (combined, increments, solid_endpoints, report) = prepared.into_conjugate();
+        Ok((
+            combined,
+            report.conduction.absolute_enthalpy_defect_j,
+            (increments, solid_endpoints, report),
+        ))
     }
 }
 

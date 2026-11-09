@@ -6,6 +6,7 @@ use super::super::resistance::{
 };
 use super::*;
 use crate::conjugate::FvBoundary;
+use crate::conjugate::flow::density_projection::BoundaryPressure;
 use fs_material::fluid_transport::FluidTransport;
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::phase::mushy::MushyPhaseLaw;
@@ -24,7 +25,8 @@ pub struct ViscousResistiveThermalVolumeMomentumStep {
     pub viscosity: MaterialViscosityReport,
     /// Roundoff from adding molecular heat to the authored caloric increments.
     pub absolute_heat_assembly_defect_j: f64,
-    /// Assembly, caloric transport and accepted resistance coupling defects.
+    /// Assembly, optional heat-transform, caloric transport and accepted
+    /// resistance coupling defects, each counted once.
     pub absolute_enthalpy_defect_j: f64,
     /// The above caloric defects plus both native physical-work defects.
     /// Numerical dissipation is accounted separately, never included as heat.
@@ -77,11 +79,50 @@ impl FlowField {
         controls: ResistiveThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             usize,
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
     ) -> Result<ViscousResistiveThermalVolumeMomentumStep, ChtError> {
+        self.advance_viscous_phase_resistance_thermal_volume_with_heat(
+            domain,
+            reservoir,
+            law,
+            input,
+            boundaries,
+            bulk_viscosity_pa_s,
+            controls,
+            viscosity_controls,
+            gate,
+            resolve,
+            |heat| Ok((heat, 0.0, ())),
+        )
+        .map(|(evolution, ())| evolution)
+    }
+
+    /// Native heat-transform seam: molecular stress is prepared once, then
+    /// each resistance trial transforms the same original caloric inventory.
+    /// Only the accepted transform's receipt and non-cancelling defect escape.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::conjugate::flow) fn advance_viscous_phase_resistance_thermal_volume_with_heat<
+        H,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        law: &MushyPhaseLaw<'_>,
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        bulk_viscosity_pa_s: Option<&[f64]>,
+        controls: ResistiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        mut resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+        ) -> Result<ResolvedPhaseTransportState, ChtError>,
+        mut transform_heat: impl FnMut(Vec<f64>) -> Result<(Vec<f64>, f64, H), ChtError>,
+    ) -> Result<(ViscousResistiveThermalVolumeMomentumStep, H), ChtError> {
         let heat_budget = admit_viscous_thermal_input(domain, input, controls.thermal, gate)?;
         let (faces, profile, mouth) = match reservoir {
             Some((faces, profile)) => (
@@ -159,30 +200,24 @@ impl FlowField {
                 Some(source) if source.phase_state() == phase => Ok(source.clone()),
                 _ => resolve(cell, phase),
             };
-        let evolution = match profile {
-            Some(profile) => self
-                .advance_resolved_phase_resistance_thermal_volume_momentum_with_pressure_profile(
-                    domain,
-                    faces,
-                    profile,
-                    law,
-                    heated,
-                    controls,
-                    gate,
-                    &mut source_at,
-                )?,
-            None => self.advance_resolved_phase_resistance_thermal_volume_momentum(
+        let (evolution, (transformed_heat_defect_j, receipt)) = self
+            .advance_resolved_phase_resistance_thermal_volume_with_heat(
                 domain,
                 faces,
+                profile.map(BoundaryPressure::Profile),
                 law,
                 heated,
                 controls,
                 gate,
                 &mut source_at,
-            )?,
-        };
+                |heat| {
+                    let (combined, defect, receipt) = transform_heat(heat)?;
+                    Ok((combined, defect, (defect, receipt)))
+                },
+            )?;
         let native = &evolution.evolution;
         let caloric = assembly
+            + Dd::from_f64(transformed_heat_defect_j)
             + Dd::from_f64(native.thermal.volume.report.absolute_enthalpy_defect_j)
             + Dd::from_f64(native.coupling.absolute_heat_coupling_defect_j)
             + Dd::from_f64(native.coupling.absolute_constitutive_heat_defect_j);
@@ -208,14 +243,17 @@ impl FlowField {
             ));
         }
         poll(gate)?;
-        Ok(ViscousResistiveThermalVolumeMomentumStep {
-            evolution,
-            viscosity_sources: original_sources,
-            viscosity_reconstruction: viscous.reconstruction,
-            viscosity: viscous.report,
-            absolute_heat_assembly_defect_j: assembly.to_f64(),
-            absolute_enthalpy_defect_j,
-            absolute_energy_defect_j,
-        })
+        Ok((
+            ViscousResistiveThermalVolumeMomentumStep {
+                evolution,
+                viscosity_sources: original_sources,
+                viscosity_reconstruction: viscous.reconstruction,
+                viscosity: viscous.report,
+                absolute_heat_assembly_defect_j: assembly.to_f64(),
+                absolute_enthalpy_defect_j,
+                absolute_energy_defect_j,
+            },
+            receipt,
+        ))
     }
 }

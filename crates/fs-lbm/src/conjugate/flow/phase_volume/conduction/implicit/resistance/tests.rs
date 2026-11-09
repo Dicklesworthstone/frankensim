@@ -32,6 +32,10 @@ fn quantity(kind: QuantityKind) -> QuantitySpec {
 }
 
 fn fixture() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
+    fixture_with_densities([2.0; 2])
+}
+
+fn fixture_with_densities(densities: [f64; 2]) -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
     let mut claims = ClaimSet::new();
     for (name, spec, value) in [
         (
@@ -56,10 +60,20 @@ fn fixture() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
         ),
     ] {
         let conductivity = name == THERMAL_CONDUCTIVITY_PROPERTY;
+        let density = name == DENSITY_PROPERTY;
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::with_quantity(name, spec),
-                value: if conductivity {
+                value: if density {
+                    // Exact manufactured chart-density query, not an
+                    // approximate linear mass-fraction density mixture.
+                    PropertyValue::Curve {
+                        abscissa: "manufactured_mass_concentration".into(),
+                        abscissa_dims: Density::DIMS,
+                        knots: vec![(0.0, 0.0), (8.0, 8.0)],
+                        dims: Density::DIMS,
+                    }
+                } else if conductivity {
                     PropertyValue::Curve {
                         abscissa: "liquid".into(),
                         abscissa_dims: Dims([0; 6]),
@@ -79,9 +93,15 @@ fn fixture() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
                         400.0,
                         600.0,
                     )
-                    .with_quantity("liquid", QuantitySpec::dimensional(Dims([0; 6])), 0.0, 1.0),
+                    .with_quantity("liquid", QuantitySpec::dimensional(Dims([0; 6])), 0.0, 1.0)
+                    .with_quantity(
+                        "manufactured_mass_concentration",
+                        quantity(QuantityKind::MassConcentration),
+                        1.0,
+                        8.0,
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: if conductivity {
+                interpolation: if conductivity || density {
                     InterpolationPolicy::LinearInside
                 } else {
                     InterpolationPolicy::ConstantWithinValidity
@@ -98,7 +118,7 @@ fn fixture() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
     }
     let card = MaterialCard::assemble(
         MaterialStateId {
-            chemistry: "manufactured equal-density phase mixture".into(),
+            chemistry: "manufactured phase-density mixture".into(),
             phase: "solid/liquid".into(),
             process: "coupled implicit Fourier and Darcy calorimetry".into(),
             revision: 0,
@@ -120,7 +140,7 @@ fn fixture() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
             specific_enthalpy_j_kg: h,
             temperature_k: t,
             liquid_mass_fraction: f,
-            bulk_density_kg_m3: 2.0,
+            bulk_density_kg_m3: if f == 0.0 { densities[0] } else { densities[1] },
         })
         .collect(),
     )
@@ -136,6 +156,12 @@ fn context() -> QueryPoint {
         .unwrap()
         .with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0)
         .unwrap()
+        .with_quantity(
+            "manufactured_mass_concentration",
+            quantity(QuantityKind::MassConcentration),
+            2.0,
+        )
+        .unwrap()
 }
 
 fn source(
@@ -143,7 +169,13 @@ fn source(
     law: &MushyPhaseLaw<'_>,
     phase: &EquilibriumPhaseState,
 ) -> Result<ResolvedPhaseTransportState, ChtError> {
-    let context = context();
+    let context = context()
+        .with_quantity(
+            "manufactured_mass_concentration",
+            quantity(QuantityKind::MassConcentration),
+            phase.bulk_density_kg_m3(),
+        )
+        .unwrap();
     resolve_phase_transport_state_for_volume_change(
         law,
         phase.specific_enthalpy_j_kg(),
@@ -229,6 +261,8 @@ fn close(actual: f64, expected: f64) {
         "{actual:.17e} != {expected:.17e}"
     );
 }
+
+mod viscous;
 
 #[test]
 fn latent_bath_drag_and_phase_share_one_accepted_energy_and_momentum_endpoint() {
@@ -617,3 +651,4 @@ fn finite_wall_is_reheated_from_original_inventory_in_every_phase_drag_trial() {
     assert_eq!(momentum, [[0.0; 3]; 2]);
     assert_eq!(field, FlowField::quiescent(&domain));
 }
+

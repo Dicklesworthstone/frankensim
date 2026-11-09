@@ -113,6 +113,7 @@ pub use flow::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitThermorheologicalThermalVolumeMomentumStep,
@@ -429,3 +430,4 @@ fn finite(field: &'static str, value: f64) -> Result<(), ChtError> {
         })
     }
 }
+

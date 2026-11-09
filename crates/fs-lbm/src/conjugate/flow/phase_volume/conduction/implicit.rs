@@ -42,6 +42,7 @@ mod resistance;
 pub use resistance::{
     ImplicitConductiveResistiveThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
 };
 
 /// Bounded native analytic Newton/Krylov work for ONE backward-Euler interval.
@@ -856,3 +857,4 @@ fn native_error(gate: &CancelGate, error: impl core::fmt::Display) -> ChtError {
         refuse(error.to_string())
     }
 }
+

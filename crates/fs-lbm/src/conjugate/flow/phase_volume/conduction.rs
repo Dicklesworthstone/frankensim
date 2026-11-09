@@ -20,6 +20,7 @@ pub use implicit::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitThermorheologicalThermalVolumeMomentumStep,
@@ -502,3 +503,4 @@ fn refuse(reason: impl Into<String>) -> ChtError {
 
 #[cfg(test)]
 mod tests;
+

@@ -2158,3 +2158,40 @@ compiled the complete original `fs_math` crate and the actual
 `model.rs`, `vreman.rs` and `tangent.rs` sources without runtime
 adapters, numerical stubs or substituted kernels. This establishes the
 numerical slice, not full `fs-lbm` or downstream solver integration.
+
+## Implicit conjugate heat with molecular and phase resistance
+
+`FlowField::advance_isotropic_implicit_conjugate_viscous_phase_resistance_thermal_volume_momentum_with_baths`
+combines the native full molecular stress stage, implicit spatial conduction,
+finite solid storage, bath/contact exchange and phase-dependent Darcy drag on
+the original material chart. Molecular inertia uses actual M/V; original checked
+phase sources supply its viscosity once. Its physical heat joins authored heat
+once, then the existing resistance owner iterates Darcy heat, implicit thermal
+state and density-compatible volume flow from the same original fluid and solid
+inventories. Only the accepted trial transports M, M*h and P and publishes a
+finite-wall endpoint. Fixed-solid mass and momentum stay outside fluid routes.
+
+Source conductivity uses the native analytic enthalpy Newton/Krylov graph.
+Whole-call residual-evaluation and Krylov ceilings include rejected outer
+trials. Molecular assembly, implicit heat, conservative caloric transport and
+Darcy heat/constitutive defects enter the shared caloric and both mechanical
+budgets exactly once. Physical molecular/Darcy heat, bath/contact transfers,
+pressure/source work and numerical mechanical losses remain separate accounts.
+Cancellation or any source, heat, mechanical or work-budget refusal publishes
+no partial momentum, material inventory or heated wall.
+
+G1/G3 checks independently reconstruct finite-wall/contact Fourier heat,
+unequal-density latent volume expansion and combined fluid/wall/advection
+mass/enthalpy balance while both physical dissipations are active. Zero Fourier
+exchange preserves the prior composed molecular/resistance endpoint exactly.
+G4 checks cancel after a completed heat trial, exhaust aggregate residual work,
+and reproduce the unchanged accepted result on scratch reuse. Focused execution
+uses actual material, native sparse, deterministic reduction, LU, FGMRES,
+enthalpy/conduction and flow sources; full Cargo/execution-context integration
+remains a separate verification gate.
+
+The split retains original-state molecular viscosity, implicit pre-advection
+conductivity and transported-endpoint phase resistance. It is first order and
+requires refinement; it does not infer simultaneous endpoint shear feedback.
+Fluid phases must remain mobile. Exact solid locking, moving skeletons and
+free surfaces remain outside this owner.

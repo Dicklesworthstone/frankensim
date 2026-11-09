@@ -76,6 +76,7 @@ pub use phase_volume::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
+    ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitThermorheologicalThermalVolumeMomentumStep,
@@ -1136,3 +1137,4 @@ pub fn lbm_duct_flow(
     };
     Ok(flow)
 }
+
