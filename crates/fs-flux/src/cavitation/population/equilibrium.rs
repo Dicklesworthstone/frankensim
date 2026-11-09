@@ -59,19 +59,21 @@ impl BubblePopulationClass {
         // outside their weak-compressibility approximation.
         let reference = self.bubble.linearization()?;
         let liquid = self.bubble.liquid();
-        let pressure_ratio = (absolute_pressure_pa - reference.equilibrium_absolute_pressure_pa)
-            .abs()
-            / liquid.liquid_density_kg_m3()
-            / liquid.liquid_sound_speed_m_s()
-            / liquid.liquid_sound_speed_m_s();
         let maximum_pressure_ratio = self.bubble.compressibility_limits().maximum_pressure_ratio;
-        if !pressure_ratio.is_finite() || pressure_ratio > maximum_pressure_ratio {
-            return Err(CavitationError::PressureRatioExceeded {
-                pressure_ratio,
-                maximum_pressure_ratio,
+        let admit_pressure = |pressure: f64| -> Result<(), CavitationError> {
+            let pressure_ratio = (pressure - reference.equilibrium_absolute_pressure_pa).abs()
+                / liquid.liquid_density_kg_m3()
+                / liquid.liquid_sound_speed_m_s()
+                / liquid.liquid_sound_speed_m_s();
+            if !pressure_ratio.is_finite() || pressure_ratio > maximum_pressure_ratio {
+                return Err(CavitationError::PressureRatioExceeded {
+                    pressure_ratio,
+                    maximum_pressure_ratio,
+                });
             }
-            .into());
-        }
+            Ok(())
+        };
+        admit_pressure(absolute_pressure_pa)?;
         let equilibrium = equilibrium_at_pressure_controlled(
             &self.bubble,
             absolute_pressure_pa,
@@ -82,6 +84,10 @@ impl BubblePopulationClass {
         let linearization = self
             .bubble
             .linearization_at_radius(equilibrium.response.radius_m)?;
+        // Root tolerances are numerical controls, not permission to exceed a
+        // physical bound. Also admit the actual returned equilibrium, even
+        // when an explicitly loose solve leaves a large pressure residual.
+        admit_pressure(linearization.equilibrium_absolute_pressure_pa)?;
         let radius = linearization.equilibrium_radius_m;
         let volume = (4.0 * core::f64::consts::PI / 3.0) * radius * radius * radius;
         let void_fraction = self.number_density_per_m3 * volume;

@@ -14,7 +14,8 @@
 //! cloud dynamics, a distribution-fitting routine or a thermal model.
 
 use super::*;
-use fs_flux::cavitation::BubblePopulation;
+use fs_flux::cavitation::inception::EquilibriumControls;
+use fs_flux::cavitation::{BubblePopulation, PopulationEquilibriumReport};
 
 /// One source and its original, number-conserving native bubble distribution.
 pub struct PolydisperseBubblyLiquid<'a, F: CavitationProperties + ?Sized> {
@@ -56,6 +57,34 @@ impl<'a, F: CavitationProperties + ?Sized> PolydisperseBubblyLiquid<'a, F> {
     }
     pub const fn population(&self) -> &BubblePopulation {
         &self.population
+    }
+
+    /// Prepare this same number distribution at a new absolute liquid pressure.
+    ///
+    /// The native stable-branch solve preserves every gas inventory, original
+    /// model, radius domain and number density. It refreshes each occupied
+    /// radius, volume fraction and native acoustic tangent once, before any
+    /// frequency queries. The complete new distribution must again satisfy
+    /// this owner's dilution bound; pressure reduction cannot silently admit
+    /// a dense or unstable cloud. Failure leaves this original owner usable.
+    ///
+    /// This is held-volume equilibrium continuation with frozen liquid
+    /// properties and the authored polytropic gas law. It does not model a
+    /// closed liquid parcel's compression, thermal relaxation or gas diffusion.
+    /// The returned per-class root residuals are numerical indicators; acoustic
+    /// field, bandwidth and scattering limits still apply at each frequency.
+    pub fn at_equilibrium_pressure(
+        &self,
+        absolute_pressure_pa: f64,
+        controls: &EquilibriumControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, PopulationEquilibriumReport), BubblyLiquidError> {
+        let prepared =
+            self.population
+                .at_equilibrium_pressure(absolute_pressure_pa, controls, cancelled)?;
+        let next = Self::new(self.source, prepared.population, self.limits)?;
+        poll(cancelled)?;
+        Ok((next, prepared.report))
     }
 
     /// Admit the complete distribution under one maximum LOCAL pressure

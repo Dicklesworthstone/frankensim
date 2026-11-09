@@ -59,12 +59,18 @@ fn options() -> ComposeOptions {
 // Reconstruct the complex radial susceptibility from gas/interface properties,
 // independently of both the cached native coefficients and coupled helper.
 fn independent_chi(model: &KellerMiksisBubble, omega: f64) -> C64 {
+    independent_chi_at_radius(model, model.gas().reference_radius_m(), omega)
+}
+
+fn independent_chi_at_radius(model: &KellerMiksisBubble, r: f64, omega: f64) -> C64 {
     let liquid = model.liquid();
-    let r = model.gas().reference_radius_m();
     let rho = liquid.liquid_density_kg_m3();
     let mu = liquid.dynamic_viscosity_pa_s();
     let c = liquid.liquid_sound_speed_m_s();
-    let stiffness = (3.0 * model.gas().polytropic_exponent() * model.gas().reference_pressure_pa()
+    let gas = model.gas();
+    let gas_pressure = gas.reference_pressure_pa()
+        * (gas.reference_radius_m() / r).powf(3.0 * gas.polytropic_exponent());
+    let stiffness = (3.0 * gas.polytropic_exponent() * gas_pressure
         - 2.0 * liquid.surface_tension_n_m() / r)
         / (rho * r * r);
     let inertia = 1.0 + 4.0 * mu / (rho * c * r);
@@ -72,6 +78,15 @@ fn independent_chi(model: &KellerMiksisBubble, omega: f64) -> C64 {
     -(C64::new(1.0, -omega * r / c)
         / C64::new(stiffness - inertia * omega * omega, -damping * omega))
     .scale(1.0 / (rho * r * r))
+}
+
+fn equilibrium_controls() -> EquilibriumControls {
+    EquilibriumControls {
+        relative_radius_tolerance: 1e-13,
+        absolute_radius_tolerance_m: 1e-19,
+        absolute_pressure_tolerance_pa: 1e-8,
+        maximum_iterations: 100,
+    }
 }
 
 #[test]
@@ -130,6 +145,171 @@ fn zero_distribution_is_exact_original_liquid_and_one_bin_recovers_mono_owner() 
         a.diagnostics().multiple_scattering_parameter,
         8e-15,
     );
+}
+
+#[test]
+fn pressure_sweep_uses_actual_radii_in_foldy_dispersion_and_liquid_momentum() {
+    let source = material();
+    let original = PolydisperseBubblyLiquid::new(&source, distribution(), limits()).unwrap();
+    let omega = 1000.0;
+    let mut previous_phase_speed = 0.0;
+    for pressure in [20_000.0, 40_000.0, 180_000.0] {
+        let (continued, report) = original
+            .at_equilibrium_pressure(pressure, &equilibrium_controls(), &mut || false)
+            .unwrap();
+        assert!(core::ptr::eq(continued.source(), original.source()));
+        assert_eq!(
+            continued.population().number_density_per_m3(),
+            original.population().number_density_per_m3()
+        );
+        assert!(
+            report.maximum_absolute_pressure_residual_pa
+                <= equilibrium_controls().absolute_pressure_tolerance_pa
+        );
+        let response = continued.response(omega, 0.01).unwrap();
+        let mut expected_k_squared = C64::from_re((omega / 1500.0_f64).powi(2));
+        let mut expected_volume_response = C64::ZERO;
+        let mut expected_scattering = 0.0;
+        for (before, after) in original
+            .population()
+            .classes()
+            .iter()
+            .zip(continued.population().classes())
+        {
+            assert_eq!(after.bubble(), before.bubble());
+            let radius = after.linearization().unwrap().equilibrium_radius_m;
+            let gas = before.bubble().gas();
+            let gas_pressure = gas.reference_pressure_pa()
+                * (gas.reference_radius_m() / radius).powf(3.0 * gas.polytropic_exponent());
+            assert!((gas_pressure + 2000.0 - 2.0 * 0.072 / radius - pressure).abs() < 1.1e-8);
+            assert_ne!(radius, gas.reference_radius_m());
+            let chi = independent_chi_at_radius(before.bubble(), radius, omega);
+            let number = before.number_density_per_m3();
+            let scattering = chi.scale(-1000.0 * radius.powi(3) * omega * omega);
+            expected_k_squared =
+                expected_k_squared + scattering.scale(4.0 * core::f64::consts::PI * number);
+            expected_volume_response = expected_volume_response
+                + chi.scale(4.0 * core::f64::consts::PI * number * radius.powi(3));
+            expected_scattering += number * 4.0 * core::f64::consts::PI * scattering.abs().powi(2);
+        }
+        near(
+            response.wavenumber_per_m(),
+            expected_k_squared.sqrt(),
+            3e-13,
+        );
+        near(
+            response.diagnostics().void_fraction_per_pa,
+            expected_volume_response,
+            3e-13,
+        );
+        near_scalar(
+            response.diagnostics().multiple_scattering_parameter,
+            expected_scattering / (omega / 1500.0),
+            3e-13,
+        );
+        let wave = response.segment_wave(0.005).unwrap();
+        near(
+            wave.specific_impedance,
+            C64::from_re(1000.0 * omega) / response.wavenumber_per_m(),
+            3e-13,
+        );
+        let phase_speed = omega / response.wavenumber_per_m().re;
+        assert!(phase_speed > previous_phase_speed);
+        assert!(phase_speed < 1500.0);
+        previous_phase_speed = phase_speed;
+    }
+}
+
+#[test]
+fn a_continued_single_class_has_the_same_mono_and_polydisperse_response() {
+    let source = material();
+    let original_class = class(1e-4, 1e-4);
+    let original = PolydisperseBubblyLiquid::new(
+        &source,
+        BubblePopulation::try_new(source, vec![original_class], 1).unwrap(),
+        limits(),
+    )
+    .unwrap();
+    let (continued, _) = original
+        .at_equilibrium_pressure(40_000.0, &equilibrium_controls(), &mut || false)
+        .unwrap();
+    let continued_class = continued.population().classes()[0];
+    let mono =
+        DiluteBubblyLiquid::from_population_class(&source, continued_class, limits()).unwrap();
+    assert_eq!(mono.bubble(), original_class.bubble());
+    assert_eq!(mono.linearization(), continued_class.linearization());
+    assert_eq!(mono.void_fraction(), continued_class.void_fraction());
+    for omega in [1000.0, 10_000.0] {
+        let a = mono.response(omega, 0.1).unwrap();
+        let b = continued.response(omega, 0.1).unwrap();
+        near(a.wavenumber_per_m(), b.wavenumber_per_m(), 4e-15);
+        near_scalar(
+            a.diagnostics().mean_bubble_spacing_m.unwrap(),
+            b.diagnostics().mean_bubble_spacing_m.unwrap(),
+            8e-15,
+        );
+        near_scalar(
+            a.diagnostics().multiple_scattering_parameter,
+            b.diagnostics().multiple_scattering_parameter,
+            8e-15,
+        );
+        assert!(b.diagnostics().void_fraction > original_class.void_fraction());
+    }
+    let wrong_source =
+        CavitationState::try_new(300.0, 999.0, 0.001, 0.072, 2000.0, 1500.0).unwrap();
+    assert!(matches!(
+        DiluteBubblyLiquid::from_population_class(&wrong_source, continued_class, limits()),
+        Err(BubblyLiquidError::MaterialMismatch)
+    ));
+}
+
+#[test]
+fn pressure_continuation_rechecks_dilution_and_preserves_accepted_response_on_refusal() {
+    let source = material();
+    let member = class(1e-4, 8e-4);
+    let original = PolydisperseBubblyLiquid::new(
+        &source,
+        BubblePopulation::try_new(source, vec![member], 1).unwrap(),
+        limits(),
+    )
+    .unwrap();
+    let before = original.response(1000.0, 0.01).unwrap();
+    assert!(matches!(
+        original.at_equilibrium_pressure(40_000.0, &equilibrium_controls(), &mut || false),
+        Err(BubblyLiquidError::OutsideModel {
+            quantity: "void fraction",
+            ..
+        })
+    ));
+    assert_eq!(original.response(1000.0, 0.01).unwrap(), before);
+    assert!(
+        original
+            .at_equilibrium_pressure(-100_000.0, &equilibrium_controls(), &mut || false)
+            .is_err()
+    );
+
+    let mut total_polls = 0;
+    let (prepared, _) = original
+        .at_equilibrium_pressure(180_000.0, &equilibrium_controls(), &mut || {
+            total_polls += 1;
+            false
+        })
+        .unwrap();
+    let expected = prepared.response(1000.0, 0.01).unwrap();
+    let mut polls = 0;
+    assert!(
+        original
+            .at_equilibrium_pressure(180_000.0, &equilibrium_controls(), &mut || {
+                polls += 1;
+                polls == total_polls
+            })
+            .is_err()
+    );
+    assert_eq!(original.response(1000.0, 0.01).unwrap(), before);
+    let (retry, _) = original
+        .at_equilibrium_pressure(180_000.0, &equilibrium_controls(), &mut || false)
+        .unwrap();
+    assert_eq!(retry.response(1000.0, 0.01).unwrap(), expected);
 }
 
 #[test]

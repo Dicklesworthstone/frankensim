@@ -8480,3 +8480,48 @@ Focused regressions exercise localized startup, native mechanics equality,
 held ports, conduction and source events, excluded matched-boundary loss,
 latent storage, shifted-clock energy preservation and underresolved-clock
 refusal, cancellation and rollback on thermal/material refusal.
+
+
+## Cavitation populations at changing operating pressure
+
+`PolydisperseBubblyLiquid::at_equilibrium_pressure` continues the original native
+number distribution through stable equilibria and binds the result to the SAME
+material source. Every retained gas inventory, radius domain, original class
+order and absolute number density stays unchanged. Updated radius, occupied
+volume, restoring stiffness, viscous damping and Keller--Miksis compressible
+coefficients enter coherent propagation together. The native root work occurs
+once during preparation; frequency response retains its allocation-free,
+fixed-order compensated accumulation.
+
+`DiluteBubblyLiquid::from_population_class` consumes the current equilibrium
+of a native class, preserving one-bin equivalence with the polydisperse owner.
+It does not recreate a bubble at the gas reference radius. Source identity and
+all existing dilution, amplitude, compactness, homogenization, neighboring
+scattering and multiple-scattering limits remain in force. The complete new
+population is re-admitted before publication, so decompression cannot silently
+turn a previously dilute cloud into an admitted dense cloud. Cancellation or
+failure leaves the previous immutable acoustic owner usable.
+
+The same pressure-dependent coherent wavenumber supplies native segment-wave
+momentum impedance and the existing native duct-chain entry point. Scattering
+loss is still not an unrestricted thermal deposition source. These are
+held-volume, frozen-liquid equilibrium queries with an explicitly authored
+polytropic gas law, not closed-parcel compression, evolving temperature,
+phase-change kinetics, gas diffusion or an interacting cloud model. Both
+requested and returned equilibrium pressures must satisfy the native original-
+reference pressure/bulk-modulus bound, independent of numerical root tolerance.
+
+The `cavitation` example adds a fixed-number two-class pressure sweep reporting
+radii, void fraction, phase speed, coherent attenuation and native root residuals.
+Run `cargo run -p fs-couple --features cavitation --example cavitation` in a
+complete constellation checkout. Focused regressions independently reconstruct
+pressure-dependent complex susceptibility, Foldy dispersion, scattered power
+and liquid-momentum impedance; they also check one-bin equivalence, original
+gas/source retention and transactional dilution/cancellation refusals.
+
+All 65 native cavitation tests and 12 focused bubbly-response tests passed using
+the original numerical sources with restricted dependency facades. Three
+existing full duct-chain/IF97 tests are excluded from that focused executable.
+Full Cargo/DSR and the complete IF97 example remain unverified because the seven
+constellation siblings and DSR/RCH are unavailable. No experimental-validation
+or model-error certificate is claimed by these numerical checks.

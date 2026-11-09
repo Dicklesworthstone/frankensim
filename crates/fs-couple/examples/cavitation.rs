@@ -5,10 +5,13 @@
 //! tension is explicitly prescribed; temperature remains fixed throughout.
 //! Film content is not vapor mass. Keller--Miksis supplies first-order liquid
 //! compressibility; the compact observer adds no second radiation loss.
+//! A final pressure sweep preserves nucleus gas inventories and number counts
+//! while updating equilibrium radii and coherent acoustic propagation.
 
 use fs_aeroac::curle3d::moving::{MovingCompactLimits, MovingCompactObserver};
 use fs_aeroac::monopole::MonopoleLimits;
 use fs_couple::cavitation::bubble::MaterialBubble;
+use fs_couple::cavitation::bubbly::{BubblyLiquidLimits, PolydisperseBubblyLiquid};
 use fs_couple::cavitation::cluster::MaterialBubbleCluster;
 use fs_couple::cavitation::{
     CavitationFilmEnvironment, CavitationSolveConfig, MaterialCavitatingFilm,
@@ -22,8 +25,8 @@ use fs_flux::cavitation::inception::{
 };
 use fs_flux::cavitation::{
     BubbleCluster, BubbleClusterLimits, BubbleClusterNumerics, BubbleGas, BubbleLimits,
-    BubbleNumerics, BubblePressureSample, BubbleState, ClusterBubble, KellerMiksisLimits,
-    RayleighPlessetBubble,
+    BubbleNumerics, BubblePopulation, BubblePopulationClass, BubblePressureSample, BubbleState,
+    ClusterBubble, KellerMiksisBubble, KellerMiksisLimits, RayleighPlessetBubble,
 };
 use fs_material::cavitation::SaturatedWaterCavitation;
 use fs_material::fluid_acoustics::FluidAcoustics;
@@ -146,7 +149,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     cluster_noise(&water)?;
-    nucleus_inception(&water)
+    nucleus_inception(&water)?;
+    pressure_sweep(&water)
+}
+
+// Continue the SAME gas inventories and number densities through quasistatic
+// operating pressures. Liquid coefficients remain frozen at the authored
+// temperature; this is a held-volume distribution, not a closed-parcel process.
+fn pressure_sweep(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::error::Error>> {
+    let liquid = water.state();
+    let reference_pressure = 101_325.0;
+    let mut classes = Vec::with_capacity(2);
+    for (radius, fraction) in [(50e-6_f64, 1e-5), (200e-6_f64, 2e-6)] {
+        let bubble = KellerMiksisBubble::try_new(
+            liquid,
+            BubbleGas::equilibrium(liquid, radius, reference_pressure, 1.4)?,
+            KellerMiksisLimits {
+                bubble: BubbleLimits {
+                    minimum_radius_m: 0.5 * radius,
+                    maximum_radius_m: 2.0 * radius,
+                    maximum_wall_mach_number: 0.01,
+                    maximum_vapor_density_ratio: 0.01,
+                },
+                maximum_pressure_ratio: 0.01,
+            },
+        )?;
+        let number = fraction / (4.0 * std::f64::consts::PI * radius.powi(3) / 3.0);
+        classes.push(BubblePopulationClass::try_new(bubble, number)?);
+    }
+    let original = PolydisperseBubblyLiquid::new(
+        water,
+        BubblePopulation::try_new(liquid, classes, 2)?,
+        BubblyLiquidLimits {
+            maximum_void_fraction: 0.001,
+            maximum_wavenumber_radius: 0.1,
+            maximum_wavenumber_spacing: 1.0,
+            maximum_fractional_radius: 0.01,
+            maximum_neighbor_scattered_pressure_ratio: 0.1,
+            maximum_multiple_scattering_parameter: 0.1,
+        },
+    )?;
+    let controls = EquilibriumControls {
+        relative_radius_tolerance: 1e-13,
+        absolute_radius_tolerance_m: 1e-19,
+        absolute_pressure_tolerance_pa: 1e-8,
+        maximum_iterations: 100,
+    };
+    let omega = 1000.0;
+    println!("Same nuclei at 1000 rad/s; local pressure envelope 0.01 Pa");
+    println!("pressure_Pa alpha R1_um R2_um phase_speed_m_s attenuation_per_m root_residual_Pa");
+    for pressure in [20_000.0, 40_000.0, reference_pressure, 180_000.0] {
+        let (continued, report) =
+            original.at_equilibrium_pressure(pressure, &controls, &mut || false)?;
+        let response = continued.response(omega, 0.01)?;
+        let k = response.wavenumber_per_m();
+        let radii: Vec<_> = report
+            .equilibria
+            .iter()
+            .filter_map(|root| root.as_ref().map(|value| value.response.radius_m * 1e6))
+            .collect();
+        println!(
+            "{pressure:.1} {:.6e} {:.6} {:.6} {:.6} {:.6e} {:.3e}",
+            continued.population().void_fraction(),
+            radii[0],
+            radii[1],
+            omega / k.re,
+            k.im,
+            report.maximum_absolute_pressure_residual_pa,
+        );
+    }
+    Ok(())
 }
 
 // Each original member supplies its own joint nonlinear source history.

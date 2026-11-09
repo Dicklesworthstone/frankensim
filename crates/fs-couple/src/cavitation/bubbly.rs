@@ -1,11 +1,12 @@
 //! Small-amplitude coherent waves in a dilute bubbly liquid.
 //!
-//! The original Keller--Miksis owner supplies its reference-equilibrium
-//! linearization. For exp(-i omega t), its fractional-radius susceptibility is
-//! `chi = -(1-i omega tau)/(rho R0^2 (omega0^2-a omega^2-i b omega))`.
-//! The point-monopole scattering amplitude is `f = -rho R0^3 omega^2 chi`.
+//! The original Keller--Miksis owner supplies its admitted equilibrium
+//! linearization at the current equilibrium radius Re, retaining the original
+//! gas reference. For exp(-i omega t), its fractional-radius susceptibility is
+//! `chi = -(1-i omega tau)/(rho Re^2 (omega0^2-a omega^2-i b omega))`.
+//! The point-monopole scattering amplitude is `f = -rho Re^3 omega^2 chi`.
 //! Foldy's coherent dispersion law then gives
-//! `k^2 = omega^2/c_l^2 + 4 pi n f`, where `n = 3 alpha/(4 pi R0^3)`.
+//! `k^2 = omega^2/c_l^2 + 4 pi n f`, where `n = 3 alpha/(4 pi Re^3)`.
 //! See Foldy (1945), equations 15 and 54:
 //! <https://doi.org/10.1103/PhysRev.67.107>.
 //!
@@ -31,7 +32,8 @@ use fs_duct::compose::{ComposeOptions, PreparedChain};
 use fs_duct::fluid::{self, FluidDuctError};
 use fs_duct::{ConeSlices, Duct, SegmentWave, WallModel};
 use fs_flux::cavitation::{
-    BubbleLinearization, BubblePopulationError, CavitationError, KellerMiksisBubble,
+    BubbleLinearization, BubblePopulationClass, BubblePopulationError, CavitationError,
+    KellerMiksisBubble,
 };
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};
@@ -49,12 +51,12 @@ pub use population::{
 pub struct BubblyLiquidLimits {
     /// Largest equilibrium bubble volume fraction, in (0, 0.01].
     pub maximum_void_fraction: f64,
-    /// Largest max(k_l, |k|) R0, in (0, 0.1].
+    /// Largest max(k_l, |k|) Re at the current equilibrium, in (0, 0.1].
     pub maximum_wavenumber_radius: f64,
     /// Largest max(k_l, |k|) d, in (0, 1]. The characteristic wavelength and
     /// attenuation length must exceed the mean interbubble spacing.
     pub maximum_wavenumber_spacing: f64,
-    /// Largest |delta R|/R0 under the declared LOCAL pressure, in (0, 0.05].
+    /// Largest |delta R|/Re under the declared LOCAL pressure, in (0, 0.05].
     pub maximum_fractional_radius: f64,
     /// Largest |f|/d, in (0, 0.1].
     pub maximum_neighbor_scattered_pressure_ratio: f64,
@@ -194,6 +196,38 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
             bubble,
             linearization,
             void_fraction,
+            limits,
+        })
+    }
+
+    /// Use one native population class at its CURRENT pressure equilibrium.
+    ///
+    /// A class returned by `BubblePopulationClass::at_equilibrium_pressure`
+    /// retains its original gas inventory and number density. Its updated
+    /// radius, occupied volume and native tangent enter this response together;
+    /// calling `new` with the old gas reference would lose that equilibrium.
+    /// All source, dilution, amplitude and scattering checks remain in force.
+    pub fn from_population_class(
+        source: &'a F,
+        class: BubblePopulationClass,
+        limits: BubblyLiquidLimits,
+    ) -> Result<Self, BubblyLiquidError> {
+        limits.validate()?;
+        bound(
+            "void fraction",
+            class.void_fraction(),
+            limits.maximum_void_fraction,
+        )?;
+        let material = source.cavitation_state()?;
+        if material != class.bubble().liquid() {
+            return Err(BubblyLiquidError::MaterialMismatch);
+        }
+        Ok(Self {
+            source,
+            material,
+            bubble: *class.bubble(),
+            linearization: class.linearization(),
+            void_fraction: class.void_fraction(),
             limits,
         })
     }
@@ -470,7 +504,7 @@ fn collective_admission(
 pub struct BubblyResponseDiagnostics {
     pub void_fraction: f64,
     pub maximum_local_pressure_amplitude_pa: f64,
-    /// Complex (delta R/R0)/delta p in Pa^-1, under exp(-i omega t).
+    /// Complex (delta R/Re)/delta p in Pa^-1, under exp(-i omega t).
     pub fractional_radius_per_pa: C64,
     pub fractional_radius_amplitude: f64,
     pub wall_mach_amplitude: f64,

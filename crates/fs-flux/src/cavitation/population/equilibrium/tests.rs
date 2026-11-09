@@ -322,4 +322,18 @@ fn static_pressure_excursions_cannot_bypass_frozen_liquid_compressibility_limits
             .at_equilibrium_pressure(140_000.0, &controls(), &mut || false)
             .is_err()
     );
+    // The target is within 25 kPa, but the first bisection midpoint has an
+    // equilibrium pressure near 61 kPa. Loose numerical tolerances must not
+    // admit its actual pressure outside the original physical envelope.
+    let loose = EquilibriumControls {
+        relative_radius_tolerance: 1.0,
+        absolute_pressure_tolerance_pa: 1e6,
+        ..controls()
+    };
+    assert!(matches!(
+        original.at_equilibrium_pressure(120_000.0, &loose, &mut || false),
+        Err(crate::cavitation::inception::InceptionError::Input(
+            CavitationError::PressureRatioExceeded { .. }
+        ))
+    ));
 }
