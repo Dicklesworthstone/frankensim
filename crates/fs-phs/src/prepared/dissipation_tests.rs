@@ -107,3 +107,55 @@ fn bad_dissipation_cancellation_and_missing_tangent_preserve_outputs_and_retry()
         &loss,Some(&hessian),Some(&tangent),||false).unwrap();
     assert_eq!(next,expected);assert_eq!(y,ey);
 }
+
+#[test]
+fn weak_passive_loss_survives_large_lossless_exchange_in_every_coordinate_order() {
+    // A skew exchange between coordinates 0/2 plus a unit resistance on 1.
+    // At unit effort the physical dissipation is exactly e_1^2 = 1 W.
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let flow = [1e16, 1.0, -1e16];
+        let permuted = order.map(|i| flow[i]);
+        assert_eq!(power(&[1.0; 3], &permuted).unwrap(), 1.0);
+    }
+    assert!(power(&[1.0], &[-1.0]).is_err());
+    assert!(power(&[1.0, 1.0], &[1.0]).is_err());
+    assert!(power(&[f64::MIN_POSITIVE], &[f64::MIN_POSITIVE]).is_err());
+}
+
+#[test]
+fn nonlinear_loss_preserves_the_independent_product_remainder() {
+    let delta = 2.0_f64.powi(-27);
+    // Exact binary inputs: 1 - (1+d)(1-d) = d^2. Rounding each
+    // product before summing incorrectly reports no dissipated power.
+    assert_eq!(
+        power(&[1.0, 1.0 + delta], &[1.0, -(1.0 - delta)]).unwrap(),
+        delta * delta,
+    );
+}
+
+#[test]
+fn original_prepared_step_keeps_small_heat_beside_opposing_actuator_power() {
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let sys = PortHamiltonian::new(
+        3, 3, vec![0.0; 9], vec![0.0; 9], identity.clone(),
+        Box::new(QuadraticStorage::new(identity, 3).unwrap()),
+    ).unwrap();
+    let mut workspace = StepWorkspace::new(&sys).unwrap();
+    let force = |_: &[f64], effort: &[f64], out: &mut [f64]| {
+        out[0] = 1e16 * effort[2];
+        out[1] = effort[1];
+        out[2] = -1e16 * effort[0];
+        true
+    };
+    let (mut next, mut output) = ([0.0; 3], [0.0; 3]);
+    let record = workspace.step_into_dissipative_controlled(
+        &sys, &[1.0; 3], &[1e16, 1.0, -1e16], 0.25,
+        &mut next, &mut output, &force, None, None, || false,
+    ).unwrap();
+    assert_eq!(next, [1.0; 3]);
+    assert_eq!(output, [1.0; 3]);
+    assert_eq!(record.delta_h, 0.0);
+    assert_eq!(record.supplied, 0.25);
+    assert_eq!(record.dissipated, 0.25);
+    assert_eq!(record.balance_residual(), 0.0);
+}

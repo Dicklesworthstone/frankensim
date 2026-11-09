@@ -354,6 +354,15 @@ between opposing modal efforts. R, source witnesses, state evolution, solver
 tolerances and constitutive laws are unchanged; heat is not reconstructed from
 the energy balance. Raw active mutations retain their signed power.
 
+Nonlinear passive and supplied callbacks also retain both words and product
+remainders through the original effort/flow contraction and supplied-power
+balance. Small physical losses survive large cancelling internal exchanges,
+without allocating, changing the constitutive callback, or tightening the
+existing admission tolerance. G0/G1 regressions retain a unit resistor's heat
+beside a large skew exchange through the actual prepared step, every coordinate
+ordering, and an independently known binary product remainder. Unrepresentable
+nonzero power products refuse instead of silently becoming zero heat.
+
 The contraction allocates nothing, performs O(n^2) work, and refuses invalid or
 unrepresentable inputs. It does not certify positivity near arbitrary numerical
 nulls or support arbitrary-precision/overflow cancellation. Focused G1/G3 cases

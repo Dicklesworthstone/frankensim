@@ -2,6 +2,7 @@
 //! No explicit lag, operator split, changed storage, or second time integrator.
 use super::{StepWorkspace, PreparedStepError, PreparedStepRecord, dimensions, norm};
 use crate::PortHamiltonian;
+use crate::interconnection::accumulation::Sum;
 
 type Force<'a> = &'a dyn Fn(&[f64], &[f64], &mut [f64]) -> bool;
 type DrivenForce<'a> = &'a dyn Fn(&[f64], &[f64], &mut [f64]) -> Option<NonlinearPortPower>;
@@ -31,18 +32,31 @@ pub struct NonlinearPortPower {
     pub dissipated_power_w: f64,
 }
 
+// Keep physical cancellation and multiplication remainders through the whole
+// conjugate contraction, as for the original linear ports. A passive callback
+// may contain lossless exchange alongside much smaller actual dissipation.
+fn conjugate_power(effort: &[f64], force: &[f64]) -> Result<(Sum, f64), crate::PhsError> {
+    if effort.len() != force.len() {
+        return Err(dimensions("nonlinear port effort/flow dimension mismatch"));
+    }
+    let mut value = Sum::default();
+    let mut absolute = 0.0;
+    for (&e, &f) in effort.iter().zip(force) {
+        value.product(e, f)
+            .ok_or_else(|| dimensions("nonlinear conjugate power is unrepresentable"))?;
+        absolute += (e * f).abs();
+    }
+    norm(&[absolute])?;
+    Ok((value, absolute))
+}
+
 /// Conjugate power, not the norm of a force. Refuse a materially active port.
 /// A last-bit negative dot product within its summation roundoff is numerical
 /// zero; the caller's independent Hamiltonian/work gate remains unchanged.
 pub(super) fn power(effort: &[f64], force: &[f64]) -> Result<f64, crate::PhsError> {
-    let mut value = 0.0;
-    let mut absolute = 0.0;
-    for (&e, &f) in effort.iter().zip(force) {
-        let product = e*f;
-        value += product;
-        absolute += product.abs();
-    }
-    norm(&[value, absolute])?;
+    let (sum, absolute) = conjugate_power(effort, force)?;
+    let value = sum.value()
+        .ok_or_else(|| dimensions("nonlinear conjugate power is unrepresentable"))?;
     let tolerance = 8.0*f64::EPSILON*effort.len() as f64*absolute;
     if !tolerance.is_finite() || value < -tolerance {
         return Err(dimensions("nonlinear dissipative port supplies energy"));
@@ -51,23 +65,22 @@ pub(super) fn power(effort: &[f64], force: &[f64]) -> Result<f64, crate::PhsErro
 }
 
 // Check the supplied owner's loss without reconstructing a small heat rate by
-// subtracting two large powers. Passive callers retain their original path.
+// subtracting two rounded large powers. Both words survive through the supply
+// and loss terms; the original physical admission allowance remains unchanged.
 fn admit_supplied_power(effort: &[f64], force: &[f64], power: NonlinearPortPower)
     -> Result<(), crate::PhsError>
 {
     let NonlinearPortPower { supplied_power_w: supplied, dissipated_power_w: loss } = power;
     norm(&[supplied, loss])?;
     if loss < 0.0 { return Err(dimensions("nonlinear supplied port declares negative loss")); }
-    let mut value = 0.0;
-    let mut absolute = 0.0;
-    for (&e, &f) in effort.iter().zip(force) {
-        let product = e*f;
-        value += product;
-        absolute += product.abs();
-    }
-    let defect = (value + supplied) - loss;
+    let (mut sum, mut absolute) = conjugate_power(effort, force)?;
+    sum.product(1.0, supplied)
+        .and_then(|()| sum.product(-1.0, loss))
+        .ok_or_else(|| dimensions("nonlinear supplied power balance is unrepresentable"))?;
+    let defect = sum.value()
+        .ok_or_else(|| dimensions("nonlinear supplied power balance is unrepresentable"))?;
     absolute += supplied.abs() + loss;
-    norm(&[value, absolute, defect])?;
+    norm(&[absolute, defect])?;
     let tolerance = 8.0*f64::EPSILON*(effort.len()+2) as f64*absolute;
     if !tolerance.is_finite() || defect.abs() > tolerance {
         return Err(dimensions("nonlinear supplied port violates its power identity"));
