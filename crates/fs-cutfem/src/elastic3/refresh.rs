@@ -4,7 +4,7 @@
 //! ghost stencils and displacement coordinates are neither rebuilt nor copied.
 
 use super::*;
-use std::mem::size_of;
+use std::mem::{size_of, swap};
 use std::sync::Arc;
 
 /// Explicit native work/storage bounds before material callbacks or allocation.
@@ -38,6 +38,95 @@ struct CellRefresh3 {
     material: ReferenceMaterial3,
     kinematics: CellKinematics3,
     stiffness: [[f64; 24]; 24],
+}
+
+/// Only constitutive caches and their ownership token move between accepted
+/// and trial states. After installation these same buffers hold the old state.
+struct MaterialRefresh3 {
+    cells: Vec<CellRefresh3>,
+    ghost_weights: Vec<[f64; 2]>,
+    binding: Arc<()>,
+}
+
+impl MaterialRefresh3 {
+    fn swap_with(&mut self, source: &mut CutElasticity3) {
+        // Both vectors were staged from this exact owner. These swaps perform
+        // no allocation, indexing, callbacks or destruction of stored values.
+        // Geometry, scales and reference inventory retain their exact storage.
+        for (cell, replacement) in source.cells.iter_mut().zip(&mut self.cells) {
+            swap(&mut cell.material, &mut replacement.material);
+            swap(&mut cell.kinematics, &mut replacement.kinematics);
+            swap(&mut cell.stiffness, &mut replacement.stiffness);
+        }
+        for (ghost, weights) in source.ghosts.iter_mut().zip(&mut self.ghost_weights) {
+            swap(&mut ghost.weights, weights);
+        }
+        swap(&mut source.material_body_binding, &mut self.binding);
+    }
+}
+
+// The guard borrows the COMPLETE original owner. In particular, an adaptive
+// callback must retain access to its original master-space solve and maps.
+pub(in crate::elastic3) trait MaterialRefreshOwner3 {
+    fn material_refresh_raw(&self) -> &CutElasticity3;
+    fn material_refresh_raw_mut(&mut self) -> &mut CutElasticity3;
+}
+
+impl MaterialRefreshOwner3 for CutElasticity3 {
+    fn material_refresh_raw(&self) -> &CutElasticity3 {
+        self
+    }
+
+    fn material_refresh_raw_mut(&mut self) -> &mut CutElasticity3 {
+        self
+    }
+}
+
+struct MaterialRefreshGuard3<'a, O: MaterialRefreshOwner3> {
+    owner: &'a mut O,
+    previous: MaterialRefresh3,
+    rollback: bool,
+}
+
+impl<O: MaterialRefreshOwner3> Drop for MaterialRefreshGuard3<'_, O> {
+    fn drop(&mut self) {
+        if self.rollback {
+            self.previous.swap_with(self.owner.material_refresh_raw_mut());
+        }
+    }
+}
+
+/// Shared single-owner transaction; native raw/adaptive methods expose it with
+/// their own immutable operator type, retaining all existing native consumers.
+pub(in crate::elastic3) fn refresh_material_owner<O: MaterialRefreshOwner3, R>(
+    owner: &mut O,
+    field: ElasticMaterialField3<'_>,
+    limits: MaterialRefreshLimits3,
+    attempt: impl FnOnce(&O) -> Result<R, ElasticityError3>,
+    mut checkpoint: impl FnMut() -> ControlFlow<()>,
+) -> Result<R, ElasticityError3> {
+    let mut poll = || {
+        if checkpoint().is_break() {
+            Err(ElasticityError3::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    let replacement = owner
+        .material_refresh_raw()
+        .stage_material_refresh(field, limits, &mut poll)?;
+    // Arm rollback before installation. The swap itself cannot invoke fallible
+    // or user code; every callback and the final poll run under this guard.
+    let mut trial = MaterialRefreshGuard3 {
+        owner,
+        previous: replacement,
+        rollback: true,
+    };
+    trial.previous.swap_with(trial.owner.material_refresh_raw_mut());
+    let result = attempt(&*trial.owner)?;
+    poll()?;
+    trial.rollback = false;
+    Ok(result)
 }
 
 fn invalid(reason: &'static str) -> ElasticityError3 {
@@ -113,16 +202,60 @@ impl CutElasticity3 {
     /// This commits an OPERATOR update, not a complete heat/mechanical step.
     /// It does not advance temperature, replace a source query, differentiate
     /// C(T), or claim atomicity for a later equilibrium/thermal solve.
+    /// Use [Self::refresh_material_field_with] when dependent solves or checks
+    /// must succeed before this operator update can be accepted.
     pub fn refresh_material_field(
         &mut self,
         field: ElasticMaterialField3<'_>,
         limits: MaterialRefreshLimits3,
-        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<(), ElasticityError3> {
-        let mut poll = || {
-            if checkpoint().is_break() { Err(ElasticityError3::Cancelled) } else { Ok(()) }
-        };
-        self.admit_material_refresh(limits, &mut poll)?;
+        self.refresh_material_field_with(field, limits, |_| Ok(()), checkpoint)
+    }
+
+    /// Accept a native material update only after a dependent attempt succeeds.
+    ///
+    /// The immutable candidate is this SAME native displacement owner with its
+    /// fully staged material, bulk/B-bar, selected Nitsche and ghost caches.
+    /// The callback can use existing thermal/eigenstrain loads, equilibrium
+    /// solvers, physical response, adjoints, mass and prestress preparation.
+    /// Its own physical/conservation checks and solve budgets remain required.
+    /// Staging limits and reference-density rules match [Self::refresh_material_field].
+    ///
+    /// Returning Err, cancellation after the callback, or an unwinding panic in
+    /// the callback/final checkpoint restores the old caches and exact ownership
+    /// token. Every previously valid preparation remains valid after rejection.
+    /// Successful return keeps the candidate token; owned preparations returned
+    /// in R remain valid against the accepted operator, while old ones are stale.
+    /// R cannot borrow the temporary candidate view.
+    ///
+    /// Geometry, scales, supports and reference inventory are never changed.
+    /// The same staging buffers hold the old caches during the attempt; no
+    /// geometry copy or second old-cache allocation is needed. Final acceptance
+    /// and rollback have no callbacks, allocations or fallible work.
+    ///
+    /// Atomicity covers this operator and the returned owned payload. Mutations
+    /// to caller-owned state, source accounts or observations inside the callback
+    /// cannot be undone here: return proposed external state and publish it only
+    /// after success. Nesting independent transactions does not establish a
+    /// multi-operator coupled commit or a whole-system conservation claim.
+    pub fn refresh_material_field_with<R>(
+        &mut self,
+        field: ElasticMaterialField3<'_>,
+        limits: MaterialRefreshLimits3,
+        attempt: impl FnOnce(&Self) -> Result<R, ElasticityError3>,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<R, ElasticityError3> {
+        refresh_material_owner(self, field, limits, attempt, checkpoint)
+    }
+
+    fn stage_material_refresh(
+        &self,
+        field: ElasticMaterialField3<'_>,
+        limits: MaterialRefreshLimits3,
+        poll: &mut impl FnMut() -> Result<(), ElasticityError3>,
+    ) -> Result<MaterialRefresh3, ElasticityError3> {
+        self.admit_material_refresh(limits, poll)?;
         let provider = MaterialProvider3::from_field(field)?;
         poll()?;
         let mut cells = Vec::with_capacity(self.cells.len());
@@ -139,10 +272,10 @@ impl CutElasticity3 {
             }
             let kinematics = cell.kinematics.with_material(&material)?;
             let mut stiffness = assemble_cell_stiffness_controlled(
-                cell.bounds, &cell.rules, &material, kinematics, &mut poll)?;
+                cell.bounds, &cell.rules, &material, kinematics, poll)?;
             if let Some(support) = &self.embedded {
                 support.reassemble_cell_stiffness(index, cell, &material, kinematics,
-                    &mut stiffness, &mut poll)?;
+                    &mut stiffness, poll)?;
             }
             cells.push(CellRefresh3 { material, kinematics, stiffness });
         }
@@ -160,17 +293,6 @@ impl CutElasticity3 {
         }
         let binding = Arc::new(());
         poll()?;
-        // The final publication has no callbacks, allocations or fallible work.
-        // Geometry, scales and reference inventory retain their exact storage.
-        for (cell, replacement) in self.cells.iter_mut().zip(cells) {
-            cell.material = replacement.material;
-            cell.kinematics = replacement.kinematics;
-            cell.stiffness = replacement.stiffness;
-        }
-        for (ghost, weights) in self.ghosts.iter_mut().zip(ghost_weights) {
-            ghost.weights = weights;
-        }
-        self.material_body_binding = binding;
-        Ok(())
+        Ok(MaterialRefresh3 { cells, ghost_weights, binding })
     }
 }
