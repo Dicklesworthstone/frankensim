@@ -26,7 +26,7 @@ pub(crate) mod dispersion;
 mod equilibrium;
 pub use equilibrium::BulkThermoviscousEquilibrium;
 mod wave;
-pub use wave::BulkThermoviscousWave;
+pub use wave::{BulkThermoviscousWave, BulkWaveAbsorption, BulkWaveCellAbsorption, BulkWaveField};
 
 /// Prepared classical bulk absorption, with no per-frequency material queries.
 #[derive(Clone, Copy, Debug, PartialEq)]

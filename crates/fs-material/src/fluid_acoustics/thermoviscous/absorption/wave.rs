@@ -2,6 +2,9 @@ use super::{ClassicalBulkAbsorption, dispersion, invalid};
 use crate::MaterialError;
 use fs_math::c64::C64;
 
+mod energy;
+pub use energy::{BulkWaveAbsorption, BulkWaveCellAbsorption, BulkWaveField};
+
 /// One forward homogeneous Navier--Stokes--Fourier acoustic mode, using
 /// `exp(i k x - i omega t)`. This excludes the independent thermal mode and
 /// transverse/wall boundary layers; it does not close thermal end conditions.
@@ -10,6 +13,7 @@ pub struct BulkThermoviscousWave {
     wavenumber: C64,
     traction_impedance: C64,
     pressure_impedance: C64,
+    thermal_denominator: C64,
 }
 
 impl BulkThermoviscousWave {
@@ -51,7 +55,7 @@ impl ClassicalBulkAbsorption {
         let c = acoustic.sound_speed_m_s();
         let nu = (4.0 / 3.0) * transport.kinematic_viscosity_m2_s()
             + self.bulk_viscosity_pa_s / acoustic.density_kg_m3();
-        let (wavenumber, traction, pressure) = dispersion::acoustic_response(
+        let (wavenumber, traction, pressure, thermal_denominator) = dispersion::acoustic_response(
             omega_rad_s,
             c,
             (nu / c) / c,
@@ -73,6 +77,7 @@ impl ClassicalBulkAbsorption {
             wavenumber,
             traction_impedance: traction,
             pressure_impedance: pressure,
+            thermal_denominator,
         })
     }
 }

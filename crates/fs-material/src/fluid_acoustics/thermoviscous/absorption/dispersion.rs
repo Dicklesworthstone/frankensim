@@ -226,13 +226,16 @@ pub(super) fn acoustic_wavenumber(
 /// normalized by rho*c. Keep the caloric part of the squared phase speed
 /// separate: recovering it by adding i*x after forming 1-i*x loses pressure
 /// in the strongly viscous limit, even while k remains accurately resolved.
+/// The fourth value retains q+i*gamma*y, q=(omega/(k*c))², BEFORE
+/// cancellation at coincident viscous/thermal scales. Only a thermal-field
+/// consumer divides by it; ordinary k/pressure/traction callers do no extra solve.
 pub(super) fn acoustic_response(
     omega: f64,
     sound_speed: f64,
     viscous_time: f64,
     thermal_time: f64,
     gamma: f64,
-) -> Result<(C64, C64, C64), &'static str> {
+) -> Result<(C64, C64, C64, C64), &'static str> {
     if !omega.is_finite()
         || omega < 0.0
         || !sound_speed.is_finite()
@@ -249,7 +252,7 @@ pub(super) fn acoustic_response(
         );
     }
     if omega == 0.0 {
-        return Ok((C64::ZERO, C64::ONE, C64::ONE));
+        return Ok((C64::ZERO, C64::ONE, C64::ONE, C64::ONE));
     }
     let x = omega * viscous_time;
     let y = omega * thermal_time;
@@ -259,8 +262,12 @@ pub(super) fn acoustic_response(
     }
     // z^-1 is a complex squared phase speed, relative to c². For gamma=1
     // thermal diffusion decouples EXACTLY, including at a thermal-root crossing.
-    let (inverse_z, caloric) = if thermal_coupling == 0.0 {
-        (C64::new(1.0, -x), C64::ONE)
+    let (inverse_z, caloric, thermal_denominator) = if thermal_coupling == 0.0 {
+        (
+            C64::new(1.0, -x),
+            C64::ONE,
+            C64::new(1.0, -(x - gamma * y)),
+        )
     } else {
         let difference = x - gamma * y;
         // Expand b²+4a analytically: the large cross terms cancel before
@@ -287,9 +294,13 @@ pub(super) fn acoustic_response(
         // [sqrt(D) + 1-i*(x-gamma*y)]. This rationalized form retains tiny
         // thermal coupling when Cp/Cv is close to one. The denominator's
         // real part is >= 1, so it does not subtract nearly equal quantities.
-        let correction =
-            C64::new(0.0, -2.0 * thermal_coupling) / (root + C64::new(1.0, -difference));
-        (C64::new(1.0, -x) + correction, C64::ONE + correction)
+        let denominator = root + C64::new(1.0, -difference);
+        let correction = C64::new(0.0, -2.0 * thermal_coupling) / denominator;
+        (
+            C64::new(1.0, -x) + correction,
+            C64::ONE + correction,
+            denominator.scale(0.5),
+        )
     };
     let traction = inverse_z.sqrt();
     let inverse_traction = traction.recip();
@@ -302,7 +313,7 @@ pub(super) fn acoustic_response(
     {
         return Err("bulk acoustic wavenumber is unrepresentable or nonpassive");
     }
-    Ok((wave, traction, caloric * inverse_traction))
+    Ok((wave, traction, caloric * inverse_traction, thermal_denominator))
 }
 
 #[cfg(test)]
