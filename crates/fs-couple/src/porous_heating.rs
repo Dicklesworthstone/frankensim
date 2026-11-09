@@ -41,6 +41,8 @@ pub mod coherent;
 pub mod feedback;
 /// Element-resolved transient absorption on the original DG and thermal clocks.
 pub mod transient;
+/// Resolved three-dimensional volume absorption on the original thermal cells.
+pub mod interior;
 
 /// Hard preparation/storage ceiling; callers may declare a smaller cell budget.
 pub const MAX_POROUS_HEATING_CELLS: usize = 4096;

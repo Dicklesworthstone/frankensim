@@ -1,3 +1,36 @@
+## Resolved interior acoustic absorption on the native thermal timeline
+
+`porous_heating::interior::InteriorAcousticHeating` binds every original
+equivalent-fluid tetrahedron to one explicit existing thermal control volume.
+It evaluates the prepared operator's positive local density and compressional
+loss forms from the retained coherent pressure coefficients, once at preparation.
+These are physical volume-integrated cycle-mean watts. Boundary absorption,
+outgoing power and numerical residuals are excluded; no second volume, density,
+porosity or peak-to-mean factor is applied.
+
+The complete original-order map requires unique active destinations, matching
+original integrated volumes, and the exact borrowed native caloric object.
+The caller owns spatial correspondence and the uniform-temperature assumption;
+equal volumes do not prove overlap. Native mass, geometry, material, caloric
+identity/storage basis and body/segment bindings are checked throughout an
+advance. The original source pressure and equivalent-fluid owner remain borrowed.
+An arbitrary supplied pressure field is not certified as an acoustic solution.
+
+A composable native observer adds cached watts to authored sources only for
+accepted thermal steps. Contacts, reservoirs, events, caloric domains, latent
+storage and timestep/conservation admission remain in `fs-thermal`.
+Separate mechanism and per-cell Joule receipts use the actual accepted durations
+and are already included once in the native external-heat report. Candidate
+thermal and observer states publish together; cancellation or refusal leaves
+their inputs unchanged. Prepared storage is bounded by an explicit cell budget
+and a hard 4096-cell ceiling; thermal steps perform no acoustic/material solve.
+
+This is one-way frozen harmonic heating. Reprepare when equilibrium/material
+state or coherent drive changes; the mechanism split supplies no independent
+fluid/skeleton temperature model or transient acoustic startup. Native tests in
+`porous_heating/interior/tests.rs` specify independent affine-field loss
+integrals, authored-event accounting, observer composition, bindings and rollback.
+
 ## Optional local material tangents in finite-solid motion
 
 `FiniteSolidBody::with_tangent_storage` selects ordinary midpoint Newton tangent
