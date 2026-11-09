@@ -13820,3 +13820,31 @@ cached factor or hereditary material state. The original material observer can
 independently observe the same complete displacement field. Focused Tet4 cases
 compare direct loaded equations, reaction, original-quadrature material heat and
 port power across frequency, and retain domain, strain and cancellation refusals.
+
+
+## Signed CutFEM prestress modes
+
+`cutfront::prestress3::CutPrestressModes3` targets low algebraic Ritz estimates of
+`(K_e + G) phi = lambda M phi` using the original Cartesian/adaptive stiffness,
+prepared signed geometric stiffness and consistent reference-density inertia.
+Only the free-coordinate mass is sparsely assembled and positively factored;
+`fs-sparse::PositiveWhitening` and `fs-spectral::EigenService` own the transforms
+and LOBPCG iteration. K/G stay matrix-free, with no coordinate probing or dense
+production pencil. The mass factor is reused across queries. Strong/hanging
+constraints, physical occupancy and frozen material-scale identity are retained.
+
+Returned values retain their sign, including negative and near-zero values.
+Each physical mode is mass-normalized, checked for M orthogonality and verified
+against fresh native K/G/M actions in the mass-whitened residual norm, with
+explicit absolute and relative tolerances. The spectral residual is also admitted.
+DOF/cell/entry limits, sparse factor work/storage, spectral workspace and total
+operator applications are bounded; cancellation publishes no partial packet.
+
+These are residual-admitted estimates, not a complete-spectrum/inertia theorem,
+critical-load factor, follower-load correction or finite-deformation tangent.
+The caller separately establishes the intended prestress equilibrium. The four
+`cutfem_prestress_modes` regression sources compare an independent dense Cholesky
+oracle, signed/rigid modes, adaptive nonuniform mass, and resource/owner refusal.
+The `cutfem_prestress_modes` example demonstrates a synthetic restrained bar with
+explicit free extension and an independent native equilibrium check; it reports
+signed squared-frequency estimates without a measured-material or buckling claim.

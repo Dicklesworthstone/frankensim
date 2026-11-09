@@ -83,6 +83,27 @@ impl MaterialMass3 {
         self.values.len()
     }
 
+    /// Allocation-free reference entries `(cell, [node_a, node_b], value)`.
+    ///
+    /// The native upper-triangular pairs already include adaptive constraint
+    /// condensation and strong-row removal. A pair can recur in different
+    /// cells: sparse assembly must sum those contributions. Multiply each
+    /// reference value by its physical cell occupancy, replicate over xyz and
+    /// mirror off-diagonal pairs. Stiffness scales do not enter physical mass.
+    /// This view supports bounded sparse factorization without basis probing.
+    pub fn reference_scalar_entries(&self) -> impl Iterator<Item = (usize, [usize; 2], f64)> + '_ {
+        self.offsets
+            .windows(2)
+            .enumerate()
+            .flat_map(move |(cell, bounds)| {
+                self.pairs[bounds[0]..bounds[1]]
+                    .iter()
+                    .copied()
+                    .zip(self.values[bounds[0]..bounds[1]].iter().copied())
+                    .map(move |(pair, value)| (cell, pair, value))
+            })
+    }
+
     /// Original source state; `None` only when the cell index is out of range.
     #[must_use]
     pub fn cell_material_state(&self, cell: usize) -> Option<&ElasticAcousticState> {

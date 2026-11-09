@@ -829,3 +829,13 @@ This is conservative reference-geometry initial stress at an admitted supplied
 state. The caller must separately establish equilibrium; finite-strain dP/dF,
 follower loads, coercivity and complete buckling/stability certification are not
 inferred. In particular, negative geometric stiffness is retained, not clipped.
+
+
+### Sparse handoff of original consistent inertia
+
+`MaterialMass3::reference_scalar_entries` exposes an allocation-free read-only
+stream of `(cell, upper node pair, reference mass)` from the original prepared
+owner. Adaptive condensation and strong-row removal are already included. Sparse
+consumers multiply physical occupancy, replicate xyz and sum/mirror pairs; they
+must retain native source validation. No stiffness scale or mass lumping enters
+this handoff. The signed CutFEM modal adapter uses it to factor only physical M.
