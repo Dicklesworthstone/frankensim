@@ -906,10 +906,22 @@ Bulk, selected support and ghost point counts precede O(cells) scratch/output
 allocation. The original adaptive reconstruction is applied locally to both
 fields; no global expansion, derivative matrix, material fit, source callback
 or finite-difference production kernel is introduced. Relevant nonsmooth
-absolute-value/max-row stabilization branches refuse a derivative. Homogeneous
-supports are covered; nonzero displacement lifting, temperature-dependent
-external loads and the heat-equation adjoint require their additional terms.
-The caller owns the equilibrium-adjoint sign and explicit objective partials.
+absolute-value/max-row stabilization branches refuse a derivative. The caller owns the
+equilibrium-adjoint sign and explicit objective partials.
+
+The Cartesian and adaptive `thermal_residual_temperature_pullback_with_motion`
+entries additionally differentiate the original embedded Nitsche motion load.
+The same prescribed displacement used by `prescribed_displacement_load` enters
+both the constitutive consistency and penalty derivatives. An optional
+displacement slope in metres per kelvin adds the full lifting product rule
+with respect to the owning cell's temperature. Geometry and strong zero box
+clamps remain fixed; the motion must be compatible with those clamps. Missing
+embedded support or nonfinite callback data refuse. The original point budget
+precedes callbacks, cancellation is checked immediately after each callback,
+and no global lifting vector or derivative matrix is allocated. Existing
+preparations and the operator remain unchanged on success or failure.
+Temperature-dependent external forces and a heat-equation adjoint retain
+their separate owners and terms.
 
 
 Explicit-isotropic free-strain and signed temperature-stress actions share the
