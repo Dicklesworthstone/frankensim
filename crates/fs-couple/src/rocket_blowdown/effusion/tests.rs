@@ -903,3 +903,5 @@ mod trajectory;
 mod exchange;
 
 mod thermal;
+
+mod channel;

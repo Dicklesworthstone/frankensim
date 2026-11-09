@@ -22,6 +22,9 @@ pub mod exchange;
 /// Finite material-wall heat feedback on the same freely recoiling gas inventory.
 pub mod thermal;
 
+/// Finite diffuse channels with material-wall feedback and resolved exit momentum.
+pub mod channel;
+
 use super::GasRocketState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_TRANSFERS,

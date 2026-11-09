@@ -10459,3 +10459,40 @@ An independent scalar calculation gives successive feedback error ratios
 2.00107, 2.00103 and 2.00064, with balance residuals below 1.95e-15 J.
 Native integration execution remains outstanding under the existing dependency
 build resource constraint; these calculations are not full crate validation.
+
+
+## Finite diffuse-channel recoil with material-wall feedback
+
+`rocket_blowdown::effusion::channel` adds
+`GasRocketState::advance_effusion_channels` for a translating finite gas vessel
+with independently oriented molecular channel arrays and finite original
+material walls. The existing material vacuum-channel transaction owns all
+gross reflected and escaping species, one gas reconstruction, and
+accommodation heat pooled by physical wall identity. Each qualified
+`DiffuseChannelMomentumInterface` enriches that same accepted outlet receipt
+with geometry-resolved axial momentum. The vessel encloses both source gas
+and channel walls, so only escaping momentum enters the native forced exhaust
+trajectory. Local source-gas and wall impulses remain separate receipts and
+are not added again as thrust. Complete escaped molecular energy includes
+accommodation before its inertial-frame transform.
+
+Distinct wall inventories must fit within the vehicle's existing dry mass,
+with shared wall IDs counted once. Gas mass remains the authoritative
+propellant inventory. Native source/rate/remapping corrections and gravity
+mass-history reserves retain the original physical budgets. The complete
+energy gate also bounds the sum of absolute material and mechanical defects.
+Gas, vehicle and all wall endpoints publish atomically. Geometry, axes, loads
+and initial molecular rates are held for this first-order quasistatic interval;
+repeated calls use actual evolving gas and wall states. Rotation, transit delay,
+spatial rarefied-flow resolution and additional continuum pressure thrust are
+outside this point-vessel model.
+
+Five G1/G3/G4 test groups cover independent monatomic hot/cold gas and nonlinear
+wall storage balances; local traction versus escaping recoil; shared-wall
+opposed mixture outlets and canonical replay; loaded Galilean momentum/energy
+transport; closed, elastic and zero-length limits; and dry-mass, frame, gross
+withdrawal and late-cancellation refusal. Pinned formatting and scoped
+whitespace checks pass. Focused source/API/physics review found no concrete
+blocker. These native integration tests have not been compiled or executed
+in the constrained workspace; geometry-only native tests do not prove this
+cross-crate integration.
