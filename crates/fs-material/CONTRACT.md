@@ -24453,3 +24453,30 @@ heating/cooling, derivatives, datum invariance and refusals. They and the added
 native harmonic-corner consumer regression are authored but unexecuted behind
 the runtime build limit; final source files parse and received independent
 source review. The underlying five PR caloric tests executed successfully.
+
+## Fully relaxed source-bound material initial conditions
+
+`TensorPronyHistory::initial_relaxed_strain` and
+`initial_relaxed_plane_stress` create explicit initial conditions from an
+original virgin history template. They retain the identical immutable model
+binding and every original Maxwell row, with zero branch coordinates and zero
+cumulative work/heat. Nonvirgin templates refuse; initialization never resets
+an accepted history. Initial stored energy is supplied by the caller as part
+of the initial condition, not manufactured as work or thermal deposition.
+
+Full-strain input uses tensor-shear Voigt coordinates. The plane method accepts
+ordered engineering in-plane strain and reuses the original DC harmonic
+plane-stress elimination to recover the complete equilibrium strain. Initial
+stress and storage come from the original equilibrium Gram, with transverse
+traction checked before publishing a plane state. Kelvin viscosity has zero
+initial rate and supplies no initial stress or loss. Nonzero static strain
+requires original DC coverage; the zero relaxed state remains admissible for
+an AC-only source. Full-strain validity, representability and cancellation
+remain mandatory.
+
+These initial conditions support independently admitted held thermal free
+strains and restrained thermal preloads. They do not solve assembled force
+equilibrium, infer a preceding loading path or relaxation duration, evolve
+temperature, or authorize a changing material source. Four focused regressions
+cover analytic plane elasticity in all ordered planes, original source binding,
+tensor-shear energy, and atomic domain/reset/cancellation refusals.

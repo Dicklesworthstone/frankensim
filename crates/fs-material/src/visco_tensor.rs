@@ -25,6 +25,8 @@ pub mod history_fit;
 pub use sensitivity::{TensorPronyStepDerivative, TensorPronyStepDirection,
     TensorPronyStepLinearization, TensorPronyStrainPullback};
 
+mod initialization;
+
 mod projection;
 pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, ProjectedTensorTemperatureDerivative,
     TensorProjectionBudget, TensorThermalExpansion, TensorThermalState};
