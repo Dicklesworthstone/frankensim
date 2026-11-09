@@ -23,6 +23,8 @@ pub mod phase_heat_exchanger;
 pub mod phase_machinery;
 /// Conservative adiabatic mixing of distinct original phase-equilibrium streams.
 pub mod phase_mixing;
+/// Conservative liquid/vapor outlet streams from original equilibrium splits.
+pub mod phase_separator;
 /// Original equilibrium enthalpy and acoustics in bounded converging-nozzle flow.
 pub mod phase_nozzle;
 /// Conservative normal shocks with original liquid/vapor phase equilibrium.

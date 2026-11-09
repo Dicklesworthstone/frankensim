@@ -25,6 +25,8 @@ pub mod entropy;
 pub mod mixing;
 /// Reusable original inlet for bounded repeated pressure/enthalpy increments.
 pub mod prepared;
+/// Source-preserving liquid/vapor outlet calorics from an admitted phase split.
+pub mod separation;
 /// Conserved internal-energy and volume closure over the same phase owner.
 pub mod volume;
 
