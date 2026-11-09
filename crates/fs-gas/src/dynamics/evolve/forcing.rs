@@ -4,7 +4,7 @@ use super::*;
 use crate::body_force::{Accumulator, kick};
 
 impl Euler1d {
-    /// Apply the exact flow of a held distributed mechanical source alone.
+    /// Apply the exact flow of a prescribed distributed mechanical source alone.
     ///
     /// Mass and the original caloric reference are unchanged. The represented
     /// momentum increment supplies midpoint kinetic work to total energy;
@@ -13,7 +13,8 @@ impl Euler1d {
     /// Every candidate uses the original EOS and caller's Mach bound. Failure
     /// or cancellation leaves every accepted cell unchanged.
     ///
-    /// Time does not advance: this is a source substep for a composing owner.
+    /// Histories start at the current flow clock. Time does not advance: this
+    /// is a source substep for a composing owner.
     /// Use [`Self::step_with_body_force`] for atomic source/transport evolution.
     pub fn apply_body_force(
         &mut self,
@@ -40,12 +41,13 @@ impl Euler1d {
                 &mut self.work.primitive[i],
                 i,
                 force,
-                duration.value(),
+                [self.time, 0.0, duration.value()],
                 controls,
                 self.mesh.volumes()[i],
                 &mut exchange,
                 &mut cancelled,
-            )?;
+            )?
+            .0;
         }
         // Also admit represented extensive storage before an infallible totals query.
         totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
@@ -54,12 +56,12 @@ impl Euler1d {
         Ok(exchange.finish())
     }
 
-    /// Advance held distributed forcing and native Euler transport together.
+    /// Advance prescribed body forcing and native Euler transport together.
     ///
     /// Symmetric force/advection/force splitting applies two exact half-duration
     /// source maps around the original MUSCL/HLLC SSP-RK2 update. The same retry
     /// restarts both source halves and transport from the accepted field. Source
-    /// endpoints obey the original caloric domain, authored Mach bound and full
+    /// endpoints and interior speed extrema obey the caloric domain, Mach bound and full
     /// interval CFL. Gas, source accounting and clock publish only together.
     /// The first nonzero call allocates one bounded cell buffer, reused thereafter;
     /// zero forcing follows the ordinary step exactly without that allocation.
@@ -69,8 +71,9 @@ impl Euler1d {
     /// gravity remains a distinct, additive source: do not supply it again here.
     /// Boundary pressure work is already included in the native boundary flux.
     /// This stationary-mesh method does not compose moving-wall, wall-heat or
-    /// network updates. Time-varying or state-dependent forces are held at the
-    /// authored value for this complete accepted interval and require refinement.
+    /// network updates. Linear histories integrate each actual source interval;
+    /// held variants retain their authored value. General state-dependent laws
+    /// and the source/transport composition still require temporal refinement.
     pub fn step_with_body_force(
         &mut self,
         maximum_duration: Time,
@@ -104,16 +107,32 @@ pub(in crate::dynamics) fn update(
     primitive: &mut Primitive,
     cell: usize,
     force: BodyForce<'_>,
-    duration: f64,
+    time: [f64; 3],
     controls: ForceControl,
     volume: f64,
     exchange: &mut Accumulator,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Conserved, Error> {
+) -> Result<(Conserved, Option<Primitive>), Error> {
     poll(cancelled)?;
     let before = gas.decode(q, Some(primitive.temperature), cancelled)?;
     controls.admit_velocity::<Error>(before.velocity, before.sound_speed)?;
-    let source = kick::<Error>(force, cell, q.density, q.momentum, q.energy, duration)?;
+    let source = kick::<Error>(force, cell, q.density, q.momentum, q.energy, time)?;
+    let interior = source
+        .interior
+        .map(|[momentum, energy]| {
+            let state = gas.decode(
+                Conserved {
+                    density: q.density,
+                    momentum,
+                    energy,
+                },
+                Some(before.temperature),
+                cancelled,
+            )?;
+            controls.admit_velocity::<Error>(state.velocity, state.sound_speed)?;
+            Ok::<_, Error>(state)
+        })
+        .transpose()?;
     let next = Conserved {
         density: q.density,
         momentum: source.momentum,
@@ -126,7 +145,7 @@ pub(in crate::dynamics) fn update(
     };
     controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
     exchange.add::<Error>(&source, volume)?;
-    Ok(next)
+    Ok((next, interior))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,18 +172,22 @@ where
     let mut exchange = Accumulator::default();
     let mut signal_rate = 0.0_f64;
     for (i, &q) in states.iter().enumerate() {
-        forced[i] = update(
+        let interior;
+        (forced[i], interior) = update(
             gas,
             q,
             &mut work.primitive[i],
             i,
             force,
-            0.5 * dt,
+            [time[0], 0.0, 0.5 * dt],
             controls,
             mesh.volumes()[i],
             &mut exchange,
             cancelled,
         )?;
+        if let Some(peak) = interior {
+            admit_cfl(mesh, i, peak, dt, cfl, &mut signal_rate)?;
+        }
         admit_cfl(mesh, i, work.primitive[i], dt, cfl, &mut signal_rate)?;
     }
     let (a, b) = super::attempt(
@@ -181,18 +204,22 @@ where
         cancelled,
     )?;
     for (i, q) in work.candidate.iter_mut().enumerate() {
-        *q = update(
+        let interior;
+        (*q, interior) = update(
             gas,
             *q,
             &mut work.primitive[i],
             i,
             force,
-            0.5 * dt,
+            [time[0], 0.5 * dt, 0.5 * dt],
             controls,
             mesh.volumes()[i],
             &mut exchange,
             cancelled,
         )?;
+        if let Some(peak) = interior {
+            admit_cfl(mesh, i, peak, dt, cfl, &mut signal_rate)?;
+        }
         admit_cfl(mesh, i, work.primitive[i], dt, cfl, &mut signal_rate)?;
     }
     Ok((a, b, exchange.finish(), signal_rate))

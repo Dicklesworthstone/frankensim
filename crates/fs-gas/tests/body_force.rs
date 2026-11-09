@@ -742,3 +742,6 @@ fn g1_time_dependent_drive_refines_to_exact_velocity_and_work() {
 
 #[path = "body_force/moving.rs"]
 mod moving;
+
+#[path = "body_force/history.rs"]
+mod history;

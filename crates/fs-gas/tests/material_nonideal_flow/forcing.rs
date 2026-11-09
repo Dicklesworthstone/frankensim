@@ -328,3 +328,71 @@ fn invalid_mach_and_late_cancellation_leave_gas_cache_wall_inventory_and_clock_u
     assert_eq!(walls.contacts(), contact);
     assert!(walls.last_report().is_none());
 }
+
+#[test]
+fn dense_gas_ramp_uses_absolute_time_and_admits_the_hidden_interior_velocity() {
+    let source = gas();
+    let q = state(&source, 20.0, -11.0, 430.0);
+    let mut flow = uniform_mesh_field(source, vec![q; 5]);
+    let initial = flow.totals(|| false).unwrap();
+    let (reference_time, acceleration, jerk) = (-0.001, -200_000.0, 400_000_000.0);
+    let force = BodyForce::UniformAccelerationRamp {
+        reference_time,
+        acceleration,
+        jerk,
+    };
+    let (mut impulse, mut work) = (0.0, 0.0);
+    for _ in 0..12 {
+        let start = flow.time().value();
+        let report = flow
+            .step_with_body_force(
+                Time::new(0.000025), controls(), force, force_controls(), || false,
+            )
+            .unwrap();
+        assert_eq!(report.elapsed, Time::new(0.000025));
+        let h = report.elapsed.value();
+        let delta = h * (acceleration + jerk * (start - reference_time) + 0.5 * jerk * h);
+        near(report.source_change.impulse, initial.mass * delta, 2e-11);
+        near(report.conservation_residual.momentum, 0.0, 2e-11);
+        near(report.conservation_residual.energy, 0.0, 5e-9);
+        impulse += report.source_change.impulse;
+        work += report.source_change.work;
+    }
+    let time = flow.time().value();
+    let velocity = -11.0 + (acceleration - jerk * reference_time) * time
+        + 0.5 * jerk * time * time;
+    near(impulse, initial.mass * (velocity + 11.0), 5e-10);
+    near(work, 0.5 * initial.mass * (velocity * velocity - 121.0), 5e-8);
+    near(flow.totals(|| false).unwrap().energy - initial.energy, work, 5e-8);
+    for p in flow.primitives() {
+        near(p.velocity, velocity, 5e-10);
+        near(p.temperature, 430.0, 5e-8);
+    }
+
+    let source = gas();
+    let q = state(&source, 20.0, 0.0, 430.0);
+    let mut reversal = uniform_mesh_field(source, vec![q; 3]);
+    let before = reversal.states().to_vec();
+    let primitives = reversal.primitives().to_vec();
+    let limit = ForceControl {
+        maximum_mach: 25.0 / primitives[0].sound_speed,
+    };
+    // This source returns to zero velocity, but its interior 50 m/s state
+    // must pass the original PR inversion and then the authored Mach gate.
+    assert!(
+        reversal.apply_body_force(
+            Time::new(0.02),
+            BodyForce::UniformAccelerationRamp {
+                reference_time: 0.0,
+                acceleration: 10_000.0,
+                jerk: -1_000_000.0,
+            },
+            limit,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(reversal.states(), before);
+    assert_eq!(reversal.primitives(), primitives);
+    assert_eq!(reversal.time(), Time::new(0.0));
+}

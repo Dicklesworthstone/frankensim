@@ -1,3 +1,35 @@
+## Physical-time acceleration and force-density histories
+
+The original BodyForce owner now admits uniform and per-cell linear histories
+for acceleration or force density. Each history specifies an absolute reference
+time, its value there, and its constant time derivative. The shared kick
+integrates the two actual source half-intervals separately: [t,t+h/2] and
+[t+h/2,t+h]. It carries the accepted clock and within-step offset separately,
+so a shortened retry or a later reacting/molecular window cannot reuse a stale
+requested-interval sample. A source-only apply starts at the current flow clock
+and does not advance that clock.
+
+Frozen caloric, evolving-species, and retained NASA/Peng--Robinson gas owners
+use the same impulse kernel. Acceleration uses each stage's actual mass density;
+force per volume retains its independent volume weighting. Actual represented
+momentum change supplies conjugate kinetic work, and representation loss stays
+in the original residual. No chemical energy or heat is synthesized. Old and
+moved cell volumes remain owned by the native ALE stages, including reciprocal
+inertial-wall and nonideal piston solves. Time-varying force density on changing
+volume retains the native second-order source/transport composition; exact
+integration of the source history alone is not an exact moving-volume or
+coupled-flow solution.
+
+An affine force can reverse inside a source stage even when its net impulse
+vanishes. The shared kernel locates that strict interior velocity extremum;
+each original EOS decodes the represented state and applies the authored Mach
+bound. Stationary and moving relative-wave CFL gates also admit the peak.
+A piston source before the wall root bounds every speed in the original
+declared bracket. Interior probes add no impulse, work, state buffer, or source
+receipt. Ordinary held sources and zero-rate histories retain their previous
+arithmetic; zero histories still use the unforced path. Refusal and cancellation
+preserve accepted gas, geometry, wall state, source accounting, and clock.
+
 # fs-gas contract
 
 ## Conservative finite-plenum exchange candidates

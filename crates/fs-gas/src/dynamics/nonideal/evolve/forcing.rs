@@ -34,25 +34,30 @@ impl Workspace {
         mesh: &Mesh1d,
         force: BodyForce<'_>,
         controls: ForceControl,
-        dt: f64,
+        time: [f64; 2],
         cfl: f64,
         exchange: &mut Accumulator,
         rate: &mut f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), RealGasFlowError> {
+        let dt = time[1];
         for (i, &q) in states.iter().enumerate() {
-            (self.states[i], self.primitive[i]) = update(
+            let interior;
+            (self.states[i], self.primitive[i], interior) = update(
                 gas,
                 q,
                 primitive[i],
                 force,
                 controls,
                 i,
-                0.5 * dt,
+                [time[0], 0.0, 0.5 * dt],
                 mesh.volumes()[i],
                 exchange,
                 cancelled,
             )?;
+            if let Some(peak) = interior {
+                admit_cfl(peak, mesh, i, dt, cfl, rate)?;
+            }
             admit_cfl(self.primitive[i], mesh, i, dt, cfl, rate)?;
         }
         Ok(())
@@ -60,7 +65,8 @@ impl Workspace {
 }
 
 impl RealGasEuler1d {
-    /// Apply a held acceleration or force density without advancing the clock.
+    /// Apply a prescribed acceleration or force density without advancing time.
+    /// Linear histories start at the current flow clock.
     ///
     /// The original shared kick changes momentum and total energy together:
     /// `delta E = delta(rho*u) * (u_before + u_after)/2`. Density and caloric
@@ -87,14 +93,14 @@ impl RealGasEuler1d {
         }
         let mut exchange = Accumulator::default();
         for (i, &q) in self.states.iter().enumerate() {
-            (self.work.candidate[i], self.work.candidate_primitive[i]) = update(
+            (self.work.candidate[i], self.work.candidate_primitive[i], _) = update(
                 &self.gas,
                 q,
                 self.primitive[i],
                 force,
                 controls,
                 i,
-                duration.value(),
+                [self.time, 0.0, duration.value()],
                 self.mesh.volumes()[i],
                 &mut exchange,
                 &mut cancelled,
@@ -112,18 +118,20 @@ impl RealGasEuler1d {
         Ok(exchange.finish())
     }
 
-    /// Compose exact held-source half steps around the original SSP-RK2 waves.
+    /// Compose exact prescribed-source half steps around the original SSP-RK2 waves.
     ///
     /// Acceleration uses density at EACH source stage; force per volume does
-    /// not acquire an extra density factor. Original EOS, endpoint Mach and
+    /// not acquire an extra density factor. Original EOS, Mach at endpoints and
+    /// interior velocity extrema, and
     /// full-interval CFL admission cover both kicks. A retry restarts from the
     /// accepted field, and commits gas, primitive cache, source report and clock
     /// together. Two cell buffers are allocated on first nonzero use and reused.
     /// Zero force follows the ordinary wave path without these allocations.
     ///
-    /// The source is held over the complete attempted interval. This does not
-    /// provide a state-dependent force law, hydrostatic well balancing, moving
-    /// walls or a new spatial reconstruction. Time refinement remains required.
+    /// Linear histories integrate each actual source interval; held variants
+    /// retain their authored value. This does not provide a state-dependent law,
+    /// hydrostatic well balancing or new spatial reconstruction. Time refinement
+    /// of source/transport composition remains required.
     pub fn step_with_body_force(
         &mut self,
         maximum_duration: Time,
@@ -178,14 +186,29 @@ pub(super) fn update(
     force: BodyForce<'_>,
     controls: ForceControl,
     cell: usize,
-    duration: f64,
+    time: [f64; 3],
     volume: f64,
     exchange: &mut Accumulator,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Conserved, Primitive), RealGasFlowError> {
+) -> Result<(Conserved, Primitive, Option<Primitive>), RealGasFlowError> {
     poll(cancelled)?;
     controls.admit_velocity::<RealGasFlowError>(before.velocity, before.sound_speed)?;
-    let source = kick::<RealGasFlowError>(force, cell, q.density, q.momentum, q.energy, duration)?;
+    let source = kick::<RealGasFlowError>(force, cell, q.density, q.momentum, q.energy, time)?;
+    let interior = source
+        .interior
+        .map(|[momentum, energy]| {
+            let state = gas.decode(
+                Conserved {
+                    density: q.density,
+                    momentum,
+                    energy,
+                },
+                cancelled,
+            )?;
+            controls.admit_velocity::<RealGasFlowError>(state.velocity, state.sound_speed)?;
+            Ok::<_, RealGasFlowError>(state)
+        })
+        .transpose()?;
     let next = Conserved {
         density: q.density,
         momentum: source.momentum,
@@ -198,7 +221,7 @@ pub(super) fn update(
     };
     controls.admit_velocity::<RealGasFlowError>(primitive.velocity, primitive.sound_speed)?;
     exchange.add::<RealGasFlowError>(&source, volume)?;
-    Ok((next, primitive))
+    Ok((next, primitive, interior))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -209,25 +232,30 @@ pub(super) fn finish(
     mesh: &Mesh1d,
     force: BodyForce<'_>,
     controls: ForceControl,
-    dt: f64,
+    time: [f64; 2],
     cfl: f64,
     exchange: &mut Accumulator,
     rate: &mut f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), RealGasFlowError> {
+    let dt = time[1];
     for (i, q) in states.iter_mut().enumerate() {
-        (*q, primitive[i]) = update(
+        let interior;
+        (*q, primitive[i], interior) = update(
             gas,
             *q,
             primitive[i],
             force,
             controls,
             i,
-            0.5 * dt,
+            [time[0], 0.5 * dt, 0.5 * dt],
             mesh.volumes()[i],
             exchange,
             cancelled,
         )?;
+        if let Some(peak) = interior {
+            admit_cfl(peak, mesh, i, dt, cfl, rate)?;
+        }
         admit_cfl(primitive[i], mesh, i, dt, cfl, rate)?;
     }
     Ok(())

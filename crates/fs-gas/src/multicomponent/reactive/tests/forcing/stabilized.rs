@@ -232,3 +232,86 @@ fn accelerated_bath_window_rolls_back_a_completed_prefix_on_cancel_or_work_refus
         near(actual, expected, 3e-11);
     }
 }
+
+#[test]
+fn ramped_stabilized_windows_share_absolute_time_and_preserve_cold_isomer_chemistry() {
+    let cells = 40;
+    let mechanism = mechanism(0.0, 2.0, 0.0);
+    let flow = field(&mechanism, cells, 0.7, |x| {
+        let a = 0.6 + 0.2 * (core::f64::consts::TAU * x).sin();
+        [a, 1.0 - a]
+    });
+    let mut operator = molecular::molecular(&flow, 0.3, 0.0, 0.0);
+    let mut simulation = ReactingEuler1d::new(flow, mechanism, chemistry(), || false).unwrap();
+    let initial = simulation.flow().totals();
+    let (reference_time, acceleration, jerk) = (-0.025, 2.0, 120.0);
+    let at_zero = acceleration - jerk * reference_time;
+    let velocity_at = |time: f64| 0.7 + at_zero * time + 0.5 * jerk * time * time;
+    let source = BodyForce::UniformAccelerationRamp {
+        reference_time,
+        acceleration,
+        jerk,
+    };
+    let (mut impulse, mut work) = (0.0, 0.0);
+    for end in [0.015, 0.04] {
+        let start = simulation.flow().time().value();
+        let report = simulation
+            .advance_stabilized_with_body_force_to(
+                &mut operator,
+                Time::new(end),
+                StabilizedReactiveIntervalControl::default(),
+                source,
+                FORCE_CONTROL,
+                [None; 2],
+                || false,
+            )
+            .unwrap();
+        assert_eq!(simulation.flow().time().value(), end);
+        assert!(report.coupled_steps > 1);
+        assert!(report.maximum_stages_used > 2);
+        assert!(report.maximum_scaled_parabolic_number <= 0.40000000000001);
+        let before_velocity = velocity_at(start);
+        let after_velocity = velocity_at(end);
+        near(
+            report.source_change.impulse,
+            initial.mass() * (after_velocity - before_velocity),
+            3e-11,
+        );
+        near(
+            report.source_change.work,
+            0.5 * initial.mass() * (after_velocity.powi(2) - before_velocity.powi(2)),
+            3e-10,
+        );
+        near(report.conservation_residual.momentum, 0.0, 3e-11);
+        near(report.absolute_energy_residual_j, 0.0, 3e-10);
+        near(report.mass_residual_kg, 0.0, 3e-12);
+        impulse += report.source_change.impulse;
+        work += report.source_change.work;
+        // Equal-caloric isomers react without changing temperature; diffusion
+        // redistributes their mode while preserving its global reaction mean.
+        let expected_mean = 0.5 + 0.1 * (-4.0 * end).exp();
+        near(simulation.flow().totals().species_masses[0], initial.mass() * expected_mean, 3e-7);
+        for i in 0..cells {
+            let q = simulation.flow().cell(i).unwrap();
+            let p = simulation.flow().gas().primitive(q, || false).unwrap();
+            near(p.velocity, after_velocity, 3e-9);
+            near(p.temperature, 1.0, 3e-9);
+        }
+    }
+    let end = simulation.flow().time().value();
+    near(impulse, initial.mass() * (velocity_at(end) - 0.7), 3e-11);
+    near(work, 0.5 * initial.mass() * (velocity_at(end).powi(2) - 0.49), 3e-10);
+    let laplacian =
+        4.0 * (cells * cells) as f64 * (core::f64::consts::PI / cells as f64).sin().powi(2);
+    let mean = 0.5 + 0.1 * (-4.0 * end).exp();
+    let amplitude = 0.2 * (-(4.0 + 0.3 * laplacian) * end).exp();
+    let displacement = 0.7 * end + 0.5 * at_zero * end * end + jerk * end * end * end / 6.0;
+    let mut error = 0.0;
+    for i in 0..cells {
+        let x = (i as f64 + 0.5) / cells as f64;
+        let expected = mean + amplitude * (core::f64::consts::TAU * (x - displacement)).sin();
+        error += (simulation.flow().cell(i).unwrap().partial_densities[0] - expected).abs()
+            / cells as f64;
+    }
+    assert!(error < 1e-3, "accelerated reaction/diffusion/advection L1={error:e}");
+}

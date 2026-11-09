@@ -580,7 +580,7 @@ impl MixtureEuler1d {
                     &self.states,
                     &self.mesh,
                     self.boundaries,
-                    dt,
+                    [self.time, dt],
                     controls.cfl,
                     order,
                     reservoirs,

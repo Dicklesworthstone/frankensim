@@ -129,17 +129,17 @@ impl MixtureEuler1d {
     /// work. No source work is relabeled as heat or a balance correction.
     ///
     /// The original EOS, authored Mach bound and full-interval CFL relative to
-    /// moving faces admit both source endpoints. Rejected trials restart both
+    /// moving faces admit source endpoints and interior extrema. Trials restart both
     /// sources, transport and geometry from the accepted field. State, complete
     /// mesh, clock and accounting publish once, after every check. The existing
     /// flat body-source buffer is reused without cloning fields per retry.
     /// Zero force follows the original moving method; zero wall speeds follow
     /// the stationary forced method with its original arithmetic.
     ///
-    /// Sources are held in original cell order for the accepted interval.
-    /// Constant area and reflecting ends remain required. Chemistry, piston
-    /// inertia, radial heat transport and changing source histories retain
-    /// separate owners. This does not change the underlying scheme's admitted
+    /// Sources follow original cell order. Linear histories integrate each actual
+    /// half-interval at the accepted clock. Constant area and reflecting ends
+    /// remain required. Chemistry, piston inertia, radial heat and general
+    /// state-dependent laws retain separate owners. This does not change the scheme's admitted
     /// pressure-equilibrium or entropy qualifications.
     ///
     /// # Errors
@@ -288,7 +288,7 @@ impl MixtureEuler1d {
                     &self.states,
                     &self.mesh,
                     self.boundaries,
-                    dt,
+                    [self.time, dt],
                     controls.cfl,
                     reconstruction,
                     &mut self.work,
@@ -599,7 +599,7 @@ pub(super) fn attempt_with_body_force(
     states: &[f64],
     mesh: &Mesh1d,
     boundaries: Boundaries,
-    dt: f64,
+    time: [f64; 2],
     cfl: f64,
     reconstruction: Reconstruction,
     work: &mut Workspace,
@@ -609,6 +609,7 @@ pub(super) fn attempt_with_body_force(
     controls: ForceControl,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage, ForceChange, f64), Error> {
+    let dt = time[1];
     let m = gas.species_count() + 2;
     let mut exchange = Accumulator::default();
     let mut signal_rate = 0.0_f64;
@@ -618,18 +619,23 @@ pub(super) fn attempt_with_body_force(
         .enumerate()
     {
         next.copy_from_slice(q);
-        super::evolve::forcing::update(
+        let interior = super::evolve::forcing::update(
             gas,
             next,
             &mut work.primitive[i],
             i,
             force,
-            0.5 * dt,
+            [time[0], 0.0, 0.5 * dt],
             controls,
             mesh.volumes()[i],
             &mut exchange,
             cancelled,
         )?;
+        if let Some(peak) = interior {
+            let rate = moving.relative_signal_rate(mesh, i, peak.velocity, peak.sound_speed);
+            check_cfl(rate * dt, cfl)?;
+            signal_rate = signal_rate.max(rate);
+        }
         let p = work.primitive[i];
         let rate = moving.relative_signal_rate(mesh, i, p.velocity, p.sound_speed);
         check_cfl(rate * dt, cfl)?;
@@ -648,18 +654,23 @@ pub(super) fn attempt_with_body_force(
         cancelled,
     )?;
     for (i, q) in work.candidate.chunks_exact_mut(m).enumerate() {
-        super::evolve::forcing::update(
+        let interior = super::evolve::forcing::update(
             gas,
             q,
             &mut work.primitive[i],
             i,
             force,
-            0.5 * dt,
+            [time[0], 0.5 * dt, 0.5 * dt],
             controls,
             moving.mesh.volumes()[i],
             &mut exchange,
             cancelled,
         )?;
+        if let Some(peak) = interior {
+            let rate = moving.relative_signal_rate(&moving.mesh, i, peak.velocity, peak.sound_speed);
+            check_cfl(rate * dt, cfl)?;
+            signal_rate = signal_rate.max(rate);
+        }
         let p = work.primitive[i];
         let rate = moving.relative_signal_rate(&moving.mesh, i, p.velocity, p.sound_speed);
         check_cfl(rate * dt, cfl)?;

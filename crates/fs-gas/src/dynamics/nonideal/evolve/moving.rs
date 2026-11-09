@@ -41,7 +41,7 @@ impl RealGasEuler1d {
         self.advance_moving(maximum_duration, controls, wall_velocity, None, cancelled)
     }
 
-    /// Compose held mechanical-force half steps with moving real-gas transport.
+    /// Compose prescribed force half steps with moving real-gas transport.
     ///
     /// The first kick uses the accepted density and physical volume. The
     /// second uses the actual transported density and moved volume. Both use
@@ -49,7 +49,9 @@ impl RealGasEuler1d {
     /// full-interval relative-face CFL. Pressure work stays in boundary_change;
     /// external body impulse/work stays in source_change, counted once.
     ///
-    /// Force values follow the original cell order for this whole interval.
+    /// Sources follow original cell order. Linear histories integrate each actual
+    /// half-interval at the accepted clock; interior speed extrema also pass
+    /// the original EOS, Mach and relative-wave CFL gates.
     /// Refusal or cancellation publishes neither source nor motion. Zero force
     /// uses the source-free path and zero motion uses the existing forced step.
     #[allow(clippy::too_many_arguments)]
@@ -175,18 +177,22 @@ impl RealGasEuler1d {
                 let (states, primitive) = if let Some((force, force_controls)) = source {
                     let forced = self.force_work.as_mut().expect("admitted source workspace");
                     for (i, &q) in self.states.iter().enumerate() {
-                        (forced.states[i], forced.primitive[i]) = forcing::update(
+                        let interior;
+                        (forced.states[i], forced.primitive[i], interior) = forcing::update(
                             &self.gas,
                             q,
                             self.primitive[i],
                             force,
                             force_controls,
                             i,
-                            0.5 * dt,
+                            [self.time, 0.0, 0.5 * dt],
                             self.mesh.volumes()[i],
                             &mut exchange,
                             &mut cancelled,
                         )?;
+                        if let Some(peak) = interior {
+                            source_cfl(peak, &self.mesh, moving, i, dt, controls.cfl, &mut source_rate)?;
+                        }
                         source_cfl(
                             forced.primitive[i],
                             &self.mesh,
@@ -217,18 +223,22 @@ impl RealGasEuler1d {
                 )?;
                 if let Some((force, force_controls)) = source {
                     for (i, q) in self.work.candidate.iter_mut().enumerate() {
-                        (*q, self.work.candidate_primitive[i]) = forcing::update(
+                        let interior;
+                        (*q, self.work.candidate_primitive[i], interior) = forcing::update(
                             &self.gas,
                             *q,
                             self.work.candidate_primitive[i],
                             force,
                             force_controls,
                             i,
-                            0.5 * dt,
+                            [self.time, 0.5 * dt, 0.5 * dt],
                             moving.mesh.volumes()[i],
                             &mut exchange,
                             &mut cancelled,
                         )?;
+                        if let Some(peak) = interior {
+                            source_cfl(peak, &moving.mesh, moving, i, dt, controls.cfl, &mut source_rate)?;
+                        }
                         source_cfl(
                             self.work.candidate_primitive[i],
                             &moving.mesh,

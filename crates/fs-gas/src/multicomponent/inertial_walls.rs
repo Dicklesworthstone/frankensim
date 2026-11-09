@@ -78,7 +78,8 @@ impl MixtureEuler1d {
     /// Interior mechanical impulse/work are separate external inputs in the
     /// complete gas-plus-walls balance, never attributed to wall pressure.
     ///
-    /// The authored source is held in moving-cell order. Loads on the walls
+    /// The source follows original moving-cell order; histories integrate each
+    /// actual source interval using the accepted flow clock. Loads on the walls
     /// remain explicit; a gravitational acceleration on the gas does not
     /// implicitly add either wall's weight. Source Mach/CFL refusal retries the
     /// entire two-speed solve. One existing source buffer is allocated on first
@@ -216,7 +217,7 @@ impl MixtureEuler1d {
                             &self.states,
                             &self.mesh,
                             self.boundaries,
-                            dt,
+                            [self.time, dt],
                             gas_controls.cfl,
                             reconstruction,
                             &mut self.work,

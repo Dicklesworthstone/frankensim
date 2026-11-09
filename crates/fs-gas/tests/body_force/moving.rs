@@ -721,3 +721,81 @@ fn g4_cancelled_or_refused_ale_sources_leave_cells_geometry_and_time_unchanged()
         same_mixture(&field, &original);
     }
 }
+
+#[test]
+fn ramped_volume_force_uses_each_ale_source_volume_and_its_actual_half_interval() {
+    let walls = [0.2, -0.1];
+    let reference_time = -0.03;
+    let force_density = 4.0;
+    let rate = 200.0;
+    let source = BodyForce::UniformForceDensityRamp {
+        reference_time,
+        force_density,
+        rate,
+    };
+    for h in [0.005, 0.0025] {
+        let mut frozen = closed_frozen(8, 0.4, false);
+        let mut mixture = closed_mixture(8, 0.4, false);
+        for _ in 0..2 {
+            let time = frozen.time().value();
+            assert_eq!(mixture.time(), frozen.time());
+            let old_volume: f64 = frozen.mesh().volumes().iter().sum();
+            let a = frozen
+                .step_with_moving_walls_and_body_force(
+                    Time::new(h), StepControl::default(), walls, source, FORCE, || false,
+                )
+                .unwrap();
+            let b = mixture
+                .step_with_moving_walls_and_body_force(
+                    Time::new(h), StepControl::default(), walls, source, FORCE, || false,
+                )
+                .unwrap();
+            assert_eq!(a.elapsed, Time::new(h));
+            assert_eq!(b.elapsed, a.elapsed);
+            let new_volume: f64 = frozen.mesh().volumes().iter().sum();
+            close(mixture.mesh().volumes().iter().sum(), new_volume, 2e-15);
+            let start_force = force_density + rate * (time - reference_time);
+            let first_integral = start_force * h / 2.0 + rate * h * h / 8.0;
+            let second_integral = start_force * h / 2.0 + 3.0 * rate * h * h / 8.0;
+            let impulse = old_volume * first_integral + new_volume * second_integral;
+            close(a.source_change.impulse, impulse, 5e-14);
+            close(b.source_change.impulse, impulse, 5e-14);
+
+            // Native Strang composition weights its two exact source integrals
+            // by V_old and V_new. For affine F(t) and V(t), its local difference
+            // from the continuous integral F(t)*V(t) is j*dV/dt*h^3/24.
+            let volume_rate = 0.7 * (walls[1] - walls[0]);
+            let continuous = old_volume * start_force * h
+                + 0.5 * (old_volume * rate + volume_rate * start_force) * h * h
+                + rate * volume_rate * h * h * h / 3.0;
+            let quadrature_error = rate * volume_rate * h * h * h / 24.0;
+            close(a.source_change.impulse - continuous, quadrature_error, 5e-14);
+            close(b.source_change.impulse - continuous, quadrature_error, 5e-14);
+            close(
+                a.after.momentum - a.before.momentum,
+                a.boundary_change.momentum + a.source_change.impulse,
+                2e-12,
+            );
+            close(
+                b.after.momentum - b.before.momentum,
+                b.boundary_change.momentum + b.source_change.impulse,
+                2e-12,
+            );
+            close(
+                a.after.energy - a.before.energy,
+                a.boundary_change.energy + a.source_change.work,
+                2e-11,
+            );
+            close(
+                b.after.energy - b.before.energy,
+                b.boundary_change.energy + b.source_change.work,
+                2e-11,
+            );
+            assert_eq!(a.boundary_change.mass, 0.0);
+            for k in 0..3 {
+                close(b.after.species_masses[k], b.before.species_masses[k], 2e-13);
+                assert_eq!(b.boundary_change.species_masses[k], 0.0);
+            }
+        }
+    }
+}

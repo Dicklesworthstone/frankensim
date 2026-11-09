@@ -1,10 +1,15 @@
 //! Mechanical body sources shared by the original one-dimensional gas owners.
 //!
-//! A held force changes momentum and total energy together. Its work is the
-//! represented impulse times the midpoint velocity, so the exact source flow
+//! A mechanical source changes momentum and total energy together. Its work is
+//! the represented impulse times the midpoint velocity, so the exact source flow
 //! changes kinetic energy without introducing a heat or chemical-energy source.
+//! Linear histories integrate over the original owner's actual physical clock,
+//! including shortened retries and the two distinct source half-intervals.
 
-/// An axial source held over the complete attempted interval, in cell order.
+/// An axial source in original cell order. The first four variants are held;
+/// ramps specify a linear history at an absolute reference time in seconds.
+/// A ramp is evaluated on each actual source interval, never on the originally
+/// requested duration. It remains prescribed, independent of the gas state.
 #[derive(Clone, Copy, Debug)]
 pub enum BodyForce<'a> {
     /// Uniform acceleration [m/s²], multiplied by each source stage's density.
@@ -15,9 +20,45 @@ pub enum BodyForce<'a> {
     UniformForceDensity(f64),
     /// One force per volume [N/m³] per original finite-volume cell.
     ForceDensity(&'a [f64]),
+    /// Uniform acceleration `acceleration + jerk * (t - reference_time)`.
+    UniformAccelerationRamp {
+        /// Absolute flow-clock reference [s].
+        reference_time: f64,
+        /// Acceleration at the reference time [m/s²].
+        acceleration: f64,
+        /// Constant rate of change of acceleration [m/s³].
+        jerk: f64,
+    },
+    /// One linear acceleration history per original finite-volume cell.
+    AccelerationRamp {
+        /// Absolute flow-clock reference [s].
+        reference_time: f64,
+        /// Acceleration at the reference time [m/s²], in cell order.
+        acceleration: &'a [f64],
+        /// Constant rate of change [m/s³], in the same cell order.
+        jerk: &'a [f64],
+    },
+    /// Uniform force density `force_density + rate * (t - reference_time)`.
+    UniformForceDensityRamp {
+        /// Absolute flow-clock reference [s].
+        reference_time: f64,
+        /// Force per volume at the reference time [N/m³].
+        force_density: f64,
+        /// Constant rate of change of force per volume [N/(m³ s)].
+        rate: f64,
+    },
+    /// One linear force-density history per original finite-volume cell.
+    ForceDensityRamp {
+        /// Absolute flow-clock reference [s].
+        reference_time: f64,
+        /// Force per volume at the reference time [N/m³], in cell order.
+        force_density: &'a [f64],
+        /// Constant rate of change [N/(m³ s)], in the same cell order.
+        rate: &'a [f64],
+    },
 }
 
-/// Physical admission for the states entering and leaving each force substep.
+/// Physical admission at source endpoints and any interior velocity extremum.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForceControl {
     /// Positive finite bound on axial speed divided by the original sound speed.
@@ -60,10 +101,33 @@ impl Failure for crate::multicomponent::Error {
 }
 
 impl BodyForce<'_> {
-    fn value(self, cell: usize) -> f64 {
+    // (reference value, time derivative, reference time, is acceleration).
+    fn coefficients(self, cell: usize) -> (f64, f64, f64, bool) {
         match self {
-            Self::UniformAcceleration(value) | Self::UniformForceDensity(value) => value,
-            Self::Acceleration(values) | Self::ForceDensity(values) => values[cell],
+            Self::UniformAcceleration(value) => (value, 0.0, 0.0, true),
+            Self::Acceleration(values) => (values[cell], 0.0, 0.0, true),
+            Self::UniformForceDensity(value) => (value, 0.0, 0.0, false),
+            Self::ForceDensity(values) => (values[cell], 0.0, 0.0, false),
+            Self::UniformAccelerationRamp {
+                reference_time,
+                acceleration,
+                jerk,
+            } => (acceleration, jerk, reference_time, true),
+            Self::AccelerationRamp {
+                reference_time,
+                acceleration,
+                jerk,
+            } => (acceleration[cell], jerk[cell], reference_time, true),
+            Self::UniformForceDensityRamp {
+                reference_time,
+                force_density,
+                rate,
+            } => (force_density, rate, reference_time, false),
+            Self::ForceDensityRamp {
+                reference_time,
+                force_density,
+                rate,
+            } => (force_density[cell], rate[cell], reference_time, false),
         }
     }
 
@@ -75,14 +139,46 @@ impl BodyForce<'_> {
         if cancelled() {
             return Err(E::cancelled());
         }
-        let values = match self {
+        let (values, rates) = match self {
             Self::UniformAcceleration(value) | Self::UniformForceDensity(value) => {
                 if !value.is_finite() {
                     return Err(E::invalid("body force must be finite"));
                 }
                 return Ok(value != 0.0);
             }
-            Self::Acceleration(values) | Self::ForceDensity(values) => values,
+            Self::Acceleration(values) | Self::ForceDensity(values) => (values, None),
+            Self::UniformAccelerationRamp {
+                reference_time,
+                acceleration: value,
+                jerk: rate,
+            }
+            | Self::UniformForceDensityRamp {
+                reference_time,
+                force_density: value,
+                rate,
+            } => {
+                if ![reference_time, value, rate].iter().all(|x| x.is_finite()) {
+                    return Err(E::invalid("body-force history must be finite"));
+                }
+                return Ok(value != 0.0 || rate != 0.0);
+            }
+            Self::AccelerationRamp {
+                reference_time,
+                acceleration: values,
+                jerk: rates,
+            }
+            | Self::ForceDensityRamp {
+                reference_time,
+                force_density: values,
+                rate: rates,
+            } => {
+                if !reference_time.is_finite() || rates.len() != cells {
+                    return Err(E::invalid(
+                        "body-force history requires a finite clock and one rate per original cell",
+                    ));
+                }
+                (values, Some(rates))
+            }
         };
         if values.len() != cells {
             return Err(E::invalid(
@@ -94,10 +190,11 @@ impl BodyForce<'_> {
             if cell % 64 == 0 && cancelled() {
                 return Err(E::cancelled());
             }
-            if !value.is_finite() {
+            let rate = rates.map_or(0.0, |rates| rates[cell]);
+            if !value.is_finite() || !rate.is_finite() {
                 return Err(E::invalid("body force must be finite"));
             }
-            active |= value != 0.0;
+            active |= value != 0.0 || rate != 0.0;
         }
         Ok(active)
     }
@@ -135,28 +232,85 @@ impl ForceControl {
 pub(crate) struct Kick {
     pub(crate) momentum: f64,
     pub(crate) energy: f64,
+    /// Represented momentum and energy at a strict interior velocity extremum.
+    /// Owners decode this through their original EOS and apply Mach/CFL gates.
+    pub(crate) interior: Option<[f64; 2]>,
     impulse: f64,
     work: f64,
     energy_residual: f64,
 }
 
-/// Exact held-source map before floating-point representation. Use the actual
-/// momentum increment: a nominal impulse that rounds away cannot become heat.
+/// Exact prescribed-source map before floating-point representation. Use the
+/// actual momentum increment: an impulse that rounds away cannot become heat.
+/// Time is [accepted step start, offset within that step, source duration].
+/// Keeping the offset separate avoids losing a half-step at a large clock.
 pub(crate) fn kick<E: Failure>(
     source: BodyForce<'_>,
     cell: usize,
     density: f64,
     momentum: f64,
     energy: f64,
-    duration: f64,
+    [time, offset, duration]: [f64; 3],
 ) -> Result<Kick, E> {
-    let value = source.value(cell);
-    let authored_impulse = match source {
-        BodyForce::UniformAcceleration(_) | BodyForce::Acceleration(_) => {
-            (duration * value) * density
-        }
-        BodyForce::UniformForceDensity(_) | BodyForce::ForceDensity(_) => duration * value,
+    if !density.is_finite()
+        || density <= 0.0
+        || !time.is_finite()
+        || !offset.is_finite()
+        || offset < 0.0
+        || !duration.is_finite()
+        || duration <= 0.0
+    {
+        return Err(E::invalid("unrepresentable body-force interval or density"));
+    }
+    let (reference, rate, reference_time, acceleration) = source.coefficients(cell);
+    // Retain the held-source arithmetic exactly, including zero-rate histories.
+    let value = if rate == 0.0 {
+        reference
+    } else {
+        rate.mul_add(offset, rate.mul_add(time - reference_time, reference))
     };
+    let mean = if rate == 0.0 {
+        value
+    } else {
+        rate.mul_add(0.5 * duration, value)
+    };
+    let end = if rate == 0.0 {
+        value
+    } else {
+        rate.mul_add(duration, value)
+    };
+    if ![value, mean, end].iter().all(|x| x.is_finite()) {
+        return Err(E::invalid("unrepresentable body-force history"));
+    }
+    let integral = duration * mean;
+    let authored_impulse = if acceleration {
+        integral * density
+    } else {
+        integral
+    };
+    let mut result = represented::<E>(density, momentum, energy, authored_impulse)?;
+    if rate != 0.0 {
+        let extremum_time = -value / rate;
+        if extremum_time > 0.0 && extremum_time < duration {
+            let integral = (0.5 * value) * extremum_time;
+            let impulse = if acceleration {
+                integral * density
+            } else {
+                integral
+            };
+            let interior = represented::<E>(density, momentum, energy, impulse)?;
+            result.interior = Some([interior.momentum, interior.energy]);
+        }
+    }
+    Ok(result)
+}
+
+fn represented<E: Failure>(
+    density: f64,
+    momentum: f64,
+    energy: f64,
+    authored_impulse: f64,
+) -> Result<Kick, E> {
     let next = if authored_impulse == 0.0 {
         momentum
     } else {
@@ -168,27 +322,24 @@ pub(crate) fn kick<E: Failure>(
     let work = impulse * midpoint;
     let final_energy = if work == 0.0 { energy } else { energy + work };
     let energy_residual = (final_energy - energy) - work;
-    if !density.is_finite()
-        || density <= 0.0
-        || !duration.is_finite()
-        || duration <= 0.0
-        || ![
-            authored_impulse,
-            next,
-            impulse,
-            midpoint,
-            work,
-            final_energy,
-            energy_residual,
-        ]
-        .iter()
-        .all(|x| x.is_finite())
+    if ![
+        authored_impulse,
+        next,
+        impulse,
+        midpoint,
+        work,
+        final_energy,
+        energy_residual,
+    ]
+    .iter()
+    .all(|x| x.is_finite())
     {
         return Err(E::invalid("unrepresentable body-force impulse or work"));
     }
     Ok(Kick {
         momentum: next,
         energy: final_energy,
+        interior: None,
         impulse,
         work,
         energy_residual,

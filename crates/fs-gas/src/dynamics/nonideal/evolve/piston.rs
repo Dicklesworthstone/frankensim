@@ -200,6 +200,7 @@ impl RealGasEuler1d {
             let mut wave_failure = false;
             let result = (|| {
                 let mut body_exchange = Accumulator::default();
+                let mut source_cfl = 0.0_f64;
                 if walls.is_some() || force.is_some() {
                     let source = self
                         .force_work
@@ -212,18 +213,32 @@ impl RealGasEuler1d {
                     }
                     if let Some((body, force_controls)) = force {
                         for (i, state) in source.states.iter_mut().enumerate() {
-                            (*state, source.primitive[i]) = forcing::update(
+                            let interior;
+                            (*state, source.primitive[i], interior) = forcing::update(
                                 &self.gas,
                                 *state,
                                 source.primitive[i],
                                 body,
                                 force_controls,
                                 i,
-                                0.5 * dt,
+                                [self.time, 0.0, 0.5 * dt],
                                 self.mesh.volumes()[i],
                                 &mut body_exchange,
                                 &mut cancelled,
                             )?;
+                            if let Some(peak) = interior {
+                                // The reciprocal wall root may choose any speed in
+                                // this original bracket. Bound its entire family.
+                                let relative = peak.velocity.abs()
+                                    .max((peak.velocity - lo).abs())
+                                    .max((peak.velocity - hi).abs());
+                                let local = (relative + peak.sound_speed) * area / self.mesh.volumes()[i];
+                                if !positive(local) {
+                                    return Err(PistonError::Invalid("unrepresentable source-interior CFL"));
+                                }
+                                cfl_gate(local * dt, gas_controls.cfl)?;
+                                source_cfl = source_cfl.max(local * dt);
+                            }
                         }
                     }
                 }
@@ -309,20 +324,30 @@ impl RealGasEuler1d {
                 };
                 if let Some((body, force_controls)) = force {
                     for (i, state) in self.work.candidate.iter_mut().enumerate() {
-                        (*state, self.work.candidate_primitive[i]) = forcing::update(
+                        let interior;
+                        (*state, self.work.candidate_primitive[i], interior) = forcing::update(
                             &self.gas,
                             *state,
                             self.work.candidate_primitive[i],
                             body,
                             force_controls,
                             i,
-                            0.5 * dt,
+                            [self.time, 0.5 * dt, 0.5 * dt],
                             moving.mesh.volumes()[i],
                             &mut body_exchange,
                             &mut cancelled,
                         )?;
+                        if let Some(peak) = interior {
+                            let local = moving.relative_signal_rate(&moving.mesh, i, peak.velocity, peak.sound_speed);
+                            if !positive(local) {
+                                return Err(PistonError::Invalid("unrepresentable source-interior CFL"));
+                            }
+                            cfl_gate(local * dt, gas_controls.cfl)?;
+                            source_cfl = source_cfl.max(local * dt);
+                        }
                     }
                 }
+                step.piston.gas.maximum_cfl = step.piston.gas.maximum_cfl.max(source_cfl);
                 let thermal = if first.is_some() || force.is_some() {
                     for (i, p) in self.work.candidate_primitive.iter().enumerate() {
                         poll(&mut cancelled)?;
