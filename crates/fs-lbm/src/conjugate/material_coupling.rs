@@ -7,6 +7,14 @@
 /// Source-backed electrical interfaces in the shared temperature feedback loop.
 pub mod interfaces;
 
+#[cfg(feature = "enthalpy-coupling")]
+mod caloric;
+#[cfg(feature = "enthalpy-coupling")]
+pub use caloric::{
+    CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalStep,
+    advance_caloric_tensor_electrothermal,
+};
+
 use fs_exec::CancelGate;
 
 use super::{

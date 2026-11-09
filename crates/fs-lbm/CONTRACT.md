@@ -4239,3 +4239,48 @@ equal-and-opposite dilatation, actual open-boundary expansion/contraction,
 species transport, momentum transport and incompatible sealed net expansion.
 These tests are authored and syntax-parsed; native compilation and execution
 are unavailable in this environment.
+
+## Spatial current feedback on original caloric storage
+
+`advance_caloric_tensor_electrothermal` connects the original per-cell
+electrical/contact solve to the native tensor-caloric backward-Euler owner.
+The resistivity callback receives occupancy, original specific energy and
+temperature, allowing electrical response to follow phase fraction while
+temperature remains fixed on a latent plateau. No new current or thermal
+discretization, apparent heat capacity or fitted phase curve is introduced.
+
+Every coupling proposal starts from the same physical opening masses and
+energies. Only its proposed Joule sources change. The original conductivity
+tensors, physical face traces, contacts, reservoirs and caloric inverse remain
+with the native heat owner. A discarded coupling pass adds no physical time or
+heat. Endpoint current is reused as the next source estimate, requiring one
+more electrical solve than the number of thermal passes.
+
+`CaloricElectrothermalConfig` bounds coupling passes and retains native
+per-solve work limits. Acceptance compares energy changes scaled by increments
+from the opening state, local Joule-power changes, and an absolute joule
+allowance. The allowance includes noncancelling local source discrepancies,
+authored/Joule source-combination and reduction rounding, applied/endpoint
+electrical work versus deposited heat, and native thermal closure. Existing
+double-double arithmetic supports these accounting reductions.
+
+`CaloricElectrothermalStep` distinguishes the electrical field actually
+applied from the field refreshed at the accepted thermal endpoint. The latter
+deposits no additional heat. Applied Joule heat on prescribed-energy cells is
+reported as `thermostat_joule_energy_j`: an equal source and immediate
+thermostat-removal pair omitted by the original native thermal ledger. It is
+already included in total applied Joule energy. Free-cell Joule heat is already
+in the native source account; neither channel is deposited again.
+
+This is stationary, fixed-mass DC coupling with fixed electrode/contact data
+and first-order physical time stepping. The bounded source iteration may
+refuse strong feedback that does not converge. It adds no expansion work,
+advection, chemistry or electrical energy storage. A source, work, energy or
+cancellation refusal returns no partial interval.
+
+G1/G3/G4 regressions cover current-dependent latent energy at constant
+temperature under an energy-datum shift, spatial single-phase conduction
+against a three-cell energy system, contact heat partition with a prescribed
+electrode, and exhausted/late-refused coupling. The changed Rust sources are
+syntax-parsed and independent scalar references checked; native compilation
+and test execution are unavailable in this environment.

@@ -144,6 +144,11 @@ pub use flow::{
 };
 pub(crate) mod krylov;
 pub mod material_coupling;
+#[cfg(feature = "enthalpy-coupling")]
+pub use material_coupling::{
+    CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalStep,
+    advance_caloric_tensor_electrothermal,
+};
 mod natural;
 mod radiation;
 pub(crate) use radiation::Radiators;
