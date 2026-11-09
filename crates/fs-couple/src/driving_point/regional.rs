@@ -19,8 +19,8 @@ pub mod material_wall;
 mod baked;
 
 use super::{
-    DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
-    characteristic_line_response_with_poles, duct_reflectance, impedance_reflectance,
+    DrivingPointError, LineLadder, LineRealization, PoleState, bulk_delay_pole_state,
+    characteristic_line_response_with_poles_ladder, duct_reflectance, impedance_reflectance,
     sealed_volume_compliance_gain,
 };
 use fs_duct::{
@@ -58,6 +58,8 @@ pub struct RegionalDuct {
     continuous: Option<fs_duct::profile::gas_field::GasFieldDuct>,
     /// Open holes (first `n` in bore order) whose orifice law is solved together; `1` = the first hole only.
     orifice_ports: usize,
+    /// The characteristic line's convergence ladder when a card declares one (`line_ladder TAIL_TOL MAX_TAPS`); `None` = the default ladder.
+    line_ladder: Option<LineLadder>,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -132,7 +134,15 @@ impl RegionalDuct {
             return Err(invalid("regional travel time must be positive and finite"));
         }
         Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None,
-            inlet_gas_override: None, continuous: None, orifice_ports: 1 })
+            inlet_gas_override: None, continuous: None, orifice_ports: 1, line_ladder: None })
+    }
+
+    /// Declare the convergence ladder of the characteristic line (card row `line_ladder TAIL_TOL MAX_TAPS`). The default ladder (`None`) is unchanged.
+    /// The ladder's own bounds are checked when the line is realized.
+    #[must_use]
+    pub fn with_line_ladder(mut self, ladder: LineLadder) -> Self {
+        self.line_ladder = Some(ladder);
+        self
     }
 
     /// Solve the quasi-steady orifice law of the first `ports` open holes together (card row
@@ -431,7 +441,7 @@ impl RegionalDuct {
             }
             pole_states.push(bulk_delay_pole_state(geo_delay));
             let zc = self.inlet_impedance();
-            return characteristic_line_response_with_poles(
+            return characteristic_line_response_with_poles_ladder(
                 geo_delay,
                 termination,
                 sample_rate_hz,
@@ -439,6 +449,7 @@ impl RegionalDuct {
                 zc,
                 n_fft_override,
                 pole_states,
+                self.line_ladder.as_ref(),
                 |omega| {
                     duct_reflectance(&r.duct, &r.gas, omega, LossModel::Bessel, termination, pin, zc)
                 },
@@ -450,7 +461,7 @@ impl RegionalDuct {
         let zc = self.inlet_impedance();
         // The continuous operator supplies R directly through its stable local
         // two-ports. The retained piecewise path still composes through Z.
-        characteristic_line_response_with_poles(
+        characteristic_line_response_with_poles_ladder(
             geo_delay,
             termination,
             sample_rate_hz,
@@ -458,6 +469,7 @@ impl RegionalDuct {
             zc,
             n_fft_override,
             pole_states,
+            self.line_ladder.as_ref(),
             |omega| {
                 self.reflection_with_wall(omega, LossModel::Bessel, termination, wall)
             },

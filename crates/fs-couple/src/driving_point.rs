@@ -1047,6 +1047,23 @@ pub(crate) fn characteristic_line_response_with_poles(
     zc: f64,
     n_fft_override: Option<usize>,
     pole_states: Vec<PoleState>,
+    reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    characteristic_line_response_with_poles_ladder(geo_delay, termination, sample_rate_hz, n, zc, n_fft_override, pole_states, None, reflectance_at)
+}
+
+/// [`characteristic_line_response_with_poles`] with the convergence ladder a caller declares (`None` = [`LineLadder::default`], the bits of the function above).
+/// A fixed `n_fft_override` does not use the ladder.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn characteristic_line_response_with_poles_ladder(
+    geo_delay: f64,
+    termination: impl Into<LineDc>,
+    sample_rate_hz: u32,
+    n: usize,
+    zc: f64,
+    n_fft_override: Option<usize>,
+    pole_states: Vec<PoleState>,
+    ladder: Option<&LineLadder>,
     mut reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
     let termination = termination.into();
@@ -1068,7 +1085,7 @@ pub(crate) fn characteristic_line_response_with_poles(
             sample_rate_hz,
             zc,
             pole_states,
-            &LineLadder::default(),
+            ladder.unwrap_or(&LineLadder::default()),
             reflectance_at,
         );
     };

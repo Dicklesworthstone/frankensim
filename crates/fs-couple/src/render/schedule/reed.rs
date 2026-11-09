@@ -48,6 +48,10 @@
 //! see `ReedBoreVoice::set_constriction_noise`). It is an extrapolation in size, speed and shape, from dampers and
 //! plates in a 300 mm duct to a reed slit; the printed law fixes neither the jet speed nor the pressure drop to use
 //! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
+//! Optional `line_ladder TAIL_TOL MAX_TAPS` after those rows, before `compile_limits`, declares the convergence ladder of the characteristic line (the reed's
+//! reflectance as a finite impulse response): `TAIL_TOL` the relative tail energy in the last quarter of the window, positive and below 1 (default 1e-10), `MAX_TAPS` the ceiling,
+//! a power of two in [256, 131072] (default 65536). A bore that rings longer than the ceiling refuses by name with the measured tail energy and peak shift of
+//! the last rung; the row raises the ceiling or declares the tolerance, it is never chosen by the count. A card without the row is unchanged to the bit. A molecular bore refuses it.
 //! Optional `open_hole_orifice N` (N = 1..=16; N above the open-hole count uses all of them) after those rows, before `compile_limits`, solves the quasi-steady
 //! sharp-edged orifice law of the first N open tone holes TOGETHER, coupled through the bore, instead of the first hole
 //! alone. N = 1, or no row, is the unchanged first-hole shunt. N above 1 needs a constant-medium bore or a
@@ -989,6 +993,26 @@ impl ReedPerformance {
             }
             ports
         } else { 1 };
+        // `line_ladder TAIL_TOL MAX_TAPS`: the convergence ladder of the characteristic line (default: tail energy 1e-10, ceiling 65536 taps; the peak-shift tolerance stays at its default). Both fields required, no default,
+        // once only, after the hole rows and before `compile_limits`; the ceiling a power of two in [256, 131072] (the code's own bounds).
+        let line_ladder = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("line_ladder") {
+            let mut row = r.row("line_ladder")?;
+            let line = row.line;
+            let tail_tol = row.positive()?;
+            let max_taps: usize = row.parse()?;
+            row.finish()?;
+            if molecular.is_some() {
+                return Err(bad(line, "line_ladder applies to a regional bore, not a molecular one"));
+            }
+            if !(tail_tol.is_finite() && tail_tol < 1.0) {
+                return Err(bad(line, "line_ladder needs a finite tail-energy tolerance below 1"));
+            }
+            if !(256..=131_072).contains(&max_taps) || !max_taps.is_power_of_two() {
+                return Err(bad(line, "line_ladder needs a tap ceiling that is a power of two in [256, 131072]"));
+            }
+            Some(crate::driving_point::LineLadder { tail_tol, max_taps, ..crate::driving_point::LineLadder::default() })
+        } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -1143,6 +1167,10 @@ impl ReedPerformance {
             let regional = match open_hole_interaction {
                 Some(interaction) => regional.with_open_hole_interaction(interaction)
                     .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?,
+                None => regional,
+            };
+            let regional = match line_ladder {
+                Some(ladder) => regional.with_line_ladder(ladder),
                 None => regional,
             };
             let regional = if printed_hole_lengths {

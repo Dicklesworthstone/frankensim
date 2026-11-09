@@ -70,7 +70,7 @@ impl RegionalDuct {
         let mouth = table
             .validate_mouth(length, radius, self.exterior_gas())
             .map_err(DrivingPointError::Duct)?;
-        let band_n = n_fft.map_or(LineLadder::default().max_taps, |n| {
+        let band_n = n_fft.map_or(self.line_ladder.unwrap_or_default().max_taps, |n| {
             n.clamp(256, 8192).next_power_of_two()
         });
         super::super::baked::validate_band(table, rate, band_n)?;
@@ -95,7 +95,7 @@ impl RegionalDuct {
                 self.inlet_impedance(),
                 pin,
                 n_fft,
-                None,
+                self.line_ladder.as_ref(),
             );
         }
         let delay = 2.0 * self.one_way_time_s * f64::from(rate);
@@ -103,7 +103,7 @@ impl RegionalDuct {
             .loaded_reflection(1.0e-3, C64::new(mouth.dc_impedance, 0.0), wall)
             .map_err(DrivingPointError::Duct)?
             .re;
-        characteristic_line_response_with_poles(
+        characteristic_line_response_with_poles_ladder(
             delay,
             LineDc::Explicit(dc),
             rate,
@@ -111,6 +111,7 @@ impl RegionalDuct {
             self.inlet_impedance(),
             n_fft,
             vec![bulk_delay_pole_state(delay)],
+            self.line_ladder.as_ref(),
             |omega| {
                 let r = self.loaded_reflection(omega, table.z_at(omega)?, wall)?;
                 if !r.re.is_finite() || !r.im.is_finite() || r.abs() > 1.0 + PASSIVITY_TOL {

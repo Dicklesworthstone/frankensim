@@ -161,6 +161,20 @@ pub enum AcousticRealizeError {
         /// Which check failed.
         what: &'static str,
     },
+    /// The reed's characteristic-line convergence ladder reached its tap ceiling before it converged: the measured figures of the last rung, so the
+    /// refusal says how far from converged it stopped (a card may raise the ceiling or declare the tolerance with its `line_ladder` row).
+    ReedLadder {
+        /// Ceiling tap count reached.
+        max_taps: usize,
+        /// Measured relative tail energy in the last quarter of the window at the ceiling rung.
+        tail_energy: f64,
+        /// Required tail energy tolerance.
+        tail_tol: f64,
+        /// Measured resonance peak shift [cents] at the ceiling rung.
+        peak_shift_cents: f64,
+        /// Required peak shift tolerance [cents].
+        peak_tol_cents: f64,
+    },
     /// A fixed supply passage is so heavy against the moving reed that the three-level coupling (the passage steps
     /// on the reed's step-mean flow) leaves a parasitic alternating mode that decays too slowly. The mode's root is
     /// -mu/(mu+2) per step; it must fall to the declared decay within one period of the fastest admitted mode.
@@ -226,6 +240,11 @@ impl core::fmt::Display for AcousticRealizeError {
                  cells: {min_admissible_cells})"
             ),
             Self::Reed { what } => write!(f, "FS-COUPLE-REED: {what}"),
+            Self::ReedLadder { max_taps, tail_energy, tail_tol, peak_shift_cents, peak_tol_cents } => write!(
+                f,
+                "FS-COUPLE-REED: characteristic line ladder reached max_taps={max_taps} before convergence: tail_energy={tail_energy:.3e} (tol={tail_tol:.3e}), \
+                 peak_shift_cents={peak_shift_cents:.4} (tol={peak_tol_cents:.4})"
+            ),
             Self::SupplyParasiticRoot { mass_ratio, root, maximum_root } => write!(
                 f,
                 "FS-COUPLE-SUPPLY-PARASITIC-ROOT: supply channel added-mass ratio {mass_ratio:.4} gives a \
@@ -1444,11 +1463,9 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
         crate::driving_point::DrivingPointError::Invalid { what } => {
             AcousticRealizeError::Reed { what }
         }
-        crate::driving_point::DrivingPointError::LadderUnconverged { .. } => {
-            AcousticRealizeError::Reed {
-                what: "characteristic line ladder reached max_taps ceiling before convergence",
-            }
-        }
+        crate::driving_point::DrivingPointError::LadderUnconverged {
+            max_taps, tail_energy, tail_tol, peak_shift_cents, peak_tol_cents,
+        } => AcousticRealizeError::ReedLadder { max_taps, tail_energy, tail_tol, peak_shift_cents, peak_tol_cents },
         crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
         crate::driving_point::DrivingPointError::Material(e) => AcousticRealizeError::Ambient(e.to_string()),
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {

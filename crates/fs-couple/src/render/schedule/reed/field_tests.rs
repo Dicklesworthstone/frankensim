@@ -285,3 +285,32 @@ fn the_constriction_noise_row_is_validated_ordered_and_once_only() {
     // Once only.
     assert!(continuous_load(&with_row(&declared, "constriction_noise 8 0.0015"), 280.0).is_err());
 }
+
+// ---- `line_ladder TAIL_TOL MAX_TAPS` (the characteristic line's convergence ladder; MB 14569, route A) ----
+#[test]
+fn the_line_ladder_row_is_validated_and_the_declared_default_changes_no_bit() {
+    let base = source();
+    for bad in [
+        "line_ladder 0 65536", "line_ladder -1e-10 65536", "line_ladder nan 65536", "line_ladder inf 65536", "line_ladder 1 65536",
+        "line_ladder 1e-10 1000", "line_ladder 1e-10 128", "line_ladder 1e-10 262144", "line_ladder 1e-10 0", "line_ladder 1e-10",
+        "line_ladder", "line_ladder 1e-10 65536 3",
+    ] {
+        assert!(continuous_load(&with_row(&base, bad), 280.0).is_err(), "{bad}");
+    }
+    // The ladder's default declared is the default: the same pressure, bit for bit, as no row.
+    let plain = pressure_of(&base);
+    let declared = pressure_of(&with_row(&base, "line_ladder 1e-10 65536"));
+    assert_eq!(plain.len(), declared.len());
+    assert!(plain.iter().zip(&declared).all(|(a, b)| a.to_bits() == b.to_bits()), "line_ladder 1e-10 65536 is the default ladder");
+}
+
+#[test]
+fn the_line_ladder_row_reaches_the_ladder_and_the_refusal_carries_its_figures() {
+    // A tail tolerance no finite window meets, on a 512-tap ceiling: the ladder stops at the card's ceiling and the refusal names the card's tolerance and the measured
+    // figures of the last rung (the text used to say only that the ceiling was reached).
+    let text = with_row(&source(), "line_ladder 1e-300 512");
+    let error = continuous_load(&text, 280.0).err().expect("an unreachable tolerance must refuse").to_string();
+    for needle in ["max_taps=512", "tail_energy=", "(tol=1.000e-300)", "peak_shift_cents="] {
+        assert!(error.contains(needle), "{needle} not in {error}");
+    }
+}
