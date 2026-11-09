@@ -8,6 +8,63 @@ struct Substep<const B: usize> {
     outgoing: Vec<[f64; B]>,
 }
 
+/// Optional attribution of actual channel events; ordinary external-only
+/// callers allocate none of these additional accumulators.
+pub(super) struct SourceAttribution {
+    pub external_paths: usize,
+    pub external_absorbed: Vec<[Sum; 2]>,
+    pub recycled_absorbed: Vec<[Sum; 2]>,
+    pub external_events: Vec<[Sum; 2]>,
+    pub recycled_events: Vec<[Sum; 2]>,
+    pub external_relaxation: Vec<[Sum; 2]>,
+    pub recycled_relaxation: Vec<[Sum; 2]>,
+    pub external_passive: Vec<Sum>,
+    pub recycled_passive: Vec<Sum>,
+}
+
+impl SourceAttribution {
+    pub fn new(cells: usize, external_paths: usize) -> Self {
+        Self {
+            external_paths,
+            external_absorbed: vec![[Sum::default(); 2]; cells],
+            recycled_absorbed: vec![[Sum::default(); 2]; cells],
+            external_events: vec![[Sum::default(); 2]; cells],
+            recycled_events: vec![[Sum::default(); 2]; cells],
+            external_relaxation: vec![[Sum::default(); 2]; cells],
+            recycled_relaxation: vec![[Sum::default(); 2]; cells],
+            external_passive: vec![Sum::default(); cells],
+            recycled_passive: vec![Sum::default(); cells],
+        }
+    }
+
+    pub fn add_packet(
+        &mut self,
+        index: usize,
+        beam: usize,
+        packet: cell::ChannelStep,
+        energy: f64,
+        state_energies: [f64; 2],
+    ) -> Result<(), SingletTripletError> {
+        let (absorbed, events, relaxation, passive) = if beam < self.external_paths {
+            (&mut self.external_absorbed[index], &mut self.external_events[index],
+                &mut self.external_relaxation[index], &mut self.external_passive[index])
+        } else {
+            (&mut self.recycled_absorbed[index], &mut self.recycled_events[index],
+                &mut self.recycled_relaxation[index], &mut self.recycled_passive[index])
+        };
+        for target in 0..2 {
+            let count = packet.absorbed_by_state[target];
+            events[target].add(count)?;
+            absorbed[target].add(positive_product(count, energy, "attributed pump energy")?)?;
+            if count > 0.0 {
+                relaxation[target].add(positive_product(count, energy - state_energies[target], "attributed pump relaxation")?)?;
+            }
+        }
+        passive.add(positive_product(packet.passive, energy, "attributed passive heat")?)?;
+        Ok(())
+    }
+}
+
 impl<const B: usize> SaturablePumpBeams<B> {
     fn channel(&self, visit: Visit, lane: usize, incident_rate: f64) -> cell::Channel {
         let path = &self.paths[visit.beam];
@@ -164,6 +221,26 @@ impl<const B: usize> SaturablePumpBeams<B> {
         coupling_iterations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<PumpBeamsStep<B>>, SingletTripletError> {
+        self.uniform_attributed(
+            initial, incident, duration, substeps, nonlinear, limits,
+            evaluations, coupling_iterations, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn uniform_attributed(
+        &self,
+        initial: &[[f64; 3]],
+        incident: &[[f64; B]],
+        duration: f64,
+        substeps: usize,
+        nonlinear: bool,
+        limits: PumpBeamsLimits,
+        evaluations: &mut usize,
+        coupling_iterations: &mut usize,
+        mut attribution: Option<&mut SourceAttribution>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<PumpBeamsStep<B>>, SingletTripletError> {
         let mut populations = initial.to_vec();
         let mut totals: Vec<_> = self.models.iter().map(|_| KineticTotals::new()).collect();
         let mut passive = vec![Sum::default(); self.models.len()];
@@ -191,6 +268,11 @@ impl<const B: usize> SaturablePumpBeams<B> {
                     for lane in 0..B {
                         let packet = trial.channels[ordinal * B + lane];
                         beams[visit.beam].add_packet(lane, packet)?;
+                        if let Some(split) = attribution.as_deref_mut() {
+                            let energy = self.paths[visit.beam].photon_energies_j[lane];
+                            split.add_packet(index, visit.beam, packet, energy,
+                                self.models[index].excitation_energies_j())?;
+                        }
                     }
                 }
             }

@@ -4244,6 +4244,59 @@ focused native tests passed against the production math, reaction and thermal
 sources. Renderer execution remains a separate gate.
 
 
+## Finite-ground spectral photon recycling
+
+`pump_beams::recycling::SaturablePhotonRecycling` couples authored emitted
+paths and external beams to the same original ground/singlet/triplet
+inventories. Spectral/directional photon fractions sum to one per emitting
+state; they are admitted without normalization. Every photon must be
+affordable by its source state and each active receiving branch. Source
+Stokes heat, destination relaxation, passive heat, escaped photons and
+declared unresolved photons remain distinct. Photon flight time is neglected;
+paths are ballistic, cell-averaged inputs. Geometry/spectral quadrature and
+measured material validity remain caller responsibilities.
+
+Each nonstationary stage solves mean radiative source rates together with
+the original common-ground optical closure. Sources are bounded by radiative
+rate times the original cell inventory. Safeguarded inverse-Broyden updates
+accelerate return modes; rejected trials retain their aggregate kinetic work.
+The dense accelerator admits at most the existing reaction-node bound of
+active source states. Optional authored triplet-pair kinetics use the same
+positive midpoint schedule. Temporal checks include physical event energies,
+every attributed heat channel and endpoint radiative power, including when
+no pair law is present.
+
+A stationary candidate evaluates physical event flows at the original
+populations and cancels same-state self-return before forming net rates.
+It checks each state's integrated mismatch against the original
+initial/external-energy allowance. Accepted constant histories split the
+original radiative event counts consistently through the photon paths.
+This avoids subtracting large self-return counts to recover a small escape
+rate. It is numerical stationary admission, not an equilibrium certificate.
+The final physical energy audit still applies.
+
+Returned external/recycled pump events, photon energies and relaxation heat
+are accumulated directly from actual channel events. Internal emitted and
+absorbed traffic is excluded from external input and from the global
+energy-balance scale. No population is clipped, no coefficient inferred and
+no residual deposited as heat. Refusal preserves caller state. Scattering,
+reflection, stimulated emission, excited-state absorption and finite photon
+flight are not introduced by this owner.
+
+Four focused native regression groups passed against the corrected
+production sources: independent exponential-integral self-return decay;
+exact emitted-fluence saturation of a finite second cell with separate
+spectral heat; a near-closed pumped equilibrium retaining 200,000 radiative
+events per emitter in one accepted stationary step; and no-active-return
+parity with cancellation, work refusal and retry. The self-return transient
+used 525 accepted substeps, with a global residual of -7.80e-20 J. The
+stationary residual was 4.14e-25 J. An additional independent recycling/pair
+equilibrium test is authored. Its execution and the combined rerun of the
+twenty-one earlier focused regressions remain unconfirmed after an executor
+outage. The authored source was recovered from the recorded edit patches;
+post-recovery formatting and native execution were unavailable. Renderer
+integration and its native execution remain separate work.
+
 ## Stationary and harmonic prescribed throughflow
 
 The native implicit operating-point and thermal-impedance owners now admit

@@ -14,7 +14,8 @@
 //! common-field residence and each beam's photon balance. Temporal refinement
 //! discards unconverged grids and publishes only a converged finer history.
 //! Phase interference, reflection, scattering, stimulated emission, excited
-//! state absorption and active recycling of emitted light are outside scope.
+//! state absorption are outside scope. Active emitted-light recycling is an
+//! explicit opt-in through [`recycling`].
 
 use super::pump_column::{
     KineticTotals, PumpColumnLimits, Sum, admit_energy, admit_photons, cap, cell, energies,
@@ -373,6 +374,9 @@ mod accounts;
 mod annihilation;
 #[path = "pump_beams/evolution.rs"]
 mod evolution;
+/// Finite-ground absorption of actual emitted photons on the same cell history.
+#[path = "pump_beams/recycling.rs"]
+pub mod recycling;
 #[cfg(test)]
 #[path = "pump_beams/oracles.rs"]
 mod oracles;

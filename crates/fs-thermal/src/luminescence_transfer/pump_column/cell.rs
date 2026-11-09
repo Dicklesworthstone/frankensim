@@ -15,6 +15,8 @@ pub(crate) struct ChannelStep {
     pub incident: f64,
     pub transmitted: f64,
     pub absorbed: f64,
+    /// Original target counts before spectral energy partition.
+    pub absorbed_by_state: [f64; 2],
     pub passive: f64,
     pub transmitted_rate: f64,
     pub residual: f64,
@@ -177,7 +179,7 @@ pub(crate) fn evaluate(
         }
         hazards.push(hazard);
         packets.push(ChannelStep {
-            incident, transmitted, absorbed: 0.0, passive,
+            incident, transmitted, absorbed: 0.0, absorbed_by_state: [0.0; 2], passive,
             transmitted_rate, residual: 0.0,
         });
     }
@@ -209,6 +211,7 @@ pub(crate) fn evaluate(
                 let count = positive_product(
                     kinetics.pump_events[target], weight, "spectral pump events",
                 )?;
+                packet.absorbed_by_state[target] = count;
                 events.add(count)?;
                 pump_energy[target].add(positive_product(
                     count, channel.energy, "spectral pump energy",

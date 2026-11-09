@@ -48,6 +48,16 @@ impl<const B: usize> BeamTotals<B> {
         Ok(())
     }
 
+    pub(super) fn add_transmitted_photons(
+        &mut self,
+        photons: [f64; B],
+    ) -> Result<(), SingletTripletError> {
+        for (sum, value) in self.transmitted.iter_mut().zip(photons) {
+            sum.add(value)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn finish(
         self,
         rates: [f64; B],
@@ -59,6 +69,15 @@ impl<const B: usize> BeamTotals<B> {
         for lane in 0..B {
             incident_photons[lane] = positive_product(rates[lane], duration, "incident photons")?;
         }
+        self.finish_photons(incident_photons, quantum, tolerance)
+    }
+
+    pub(super) fn finish_photons(
+        self,
+        incident_photons: [f64; B],
+        quantum: [f64; B],
+        tolerance: f64,
+    ) -> Result<PumpBeamStep<B>, SingletTripletError> {
         let transmitted_photons = values(self.transmitted)?;
         let absorbed_photons = values(self.absorbed)?;
         let passive_absorbed_photons = values(self.passive)?;
