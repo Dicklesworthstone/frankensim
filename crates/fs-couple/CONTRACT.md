@@ -10182,3 +10182,26 @@ Focused regressions cover local pressure response, post-phase/post-heat EOS
 loading, unpatched interfaces, complete native link coverage and atomic refusal.
 Runtime execution remains unavailable under the session's dependency/resource
 block and subsequent loss of its execution workspace.
+
+
+## Gas transport followed by regional evaporation pressure
+
+`liquid_gas::evaporation::transport::regions` now supplies explicit pressure
+variants for both phase-only and sensible-heat/phase coupling. Original gas
+paths first sample one network snapshot. The transported parcels then feed
+their regional original phase/heat owners, and the resulting local EOS
+pressures load the original native links during exactly one liquid flow step.
+The existing final gas-map driving-force and aggregate absolute conservation
+checks remain the publication gates; a late pressure or network refusal
+discards gas transport and liquid changes together.
+
+These routes reuse the same transport/coupling helper and pressure map as the
+separate native regional pressure API. Pressure receipts begin at the
+post-transport, pre-phase/heat gas state and end at the actually applied state.
+Transported partial enthalpy, sensible heat and carried-vapor energy are each
+accounted once. Fixed external gas volumes, prescribed regional membership,
+first-order splitting and the absence of gas-volume work remain explicit.
+Focused regressions specify original nozzle transport, independent final EOS
+and native velocity, complete-system species/mass/caloric balances, empty-path
+equivalence, late coverage refusal, retry and cancellation. These newly added
+regressions have been reviewed statically but not executed.

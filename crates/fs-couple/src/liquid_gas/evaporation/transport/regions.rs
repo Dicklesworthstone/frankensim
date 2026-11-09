@@ -17,6 +17,7 @@ use crate::liquid_gas::evaporation::{
         regions::{
             self as phase, RegionalLiquidGasCandidate, RegionalLiquidGasHeatSurface,
             RegionalLiquidGasReport, RegionalLiquidGasSurface,
+            pressure::{self as regional_pressure, RegionalGasPressure},
         },
     },
 };
@@ -177,6 +178,106 @@ pub fn advance_liquid_regions_with_gas_transport_and_heat<'s, 'm, 'catalog>(
                 surfaces,
                 phase_controls,
                 heat_controls,
+                gate,
+            )
+        },
+    )
+}
+
+/// Transport the gas network, exchange regional vapor, and apply each final
+/// gas pressure through the original native liquid-gas link pressure owner.
+///
+/// The pressure map must cover every native gas-facing link, including diagonal
+/// links and interfaces without phase patches. Authored phase faces must name
+/// the same regions as that map. Each applied pressure is sampled from the
+/// actual gas after transport and phase exchange, never from the old network
+/// snapshot. All regions share one native mass/enthalpy batch and one flow step.
+///
+/// The original pressure reference and density-excursion gates remain active.
+/// Final transport driving forces are checked after the pressure-loaded native
+/// candidate, so any late refusal discards the complete interval. Gas volumes
+/// remain fixed external control volumes; pressure loading does not add gas
+/// volume work or a total mechanical-plus-thermal energy closure. Refine the
+/// complete first-order split, as for the unpressurized transport route.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_regions_with_gas_transport_and_pressure<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    catalog: &'catalog ThermochemicalGasModel,
+    paths: GasTransportPaths<'_>,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    surfaces: &[RegionalLiquidGasSurface<'_>],
+    transport_controls: GasTransportSolve,
+    phase_controls: DistributedLiquidGasSolve,
+    pressure: RegionalGasPressure<'_>,
+    gate: &CancelGate,
+) -> Result<RegionalGasTransportCandidate<'s, 'm, 'catalog>, Error> {
+    transporting_regions_candidate(
+        liquid,
+        parcels,
+        paths,
+        endpoints,
+        transport_controls,
+        phase_controls,
+        gate,
+        |transported| {
+            regional_pressure::advance_liquid_regions_with_gas_and_pressure(
+                liquid,
+                transported,
+                catalog,
+                surfaces,
+                phase_controls,
+                pressure,
+                gate,
+            )
+        },
+    )
+}
+
+/// Transport gas, exchange reciprocal sensible heat and vapor regionally, then
+/// apply the resulting local gas pressures during exactly one native flow step.
+///
+/// Pressure follows both the original sensible-heat and phase owners. Their
+/// heat and carried-vapor energy enter once; this wrapper introduces no second
+/// heat source or pressure-work debit. Gas and liquid publish together only
+/// after the original native pressure, conservation and final network gates.
+/// Coverage, fixed-volume and split limits are those of
+/// [`advance_liquid_regions_with_gas_transport_and_pressure`].
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_regions_with_gas_transport_and_heat_and_pressure<
+    's,
+    'm,
+    'catalog,
+>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    catalog: &'catalog ThermochemicalGasModel,
+    paths: GasTransportPaths<'_>,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    surfaces: &[RegionalLiquidGasHeatSurface<'_>],
+    transport_controls: GasTransportSolve,
+    phase_controls: DistributedLiquidGasSolve,
+    heat_controls: GasLiquidChamberHeatSolve,
+    pressure: RegionalGasPressure<'_>,
+    gate: &CancelGate,
+) -> Result<RegionalGasTransportCandidate<'s, 'm, 'catalog>, Error> {
+    transporting_regions_candidate(
+        liquid,
+        parcels,
+        paths,
+        endpoints,
+        transport_controls,
+        phase_controls,
+        gate,
+        |transported| {
+            regional_pressure::advance_liquid_regions_with_gas_and_heat_and_pressure(
+                liquid,
+                transported,
+                catalog,
+                surfaces,
+                phase_controls,
+                heat_controls,
+                pressure,
                 gate,
             )
         },
