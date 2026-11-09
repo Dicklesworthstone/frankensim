@@ -99,7 +99,8 @@ fn matrix_response(stack: &RigidBackedLayers<'_>, cosine: f64, load: C64) -> (C6
                     thickness_m,
                 )
             }
-            Layer::Porous { thickness_m, .. } => {
+            Layer::Porous { thickness_m, .. }
+            | Layer::RelaxingPorous { thickness_m, .. } => {
                 let (zc, k) = stack.material_response(i).unwrap().characteristic();
                 let mut kn = (k * k - C64::from_re(kt * kt)).sqrt();
                 if kn.im > 0.0 {

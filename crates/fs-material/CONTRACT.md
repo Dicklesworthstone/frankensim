@@ -15058,6 +15058,32 @@ up to 64 ordered rigid-backed layers. Every porous response retains the original
 frequency support and fluid-dependent JCA(L) density/bulk law. Lossless gaps use
 that same fluid's density and sound speed; no new attenuation preset is supplied.
 
+`PorousFluidLaw::effective_relaxing` and `Layer::RelaxingPorous` retain an original
+`RelaxationState` and couple its complex Cp to the JCA(L) pore thermal function.
+The underlying gas energy equation is
+`(s rho Cp*(s) - kappa Laplacian) T' = s p'`, with `s=i omega`.
+For JCAL, write `A=kappa phi/(rho k0')`,
+`B=4 k0'^2 rho/(kappa Lambda'^2 phi^2)` and
+`W=Cp* + A/s sqrt(1+s B Cp*)`; then
+`K_eff=(p/phi)/(1-R/W)`. JCA uses `k0'=phi Lambda'^2/8`.
+The original molecular calorics are conjugated once from their opposite phasor
+convention. Complex Cp controls both pressure/temperature coupling and thermal
+penetration, so free-gas attenuation is not added to a separately cooled pore.
+The isothermal limit removes molecular compression loss; negligible wall
+exchange recovers the original relaxing gas modulus divided by porosity.
+Zero reservoir strength preserves the previous response bit for bit.
+
+The relaxing gas must match the stack's one coherent equilibrium pore-fluid
+snapshot. Porous density and drag remain the original geometry and mu/k0 law.
+Frequency preparation caches the response for all reflection, transmission,
+interior-field and heat consumers. Their bulk-compliance/thermal heat channel
+includes both molecular relaxation and pore heat diffusion, without assigning
+a gas/frame temperature partition. Exterior fluids and gaps remain explicitly
+lossless. This ideal-gas, rigid-frame constitutive extension is not a new
+measured gas/foam qualification. `porous_relaxation` tests use declared synthetic
+reservoirs to check the isothermal, wide-pore and frozen-gas limits, passivity,
+coherent field energy and layer-resolved R+T+absorption balance.
+
 Tangential wavenumber and pressure/normal velocity continuity give exact planar
 extended-reaction reflection within the admitted equivalent-fluid model.
 Attenuating-wave transfer and homogeneous state normalization preserve thick

@@ -329,6 +329,46 @@ impl PorousCard {
         Ok(C64::new(adiabatic_bulk_modulus / phi, 0.0) / inner)
     }
 
+    // Shared ideal-gas energy equation with the original molecular reservoirs:
+    // (s rho Cp*(s) - kappa Laplacian) T' = s p', s=i omega. The JCA(L)
+    // closure gives W = Cp* + A/s sqrt(1+s B Cp*), with
+    // A=kappa phi/(rho k0') and B=4 k0'^2 rho/(kappa Lambda'^2 phi^2).
+    // Averaged ideal-gas continuity then gives K=(p/phi)/(1-R/W).
+    // Real Cp recovers effective_bulk_from, using Pr=mu Cp/kappa; inserting
+    // complex Cp only into gamma would miss its effect on thermal penetration.
+    //
+    // Passivity: Im Cp* <= 0, Re sqrt(...) > 0, hence Im W <= 0 and
+    // -Im(1/K) = (phi R/p) (-Im W)/|W|^2 >= 0. This contains molecular and
+    // pore thermal dissipation ONCE. Multiply numerator and denominator by s
+    // to avoid a 1/omega intermediate in the isothermal low-frequency limit.
+    fn effective_relaxing_bulk_from(
+        &self,
+        gas: &crate::gas::GasState,
+        cp: C64,
+        omega: f64,
+    ) -> Result<C64, MaterialError> {
+        self.validate()?;
+        if !(omega.is_finite() && omega > 0.0) {
+            return Err(MaterialError::State {
+                what: "angular frequency must be positive".to_string(),
+            });
+        }
+        let phi = self.porosity;
+        let lam_t = self.thermal_length_m;
+        let k0p = self
+            .thermal_permeability_m2
+            .unwrap_or(phi * lam_t * lam_t / 8.0);
+        let rate = gas.thermal_conductivity * phi / (gas.density * k0p);
+        let time_per_capacity = 4.0 * k0p * k0p * gas.density
+            / (gas.thermal_conductivity * lam_t * lam_t * phi * phi);
+        let s = C64::new(0.0, omega);
+        let root = (C64::ONE + s * cp.scale(time_per_capacity)).sqrt();
+        let thermal_denominator = s * cp + root.scale(rate);
+        let compliance_ratio =
+            C64::ONE - s.scale(gas.specific_gas_constant) / thermal_denominator;
+        Ok(C64::from_re(gas.pressure / phi) / compliance_ratio)
+    }
+
     /// Characteristic impedance Zc and complex wavenumber k.
     ///
     /// # Errors

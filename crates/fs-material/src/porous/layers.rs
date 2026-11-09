@@ -3,8 +3,10 @@
 //! Ordered homogeneous isotropic equivalent-fluid layers share ONE saturating
 //! fluid snapshot. Pore drag, density, bulk modulus and source-frequency support
 //! remain owned by PorousFluidLaw. Gaps use the same fluid's lossless acoustics;
-//! explicit fluid layers retain their own original acoustic source. No elastic
-//! frame, lateral finite-size effect or fluid attenuation is invented.
+//! explicit fluid layers retain their own original acoustic source. Declared
+//! relaxing porous layers couple their original molecular reservoirs to pore
+//! heat diffusion. Exterior fluids and gaps remain lossless. No elastic frame,
+//! lateral finite-size effect or unspecified fluid attenuation is invented.
 //!
 //! exp(+i omega t), forward exp(-i k_n z). Tangential wavenumber is conserved,
 //! k_n^2=k^2-k_0^2 sin^2(theta), Z_n=Z_c k/k_n. Pressure and normal velocity
@@ -25,6 +27,7 @@
 
 use super::{PorousFluidLaw, PorousFluidResponse};
 use crate::MaterialError;
+use crate::relaxation::RelaxationState;
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, det};
@@ -71,6 +74,15 @@ pub enum Layer<'a> {
         law: &'a PorousFluidLaw,
         thickness_m: f64,
     },
+    /// The same skeleton and gas with explicitly sourced molecular reservoirs.
+    /// The relaxation state's equilibrium gas must match the incident/pore
+    /// snapshot. Its dynamic calorics affect this layer only; exterior fluids
+    /// and gaps retain their declared lossless acoustic approximation.
+    RelaxingPorous {
+        law: &'a PorousFluidLaw,
+        relaxation: &'a RelaxationState,
+        thickness_m: f64,
+    },
     /// Lossless gap filled by the original coherent saturating/exterior fluid.
     FluidGap { thickness_m: f64 },
     /// Lossless homogeneous fluid with its own density and adiabatic sound
@@ -88,6 +100,16 @@ impl core::fmt::Debug for Layer<'_> {
                 .field("law", law)
                 .field("thickness_m", thickness_m)
                 .finish(),
+            Self::RelaxingPorous {
+                law,
+                relaxation,
+                thickness_m,
+            } => f
+                .debug_struct("RelaxingPorous")
+                .field("law", law)
+                .field("relaxation", relaxation)
+                .field("thickness_m", thickness_m)
+                .finish(),
             Self::FluidGap { thickness_m } => f
                 .debug_struct("FluidGap")
                 .field("thickness_m", thickness_m)
@@ -103,6 +125,7 @@ impl Layer<'_> {
     fn thickness_m(self) -> f64 {
         match self {
             Self::Porous { thickness_m, .. }
+            | Self::RelaxingPorous { thickness_m, .. }
             | Self::FluidGap { thickness_m }
             | Self::FluidLayer { thickness_m, .. } => thickness_m,
         }
@@ -246,6 +269,17 @@ impl<'a> RigidBackedLayers<'a> {
         for &source in layers {
             let porous = match source {
                 Layer::Porous { law, .. } => Some(law.effective_fluid(&snapshot, omega)?),
+                Layer::RelaxingPorous {
+                    law, relaxation, ..
+                } => {
+                    let response = law.effective_relaxing(relaxation, omega)?;
+                    if response.fluid() != &snapshot {
+                        return Err(bad(
+                            "relaxing porous gas must match the original incident/pore fluid state",
+                        ));
+                    }
+                    Some(response)
+                }
                 Layer::FluidGap { .. } | Layer::FluidLayer { .. } => None,
             };
             let layer_fluid = if let Layer::FluidLayer {

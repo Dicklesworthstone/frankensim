@@ -21,7 +21,7 @@ use super::permeability::IntrinsicPermeability;
 use super::{PorousAmbient, PorousCard};
 use super::{characteristic_from_response, rigid_surface_from_response};
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
-use crate::{MaterialError, gas::GasState};
+use crate::{MaterialError, gas::GasState, relaxation::RelaxationState};
 use fs_math::c64::C64;
 
 /// An unchanged porous skeleton with explicitly characterized viscous drag.
@@ -60,7 +60,44 @@ pub struct PorousFluidResponse {
 }
 
 impl PorousFluidResponse {
-    /// Actual acoustic, caloric and transport snapshot used together.
+    fn from_coefficients(
+        fluid: ThermoviscousFluidState,
+        omega: f64,
+        flow_resistivity: f64,
+        density: C64,
+        bulk: C64,
+    ) -> Result<Self, MaterialError> {
+        let (impedance, wavenumber) = characteristic_from_response(density, bulk, omega);
+        if !finite(density)
+            || density.re <= 0.0
+            || density.im > 0.0
+            || !finite(bulk)
+            || bulk.re <= 0.0
+            || bulk.im < 0.0
+            || !finite(impedance)
+            || impedance.re <= 0.0
+            || !finite(wavenumber)
+            || wavenumber.re <= 0.0
+            || wavenumber.im > 0.0
+        {
+            return Err(MaterialError::State {
+                what: "fluid-filled porous response must be finite and passive".into(),
+            });
+        }
+        Ok(Self {
+            fluid,
+            omega,
+            flow_resistivity,
+            density,
+            bulk,
+            impedance,
+            wavenumber,
+        })
+    }
+
+    /// Equilibrium acoustic, caloric and transport snapshot used together.
+    /// A relaxing response retains this gas state while its dynamic bulk
+    /// modulus also includes the explicitly supplied molecular reservoirs.
     pub const fn fluid(&self) -> &ThermoviscousFluidState {
         &self.fluid
     }
@@ -234,32 +271,61 @@ impl PorousFluidLaw {
             acoustic.adiabatic_bulk_modulus_pa(),
             omega,
         )?;
-        let (impedance, wavenumber) = characteristic_from_response(density, bulk, omega);
-        if !finite(density)
-            || density.re <= 0.0
-            || density.im > 0.0
-            || !finite(bulk)
-            || bulk.re <= 0.0
-            || bulk.im < 0.0
-            || !finite(impedance)
-            || impedance.re <= 0.0
-            || !finite(wavenumber)
-            || wavenumber.re <= 0.0
-            || wavenumber.im > 0.0
-        {
-            return Err(MaterialError::State {
-                what: "fluid-filled porous response must be finite and passive".into(),
-            });
-        }
-        Ok(PorousFluidResponse {
+        PorousFluidResponse::from_coefficients(
             fluid,
             omega,
-            flow_resistivity: current.flow_resistivity,
+            current.flow_resistivity,
             density,
             bulk,
-            impedance,
-            wavenumber,
-        })
+        )
+    }
+
+    /// Couple the original gas's molecular reservoirs to pore heat diffusion.
+    ///
+    /// The same complex Cp enters both the pressure/temperature relation and
+    /// the JCA(L) thermal diffusion function. Molecular and pore-wall losses
+    /// therefore share one energy equation; adding free-gas attenuation to a
+    /// nonrelaxing porous wavenumber would count a different temperature field.
+    /// In the isothermal pore limit molecular compression loss vanishes; with
+    /// negligible wall exchange the original relaxing gas modulus is recovered.
+    ///
+    /// The original relaxation state supplies all equilibrium gas properties,
+    /// reservoir strengths and times. Its exp(-i omega t) caloric response is
+    /// conjugated once to this owner's exp(+i omega t) convention. Viscous drag
+    /// remains the same mu/k0 law. No free-fluid Stokes--Kirchhoff loss is added.
+    /// No reservoirs (or all zero strengths) preserves the original response
+    /// bit for bit, including general-fluid arithmetic and source admission.
+    ///
+    /// This is the rigid-frame, ideal-gas JCA(L) constitutive extension, not a
+    /// measured qualification of a new gas/skeleton combination. The original
+    /// source and continuum-frequency limits still apply.
+    pub fn effective_relaxing(
+        &self,
+        relaxation: &RelaxationState,
+        omega: f64,
+    ) -> Result<PorousFluidResponse, MaterialError> {
+        if relaxation
+            .processes()
+            .iter()
+            .all(|process| process.heat_capacity_j_kg_k == 0.0)
+        {
+            return self.effective_fluid(relaxation.gas(), omega);
+        }
+        self.admit_frequency(omega)?;
+        let gas = relaxation.gas();
+        let fluid = gas.thermoviscous_state()?;
+        let cp = relaxation.caloric_response(omega)?.cp_j_kg_k.conj();
+        let current = self.current_card(gas.dynamic_viscosity);
+        let density =
+            current.effective_density_from(gas.density, gas.dynamic_viscosity, omega)?;
+        let bulk = current.effective_relaxing_bulk_from(gas, cp, omega)?;
+        PorousFluidResponse::from_coefficients(
+            fluid,
+            omega,
+            current.flow_resistivity,
+            density,
+            bulk,
+        )
     }
 
     /// Rigid-backed surface impedance [Pa s/m] from the actual saturating

@@ -16,6 +16,9 @@
 //! below the resolution of `1-R-T`. No power residual is redistributed as heat.
 //! Rigid frame, infinite planar layers and the original source support remain;
 //! the viscous/thermal mechanisms are not a fluid/solid temperature partition.
+//! For a relaxing porous layer the bulk-modulus loss includes both pore heat
+//! diffusion and the declared molecular reservoirs, coupled through one
+//! temperature field. These are not independent additive attenuation fits.
 
 use super::transmission::{LogAmplitude, log_scaled};
 use super::{
@@ -52,6 +55,8 @@ pub struct LayerSurfacePower {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayerAbsorbedPower {
     pub viscous_absorbed_fraction: f64,
+    /// Bulk-compliance loss: pore heat diffusion plus any declared molecular
+    /// relaxation. This does not partition heat between gas and solid frame.
     pub thermal_absorbed_fraction: f64,
     pub absorbed_power_w: f64,
 }

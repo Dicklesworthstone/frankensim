@@ -59,6 +59,8 @@ pub struct AcousticWindowSample {
 pub struct AcousticLayerWindowSample {
     pub field: AcousticWindowSample,
     pub viscous_heating_w_m3: f64,
+    /// Bulk-compliance loss, including pore diffusion and any declared
+    /// molecular relaxation; not a gas/frame temperature partition.
     pub thermal_heating_w_m3: f64,
 }
 

@@ -30,7 +30,8 @@ pub struct AcousticLayerSample {
     pub field: AcousticSpectrumSample,
     /// `-omega Im(rho) |v|^2 / 2` [W/m³], including tangential velocity.
     pub viscous_heating_w_m3: f64,
-    /// `-omega Im(1/K) |p|^2 / 2` [W/m³].
+    /// `-omega Im(1/K) |p|^2 / 2` [W/m³]. Includes pore heat diffusion
+    /// and any explicitly declared molecular relaxation in the same gas.
     pub thermal_heating_w_m3: f64,
 }
 
@@ -355,6 +356,13 @@ impl PreparedLayerFields {
                 source: match layer.source {
                     Layer::Porous { law, .. } => Layer::Porous {
                         law,
+                        thickness_m: distance,
+                    },
+                    Layer::RelaxingPorous {
+                        law, relaxation, ..
+                    } => Layer::RelaxingPorous {
+                        law,
+                        relaxation,
                         thickness_m: distance,
                     },
                     Layer::FluidGap { .. } => Layer::FluidGap {
