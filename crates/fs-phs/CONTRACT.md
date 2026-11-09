@@ -4126,9 +4126,12 @@ A focused actual-source regression preserves weak net work amid opposing
 
 The original Maxwell storage exposes a quadratic split for explicitly declared
 at-most-quadratic strain maps. It retains the base storage's complete Q and
-each original normalized memory's z²/2. The full
-k*epsilon(x)²/2-sqrt(k)*epsilon(x)*z coupling remains in the existing implicit
-nonlinear remainder; complete storage is marked nonquadratic. No tangent
+each original normalized memory's z²/2. Without an explicit zero-constant
+linear strain declaration, the full k*epsilon(x)²/2-sqrt(k)*epsilon(x)*z
+coupling remains in the existing implicit nonlinear remainder. A declared
+linear polynomial row also contributes its exact Maxwell dyad and reciprocal
+mechanical/history cross terms to Q. Every geometric coupling stays implicit;
+complete mapped storage is marked nonquadratic. No tangent
 linearization, frozen strain, constitutive update or memory elimination is
 introduced. Linear projection arms keep their original Q arithmetic and exact
 flag.
@@ -4262,3 +4265,35 @@ J/R/G and argument extents are admitted before slicing, including raw-parts
 sources. This allocation-free algebra supplies no additional constitutive
 law; external work, native resistance and nonlinear internal work remain
 separate accounts.
+
+## Exact linear strain metadata and shared quadratic-strain work
+
+RelaxationStrainMap::zero_constant_linear_strain optionally declares the exact
+linear polynomial row b of epsilon(x)=b.x+quadratic(x), with epsilon(0)=0.
+It is immutable source algebra, not a finite-difference or trial-state tangent.
+The default None retains the previous mapped quadratic split bitwise.
+A declared complete finite row adds the same normalized linear Maxwell dyad
+and reciprocal mechanical/history cross terms as the original linear branch
+owner. Every z²/2 remains, and complete mapped storage is still marked
+nonquadratic. All geometric cubic/quartic coupling, stored-stress curvature
+and original history-force derivatives remain in the existing implicit owner.
+Malformed or unrepresentable row metadata refuses the split.
+
+quadratic_strain_midpoint_energy_remainder factors the original mapped-square
+work formula for (scale*epsilon(x)-z)^2/2 into a shared native helper. It uses
+the original strain, gradient and constant Hessian, retains the represented
+midpoint's rounding, and refuses incomplete/nonfinite arguments or undeclared
+quadratic strain. Mapped Maxwell storage delegates to that same arithmetic.
+Equilibrium strain storage can use scale one and zero offsets, multiplying
+the returned remainder by its actual energy coefficient; no artificial
+Maxwell state, constitutive solver or rounded square-root coefficient is
+needed. The existing bounded derivative scratch behavior remains.
+
+Nine focused native groups passed with the exact revised pHS sources:
+five new groups for tiny cubic work down to 2^-22, rounded midpoints, original
+equilibrium coefficients, malformed-input refusal, complete declared-linear
+Maxwell matrix/trajectory/work/heat parity and unchanged nonlinear storage/
+force/work; the three existing mapped exponential groups; and original
+linear-Q bit/energy/force parity. The actual fs-math, fs-la and pHS numerical
+owners ran under pinned nightly-2026-07-06, without a substitute solver.
+The shared physical support host was not part of that native closure.

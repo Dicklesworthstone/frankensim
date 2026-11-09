@@ -289,7 +289,13 @@ impl ImpactSystem {
         let base_dim=self.x.len();let mut branches=Vec::new();let mut supports=Vec::new();
         let mut memories=Vec::new();let mut rates=Vec::new();let mut films=Vec::new();
         for (_,offset,support) in &self.supports {
-            let Some(config)=support.memory_configuration() else {continue;};
+            let Some(config)=support.memory_configuration() else {
+                if support.has_exponential_envelope() {
+                    // Numerical domain metadata only: no dummy history or law.
+                    supports.push((*offset,support.clone(),branches.len(),0));
+                }
+                continue;
+            };
             config.admit_domain(joint_omega_bound,self.config.dt_s)?;
             let local=support.memory_branches(*offset,base_dim)?;
             let start=branches.len();
@@ -332,7 +338,7 @@ impl ImpactSystem {
             films.push((*offset,film.clone(),start,local.len()));branches.extend(local);
         }
         if branches.is_empty() && films.is_empty() && supports.iter().all(|(_,s,_,_)|
-            s.memory_configuration().is_none_or(|m|!m.has_source_domain())) {return Ok(self);}
+            !s.has_exponential_envelope() && s.memory_configuration().is_none_or(|m|!m.has_source_domain())) {return Ok(self);}
         self.system=self.system.with_mapped_relaxation_branches(branches.clone()).map_err(ImpactError::PreparedSolve)?;
         self.x.extend(memories);
         let memory=Memory {base_dim,rows:vec![],rates,mapped:branches,supports,films,joint_omega_bound};

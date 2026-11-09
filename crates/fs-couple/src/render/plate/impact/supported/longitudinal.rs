@@ -9,6 +9,7 @@ use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 use std::sync::Arc;
 mod strength;
 mod viscosity;
+pub(in crate::render::plate::impact) mod exponential;
 pub mod relaxation;
 
 /// A physical span and the direction of the common translating termination.

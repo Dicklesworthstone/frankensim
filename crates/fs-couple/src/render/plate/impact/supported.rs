@@ -166,6 +166,8 @@ struct Data {
     // hereditary strain/history tangent envelope. These are admission bounds,
     // never substituted for the original physical storage's eigenfrequencies.
     clock_bounds: Vec<f64>,
+    // Cold exact-linear admission metadata; no material state or stiffness.
+    exponential_equilibrium_bound: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -424,7 +426,7 @@ impl SupportedStrings {
         let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,storage_ranges,axial_ranges,translation,damping,
             axial_viscosity_n_s:None,axial_viscosity_sources:None,axial_tensile:vec![None;wires.len()],axial_relaxation:None,finite_strain_axial_viscosity:false,axial_endpoint_damping_n_s_m:0.0,
             end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
-            total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
+            total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1],exponential_equilibrium_bound:None}));
         // Check initial energy/motion representation before returning an adapter.
         result.observe_interleaved(&result.initial_state(),0)?;
         Ok(result)

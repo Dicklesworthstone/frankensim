@@ -11726,7 +11726,8 @@ Geometry, material domains and source parameters remain authoritative. The
 opt-in exact linear block removes midpoint decay/phase error from original
 linear modes and Kelvin recovery; nonlinear contact and conditioning still
 require temporal refinement. This route does not yet admit nonlinear contact
-drag, shell/support potentials, undeclared or nonquadratic strain maps, or thermal feedback.
+drag, shell potentials, transverse-only support images, undeclared or
+nonquadratic strain maps, or thermal feedback.
 It does not certify a rendered waveform or measured felt calibration.
 
 Seven focused native source tests passed with pinned nightly-2026-07-06:
@@ -13272,7 +13273,8 @@ pHS seams do not stand in for that full integration run.
 The physical scope remains the original moderate-slope, statically relaxed
 in-plane film with a common proportional spectrum. This does not supply
 heterogeneous viscoelastic condensation, finite-strain 3-D tissue, wrinkling,
-in-plane inertia, shell/support exact propagation or thermal feedback.
+in-plane inertia, exact shell or transverse-only support propagation, or
+thermal feedback.
 
 
 ### Adaptive finite-gas windows with nonlinear wall feedback
@@ -13738,3 +13740,62 @@ manufactured nonuniform mutual-memory/gyroscopic equations, every independent
 storage/work channel and the zero-memory limit. The actual mechanical and
 Maxwell owners execute; outer FE mesh assembly is outside this focused runtime
 verification. Existing physical field/curvature regressions remain.
+
+## Original longitudinal support damping in exponential impact
+
+ExponentialImpactSystem admits SupportedStrings prepared with the original
+longitudinal motion and explicit support geometry for every span. The original
+canonical mass transformation, signed moving-end chord, both transverse
+planes, all retained axial modes and every mean/cosine Maxwell history survive
+in one state. Support reactions, absolute/relative drag, ground damping and
+the selected constant axial viscosity retain their original complete
+resistance matrix. Configuration-dependent finite-strain axial viscosity and
+transverse-only support images refuse this fixed-resistance entry.
+
+The exact quadratic block contains the original support spring, transverse
+tension/bending and affine lift, plus the exact zero-constant linear part of
+every original equilibrium and relaxing strain. All reciprocal support and
+mechanical/history cross terms remain. This is a split of the original
+polynomial, not a tangent fitted at a trial state. Cubic/quartic geometric
+coupling stays in the existing implicit discrete-gradient equation. Original
+storage, force, accepted material history and the work/heat ledger are not
+replaced. The shared native quadratic-strain remainder computes equilibrium
+work using the original energy coefficient directly, without square-root
+renormalization or subtraction of large stored energies.
+
+Cold preparation augments each existing squared support clock bound by
+sum_j k_j * SupportedStrainMap::stiffness_bound(maximum_strain_j).
+The existing map bounds the complete canonical strain-gradient norm squared
+plus maximum_strain times the strain-Hessian norm on the original declared
+slope/strain domain. The preexisting small-signal and Maxwell stress/history
+bounds remain; no norm is subtracted to claim a sharper estimate. This is a
+conservative frequency envelope, never a replacement physical stiffness.
+Preparation is idempotent and does not widen any source frequency band,
+change the source's exact dt, or relax its dt/tau limit.
+
+Only exponential-prepared support images retain this domain metadata when no
+Maxwell arm is selected. No dummy physical history or material law is added.
+The original joint material owner checks the complete support/volume/radiation
+envelope and original source authority; a zero-state selection cannot discard
+those gates. Ordinary midpoint support preparation is unchanged. All actual
+body, Kelvin, material and acoustic coordinates count against the existing
+dense capacities. Original strain, slope, travel, tension, tensile-source,
+history, energy and cancellation checks still own acceptance and rollback.
+
+Four focused source/integration groups are authored beside this split:
+signed original Q and stable nonlinear work against an independent two-word
+polynomial; storage/resistance/history and envelope parity; complete material
+response/heat refinement; and zero-history metadata, capacity, source clock,
+volume/radiation and transactional refusal. They passed native parser and
+formatter checks but remain unrun because the complete original supported
+host closure is unavailable in the bounded build. No replacement physical
+host was used. The separate nine passing native pHS groups establish the
+shared work/split algebra and original Maxwell behavior, not a full supported
+ImpactSystem integration result.
+
+Physical scope remains the original moderate-slope, statically balanced
+reference with its explicitly selected axial Fourier channels. Unretained
+strain harmonics remain statically condensed by the original model; this is
+not a claim of fully resolved axial waves, exact finite geometry or thermal
+material evolution. Exact propagation applies to the complete declared linear
+block. Nonlinear/contact accuracy still requires temporal and modal refinement.

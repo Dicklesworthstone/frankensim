@@ -81,7 +81,9 @@ use fs_math::c64::C64;
 use fs_math::det;
 mod relaxation_map;
 mod port_conductance;
-pub use relaxation_map::{MappedRelaxationBranch, RelaxationStrainMap};
+pub use relaxation_map::{
+    MappedRelaxationBranch, RelaxationStrainMap, quadratic_strain_midpoint_energy_remainder,
+};
 
 mod gap_flow;
 pub use gap_flow::{GapFlowError, GapFlowLaw};
@@ -874,13 +876,34 @@ impl Storage for RelaxationStorage {
                         matrix[z * n + i] = -b[i];
                     }
                 }
-                RelaxationCoupling::Mapped { strain, .. } => {
+                RelaxationCoupling::Mapped { strain, scale } => {
                     if !strain.is_quadratic_strain() {
                         return None;
                     }
-                    // Keep free memory recovery in the exact linear block. The
-                    // complete k*epsilon(x)^2/2 - sqrt(k)*epsilon(x)*z remains in
-                    // the ORIGINAL implicit storage and stable polynomial work.
+                    if let Some(row) = strain.zero_constant_linear_strain() {
+                        if row.len() != self.base_dim || row.iter().any(|v| !v.is_finite()) {
+                            return None;
+                        }
+                        let b: Vec<_> = row.iter().map(|v| scale * v).collect();
+                        if b.iter().any(|v| !v.is_finite())
+                            || (row.iter().any(|v| *v != 0.0) && b.iter().all(|v| *v == 0.0))
+                        {
+                            return None;
+                        }
+                        // Original zero-constant polynomial row, not a tangent
+                        // sampled at a trial state. Keep its COMPLETE Maxwell
+                        // dyad and reciprocal mechanical/history cross terms.
+                        for i in 0..self.base_dim {
+                            for j in 0..self.base_dim {
+                                matrix[i * n + j] += b[i] * b[j];
+                            }
+                            matrix[i * n + z] = -b[i];
+                            matrix[z * n + i] = -b[i];
+                        }
+                    }
+                    // Unspecified linear rows keep the previous Q bitwise.
+                    // Every cubic/quartic geometric and history coupling stays
+                    // in the ORIGINAL implicit storage and stable work owner.
                     exact = false;
                 }
             }

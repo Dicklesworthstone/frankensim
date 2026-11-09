@@ -90,6 +90,9 @@ impl SupportedStrings {
     pub fn longitudinal_relaxation_stiffness_bound_per_s2(&self) -> f64 {
         self.0.axial_relaxation.as_ref().map_or(0.0,|m|m.stiffness_bound)
     }
+    pub(in crate::render::plate::impact) fn relaxation_state_count(&self) -> usize {
+        self.0.axial_relaxation.as_ref().map_or(0, |config| config.states)
+    }
     pub(in crate::render::plate::impact) fn memory_configuration(&self) -> Option<&SupportedRelaxation> {
         self.0.axial_relaxation.as_ref()
     }
@@ -273,15 +276,15 @@ impl SupportedRelaxation {
 
 /// Geometry only. The actual z history is held once in ImpactSystem's state.
 #[derive(Clone, Debug)]
-struct SupportedStrainMap {
-    support: SupportedStrings,
-    string: usize,
-    channel: usize,
-    offset: usize,
-    base_dim: usize,
+pub(super) struct SupportedStrainMap {
+    pub(super) support: SupportedStrings,
+    pub(super) string: usize,
+    pub(super) channel: usize,
+    pub(super) offset: usize,
+    pub(super) base_dim: usize,
 }
 impl SupportedStrainMap {
-    fn potential(&self) -> &LongitudinalPotential {
+    pub(super) fn potential(&self) -> &LongitudinalPotential {
         let SupportedPotential::Longitudinal(p)=&self.support.0.potentials[self.string] else {unreachable!()};p
     }
     fn local(&self,state:&[f64]) -> Option<Vec<f64>> {
@@ -319,7 +322,7 @@ impl SupportedStrainMap {
         }
         Some(out)
     }
-    fn stiffness_bound(&self,residual_bound:f64) -> Result<f64,ImpactError> {
+    pub(super) fn stiffness_bound(&self,residual_bound:f64) -> Result<f64,ImpactError> {
         let p=self.potential();let mut gradient_square=0.0;let mut rows=vec![0.0;self.base_dim];
         for mode in 0..self.support.mode_count() {
             let mut unit=vec![0.0;self.base_dim];unit[2*(self.offset+mode)]=1.0;
@@ -340,6 +343,19 @@ impl SupportedStrainMap {
 }
 impl RelaxationStrainMap for SupportedStrainMap {
     fn is_quadratic_strain(&self)->bool {true}
+    fn zero_constant_linear_strain(&self) -> Option<Vec<f64>> {
+        let p = self.potential();
+        let mut local = vec![0.0; p.count()];
+        if self.channel == 0 {
+            local[p.count() - 1] = p.chord[2];
+        } else {
+            local[p.omegas.len() + self.channel - 1] =
+                p.model.axial_slope_scales()[self.channel - 1];
+        }
+        let mut row = vec![0.0; self.base_dim];
+        self.pull(&local, &mut row);
+        row.iter().all(|v| v.is_finite()).then_some(row)
+    }
     fn state_dimension(&self)->usize {self.base_dim}
     fn strain(&self,state:&[f64])->f64 {
         let Some(q)=self.local(state) else {return f64::NAN;};

@@ -20,6 +20,12 @@ pub trait RelaxationStrainMap: core::fmt::Debug {
     /// make its Maxwell energy quadratic in the complete state. It permits a
     /// cancellation-stable exact Gonzalez remainder using the same derivatives.
     fn is_quadratic_strain(&self) -> bool { false }
+    /// Optional exact linear polynomial row of a zero-constant quadratic
+    /// strain: epsilon(x) = b.x + quadratic(x), with epsilon(0)=0.
+    /// This is original source algebra, never a sampled tangent. It lets the
+    /// complete axial/history small-signal block propagate exactly while all
+    /// geometric coupling stays implicit. None keeps the existing split.
+    fn zero_constant_linear_strain(&self) -> Option<Vec<f64>> { None }
 }
 
 /// A Maxwell arm on an explicitly supplied, possibly nonlinear strain map.
@@ -32,6 +38,66 @@ pub struct MappedRelaxationBranch {
     pub relaxation_time_s: f64,
 }
 
+/// Stable midpoint work remainder for `(scale * epsilon(x) - z)^2 / 2`.
+///
+/// This uses the original declared quadratic strain and its exact derivatives;
+/// it does not approximate the strain or advance a constitutive history.
+/// `offsets` contains the actual scalar z coordinate at a, b and mid. A
+/// physical equilibrium strain energy `k * epsilon^2 / 2` uses scale 1,
+/// zero offsets, and multiplies the returned remainder by its original k.
+/// Midpoint rounding is retained. No subtraction of total stored energies is
+/// used to recover small cubic/quartic work. Finite complete coordinates,
+/// positive finite scale and an explicit quadratic declaration are required.
+pub fn quadratic_strain_midpoint_energy_remainder(
+    strain: &dyn RelaxationStrainMap,
+    scale: f64,
+    a: &[f64],
+    b: &[f64],
+    mid: &[f64],
+    offsets: [f64; 3],
+) -> Option<f64> {
+    let n = strain.state_dimension();
+    if n == 0
+        || a.len() != n
+        || b.len() != n
+        || mid.len() != n
+        || !scale.is_finite()
+        || scale <= 0.0
+        || a.iter()
+            .chain(b)
+            .chain(mid)
+            .chain(&offsets)
+            .any(|v| !v.is_finite())
+        || !strain.is_quadratic_strain()
+    {
+        return None;
+    }
+    let [za, zb, zm] = offsets;
+    let delta: Vec<_> = b.iter().zip(a).map(|(b, a)| b - a).collect();
+    let left: Vec<_> = a.iter().zip(mid).map(|(a, m)| a - m).collect();
+    let right: Vec<_> = b.iter().zip(mid).map(|(b, m)| b - m).collect();
+    let mut g = vec![0.0; mid.len()];
+    let mut hd = vec![0.0; mid.len()];
+    let mut ha = vec![0.0; mid.len()];
+    let mut hb = vec![0.0; mid.len()];
+    strain.gradient(mid, &mut g);
+    strain.hessian_vector(mid, &delta, &mut hd);
+    strain.hessian_vector(mid, &left, &mut ha);
+    strain.hessian_vector(mid, &right, &mut hb);
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+    let rounding: Vec<_> = left.iter().zip(&right).map(|(a, b)| a + b).collect();
+    // Retain midpoint rounding, not only the ideal symmetric-endpoint
+    // formula. With exact midpoint, cross=0 and the first factor is
+    // Delta x^T Hess(sqrt(k)*epsilon) Delta x / 8.
+    let cross = 0.5 * scale * dot(&rounding, &hd);
+    let change = scale * dot(&g, &delta) - (zb - za) + cross;
+    let offset = scale * (dot(&g, &rounding) + 0.5 * (dot(&left, &ha) + dot(&right, &hb)))
+        - ((za - zm) + (zb - zm));
+    let effort = scale * strain.strain(mid) - zm;
+    let result = (0.5 * offset) * change + effort * cross;
+    result.is_finite().then_some(result)
+}
+
 pub(super) enum RelaxationCoupling {
     Linear(Vec<f64>),
     Mapped { strain: Rc<dyn RelaxationStrainMap>, scale: f64 },
@@ -41,25 +107,7 @@ impl RelaxationCoupling {
         za:f64,zb:f64,zm:f64)->Option<f64>
     {
         let Self::Mapped {strain,scale}=self else {return None;};
-        if !strain.is_quadratic_strain() {return None;}
-        let delta:Vec<_>=b.iter().zip(a).map(|(b,a)|b-a).collect();
-        let left:Vec<_>=a.iter().zip(mid).map(|(a,m)|a-m).collect();
-        let right:Vec<_>=b.iter().zip(mid).map(|(b,m)|b-m).collect();
-        let mut g=vec![0.0;mid.len()];let mut hd=vec![0.0;mid.len()];
-        let mut ha=vec![0.0;mid.len()];let mut hb=vec![0.0;mid.len()];
-        strain.gradient(mid,&mut g);strain.hessian_vector(mid,&delta,&mut hd);
-        strain.hessian_vector(mid,&left,&mut ha);strain.hessian_vector(mid,&right,&mut hb);
-        let dot=|a:&[f64],b:&[f64]|a.iter().zip(b).map(|(a,b)|a*b).sum::<f64>();
-        let rounding:Vec<_>=left.iter().zip(&right).map(|(a,b)|a+b).collect();
-        // Retain midpoint rounding, not only the ideal symmetric-endpoint
-        // formula. With exact midpoint, cross=0 and the first factor is
-        // Delta x^T Hess(sqrt(k)*epsilon) Delta x / 8.
-        let cross=0.5*scale*dot(&rounding,&hd);
-        let change=scale*dot(&g,&delta)-(zb-za)+cross;
-        let offset=scale*(dot(&g,&rounding)+0.5*(dot(&left,&ha)+dot(&right,&hb)))
-            -((za-zm)+(zb-zm));
-        let effort=scale*strain.strain(mid)-zm;
-        Some((0.5*offset)*change+effort*cross)
+        quadratic_strain_midpoint_energy_remainder(strain.as_ref(), *scale, a, b, mid, [za,zb,zm])
     }
     pub(super) fn strain(&self, x: &[f64]) -> f64 {
         match self {
@@ -161,8 +209,9 @@ impl PortHamiltonian {
     /// and has `R_zz=1/tau`. Existing ports, state order and original storage
     /// remain. This is a nonlinear pHS system. An explicitly quadratic strain
     /// map retains the original base quadratic block and each z²/2 storage for
-    /// the existing exponential discrete-gradient owner; all strain/history
-    /// coupling remains implicit. The complete energy is never marked quadratic.
+    /// the existing exponential discrete-gradient owner. An explicit
+    /// zero-constant linear strain row also retains its exact Maxwell dyad and
+    /// cross-memory terms; all geometric strain/history coupling remains implicit. The complete energy is never marked quadratic.
     /// The ordinary discrete-gradient owner is unchanged: its accepted loss is
     /// `dt*e_z^2/tau`. The exponential owner instead integrates the SAME positive
     /// resistance along its accepted held-remainder trajectory. Only its linear
@@ -208,3 +257,6 @@ mod tests;
 
 #[cfg(test)]
 mod exponential_tests;
+
+#[cfg(test)]
+mod square_work_tests;
