@@ -4,9 +4,12 @@ use super::{MaterialStokesBoundary, MaterialStokesSolution};
 use crate::material::{MaterialFluxError, MaterialFluxSystem};
 use crate::ns::boundary::{
     StokesAssembly, StokesSolution, StokesWindkesselBalance, StokesWindkesselHistory,
-    StokesWindkesselPort, solve_windkessel_assembly,
+    StokesWindkesselPort, StokesWindkesselSolution, solve_windkessel_assembly,
 };
 use fs_material::fluid_transport::FluidTransport;
+
+#[path = "windkessel/nonlinear.rs"]
+mod nonlinear;
 
 /// Physical RCR/Windkessel load with optional series inertance, per unit depth.
 /// R, C and L are explicit external device properties; they are not inferred
@@ -148,6 +151,46 @@ pub(super) fn solve_material_windkessel_assembly<S>(
     tolerance_m2_s: f64,
     recover: impl FnOnce(StokesSolution, f64) -> Result<S, MaterialFluxError>,
 ) -> Result<MaterialStokesWindkesselSolution<S>, MaterialFluxError> {
+    let solved = with_kinematic_windkessel(
+        density,
+        ports,
+        loads,
+        previous,
+        older_history,
+        tolerance_pa,
+        tolerance_m2_s,
+        |native, previous, older| {
+            solve_windkessel_assembly(
+                assembly,
+                ports,
+                native,
+                previous,
+                older,
+                timestep_s,
+                tolerance_pa / density,
+                tolerance_m2_s,
+            )
+            .map_err(MaterialFluxError::Boundary)
+        },
+    )?;
+    physical_windkessel(solved, density, recover)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_kinematic_windkessel<T>(
+    density: f64,
+    ports: &[&[usize]],
+    loads: &[MaterialStokesWindkesselPort],
+    previous: MaterialStokesWindkesselHistory<'_>,
+    older_history: Option<(MaterialStokesWindkesselHistory<'_>, f64)>,
+    tolerance_pa: f64,
+    tolerance_m2_s: f64,
+    solve: impl FnOnce(
+        &[StokesWindkesselPort],
+        StokesWindkesselHistory<'_>,
+        Option<(StokesWindkesselHistory<'_>, f64)>,
+    ) -> Result<T, MaterialFluxError>,
+) -> Result<T, MaterialFluxError> {
     let normalized = |value: f64| {
         let result = value / density;
         value.is_finite() && result.is_finite() && (value == 0.0 || result != 0.0)
@@ -220,20 +263,21 @@ pub(super) fn solve_material_windkessel_assembly<S>(
                 dt,
             )
         });
-    let solved = solve_windkessel_assembly(
-        assembly,
-        ports,
+    solve(
         &native,
         StokesWindkesselHistory {
             velocity: previous.velocity,
             compliance_pressures_m2_s2: &recent_pressure,
         },
         old,
-        timestep_s,
-        tolerance_pa / density,
-        tolerance_m2_s,
     )
-    .map_err(MaterialFluxError::Boundary)?;
+}
+
+fn physical_windkessel<N, S>(
+    solved: StokesWindkesselSolution<N>,
+    density: f64,
+    recover: impl FnOnce(N, f64) -> Result<S, MaterialFluxError>,
+) -> Result<MaterialStokesWindkesselSolution<S>, MaterialFluxError> {
     let kinetic_energy = density * solved.kinetic_energy_m4_s2;
     let pressure_offsets_pa: Vec<_> = solved
         .pressure_offsets_m2_s2

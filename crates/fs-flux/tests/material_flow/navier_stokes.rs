@@ -3,10 +3,12 @@
 use super::*;
 use fs_flux::{MaterialNavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
 
-#[path = "navier_stokes_rheology.rs"]
-mod rheology;
 #[path = "reservoir.rs"]
 mod reservoir;
+#[path = "navier_stokes_rheology.rs"]
+mod rheology;
+#[path = "navier_stokes/windkessel.rs"]
+mod windkessel;
 
 #[test]
 fn nonlinear_mixed_flow_keeps_shared_gas_density_and_viscous_traction_in_si() {

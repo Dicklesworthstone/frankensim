@@ -9783,3 +9783,29 @@ existing planar regressions pass under pinned-Rust validation with the original
 NS, Jacobian, sparse, Krylov and dense numerical owners. That focused build
 omits unrelated material/thermal/density adapters; it is not a full workspace
 or runtime integration qualification.
+
+## Original material rheology in convective dynamic-port solves
+
+Both fixed-viscosity material Navier–Stokes and the original source-rheology
+resolver expose the nonlinear BDF Windkessel entry. The latter retains the
+existing `RheologyField` query/cache owner: accepted cell materials belong to
+the final actual shear, while source refusal takes precedence over provisional
+linear/nonlinear results. It consumes the original Carreau-Yasuda/temperature
+source without copying a constitutive fit or replacing it with frozen viscosity.
+
+The linear and nonlinear material entries share one physical-load/history
+normalizer and one result converter. Pressure, resistances and inertance divide
+by the SAME reference density; compliance multiplies by it; velocity and Q
+histories remain native SI moments. Every original source preserves that fixed
+density. Fluid stress, inertia, convection, pressure/reactions and instantaneous
+bulk heat use the original accepted material state. External resistor losses,
+compliance/inertance storage and signed BDF defect remain separate; no coupled
+thermal or thermodynamic-pressure update is inferred.
+
+Focused native tests are authored with actual ThermalCarreauYasuda source owners,
+its Newtonian limit, nonzero convection, candidate-dependent rates, BDF1 and
+unequal BDF2, under-relaxation, physical density swaps, accepted source identity,
+independent physical viscosity/heat/storage checks and source-domain refusal.
+The new FEM/material tests remain UNEXECUTED at the pinned-asupersync build gate.
+Rust formatting/parsing and bounded static signature/ownership checks passed;
+the prior unchanged scalar BDF/RCR tests are separate evidence.

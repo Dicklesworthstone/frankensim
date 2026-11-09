@@ -655,7 +655,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         Ok(MaterialNavierStokesRheologyStep { step, samples })
     }
 
-    fn material_navier_stokes_step(
+    pub(super) fn material_navier_stokes_step(
         &self,
         endpoint: NavierStokesStep,
     ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
