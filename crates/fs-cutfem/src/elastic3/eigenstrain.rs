@@ -27,6 +27,7 @@ use super::material::{ReferenceMaterial3, engineering_strain};
 use super::strain_domain::FrobeniusStrainBall;
 use super::{Cell3, CutElasticity3, ElasticityError3, q1};
 
+mod equilibrium;
 mod reaction;
 mod sensitivity;
 
@@ -380,7 +381,7 @@ impl CutElasticity3 {
         max_points: usize,
         checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<Vec<EigenstrainResponse3>, ElasticityError3> {
-        self.eigenstrain_response_mapped(
+        self.eigenstrain_response_mapped::<true>(
             prepared,
             u,
             self.n(),
@@ -400,8 +401,39 @@ impl CutElasticity3 {
         )
     }
 
+    /// Apply identical retained-point physical admission without allocating
+    /// a response array. Strong-support recovery shares this thermal owner.
+    pub(in crate::elastic3) fn admit_eigenstrain(
+        &self,
+        prepared: &PreparedEigenstrain3,
+        u: &[f64],
+        maximum_kinematic_strain: f64,
+        max_points: usize,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.eigenstrain_response_mapped::<false>(
+            prepared,
+            u,
+            self.n(),
+            maximum_kinematic_strain,
+            max_points,
+            |cell, field| {
+                std::array::from_fn(|i| {
+                    let node = cell.nodes[i / 3];
+                    if self.fixed[node] {
+                        0.0
+                    } else {
+                        field[3 * node + i % 3]
+                    }
+                })
+            },
+            checkpoint,
+        )
+        .map(|_| ())
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn eigenstrain_response_mapped(
+    pub(super) fn eigenstrain_response_mapped<const COLLECT: bool>(
         &self,
         prepared: &PreparedEigenstrain3,
         u: &[f64],
@@ -435,7 +467,11 @@ impl CutElasticity3 {
                 ));
             }
         }
-        let mut response = Vec::with_capacity(prepared.points);
+        let mut response = if COLLECT {
+            Vec::with_capacity(prepared.points)
+        } else {
+            Vec::new()
+        };
         for (id, (cell, free)) in self.cells.iter().zip(&prepared.cells).enumerate() {
             poll(&mut checkpoint)?;
             let local = local(cell, u);
@@ -474,18 +510,20 @@ impl CutElasticity3 {
                         "unrepresentable eigenstrain response",
                     ));
                 }
-                response.push(EigenstrainResponse3 {
-                    cell: id,
-                    position,
-                    weight,
-                    strain: from_mandel(&strain),
-                    free_strain,
-                    elastic_strain: from_mandel(&elastic),
-                    constitutive_elastic_strain,
-                    reference_stress,
-                    stress,
-                    energy_density,
-                });
+                if COLLECT {
+                    response.push(EigenstrainResponse3 {
+                        cell: id,
+                        position,
+                        weight,
+                        strain: from_mandel(&strain),
+                        free_strain,
+                        elastic_strain: from_mandel(&elastic),
+                        constitutive_elastic_strain,
+                        reference_stress,
+                        stress,
+                        energy_density,
+                    });
+                }
             }
         }
         poll(&mut checkpoint)?;

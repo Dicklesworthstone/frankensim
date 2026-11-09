@@ -341,9 +341,7 @@ fn adaptive_reaction_partial_and_equilibrium_gradients_include_original_thermal_
     let total: Vec<_> = (0..op.cells())
         .map(|i| reaction.scale_gradient[i] + thermal[i] + lifting[i] - stiffness[i])
         .collect();
-    let ds: Vec<_> = (0..op.cells())
-        .map(|i| 0.1 * (1 + i % 3) as f64)
-        .collect();
+    let ds: Vec<_> = (0..op.cells()).map(|i| 0.1 * (1 + i % 3) as f64).collect();
     op.set_scales(
         &base
             .iter()
@@ -396,20 +394,14 @@ fn adaptive_reaction_partial_and_equilibrium_gradients_include_original_thermal_
     );
     let mut polls = 0;
     assert!(matches!(
-        op.eigenstrain_embedded_reaction(
-            &prepared,
-            &u,
-            Some(&motion),
-            &right_moment_z,
-            || {
-                polls += 1;
-                if polls > 20 {
-                    ControlFlow::Break(())
-                } else {
-                    poll()
-                }
-            },
-        ),
+        op.eigenstrain_embedded_reaction(&prepared, &u, Some(&motion), &right_moment_z, || {
+            polls += 1;
+            if polls > 20 {
+                ControlFlow::Break(())
+            } else {
+                poll()
+            }
+        }),
         Err(ElasticityError3::Cancelled)
     ));
     assert_eq!(polls, 21);

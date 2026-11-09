@@ -319,6 +319,34 @@ checked. `eigenstrain3_reaction` covers free-expansion force/moment cancellation
 analytic confined axial compression, adaptive partial and equilibrium
 derivatives, source retention, invalid input and cancellation.
 
+### Complete thermal strong-support force balance
+
+Cartesian and adaptive `eigenstrain_equilibrium_load` retain the original
+supported entries of both external loads and the prepared free-strain columns,
+including any embedded prescribed-motion lifting. Reassemble after changing
+material scales. Use the same complete vector for the algebraic solve and
+`eigenstrain_equilibrium_response`; a masked thermal load cannot recover
+the forces already discarded at its strong supports.
+
+Thermal force recovery evaluates the original uneliminated cell, B-bar,
+Nitsche and ghost actions, subtracts the complete RHS and reports strong-support
+force and moment plus the free residual norm. Adaptive forces use the original
+unmasked hanging-node transpose and master-node moment arms. Embedded support
+reactions remain a separate functional, avoiding double counting.
+
+Physical admission shares the thermal response owner: actual/projected total
+strain obeys the explicit kinematic ceiling and actual/projected elastic
+strain obeys the original material calibration at retained bulk points.
+The admission-only path allocates no array of stress observations; adaptive
+reconstruction remains cell-local. A solved state is needed to interpret
+supported residuals as equilibrium reactions. The free norm measures algebraic
+imbalance and does not certify continuum accuracy.
+
+`eigenstrain3_equilibrium` covers compatible expansion beyond narrow elastic
+calibration, restrained thermal face forces, supported source-density body
+loads, graded B-bar force/moment balance and simultaneous strong/embedded
+support reactions, together with ownership, budget and cancellation refusal.
+
 ## Consistent native material inertia in three dimensions
 
 `CutElasticity3::prepare_material_mass` and the adaptive equivalent prepare

@@ -11,8 +11,8 @@ use crate::octree3::{Octant3, Octree3, OctreeError3, OctreeNode3};
 type Row = Vec<(OctreeNode3, f64)>;
 
 mod body;
-mod eigenstrain;
 pub mod dirichlet;
+mod eigenstrain;
 pub mod enrichment;
 mod equilibrium;
 mod mass;

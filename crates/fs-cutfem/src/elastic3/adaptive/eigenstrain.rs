@@ -13,6 +13,8 @@ use crate::elastic3::ElasticityError3;
 use crate::elastic3::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3};
 use crate::elastic3::stress::BulkStressPullback3;
 
+mod equilibrium;
+
 fn checkpoint(poll: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
     if poll().is_break() {
         Err(ElasticityError3::Cancelled)
@@ -79,7 +81,7 @@ impl AdaptiveElasticity3 {
         max_points: usize,
         poll: impl FnMut() -> ControlFlow<()>,
     ) -> Result<Vec<EigenstrainResponse3>, ElasticityError3> {
-        self.raw.eigenstrain_response_mapped(
+        self.raw.eigenstrain_response_mapped::<true>(
             prepared,
             u,
             self.n(),
@@ -90,6 +92,33 @@ impl AdaptiveElasticity3 {
             },
             poll,
         )
+    }
+
+    /// Admit the original thermal state without a global displacement copy or
+    /// an allocated response array. The raw owner performs the same checks.
+    pub(in crate::elastic3) fn admit_eigenstrain(
+        &self,
+        prepared: &PreparedEigenstrain3,
+        u: &[f64],
+        maximum_kinematic_strain: f64,
+        max_points: usize,
+        poll: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.raw
+            .eigenstrain_response_mapped::<false>(
+                prepared,
+                u,
+                self.n(),
+                maximum_kinematic_strain,
+                max_points,
+                |cell, field| {
+                    std::array::from_fn(|i| {
+                        self.physical_coefficient(field, cell.nodes[i / 3], i % 3)
+                    })
+                },
+                poll,
+            )
+            .map(|_| ())
     }
 
     /// Exact scale-load transpose in the independent master space.
