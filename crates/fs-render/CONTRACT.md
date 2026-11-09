@@ -12703,8 +12703,10 @@ complete paths to the open boundary. A traversal refusal discards the binding;
 no unfinished ray becomes escape or heat. Spatial/angular samples are reused
 across physical stages and wavelengths. Their finite quadrature has its own
 ray-count/seed sensitivity; it is not an unbiased nonlinear estimator or an
-empirical confidence bound. No scattering, reflecting/refracting interfaces,
-coherent interference or photon flight-time model is inferred.
+empirical confidence bound. This ballistic binding does not infer scattering,
+reflecting/refracting interfaces, coherent interference or photon flight time.
+The explicit elastic-scattering binding below retains its own original optical
+snapshot and wavelength-dependent paths.
 
 `EmitterAbsorptionCrossSections<B>` is the same molecular source for external
 and internally emitted photons. The existing `BeamEmitterCrossSections` name
@@ -12756,6 +12758,63 @@ and endpoint domain refusal with clean retry. These renderer fixtures and the
 example are source-formatted and source-reviewed; native execution remains
 unverified because the unchanged `asupersync` dependency was killed before
 renderer typechecking. Lower-owner native tests do not establish this gate.
+
+### Elastic scattering coupled to finite-ground photon return
+
+`SaturableLuminescentHeating::{try_new_with_scattered_photon_recycling,
+with_scattered_photon_recycling}` binds the original `ScatteringGrid`, including
+its cell-specific elastic spectra and reciprocal phase laws, to the same finite
+emitter/thermal history. Each emission wavelength samples complete independent
+elastic walks from the existing uniform-cell isotropic source. The original
+native free-flight and phase samplers are reused; prepared optical palettes are
+amortized over all histories. Zero scattering delegates to the original
+ballistic binding and retains its arithmetic, samples and source identity.
+
+The geometry proposal contains scattering only. Passive and evolving molecular
+absorption act as survival factors along the retained walk, so no ground-state
+absorption probability is frozen into the geometry. This decomposition uses
+one monochromatic proposal per path: native collision/phase weights are one,
+with no cross-wavelength mixture correction. Every clipped original-cell
+traversal remains ordered, including zero-host-density cells and repeated
+returns. A repeated cell uses its original volume and single shared population;
+nonadjacent visits are never collapsed across intervening passive absorption.
+Source singlet/triplet spectra lower separately onto those walks, with their
+authored photon fractions and distinct source/destination energy accounts.
+
+The explicit per-history scattering-event limit and native DDA-visit limits
+refuse unfinished walks. Aggregate path/segment bounds include every wavelength
+and state copy plus external beams at native admission. Reaching a cap does not
+make a surviving path escape or deposit its residual as heat. Cancellation or
+any refused binding publishes no kinetic state. The complete scattering/phase
+snapshot, collision bound, sample seed and geometry enter source identity.
+Its declared temperature domain covers the entire immutable passive optical
+snapshot; this adapter does not invent a temperature law for scattering.
+
+Fixed sampled geometry is reused through the nonlinear kinetics. Angular,
+spectral and spatial sampling sensitivity remains separate from kinetic and
+thermal error control; the nonlinear result is not an unbiased estimator or
+a certified Monte Carlo interval. Elastic scattering does not alter photon
+energy. Interfaces, coherent propagation, directional dipole emission and
+finite flight delays remain outside this open index-one volume model.
+
+The existing `saturable_afterglow` example accepts `--scattered-recycling` with
+the prescribed, depleted or counterpropagating pump modes and optional local
+background/pair kinetics. Its explicitly synthetic spectrum has zero elastic
+scattering at both pump colors and nonzero scattering at the two emission
+wavelengths. The same snapshot drives photon return and the accepted-opacity
+endpoint observation; direct pump transport therefore remains consistent with
+that declared spectrum. The endpoint uses 128 bounded native photon histories,
+while recycling uses 32 complete walks per cell and wavelength. Those sample
+counts demonstrate the API and do not certify sampling convergence.
+
+Authored focused fixtures check wavelength-dependent collision distances,
+clipped returns through vacuum, independence of the walk from passive
+absorption, exact zero-scattering parity, secondary excitation/native heat,
+deterministic replay and aggregate/event-budget refusal. The original recycling
+fixture now explicitly authors passive spectral support through its 800 nm
+emission node. These Rust fixtures are source-reviewed and unexecuted: Rust,
+DSR and RCH are unavailable in the current workspace. Independent ordered-path
+fluence/energy equations and source review do not establish the renderer gate.
 
 ### Maintained local excitation with beams and photon return
 

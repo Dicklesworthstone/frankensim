@@ -206,6 +206,8 @@ pub(super) fn sample_extinction<const N: usize>(
 /// The source reads each full cell's incoming extinction depth before the
 /// sampled continuation weight. Completing its ray after a sampled collision
 /// is essential: stopping a deterministic source integral there would bias it.
+/// With `complete_source = false`, the observer instead receives only the
+/// actual flight, ending at the sampled collision inside its original cell.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sample_extinction_observed<const N: usize>(
     medium: &impl PreparedOptics<N>,
@@ -266,14 +268,16 @@ pub(super) fn sample_extinction_observed<const N: usize>(
             .map_or(&zero_absorption, |index| &additional_absorption[index].1);
         let has_additional = additional.iter().any(|&value| value > 0.0);
         if (rho == 0.0 && !has_additional) || segment.length_m == 0.0 {
-            source(
-                segment.cell,
-                segment.length_m,
-                rho,
-                &[0.0; N],
-                additional,
-                &depth,
-            )?;
+            if complete_source || result.event.is_none() {
+                source(
+                    segment.cell,
+                    segment.length_m,
+                    rho,
+                    &[0.0; N],
+                    additional,
+                    &depth,
+                )?;
+            }
             continue;
         }
         let (absorption, scattering, extinction) = medium.coefficients(segment.cell)?;
@@ -289,14 +293,16 @@ pub(super) fn sample_extinction_observed<const N: usize>(
                 host + positive_product(additional[lane], segment.length_m, 1.0)
             }
         });
-        source(
-            segment.cell,
-            segment.length_m,
-            rho,
-            &extinction,
-            additional,
-            &depth,
-        )?;
+        if complete_source {
+            source(
+                segment.cell,
+                segment.length_m,
+                rho,
+                &extinction,
+                additional,
+                &depth,
+            )?;
+        }
         if result.event.is_none()
             && ((rho > 0.0 && extinction[hero] > 0.0) || additional[hero] > 0.0)
             && remaining_tau < tau[hero]
@@ -357,11 +363,24 @@ pub(super) fn sample_extinction_observed<const N: usize>(
                 distance_m,
             });
             result.escape_probability = 0.0;
+            if !complete_source {
+                source(segment.cell, local_m, rho, &extinction, additional, &depth)?;
+            }
             if !complete_source && (!include_emission || !medium.has_emission()) {
                 return Ok((result, cell_visits));
             }
         }
         if result.event.is_none() {
+            if !complete_source {
+                source(
+                    segment.cell,
+                    segment.length_m,
+                    rho,
+                    &extinction,
+                    additional,
+                    &depth,
+                )?;
+            }
             remaining_tau -= tau[hero];
         }
         if include_emission {

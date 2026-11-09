@@ -13,6 +13,13 @@
 //! the synthetic triplet level to 650 nm:
 //! 600 nm singlet light can excite it, while 750 nm triplet light escapes.
 //! The endpoint view includes the same accepted molecular absorption.
+//! Add `--scattered-recycling` to include original elastic scattering in both
+//! photon return and the endpoint view; this implies `--recycling`. Its explicit
+//! synthetic spectrum is zero at both pump colors, preserving the direct pump,
+//! and 0.05/0.1 m²/kg at 600/750 nm with isotropic scattering. Recycling uses
+//! 32 complete walks per cell and wavelength; each endpoint view averages 128
+//! native histories with a fixed seed. Refine both sample counts and seeds to
+//! assess sampling sensitivity separately from kinetic/thermal refinement.
 //! Add `--background-pump` to a depleted-pump mode to also supply an explicitly
 //! maintained 400 nm local field: 5e24 photons/(m² s), or a 5e4/s excitation
 //! hazard per available ground-state emitter, under the same global pulse.
@@ -61,7 +68,12 @@ use fs_render::volumes::heating::luminescence::{
         },
     },
 };
-use fs_render::volumes::transport::luminescence::LuminescenceGrid;
+use fs_render::volumes::transport::luminescence::{
+    LuminescenceGrid, LuminescenceScatteringBudget, ScatteringLuminescenceGrid,
+};
+use fs_render::volumes::transport::scattering::{
+    MassScatteringSpectrum, PhaseFunction, ScatteringGrid,
+};
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -72,6 +84,42 @@ use std::error::Error;
 
 const HC_J_NM: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
 const CROSS_SECTION_M2: f64 = 1e-20;
+const SCATTERED_VIEW_SAMPLES: u32 = 128;
+const SCATTERED_VIEW_SEED: u64 = 251;
+
+fn observe_scattered<'g>(
+    cx: &Cx<'_>,
+    field: &LuminescenceGrid<'_, 'g, 2>,
+    medium: &ScatteringGrid<'g>,
+) -> Result<[f64; 2], Box<dyn Error>> {
+    let view = ScatteringLuminescenceGrid::try_new(cx, field, medium)?;
+    let mut radiance = [0.0; 2];
+    let mut remaining_visits = 32_768_u32;
+    for path in 0..SCATTERED_VIEW_SAMPLES {
+        let sample = view.sample_ray(
+            cx,
+            Point3::new(-0.01, 0.005, 0.005),
+            Vec3::new(1.0, 0.0, 0.0),
+            LuminescenceScatteringBudget {
+                max_scattering_events: 128,
+                max_cell_visits: remaining_visits.min(512),
+            },
+            SCATTERED_VIEW_SEED,
+            u64::from(path),
+        )?;
+        remaining_visits = remaining_visits
+            .checked_sub(sample.cell_visits)
+            .ok_or("scattered endpoint observation exhausted its aggregate visit budget")?;
+        for lane in 0..2 {
+            radiance[lane] +=
+                (sample.radiance_w_m2_sr[lane] - radiance[lane]) / f64::from(path + 1);
+        }
+    }
+    if radiance.iter().any(|value| !value.is_finite()) {
+        return Err("scattered endpoint radiance is not representable".into());
+    }
+    Ok(radiance)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PumpMode {
@@ -127,6 +175,7 @@ fn run(
     mode: PumpMode,
     annihilation: bool,
     recycling: bool,
+    scattered_recycling: bool,
     background_pump: bool,
 ) -> Result<(), Box<dyn Error>> {
     let depleting = mode != PumpMode::Prescribed;
@@ -151,6 +200,33 @@ fn run(
             max_steps_per_segment: 8,
         },
     )?;
+    let (absorption, scattering) = if scattered_recycling {
+        (
+            None,
+            Some(ScatteringGrid::try_new(
+                cx,
+                medium,
+                MassScatteringSpectrum::source_table(
+                    &[
+                        (380.0, 0.0),
+                        (400.0, 0.0),
+                        (410.0, 0.0),
+                        (600.0, 0.05),
+                        (750.0, 0.1),
+                        (780.0, 0.1),
+                    ],
+                    ContentHash([250; 32]),
+                )?,
+                PhaseFunction::Isotropic,
+            )?),
+        )
+    } else {
+        (Some(medium), None)
+    };
+    let medium = match &scattering {
+        Some(medium) => medium.absorption_grid(),
+        None => absorption.as_ref().expect("original absorption snapshot"),
+    };
     let caloric = Caloric;
     let config = StepConfig {
         max_dt_s: 5e-6,
@@ -226,7 +302,7 @@ fn run(
         })
         .collect();
     let mut heating = SaturableLuminescentHeating::try_new(
-        &medium,
+        medium,
         singlet,
         triplet,
         &bindings,
@@ -300,7 +376,7 @@ fn run(
         ];
         heating = heating.with_depleting_beams(
             cx,
-            &medium,
+            medium,
             &beams,
             &thermal,
             2,
@@ -325,7 +401,7 @@ fn run(
     } else if depleting {
         heating = heating.with_depleting_beam(
             cx,
-            &medium,
+            medium,
             ContentHash([244; 32]),
             IncidentBeam {
                 origin: Point3::new(-0.001, 0.005, 0.005),
@@ -369,48 +445,63 @@ fn run(
                 )
             })
             .collect::<Result<_, _>>()?;
-        heating = heating.with_photon_recycling(
-            cx,
-            &medium,
-            &sections,
-            &thermal,
-            PhotonRecyclingGeometry {
-                histories_per_emitter: 32,
-                maximum_paths: 256,
-                maximum_total_segments: 1024,
-                seed: 248,
-                source_id: 249,
-                minimum_temperature_k: 295.0,
-                maximum_temperature_k: 400.0,
-                fraction_roundoff: 1e-12,
-            },
-            SaturableRecyclingLimits {
-                pump: PumpBeamsLimits {
-                    column: PumpColumnLimits {
-                        relative_tolerance: 1e-4,
-                        absolute_energy_tolerance_j: 1e-12,
-                        maximum_substeps: 4096,
-                        maximum_cell_evaluations: 1_048_576,
-                        ..PumpColumnLimits::default()
-                    },
-                    maximum_coupling_iterations: 128,
-                },
-                annihilation: AnnihilationLimits {
+        let geometry = PhotonRecyclingGeometry {
+            histories_per_emitter: 32,
+            // Two states per wavelength, plus any external pump paths.
+            maximum_paths: if scattered_recycling { 512 } else { 256 },
+            maximum_total_segments: if scattered_recycling { 16_384 } else { 1024 },
+            seed: 248,
+            source_id: 249,
+            minimum_temperature_k: 295.0,
+            maximum_temperature_k: 400.0,
+            fraction_roundoff: 1e-12,
+        };
+        let limits = SaturableRecyclingLimits {
+            pump: PumpBeamsLimits {
+                column: PumpColumnLimits {
                     relative_tolerance: 1e-4,
                     absolute_energy_tolerance_j: 1e-12,
                     maximum_substeps: 4096,
+                    maximum_cell_evaluations: 1_048_576,
+                    ..PumpColumnLimits::default()
                 },
-                maximum_feedback_iterations: 128,
-                maximum_secant_history: 8,
+                maximum_coupling_iterations: 128,
             },
-            || Ok(()),
-        )?;
-        println!(
-            "Synthetic active recycling: 32 uniform-cell isotropic rays/cell, sigma(600nm,G→T)=1e-20 m², triplet level=650nm; 750nm remains transparent."
-        );
-        println!(
-            "Ballistic open-grid quadrature, quasistatic flight; ray-count/seed refinement is separate from kinetic and thermal refinement."
-        );
+            annihilation: AnnihilationLimits {
+                relative_tolerance: 1e-4,
+                absolute_energy_tolerance_j: 1e-12,
+                maximum_substeps: 4096,
+            },
+            maximum_feedback_iterations: 128,
+            maximum_secant_history: 8,
+        };
+        heating = if let Some(scattering) = &scattering {
+            heating.with_scattered_photon_recycling(
+                cx, scattering, &sections, &thermal, geometry, 128, limits, || Ok(()),
+            )?
+        } else {
+            heating.with_photon_recycling(
+                cx, medium, &sections, &thermal, geometry, limits, || Ok(()),
+            )?
+        };
+        if scattered_recycling {
+            println!(
+                "Synthetic elastic recycling: 32 uniform-cell isotropic walks/cell/wavelength, sigma(600nm,G→T)=1e-20 m², triplet level=650nm; no molecular absorption at 750nm."
+            );
+            println!(
+                "Original isotropic scattering: kappa_s(400/410nm)=0, kappa_s(600nm)=0.05 m²/kg, kappa_s(750nm)=0.1 m²/kg. Direct pumps remain unscattered."
+            );
+            println!(
+                "Endpoint radiance uses the same snapshot and {SCATTERED_VIEW_SAMPLES} native histories, seed={SCATTERED_VIEW_SEED}; complete-walk sampling sensitivity is separate from kinetic and thermal refinement."
+            );
+        } else {
+            println!(
+                "Synthetic active recycling: 32 uniform-cell isotropic rays/cell, sigma(600nm,G→T)=1e-20 m², triplet level=650nm; 750nm remains transparent."
+            );
+            println!(
+                "Ballistic open-grid quadrature, quasistatic flight; ray-count/seed refinement is separate from kinetic and thermal refinement."
+            );
+        }
     }
     heating = heating.with_pump_window(0.0, pulse_end_s)?;
     let absorbed_label = if background_pump {
@@ -472,23 +563,28 @@ fn run(
                 [sum[0] + power[0], sum[1] + power[1]]
             });
         let view = if recycling {
-            heating.recycling_emission_grid(cx, &medium, cell_count)?
+            heating.recycling_emission_grid(cx, medium, cell_count)?
         } else {
             LuminescenceGrid::try_new(
                 cx,
-                &medium,
+                medium,
                 heating.emission_source_identity(),
                 [600.0, 750.0],
                 heating.cell_emission_w(),
                 cell_count,
             )?
         };
-        let observed = view.transport(
-            cx,
-            Point3::new(-0.01, 0.005, 0.005),
-            Vec3::new(1.0, 0.0, 0.0),
-            0.03,
-        )?;
+        let observed = if let Some(scattering) = &scattering {
+            observe_scattered(cx, &view, scattering)?
+        } else {
+            view.transport(
+                cx,
+                Point3::new(-0.01, 0.005, 0.005),
+                Vec3::new(1.0, 0.0, 0.0),
+                0.03,
+            )?
+            .emitted_radiance_w_m2_sr
+        };
         let beam_accounts = if counterpropagating {
             let report = heating
                 .depleting_pump_report()
@@ -561,8 +657,8 @@ fn run(
             heating.energy().stored_excitation_j,
             heating.thermal_input_j(),
             mean_temperature_k,
-            observed.emitted_radiance_w_m2_sr[0],
-            observed.emitted_radiance_w_m2_sr[1],
+            observed[0],
+            observed[1],
             heating.energy().residual_j,
         );
     }
@@ -574,6 +670,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut mode = PumpMode::Prescribed;
     let mut annihilation = false;
     let mut recycling = false;
+    let mut scattered_recycling = false;
     let mut background_pump = false;
     for argument in &arguments {
         match argument.as_str() {
@@ -583,9 +680,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "--annihilation" if !annihilation => annihilation = true,
             "--recycling" if !recycling => recycling = true,
+            "--scattered-recycling" if !scattered_recycling => scattered_recycling = true,
             "--background-pump" if !background_pump => background_pump = true,
             _ => return Err(
-                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation] [--recycling] [--background-pump]"
+                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation] [--recycling] [--scattered-recycling] [--background-pump]"
                     .into(),
             ),
         }
@@ -611,7 +709,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
             mode,
             annihilation,
-            recycling,
+            recycling || scattered_recycling,
+            scattered_recycling,
             background_pump,
         )
     })

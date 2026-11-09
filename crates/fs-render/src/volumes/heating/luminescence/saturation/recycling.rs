@@ -1,11 +1,11 @@
 //! Finite-inventory emitted-photon feedback on the accepted thermal clock.
 //!
-//! Complete ballistic rays are sampled once from the original cells. Their
+//! Complete ballistic rays or elastic walks are sampled once from the original cells. Their
 //! geometry is reused while molecular absorption follows the same evolving
 //! ground inventory as all external pumps. Spatial/angular sampling, kinetic
 //! refinement and thermal feedback are distinct approximations and budgets.
-//! Photon flight is quasistatic; scattering, interfaces and coherent light
-//! require their own transport models and are not inferred from this binding.
+//! Photon flight is quasistatic. Elastic walks use the original scattering
+//! spectra and phase laws; interfaces and coherent light are not inferred.
 
 use super::cross_sections::{CrossSections, EmitterAbsorptionCrossSections};
 use super::{
@@ -14,6 +14,7 @@ use super::{
     SingletTripletSource, finite, invalid, preserve_checkpoint, resolve_model,
 };
 use crate::volumes::transport::luminescence::LuminescenceGrid;
+use crate::volumes::transport::scattering::ScatteringGrid;
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 use fs_exec::Cx;
 use fs_thermal::luminescence::transfer::pump_beams::recycling::{
@@ -39,12 +40,14 @@ pub type RecyclingEmitterCrossSections<const M: usize> = EmitterAbsorptionCrossS
 pub struct PhotonRecyclingGeometry {
     pub histories_per_emitter: u32,
     /// Includes external paths and every emitted spectral-pair/spin path.
+    /// Scattered walks use one physical wavelength per path and two spin copies.
     pub maximum_paths: usize,
     /// Includes every retained segment over all those paths, not per emitter.
     pub maximum_total_segments: usize,
     pub seed: u64,
     pub source_id: u64,
-    /// Explicit validity domain of the immutable passive host optical snapshot.
+    /// Explicit validity domain of the immutable passive host optical snapshot,
+    /// including its scattering coefficients and phase laws when present.
     pub minimum_temperature_k: f64,
     pub maximum_temperature_k: f64,
     /// Arithmetic allowance for complete emission-probability rows.
@@ -62,6 +65,8 @@ struct RayCell<const M: usize> {
 #[derive(Clone, Debug)]
 struct EmissionRay<const M: usize> {
     source_cell: usize,
+    /// Ballistic rays share all bins; an elastic walk samples one wavelength.
+    lane: Option<usize>,
     cells: Vec<RayCell<M>>,
 }
 
@@ -143,9 +148,124 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
     /// No excitation probability or missing coefficient is inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn with_photon_recycling(
+        self,
+        cx: &Cx<'_>,
+        medium: &AbsorbingGrid<'_>,
+        cross_sections: &[RecyclingEmitterCrossSections<M>],
+        thermal: &DepositionSimulation<'_>,
+        config: PhotonRecyclingGeometry,
+        limits: SaturableRecyclingLimits,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        self.with_photon_recycling_impl(
+            cx, medium, None, cross_sections, thermal, config, limits, checkpoint,
+        )
+    }
+
+    /// Construct finite populations with complete, wavelength-resolved elastic
+    /// walks through the original scattering medium. Passive host absorption
+    /// excludes the molecular cross sections supplied here. Every occupied host
+    /// cell needs its original thermal binding; zero emitter counts are allowed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_scattered_photon_recycling(
+        cx: &Cx<'_>,
+        medium: &ScatteringGrid<'_>,
+        singlet: LuminescenceSource<M>,
+        triplet: SingletTripletSource<M>,
+        bindings: &[SaturableEmitterCell],
+        thermal: &DepositionSimulation<'_>,
+        max_grid_cells: usize,
+        energy_tolerance_j: f64,
+        cross_sections: &[RecyclingEmitterCrossSections<M>],
+        geometry: PhotonRecyclingGeometry,
+        maximum_scattering_events_per_history: u32,
+        limits: SaturableRecyclingLimits,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        Self::try_new_impl(
+            medium.absorption_grid(),
+            singlet,
+            triplet,
+            bindings,
+            thermal,
+            max_grid_cells,
+            energy_tolerance_j,
+            None,
+            true,
+            &mut checkpoint,
+        )?
+        .with_scattered_photon_recycling(
+            cx,
+            medium,
+            cross_sections,
+            thermal,
+            geometry,
+            maximum_scattering_events_per_history,
+            limits,
+            checkpoint,
+        )
+    }
+
+    /// Bind original elastic scattering to the same finite ground inventory.
+    /// Each emission bin samples independent complete walks with its own
+    /// original phase law; no spectral mixture weights or fixed molecular
+    /// absorption probabilities are introduced. Absorption is integrated along
+    /// every ordered visit, including returns to a previously visited cell.
+    ///
+    /// A collision or traversal cap refuses the entire binding without
+    /// classifying unfinished photons as escape or heat. Zero scattering takes
+    /// the exact ballistic route, preserving its samples and source identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_scattered_photon_recycling(
+        self,
+        cx: &Cx<'_>,
+        medium: &ScatteringGrid<'_>,
+        cross_sections: &[RecyclingEmitterCrossSections<M>],
+        thermal: &DepositionSimulation<'_>,
+        config: PhotonRecyclingGeometry,
+        maximum_scattering_events_per_history: u32,
+        limits: SaturableRecyclingLimits,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        let (lo, hi) = medium.wavelength_bounds_nm();
+        if self
+            .singlet
+            .fluorescence()
+            .wavelengths_nm()
+            .iter()
+            .any(|wavelength| !(lo..=hi).contains(wavelength))
+        {
+            return Err(invalid("emission exceeds original scattering snapshot support"));
+        }
+        if !medium.has_scattering() {
+            return self.with_photon_recycling(
+                cx,
+                medium.absorption_grid(),
+                cross_sections,
+                thermal,
+                config,
+                limits,
+                checkpoint,
+            );
+        }
+        self.with_photon_recycling_impl(
+            cx,
+            medium.absorption_grid(),
+            Some((medium, maximum_scattering_events_per_history)),
+            cross_sections,
+            thermal,
+            config,
+            limits,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_photon_recycling_impl(
         mut self,
         cx: &Cx<'_>,
         medium: &AbsorbingGrid<'_>,
+        scattering: Option<(&ScatteringGrid<'_>, u32)>,
         cross_sections: &[RecyclingEmitterCrossSections<M>],
         thermal: &DepositionSimulation<'_>,
         config: PhotonRecyclingGeometry,
@@ -164,12 +284,21 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
                 "finite photon recycling requires original unadvanced inventories and matching medium",
             ));
         }
-        let mut hash = DomainHasher::new("org.frankensim.render.finite-photon-recycling.v1");
+        let mut hash = DomainHasher::new(if scattering.is_some() {
+            "org.frankensim.render.finite-scattered-photon-recycling.v1"
+        } else {
+            "org.frankensim.render.finite-photon-recycling.v1"
+        });
         hash.update(self.source_identity.as_bytes());
+        if let Some((medium, maximum_events)) = scattering {
+            hash.update(medium.content_identity().as_bytes());
+            hash.update(&maximum_events.to_le_bytes());
+        }
         let geometry = geometry::compile(
             &self,
             cx,
             medium,
+            scattering,
             cross_sections,
             config,
             limits,
@@ -333,13 +462,18 @@ impl<const M: usize> PhotonRecycling<M> {
                 } else {
                     owner.triplet.triplet().fluorescence()
                 };
-                for pair in 0..M.div_ceil(2) {
+                let pairs = if ray.lane.is_some() { 1 } else { M.div_ceil(2) };
+                for pair in 0..pairs {
                     checkpoint()?;
-                    let bins = [Some(2 * pair), (2 * pair + 1 < M).then_some(2 * pair + 1)];
+                    let first = ray.lane.unwrap_or(2 * pair);
+                    let bins = [
+                        Some(first),
+                        (ray.lane.is_none() && first + 1 < M).then_some(first + 1),
+                    ];
                     let mut photon_energies_j = [0.0; 2];
                     let mut photon_fractions = [0.0; 2];
                     for lane in 0..2 {
-                        let bin = bins[lane].unwrap_or(2 * pair);
+                        let bin = bins[lane].unwrap_or(first);
                         photon_energies_j[lane] = finite(super::HC_J_NM / wavelengths[bin])?;
                         if bins[lane].is_some() {
                             photon_fractions[lane] =

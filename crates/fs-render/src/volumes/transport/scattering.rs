@@ -45,6 +45,8 @@ pub mod field;
 /// Directed transport of isotropic nonthermal volume emission.
 pub mod luminescence;
 mod prepared;
+#[cfg(feature = "optical-heating")]
+pub(crate) mod population;
 pub use field::{CellPhaseFunction, CellScatteringGrid};
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.
 pub mod mie;

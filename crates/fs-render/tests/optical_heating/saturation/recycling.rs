@@ -10,6 +10,18 @@ use fs_render::volumes::heating::luminescence::saturation::recycling::{
     PhotonRecyclingGeometry, RecyclingEmitterCrossSections, SaturableRecyclingLimits,
 };
 
+mod scattering;
+
+// This fixture emits at 800 nm, beyond the legacy visible constant spectrum.
+// Its passive host is explicitly authored across both emission nodes.
+fn passive_spectrum(coefficient: f64) -> MassAbsorptionSpectrum {
+    MassAbsorptionSpectrum::source_table(
+        &[(380.0, coefficient), (800.0, coefficient)],
+        ContentHash([81; 32]),
+    )
+    .unwrap()
+}
+
 fn geometry() -> PhotonRecyclingGeometry {
     PhotonRecyclingGeometry {
         histories_per_emitter: 16,
@@ -133,7 +145,7 @@ fn g1_zero_active_return_retains_analytic_decay_and_routes_passive_host_heat_onc
             let medium = grid(
                 cx,
                 &density,
-                MassAbsorptionSpectrum::constant(coefficient).unwrap(),
+                passive_spectrum(coefficient),
             );
             let initial = [0.5 * COUNT, 0.3 * COUNT, 0.2 * COUNT];
             let (thermal, heating) = owner(cx, &medium, &[initial], [[0.0; 2]; 2]);
@@ -179,7 +191,7 @@ fn g1_zero_active_return_retains_analytic_decay_and_routes_passive_host_heat_onc
 fn g3_recycled_light_excites_an_unpumped_cell_and_endpoint_camera_uses_its_ground_opacity() {
     with_cx(|cx| {
         let density = [1.0; 2];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, passive_spectrum(0.0));
         let initial = [[0.5 * COUNT, 0.5 * COUNT, 0.0], [COUNT, 0.0, 0.0]];
         let sigma = 4.0 / COUNT;
         let (thermal, heating) = owner(cx, &medium, &initial, [[sigma, 0.0], [0.0; 2]]);
@@ -238,7 +250,7 @@ fn g3_recycled_light_excites_an_unpumped_cell_and_endpoint_camera_uses_its_groun
 fn g3_shared_pumps_pairs_recycling_and_retry_keep_one_native_inventory_and_external_ledger() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, passive_spectrum(0.0));
         let (thermal, base) = owner(
             cx,
             &medium,
@@ -342,7 +354,7 @@ fn g3_shared_pumps_pairs_recycling_and_retry_keep_one_native_inventory_and_exter
 fn g1_prescribed_excitation_with_transparent_recycling_keeps_analytic_local_accounts() {
     with_cx(|cx| {
         let density = [1.0];
-        let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+        let medium = grid(cx, &density, passive_spectrum(0.0));
         let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
         let mut binding = bindings(&[[COUNT, 0.0, 0.0]]);
         binding[0].pump = PrescribedPhotonPump::try_new(
@@ -411,7 +423,7 @@ fn g3_local_triplet_excitation_competes_with_a_singlet_beam_pairs_and_photon_ret
     with_cx(|cx| {
         for recycling in [false, true] {
             let density = [1.0];
-            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let medium = grid(cx, &density, passive_spectrum(0.0));
             let thermal = thermal(vec![cell(1, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
             let mut binding = bindings(&[[COUNT, 0.0, 0.0]]);
             binding[0].pump = PrescribedPhotonPump::try_new(
