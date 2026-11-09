@@ -1,6 +1,11 @@
 //! Bounded simultaneous continuous tones in the shared physical runtime.
 
 mod power;
+mod sensitivity;
+pub use sensitivity::{
+    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
+    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedModalToneSensitivity,
+};
 
 use super::super::{
     ExactZohKernel, ModalAcousticFrame, ModalAcousticState, ModalAcousticTimeError,

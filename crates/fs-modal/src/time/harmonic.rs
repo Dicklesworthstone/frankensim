@@ -21,7 +21,11 @@ pub use sensitivity::{
     HarmonicForceParameterSensitivity, HarmonicForcePhasePullback, HarmonicForcePullback,
     HarmonicForceSensitivityFrame, PreparedHarmonicForceSensitivity,
 };
-pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
+pub use tones::{
+    MAX_HARMONIC_TONES, ModalToneBudget, ModalTonePullback, ModalToneSensitivityBudget,
+    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
+    PreparedModalToneSensitivity, PreparedModalTones,
+};
 
 /// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where
 /// `F(t) = cosine_force*cos(Omega*t) + sine_force*sin(Omega*t)` and time is

@@ -995,6 +995,55 @@ continuous-power integration across DC/inharmonic/critical/free/high-Q cases,
 close destructive beats, exact duplicate cancellation, resonance, multimode
 subdivision/replay, tiny near-DC heat, the active 32nd tone and budget refusals.
 
+`PreparedModalTones::prepare_sensitivities` cold-prepares optional exact
+constant-tone motion derivatives for every mode and distinct nominal frequency.
+The returned `PreparedModalToneSensitivity` borrows the unchanged bank and
+reuses the original scalar harmonic sensitivity caches. `advance_mode` returns
+the original coherent endpoint, independent physical k/c partials, and each
+original source's forcing-frequency/initial-phase partials. `pullback_mode`
+returns initial-state, k/c and original source-force/clock cotangents for an
+endpoint objective. Fixed-capacity results expose only the complete original
+caller order through `source_partials` or `source_cotangents`; warm queries
+allocate nothing and evaluate no transcendental functions.
+
+The shared scalar mechanical contraction receives one compensated aggregate
+held-force imbalance and the summed source derivative gains. It differentiates
+one physical initial state, preserving a nearly balanced DC load's tiny damping
+derivative instead of subtracting separately differentiated trajectories.
+Duplicate frequencies coalesce their primal forces and shared k/c response,
+while each original input tone retains its own frequency and phase parameters.
+Its clock partial therefore uses its own original force quadratures, even when
+a duplicate cancels the nominal motion completely. Force cotangents map back
+to every original source; nearby distinct tones retain their beat dynamics.
+
+`PreparedModalTones::pullback_force_phase` delegates the original scalar phase
+rotation's transpose and frequency derivative for the selected original tone.
+A reverse trajectory combines source-state and mechanical cotangents at every
+interval. Shared physical parameters require their authored chain rule across
+tones and modes: a common fundamental with `Omega_j = n_j*Omega_0` weights each
+source-frequency cotangent by `n_j`, and a shared initial harmonic phase uses
+the corresponding phase factors. No frequency-ratio or parameter identity is
+inferred from coincident nominal frequencies.
+
+`ModalToneSensitivityBudget` separately caps the additional cache/scratch
+payload, scalar preparation work and one mode's forward/reverse query work.
+Admission precedes allocation; cancellation is polled during admission, between
+scalar preparations and query contributions, and before publication. A refusal
+returns no partial derivative and changes no bank/model state. Pure mode queries
+leave physical state and observation admission to the caller, as do the original
+mode previews. Affine envelopes explicitly refuse because their frequency
+partial requires a quadratic time envelope; it is not approximated by this
+constant-tone entry. Work/heat, changing duration, basis/mass normalization and
+nonsmooth objective derivatives remain outside these motion partials.
+
+G1/G3 checks in `tests/tone_sensitivities.rs` compare independent physical
+variational ODEs across free, resonant, critical, overdamped and near-frequency
+motion; retain nonzero individual gradients at destructive duplicate
+cancellation; resolve tiny near-DC equilibrium damping derivatives relatively;
+and compare a multimode unequal-interval source/state reverse sweep with the
+complete interval and independent ODEs. Transpose, budget, affine-law and
+cancellation refusals cover reusable bank queries.
+
 `LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
 initial displacement/velocity and both endpoint forces, with frequency, damping
 and duration fixed. It transposes the same cached flow and force moments;

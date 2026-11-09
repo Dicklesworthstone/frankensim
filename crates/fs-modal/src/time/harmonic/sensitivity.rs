@@ -10,6 +10,7 @@ use super::{
     double_force, invalid, small_force,
 };
 use crate::time::forcing::{
+    LinearForceParameterSensitivity,
     sensitivity::{MomentDerivative, Parameter},
     small_ramp_moments,
 };
@@ -196,24 +197,61 @@ impl PreparedHarmonicForceSensitivity {
         sine_force: f64,
     ) -> Result<HarmonicForceSensitivityFrame, ModalAcousticTimeError> {
         let next = self.motion.advance(state, cosine_force, sine_force)?;
+        let mechanical =
+            self.mechanical_partials(state, self.parameter_forcing(cosine_force, sine_force))?;
+        let [qw, vw, qp, vp] = self.clock_partials(cosine_force, sine_force)?;
+        Ok(HarmonicForceSensitivityFrame {
+            state: next,
+            parameters: HarmonicForceParameterSensitivity {
+                displacement_by_stiffness: mechanical.displacement_by_stiffness,
+                velocity_by_stiffness: mechanical.velocity_by_stiffness,
+                displacement_by_damping_rate: mechanical.displacement_by_damping_rate,
+                velocity_by_damping_rate: mechanical.velocity_by_damping_rate,
+                displacement_by_forcing_angular_frequency: qw,
+                velocity_by_forcing_angular_frequency: vw,
+                displacement_by_initial_phase: qp,
+                velocity_by_initial_phase: vp,
+            },
+        })
+    }
+
+    // [held impulse, q_k source gain, v_k source gain, q_c gain, v_c gain].
+    // A coherent bank sums these BEFORE contracting the one physical state.
+    pub(super) fn parameter_forcing(&self, cosine_force: f64, sine_force: f64) -> [f64; 5] {
+        let fc = self.motion.duration_s * cosine_force;
+        let fs = self.motion.duration_s * sine_force;
+        let [kqc, kqs, kvc, kvs] = self.force_stiffness;
+        let [cqc, cqs, cvc, cvs] = self.force_damping;
+        [
+            if self.motion.cosine_remainder {
+                fc
+            } else {
+                0.0
+            },
+            kqc * fc + kqs * fs,
+            kvc * fc + kvs * fs,
+            cqc * fc + cqs * fs,
+            cvc * fc + cvs * fs,
+        ]
+    }
+
+    // Same physical mechanical contraction for one tone or a coherent bank.
+    // Retain a SINGLE held-force imbalance, so a near-DC equilibrium does not
+    // become cancellation between separately differentiated large trajectories.
+    pub(super) fn mechanical_partials(
+        &self,
+        state: ModalAcousticState,
+        forcing: [f64; 5],
+    ) -> Result<LinearForceParameterSensitivity, ModalAcousticTimeError> {
         let h = self.motion.duration_s;
         let flow = self.motion.transition;
         let q = state.displacement_m_sqrt_kg;
         let v = state.velocity_m_sqrt_kg_per_s;
-        let fc = h * cosine_force;
-        let fs = h * sine_force;
-        let held = if self.motion.cosine_remainder {
-            fc
-        } else {
-            0.0
-        };
+        let [held, force_qk, force_vk, force_qc, force_vc] = forcing;
         let restoring = (self.motion.angular_frequency_rad_s * q) * flow.angle;
         let residual = held - restoring;
         let k = self.stiffness;
         let c = self.damping;
-        let [kqc, kqs, kvc, kvs] = self.force_stiffness;
-        let [cqc, cqs, cvc, cvs] = self.force_damping;
-        let force_qk = kqc * fc + kqs * fs;
         // Retain the original force imbalance around static equilibrium and
         // independently computed homogeneous tails after a long decay.
         let qk = if flow.position_decrement.abs() < 0.5 {
@@ -221,27 +259,19 @@ impl PreparedHarmonicForceSensitivity {
         } else {
             h * (h * (k.position * q + h * (k.b * v + k.g * held + force_qk)))
         };
-        let qc = h * (h * (c.b * v + c.g * residual + cqc * fc + cqs * fs));
-        let vk = h * (h * (k.velocity * v + k.b * residual + kvc * fc + kvs * fs) - flow.b * q);
-        let vc = h * (c.velocity * v + c.b * residual + cvc * fc + cvs * fs);
+        let qc = h * (h * (c.b * v + c.g * residual + force_qc));
+        let vk = h * (h * (k.velocity * v + k.b * residual + force_vk) - flow.b * q);
+        let vc = h * (c.velocity * v + c.b * residual + force_vc);
         if ![qk, vk, qc, vc].into_iter().all(f64::is_finite) {
             return Err(invalid(
                 "harmonic physical sensitivities must be representable",
             ));
         }
-        let [qw, vw, qp, vp] = self.clock_partials(cosine_force, sine_force)?;
-        Ok(HarmonicForceSensitivityFrame {
-            state: next,
-            parameters: HarmonicForceParameterSensitivity {
-                displacement_by_stiffness: qk,
-                velocity_by_stiffness: vk,
-                displacement_by_damping_rate: qc,
-                velocity_by_damping_rate: vc,
-                displacement_by_forcing_angular_frequency: qw,
-                velocity_by_forcing_angular_frequency: vw,
-                displacement_by_initial_phase: qp,
-                velocity_by_initial_phase: vp,
-            },
+        Ok(LinearForceParameterSensitivity {
+            displacement_by_stiffness: qk,
+            velocity_by_stiffness: vk,
+            displacement_by_damping_rate: qc,
+            velocity_by_damping_rate: vc,
         })
     }
 
@@ -264,6 +294,56 @@ impl PreparedHarmonicForceSensitivity {
             return Err(invalid("harmonic endpoint cotangents must be finite"));
         }
         let parameter = self.advance(state, cosine_force, sine_force)?.parameters;
+        let [
+            initial_displacement,
+            initial_velocity,
+            cosine_force,
+            sine_force,
+        ] = self.input_cotangents(q_bar, v_bar)?;
+        let stiffness = q_bar.mul_add(
+            parameter.displacement_by_stiffness,
+            v_bar * parameter.velocity_by_stiffness,
+        );
+        let damping_rate = q_bar.mul_add(
+            parameter.displacement_by_damping_rate,
+            v_bar * parameter.velocity_by_damping_rate,
+        );
+        let forcing_angular_frequency = q_bar.mul_add(
+            parameter.displacement_by_forcing_angular_frequency,
+            v_bar * parameter.velocity_by_forcing_angular_frequency,
+        );
+        let initial_phase = q_bar.mul_add(
+            parameter.displacement_by_initial_phase,
+            v_bar * parameter.velocity_by_initial_phase,
+        );
+        if ![
+            stiffness,
+            damping_rate,
+            forcing_angular_frequency,
+            initial_phase,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+        {
+            return Err(invalid("harmonic input cotangents must be representable"));
+        }
+        Ok(HarmonicForcePullback {
+            initial_displacement,
+            initial_velocity,
+            cosine_force,
+            sine_force,
+            stiffness,
+            damping_rate,
+            forcing_angular_frequency,
+            initial_phase,
+        })
+    }
+
+    pub(super) fn input_cotangents(
+        &self,
+        q_bar: f64,
+        v_bar: f64,
+    ) -> Result<[f64; 4], ModalAcousticTimeError> {
         let h = self.motion.duration_s;
         let flow = self.motion.transition;
         let restoring = self.motion.angular_frequency_rad_s * ((flow.angle * flow.b) * v_bar);
@@ -285,47 +365,23 @@ impl PreparedHarmonicForceSensitivity {
         }
         let cosine_force = h * (qc * scaled_q_bar + vc * v_bar);
         let sine_force = h * (qs * scaled_q_bar + vs * v_bar);
-        let stiffness = q_bar.mul_add(
-            parameter.displacement_by_stiffness,
-            v_bar * parameter.velocity_by_stiffness,
-        );
-        let damping_rate = q_bar.mul_add(
-            parameter.displacement_by_damping_rate,
-            v_bar * parameter.velocity_by_damping_rate,
-        );
-        let forcing_angular_frequency = q_bar.mul_add(
-            parameter.displacement_by_forcing_angular_frequency,
-            v_bar * parameter.velocity_by_forcing_angular_frequency,
-        );
-        let initial_phase = q_bar.mul_add(
-            parameter.displacement_by_initial_phase,
-            v_bar * parameter.velocity_by_initial_phase,
-        );
         if ![
             initial_displacement,
             initial_velocity,
             cosine_force,
             sine_force,
-            stiffness,
-            damping_rate,
-            forcing_angular_frequency,
-            initial_phase,
         ]
         .into_iter()
         .all(f64::is_finite)
         {
             return Err(invalid("harmonic input cotangents must be representable"));
         }
-        Ok(HarmonicForcePullback {
+        Ok([
             initial_displacement,
             initial_velocity,
             cosine_force,
             sine_force,
-            stiffness,
-            damping_rate,
-            forcing_angular_frequency,
-            initial_phase,
-        })
+        ])
     }
 }
 

@@ -71,7 +71,7 @@ impl HarmonicForceTransition {
 }
 
 impl PreparedHarmonicForceSensitivity {
-    pub(super) fn clock_partials(
+    pub(in crate::time::harmonic) fn clock_partials(
         &self,
         cosine_force: f64,
         sine_force: f64,
