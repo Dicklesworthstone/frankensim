@@ -12197,3 +12197,56 @@ for two noncommuting tensors and an oriented support, parity with the original
 isotropic coating at normal incidence, reactive storage without heat, and
 original coating-domain/cancellation admission. Native execution status is
 reported separately.
+
+## Initialized source storage in the live nonlinear valve and both acoustic ducts
+
+`TwoSidedAperture::with_stored_pressure_source` binds the original
+`StoredPressureSource` to one explicitly authored Driven endpoint at the remote
+end of the upstream duct. Its wave reference and physical sample period must
+match the actual adjacent section and valve clock. A cold attachment retains
+initialized compliance pressure/inertive flow and admits their original
+quadratic storage against the existing complete energy bound. It does not
+overwrite a passive, fitted or already owned termination.
+
+`step_with_stored_source_under_gate` and the corresponding downstream-boundary/
+spatial-pressure entry point solve the source, original nonlinear valve and
+both retained networks in one accepted transaction. Every endpoint reads the
+old traveling state. The remote source uses the native causal R-L-C reflection;
+the valve still uses its original combined characteristic load, Bernoulli and
+swept-flow solve. There is no extra source/valve solve, wave-history clone,
+replacement FIR termination or implicit zero-delay shortcut across the duct.
+
+The remote ideal pressure supply works against its own outgoing flow, which
+can differ from valve flow while the duct stores energy. This work and the
+separate local series-source work enter once. Initial source energy is storage,
+not supplied work. Original source resistor heat, source storage change,
+mechanical/contact/material dissipation, both graph accounts and any fixed
+supply-passage account participate in the original whole-system gates. Internal
+source-to-duct transfer cancels once. The original paired graph acceptance
+remains the last fallible physical operation, followed by infallible publication
+of valve/source/optional passage histories. Refusal and cancellation preserve
+all accepted clocks, source state, waves, motion and observations.
+
+The upstream graph may contain passive branches and its admitted distributed
+loads, but must have exactly this one Driven endpoint and no moving-key owner.
+Downstream keys and original spatial pressure ports retain their explicit
+entry point. Existing source-free/local-pressure entry points and arithmetic
+are unchanged; a bound remote source requires an explicit remote pressure
+input. Coefficients and geometry remain fixed. This is a declared linear R-L-C
+source, not finite thermodynamic gas inventory, anatomical tissue properties,
+moving lung volume or measured player validation.
+
+Six integration regression groups cover initialized pressure traveling to
+independently moving nonlinear blades, bore reflections returning to the
+reservoir only after the full round trip, independent local/remote source work
+with initialized R-L-C storage and resistor heat, the zero-storage
+pressure-release limit, late whole-system energy rejection/cancellation with
+exact retry, and source/clock/termination/storage admission. All six passed in
+a focused native build executing the actual source and transaction methods,
+original uniform-slit paired midpoint solver and native fs-vfit wave/load
+owners. Its open-contact/scalar-gas fixture explicitly excluded closed contact,
+exact/modal/Maxwell blades, moving keys, source geometry/material lowering,
+supply passages and coupled radiation; those combinations were not runtime
+verified. Seven existing stored-source regressions also passed after sharing
+its immutable boundary preview. New files passed pinned formatting; full
+workspace Cargo/remote-runner validation remains unavailable.

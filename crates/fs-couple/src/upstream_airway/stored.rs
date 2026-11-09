@@ -22,7 +22,7 @@ use super::UpstreamPort;
 use fs_vfit::impedance::{ImpedanceFrame, SeriesImpedance};
 use fs_vfit::waveguide::{
     WaveguideError,
-    network::{DrivenWave, NetworkFrame, WaveguideNetwork},
+    network::{DrivenBoundary, DrivenWave, NetworkFrame, WaveguideNetwork},
 };
 
 /// One accepted source sample. Positive flow and outgoing work leave the source.
@@ -176,6 +176,43 @@ impl StoredPressureSource {
         Ok(frame)
     }
 
+    /// Shared physical boundary candidate for larger native transactions.
+    /// Only this bounded source state is copied; the caller retains and checks
+    /// the original network clock and publishes the candidate after all peers.
+    pub(crate) fn preview_boundary(
+        &self,
+        boundary: DrivenBoundary,
+        source_pa: f64,
+    ) -> Result<(Self, StoredSourceFrame, DrivenWave), WaveguideError> {
+        if boundary.impedance_pa_s_m3.to_bits() != self.load.port_impedance().to_bits() {
+            return Err(WaveguideError(
+                "stored source and adjacent characteristic references must match",
+            ));
+        }
+        // p_load = p_node - P_s; subtract half the series source from both
+        // characteristic waves. The native boundary solves its full history.
+        let mut next = *self;
+        let load = next
+            .load
+            .step(boundary.incoming_pressure_pa - 0.5 * source_pa)?;
+        let frame = self.frame(load, source_pa)?;
+        let outgoing_pressure_pa = load.reflected_pressure_pa + 0.5 * source_pa;
+        if !outgoing_pressure_pa.is_finite() {
+            return Err(WaveguideError(
+                "stored pressure source outgoing wave must be finite",
+            ));
+        }
+        next.pending = None;
+        Ok((
+            next,
+            frame,
+            DrivenWave {
+                node: boundary.node,
+                outgoing_pressure_pa,
+            },
+        ))
+    }
+
     /// Couple to the sole additional driven endpoint of an existing native
     /// characteristic network. `outgoing_at_inlet_pa` is the independently
     /// solved inlet wave; all endpoints read the same old traveling state.
@@ -209,51 +246,25 @@ impl StoredPressureSource {
             ));
         }
         let boundary = network.driven_boundary(source_node)?;
-        if boundary.impedance_pa_s_m3.to_bits() != self.load.port_impedance().to_bits() {
-            return Err(WaveguideError(
-                "stored source and adjacent characteristic references must match",
-            ));
-        }
-        // p_load = p_node - P_s; subtract half the series source from both
-        // characteristic waves. The native boundary solves its full history.
-        let mut next = *self;
-        let load = next
-            .load
-            .step(boundary.incoming_pressure_pa - 0.5 * source_pa)?;
-        let source = self.frame(load, source_pa)?;
-        let departing = load.reflected_pressure_pa + 0.5 * source_pa;
-        if !departing.is_finite() {
-            return Err(WaveguideError(
-                "stored pressure source outgoing wave must be finite",
-            ));
-        }
-        let frame = network.step_with_driven_checked(
-            outgoing_at_inlet_pa,
-            &[DrivenWave {
-                node: source_node,
-                outgoing_pressure_pa: departing,
-            }],
-            |network| {
-                let combined = StoredSourceNetworkFrame {
-                    network: *network,
-                    source,
-                };
-                if !combined.stored_energy_j().is_finite()
-                    || !combined.balance_residual_j().is_finite()
-                {
-                    return Err(WaveguideError(
-                        "combined source/network energy is not representable",
-                    ));
-                }
-                if cancelled() {
-                    return Err(WaveguideError(
-                        "stored pressure source network step cancelled",
-                    ));
-                }
-                Ok(())
-            },
-        )?;
-        next.pending = None;
+        let (next, source, wave) = self.preview_boundary(boundary, source_pa)?;
+        let frame = network.step_with_driven_checked(outgoing_at_inlet_pa, &[wave], |network| {
+            let combined = StoredSourceNetworkFrame {
+                network: *network,
+                source,
+            };
+            if !combined.stored_energy_j().is_finite() || !combined.balance_residual_j().is_finite()
+            {
+                return Err(WaveguideError(
+                    "combined source/network energy is not representable",
+                ));
+            }
+            if cancelled() {
+                return Err(WaveguideError(
+                    "stored pressure source network step cancelled",
+                ));
+            }
+            Ok(())
+        })?;
         *self = next;
         Ok(StoredSourceNetworkFrame {
             network: frame,

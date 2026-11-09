@@ -29,6 +29,9 @@ impl TwoSidedAperture {
         if self.valve.accepted_steps() != 0 || self.sides[side.index()].boundaries.is_some() {
             return Err(invalid("moving boundaries require one cold attachment per acoustic side"));
         }
+        if side == ValveSide::Upstream && self.stored_source.is_some() {
+            return Err(invalid("the upstream driven endpoint already belongs to stored source physics"));
+        }
         keyed::admit_horizon(&inputs, max_apertures, self.valve.max_steps())?;
         let duct = &mut self.sides[side.index()];
         duct.boundaries = Some(BoundaryApertures::new(

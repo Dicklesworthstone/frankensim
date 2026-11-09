@@ -211,4 +211,6 @@ mod mimo;
 
 #[path = "two_sided_aperture/keyed.rs"]
 mod keyed;
+#[path = "two_sided_aperture/stored_source.rs"]
+mod stored_source;
 

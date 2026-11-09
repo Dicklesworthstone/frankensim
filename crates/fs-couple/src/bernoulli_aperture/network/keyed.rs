@@ -8,7 +8,7 @@ use super::{ApertureNetworkFrame, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureFrame;
 use crate::bernoulli_aperture::tube::TubeDrive;
-use fs_vfit::waveguide::network::{NetworkFrame, WaveguideNetwork};
+use fs_vfit::waveguide::network::{DrivenWave, NetworkFrame, WaveguideNetwork};
 
 pub(in crate::bernoulli_aperture) struct NetworkTrial {
     pub frame: ApertureNetworkFrame,
@@ -22,6 +22,7 @@ pub(in crate::bernoulli_aperture) struct DuctTrial {
     pub boundary_frame: Option<BoundaryNetworkFrame>,
     inlet_outgoing_pa: f64,
     boundaries: Option<BoundaryTrial>,
+    supplied_wave: Option<DrivenWave>,
 }
 
 pub(in crate::bernoulli_aperture) fn admit_horizon(
@@ -103,9 +104,7 @@ pub(in crate::bernoulli_aperture) fn preview_duct(
     drives: &[BoundaryDrive],
 ) -> Result<DuctTrial, AcousticRealizeError> {
     let boundary_trial = match boundaries {
-        Some(boundaries) => {
-            Some(boundaries.preview_step(network, inlet_outgoing_pa, drives)?)
-        }
+        Some(boundaries) => Some(boundaries.preview_step(network, inlet_outgoing_pa, drives)?),
         None if drives.is_empty() => None,
         None => {
             return Err(invalid(
@@ -125,6 +124,27 @@ pub(in crate::bernoulli_aperture) fn preview_duct(
         boundary_frame,
         inlet_outgoing_pa,
         boundaries: boundary_trial,
+        supplied_wave: None,
+    })
+}
+
+/// One independently owned remote endpoint, with its original graph state.
+/// Other driven endpoints must have their own explicit owner; they cannot be
+/// silently dropped or overwritten by this one-source transaction.
+pub(in crate::bernoulli_aperture) fn preview_duct_with_wave(
+    network: &mut WaveguideNetwork,
+    inlet_outgoing_pa: f64,
+    wave: DrivenWave,
+) -> Result<DuctTrial, AcousticRealizeError> {
+    let frame = network
+        .preview_step_with_driven(inlet_outgoing_pa, &[wave])
+        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+    Ok(DuctTrial {
+        network: frame,
+        boundary_frame: None,
+        inlet_outgoing_pa,
+        boundaries: None,
+        supplied_wave: Some(wave),
     })
 }
 
@@ -166,12 +186,21 @@ pub(in crate::bernoulli_aperture) fn accept_pair(
         match (boundaries[i].as_ref(), trials[i].boundaries.as_ref()) {
             (Some(owner), Some(trial)) => owner.validate_trial(networks[i], trial)?,
             (None, None) => {}
-            _ => return Err(invalid("moving-boundary trial must retain its original owner")),
+            _ => {
+                return Err(invalid(
+                    "moving-boundary trial must retain its original owner",
+                ));
+            }
         }
     }
     let outgoing = trials.each_ref().map(|trial| trial.inlet_outgoing_pa);
     let waves = trials.each_ref().map(|trial| {
-        trial.boundaries.as_ref().map_or(&[][..], |boundary| boundary.waves.as_slice())
+        trial
+            .boundaries
+            .as_ref()
+            .map_or(trial.supplied_wave.as_slice(), |boundary| {
+                boundary.waves.as_slice()
+            })
     });
     let [left, right] = networks;
     let frames = left

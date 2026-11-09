@@ -24,6 +24,8 @@ mod keyed;
 pub mod radiation;
 /// Fixed material-gas supply passage in the same accepted pressure/flow solve.
 pub mod supply;
+/// Initialized passive source storage at the remote upstream duct endpoint.
+mod stored_source;
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTerminal,
     ApertureTrial, DynamicAperture};
@@ -38,6 +40,7 @@ use super::radiation::environment::multiport::MimoEnvironment;
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec, ViscothermalTimeOptions,
     with_regional_viscothermal_sections_options};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::upstream_airway::{StoredPressureSource, StoredSourceFrame};
 use super::slit_channel::FixedChannel;
 use supply::SupplyChannelFrame;
 use fs_exec::CancelGate;
@@ -205,7 +208,7 @@ impl ValveTrial {
 /// Explicit whole-system limits, additional to every participant's original gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TwoSidedLimits {
-    /// Maximum valve, keys, both wave/load and optional supply-fluid storage [J].
+    /// Maximum valve, keys, both wave/load, optional supply-fluid and source storage [J].
     pub maximum_energy_j: f64,
     /// Absolute full-step energy-balance allowance [J].
     pub energy_absolute_tolerance_j: f64,
@@ -259,7 +262,9 @@ pub struct TwoSidedFrame {
     pub boundaries: [Option<BoundaryNetworkFrame>; 2],
     /// Optional fixed supply passage, distinct from the moving aperture slit.
     pub supply: Option<SupplyChannelFrame>,
-    /// Actual valve, keys, both networks and optional supply-fluid storage [J].
+    /// Optional remote upstream source, with original storage, heat and work.
+    pub stored_source: Option<StoredSourceFrame>,
+    /// Actual valve, keys, both networks, supply-fluid and source storage [J].
     /// Excludes the rational exterior's unmodeled stored-energy coordinate.
     pub stored_energy_j: f64,
     /// Independently evaluated change of total storage [J].
@@ -272,7 +277,8 @@ pub struct TwoSidedFrame {
     /// May be negative when an exterior returns energy. This is neither a loss
     /// nor an estimate of the rational exterior's stored energy.
     pub coupled_terminal_work_j: f64,
-    /// Explicit series-source work P_s Q dt [J], which may be negative.
+    /// Work of the explicit junction series source and optional remote source [J].
+    /// The remote source's own flow can differ from valve flow during storage.
     pub source_work_j: f64,
     /// Additional prescribed spatial blade pressure, separate from series-source
     /// work and uniform blade pressure. Work is included in mechanical_work_j.
@@ -343,6 +349,7 @@ pub struct TwoSidedAperture {
     material_ducts: [Option<material::MaterialDuctWalls>; 2],
     supply_channel: Option<FixedChannel>,
     spatial_pressure_work_j: [f64; 2],
+    stored_source: Option<(usize, StoredPressureSource)>,
 }
 impl TwoSidedAperture {
     /// Attach two quiescent networks to an unadvanced valve, preserving initial
@@ -440,7 +447,7 @@ impl TwoSidedAperture {
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, options[0])?,
             prepare(down, options[1])?], limits, material_ducts: [None, None], supply_channel,
-            spatial_pressure_work_j: [0.0; 2] };
+            spatial_pressure_work_j: [0.0; 2], stored_source: None };
         // A lowering must preserve the exact boundary used in the mechanical solve.
         let actual_z = model.sides.iter().map(|s| s.network.inlet_impedance_pa_s_m3()).sum::<f64>();
         if actual_z.to_bits() != duct_z.to_bits() || !model.stored_energy_j().is_finite()
@@ -517,6 +524,9 @@ impl TwoSidedAperture {
         for boundaries in self.sides.iter().filter_map(|side| side.boundaries.as_ref()) {
             energy += boundaries.stored_energy_j();
         }
+        if let Some((_, source)) = &self.stored_source {
+            energy += source.impedance().stored_energy_j();
+        }
         match &self.supply_channel {
             Some(channel) => energy + channel.last_step().kinetic_energy_j,
             None => energy,
@@ -579,7 +589,25 @@ impl TwoSidedAperture {
         &mut self, drive: TwoSidedDrive, boundaries: [&[BoundaryDrive]; 2],
         pressures_pa: [f64; 2], gate: &CancelGate,
     ) -> Result<TwoSidedFrame, AcousticRealizeError> {
+        self.step_coupled_under_gate(drive, boundaries, pressures_pa, None, gate)
+    }
+
+    fn step_coupled_under_gate(
+        &mut self, drive: TwoSidedDrive, boundaries: [&[BoundaryDrive]; 2],
+        pressures_pa: [f64; 2], remote_pressure_pa: Option<f64>, gate: &CancelGate,
+    ) -> Result<TwoSidedFrame, AcousticRealizeError> {
         poll(gate)?;
+        let source_trial = match (&self.stored_source, remote_pressure_pa) {
+            (Some((node, source)), Some(pressure)) => {
+                if self.sides[0].boundaries.is_some() || !boundaries[0].is_empty() {
+                    return Err(invalid("remote source and moving keys need distinct upstream endpoint owners"));
+                }
+                let boundary = self.sides[0].network.driven_boundary(*node).map_err(wave)?;
+                Some(source.preview_boundary(boundary, pressure).map_err(wave)?)
+            }
+            (None, None) => None,
+            _ => return Err(invalid("remote source stepping needs one attached source and explicit pressure")),
+        };
         if !drive.source_pressure_pa.is_finite()
             || drive.blade_forces_n.iter().any(|f| !f.is_finite()) {
             return Err(invalid("two-sided pressure and force supplies must be finite"));
@@ -614,8 +642,12 @@ impl TwoSidedAperture {
         };
         let outgoing = [a[0] - z[0] * q, a[1] + z[1] * q];
         let [upstream, downstream] = &mut self.sides;
-        let up_trial = keyed_network::preview_duct(&mut upstream.network,
-            upstream.boundaries.as_ref(), outgoing[0], boundaries[0])?;
+        let up_trial = match source_trial.as_ref() {
+            Some((_, _, wave)) => keyed_network::preview_duct_with_wave(
+                &mut upstream.network, outgoing[0], *wave)?,
+            None => keyed_network::preview_duct(&mut upstream.network,
+                upstream.boundaries.as_ref(), outgoing[0], boundaries[0])?,
+        };
         let down_trial = keyed_network::preview_duct(&mut downstream.network,
             downstream.boundaries.as_ref(), outgoing[1], boundaries[1])?;
         let up = up_trial.network;
@@ -634,6 +666,7 @@ impl TwoSidedAperture {
         let mut frame = TwoSidedFrame {
             aperture, upstream_pressure_pa: upstream_pressure, pressure_drop_pa: dp,
             upstream: up, downstream: down, supply,
+            stored_source: source_trial.as_ref().map(|(_, frame, _)| *frame),
             boundaries: [up_trial.boundary_frame, down_trial.boundary_frame],
             stored_energy_j: aperture.stored_energy_j + up.stored_energy_j + down.stored_energy_j,
             storage_change_j: aperture.storage_change_j + up.storage_change_j + down.storage_change_j,
@@ -662,6 +695,12 @@ impl TwoSidedAperture {
             frame.storage_change_j += s.channel.stored_delta_j;
             frame.dissipated_energy_j += s.channel.viscous_dissipation_j
                 + s.channel.numerical_dissipation_j;
+        }
+        if let Some(source) = frame.stored_source {
+            frame.stored_energy_j += source.load.stored_energy_j;
+            frame.storage_change_j += source.load.storage_change_j;
+            frame.dissipated_energy_j += source.load.dissipated_energy_j;
+            frame.source_work_j += source.source_work_j;
         }
         let flow_scale = q.abs() + up.inlet_flow_m3_s.abs() + down.inlet_flow_m3_s.abs()
             + aperture.jet_flow_m3_s.abs() + aperture.swept_flow_m3_s.abs();
@@ -698,6 +737,9 @@ impl TwoSidedAperture {
             [up_trial, down_trial],
         )?;
         self.valve.accept(trial);
+        if let Some((source, _, _)) = source_trial {
+            self.stored_source.as_mut().expect("same bound source").1 = source;
+        }
         self.supply_channel = supply_trial;
         self.spatial_pressure_work_j = pressure_work;
         Ok(frame)
