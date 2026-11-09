@@ -1,6 +1,6 @@
 //! G1 independent continuity/force solutions; G3 modal work and normalization.
 use super::*;
-use crate::vibroacoustic::{AcousticMedium, CavityModes, StructuralModes};
+use crate::vibroacoustic::{AcousticMedium, CavityModes, StructuralModes, radiation_sample};
 
 fn close(a: C64, b: C64) {
     assert!(
@@ -16,7 +16,9 @@ fn scalar(a: f64, b: f64) {
     );
 }
 
-fn one_mode(medium: AcousticMedium) -> VibroacousticModel {
+// The radiation row is one sample at omega (1375179bb refuses unsampled loads), so the
+// model is built at each solved frequency with the same Z = 0.3 - 0.1i.
+fn one_mode(medium: AcousticMedium, omega: f64) -> VibroacousticModel {
     VibroacousticModel::try_new(
         &StructuralModes {
             omegas: vec![150.0],
@@ -32,7 +34,7 @@ fn one_mode(medium: AcousticMedium) -> VibroacousticModel {
             c0: medium.c0,
         },
         vec![0.003],
-        Some(vec![C64::new(0.3, -0.1)]),
+        Some(radiation_sample(omega, 1, vec![C64::new(0.3, -0.1)])),
     )
     .unwrap()
 }
@@ -50,11 +52,11 @@ fn boundary(
 #[test]
 fn g1_impedance_boundary_matches_continuity_and_wall_reaction() {
     let medium = AcousticMedium::air();
-    let model = one_mode(medium);
     let bulk = C64::from_re(medium.rho0 * medium.c0 * medium.c0);
     let force = C64::new(0.2, -0.1);
     let flow = C64::new(2e-5, -7e-6);
     for omega in [5.0, 80.0, 150.0, 330.0, 1500.0] {
+        let model = one_mode(medium, omega);
         // The same positive resistance plus compliant-wall admittance at
         // each frequency. No normal-incidence rho*c normalization is hidden.
         let y = C64::new(2e-4, -omega * 1e-7);
@@ -230,7 +232,7 @@ fn g1_molecular_bulk_loss_and_boundary_loss_close_separately() {
         .evaluate(&medium_from_record(&record).unwrap())
         .unwrap();
     let omega = 700.0;
-    let model = one_mode(AcousticMedium::try_from_gas(record.state()).unwrap())
+    let model = one_mode(AcousticMedium::try_from_gas(record.state()).unwrap(), omega)
         .with_cavity_relaxation(relaxation.clone())
         .unwrap()
         .with_cavity_boundary_admittance(boundary(
@@ -277,7 +279,8 @@ fn invalid_active_duplicate_or_wrong_frequency_boundary_refuses() {
     );
     let b = boundary(100.0, &shapes, &[0.02], &[C64::from_re(2e-4)]);
     assert_eq!(b.angular_frequency_rad_s(), 100.0);
-    let base = one_mode(AcousticMedium::air());
+    // Radiation sampled at 101 rad/s: at 101 only the boundary (sampled at 100) is wrong.
+    let base = one_mode(AcousticMedium::air(), 101.0);
     let loaded = base
         .clone()
         .with_cavity_boundary_admittance(b.clone())

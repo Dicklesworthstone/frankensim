@@ -28,7 +28,8 @@ use fs_material::{
     state_point::THERMAL_CONDUCTIVITY_DIMS, visco_tensor::source::TensorKelvinViscosityProperties,
 };
 use fs_math::c64::C64;
-use fs_solid::linear3::visco::{ViscoHarmonicMaterialBudget, ViscoMaterialSource};
+use fs_solid::linear3::visco::ViscoHarmonicMaterialBudget;
+use fs_solid::linear3::visco::source::ViscoMaterialSource;
 use std::cell::Cell;
 
 const HEAT_CAPACITY: f64 = 0.001;
