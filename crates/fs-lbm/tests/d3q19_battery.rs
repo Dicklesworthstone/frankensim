@@ -1,8 +1,9 @@
 //! Battery for the D3Q19 core (bead 84hv): exact lattice invariants in
 //! integer arithmetic, equilibrium moments, mass conservation to the
 //! 2-D crate's bar, duct-flow physics against the analytic rectangular
-//! series, bit determinism, and the frozen golden (single-thread until
-//! WS1-D lands the parallel sweep). JSONL verdicts per house style.
+//! series, physical-rest initialization and bit determinism. The frozen
+//! raw-population kernel golden lives in `d3q19::duct_golden_tests`, where
+//! its historical initial source frame is explicit. JSONL verdicts per house style.
 //!
 //! The FULL acceptance fixture (32×32×64 from rest, 20k steps) is an
 //! `#[ignore]`d release-lane test — run explicitly:
@@ -549,6 +550,81 @@ fn reduced_cumulant_projection_is_conservative_covariant_and_nonlinear() {
     assert!(collide_cell3(populations, model, [0.0, 0.0, 1e-7]).is_ok());
 }
 
+/// G0/G3: density perturbations are at rest in the physical Guo frame,
+/// including either force sign and nonuniform density.
+#[test]
+fn duct_initialization_and_density_perturbation_are_at_physical_rest() {
+    for force in [-0.02, 0.0, 0.02] {
+        let mut duct = Duct::new(8, 8, 4, 0.8, force);
+        for amplitude in [None, Some(-0.4), Some(0.4)] {
+            if let Some(amplitude) = amplitude {
+                duct.perturb(0x84A5, amplitude);
+            }
+            let mut density_bounds = [f64::INFINITY, f64::NEG_INFINITY];
+            for z in 0..4 {
+                for y in 0..8 {
+                    for x in 0..8 {
+                        let rho = duct.density(x, y, z);
+                        density_bounds[0] = density_bounds[0].min(rho);
+                        density_bounds[1] = density_bounds[1].max(rho);
+                        assert!((0.6..=1.4).contains(&rho));
+                        let velocity = duct.velocity(x, y, z);
+                        assert!(
+                            velocity.iter().all(|u| u.abs() < 2e-16),
+                            "force={force}, rho={rho}, velocity={velocity:?}"
+                        );
+                    }
+                }
+            }
+            if amplitude.is_some() {
+                assert!(density_bounds[1] - density_bounds[0] > 0.5);
+            }
+        }
+    }
+}
+
+/// G1: before wall signals reach an interior probe, a homogeneous resting
+/// fluid receives one full `F/rho` velocity increment per native time step.
+#[test]
+fn duct_uniform_startup_has_no_spurious_half_step_velocity() {
+    for force in [-0.001, 0.001] {
+        for tau in [0.6, 0.8, 1.3] {
+            let mut duct = Duct::new(16, 16, 4, tau, force);
+            for step in 0..=4 {
+                let rho = duct.density(7, 7, 1);
+                let velocity = duct.velocity(7, 7, 1);
+                assert!((rho - 1.0).abs() < 2e-14);
+                assert!(velocity[0].abs() < 2e-16 && velocity[1].abs() < 2e-16);
+                assert!(
+                    (velocity[2] - f64::from(step) * force).abs() < 2e-15,
+                    "force={force}, tau={tau}, step={step}, velocity={velocity:?}"
+                );
+                if step < 4 {
+                    duct.step();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_duct_density_perturbation_preserves_the_accepted_flow() {
+    let mut duct = Duct::new(8, 8, 4, 0.8, 0.001);
+    duct.step();
+    let before = duct.z_velocity_section();
+    let mass = duct.total_mass();
+    for amplitude in [f64::NAN, f64::INFINITY, -1.0, 1.0] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                duct.perturb(7, amplitude);
+            }))
+            .is_err()
+        );
+        assert_eq!(duct.z_velocity_section(), before);
+        assert_eq!(duct.total_mass(), mass);
+    }
+}
+
 /// lbm3-003: mass is conserved to the 2-D crate's roundoff bar (1e-11)
 /// — collision, Guo forcing, streaming, and bounce-back all preserve
 /// Σf by construction, so drift is summation roundoff only.
@@ -646,51 +722,6 @@ fn the_solver_is_bit_deterministic() {
     let (a, b) = (build(), build());
     let same = a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits());
     verdict("lbm3-006-determinism", same, "two runs, identical bits");
-}
-
-/// Frozen golden (bead 84hv): seeded 8×8×16 fixture, 100 steps,
-/// deterministic mode (single-thread pinned traversal). Feeds density
-/// and velocity bits at fixed probes plus total mass into FNV-1a.
-/// Registered in golden-couplings.json against
-/// `fs-lbm:d3q19-bits = 1`; bump only with semantic justification
-/// (golden-evidence policy, docs/GOLDEN_POLICY.md).
-const GOLDEN_HASH: u64 = 0xd548_9283_1f0a_6d71;
-
-#[test]
-fn d3q19_golden_hash() {
-    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |v: f64| {
-        for byte in v.to_bits().to_le_bytes() {
-            acc ^= u64::from(byte);
-            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    let mut duct = Duct::new(8, 8, 16, 0.75, 2e-6);
-    duct.perturb(0x84A5, 1e-3);
-    duct.run(100);
-    for (x, y, z) in [
-        (0, 0, 0),
-        (3, 4, 7),
-        (7, 7, 15),
-        (1, 6, 9),
-        (5, 2, 12),
-        (4, 4, 8),
-        (6, 1, 3),
-        (2, 5, 14),
-    ] {
-        feed(duct.density(x, y, z));
-        let u = duct.velocity(x, y, z);
-        feed(u[0]);
-        feed(u[1]);
-        feed(u[2]);
-    }
-    feed(duct.total_mass());
-    println!("{{\"test\":\"lbm3-007-golden\",\"hash\":\"{acc:#018x}\"}}");
-    assert_eq!(
-        acc, GOLDEN_HASH,
-        "d3q19 bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
-         justification and a golden-couplings.json update in the same commit"
-    );
 }
 
 /// ACCEPTANCE FIXTURE (bead 84hv, release lane): 32×32×64 duct from

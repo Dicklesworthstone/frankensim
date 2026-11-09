@@ -75,6 +75,16 @@ the initial isotropic pressure tensor, and integrated body impulse on periodic
 grids with nonuniform density and spatial forcing. These establish the stated
 initialization and balance laws, not a new whole-solver convergence claim.
 
+The public tiled `Duct` constructor and its seeded density perturbation now
+use the same physical-rest half-source convention. Both force signs and
+nonuniform density therefore start with zero physical velocity; an interior
+uniform-fluid probe gains one full force-density-over-density increment per
+native step before wall signals arrive. Invalid perturbation amplitudes refuse
+before mutation. Zero-force arithmetic, collision, streaming and wall rules
+are unchanged. The historical core golden remains a kernel sentinel with its
+original explicitly authored raw initial populations in a native unit test;
+its hash is unchanged and does not certify the new initialization behavior.
+
 ## Centered temperatures in conjugate conduction
 
 The native scalar/axis-aligned finite-volume energy solve uses temperature

@@ -77,7 +77,9 @@ pub use simd::{
 /// covers the velocity/weight/opposite tables and ordering, the
 /// equilibrium form, the Guo forcing form, the pull-stream + halfway
 /// bounce-back rules, and the pinned traversal order. Bump on ANY
-/// change that can move result bits.
+/// change that can move these kernel bits. The core golden retains its
+/// explicit historical raw-population initial state; physical-rest
+/// initialization is checked independently by the analytic duct battery.
 pub const D3Q19_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-semantics version for the optional moment-space collision surface.
@@ -1312,8 +1314,8 @@ mod forcing_tests {
 
 /// A D3Q19 duct: halfway bounce-back walls on the x and y boundaries,
 /// periodic in z, driven by a body force `gz` along z — the 3-D
-/// Poiseuille fixture (plan §14.1). Densities start at 1, velocities at
-/// rest, unless seeded through [`Duct::perturb`].
+/// Poiseuille fixture (plan §14.1). Densities start at 1 or are seeded through
+/// [`Duct::perturb`]; both initialization paths have zero physical velocity.
 pub struct Duct {
     nx: usize,
     ny: usize,
@@ -1327,9 +1329,10 @@ pub struct Duct {
 }
 
 impl Duct {
-    /// A duct at rest (unit density) with relaxation time `tau` and body
-    /// force `gz`. Every dimension must be a positive multiple of
-    /// [`TILE`].
+    /// A duct at physical rest (unit density) with relaxation time `tau` and
+    /// force density `gz`. The stored populations include the negative Guo
+    /// half-source, so the force does not introduce an initial half-step
+    /// velocity. Every dimension must be a positive multiple of [`TILE`].
     ///
     /// # Panics
     /// If any dimension is zero or not a multiple of [`TILE`], if `tau` is not
@@ -1350,7 +1353,10 @@ impl Duct {
             .expect("duct relaxation time must be finite and greater than 0.5");
         assert!(gz.is_finite(), "duct body force must be finite");
         let tiles = (nx / TILE) * (ny / TILE) * (nz / TILE);
-        let f0 = equilibrium3(1.0, [0.0; 3]);
+        let mut f0 = equilibrium3(1.0, [0.0; 3]);
+        if gz != 0.0 {
+            crate::thermal::forcing::reframe3(&mut f0, [0.0; 3], [0.0; 3], [0.0, 0.0, gz]);
+        }
         let f = core::array::from_fn(|i| vec![Tile::filled(f0[i]); tiles]);
         let post = core::array::from_fn(|i| vec![Tile::filled(f0[i]); tiles]);
         Duct {
@@ -1415,12 +1421,20 @@ impl Duct {
             .sum()
     }
 
-    /// Deterministically perturb the resting state: cell `(x, y, z)`
-    /// gets its density shifted by `amplitude · h(x, y, z)` where `h`
-    /// is a fixed integer hash mapped to `[-1, 1)` — the seeded golden
-    /// fixture's initial condition (no RNG dependency; the hash IS the
-    /// seed schedule).
+    /// Prepare perturbed densities at physical rest: cell `(x, y, z)` gets
+    /// its density shifted by `amplitude · h(x, y, z)` where `h` is a fixed
+    /// integer hash mapped to `[-1, 1)` (no RNG dependency; the hash IS the
+    /// seed schedule). The retained force selects each cell's Guo half-source
+    /// frame; it does not seed a density-dependent velocity `gz/(2*rho)`.
+    ///
+    /// # Panics
+    /// If `amplitude` is not finite with magnitude below one. Admission
+    /// precedes every population write, preserving the entire state on refusal.
     pub fn perturb(&mut self, seed: u64, amplitude: f64) {
+        assert!(
+            amplitude.is_finite() && amplitude.abs() < 1.0,
+            "density perturbation amplitude must be finite with magnitude below one"
+        );
         for z in 0..self.nz {
             for y in 0..self.ny {
                 for x in 0..self.nx {
@@ -1435,7 +1449,15 @@ impl Duct {
                     // map to [-1, 1)
                     let unit = (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
                     let rho = 1.0 + amplitude * unit;
-                    let feq = equilibrium3(rho, [0.0; 3]);
+                    let mut feq = equilibrium3(rho, [0.0; 3]);
+                    if self.gz != 0.0 {
+                        crate::thermal::forcing::reframe3(
+                            &mut feq,
+                            [0.0; 3],
+                            [0.0; 3],
+                            [0.0, 0.0, self.gz],
+                        );
+                    }
                     let (tile, lane) = self.addr(x, y, z);
                     for (field, feq_i) in self.f.iter_mut().zip(feq) {
                         field[tile].0[lane] = feq_i;
@@ -1493,6 +1515,58 @@ impl core::fmt::Debug for Duct {
             .field("tau", &self.tau)
             .field("gz", &self.gz)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod duct_golden_tests {
+    use super::*;
+
+    /// Frozen kernel sentinel (bead 84hv), with its original RAW population
+    /// preimage. It intentionally starts at physical velocity F/(2*rho).
+    /// Physical-rest initialization has separate public-API regressions.
+    /// The collision/streaming kernels and this hash are unchanged.
+    const GOLDEN_HASH: u64 = 0xd548_9283_1f0a_6d71;
+
+    #[test]
+    fn d3q19_golden_hash() {
+        let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |v: f64| {
+            for byte in v.to_bits().to_le_bytes() {
+                acc ^= u64::from(byte);
+                acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        // Author the original unshifted equilibrium state directly through
+        // zero-force initialization, then select the fixture's source frame.
+        // This is test-local access, not a legacy production constructor.
+        let mut duct = Duct::new(8, 8, 16, 0.75, 0.0);
+        duct.perturb(0x84A5, 1e-3);
+        duct.gz = 2e-6;
+        duct.run(100);
+        for (x, y, z) in [
+            (0, 0, 0),
+            (3, 4, 7),
+            (7, 7, 15),
+            (1, 6, 9),
+            (5, 2, 12),
+            (4, 4, 8),
+            (6, 1, 3),
+            (2, 5, 14),
+        ] {
+            feed(duct.density(x, y, z));
+            let u = duct.velocity(x, y, z);
+            feed(u[0]);
+            feed(u[1]);
+            feed(u[2]);
+        }
+        feed(duct.total_mass());
+        println!("{{\"test\":\"lbm3-007-golden\",\"hash\":\"{acc:#018x}\"}}");
+        assert_eq!(
+            acc, GOLDEN_HASH,
+            "d3q19 kernel bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
+             justification and a golden-couplings.json update in the same commit"
+        );
     }
 }
 
