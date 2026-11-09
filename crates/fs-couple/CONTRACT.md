@@ -1,3 +1,31 @@
+## Source-resolved Hertz trajectories with finite-cell heat
+
+`friction_heat::hertz::{trajectory,transient}` compose the original exact-direction
+and curved native pair trajectories with the same finite-cell/interface-temperature
+Newton transaction used by the held-midpoint Hertz owner. Each window prepares
+original body geometry and complete mobility once; coefficient trials restart
+that captured pair and refresh the same pinned source claims at the solved face
+temperature. Original physical path dissipation, including independently bounded
+extinction-tail heat, enters the existing massless face once. Numerical work
+residuals remain separate. Original finite cells conduct throughout stationary
+dwell without additional frictional heat.
+
+Both native bodies, thermal endpoint, source receipt and material payload leave
+together after original and combined energy gates. The exact branch checks both
+normal endpoint rates, which bound its linear moving phase and constant dwell.
+The curved owner checks its whole-path normal-response bound. Poses, load, radius,
+geometry and inertia remain held. Endpoint coefficient sampling and backward-Euler
+thermal transport require window/spatial refinement; exact mechanical arrest and
+numerical root convergence do not certify a continuously varying thermal law,
+unique root, moving footprint or radial flash field.
+
+Six G1/G3/G4 additions to `articulated_friction_heat/hertz` cover sliding/spin
+arrest and dwell, ordinary hot/cold conduction, independent continuous thermal-fade
+refinement, mixed curved recoil/heat balances, source feedback, normal
+incompatibility, late failure/cancellation, work-budget refusal and exact retry.
+All six plus the five original Hertz heat regressions pass in the bounded
+actual-source closure; full workspace proof remains separate.
+
 ## Work-consistent gas pressure on nonlinear heated membranes
 
 The existing `GasMembraneThermalMotion` couples each original ideal or

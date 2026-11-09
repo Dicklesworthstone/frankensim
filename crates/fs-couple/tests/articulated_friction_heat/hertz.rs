@@ -1,5 +1,10 @@
 //! Source-resolved Hertz recoil and the original three-cell thermal fixture.
 
+#[path = "hertz/trajectory.rs"]
+mod trajectory;
+#[path = "hertz/transient.rs"]
+mod transient;
+
 use super::{A, AREA, CAP, DT, K, MU, SLOPE, close, energy, law, routes, solve_dense, thermal};
 use fs_contact::interface_binding::thermal_friction::SourceThermalCoulomb;
 use fs_couple::friction_heat::FrictionHeatRoute;
