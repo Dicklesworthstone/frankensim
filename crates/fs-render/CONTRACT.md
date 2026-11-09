@@ -5323,7 +5323,37 @@ explicitly authored. Cinematic paths
 validate the outgoing wavelength's exterior against their original initial
 medium stack before transport.
 Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
-available. Motion stays unavailable until a lens-aware inverse mapping exists.
+available. Aligned motion output remains unavailable until it consumes the explicit
+wavelength- and pupil-specific inverse projection below.
+
+`PhysicalCamera::project_sequential_point` supplies a local inverse for an
+explicit original wavelength and `LensSample`. It replays the original steady
+spectral lens generator at trial sensor coordinates; the fixed original sample
+retains both the direct/ghost selection and remapped conditional pupil. Snell
+geometry, spectral/coating support, full optical throughput and clipping remain
+with their existing owners. Group timing is not required. The target must lie
+beyond the complete front cap, and every accepted residual uses a nonnegative
+forward distance along an actual native ray to the target's axial plane.
+
+`SequentialProjectionOptions` specifies the local sensor seed, physical miss
+tolerance, finite-difference step, maximum sensor step and total native trace
+budget. Fixed-size double-double plane residuals and a scaled 2x2 solve drive
+bounded monotone backtracking. Clipped probes may shorten the step or supply
+a one-sided local direction; source errors propagate. The difference stencil
+guides the solve and makes no certified-gradient claim. Clipped seeds, singular
+or unresolved solves, exhausted work and cancellation return explicit
+`SequentialProjectionError` values. Every ray evaluation, including failed
+probes, counts against the original caller's cap.
+
+The returned `SequentialProjection` retains sensor tangents, NDC, axial depth,
+achieved physical residual and actual trace count. Off-screen coordinates are
+valid. This is one locally converged conditional image; it does not establish
+visibility, uniqueness, all ghost images, or a pupil-averaged projection of a
+defocused point. Three G1/G3 integration fixtures specify native spectral/pupil/
+ghost and world-pose round trips, an independent closest-point residual,
+chromatic geometry, steady absorbing coatings, and work/clipping/cancellation
+refusals. The changed Rust passed parser and source/API review; the full
+renderer integration fixtures were not executed in this editing environment.
 
 The film convention is sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers

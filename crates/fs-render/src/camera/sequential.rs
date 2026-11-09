@@ -36,6 +36,8 @@ use ghost::{GhostSampling, PathSteps};
 mod focus;
 pub use focus::SequentialLensFocus;
 mod paraxial;
+mod projection;
+pub use projection::{SequentialProjection, SequentialProjectionError, SequentialProjectionOptions};
 pub use paraxial::ParaxialFocusSensitivity;
 
 /// A rotationally symmetric surface, ordered from sensor to scene.

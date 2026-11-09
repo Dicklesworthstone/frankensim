@@ -723,3 +723,6 @@ fn native_film_preserves_spectral_paths_camera_weights_aovs_and_replay() {
         assert_eq!(mask & validity::PREVIOUS_MOTION, 0);
     });
 }
+
+#[path = "sequential_lens/projection.rs"]
+mod projection;
