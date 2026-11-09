@@ -5,6 +5,7 @@
 
 use super::*;
 use CompositionEquilibriumErrorV1 as E;
+use fs_math::dd::Dd;
 use fs_math::det::{exp, ln};
 
 pub(super) mod expansion;
@@ -26,10 +27,12 @@ pub(super) struct Workspace {
     log_n: Vec<f64>,
     n: Vec<f64>,
     log_total: f64,
-    lambda: Vec<f64>,
+    // Arbitrary elemental formation references can make dual potentials huge.
+    // Keep small Newton corrections without changing physical f64 coordinates.
+    lambda: Vec<Dd>,
     trial_log_n: Vec<f64>,
     trial_n: Vec<f64>,
-    trial_lambda: Vec<f64>,
+    trial_lambda: Vec<Dd>,
     g: Vec<f64>,
     h: Vec<f64>,
     cp: Vec<f64>,
@@ -197,10 +200,10 @@ impl Workspace {
             log_n,
             n,
             log_total: ln(total.value()),
-            lambda: allocated(rank, 0.0)?,
+            lambda: allocated(rank, Dd::ZERO)?,
             trial_log_n: allocated(ns, f64::NEG_INFINITY)?,
             trial_n: allocated(ns, 0.0)?,
-            trial_lambda: allocated(rank, 0.0)?,
+            trial_lambda: allocated(rank, Dd::ZERO)?,
             g: allocated(ns, 0.0)?,
             h: allocated(ns, 0.0)?,
             cp: allocated(ns, 0.0)?,
@@ -292,7 +295,8 @@ impl Workspace {
                 poll(cancelled)?;
                 let trial_total = self.log_total + alpha * self.rhs[self.rank];
                 for k in 0..self.rank {
-                    self.trial_lambda[k] = self.lambda[k] + alpha * self.rhs[k];
+                    self.trial_lambda[k] = self.lambda[k]
+                        + Dd::from_f64(alpha) * Dd::from_f64(self.rhs[k]);
                 }
                 for &i in &self.active {
                     self.trial_log_n[i] = self.log_n[i] + alpha * self.step[i];
@@ -320,6 +324,26 @@ impl Workspace {
             }
         }
         unreachable!("bounded Newton loop returns on its final iteration")
+    }
+
+    // The reported residual and the Newton right-hand side share this original
+    // stationarity equation. Compensated dual products preserve chemical
+    // corrections smaller than one ulp of a large elemental reference; no
+    // residual allowance proportional to that arbitrary reference is added.
+    fn chemical_potential_residual(
+        &self,
+        species: usize,
+        log_amount: f64,
+        log_total: f64,
+        lambda: &[Dd],
+    ) -> f64 {
+        let mut value = Dd::from_f64(self.g[species])
+            + Dd::from_f64(log_amount - log_total)
+            + Dd::from_f64(self.log_pressure_ratio);
+        for (k, &potential) in lambda.iter().enumerate() {
+            value = value - Dd::from_f64(self.a[k * self.n.len() + species]) * potential;
+        }
+        value.to_f64()
     }
 
     fn residuals(
@@ -371,14 +395,7 @@ impl Workspace {
         let mut maximum_potential = 0.0_f64;
         let actual_log_total = ln(sum);
         for &i in &self.active {
-            let mut value = Sum::default();
-            value.add(self.g[i]);
-            value.add(logs[i] - log_total);
-            value.add(self.log_pressure_ratio);
-            for k in 0..self.rank {
-                value.add(-self.a[k * ns + i] * lambda[k]);
-            }
-            let value = value.value();
+            let value = self.chemical_potential_residual(i, logs[i], log_total, lambda);
             if !value.is_finite() {
                 return Err(E::Arithmetic("chemical potential"));
             }
@@ -463,14 +480,9 @@ impl Workspace {
         let ns = self.n.len();
         let (sum, total) = self.fill_matrix()?;
         for &i in &self.active {
-            let mut mu = Sum::default();
-            mu.add(self.g[i]);
-            mu.add(self.log_n[i] - self.log_total);
-            mu.add(self.log_pressure_ratio);
-            for k in 0..self.rank {
-                mu.add(-self.a[k * ns + i] * self.lambda[k]);
-            }
-            self.mu[i] = mu.value();
+            self.mu[i] = self.chemical_potential_residual(
+                i, self.log_n[i], self.log_total, &self.lambda,
+            );
         }
         for k in 0..self.rank {
             let mut right = Sum::default();

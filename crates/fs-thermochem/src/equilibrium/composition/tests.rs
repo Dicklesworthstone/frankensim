@@ -846,6 +846,76 @@ fn g3_feed_scale_order_and_common_element_reference_preserve_equilibrium() {
 }
 
 #[test]
+fn g3_large_elemental_references_preserve_strict_tp_stationarity_and_mass_action() {
+    let q = 20000.0;
+    let temperature = 900.0;
+    let expected_b = 1.0 / (1.0 + (-q / (R * temperature)).exp());
+    let controls = EquilibriumSolveV1 {
+        relative_balance_tolerance: 1e-13,
+        dimensionless_potential_tolerance: 1e-12,
+        ..EquilibriumSolveV1::default()
+    };
+    for offset in [-1e11, 0.0, 1e11] {
+        let chemistry = owner(
+            vec![
+                model("A", 0.01, 4.0, offset, offset / (R * REFERENCE_T)),
+                model("B", 0.01, 4.0, offset - q, (offset - q) / (R * REFERENCE_T)),
+            ],
+            &["H"],
+            vec![vec![1, 1]],
+        );
+        for (pressure, scale) in [(1.0, 0.25), (748301.6356337916, 1.0), (1e10, 4.0)] {
+            let state = chemistry.equilibrate_tp(
+                Temperature::new(temperature), Pressure::new(pressure),
+                &[(id("A"), Amount::new(2.0 * scale))], controls, || false,
+            ).unwrap();
+            close(species(&state, "B").mole_fraction, expected_b, 1e-9);
+            close(state.total_amount().value(), 2.0 * scale, 2e-13);
+            let residual = state.residuals();
+            assert!(residual.maximum_dimensionless_potential_residual
+                <= controls.dimensionless_potential_tolerance);
+            assert!(residual.maximum_relative_element_residual
+                <= controls.relative_balance_tolerance);
+        }
+    }
+}
+
+#[test]
+fn g3_independent_element_reference_products_retain_the_original_potential_gate() {
+    let controls = EquilibriumSolveV1 {
+        relative_balance_tolerance: 1e-13,
+        dimensionless_potential_tolerance: 1e-12,
+        ..EquilibriumSolveV1::default()
+    };
+    for offset in [-1e11, 0.0, 1e11] {
+        let chemistry = owner(
+            vec![
+                model("A", 0.01, 4.0, offset, offset / (R * REFERENCE_T)),
+                model("B", 0.02, 2.5, -2.0 * offset, -2.0 * offset / (R * REFERENCE_T)),
+            ],
+            &["H", "He"],
+            vec![vec![1, 0], vec![0, 1]],
+        );
+        // Both inert populations are fixed independently by their elements.
+        // The second scaled elemental row contains the nonbinary factor 4/3,
+        // so retaining only compensated dual additions would be insufficient.
+        for (temperature, pressure, scale) in [(300.0, 1.0, 0.25), (900.0, 1e5, 1.0), (2000.0, 1e10, 4.0)] {
+            let state = chemistry.equilibrate_tp(
+                Temperature::new(temperature), Pressure::new(pressure),
+                &[(id("A"), Amount::new(0.5 * scale)), (id("B"), Amount::new(1.5 * scale))],
+                controls, || false,
+            ).unwrap();
+            close(species(&state, "A").amount.value(), 0.5 * scale, 2e-13);
+            close(species(&state, "B").amount.value(), 1.5 * scale, 2e-13);
+            assert!(state.residuals().maximum_dimensionless_potential_residual
+                <= controls.dimensionless_potential_tolerance);
+            assert!(state.residuals().maximum_relative_element_residual
+                <= controls.relative_balance_tolerance);
+        }
+    }
+}
+
+#[test]
 fn g0_source_domain_mass_inconsistency_and_work_limits_refuse_without_mutation() {
     let chemistry = dissociation();
     let original = chemistry.clone();
