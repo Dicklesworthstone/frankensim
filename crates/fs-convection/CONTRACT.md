@@ -792,3 +792,30 @@ independent 80-digit formula values, original-entrance heat additivity, factor
 replacement, complete liquid/air tangents, coordinate provenance and domain
 refusals. These are arithmetic and conservation checks; they do not establish
 experimental validation or a numerical/model error enclosure.
+
+
+## Constant-section fin heat transfer
+
+`fin::StraightFinResponse` resolves the one-dimensional steady boundary-value
+problem k A theta'' = h P theta with a prescribed base temperature and an
+explicitly insulated or convecting tip. Side and tip coefficients may differ.
+It reports one base conductance, fin efficiency, signed heat, axial temperature
+and the transverse Biot diagnostic. Geometry and coefficients are explicit SI
+inputs. The solution uses bounded scalar work without an axial mesh or array
+allocation. A stable tanh(x)/x limit handles short fins and zero lateral heat;
+decaying exponentials represent long-fin temperatures without cosh overflow.
+
+This is the exact constant-coefficient model, not measured performance or a
+fin-array correlation. Callers must admit uniform k/h and negligible transverse
+temperature variation. No transient fin inventory, nonlinear distributed
+conductivity, radiation, root contact resistance or mutual flow shielding is
+inferred. The original analytic reference is Lienhard and Lienhard, A Heat
+Transfer Textbook, section 4.5; MIT Unified Thermodynamics section 18.2 gives
+the insulated-tip reduction and transverse-Biot assumption.
+
+Four tests in the exact standalone production module were compiled with pinned
+Rust 2024 and executed successfully: independent dimensional finite-volume
+BVP refinement, original side/tip formulas, signed heat, zero/short/long limits,
+physical scaling and input refusal. The finite-volume conductance and tip
+errors decrease approximately fourfold across 64/128/256-cell refinement.
+This focused kernel execution is not a full crate, workspace or DSR pass.

@@ -120,6 +120,11 @@ pub struct ConjugateFilmSelection<'g, M: FilmGasSource = ThermochemicalGasModel>
     film: FilmGasSurface<'g, M>,
     flow: Option<MassFlowInput>,
 }
+impl<'g, M: FilmGasSource> ConjugateFilmSelection<'g, M> {
+    pub(super) fn new(film: FilmGasSurface<'g, M>, flow: Option<MassFlowInput>) -> Self {
+        Self { film, flow }
+    }
+}
 impl<M: FilmGasSource> Copy for ConjugateFilmSelection<'_, M> {}
 impl<M: FilmGasSource> Clone for ConjugateFilmSelection<'_, M> {
     fn clone(&self) -> Self {

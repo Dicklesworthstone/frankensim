@@ -242,3 +242,28 @@ fn with_speed(
         }
     })
 }
+
+impl<'g, M: FilmGasSource> PrescribedMassFlowGasSurface<'g, M> {
+    /// Preserve the original bulk-density stream velocity while applying the
+    /// source fin's one base-to-gas conductance on the native heat owner.
+    pub fn with_straight_fins<'a, 'm>(
+        self,
+        material: &'a fs_material::thermal::conduction::source::ResolvedConductionLayer<'m>,
+        geometry: super::super::fin::StraightFinArray,
+        limits: super::super::fin::SourceFinLimits,
+    ) -> Result<
+        super::super::fin::SourceFinGasSurface<
+            'a,
+            'm,
+            super::super::conjugate::ConjugateFilmSelection<'g, M>,
+        >,
+        super::super::fin::SourceFinError,
+    > {
+        super::super::fin::SourceFinGasSurface::new(
+            super::super::conjugate::ConjugateFilmSelection::new(self.surface, Some(self.flow)),
+            material,
+            geometry,
+            limits,
+        )
+    }
+}

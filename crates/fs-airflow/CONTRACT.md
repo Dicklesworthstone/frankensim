@@ -6613,3 +6613,39 @@ cover independent nonlinear layer/film powers, simultaneous native half-step
 agreement, body-order invariance, original source identity/domain refusal and
 cancellation. Pinned formatting/parsing passed; native integration compilation
 and runtime execution remain unverified.
+
+
+## Original source films on quasi-steady straight fins
+
+`finite_gas::fin::SourceFinGasSurface` composes the original sealed film owner
+and original all-solid conductivity source with the constant-section fin BVP.
+Fixed-speed and prescribed-mass-flow films retain their original property
+conventions, source identities and bulk-density velocity. Uniform h is sampled
+at the actual base/gas trial; k is held at the actual base value. The original
+source admits the computed tip-to-base temperature interval, including every
+interior conductivity knot. Explicit bounds limit neglected k variation and
+the largest source-based transverse Biot number, using the minimum admitted
+k across that interval rather than just its base value.
+
+`StraightFinArray` distinguishes bare base, covered fin-root footprints and
+actual wetted side/tip area. The original film must cover the wetted area.
+The native owner receives one combined bare-base-plus-fin conductance divided
+by the original base area; raw film hA is retained as evidence, not reapplied
+as heat. Original gas inventory and declared base-body caloric/storage remain
+authoritative. The fin material may differ from the base-body material.
+
+The isochoric convenience path reuses the original nonlinear wall-feedback
+transaction and endpoint source checks, with body-node radiation disabled.
+The coefficient callback is also available to original shared-body/adaptive
+owners under the same explicit geometry/source/model assumptions. These are
+quasi-steady attachments with no inferred fin mass or heat capacity. No fin
+array flow, transient fin field, spatially varying h/k solve, radiation,
+contact resistance or mutual shielding is supplied.
+
+Three source/native G0/G1/G3/G4 regression groups cover independent heat laws,
+source retention in both directions and equilibrium, interior conductivity
+extrema/domain limits, source-wide Biot refusal, cancellation/retry, actual
+native energy exchange, area ownership and conductivity-sensitive cooling.
+All changed sources passed the pinned parser; these cross-crate integration
+tests remain uncompiled and unexecuted. The four standalone analytic fin-kernel
+tests executed successfully as recorded in the fs-convection contract.

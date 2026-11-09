@@ -23,6 +23,8 @@ mod sensitivity;
 
 /// Finite sections of the original mean flat-plate and duct relations.
 pub mod developing;
+/// Quasi-steady constant-section fins with an explicit physical tip boundary.
+pub mod fin;
 
 /// Bare inline/staggered tube-bank crossflow with physical gap velocities.
 pub mod tube_bank;

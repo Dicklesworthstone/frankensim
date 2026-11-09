@@ -12,6 +12,9 @@ pub mod film;
 /// Source-integrated conducting surfaces on the same finite heat owners.
 pub mod conjugate;
 
+/// Source-qualified quasi-steady fins on the original finite gas/body heat owner.
+pub mod fin;
+
 mod mass_flow;
 pub use mass_flow::GasMassFlowState;
 
