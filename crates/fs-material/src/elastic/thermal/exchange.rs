@@ -132,7 +132,7 @@ fn operators(
         ]);
     }
     let c = source.stiffness_mandel_pa();
-    let ct = source.temperature_derivatives()?.stiffness_mandel_pa_k;
+    let ct = source.source_side_temperature_derivatives()?.stiffness_mandel_pa_k;
     Ok([c, ct].map(|matrix| Operator::Tensor(
         core::array::from_fn(|i| core::array::from_fn(|j| dd(matrix[i][j]))),
     )))
@@ -181,8 +181,8 @@ impl AffineThermoelastic {
             Some(self.at_temperature(after_temperature_k)?)
         };
         let source1 = changed.as_ref().unwrap_or(&source0);
-        let d0 = source0.temperature_derivatives()?;
-        let d1 = source1.temperature_derivatives()?;
+        let d0 = source0.source_side_temperature_derivatives()?;
+        let d1 = source1.source_side_temperature_derivatives()?;
         let [c0, ct0] = operators(&source0)?;
         let [c1, ct1] = operators(source1)?;
         let (dc, dct) = match coefficient_increments(self, &source0, source1)? {
@@ -200,11 +200,10 @@ impl AffineThermoelastic {
             half * (dd(d0.free_strain_mandel_per_k[i])
                 + dd(d1.free_strain_mandel_per_k[i]))
         });
-        let delta_alpha = core::array::from_fn(|i| {
-            half * (dd(d0.free_strain_mandel_per_k2[i])
-                + dd(d1.free_strain_mandel_per_k2[i])) * dt
-        });
-        let delta_free = core::array::from_fn(|i| alpha[i] * dt);
+        // CTE is continuous at its knots, but one endpoint-average alpha
+        // generally does not integrate a path crossing different slopes.
+        // Retain each original principal segment before the fixed rotation.
+        let [delta_free, delta_alpha] = self.expansion_increments(&source0, source1)?;
         Ok(PreparedThermoelasticExchange {
             before: source0,
             changed,
@@ -228,7 +227,8 @@ impl AffineThermoelastic {
     /// claims belong to this SAME law. It admits both total and elastic strain
     /// component boxes and uses the original fixed reference volume.
     ///
-    /// Affine instantaneous expansion is integrated before strain subtraction.
+    /// Continuous piecewise-affine instantaneous expansion is integrated on
+    /// every crossed original source segment before strain subtraction.
     /// Coefficient increments use original engineering paths and exact rational
     /// or compliance-inverse identities, without subtracting rounded free-strain,
     /// stiffness or derivative endpoints. Work is a trapezoidal approximation;

@@ -65,6 +65,9 @@ impl ResolvedThermoelastic {
         input: AdiabaticThermoelasticInput,
     ) -> Result<AdiabaticThermoelasticState, ThermoelasticError> {
         let invalid = ThermoelasticError::Invalid;
+        if !self.temperature_is_smooth {
+            return Err(invalid("adiabatic wave linearization is undefined at a CTE slope knot"));
+        }
         if !input.reference_density_kg_m3.is_finite()
             || input.reference_density_kg_m3 <= 0.0
             || !input.caloric_heat_capacity_j_m3_k.is_finite()

@@ -4,7 +4,9 @@
 //! orthotropic compliance is inverted by `OrthotropicElastic`; its thermal
 //! derivatives use C'=-C S' C and C''=2 C S' C S' C-C S'' C. Independently
 //! oriented instantaneous expansion is integrated by the original source
-//! owner. All derivatives are at fixed TOTAL Mandel strain in the target frame.
+//! owner, including continuous piecewise-affine CTE tables. All derivatives
+//! are at fixed TOTAL Mandel strain in the target frame. CTE slope knots
+//! retain explicit one-sided capacity and refuse classical second derivatives.
 //! Independent affine bulk/shear sources instead give an affine isotropic C:
 //! its first derivative is exact and its second derivative is zero. Derived
 //! Young/Poisson values are not misrepresented as affine source measurements.
@@ -120,6 +122,41 @@ impl AffineThermoelastic {
     pub fn minimum_heat_capacity_j_k(&self, volume_m3: f64) -> Result<f64, ThermoelasticError> {
         match self { Self::Isotropic(x) => x.minimum_heat_capacity_j_k(volume_m3), Self::Tensor(x) => x.minimum_heat_capacity_j_k(volume_m3) }
     }
+
+    // Finite increments are integrated per ORIGINAL principal source segment,
+    // then rotated in retained precision. No whole-span CTE chord is used.
+    pub(super) fn expansion_increments(
+        &self, before: &ResolvedThermoelastic, after: &ResolvedThermoelastic,
+    ) -> Result<[[fs_math::dd::Dd; 6]; 2], ThermoelasticError> {
+        use fs_math::dd::Dd;
+        let t0=before.temperature_k; let t1=after.temperature_k;
+        let increment = |path: &ExpansionPath| {
+            let a0=value(&before.expansion,path.name,Dims([0,0,0,-1,0,0]))?;
+            let a1=value(&after.expansion,path.name,Dims([0,0,0,-1,0,0]))?;
+            path.increments(t0,t1,a0,a1)
+        };
+        match self {
+            Self::Isotropic(law) => {
+                let increments=increment(&law.expansion_path)?;
+                Ok(increments.map(|x|[x,x,x,Dd::ZERO,Dd::ZERO,Dd::ZERO]))
+            }
+            Self::Tensor(law) => {
+                let mut principal=[[Dd::ZERO;3];2];
+                for i in 0..3 {
+                    let index=if law.expansion_coefficients.len()==1 {0} else {i};
+                    let increments=increment(&law.expansion_coefficients[index])?;
+                    for k in 0..2 {principal[k][i]=increments[k];}
+                }
+                let rotation=law.expansion.rotation();
+                if rotation==IDENTITY {
+                    return Ok(principal.map(|p|[p[0],p[1],p[2],Dd::ZERO,Dd::ZERO,Dd::ZERO]));
+                }
+                let transform=mandel_rotation(rotation);
+                Ok(principal.map(|p|core::array::from_fn(|i|
+                    (0..3).fold(Dd::ZERO,|sum,j|sum+Dd::from_f64(transform[i][j])*p[j]))))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,9 +186,10 @@ impl Coefficient {
     }
 }
 
-/// A bounded smooth tensor source path. Stiffness is the native compliance
-/// inverse, with fully independent affine engineering constants; expansion can
-/// have different fixed axes. Current density is never queried or synthesized.
+/// A bounded tensor source path. Stiffness is the native compliance inverse,
+/// with fully independent affine engineering constants. Continuous CTE tables
+/// may have different fixed axes and source knots. Current density is never
+/// queried or synthesized.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AffineTensorThermoelastic {
     card: MaterialCard,
@@ -163,7 +201,7 @@ pub struct AffineTensorThermoelastic {
     reference_temperature_k: f64,
     maximum_absolute_mandel_strain: f64,
     elastic_coefficients: Vec<Coefficient>,
-    expansion_coefficients: Vec<Coefficient>,
+    expansion_coefficients: Vec<ExpansionPath>,
     curvature_bound_j_m3_k2: f64,
 }
 
@@ -207,7 +245,7 @@ impl AffineTensorThermoelastic {
         let elastic_coefficients = elastic_schema.into_iter().map(|(name, dims, positive)|
             Coefficient::new(card, &reference, name, dims, temperature_range_k, positive)).collect::<Result<Vec<_>, _>>()?;
         let expansion_coefficients = expansion_names.into_iter().map(|name|
-            Coefficient::new(card, expansion_reference, name, Dims([0,0,0,-1,0,0]), temperature_range_k, false))
+            ExpansionPath::new(card, expansion_reference, name, temperature_range_k))
             .collect::<Result<Vec<_>, _>>()?;
         let mut law = Self { card: card.clone(), elastic_reference: reference,
             expansion_reference: expansion_reference.clone(), stiffness, expansion,
@@ -239,7 +277,8 @@ impl AffineTensorThermoelastic {
             first = rotate_mandel(first, q);
             second = rotate_mandel(second, q);
         }
-        let alpha = self.expansion_coefficients.iter().map(|x| x.at(&expansion, delta)).collect::<Result<Vec<_>, _>>()?;
+        let alpha = self.expansion_coefficients.iter().map(|x| x.at(&expansion, t)).collect::<Result<Vec<_>, _>>()?;
+        let temperature_is_smooth = alpha.iter().all(|x| x.2);
         let selected = MaterialPropertySelection::PinnedByProperty(self.expansion_coefficients.iter().map(|x| {
             let claim = self.expansion_reference.property(x.name).expect("complete expansion schema admitted").answer().receipt.selected;
             (x.name.to_owned(), claim)
@@ -247,12 +286,12 @@ impl AffineTensorThermoelastic {
         let (free, instantaneous, derivative) = match self.expansion {
             ThermoelasticSymmetry::Isotropic => {
                 let path = integrate_isotropic_thermal_expansion(&self.card, &self.expansion_reference.query(), &point, selected)?;
-                ([path.free_linear_strain(); 3], [alpha[0]; 3], [self.expansion_coefficients[0].slope; 3])
+                ([path.free_linear_strain(); 3], [alpha[0].0; 3], [alpha[0].1; 3])
             }
             ThermoelasticSymmetry::OrientedOrthotropic { .. } => {
                 let path = integrate_orthotropic_thermal_expansion(&self.card, &self.expansion_reference.query(), &point, selected)?;
-                (*path.free_principal_strains(), [alpha[0], alpha[1], alpha[2]],
-                    core::array::from_fn(|i| self.expansion_coefficients[i].slope))
+                (*path.free_principal_strains(), core::array::from_fn(|i| alpha[i].0),
+                    core::array::from_fn(|i| alpha[i].1))
             }
             ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear =>
                 return Err(ThermoelasticError::Invalid("elastic moduli cannot supply thermal expansion")),
@@ -270,6 +309,7 @@ impl AffineTensorThermoelastic {
         }
         Ok(ResolvedThermoelastic { elastic, expansion, temperature_k: t,
             maximum_absolute_mandel_strain: self.maximum_absolute_mandel_strain,
+            temperature_is_smooth,
             response: ResolvedThermoelasticLaw::Tensor(response) })
     }
 
@@ -308,7 +348,7 @@ impl AffineTensorThermoelastic {
         for i in 0..3 {
             let a = &self.expansion_coefficients[if self.expansion_coefficients.len() == 1 { 0 } else { i }];
             alpha = upper_add(alpha, a.maximum_abs())?;
-            alpha_first = upper_add(alpha_first, a.slope.abs())?;
+            alpha_first = upper_add(alpha_first, a.maximum_slope_abs())?;
         }
         let expansion_rotation = rotation_norm_bound(self.expansion.rotation())?;
         alpha = upper_mul(alpha, expansion_rotation)?;

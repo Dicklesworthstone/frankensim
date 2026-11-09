@@ -41,7 +41,9 @@ pub struct IsothermalThermoelasticState {
 
 /// Exact local temperature derivatives in the original fixed Mandel frame.
 ///
-/// The independent engineering sources are affine; C(T) generally is not.
+/// The independent elastic engineering sources are affine; C(T) generally
+/// is not. Original CTE tables may be piecewise affine, but this classical
+/// second-derivative interface excludes their slope knots.
 /// These derivatives retain the native rational/compliance-inverse response.
 /// They do not differentiate a solved equilibrium, a geometric transformation,
 /// a stabilization coefficient or a caloric transport operator.
@@ -80,7 +82,22 @@ impl ResolvedThermoelastic {
 
     /// Expose the same exact coefficient derivatives used by `state`.
     /// No source query, finite difference, unit-strain probing or fit occurs.
+    /// A continuous CTE slope knot refuses this classical second-derivative
+    /// interface; its finite energy exchange remains available.
     pub fn temperature_derivatives(
+        &self,
+    ) -> Result<ThermoelasticTemperatureDerivatives, ThermoelasticError> {
+        if !self.temperature_is_smooth {
+            return Err(ThermoelasticError::Invalid(
+                "classical thermal second derivative is undefined at a CTE slope knot"));
+        }
+        self.source_side_temperature_derivatives()
+    }
+
+    // Finite exchange needs C_T and alpha, both continuous at a CTE knot.
+    // Its explicit piecewise source integral supplies the finite increments;
+    // no classical second derivative is inferred from this one-sided snapshot.
+    pub(super) fn source_side_temperature_derivatives(
         &self,
     ) -> Result<ThermoelasticTemperatureDerivatives, ThermoelasticError> {
         let moduli = self.isotropic_thermal_modes()?;

@@ -434,3 +434,6 @@ mod bulk_shear;
 
 #[path = "thermoelastic/precision.rs"]
 mod precision;
+
+#[path = "thermoelastic/tabulated_expansion.rs"]
+mod tabulated_expansion;
