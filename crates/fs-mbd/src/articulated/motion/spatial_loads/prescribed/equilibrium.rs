@@ -1,10 +1,13 @@
-//! Static equilibrium of the original supported articulated tree.
+//! Static and uniformly rotating equilibrium of the original supported tree.
 //!
-//! The residual is the native zero-rate RNEA holding effort minus the actual
+//! The residual is the native zero-joint-acceleration RNEA holding effort minus the actual
 //! actuator effort. World point loads, finite axial links and diagonal/full
 //! bushings use the same geometry and constitutive evaluator as time evolution.
 //! Newton--Krylov and numerical directional derivatives remain in fs-solver.
 //! Finding a root does not establish its stability, uniqueness or reachability.
+
+/// Relative equilibrium under a genuinely uniform supported rotation.
+pub mod rotating;
 
 use super::super::bushing::coupled::CoupledSpatialBushing;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
@@ -62,10 +65,12 @@ pub struct EquilibriumConfig<'a> {
 /// A force-balanced native state ready for the existing supported motion owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArticulatedEquilibrium {
-    /// Same support pose and clock as the seed, solved coordinates, zero rates.
+    /// Same support pose, motion and clock as the seed, solved coordinates and
+    /// zero joint rates. The stationary entry points also require a still base;
+    /// the rotating entry point explicitly retains its driven base rotation.
     /// This is explicit initialization, not a time-integrated trajectory.
     pub state: PrescribedBaseMotionState,
-    /// Native zero-acceleration holding efforts, in N or N m by joint kind.
+    /// Native zero-joint-acceleration holding efforts, N or N m by joint kind.
     pub required_effort: Vec<f64>,
     /// Actual held/callback actuator efforts at the independently checked root.
     pub applied_effort: Vec<f64>,
@@ -153,7 +158,16 @@ pub fn equilibrate(
     config: EquilibriumConfig<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedEquilibrium, EquilibriumError> {
-    dispatch(model, seed, loads, bushings, config, None, cancelled)
+    dispatch(
+        model,
+        seed,
+        loads,
+        bushings,
+        config,
+        None,
+        FrameMode::Stationary,
+        cancelled,
+    )
 }
 
 /// Use the same smooth effort callback as supported time evolution.
@@ -186,8 +200,15 @@ pub fn equilibrate_with_effort(
         bushings,
         config,
         Some(&mut effort),
+        FrameMode::Stationary,
         cancelled,
     )
+}
+
+#[derive(Clone, Copy)]
+enum FrameMode {
+    Stationary,
+    UniformRotation,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -198,14 +219,15 @@ fn dispatch(
     bushings: EquilibriumBushings<'_>,
     config: EquilibriumConfig<'_>,
     effort: Option<&mut EffortLaw<'_>>,
+    frame: FrameMode,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedEquilibrium, EquilibriumError> {
     match bushings {
         EquilibriumBushings::Diagonal(values) => {
-            solve(model, seed, loads, values, config, effort, cancelled)
+            solve(model, seed, loads, values, config, effort, frame, cancelled)
         }
         EquilibriumBushings::Coupled(values) => {
-            solve(model, seed, loads, values, config, effort, cancelled)
+            solve(model, seed, loads, values, config, effort, frame, cancelled)
         }
     }
 }
@@ -228,17 +250,21 @@ fn solve<B: BushingLaw>(
     bushings: &[B],
     config: EquilibriumConfig<'_>,
     effort: Option<&mut EffortLaw<'_>>,
+    frame: FrameMode,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedEquilibrium, EquilibriumError> {
     poll(&mut cancelled)?;
     let n = model.dof_count();
     if !seed.time_s.is_finite()
-        || seed.base.twist_body != Twist::zero()
+        || match frame {
+            FrameMode::Stationary => seed.base.twist_body != Twist::zero(),
+            FrameMode::UniformRotation => seed.base.twist_body.linear != Twist::zero().linear,
+        }
         || seed.base.acceleration_body != Twist::zero()
         || seed.joint_velocity.iter().any(|v| *v != 0.0)
     {
         return Err(EquilibriumError::Invalid(
-            "stationary seed and finite clock required",
+            "zero joint rates, admitted support motion and finite clock required",
         ));
     }
     if config.coordinate_scales.len() != n

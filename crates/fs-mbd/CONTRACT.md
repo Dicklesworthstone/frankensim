@@ -382,6 +382,58 @@ apply. Rotating supports preserve the world direction and actual application
 point of external loads; scalar root joints remain admissible. The targeted
 regression entry is `cargo test -p fs-mbd --test articulated_prescribed_spatial`.
 
+## Relative equilibrium under supported uniform rotation
+
+`articulated::motion::spatial_loads::prescribed::equilibrium::rotating::equilibrate_uniform_rotation`
+solves a steady joint shape in the original uniformly rotating supported tree.
+It reuses the existing scaled Newton--Krylov force-balance owner and the exact
+same native zero-joint-acceleration inverse-dynamics residual. The actual base
+angular velocity remains present in kinematics and RNEA, so centrifugal and
+gyroscopic effects arise from the original mass properties. No separate
+centrifugal force, rotating potential or dense mass/tangent matrix is added.
+
+The base has a fixed support origin, zero linear velocity and zero spatial
+acceleration. Joint rates are zero. Internal axial connections and diagonal or
+coupled bushings retain their original moving attachment geometry and material
+laws. Held body wrenches and generalized efforts co-rotate. World gravity,
+point forces and couples must be invariant about the original rotation axis;
+scaled compensated cross products admit only machine-roundoff axis error and
+never project or modify the applied vectors. Arbitrary actuator callbacks are
+outside this symmetry-admitted entry. Zero spin uses the stationary mode.
+
+The returned state retains the original support motion and clock and the
+independently checked physical joint residuals. The support reaction is still
+the original root wrench. Its compensated dot product with the actual base
+twist reports drive power in watts into the tree; this may be nonzero under a
+co-rotating drag. Attachment storage remains the original constitutive energy.
+Neither drive power nor displacement from the seed invents a heat destination
+or a relaxation-work history.
+
+`UniformRotationFrame` supplies `R(t)=R(0) Exp(omega_body*t)` at the original
+represented origin. `base_at_elapsed` supplies native midpoint and endpoint
+boundary samples to the existing prescribed-motion evolution owner, without
+accumulating orientation steps. Original SE(3) representation and geometric
+admission remain authoritative: translation can round and a distant rotated
+pose can be refused. Overflowed or completely underflowed nonzero rotation
+increments refuse. Zero elapsed time and zero spin retain the seed pose.
+
+Physical row scales, joint limits, finite source/material charts, bounded
+residual/Krylov work and cancellation remain the same as stationary equilibrium.
+Refusal leaves the seed unchanged. This is a driven relative equilibrium, not
+a zero-kinetic-energy state, a free-body angular-momentum solve, a stability
+certificate, a contact/sticking solver or a closed-loop mechanism solution.
+
+Four native G0/G1 production-frame checks passed against the actual fs-ga
+implementation: arbitrary-axis trajectory derivatives, invariant load scaling,
+zero-motion/invalid-time behavior and retention of original distant-pose
+refusals. Five authored integration regressions cover an independently solved
+centrifugal spring extension, original prescribed-motion continuation and drive
+power, a tilted axis, an asymmetric rotor's gyroscopic reaction, stationary
+parity, symmetry refusals and an unsupported supercritical spring branch.
+The full articulated integration target has not run in this environment because
+the genuine asupersync dependency exceeds the available compilation memory.
+The small native frame check is not a whole-MBD or whole-workspace validation.
+
 ## Static equilibrium on supported articulated mechanisms
 
 `articulated::motion::spatial_loads::prescribed::equilibrium` solves the
