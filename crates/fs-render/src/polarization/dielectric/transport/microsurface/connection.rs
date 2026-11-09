@@ -296,7 +296,7 @@ fn contribution(
         .reflect_conductor(world(basis, connection.facet), optics)?
         .beam;
     let optical = reciprocal_contraction(reflected, source_frame, source)?;
-    PositiveTerm::product(connection.factor_per_sr, optical)
+    Ok(PositiveTerm::product(connection.factor_per_sr, optical)?)
 }
 
 fn local(basis: [Vec3; 3], direction: Vec3) -> Vec3 {
@@ -313,13 +313,13 @@ fn world(basis: [Vec3; 3], direction: Vec3) -> Vec3 {
         basis[0].z * direction.x + basis[1].z * direction.y + basis[2].z * direction.z,
     )
 }
-enum PositiveTerm {
+pub(super) enum PositiveTerm {
     Zero,
     Linear(f64),
     Log(f64),
 }
 impl PositiveTerm {
-    fn product(geometric: f64, optical: f64) -> Result<Self, SmithBeamError> {
+    pub(super) fn product(geometric: f64, optical: f64) -> Result<Self, BeamError> {
         if optical == 0.0 || geometric == 0.0 {
             return Ok(Self::Zero);
         }
@@ -330,7 +330,7 @@ impl PositiveTerm {
             Self::from_log_factor(det::ln(geometric), optical)
         }
     }
-    fn from_log_factor(geometric: f64, optical: f64) -> Result<Self, SmithBeamError> {
+    pub(super) fn from_log_factor(geometric: f64, optical: f64) -> Result<Self, BeamError> {
         if optical == 0.0 {
             return Ok(Self::Zero);
         }
@@ -338,19 +338,19 @@ impl PositiveTerm {
         if value.is_finite() {
             Ok(Self::Log(value))
         } else {
-            Err(BeamError::NumericalRange.into())
+            Err(BeamError::NumericalRange)
         }
     }
 }
 
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     total: f64,
     correction: f64,
     tiny_log: Option<f64>,
 }
 impl Sum {
-    fn add(&mut self, term: PositiveTerm) -> Result<(), SmithBeamError> {
+    pub(super) fn add(&mut self, term: PositiveTerm) -> Result<(), BeamError> {
         let value = match term {
             PositiveTerm::Zero => return Ok(()),
             PositiveTerm::Linear(value) => value,
@@ -381,10 +381,10 @@ impl Sum {
         if self.total.is_finite() && self.correction.is_finite() {
             Ok(())
         } else {
-            Err(BeamError::NumericalRange.into())
+            Err(BeamError::NumericalRange)
         }
     }
-    fn value(&self) -> Result<f64, SmithBeamError> {
+    pub(super) fn value(&self) -> Result<f64, BeamError> {
         let ordinary = self.total + self.correction;
         let tiny = self.tiny_log.map_or(0.0, det::exp);
         let value = ordinary + tiny;
@@ -394,7 +394,7 @@ impl Sum {
             // positive result still refuses rather than claiming exact zero.
             Ok(value)
         } else {
-            Err(BeamError::NumericalRange.into())
+            Err(BeamError::NumericalRange)
         }
     }
 }

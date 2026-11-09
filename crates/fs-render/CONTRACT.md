@@ -13003,3 +13003,82 @@ conductor coating families, retained source and interpolation policy, and
 independent narrower coating support. They do not establish measured finish
 calibration, bulk birefringence, inter-facet multiple scattering, or inferred
 thermal evolution of the coatings.
+
+### Full rough-glass fixed-direction polarized connections
+
+`PolarizedBeam::evaluate_smith_dielectric_connection` and its arbitrary-stack
+variant evaluate every reflection and transmission order of the original
+two-sided Smith walk toward one specified source-arrival frame. The first
+height is integrated analytically: reflection uses the correlated Smith sum;
+transmission uses Beta(1+Lambda_i,1+Lambda_t). A bounded positive-argument
+log-Beta recurrence and combined Stirling expression retain grazing arguments
+without subtracting large log-Gammas. Later sampled collisions use the native
+full visible-normal law, the reflection/refraction solid-angle Jacobian and
+escape from the appropriate side of the same height. Every forced and sampled
+facet retains native coherent spectral Mueller transfer, reversed film order,
+TIR phase and authored anisotropic axes.
+
+Microscopic continuation carries ray power with its original scalar branch
+proposal. The completed connection includes the net
+(n_camera_arrival/n_source_arrival)^2 radiance conversion exactly once; the
+camera's prefix index conversion remains separate. The stochastic response has
+no outgoing PDF. Neither it nor the hidden-path joint density may enter a
+nonlinear MIS weight. The explicit capability query admits only rough
+unequal-index interfaces; smooth/bare index-matched surfaces have zero
+continuous response, and rough index-matched coatings/stacks refuse direct
+fixed-direction evaluation with UnsupportedMixedMeasure. Their existing full
+mixed-measure path sampler remains available.
+
+The shared positive accumulator retains logarithmic/subnormal terms until
+complete summation. A wholly unrepresentable positive result still refuses
+NumericalRange; one deterministic inside-to-outside grazing replay is covered.
+First-order analytic integration removes the ordinary grazing first-height
+underflow. Tests never discard refused histories: all-order integral comparisons
+use the same declared source support abs(cosine)>=0.02 for both strategies.
+No universal finite-range, globally optimal variance, measured-surface or
+arbitrary grazing-success claim is made. Work is bounded and cancellable; facet
+exhaustion refuses the complete estimate, not a truncated dark contribution.
+
+Verification: 41 focused tests passed against original optical/math/Philox
+code with explicit execution/vector/container/hash boundary fixtures: seven new
+connection groups, seven existing full-glass groups, and the previous 27 opaque
+Smith/geometry/Philox groups. New checks include independent Beta quadrature,
+262144 paths per incident side with separately compared reflected/transmitted
+polarized source integrals, the matching deterministic native-proposal angular
+partition, scalar n-squared reciprocity, lossy layered source integrals and
+polarized linearity, compact/stack equality under rotated anisotropy, near-index
+contrast, high-precision log-Beta references, cancellation, replay, budgets and
+the explicit grazing range boundary. Full workspace Cargo/DSR and native scene
+geometry execution remain outside this focused probe.
+
+### Calibrated point fixtures with complete rough-glass response
+
+`SmithDielectricPointLightCameraScene` explicitly selects complete opaque and
+two-sided dielectric Smith transport for the original point-fixture camera.
+Its shared receiving-contact adapter validates both original adjacent medium
+identities, binds anisotropic body axes once, and retains the actual compact or
+arbitrary spectral coating stack. Reflection and transmission source legs use
+their own native receiving plane, source polarization, bundle irradiance and
+Beer/GRIN propagation. The full-glass connection owns its net local radiance
+index ratio; the original camera-prefix ratio is applied exactly once.
+
+The original source solver, cumulative work, surface/LTE emission and finishing
+owner are shared with the opaque point-light view. Seeded and caller-owned
+ordinary, analyzed and resolved-lens entry points use separate ordinary-surface,
+opaque/glass continuation and opaque/glass connection streams. This new API's
+surface and facet identities are zero-based, independently of microscopic work.
+A point fixture has no competing continuous endpoint proposal; no stochastic
+response or hidden-path density enters MIS. Selected equal-index coated rough
+receivers return the core's explicit mixed-measure refusal. Smooth and bare
+null boundaries have no continuous receiving response.
+
+Unresolved connections, cancellation, facet exhaustion or numerical range
+failure refuse the complete camera sample. This covers the original declared
+source branches, not all caustic images or participating-medium source legs.
+Four focused integration checks passed using the actual old/new point wrappers
+and native fixture accumulator with explicit scene, photometry and optical
+response fixtures; two are new glass dispatch/stream/refusal groups and two
+retain the existing opaque behavior. Two full native scene regression groups
+for both source media, analyzer/Beer/index composition and cancellation are
+authored but unrun. The actual new shared receiver also compiled and ran in the
+environment integration probe. Full Cargo/DSR/RCH remain unavailable.

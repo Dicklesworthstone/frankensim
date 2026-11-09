@@ -21,12 +21,19 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
 
+/// Fixed-direction full-glass radiance response with native polarized facets.
+pub mod connection;
+
 /// A failed sample is never substituted with black or a truncated trajectory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmithDielectricError {
     Geometry(SmithError),
     Beam(BeamError),
-    FacetLimit { facet_events: u32 },
+    FacetLimit {
+        facet_events: u32,
+    },
+    /// Fixed-direction evaluation needs null-tail sampling at matched indices.
+    UnsupportedMixedMeasure,
     Cancelled,
 }
 impl From<SmithError> for SmithDielectricError {

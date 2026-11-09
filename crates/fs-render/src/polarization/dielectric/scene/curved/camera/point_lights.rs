@@ -53,7 +53,7 @@ use fs_math::det;
 pub mod participating;
 
 pub mod microsurface;
-pub use microsurface::SmithPointLightCameraScene;
+pub use microsurface::{SmithDielectricPointLightCameraScene, SmithPointLightCameraScene};
 
 /// Fixed admission bound; camera rays allocate no fixture-owned workspace.
 pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;

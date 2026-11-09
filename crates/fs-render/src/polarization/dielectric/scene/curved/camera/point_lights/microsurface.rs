@@ -21,6 +21,9 @@ use crate::polarization::dielectric::transport::PolarizedBeam;
 use crate::polarization::dielectric::transport::microsurface::SmithWalkSettings;
 use fs_rand::philox::philox4x32_10;
 
+pub mod dielectric;
+pub use dielectric::SmithDielectricPointLightCameraScene;
+
 /// Borrowed, allocation-free opt-in view of an already admitted point-light
 /// camera. The per-surface facet limit also bounds each fixed-direction solve.
 pub struct SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
@@ -173,8 +176,34 @@ impl<'v, 'a, 's, 'm, 'l> SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
         initial_medium: usize,
         settings: PointLightCameraSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+        connection_samples: impl FnMut(u32, usize, u32) -> [f64; 3],
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        self.sample_launched_with_microsurfaces(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            facet_samples,
+            connection_samples,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_with_microsurfaces(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: PointLightCameraSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut facet_samples: impl FnMut(u32, u32) -> [f64; 3],
         mut connection_samples: impl FnMut(u32, usize, u32) -> [f64; 3],
+        mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
+        mut dielectric_connections: Option<&mut dyn FnMut(u32, usize, u32) -> [f64; 4]>,
     ) -> Result<PointLightCameraSample, PointLightCameraError> {
         cx.checkpoint()?;
         validate_settings(settings)?;
@@ -204,6 +233,26 @@ impl<'v, 'a, 's, 'm, 'l> SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
                                 path,
                                 &mut connector,
                                 |receiver, connection, binding| {
+                                    if let Some(samples) = dielectric_connections.as_mut() {
+                                        if receiver.uses_smith_dielectric(camera)? {
+                                            return receiver
+                                                .smith_dielectric_response(
+                                                    cx,
+                                                    camera,
+                                                    connection,
+                                                    binding,
+                                                    self.microsurface,
+                                                    |facet| {
+                                                        samples(
+                                                            path.surface_events() - 1,
+                                                            binding,
+                                                            facet,
+                                                        )
+                                                    },
+                                                )
+                                                .map_err(Into::into);
+                                        }
+                                    }
                                     receiver
                                         .smith_response(
                                             cx,
@@ -240,7 +289,9 @@ impl<'v, 'a, 's, 'm, 'l> SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
                 Some(SmithSurfaceSampler {
                     settings: self.microsurface,
                     samples: &mut facet_samples,
-                    dielectric_samples: None,
+                    dielectric_samples: dielectric_samples
+                        .as_mut()
+                        .map(|samples| &mut **samples as &mut dyn FnMut(u32, u32) -> [f64; 4]),
                 }),
             )
             .map(|(path, _)| path);

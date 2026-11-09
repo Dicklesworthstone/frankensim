@@ -6,6 +6,8 @@ use crate::polarization::dielectric::transport::microsurface::connection::SmithC
 use crate::polarization::dielectric::transport::microsurface::{SmithBeamError, SmithWalkSettings};
 use fs_exec::Cx;
 
+mod dielectric;
+
 impl SurfaceReceiver {
     #[allow(clippy::too_many_arguments)]
     pub(in super::super::super::super) fn smith_response(

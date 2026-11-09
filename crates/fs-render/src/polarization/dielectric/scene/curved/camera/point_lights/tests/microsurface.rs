@@ -1,4 +1,6 @@
 use super::*;
+
+mod dielectric;
 use crate::conductor::{
     ConductorDataStatus, ConductorIorSample, ConductorOptics, ConductorSource, ConductorSurface,
 };

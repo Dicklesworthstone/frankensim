@@ -177,7 +177,7 @@ impl SmithGgx {
         })
     }
 
-    fn projected_area(self, wo: Vec3) -> f64 {
+    pub(crate) fn projected_area(self, wo: Vec3) -> f64 {
         let x = self.alpha_x * wo.x;
         let y = self.alpha_y * wo.y;
         let radial_squared = x * x + y * y;
@@ -190,7 +190,7 @@ impl SmithGgx {
         }
     }
 
-    fn ndf(self, m: Vec3) -> f64 {
+    pub(crate) fn ndf(self, m: Vec3) -> f64 {
         let x = m.x / self.alpha_x;
         let y = m.y / self.alpha_y;
         let length_squared = x * x + y * y + m.z * m.z;
