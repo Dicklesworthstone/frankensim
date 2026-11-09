@@ -27,14 +27,19 @@
 //! would lose nonproportional loading information.
 //!
 //! This estimates life for a caller-declared resolved representative cycle.
-//! It neither counts arbitrary multiaxial reversals nor infers repetitions or
-//! accumulated damage. Full stress and strain endpoint closure is required but
+//! By default it neither counts arbitrary multiaxial reversals nor infers
+//! repetitions or accumulated damage. Optional [`FatemiSocieCycle::enable_miner`]
+//! adds fixed-plane FS/Miner sums over explicitly declared complete cycles,
+//! selecting maximum accumulated damage separately from the single-cycle
+//! maximum-shear-plane result. Full tensor endpoint closure is required but
 //! does not establish cyclic stabilization, constitutive-model adequacy, or
 //! calibration transfer. The native constitutive owner must supply the actual
 //! stress response; no extra nonproportional hardening is invented here. The
 //! finite plane search and floating-point circle remain numerical estimates.
 
+mod miner;
 pub mod source;
+pub use miner::{FatemiSocieMinerSummary, FatemiSociePlaneDamage};
 
 use super::shear_path::{
     CircleWork, SearchPlane, ShearPathError, dot6, enclosing_radius, normal_stress,
@@ -368,6 +373,7 @@ pub struct FatemiSocieCycle {
     closure: CycleClosureTolerance,
     samples: Vec<TensorFatigueSample>,
     result: Option<FatemiSocieCycleResult>,
+    miner: Option<miner::MinerHistory>,
 }
 impl FatemiSocieCycle {
     pub fn new(
@@ -423,6 +429,7 @@ impl FatemiSocieCycle {
             closure,
             samples: Vec::new(),
             result: None,
+            miner: None,
         })
     }
     pub fn calibration(&self) -> &FatemiSocieCalibration {
@@ -449,8 +456,34 @@ impl FatemiSocieCycle {
     pub fn result(&self) -> Option<&FatemiSocieCycleResult> {
         self.result.as_ref()
     }
+    /// Opt into maximum-accumulated-damage FS/Miner over the original fixed
+    /// planes. Enable before the first loading excursion (zero or one sample).
+    /// Every successful finalization contributes ONE caller-declared complete
+    /// cycle on every plane; no repetition count or rainflow split is inferred.
+    /// Each nonzero plane parameter must fit the original finite calibration.
+    /// The existing maximum-shear-plane single-cycle result is unchanged.
+    pub fn enable_miner(&mut self, maximum_cycles: u64) -> Result<(), FatemiSocieError> {
+        if self.samples.len() > 1 || self.result.is_some() || self.miner.is_some() {
+            return Err(FatemiSocieError::Invalid(
+                "enable fixed-plane Miner once, before the first loading excursion",
+            ));
+        }
+        self.miner = Some(miner::MinerHistory::new(&self.planes, maximum_cycles)?);
+        Ok(())
+    }
+    /// Completed cycle damage only. Open windows and failed finalizations do
+    /// not contribute. The selected plane maximizes total history damage,
+    /// rather than the shear amplitude of the latest representative cycle.
+    pub fn miner_summary(&self) -> Option<FatemiSocieMinerSummary> {
+        self.miner.as_ref().map(miner::MinerHistory::summary)
+    }
+    pub fn miner_plane_damage(&self) -> Option<&[FatemiSociePlaneDamage]> {
+        self.miner.as_ref().map(miner::MinerHistory::plane_damage)
+    }
     /// Empty window with the same immutable calibration, normals and policies.
-    /// The consumer explicitly supplies the new first observation.
+    /// The consumer explicitly supplies the new first observation. Optional
+    /// Miner totals from completed cycles are carried; an unfinished window
+    /// is discarded without credit. The carried prefix survives later rollback.
     pub fn fresh(&self) -> Result<Self, FatemiSocieError> {
         Ok(Self {
             calibration: self.calibration.clone(),
@@ -459,10 +492,16 @@ impl FatemiSocieCycle {
             closure: self.closure,
             samples: Vec::new(),
             result: None,
+            miner: self
+                .miner
+                .as_ref()
+                .map(miner::MinerHistory::fresh)
+                .transpose()?,
         })
     }
     /// Roll back an explicitly saved observed prefix and clear its candidate
-    /// result. Ordinary native steps need not clone the accumulated history.
+    /// result and its optional current-window Miner contribution. Carried
+    /// previous-cycle totals survive. Native steps need not clone sample history.
     pub fn discard_after(&mut self, sample_count: u64) -> Result<(), FatemiSocieError> {
         let count = usize::try_from(sample_count).map_err(|_| FatemiSocieError::Budget)?;
         if count > self.samples.len() {
@@ -472,6 +511,9 @@ impl FatemiSocieCycle {
         }
         self.samples.truncate(count);
         self.result = None;
+        if let Some(miner) = &mut self.miner {
+            miner.discard_current();
+        }
         Ok(())
     }
     pub fn push(&mut self, sample: TensorFatigueSample) -> Result<(), FatemiSocieError> {
@@ -564,6 +606,11 @@ impl FatemiSocieCycle {
                 "a closed cycle requires at least three observations including both endpoints",
             ));
         }
+        let mut damage = self
+            .miner
+            .as_ref()
+            .map(miner::MinerHistory::begin_cycle)
+            .transpose()?;
         let first = self.samples[0];
         let last = self.samples[self.samples.len() - 1];
         let strain_defect = closure_defect(
@@ -621,6 +668,25 @@ impl FatemiSocieCycle {
             if !amplitude.is_finite() || (tensor_amplitude > 0.0 && amplitude == 0.0) {
                 return Err(FatigueError::Arithmetic.into());
             }
+            // The circle and normal extrema are evaluated once per plane for
+            // both modes. Only the explicit Miner mode inverts every plane's
+            // life; the default continues to invert the maximum-shear plane.
+            let plane_life = if let Some(damage) = &mut damage {
+                if amplitude == 0.0 {
+                    None
+                } else {
+                    let correction = self.calibration.correction(maximum)?;
+                    let parameter = amplitude * correction;
+                    if !parameter.is_finite() || parameter == 0.0 {
+                        return Err(FatigueError::Arithmetic.into());
+                    }
+                    let life = self.calibration.cycles_to_failure(parameter)?;
+                    damage.add_life(index, life)?;
+                    Some((correction, parameter, life))
+                }
+            } else {
+                None
+            };
             if selected.as_ref().is_none_or(|r| {
                 amplitude > r.engineering_shear_strain_amplitude
                     || (amplitude == r.engineering_shear_strain_amplitude
@@ -634,9 +700,9 @@ impl FatemiSocieCycle {
                     engineering_shear_strain_amplitude: amplitude,
                     minimum_normal_stress_pa: minimum,
                     maximum_normal_stress_pa: maximum,
-                    normal_stress_correction: 0.0,
-                    fatemi_socie_parameter: 0.0,
-                    cycles_to_failure: None,
+                    normal_stress_correction: plane_life.map_or(0.0, |v| v.0),
+                    fatemi_socie_parameter: plane_life.map_or(0.0, |v| v.1),
+                    cycles_to_failure: plane_life.and_then(|v| v.2),
                     projection_work: self.projection_work(),
                     circle_work: 0,
                     closure: self.closure,
@@ -647,22 +713,27 @@ impl FatemiSocieCycle {
         }
         work.check()?;
         let mut result = selected.ok_or(FatemiSocieError::Invalid("missing search planes"))?;
-        result.normal_stress_correction = self
-            .calibration
-            .correction(result.maximum_normal_stress_pa)?;
-        result.fatemi_socie_parameter =
-            result.engineering_shear_strain_amplitude * result.normal_stress_correction;
-        if !result.fatemi_socie_parameter.is_finite()
-            || (result.engineering_shear_strain_amplitude > 0.0
-                && result.fatemi_socie_parameter == 0.0)
-        {
-            return Err(FatigueError::Arithmetic.into());
+        if damage.is_none() || result.engineering_shear_strain_amplitude == 0.0 {
+            result.normal_stress_correction = self
+                .calibration
+                .correction(result.maximum_normal_stress_pa)?;
+            result.fatemi_socie_parameter =
+                result.engineering_shear_strain_amplitude * result.normal_stress_correction;
+            if !result.fatemi_socie_parameter.is_finite()
+                || (result.engineering_shear_strain_amplitude > 0.0
+                    && result.fatemi_socie_parameter == 0.0)
+            {
+                return Err(FatigueError::Arithmetic.into());
+            }
+            result.cycles_to_failure = self
+                .calibration
+                .cycles_to_failure(result.fatemi_socie_parameter)?;
         }
-        result.cycles_to_failure = self
-            .calibration
-            .cycles_to_failure(result.fatemi_socie_parameter)?;
         result.circle_work = work.used;
         work.check()?;
+        if let (Some(miner), Some(damage)) = (&mut self.miner, damage) {
+            miner.publish_cycle(damage);
+        }
         self.result = Some(result);
         Ok(result)
     }
@@ -863,6 +934,19 @@ mod tests {
         // the original convention must nevertheless retain the 45-degree plane.
         let other_parameter = 0.02 * det::sqrt(3.0) / 2.0 * 4.0;
         assert!(other_parameter > result.fatemi_socie_parameter);
+        let mut accumulated = model.fresh().unwrap();
+        accumulated.enable_miner(1).unwrap();
+        assert_eq!(
+            evaluate(&mut accumulated, &[state(-0.02), state(0.02), state(-0.02)]),
+            result
+        );
+        let history = accumulated.miner_summary().unwrap();
+        assert_eq!(history.selected_plane, 0);
+        close(
+            history.miner_damage,
+            1.0 / known_life(other_parameter),
+            4e-13,
+        );
     }
 
     #[test]
@@ -1075,6 +1159,265 @@ mod tests {
             Err(FatemiSocieError::Budget)
         );
         assert_eq!(projection.sample_count(), 0);
+    }
+
+    fn mixed_shear_cycle(
+        gamma_xy: f64,
+        gamma_yz: f64,
+        normal_peak: f64,
+    ) -> [TensorFatigueSample; 5] {
+        // Every differently loaded cycle starts and ends at the same actual
+        // tensor state. Its opening-stress peak is between shear extrema.
+        let state = |factor: f64, normal: f64| TensorFatigueSample {
+            stress_pa: [
+                normal,
+                0.0,
+                normal,
+                factor * gamma_xy * 2e9,
+                factor * gamma_yz * 2e9,
+                0.0,
+            ],
+            total_mechanical_strain: [
+                0.0,
+                0.0,
+                0.0,
+                factor * gamma_xy * 0.5,
+                factor * gamma_yz * 0.5,
+                0.0,
+            ],
+        };
+        [
+            state(0.0, 0.0),
+            state(1.0, 0.0),
+            state(0.0, normal_peak),
+            state(-1.0, 0.0),
+            state(0.0, 0.0),
+        ]
+    }
+
+    #[test]
+    fn g1_miner_accumulates_on_fixed_planes_not_per_cycle_maxima() {
+        let mut model = cycle(
+            FatemiSocieNormalStress::Signed,
+            vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        );
+        model.enable_miner(3).unwrap();
+        assert_eq!(model.miner_summary().unwrap().selected_plane, 0);
+        assert_eq!(model.miner_summary().unwrap().completed_cycles, 0);
+        let first = evaluate(&mut model, &mixed_shear_cycle(0.02, 0.0, 0.0));
+        assert_eq!(first.selected_plane, 0);
+        close(
+            model.miner_summary().unwrap().miner_damage,
+            1.0 / known_life(0.02),
+            4e-13,
+        );
+        assert_eq!(model.miner_plane_damage().unwrap()[1].miner_damage, 0.0);
+
+        model = model.fresh().unwrap();
+        let second = evaluate(&mut model, &mixed_shear_cycle(0.0, 0.03, 0.0));
+        assert_eq!(second.selected_plane, 1);
+        let summary = model.miner_summary().unwrap();
+        assert_eq!(summary.completed_cycles, 2);
+        assert_eq!(summary.selected_plane, 1);
+        close(summary.miner_damage, 1.0 / known_life(0.03), 4e-13);
+        let invented_damage = 1.0 / known_life(0.02) + 1.0 / known_life(0.03);
+        assert!(summary.miner_damage < invented_damage);
+
+        model = model.fresh().unwrap();
+        evaluate(&mut model, &mixed_shear_cycle(0.025, 0.0, 0.0));
+        let final_damage = model.miner_plane_damage().unwrap();
+        close(
+            final_damage[0].miner_damage,
+            1.0 / known_life(0.02) + 1.0 / known_life(0.025),
+            4e-13,
+        );
+        close(final_damage[1].miner_damage, 1.0 / known_life(0.03), 4e-13);
+        assert_eq!(model.miner_summary().unwrap().selected_plane, 0);
+    }
+
+    #[test]
+    fn g1_miner_uses_each_cycles_actual_normal_peak_and_amplitude() {
+        let mut model = cycle(FatemiSocieNormalStress::Signed, vec![[1.0, 0.0, 0.0]]);
+        model.enable_miner(3).unwrap();
+        let mut expected = 0.0;
+        for (index, (amplitude, peak)) in [(0.02, 0.0), (0.012, 75e6), (0.02, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            if index > 0 {
+                model = model.fresh().unwrap();
+            }
+            let history = mixed_shear_cycle(amplitude, 0.0, peak);
+            let mut single = cycle(FatemiSocieNormalStress::Signed, vec![[1.0, 0.0, 0.0]]);
+            let result = evaluate(&mut model, &history);
+            assert_eq!(result, evaluate(&mut single, &history));
+            expected += 1.0 / known_life(amplitude * (1.0 + 0.5 * peak / 250e6));
+            close(model.miner_summary().unwrap().miner_damage, expected, 4e-13);
+            assert_eq!(
+                model.miner_summary().unwrap().completed_cycles,
+                index as u64 + 1
+            );
+            let before = model.miner_summary();
+            assert_eq!(model.finish().unwrap(), result);
+            assert_eq!(model.miner_summary(), before);
+        }
+    }
+
+    #[test]
+    fn g3_miner_reuses_rotating_shear_and_is_independent_of_input_chunking() {
+        let mut history = Vec::new();
+        for i in 0..16 {
+            let (s, c) = det::sin_cos(i as f64 * core::f64::consts::TAU / 16.0);
+            history.push(sample(0.02 * c, 0.02 * s, 75e6));
+        }
+        history.push(history[0]);
+        let mut baseline = cycle(FatemiSocieNormalStress::Signed, vec![[1.0, 0.0, 0.0]]);
+        baseline.enable_miner(2).unwrap();
+        let result = evaluate(&mut baseline, &history);
+        close(result.engineering_shear_strain_amplitude, 0.02, 4e-14);
+        close(
+            baseline.miner_summary().unwrap().miner_damage,
+            1.0 / known_life(0.023),
+            4e-13,
+        );
+        for size in [1, 2, 7, history.len()] {
+            let mut blocked = baseline.fresh().unwrap();
+            for chunk in history.chunks(size) {
+                blocked.push_block(chunk, &mut || false).unwrap();
+            }
+            assert_eq!(blocked.finish().unwrap(), result);
+            close(
+                blocked.miner_summary().unwrap().miner_damage,
+                2.0 / known_life(0.023),
+                4e-13,
+            );
+            assert_eq!(blocked.miner_summary().unwrap().completed_cycles, 2);
+        }
+    }
+
+    #[test]
+    fn g4_miner_discard_undoes_only_current_credit_and_fresh_carries_completed_prefix() {
+        let mut model = cycle(FatemiSocieNormalStress::Signed, vec![[1.0, 0.0, 0.0]]);
+        let history = line(0.02, 0.0);
+        model.push(history[0]).unwrap();
+        model.enable_miner(3).unwrap();
+        model.push(history[1]).unwrap();
+        // Explicitly discarded warm-up is not silently counted as a cycle.
+        model = model.fresh().unwrap();
+        assert_eq!(model.miner_summary().unwrap().completed_cycles, 0);
+        evaluate(&mut model, &history);
+        let first = model.miner_summary().unwrap();
+        model = model.fresh().unwrap();
+        assert_eq!(model.miner_summary(), Some(first));
+        assert_eq!(model.sample_count(), 0);
+        model.push_block(&history, &mut || false).unwrap();
+        let prefix = model.sample_count();
+        let second_result = model.finish().unwrap();
+        let second = model.miner_summary().unwrap();
+        assert_eq!(second.completed_cycles, 2);
+        assert!(model.discard_after(prefix + 1).is_err());
+        assert_eq!(model.miner_summary(), Some(second));
+        // Native late-gauge rollback can undo finalization even when no
+        // samples need removal. Earlier promoted cycles remain untouched.
+        model.discard_after(prefix).unwrap();
+        assert_eq!(model.miner_summary(), Some(first));
+        assert!(model.result().is_none());
+        assert_eq!(model.finish().unwrap(), second_result);
+        assert_eq!(model.miner_summary(), Some(second));
+        model = model.fresh().unwrap();
+        model.push(history[0]).unwrap();
+        model.discard_after(0).unwrap();
+        assert_eq!(model.miner_summary(), Some(second));
+    }
+
+    #[test]
+    fn g4_miner_late_plane_domain_refusal_and_cancellation_are_transactional() {
+        let mut model = cycle(
+            FatemiSocieNormalStress::Signed,
+            vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        );
+        model.enable_miner(3).unwrap();
+        evaluate(&mut model, &mixed_shear_cycle(0.02, 0.0, 0.0));
+        model = model.fresh().unwrap();
+        let before = model.miner_summary();
+        let planes = model.miner_plane_damage().unwrap().to_vec();
+        // Plane 0 is supported; plane 1 is positive but below the finite table.
+        model
+            .push_block(&mixed_shear_cycle(0.02, 1e-8, 0.0), &mut || false)
+            .unwrap();
+        assert!(matches!(
+            model.finish(),
+            Err(FatemiSocieError::Fatigue(
+                FatigueError::StrainAmplitudeOutsideCurve { .. }
+            ))
+        ));
+        assert_eq!(model.miner_summary(), before);
+        assert_eq!(model.miner_plane_damage().unwrap(), planes);
+        assert!(model.result().is_none());
+        model.discard_after(0).unwrap();
+        model
+            .push_block(&mixed_shear_cycle(0.02, 0.03, 75e6), &mut || false)
+            .unwrap();
+        let mut completed = model.clone();
+        let mut polls = 0;
+        let result = completed
+            .finish_with_cancel(&mut || {
+                polls += 1;
+                false
+            })
+            .unwrap();
+        for stop in [1, polls / 2, polls] {
+            let mut calls = 0;
+            assert_eq!(
+                model.finish_with_cancel(&mut || {
+                    calls += 1;
+                    calls == stop
+                }),
+                Err(FatemiSocieError::Cancelled)
+            );
+            assert_eq!(model.miner_summary(), before);
+            assert_eq!(model.miner_plane_damage().unwrap(), planes);
+            assert!(model.result().is_none());
+        }
+        assert_eq!(model.finish().unwrap(), result);
+        assert_eq!(model.miner_summary(), completed.miner_summary());
+    }
+
+    #[test]
+    fn g0_miner_enable_ties_zero_shear_and_cycle_limit_are_explicit() {
+        let mut model = cycle(
+            FatemiSocieNormalStress::Signed,
+            vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        );
+        assert!(model.miner_summary().is_none());
+        assert!(model.miner_plane_damage().is_none());
+        assert!(model.enable_miner(0).is_err());
+        assert!(model.miner_summary().is_none());
+        model.enable_miner(2).unwrap();
+        assert!(model.enable_miner(3).is_err());
+        evaluate(&mut model, &line(0.02, 0.0));
+        assert_eq!(model.miner_summary().unwrap().selected_plane, 0);
+        let first = model.miner_summary().unwrap();
+        model = model.fresh().unwrap();
+        let hydro = |v| TensorFatigueSample {
+            stress_pa: [v * 1e9, v * 1e9, v * 1e9, 0.0, 0.0, 0.0],
+            total_mechanical_strain: [v, v, v, 0.0, 0.0, 0.0],
+        };
+        let result = evaluate(&mut model, &[hydro(-0.001), hydro(0.001), hydro(-0.001)]);
+        assert_eq!(result.cycles_to_failure, None);
+        let second = model.miner_summary().unwrap();
+        assert_eq!(second.completed_cycles, 2);
+        assert_eq!(second.miner_damage, first.miner_damage);
+        model = model.fresh().unwrap();
+        model.push_block(&line(0.02, 0.0), &mut || false).unwrap();
+        assert_eq!(model.finish(), Err(FatemiSocieError::Budget));
+        assert_eq!(model.miner_summary(), Some(second));
+        assert!(model.result().is_none());
+        let mut late = cycle(FatemiSocieNormalStress::Signed, vec![[1.0, 0.0, 0.0]]);
+        late.push_block(&line(0.02, 0.0)[..2], &mut || false)
+            .unwrap();
+        assert!(late.enable_miner(2).is_err());
+        assert!(late.miner_summary().is_none());
     }
 
     #[test]
