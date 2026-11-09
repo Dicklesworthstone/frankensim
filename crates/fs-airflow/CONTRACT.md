@@ -609,9 +609,49 @@ Six new regression sources cover an independent two-annulus momentum and
 regional caloric root during startup/coastdown/recovering head work, distinct
 nonlinear regional source temperatures, zero/steady limits, equal initial mean
 flow with different retained radial heating, refusal/retry and cancellation.
-The executor became unavailable before this extension's compile/runtime check
-could complete. These new regression sources are unexecuted; the earlier
-54-test result above applies to the preceding quasi-steady regional delivery.
+These six regression cases now pass in the original-source slice described
+below; three fixture calls were corrected to pass the native owned velocity
+roster. The earlier 54-test result applies to the preceding quasi-steady delivery.
+
+### Resolved regional transport through reversal
+
+`carreau::transient::adaptive::advance_resolved` resolves an event-free window
+by comparing one original coupled interval with two native half intervals.
+Only independently admitted fine states and reports are retained. Every native
+thermal cell and every radial annulus participates in the local comparison;
+mean flow alone cannot hide a different shear history. Relative thermal
+tolerances scale interval energy changes rather than the formation-energy datum.
+
+Separate limits bound the duration of sign-changing native intervals and
+`min(V+, V-)` of each branch's affine numerical flow trajectory. A near-zero
+mean therefore cannot bypass requested counterflow resolution even at uniform
+temperature. Chronological original substeps retain both directional transport,
+local viscous heat, kinetic change, external streams and signed pressure/head
+work; discarded comparisons contribute only to the aggregate work count.
+No new caloric integrator, effective viscosity or extrapolated physical state
+is introduced.
+
+Native attempts, retained steps and total branch solves have explicit limits.
+Original per-step thermal/nonlinear/source gates remain active; each original
+branch-work cap is clipped to the remaining window allowance. Source, mass,
+numerical and conservation refusals are terminal, including discarded trials.
+The complete window publishes synchronized owners together or preserves both
+input histories, even after a locally accepted prefix; scratch remains reusable.
+
+This is first-order local error estimation and resolution of sampled affine
+reversals, not a rigorous global bound or exact event locator. Held mechanical
+ports, original fixed mass/density and spatial applicability remain unchanged.
+Split forcing discontinuities and native thermal events explicitly, and refine
+maximum interval and spatial inventory for the intended accuracy.
+
+The focused original-source slice passed 53 tests, including the six regional
+transient cases and five new adaptive cases: independent coupled annular/caloric
+ODE refinement, uniform-temperature counterflow, distinct equal-mean radial
+histories, complete-window work/source refusal with retry, and cancellation
+after a local accepted prefix. It executes original material, radial, thermal,
+advection and nonlinear solver code with context-only cancellation glue; this
+is not a full Cargo or native-runtime verification. Pinned rustfmt and focused
+diff checks passed.
 
 ## Original-law Carreau network design derivatives
 
