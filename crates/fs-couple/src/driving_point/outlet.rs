@@ -166,15 +166,6 @@ fn realize_with_dc_probes<'a>(
             what: "transit delay is not finite",
         });
     }
-    // Start at the 4-transit power-of-two rung, leaving at least one doubling.
-    let mut n_fft = (demand.min(max_taps as f64) as usize)
-        .max(256)
-        .next_power_of_two()
-        .min(max_taps);
-    if max_taps >= 512 {
-        n_fft = n_fft.min(max_taps / 2).max(256);
-    }
-    let tap_tol = ladder.tail_tol.sqrt();
     let load = termination.into();
     // A declared termination takes exactly its old path; a table plays only through its
     // own mouth and must cover the top rung before any bin is sampled.
@@ -206,6 +197,43 @@ fn realize_with_dc_probes<'a>(
         Some(z) => dc_limit(&|omega| mouth_flow_against_load(physics, gas, omega, z, wall, zc), dc_probes)?,
         None => dc_limit(&response, dc_probes)?,
     };
+    transfer_ladder(&response, dc, transit, dt, max_taps, ladder)
+}
+
+/// [`dc_limit`] on the default probe list, for another transfer than a single duct's (a network port's flow).
+pub(super) fn transfer_dc_limit(
+    response: &impl Fn(f64) -> Result<C64, DrivingPointError>,
+) -> Result<f64, DrivingPointError> {
+    dc_limit(response, &DC_PROBE_RAD_S)
+}
+
+/// The mouth-flow ladder on a sampled transfer: `response` at the positive bins, `dc` (the true limit `T(0+)`) at bin
+/// 0, `transit` the one-way delay in samples, `max_taps` the validated ladder cap. The DFT length starts at the
+/// 4-transit power-of-two rung and doubles until the wrap-around tail and the change of the shared taps are both under
+/// the ladder's tolerance, or refuses at the cap. A single duct and a network port use this same arithmetic.
+pub(super) fn transfer_ladder(
+    response: &impl Fn(f64) -> Result<C64, DrivingPointError>,
+    dc: f64,
+    transit: f64,
+    dt: f64,
+    max_taps: usize,
+    ladder: &LineLadder,
+) -> Result<(Vec<f64>, MouthFlowRealization), DrivingPointError> {
+    let demand = (4.0 * transit).ceil();
+    if !demand.is_finite() {
+        return Err(DrivingPointError::Invalid {
+            what: "transit delay is not finite",
+        });
+    }
+    // Start at the 4-transit power-of-two rung, leaving at least one doubling.
+    let mut n_fft = (demand.min(max_taps as f64) as usize)
+        .max(256)
+        .next_power_of_two()
+        .min(max_taps);
+    if max_taps >= 512 {
+        n_fft = n_fft.min(max_taps / 2).max(256);
+    }
+    let tap_tol = ladder.tail_tol.sqrt();
     let mut t_pos: Vec<C64> = Vec::new();
     let mut previous: Vec<f64> = Vec::new();
     let mut rungs: Vec<MouthFlowRung> = Vec::new();
