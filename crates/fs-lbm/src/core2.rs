@@ -3020,11 +3020,13 @@ fn regularized_populations(rho: f64, velocity: [f64; 2], stress: [[f64; 2]; 2]) 
     populations
 }
 
-/// Strain-rate magnitude (sqrt(2 S:S)) of one cell from its
-/// non-equilibrium populations — the LOCAL quantity non-Newtonian
-/// relaxation adapts to. `feq` must match the cell's moments. This raw
-/// estimator is for unforced populations; Guo-forced consumers must restore
-/// the half-source stress before extracting strain.
+/// Full planar strain-rate magnitude `sqrt(2 D:D)` of one cell from its
+/// non-equilibrium populations. This diagnostic includes volume change;
+/// constitutive shear viscosity instead uses the three-dimensional deviatoric
+/// invariant, as documented by [`crate::rheology::Rheology`]. `feq` must match
+/// the cell's moments. This raw estimator is for unforced populations with
+/// tied trace/shear relaxation; Guo-forced consumers must restore the
+/// half-source stress before extracting strain.
 #[must_use]
 pub fn shear_rate(f: &[f64; Q], feq: &[f64; Q], rho: f64, tau: f64) -> f64 {
     shear_rate_from_stress(nonequilibrium_stress(f, feq), rho, tau)
@@ -3060,6 +3062,7 @@ fn shear_rate_from_stress([sxx, sxy, syy]: [f64; 3], rho: f64, tau: f64) -> f64 
 /// independent tensor entries avoids a second population loop and temporary
 /// source array. See Premnath, Pattison and Banerjee, arXiv:0901.2786,
 /// equations (5), (7) and (B23).
+#[cfg(test)]
 pub(crate) fn force_corrected_shear_rate(
     f: &[f64; Q],
     rho: f64,
@@ -3097,7 +3100,8 @@ pub(crate) fn force_corrected_stress(
 /// divided by bulk tau. The material root then combines the first / shear tau
 /// with the second / sqrt(2), since
 /// `2 dev_3(D):dev_3(D) = 4(D_dev2,xx^2 + D_xy^2) + div(u)^2/3`.
-/// This leaves native two-dimensional collision/rheology conventions intact.
+/// Native and source-backed rheology share this invariant; the collision and
+/// full-strain heating conventions remain separate.
 pub(crate) fn material_strain_components2(
     f: &[f64; Q],
     rho: f64,

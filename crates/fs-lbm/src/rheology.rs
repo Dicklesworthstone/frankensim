@@ -4,7 +4,10 @@
 //! viscosity from the constitutive law, and τ = 3ν + ½. The local
 //! stress and viscosity are solved together, rather than interpreting
 //! the current populations through the previous relaxation time. The
-//! documented stability floor handles shear-thinning laws driving τ → ½ at
+//! constitutive rate is `sqrt(2 dev_3(D):dev_3(D))` in both dimensions;
+//! planar flow embeds its strain with `D_zz = 0`. Bulk dissipation is not
+//! part of the shear-viscosity query, while real planar extension remains.
+//! The documented stability floor handles shear-thinning laws driving τ → ½ at
 //! high shear, so τ is clamped to `TAU_FLOOR` and the clamp events
 //! are counted (the scaling-assistant interplay the plan calls out:
 //! a floored cell is a cell whose viscosity the lattice can no longer
@@ -14,7 +17,7 @@
 /// Source-retaining SI constitutive parameters on the admitted material scale.
 pub mod physical;
 
-use crate::core2::{Cell, Grid, force_corrected_shear_rate, force_corrected_stress};
+use crate::core2::{Cell, Grid, material_strain_components2};
 use crate::{CS2, Q};
 
 /// The τ stability floor (ν > 0 with margin; BGK folklore-free zone
@@ -43,7 +46,10 @@ fn require_nonnegative_finite(name: &str, value: f64) {
     );
 }
 
-/// Constitutive law for the apparent kinematic viscosity ν(γ̇).
+/// Constitutive law for the apparent kinematic viscosity ν(γ̇), where
+/// `γ̇ = sqrt(2 dev_3(D):dev_3(D))` and `D = sym(grad u)`. D2Q9 uses
+/// the planar three-dimensional embedding (`D_zz = D_xz = D_yz = 0`),
+/// matching D3Q19 and physical material laws.
 #[derive(Debug, Clone, Copy)]
 pub enum Rheology {
     /// Fixed viscosity.
@@ -833,7 +839,8 @@ pub struct RheologyStats {
 /// local external force; uniform acceleration is not material shear.
 /// Central-moment collision retains its configured bulk relaxation time
 /// (unity for the historical variant): its trace strain and the
-/// shear-tau-dependent deviatoric strain are resolved separately.
+/// shear-tau-dependent planar deviatoric strain are resolved separately
+/// before forming the three-dimensional material shear invariant.
 #[must_use]
 pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
     let law = law.prepare();
@@ -861,32 +868,6 @@ pub fn update_tau_field(
     Ok(update_tau_prepared(grid, |i| laws.prepared(i)))
 }
 
-/// Collision-consistent full 2-D strain for the native lattice-unit laws.
-/// Physical material adapters use the three-dimensional planar embedding in
-/// `core2::material_strain_components2`. The first value is the shear-dependent numerator;
-/// the second is the independently relaxed dilation. Callers resolve and
-/// validate `central_bulk_tau` once per sweep when the collision is fixed.
-pub(crate) fn strain_components2(
-    f: &[f64; Q],
-    rho: f64,
-    u: [f64; 2],
-    force: [f64; 2],
-    central_bulk_tau: Option<f64>,
-) -> [f64; 2] {
-    if let Some(bulk_tau) = central_bulk_tau {
-        let [sxx, sxy, syy] = force_corrected_stress(f, rho, u, force);
-        // Pi_dev = -2 rho cs² tau D_dev and tr(Pi) =
-        // -2 rho cs² tau_bulk tr(D), independently of the shear tau.
-        // In 2-D, 2 D:D = 4(D_dev,xx² + D_xy²) + tr(D)².
-        let scale = 3.0 / rho;
-        let numerator = scale * combined_strain_rate((0.5 * (sxx - syy)).abs(), sxy.abs());
-        let dilation = 0.5 * scale * (sxx + syy).abs() / bulk_tau;
-        [numerator, dilation]
-    } else {
-        [force_corrected_shear_rate(f, rho, u, force, 1.0), 0.0]
-    }
-}
-
 // Static dispatch keeps the scalar-law path free of field indexing and
 // per-cell law validation; both APIs share the complete strain/solve loop.
 fn update_tau_prepared<'a>(
@@ -894,8 +875,13 @@ fn update_tau_prepared<'a>(
     law_at: impl Fn(usize) -> &'a PreparedRheology,
 ) -> RheologyStats {
     let central_bulk_tau = grid.collision.central_moment_bulk_tau();
-    assert!(grid.central_moment_bulk_valid(), "invalid central-moment trace relaxation field");
-    let bulk_field = grid.central_moment_bulk_tau.as_deref()
+    assert!(
+        grid.central_moment_bulk_valid(),
+        "invalid central-moment trace relaxation field"
+    );
+    let bulk_field = grid
+        .central_moment_bulk_tau
+        .as_deref()
         .filter(|_| central_bulk_tau.is_some());
     let mut stats = RheologyStats {
         floored: 0,
@@ -912,8 +898,17 @@ fn update_tau_prepared<'a>(
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
         let bulk_tau = bulk_field.map_or(central_bulk_tau, |field| Some(field[i]));
         let [numerator, dilation] =
-            strain_components2(&grid.f[i], mm.rho, mm.u, force, bulk_tau);
-        let local = law.solve_with_fixed_strain(numerator, dilation, grid.tau[i]);
+            material_strain_components2(&grid.f[i], mm.rho, mm.u, force, bulk_tau);
+        // An independently relaxed planar trace contributes div(u)^2/3
+        // to 2 dev_3(D):dev_3(D). The helper retains sqrt(2/3)|div(u)|
+        // for bulk heating, so only its 1/sqrt(2) part enters this root.
+        // With tied relaxation the first entry already contains that term.
+        let fixed_rate = if bulk_tau.is_some() {
+            dilation / core::f64::consts::SQRT_2
+        } else {
+            0.0
+        };
+        let local = law.solve_with_fixed_strain(numerator, fixed_rate, grid.tau[i]);
         grid.tau[i] = local.tau;
         stats.floored += u32::from(local.floored);
         stats.capped += u32::from(local.capped);
@@ -1010,6 +1005,13 @@ mod tests {
         core2::{Cell, CollisionModel2},
         equilibrium,
     };
+
+    // Independent planar embedding: Dzz = 0, and dev_3 removes one third
+    // of the physical trace. Equal planar extension is not 3-D dilation.
+    fn planar_material_rate(strain: [[f64; 2]; 2]) -> f64 {
+        let trace = strain[0][0] + strain[1][1];
+        (2.0 * (strain.iter().flatten().map(|s| s * s).sum::<f64>() - trace * trace / 3.0)).sqrt()
+    }
 
     fn mixed_laws() -> [Rheology; 5] {
         [
@@ -1199,7 +1201,7 @@ mod tests {
                 let force: [f64; 2] =
                     std::array::from_fn(|d| grid.g[d].mul_add(rho, grid.fext[i][d]));
                 let strain = [[0.003 + 0.001 * i as f64, -0.002], [-0.002, -0.001]];
-                let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                let rate = planar_material_rate(strain);
                 max_rate = max_rate.max(rate);
                 expected[i] = 0.5 + laws[i].viscosity(rate) / CS2;
                 let isotropic = 0.5 * (strain[0][0] + strain[1][1]);
@@ -1371,7 +1373,7 @@ mod tests {
                 [[0.003, -0.004], [-0.004, -0.001]],
                 [[-0.004, 0.002], [0.002, -0.001]],
             ] {
-                let rate = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                let rate = planar_material_rate(strain);
                 let expected_tau = 0.5 + law.viscosity(rate) / CS2;
                 assert!(expected_tau > TAU_FLOOR && expected_tau < TAU_CAP);
                 for collision in [

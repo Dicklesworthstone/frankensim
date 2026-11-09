@@ -333,7 +333,7 @@ turbulent-DNS validation. Locally adaptive memory is an explicit option below.
 
 ## Physical strain in planar material rheology
 
-Source-backed D2Q9 thermal and free-surface rheology use the same physical
+Native and source-backed D2Q9 thermal and free-surface rheology use the same physical
 `sqrt(2 dev_3(D):dev_3(D))` invariant as `fs-material`, embedding the original
 planar tensor with `D_zz = D_xz = D_yz = 0`. Equal in-plane expansion therefore
 retains its actual three-dimensional deviator. Guo half-source correction and
@@ -345,8 +345,11 @@ Ordinary tied collision keeps its existing implicit `zeta = 2 mu / 3`, so its
 total planar loss remains `2 mu D:D`; the material query no longer counts that
 bulk term as shear. Independent planar bulk relaxation still requires a physical
 bulk-heating owner and is refused by the shear-only heating entry. Native
-lattice-unit rheology retains its explicitly documented full two-dimensional
-strain convention. Manufactured original-population tests cover both source
+lattice-unit laws and SI-converted `PhysicalRheology` use this same material
+invariant, so a planar flow does not acquire another apparent viscosity when
+embedded in D3Q19. This corrects the former native full-strain convention;
+incompressible simple shear and Poiseuille retain their original law.
+Manufactured original-population tests cover native and source
 owners, force correction, trace relaxation, actual viscosity, and heat partition
 against the material tensor and independently prescribed thermal source.
 

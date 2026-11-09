@@ -160,6 +160,8 @@ impl<'s, 'm, F: FluidTransport + ?Sized> ScaledRheology<'s, 'm, F> {
     /// Converted law for uniform updates or [`super::RheologyField`]. Physical
     /// power laws use zero-yield Herschel–Bulkley to preserve their SI cutoff;
     /// the legacy lattice PowerLaw variant has a fixed 1e-12 lattice cutoff.
+    /// Both D2Q9 and D3Q19 evaluate the physical three-dimensional deviatoric
+    /// strain invariant; a planar flow embeds its unmodeled strain as zero.
     #[must_use]
     pub const fn lattice_law(&self) -> Rheology {
         self.lattice
@@ -377,6 +379,43 @@ fn checked(value: f64, name: &'static str) -> Result<f64, PhysicalRheologyError>
 mod tests {
     use super::*;
 
+    // Independently synthesize incoming quadratic-equilibrium populations
+    // with Pi = -2 rho cs² tau D and the Guo half-source transform. The
+    // antisymmetric part of grad(u) creates no viscous stress.
+    fn strained_populations<const D: usize, const Q: usize>(
+        directions: [[i32; D]; Q],
+        weights: [f64; Q],
+        gradient_per_s: [[f64; D]; D],
+        dt: f64,
+        tau: f64,
+    ) -> [f64; Q] {
+        let velocity = [0.04, -0.03, 0.0];
+        let force = [0.0002, -0.0003, 0.0];
+        let rho = 1.2;
+        core::array::from_fn(|q| {
+            let e = directions[q].map(f64::from);
+            let eu: f64 = (0..D).map(|a| e[a] * velocity[a]).sum();
+            let u2: f64 = (0..D).map(|a| velocity[a] * velocity[a]).sum();
+            let equilibrium = weights[q] * rho * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * u2);
+            let mut contraction = 0.0;
+            for a in 0..D {
+                for b in 0..D {
+                    let stress = -rho
+                        * crate::CS2
+                        * tau
+                        * dt
+                        * (gradient_per_s[a][b] + gradient_per_s[b][a]);
+                    contraction += (e[a] * e[b] - if a == b { crate::CS2 } else { 0.0 }) * stress;
+                }
+            }
+            let source: f64 = (0..D)
+                .map(|a| (3.0 * (e[a] - velocity[a]) + 9.0 * eu * e[a]) * force[a])
+                .sum();
+            equilibrium
+                + weights[q] * (contraction / (2.0 * crate::CS2 * crate::CS2) - 0.5 * source)
+        })
+    }
+
     fn models() -> [PhysicalRheology; 5] {
         [
             PhysicalRheology::Newtonian { viscosity: 0.08 },
@@ -497,6 +536,87 @@ mod tests {
                         assert!(!solved.floored && !solved.capped);
                     }
                 }
+            }
+        }
+    }
+
+    /// G0/G3: an SI law gives the same viscosity and strain in D2Q9 and
+    /// its D3Q19 planar embedding, including extension, compression, shear
+    /// and rigid rotation. The old full-2-D norm overestimated the rate of
+    /// equal planar extension by sqrt(3), changing its apparent viscosity.
+    #[test]
+    fn physical_planar_rheology_agrees_between_native_dimensions() {
+        use crate::d3q19::{E3, PlatesGrid3, W3, update_tau3};
+        use crate::material::plan_scaling_from_material;
+        use crate::rheology::update_tau;
+        use fs_material::fluid_transport::FluidTransportState;
+
+        let material = FluidTransportState::try_new(800.0, 2000.0, 0.15, 0.08).unwrap();
+        let (dx, dt) = (0.002, 0.002);
+        let scaling = plan_scaling_from_material(&material, dx, dt, 0.01).unwrap();
+        for gradient in [
+            [[4.0, 0.0], [0.0, 4.0]],
+            [[-4.0, 0.0], [0.0, -4.0]],
+            [[3.0, -4.0], [-4.0, -1.0]],
+            [[0.0, 12.0], [0.0, 0.0]],
+            [[0.0, -4.0], [4.0, 0.0]],
+        ] {
+            let gradient3 = [
+                [gradient[0][0], gradient[0][1], 0.0],
+                [gradient[1][0], gradient[1][1], 0.0],
+                [0.0; 3],
+            ];
+            let mean = (gradient[0][0] + gradient[1][1]) / 3.0;
+            let mut rate_squared = 0.0_f64;
+            for a in 0..3 {
+                for b in 0..3 {
+                    let strain = 0.5 * (gradient3[a][b] + gradient3[b][a]);
+                    let deviator = strain - if a == b { mean } else { 0.0 };
+                    rate_squared += 2.0 * deviator * deviator;
+                }
+            }
+            let rate = rate_squared.sqrt();
+            for model in models() {
+                let binding = scaling
+                    .bind_rheology(model, LiquidViscosityBasis::Dynamic)
+                    .unwrap();
+                let law = binding.lattice_law();
+                let nu = viscosity_si(model, rate) / 800.0 * dt / (dx * dx);
+                let expected_tau = 0.5 + nu / crate::CS2;
+                assert!(
+                    expected_tau > super::super::TAU_FLOOR && expected_tau < super::super::TAU_CAP
+                );
+                let mut planar = crate::Grid::uniform(2, 2, 1.7);
+                planar.f.fill(strained_populations(
+                    crate::E.map(|(x, y)| [x, y]),
+                    crate::W,
+                    gradient,
+                    dt,
+                    expected_tau,
+                ));
+                planar.fext.fill([0.0002, -0.0003]);
+                let mut spatial = PlatesGrid3::plates(1, 1, 2, 1.7);
+                spatial.f.fill(strained_populations(
+                    E3.map(|(x, y, z)| [x, y, z]),
+                    W3,
+                    gradient3,
+                    dt,
+                    expected_tau,
+                ));
+                spatial.fext.fill([0.0002, -0.0003, 0.0]);
+                let planar_stats = update_tau(&mut planar, law);
+                let spatial_stats = update_tau3(&mut spatial, law);
+                for stats in [planar_stats, spatial_stats] {
+                    assert!(
+                        (stats.max_shear / dt - rate).abs() < 2e-10,
+                        "{model:?}, {gradient:?}: {} != {rate}",
+                        stats.max_shear / dt
+                    );
+                    assert!((stats.tau_range.0 - expected_tau).abs() < 4e-12);
+                    assert!((stats.tau_range.1 - expected_tau).abs() < 4e-12);
+                    assert_eq!((stats.floored, stats.capped), (0, 0));
+                }
+                assert!((planar.tau[0] - spatial.tau[1]).abs() < 4e-12);
             }
         }
     }
