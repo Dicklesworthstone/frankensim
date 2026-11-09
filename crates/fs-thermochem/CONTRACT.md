@@ -4503,3 +4503,32 @@ never rebases the path's birth entropy. Failed current samples cannot supply
 an anchor or a direct difference. This resolves weak current energy changes
 after a large historical change without subtracting rounded absolute or
 birth-relative enthalpies. It is a caloric operation, not a flow integrator.
+
+### Pure-fluid coexistence caloric increments at fixed density
+
+`eos::peng_robinson::saturation::isochoric::PengRobinsonIsochoricCaloricReferenceV1`
+borrows one original pure PR/NASA source, a resolved interior coexistence
+state, a fixed density and a continuous subcritical NASA interval. Each query
+retains original component, temperature, phase and volume admission, including
+the original volume lever rule's 128-epsilon relative allowance.
+
+Direct final-minus-reference internal energy and source entropy combine the
+existing prepared homogeneous density-caloric increments with the symmetric,
+compensated phase-amount product identity. Common ideal, formation and entropy
+references enter once. Identical species add no mixing entropy, and rigid
+volume adds no pressure work. The original moving-phase Cv, pressure, entropy
+and acoustic response remains authoritative. Original nonnegative alpha
+curvature and mechanically stable phase roots establish the residual-Cv sign;
+a few sampled capacities are not used as a global bound.
+
+Nonidentical queries report four bounded phase caloric algebra evaluations;
+identical rest reports zero. Queries poll cancellation and publish no partial
+result. This module introduces no saturation/UV solver, time integrator,
+kinetics, interfacial storage, phase-departure continuation or critical
+regularization. Source entropy retains the original accepted Gibbs defect.
+
+The focused G1/G3/G4 source regressions cover original absolute U/S oracles,
+moving-phase derivatives, weak heat under large reference datums, composition
+and reversal, source/density/phase refusals and late cancellation. These new
+regressions were authored but could not be compiled or executed while the
+development executor was unavailable.
