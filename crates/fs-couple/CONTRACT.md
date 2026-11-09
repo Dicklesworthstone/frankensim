@@ -14317,3 +14317,75 @@ coupled owner. It is authored, formatted and API-reviewed but unexecuted
 because full Cargo dependency closure is unavailable; the three previously
 authored FE/Cx tests also remain outside the native numerical slice. This is
 not whole-crate/workspace Cargo success or a measured performance ratio.
+
+## Full original-coordinate structural reaction through FMM/Robin radiation
+
+`vibroacoustic::iterative::StructuralRadiation` couples a real frozen original
+mechanical M/C/K pencil to a closed exterior surface through the existing
+Burton-Miller `IterativeRadiation` owner. Original full consistent inertia,
+off-diagonal stiffness, viscous damping and skew gyroscopic velocity coupling
+remain in the native `PreparedHarmonicResponse`. One real panel-normal trace
+per supplied coordinate retains zero/dark rows as well as visible motion.
+
+Under peak exp(-i omega t), the original equations are
+`H q = F - T^T W p`, `H = K - omega^2 M - i omega C`, and
+`v_n = T (-i omega q)`. Native structural mobility `Y = -i omega H^-1`
+therefore supplies exactly the nonlocal normalized Robin action
+`beta p = rho*c*T*Y*T^T*W*p` and free drive `T*Y*F`. Pressure force and velocity
+use the same original trace and panel area map. No modal projection,
+independent-radiator power addition, diagonal impedance replacement or
+resymmetrization of gyroscopic response is performed by this adapter.
+
+Preparation factors the mechanical pencil once and constructs its full
+coordinate mobility using structural unit-force solves. It performs no
+acoustic unit-coordinate column solves and forms no acoustic N-by-N matrix.
+Each forcing reuses one prepared native FMM/Robin operator, obtains one
+acoustic solution, then solves the original mechanical pencil against the
+actual external force minus recovered pressure traction. Native pressure and
+outward velocity remain available as the original `RadiationSolution` for
+downstream field observation.
+
+The complete returned work account distinguishes original external input,
+structural viscous dissipation, signed structure-to-fluid interface work and
+signed radiation work. Independent contractions check the reconstructed
+physical boundary velocity, reciprocal interface work and total input =
+structural heat + outward sound. A strictly negative native outward-rounded
+radiation dot-product enclosure refuses rather than being clipped into
+passivity. That enclosure covers floating-point dot evaluation only; it is
+not a discretization or FMM error bound, and a pointwise check is not a
+global passivity certificate.
+
+Caller controls separately bound coordinate-by-panel trace entries, the full
+coordinate mobility and added numerical payload
+`16*q*q + 192*q + 160*N + 4096` bytes. Borrowed source traces, allocator
+metadata and the original mechanical/FMM owners are excluded from that added
+bound. A nonlocal action costs O(q*N + q*q) with O(q) scratch; it allocates
+bounded scratch, not a reusable allocation-free workspace. Native panel
+quadrature, directional/W5a, near-block and GMRES resource limits remain
+unchanged. Cx is polled around synchronous preparation and inside the
+existing controlled solve; native CancelGate polling remains active within
+FMM stages. Source owners remain immutable after cancellation or refusal.
+
+This route requires an invertible bare mechanical pencil. An exactly
+singular lossless bare resonance refuses even if radiation could regularize
+the jointly loaded problem; existing loaded dense owners retain that scope.
+The adapter does not turn a frequency-dependent material sample into a
+frozen M/C/K law, build a tensor-Prony shell material reduction, add incident
+acoustic illumination, infer structural traces, or certify structural/modal
+truncation, continuum geometry or broadband/causal validity.
+
+Five focused native groups execute the complete new coupling source against
+the original mechanical PSD/LU/refinement, FMM, triangle kernels, Robin,
+GMRES, cancellation gate and geometry numerics. The independent pulsating
+sphere at ka=0.8 refines from 80 to 320 panels with the admitted TriangleNear
+rule: velocity error falls from 4.3718% to 1.0934%, and radiation-power error
+from 2.7385% to 0.6183%. A separated-body directional full-Triangle fixture
+with gyroscopic coupling agrees with dense acoustic columns composed with
+the original loaded mechanical owner: relative velocity error 5.104e-10,
+pressure error 3.671e-10, and total work defect 1.027e-15. Other groups check
+coordinate congruence and structurally coupled dark motion, equality of
+nonlocal surface work and original structural dissipation, and singular,
+resource, invalid-force, cancellation, deterministic retry and zero-drive
+limits. All five groups pass. The native slice replaces only Cx arena/RNG
+construction in these new tests and omits unrelated dependency construction
+surfaces/modules; full Cargo/workspace compilation remains unexecuted.

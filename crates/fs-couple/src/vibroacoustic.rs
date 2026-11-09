@@ -129,6 +129,8 @@ mod boundary;
 pub use boundary::CavityBoundaryAdmittance;
 mod radiation;
 pub use radiation::ModalRadiationLoading;
+/// Full original-coordinate structural reaction through the native FMM/Robin owner.
+pub mod iterative;
 mod relaxation;
 pub use relaxation::ModalStructuralRelaxation;
 mod connections;
