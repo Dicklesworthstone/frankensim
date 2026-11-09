@@ -315,7 +315,7 @@ fn a_staple_row_is_refused_for_its_own_reason_and_only_directly_after_the_reed()
 }
 
 #[test]
-fn the_aperture_takes_a_staple_recovery_once_never_with_a_viscous_slit_in_either_order() {
+fn the_aperture_takes_a_staple_recovery_once_and_composes_viscosity_in_either_order() {
     use crate::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
     let source = super::build(&card(REED), 37);
     let gas = *source.renderer().system().load().duct().inlet_gas();
@@ -323,18 +323,31 @@ fn the_aperture_takes_a_staple_recovery_once_never_with_a_viscous_slit_in_either
     let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
     let mut viscous = valve(&source).clone();
     viscous.set_viscous_slit(slit).unwrap();
-    assert!(viscous.set_staple_recovery(recovery).is_err());
+    viscous.set_staple_recovery(recovery).unwrap();
     let mut once = valve(&source).clone();
     once.set_staple_recovery(recovery).unwrap();
     assert!(once.set_staple_recovery(recovery).is_err());
-    assert!(once.set_viscous_slit(slit).is_err());
+    once.set_viscous_slit(slit).unwrap();
+    assert_eq!((viscous.viscous_slit(), viscous.staple_recovery()), (Some(slit), Some(recovery)));
+    assert_eq!((once.viscous_slit(), once.staple_recovery()), (Some(slit), Some(recovery)));
+    assert!(once.set_jet_contraction(0.611).is_err());
     // A contraction and a staple compose, in either order.
-    once.set_jet_contraction(0.611).unwrap();
+    let mut contracted = valve(&source).clone();
+    contracted.set_staple_recovery(recovery).unwrap();
+    contracted.set_jet_contraction(0.611).unwrap();
     let mut other_order = valve(&source).clone();
     other_order.set_jet_contraction(0.611).unwrap();
     other_order.set_staple_recovery(recovery).unwrap();
-    assert_eq!((once.jet_contraction(), once.staple_recovery()), (Some(0.611), Some(recovery)));
+    assert_eq!((contracted.jet_contraction(), contracted.staple_recovery()), (Some(0.611), Some(recovery)));
     assert_eq!((other_order.jet_contraction(), other_order.staple_recovery()), (Some(0.611), Some(recovery)));
+    // The separated-entrance law still has no condensed modal owner.
+    let separated = ViscousSlit::separated_jet_from_gas(&gas, 0.001).unwrap();
+    assert!(once.set_viscous_slit(separated).is_err());
+    assert_eq!(once.viscous_slit(), Some(slit));
+    let mut separated_first = valve(&source).clone();
+    separated_first.set_viscous_slit(separated).unwrap();
+    assert!(separated_first.set_staple_recovery(recovery).is_err());
+    assert_eq!(separated_first.staple_recovery(), None);
 }
 
 #[test]

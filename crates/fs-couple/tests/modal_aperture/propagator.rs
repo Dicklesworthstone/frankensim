@@ -215,3 +215,45 @@ fn exact_full_c_closure_reopening_and_signed_force_ports_close_the_same_work_acc
     assert_eq!(a.modal_states(), state);
     assert_eq!(a.stored_energy_j(), energy);
 }
+
+#[test]
+fn exact_full_c_viscous_staple_closes_reopens_and_retains_zero_recovery_bits() {
+    use fs_couple::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
+    let mut s = spec();
+    s.time_step_s = 1.0 / 48_000.0;
+    s.rest_opening_m = 4e-5;
+    for m in &mut s.modes { m.damping_n_s_m = 0.0; }
+    let mut plain = exact(s, vec![BladeState::default(); 3]).with_viscosity(
+        vec![0.03, 0.005, -0.002, 0.005, 0.02, 0.003, -0.002, 0.003, 0.01],
+        &CancelGate::new_clock_free()).unwrap();
+    plain.set_viscous_slit(ViscousSlit::new(1.81e-5, 0.001).unwrap()).unwrap();
+    let mut zero = plain.clone();
+    zero.set_staple_recovery(StapleRecovery::new(0.0, 4e-6).unwrap()).unwrap();
+    let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+    let mut recovered = plain.clone();
+    recovered.set_staple_recovery(recovery).unwrap();
+    let (mut closed, mut reopened, mut forward, mut reverse) = (false, false, false, false);
+    for sample in 0..1024 {
+        let input = drive(if sample < 512 { 2000.0 } else { -100.0 });
+        let forces = [0.001, -0.0003];
+        let reference = plain.step(input, forces).unwrap();
+        let identity = zero.step(input, forces).unwrap();
+        assert_eq!(identity.modes, reference.modes);
+        assert_eq!(identity.aperture, reference.aperture);
+        let f = recovered.step(input, forces).unwrap();
+        closed |= f.aperture.state.opening_m < 0.0;
+        reopened |= closed && sample >= 512 && f.aperture.state.opening_m > 0.0;
+        forward |= f.aperture.jet_flow_m3_s > 0.0;
+        reverse |= f.aperture.jet_flow_m3_s < 0.0;
+        assert!(f.pressure_drop_pa * f.aperture.jet_flow_m3_s >= 0.0);
+        assert!(f.momentum_residual_n.iter().all(|r| r.abs() < 1e-8));
+        assert!(f.work_certificate.residual <= f.work_certificate.effective_budget);
+        assert!(f.flow_certificate.residual <= f.flow_certificate.effective_budget);
+    }
+    assert!(closed && reopened && forward && reverse);
+    let before = recovered.modal_states().to_vec();
+    let energy = recovered.stored_energy_j();
+    assert!(recovered.step(drive(f64::NAN), [0.0; 2]).is_err());
+    assert_eq!(recovered.modal_states(), before);
+    assert_eq!(recovered.stored_energy_j(), energy);
+}

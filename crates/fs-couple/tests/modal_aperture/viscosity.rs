@@ -73,6 +73,96 @@ fn full_viscosity_matches_manufactured_simultaneous_momentum_flow_and_work() {
 }
 
 #[test]
+fn viscous_staple_recovery_matches_manufactured_full_matrix_momentum_and_work() {
+    use fs_couple::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
+    let law = ViscousSlit::new(1.81e-5, 0.001).unwrap();
+    let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+    let mut s = undamped();
+    s.modes.truncate(2);
+    s.rest_opening_m = 2e-4;
+    s.modes[0].force_projection = [1.0, 0.0];
+    s.modes[1].force_projection = [0.0, 1.0];
+    let old = [BladeState { displacement_m: 1e-6, velocity_m_s: 0.01 },
+        BladeState { displacement_m: -2e-6, velocity_m_s: 0.005 }];
+    let midpoint = [0.02, -0.006];
+    let c = [0.03, -0.005, -0.005, 0.02];
+    for velocity in [-20.0_f64, 0.0, 20.0] {
+        let mut a = ModalAperture::new(s.clone(), old.to_vec(), contact()).unwrap()
+            .with_viscosity(c.to_vec(), &CancelGate::new_clock_free()).unwrap();
+        a.set_staple_recovery(recovery).unwrap();
+        a.set_viscous_slit(law).unwrap();
+        let dt = s.time_step_s;
+        let opening = s.rest_opening_m + s.modes.iter().enumerate()
+            .map(|(i, m)| m.gap_projection * (old[i].displacement_m + 0.5 * dt * midpoint[i]))
+            .sum::<f64>();
+        let jet = s.width_m * opening * velocity;
+        let wall_drop = 12.0 * law.dynamic_viscosity_pa_s() * law.length_m() * velocity / opening / opening;
+        let blade_drop = wall_drop + 0.5 * s.density_kg_m3 * velocity * velocity.abs();
+        let recovered = recovery.recovered_pressure_pa(s.density_kg_m3, jet);
+        let total_drop = blade_drop - recovered;
+        let swept = -s.modes.iter().zip(midpoint).map(|(m, v)| m.pressure_area_m2 * v).sum::<f64>();
+        let (incoming, body) = (13.0, -1e-7);
+        let upstream = total_drop + 2.0 * incoming + s.impedance_pa_s_m3 * (jet + swept + body);
+        let forces = std::array::from_fn(|i| {
+            let m = s.modes[i];
+            2.0 * m.mass_kg * (midpoint[i] - old[i].velocity_m_s) / dt
+                + m.stiffness_n_m * (old[i].displacement_m + 0.5 * dt * midpoint[i])
+                + c[2 * i] * midpoint[0] + c[2 * i + 1] * midpoint[1] + m.pressure_area_m2 * blade_drop
+        });
+        let f = a.step(ApertureDrive { upstream_pressure_pa: upstream,
+            incoming_pressure_pa: incoming, body_flow_m3_s: body }, forces).unwrap();
+        for i in 0..2 {
+            assert!((f.modes[i].displacement_m - old[i].displacement_m - dt * midpoint[i]).abs() < 1e-14);
+            assert!((f.modes[i].velocity_m_s - (2.0 * midpoint[i] - old[i].velocity_m_s)).abs() < 1e-9);
+            assert!(f.momentum_residual_n[i].abs() < 1e-9);
+        }
+        assert!((f.pressure_drop_pa - total_drop).abs() < 1e-6);
+        assert!((f.aperture.jet_flow_m3_s - jet).abs() < 1e-12);
+        let structural_power = (0..2).map(|i|
+            (0..2).map(|j| midpoint[i] * c[2 * i + j] * midpoint[j]).sum::<f64>()).sum::<f64>();
+        // Jet recovery is passive on its own port. Its signed swept-flow
+        // exchange is separate and must remain in the original work balance.
+        assert!(total_drop * jet >= 0.0);
+        assert!(total_drop * jet >= wall_drop * jet * (1.0 - 1e-12));
+        let loss = dt * (total_drop * jet - recovered * swept + structural_power);
+        assert!((f.aperture.dissipated_energy_j - loss).abs() < 1e-12);
+        assert!(f.work_certificate.residual <= f.work_certificate.effective_budget);
+        assert!(f.flow_certificate.residual <= f.flow_certificate.effective_budget);
+    }
+}
+
+#[test]
+fn viscous_staple_fixed_gap_reduces_to_original_scalar_junction() {
+    use fs_couple::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
+    let law = ViscousSlit::new(1.81e-5, 0.001).unwrap();
+    let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+    let mut s = spec();
+    s.modes.truncate(1);
+    s.rest_opening_m = 2e-4;
+    // A real mode remains present, but has no fluid-force area and starts at
+    // rest. It therefore leaves the physical slit fixed without a new owner.
+    s.modes[0].pressure_area_m2 = 0.0;
+    for pressure in [-2000.0, 0.0, 2000.0] {
+        let mut a = model(s.clone());
+        a.set_viscous_slit(law).unwrap();
+        a.set_staple_recovery(recovery).unwrap();
+        let input = ApertureDrive { upstream_pressure_pa: pressure,
+            incoming_pressure_pa: 13.0, body_flow_m3_s: -1e-7 };
+        let scalar = law.characteristic_junction_with_recovery(recovery, s.width_m,
+            s.rest_opening_m, s.density_kg_m3, s.impedance_pa_s_m3,
+            input.incoming_pressure_pa, input.upstream_pressure_pa, input.body_flow_m3_s).unwrap();
+        let f = a.step(input, [0.0; 2]).unwrap();
+        assert_eq!(f.modes, vec![BladeState::default()]);
+        assert_eq!(f.aperture.swept_flow_m3_s, 0.0);
+        assert!((f.aperture.outgoing_pressure_pa - scalar.outgoing_pa).abs() < 1e-9);
+        assert!((f.aperture.jet_flow_m3_s - scalar.flow_m3_s).abs() < 1e-14);
+        assert!(f.aperture.dissipated_energy_j >= 0.0);
+        assert!(f.work_certificate.residual <= f.work_certificate.effective_budget);
+        assert!(f.flow_certificate.residual <= f.flow_certificate.effective_budget);
+    }
+}
+
+#[test]
 fn relative_dashpot_preserves_common_motion_and_resolves_differential_decay() {
     use fs_couple::bernoulli_aperture::paired::BladePropagator;
     let mut s = undamped(); s.modes.truncate(2);

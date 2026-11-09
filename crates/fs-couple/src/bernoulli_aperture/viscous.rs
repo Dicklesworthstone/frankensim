@@ -3,7 +3,8 @@
 //! For width w, gap h, streamwise length L and mean speed v, the admitted
 //! reduced law is dp = 12 mu L v / h^2 + rho v |v| / 2, with U = w h v.
 //! The first term is fully developed, no-slip, parallel-plate resistance;
-//! the second is the existing separated-jet loss, with no pressure recovery.
+//! the second is the existing separated-jet loss. Explicit [`StapleRecovery`]
+//! can recover part of that jet head downstream while retaining all wall loss.
 //! Width is the physical slit width, not a fitted discharge coefficient.
 //!
 //! A P1 gap varying ACROSS the width is integrated as parallel local channels,
@@ -423,6 +424,47 @@ impl ViscousSlit {
         let dp = linear * velocity + (0.5 * density_kg_m3 * velocity) * velocity.abs();
         if !dp.is_finite() { return Err(numerical()); }
         Ok(dp)
+    }
+
+    /// The same fully developed slit after mechanical swept-flow condensation,
+    /// including downstream staple recovery. Returns (blade drop, total drop).
+    ///
+    /// With D = 1 + Z * pressure_mobility, the equation is
+    /// `p_blade(v) - recovery(v)/D + (Z/D) A v = drive`.
+    /// Only the quadratic jet head is recovered; the linear no-slip wall loss
+    /// remains intact. This is a quasisteady uniform slit, not a spatial or
+    /// separated-entrance model. The original passive recovery domain applies.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fixed_opening_pressure_drop_with_recovery(
+        self, recovery: StapleRecovery, width_m: f64, opening_m: f64,
+        density_kg_m3: f64, impedance_pa_s_m3: f64, denominator: f64, drive_pa: f64,
+    ) -> Result<(f64, f64), AcousticRealizeError> {
+        let area = admitted_area(width_m, opening_m, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
+        if !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0
+            || !denominator.is_finite() || denominator < 1.0 || !drive_pa.is_finite() {
+            return Err(invalid("viscous slit recovery condensation requires positive impedance, finite drive and denominator at least one"));
+        }
+        if self.is_separated_jet() { return Err(jet_refusal()); }
+        // Retain original arithmetic when no pressure can be recovered.
+        if recovery.c_p() == 0.0 || drive_pa <= 0.0 || opening_m == 0.0 {
+            let dp = self.fixed_opening_pressure_drop(
+                width_m, opening_m, density_kg_m3, impedance_pa_s_m3, drive_pa)?;
+            return Ok((dp, dp));
+        }
+        let remaining_head = recovery.forward_factor(area)?;
+        let condensed_head = 1.0 - (1.0 - remaining_head) / denominator;
+        let linear = self.linear_pressure(opening_m)?;
+        let velocity = solve_velocity(
+            linear + impedance_pa_s_m3 * area, density_kg_m3 * condensed_head, drive_pa)?;
+        let wall_drop = linear * velocity;
+        let jet_drop = (0.5 * density_kg_m3 * velocity) * velocity;
+        let blade = wall_drop + jet_drop;
+        // Do not recover viscous wall friction or subtract two nearly equal
+        // full drops when the allowed recovery approaches the jet head.
+        let total = wall_drop + remaining_head * jet_drop;
+        if ![blade, total].iter().all(|v| v.is_finite()) { return Err(numerical()); }
+        Ok((blade, total))
     }
 
     /// Integrate this same law over a linearly varying widthwise gap. Negative
@@ -1028,6 +1070,63 @@ mod tests {
             let original = law().characteristic_pressure(width, h, rho, z, incoming, mouth, moving).unwrap();
             assert!((j.outgoing_pa - original).abs() <= 1e-10 * (1.0 + original.abs()),
                 "{} vs {original}", j.outgoing_pa);
+        }
+    }
+
+    #[test]
+    fn g1_condensed_viscous_recovery_retains_wall_loss_and_manufactured_flow() {
+        let (width, rho, z) = (0.0056, 1.2, 6e7);
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        for opening in [1e-5, 2e-4, 6e-4] {
+            for denominator in [1.0, 1.7, 100.0] {
+                for velocity in [-30.0_f64, -1e-4, 0.0, 1e-4, 30.0] {
+                    let flow = width * opening * velocity;
+                    let wall = 12.0 * law().dynamic_viscosity_pa_s() * law().length_m()
+                        * velocity / opening / opening;
+                    let jet = 0.5 * rho * velocity * velocity.abs();
+                    let recovered = recovery.recovered_pressure_pa(rho, flow);
+                    let blade = wall + jet;
+                    let total = blade - recovered;
+                    // The scalar pressure force creates swept flow at the
+                    // blade drop, while only the bore sees recovered head.
+                    let drive = blade - recovered / denominator + (z / denominator) * flow;
+                    let (actual_blade, actual_total) = law().fixed_opening_pressure_drop_with_recovery(
+                        recovery, width, opening, rho, z / denominator, denominator, drive).unwrap();
+                    close(actual_blade, blade, 2e-13);
+                    close(actual_total, total, 2e-13);
+                    let actual_flow = law().evaluate(width, opening, rho, actual_blade).unwrap();
+                    close(actual_flow.flow_m3_s, flow, 2e-13);
+                    assert!(actual_total * flow >= 0.0);
+                    // Recovery never subtracts the no-slip linear loss.
+                    assert!(actual_total * flow >= wall * flow * (1.0 - 2e-13));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_condensed_viscous_recovery_keeps_identity_limits_and_refusals() {
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        let zero = StapleRecovery::new(0.0, S_C).unwrap();
+        for (opening, drive) in [(2e-4, -100.0), (0.0, 2000.0), (2e-4, 0.0)] {
+            let old = law().fixed_opening_pressure_drop(0.0056, opening, 1.2, 1e7, drive).unwrap();
+            for selected in [recovery, zero] {
+                let actual = law().fixed_opening_pressure_drop_with_recovery(
+                    selected, 0.0056, opening, 1.2, 1e7, 2.0, drive).unwrap();
+                assert_eq!((actual.0.to_bits(), actual.1.to_bits()), (old.to_bits(), old.to_bits()));
+            }
+        }
+        let old = law().fixed_opening_pressure_drop(0.0056, 2e-4, 1.2, 1e7, 500.0).unwrap();
+        let actual = law().fixed_opening_pressure_drop_with_recovery(
+            zero, 0.0056, 2e-4, 1.2, 1e7, 2.0, 500.0).unwrap();
+        assert_eq!((actual.0.to_bits(), actual.1.to_bits()), (old.to_bits(), old.to_bits()));
+        // Mechanical condensation cannot grant a nonpassive diffuser domain.
+        assert!(matches!(law().fixed_opening_pressure_drop_with_recovery(
+            recovery, 0.02, 1e-3, 1.2, 1e7, 100.0, 500.0),
+            Err(AcousticRealizeError::Reed { what: STAPLE_RECOVERY_DOMAIN })));
+        for denominator in [0.0, 0.5, f64::NAN, f64::INFINITY] {
+            assert!(law().fixed_opening_pressure_drop_with_recovery(
+                recovery, 0.0056, 2e-4, 1.2, 1e7, denominator, 500.0).is_err());
         }
     }
 }

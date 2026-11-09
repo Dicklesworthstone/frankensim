@@ -327,9 +327,9 @@ impl ModalAperture {
                 "modal jet contraction is defined on the inviscid uniform slit only, not with a viscous slit",
             ));
         }
-        if self.staple_recovery.is_some() {
+        if self.staple_recovery.is_some() && law.is_separated_jet() {
             return Err(invalid(
-                "modal staple recovery is defined on the inviscid uniform slit only, not with a viscous slit",
+                "modal staple recovery requires a uniform inviscid or fully developed viscous slit",
             ));
         }
         law.evaluate(
@@ -398,15 +398,17 @@ impl ModalAperture {
     /// The double reed's staple pressure recovery (Almeida, Vergez and Causse 2007 eqs. 14-17), as the reed-bore voice's
     /// `staple_recovery C_P S_C` row: the blade is driven by the drop `dpc` across the opening itself, not by the total
     /// mouth-to-bore drop, and the bore input is raised by `R = C_P (1/2) rho (q / S_c)^2` of the forward flow `q`, so the
-    /// bore sees `dpt = dpc - R`. The condensed mechanical solve carries it exactly: `(1 - C_P r^2 / den) dpc + (Z / den) q =
-    /// drive` (`moving::fixed_opening_pressure_drop_with_recovery`), the live junction at `den = 1`. The jet area is the
+    /// bore sees `dpt = dpc - R`. The condensed mechanical solve carries it exactly: `dpc - R/den + (Z/den) q = drive`,
+    /// the live junction at `den = 1`. A fully developed viscous channel retains its complete linear wall loss;
+    /// recovery removes only part of the quadratic jet head. The jet area is the
     /// contracted `C_c w h` when a contraction is selected, as on the live page. `C_P = 0` recovers nothing and is the
-    /// original solve bit for bit, and so is not calling this at all. Defined on the inviscid uniform slit only; selected
+    /// original solve bit for bit, and so is not calling this at all. Defined on a uniform inviscid or fully developed
+    /// viscous slit; selected
     /// once, before the first accepted sample. Forward flow with `C_P (S / S_c)^2 >= 1` refuses at the step, by the
     /// live `STAPLE_RECOVERY_DOMAIN`.
     ///
     /// # Errors
-    /// A second selection, an advanced aperture, or a viscous or spatial slit.
+    /// A second selection, an advanced aperture, a spatial slit or the separated-entrance channel law.
     pub fn set_staple_recovery(
         &mut self, recovery: super::viscous::StapleRecovery,
     ) -> Result<(), AcousticRealizeError> {
@@ -415,9 +417,10 @@ impl ModalAperture {
                 "modal staple recovery is selected once, before the first accepted sample",
             ));
         }
-        if self.viscous_slit.is_some() || self.closure.is_some() || self.solid_closure.is_some() {
+        if self.viscous_slit.is_some_and(|law| law.is_separated_jet())
+            || self.closure.is_some() || self.solid_closure.is_some() {
             return Err(invalid(
-                "modal staple recovery is defined on the inviscid uniform slit only",
+                "modal staple recovery requires a uniform inviscid or fully developed viscous slit",
             ));
         }
         self.staple_recovery = Some(recovery);

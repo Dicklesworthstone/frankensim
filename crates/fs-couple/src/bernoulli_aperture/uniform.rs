@@ -107,7 +107,9 @@ pub(super) fn solve_response(
         let opening = f64::midpoint(gap, next_gap).max(0.0);
         // `blade_dp` drives the blade and sets the jet; `dp` is what the bore sees. They differ only by the staple's recovery.
         let (blade_dp, dp) = match (viscous_slit, staple) {
-            (Some(law), _) => {
+            (Some(law), Some(recovery)) => law.fixed_opening_pressure_drop_with_recovery(
+                recovery, width, opening, rho, z/denominator, denominator, source)?,
+            (Some(law), None) => {
                 let dp = law.fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?;
                 (dp, dp)
             }
