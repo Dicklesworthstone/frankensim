@@ -196,6 +196,7 @@ impl ReactingEuler1d {
                     dissipation_controls[0],
                     [0.0, speed],
                     retry,
+                    None,
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Complete(report) => report,
@@ -215,6 +216,7 @@ impl ReactingEuler1d {
                     dissipation_controls[1],
                     [speed, 0.0],
                     retry,
+                    None,
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Complete(report) => report,

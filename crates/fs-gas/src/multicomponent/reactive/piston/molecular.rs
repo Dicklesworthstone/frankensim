@@ -1,9 +1,10 @@
 //! One common-speed root for pressure, longitudinal stress and chemical energy.
 
 use super::super::{
-    ChemistryReport, ReactingEuler1d, ReactiveError, ReactiveStepControl, ReactiveStepReport,
+    ChemistryReport, FlowError, ReactingEuler1d, ReactiveError, ReactiveStepControl, ReactiveStepReport,
     SplitDissipationReport, coupled_report, poll, positive, react_cells, sum,
 };
+use crate::body_force::{BodyForce, ForceControl};
 use crate::dynamics::piston::{
     MechanicalExchange, Piston, PistonControl, PistonLoad, PistonStep, mechanical_report, solve,
     validate,
@@ -26,7 +27,7 @@ pub(in crate::multicomponent::reactive) struct MolecularPistonReport {
     pub boundary_impulse_n_s: [f64; 2],
     /// Mechanical pressure/stress work entering the gas, excluding end heat.
     pub boundary_work_j: [f64; 2],
-    /// Gas and finite-wall storage changes minus prescribed reservoir heat.
+    /// Gas and finite-wall storage changes minus reservoir heat and body work.
     pub accounted_energy_change_j: f64,
 }
 
@@ -51,6 +52,7 @@ impl ReactingEuler1d {
         dissipation_controls: DissipationControl,
         wall_velocity: [f64; 2],
         retry: usize,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MovingMolecularTrial, ReactiveError> {
         self.trial
@@ -87,12 +89,22 @@ impl ReactingEuler1d {
             &mut chemistry,
             cancelled,
         )?;
-        let transport = self.trial.step_with_moving_walls(
-            Time::new(duration),
-            controls.transport,
-            wall_velocity,
-            &mut *cancelled,
-        )?;
+        let transport = match forcing {
+            Some((force, force_controls)) => self.trial.step_with_moving_walls_and_body_force(
+                Time::new(duration),
+                controls.transport,
+                wall_velocity,
+                force,
+                force_controls,
+                &mut *cancelled,
+            )?,
+            None => self.trial.step_with_moving_walls(
+                Time::new(duration),
+                controls.transport,
+                wall_velocity,
+                &mut *cancelled,
+            )?,
+        };
         if transport.elapsed.value() != duration {
             return Ok(MovingMolecularTrial::Shorter(transport.elapsed));
         }
@@ -138,6 +150,12 @@ impl ReactingEuler1d {
                 return Err(ReactiveError::Invalid(
                     "final molecular piston state is outside chemistry interval",
                 ));
+            }
+            if let Some((_, force_controls)) = forcing {
+                force_controls.admit_velocity::<FlowError>(
+                    primitive.velocity,
+                    primitive.sound_speed,
+                )?;
             }
         }
         let after = if heat.is_some() {
@@ -187,6 +205,14 @@ impl ReactingEuler1d {
                 -heat.external_heat_to_gas_j,
             ]),
             None => gas_energy_change_j,
+        };
+        // Distributed work is external to the gas/walls/thermal-store system.
+        // It must not be attributed to either pressure/stress wall port. Keep
+        // the physical gas energy above and the native source receipt intact.
+        let accounted_energy_change_j = if transport.source_change.work == 0.0 {
+            accounted_energy_change_j
+        } else {
+            sum([accounted_energy_change_j, -transport.source_change.work])
         };
         Ok(MovingMolecularTrial::Complete(MolecularPistonReport {
             flow,
@@ -356,6 +382,7 @@ impl ReactingEuler1d {
                     dissipation_controls,
                     [0.0, speed],
                     retry,
+                    None,
                     &mut cancelled,
                 )? {
                     MovingMolecularTrial::Shorter(elapsed) => {

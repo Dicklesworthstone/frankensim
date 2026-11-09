@@ -6,6 +6,8 @@ use crate::multicomponent::dissipation::{
 };
 use crate::multicomponent::wall_exchange::{WallContact, WallControl, WallDrag, WallThermal};
 
+mod forcing;
+
 fn nonuniform(reference: f64) -> ReactingEuler1d {
     let mechanism = mechanism(8.0, 30.0, reference);
     let mut flow = field(&mechanism, 8, 0.0, |x| {

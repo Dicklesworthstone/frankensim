@@ -9460,3 +9460,41 @@ equal-pressure identity, independent physical residual admission, original
 source/budget refusals, incorrect pressure/efficiency requests and cancellation
 at final publication. They are numerical conformance tests, not empirical
 validation, finite-rate predictions or interval certificates.
+
+## Distributed acceleration with molecular and thermal moving walls
+
+`ReactingEuler1d::step_with_inertial_walls_dissipation_and_body_force` and
+`step_with_inertial_walls_dissipation_heat_and_body_force` compose the existing
+body-force moving-volume owner with the original simultaneous two-speed wall
+root. Every proposal restarts D/2-C/2-F/2-ALE-F/2-C/2-D/2 from accepted gas;
+the thermal entry wraps that sequence with the original finite-store or
+prescribed-reservoir H/2 stages. Old and moved volumes remain authoritative
+for their respective chemistry, molecular, heat and source stages.
+
+Uniform or cellwise acceleration is converted with each actual source-stage
+density; force density remains independent of density. The native source
+receipt retains actual impulse, midpoint-velocity work and representation
+residual. Only pressure and longitudinal stress supply mechanical wall
+impulse/work. Direct wall weight belongs in the explicit wall loads, so gas
+gravity cannot be counted twice as a wall reaction. The complete energy
+balance includes physical chemical gas energy, actual finite thermal storage,
+both wall kinetic changes, exterior pressure and applied wall-force work,
+minus prescribed heat and distributed body work exactly once. The momentum
+balance likewise removes the external body impulse once.
+
+Shortened acoustic intervals restart all stages and the whole wall root.
+Accepted gas, clock, mesh, molecular binding, both velocities and thermal stores
+publish together after final chemistry, Mach, mechanical and cancellation
+admission. Existing flat field/source workspaces are reused; no second
+molecular, chemistry, viscous-heating or wall solver is introduced. Valid zero
+source follows the original unforced arithmetic.
+
+Focused G1/G3/G4 regressions reconstruct total energy and momentum from actual
+endpoints, check native pressure/stress wall reactions, replay the original
+forced moving-volume stages with a cellwise force-density/volume impulse
+oracle, and exercise zero-source parity and late cancellation with finite heat
+stores. These additions retain the native heat/splitting accuracy, explicit
+parabolic/acoustic budgets and source-domain restrictions. They do not claim
+general second order, hydrostatic well balancing, implicit FSI stability,
+entropy stability or a molecular gravitational-diffusion law.
+

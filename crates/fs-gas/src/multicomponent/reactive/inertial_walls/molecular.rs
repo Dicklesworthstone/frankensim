@@ -5,6 +5,7 @@ use super::super::{
     FlowError, PistonThermalEnds, ReactingEuler1d, ReactiveError, ReactiveStepControl,
     ReactiveStepReport, ThermalReactiveStepReport, poll, positive,
 };
+use crate::body_force::{BodyForce, ForceControl};
 use crate::dynamics::inertial_walls::{
     InertialWallLoad, InertialWallsControl, InertialWallsStep, MechanicalExchange,
     mechanical_report, solve_with, validate_controls,
@@ -57,6 +58,52 @@ impl ReactingEuler1d {
             dissipation_controls,
             loads,
             wall_controls,
+            None,
+            cancelled,
+        )
+        .map(|report| report.map_gas(|gas| gas.flow))
+    }
+
+    /// Accelerate reacting, viscous gas between two finite inertial walls.
+    ///
+    /// Each joint wall-speed proposal runs D/2, C/2, F/2, ALE, F/2, C/2, D/2
+    /// from the accepted field. The original moving source owner uses actual
+    /// stage densities and old/moved volumes for force impulse and kinetic
+    /// work. Pressure and longitudinal stress alone react on the finite walls;
+    /// their own weight or other direct force belongs in `loads`.
+    ///
+    /// The complete physical energy/momentum balance subtracts distributed
+    /// source work/impulse once. A shorter acoustic step restarts every source
+    /// and the simultaneous wall root. Sources are held in moving cell order;
+    /// zero source follows the original molecular path exactly.
+    ///
+    /// # Errors
+    /// Invalid source/Mach bounds, geometry, nonlinear or source refusal and
+    /// cancellation preserve accepted gas, walls and molecular geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_dissipation_and_body_force<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        loads: [InertialWallLoad; 2],
+        wall_controls: InertialWallsControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<InertialWallsStep<ReactiveStepReport>, ReactiveError> {
+        self.step_with_inertial_walls_molecular(
+            operator,
+            None,
+            walls,
+            maximum_duration,
+            controls,
+            dissipation_controls,
+            loads,
+            wall_controls,
+            Some((force, force_controls)),
             cancelled,
         )
         .map(|report| report.map_gas(|gas| gas.flow))
@@ -104,6 +151,7 @@ impl ReactingEuler1d {
             dissipation_controls,
             loads,
             wall_controls,
+            None,
             cancelled,
         )
         .map(|report| {
@@ -114,6 +162,61 @@ impl ReactingEuler1d {
                 heat: gas
                     .heat
                     .expect("thermal two-wall entry supplies both heat halves"),
+                gas_energy_change_j: gas.gas_energy_change_j,
+            })
+        })
+    }
+
+    /// Include body acceleration and both original thermal end stores.
+    ///
+    /// The common root runs H/2, D/2, C/2, F/2, ALE, F/2, C/2, D/2, H/2.
+    /// Finite-wall heat remains internal storage exchange; prescribed heat and
+    /// distributed body work are distinct external supplies. Native pressure
+    /// and viscous impulses/work drive both finite masses without a second
+    /// viscous or chemical heat source. Final thermal/chemical/Mach admission
+    /// precedes the atomic publication of gas, geometry, walls and stores.
+    ///
+    /// The original held-stage heat and molecular accuracy qualifications apply;
+    /// this composition claims neither general second order nor hydrostatic
+    /// well balancing, implicit FSI stability or an entropy theorem.
+    ///
+    /// # Errors
+    /// Any source, geometry, work-budget, balance or cancellation refusal leaves
+    /// all accepted physical owners unchanged and reusable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_dissipation_heat_and_body_force<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        thermal: &mut PistonThermalEnds<'_>,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        thermal_controls: WallControl,
+        loads: [InertialWallLoad; 2],
+        wall_controls: InertialWallsControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<InertialWallsStep<ThermalReactiveStepReport>, ReactiveError> {
+        self.step_with_inertial_walls_molecular(
+            operator,
+            Some((thermal, thermal_controls)),
+            walls,
+            maximum_duration,
+            controls,
+            dissipation_controls,
+            loads,
+            wall_controls,
+            Some((force, force_controls)),
+            cancelled,
+        )
+        .map(|report| {
+            report.map_gas(|gas| ThermalReactiveStepReport {
+                reactive: gas.flow,
+                before: gas.before,
+                after: gas.after,
+                heat: gas.heat.expect("forced thermal two-wall trial supplies heat"),
                 gas_energy_change_j: gas.gas_energy_change_j,
             })
         })
@@ -130,9 +233,16 @@ impl ReactingEuler1d {
         dissipation_controls: DissipationControl,
         loads: [InertialWallLoad; 2],
         wall_controls: InertialWallsControl,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<InertialWallsStep<MolecularPistonReport>, ReactiveError> {
         poll(&mut cancelled)?;
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<FlowError>()?;
+            if !force.admit::<FlowError>(self.accepted.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
         validate_controls(
             *walls,
             maximum_duration,
@@ -170,6 +280,9 @@ impl ReactingEuler1d {
                 self.accepted.cell(i).expect("admitted cell"),
                 &mut cancelled,
             )?;
+            if let Some((_, force_controls)) = forcing {
+                force_controls.admit_velocity::<FlowError>(p.velocity, p.sound_speed)?;
+            }
             let relative = (p.velocity - low).abs().max((p.velocity - high).abs());
             let rate = (relative + p.sound_speed) * area / self.accepted.mesh.volumes()[i];
             if !positive(rate) {
@@ -223,6 +336,7 @@ impl ReactingEuler1d {
                         dissipation_controls,
                         speed,
                         retry,
+                        forcing,
                         &mut cancelled,
                     )?;
                     let gas = match trial {
@@ -236,7 +350,8 @@ impl ReactingEuler1d {
                     };
                     let exchange = MechanicalExchange {
                         duration_s: duration,
-                        momentum_change: gas.after.momentum - gas.before.momentum,
+                        momentum_change: gas.after.momentum - gas.before.momentum
+                            - gas.flow.transport.source_change.impulse,
                         energy_change: gas.accounted_energy_change_j,
                         boundary_impulse: gas.boundary_impulse_n_s,
                         boundary_work: gas.boundary_work_j,
