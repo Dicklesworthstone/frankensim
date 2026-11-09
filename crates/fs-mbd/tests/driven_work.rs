@@ -398,3 +398,281 @@ fn unequal_subnormal_endpoint_forces_retain_their_displacement_work() {
         1e-14 * expected,
     );
 }
+
+#[test]
+fn affine_force_integrates_momentum_position_and_source_power() {
+    let (properties, state) = body(
+        2.0,
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(2.0, -4.0, 1.0),
+        Vec3::ZERO,
+    );
+    let gravity = Vec3::new(0.0, 0.0, -10.0);
+    let integrator = RigidBodyIntegrator::new(Gravity::new(gravity).unwrap());
+    let first = Vec3::new(4.0, 0.0, 3.0);
+    let last = Vec3::new(-2.0, 6.0, 9.0);
+    let h = 0.5;
+    let receipt = integrator
+        .step_affine_force(
+            state,
+            properties,
+            Wrench {
+                force_world: first,
+                torque_body: Vec3::ZERO,
+            },
+            last,
+            h,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt.state_after.linear_momentum_world(),
+        Vec3::new(2.5, -2.5, -6.0)
+    );
+    assert_eq!(
+        receipt.state_after.pose().position_world(),
+        Vec3::new(0.625, -0.875, -0.6875)
+    );
+    // Independent Simpson integration: affine F times quadratic v is cubic.
+    let power = |s: f64| {
+        let force = first.scale(1.0 - s).add(last.scale(s));
+        let momentum = state
+            .linear_momentum_world()
+            .add(first.scale(h * (s - 0.5 * s * s)))
+            .add(last.scale(0.5 * h * s * s))
+            .add(gravity.scale(properties.mass() * h * s));
+        force.dot(momentum.scale(1.0 / properties.mass()))
+    };
+    let work = h / 6.0 * (power(0.0) + 4.0 * power(0.5) + power(1.0));
+    near(receipt.work.applied_force_work_j, work, 2e-14);
+    near(work, -6.875, 2e-14);
+    near(receipt.work.gravity_work_j, 13.75, 2e-14);
+    near(receipt.work.kinetic_energy_change_j, 6.875, 2e-14);
+    near(receipt.work.work_energy_residual_j, 0.0, 2e-14);
+}
+
+#[test]
+fn affine_force_can_do_work_with_zero_impulse_and_zero_displacement() {
+    let (properties, state) = body(1.0, Vec3::new(1.0, 1.0, 1.0), Vec3::ZERO, Vec3::ZERO);
+    let integrator = RigidBodyIntegrator::new(Gravity::new(Vec3::new(0.0, 0.0, -2.0)).unwrap());
+    let receipt = integrator
+        .step_affine_force(
+            state,
+            properties,
+            Wrench {
+                force_world: Vec3::new(0.0, 0.0, 6.0),
+                torque_body: Vec3::ZERO,
+            },
+            Vec3::new(0.0, 0.0, -6.0),
+            1.0,
+        )
+        .unwrap();
+    // The actuator ramps from +6 N to -6 N: its impulse is zero, the body
+    // returns to its starting position, yet its final downward speed is 2 m/s.
+    // Mean-force times displacement would wrongly erase this entire 2 J.
+    near(receipt.state_after.pose().position_world().z, 0.0, 1e-30);
+    assert_eq!(receipt.state_after.linear_momentum_world().z, -2.0);
+    near(receipt.work.applied_force_work_j, 2.0, 1e-14);
+    near(receipt.work.gravity_work_j, 0.0, 1e-14);
+    near(receipt.work.kinetic_energy_change_j, 2.0, 1e-14);
+    near(receipt.work.work_energy_residual_j, 0.0, 1e-14);
+}
+
+#[test]
+fn affine_braking_and_segmented_replay_preserve_signed_work() {
+    let (properties, state) = body(
+        2.0,
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(8.0, 0.0, 0.0),
+        Vec3::ZERO,
+    );
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let force = |x| Wrench {
+        force_world: Vec3::new(x, 0.0, 0.0),
+        torque_body: Vec3::ZERO,
+    };
+    let whole = integrator
+        .step_affine_force(state, properties, force(-2.0), force(-6.0).force_world, 1.0)
+        .unwrap();
+    let first = integrator
+        .step_affine_force(state, properties, force(-2.0), force(-4.0).force_world, 0.5)
+        .unwrap();
+    let last = integrator
+        .step_affine_force(
+            first.state_after,
+            properties,
+            force(-4.0),
+            force(-6.0).force_world,
+            0.5,
+        )
+        .unwrap();
+    assert_eq!(whole.state_after.linear_momentum_world().x, 4.0);
+    near(
+        whole.state_after.pose().position_world().x,
+        19.0 / 6.0,
+        1e-15,
+    );
+    near(whole.work.applied_force_work_j, -12.0, 2e-14);
+    near(whole.work.work_energy_residual_j, 0.0, 2e-14);
+    near(
+        last.state_after.pose().position_world().x,
+        whole.state_after.pose().position_world().x,
+        1e-15,
+    );
+    assert_eq!(
+        last.state_after.linear_momentum_world(),
+        whole.state_after.linear_momentum_world()
+    );
+    near(
+        first.work.applied_work_j + last.work.applied_work_j,
+        whole.work.applied_work_j,
+        2e-14,
+    );
+}
+
+#[test]
+fn affine_translation_retains_the_original_full_inertia_rotation_and_defect() {
+    let q = UnitQuaternion::from_axis_angle(Vec3::new(1.0, -2.0, 3.0), 0.7).unwrap();
+    let properties =
+        MassProperties::from_principal_frame(2.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0), q).unwrap();
+    let state =
+        RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).unwrap();
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let torque = Vec3::new(0.3, -0.4, 0.5);
+    let native = integrator
+        .step_symplectic(
+            state,
+            properties,
+            Wrench {
+                force_world: Vec3::ZERO,
+                torque_body: torque,
+            },
+            0.3,
+        )
+        .unwrap();
+    let affine = integrator
+        .step_affine_force(
+            state,
+            properties,
+            Wrench {
+                force_world: Vec3::new(2.0, -1.0, 0.5),
+                torque_body: torque,
+            },
+            Vec3::new(-1.0, 3.0, 0.0),
+            0.3,
+        )
+        .unwrap();
+    assert_eq!(
+        affine.state_after.pose().orientation(),
+        native.state_after.pose().orientation()
+    );
+    assert_eq!(
+        affine.state_after.angular_momentum_body(),
+        native.state_after.angular_momentum_body()
+    );
+    assert_eq!(
+        affine.work.applied_torque_work_j,
+        native.work.applied_torque_work_j
+    );
+    near(
+        affine.work.work_energy_residual_j,
+        native.work.work_energy_residual_j,
+        3e-15,
+    );
+    assert!(affine.work.work_energy_residual_j.abs() > 1e-8);
+}
+
+#[test]
+fn affine_work_uses_its_path_while_rounded_storage_defects_stay_visible() {
+    let large = 2.0_f64.powi(60);
+    let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let state = RigidBodyState::new(
+        Pose::new(Vec3::new(large, 0.0, large), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+    )
+    .unwrap();
+    let integrator = RigidBodyIntegrator::new(Gravity::new(Vec3::new(0.0, 0.0, -2.0)).unwrap());
+    let receipt = integrator
+        .step_affine_force(
+            state,
+            properties,
+            Wrench::ZERO,
+            Vec3::new(6.0, 0.0, 0.0),
+            1.0,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt.state_after.pose().position_world(),
+        state.pose().position_world()
+    );
+    near(receipt.work.applied_force_work_j, 4.5, 1e-14);
+    near(receipt.work.gravity_work_j, 2.0, 1e-14);
+    assert_eq!(receipt.work.gravitational_potential_energy_change_j, 0.0);
+    near(receipt.work.kinetic_energy_change_j, 6.5, 1e-14);
+    // The rounded position lost the gravitational potential decrease; retain
+    // that 2 J error rather than altering either source work or kinetic state.
+    near(receipt.work.work_energy_residual_j, 2.0, 1e-14);
+
+    let (properties, state) = body(
+        large,
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(large, 0.0, 0.0),
+        Vec3::ZERO,
+    );
+    let receipt = RigidBodyIntegrator::new(Gravity::ZERO)
+        .step_affine_force(
+            state,
+            properties,
+            Wrench {
+                force_world: Vec3::new(1.0, 0.0, 0.0),
+                torque_body: Vec3::ZERO,
+            },
+            Vec3::new(3.0, 0.0, 0.0),
+            1.0,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt.state_after.linear_momentum_world(),
+        state.linear_momentum_world()
+    );
+    assert_eq!(receipt.work.kinetic_energy_change_j, 0.0);
+    near(receipt.work.applied_force_work_j, 2.0, 1e-14);
+    near(receipt.work.work_energy_residual_j, -2.0, 1e-14);
+}
+
+#[test]
+fn affine_force_refuses_invalid_history_without_an_endpoint() {
+    let (properties, state) = body(1.0, Vec3::new(1.0, 1.0, 1.0), Vec3::ZERO, Vec3::ZERO);
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            integrator
+                .step_affine_force(
+                    state,
+                    properties,
+                    Wrench::ZERO,
+                    Vec3::new(invalid, 0.0, 0.0),
+                    1.0
+                )
+                .is_err()
+        );
+    }
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            integrator
+                .step_affine_force(state, properties, Wrench::ZERO, Vec3::ZERO, invalid)
+                .is_err()
+        );
+    }
+    let accepted = integrator
+        .step_affine_force(
+            state,
+            properties,
+            Wrench::ZERO,
+            Vec3::new(6.0, 0.0, 0.0),
+            1.0,
+        )
+        .unwrap();
+    assert_eq!(accepted.state_before, state);
+    assert_eq!(accepted.state_after.linear_momentum_world().x, 3.0);
+}

@@ -48,6 +48,140 @@ impl RigidBodyIntegrator {
         self.begin_verlet_order(state, properties, wrench_before, duration_seconds, false)
     }
 
+    /// Advance a prescribed world force that varies linearly over this interval.
+    ///
+    /// `wrench_before.force_world` and `force_after_world` are the two ends of
+    /// the authored affine force history, not samples of a configuration- or
+    /// velocity-dependent law. The body torque in `wrench_before` stays held
+    /// in body coordinates. Gravity remains this integrator's constant world
+    /// acceleration and is excluded from both supplied forces.
+    ///
+    /// Translation integrates the force polynomial analytically: momentum uses
+    /// its trapezoidal impulse, while displacement uses its first time moment.
+    /// The source-work account independently integrates `F(t) . v(t)`, including
+    /// the cross term with gravitational acceleration. In particular, zero net
+    /// applied impulse or zero net displacement need not mean zero applied work.
+    /// Braking work retains its sign. Replacing this integral by the mean force
+    /// dotted with displacement is incorrect for an affine-in-time load.
+    ///
+    /// Rotation uses the original symmetric held-body-torque kicks and native
+    /// full-inertia free drift, with the same phase/energy error as
+    /// [`Self::step_symplectic`]. This does not make rotation exact, infer force
+    /// events, or integrate an arbitrary changing force law exactly. Callers
+    /// may join adjacent affine segments at their actual endpoints.
+    ///
+    /// Retained displacement and source work precede rounding the returned
+    /// position. Kinetic and gravitational storage changes are independently
+    /// evaluated from the represented endpoint states, so lost state increments
+    /// remain numerical defects rather than being reassigned to physical work.
+    /// All arithmetic is fixed-size and allocation-free. Invalid inputs or
+    /// unrepresentable derived values return no accepted state.
+    pub fn step_affine_force(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench_before: Wrench,
+        force_after_world: Vec3,
+        duration_seconds: f64,
+    ) -> Result<StepReceipt, DynamicsError> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(DynamicsError::InvalidStepDuration);
+        }
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
+        wrench_before.validate()?;
+        if !force_after_world.is_finite() {
+            return Err(DynamicsError::NonFinite("affine_force.force_after_world"));
+        }
+        let diagnostics_before = self.diagnostics(state, properties)?;
+        let weight_world = weight(self.gravity.acceleration_world(), properties.mass);
+        let first = resultant_force(wrench_before.force_world, weight_world);
+        let last = resultant_force(force_after_world, weight_world);
+        let initial = lifted(state.linear_momentum_world);
+        let duration = Dd::from_f64(duration_seconds);
+        // Integral_0^1 p(s) ds = p0 + h * (F0/3 + F1/6 + weight/2).
+        // Combining each applied load with gravity before the weighted sum
+        // retains small residual accelerations beside balanced large loads.
+        let mean_momentum = core::array::from_fn(|d| {
+            initial[d] + (first[d] / Dd::from_f64(3.0) + last[d] / Dd::from_f64(6.0)) * duration
+        });
+        let displacement = drift_displacement(
+            mean_momentum,
+            properties.mass,
+            duration_seconds,
+            "affine_force.drift_scale",
+        )?;
+        let position = lifted(state.pose.position_world);
+        let position_after = rounded(
+            core::array::from_fn(|d| position[d] + displacement[d]),
+            "affine_force.position_after",
+        )?;
+        let momentum_after = if first == last {
+            add_impulse(initial, first, duration_seconds)
+        } else {
+            add_half_impulse(
+                add_half_impulse(initial, first, duration_seconds),
+                last,
+                duration_seconds,
+            )
+        };
+        let linear_momentum_after = rounded(momentum_after, "affine_force.linear_momentum_after")?;
+
+        let torque = wrench_before.torque_body;
+        let angular_before = lifted(state.angular_momentum_body);
+        let kicked = add_half_impulse(angular_before, lifted(torque), duration_seconds);
+        let mut torque_work = super::work::angular_torque_work(
+            properties,
+            angular_before,
+            kicked,
+            torque,
+            duration_seconds,
+            0.5,
+        );
+        let (orientation_after, drifted) = free_rotation_step_compensated_order(
+            state.pose.orientation,
+            kicked,
+            properties,
+            duration_seconds,
+            false,
+        )?;
+        let angular_after = add_half_impulse(drifted, lifted(torque), duration_seconds);
+        torque_work.merge(super::work::angular_torque_work(
+            properties,
+            drifted,
+            angular_after,
+            torque,
+            duration_seconds,
+            0.5,
+        ));
+        let state_after = RigidBodyState::new(
+            Pose::new(position_after, orientation_after)?,
+            linear_momentum_after,
+            rounded(angular_after, "affine_force.angular_momentum_after")?,
+        )?;
+        let diagnostics_after = self.diagnostics(state_after, properties)?;
+        let work = super::work::finish_affine(
+            state,
+            state_after,
+            properties,
+            self.gravity,
+            wrench_before.force_world,
+            force_after_world,
+            torque_work,
+            duration_seconds,
+            displacement,
+        )?;
+        Ok(StepReceipt {
+            duration_seconds,
+            state_before: state,
+            state_after,
+            diagnostics_before,
+            diagnostics_after,
+            work,
+        })
+    }
+
     /// Advance a freely rotating full-inertia body with fourth-order accuracy.
     ///
     /// The smooth conservative rotation uses seven merged principal-axis flows
@@ -270,16 +404,26 @@ pub(super) fn drift_position(
     position_field: &'static str,
 ) -> Result<Vec3, DynamicsError> {
     let position = components(position);
+    let displacement = drift_displacement(momentum, mass, duration, scale_field)?;
+    rounded(
+        core::array::from_fn(|d| Dd::from_f64(position[d]) + displacement[d]),
+        position_field,
+    )
+}
+
+pub(super) fn drift_displacement(
+    momentum: [Dd; 3],
+    mass: f64,
+    duration: f64,
+    scale_field: &'static str,
+) -> Result<[Dd; 3], DynamicsError> {
     let quotient = finite_derived(duration / mass, scale_field)?;
     // A fused remainder keeps finite dt/m valid even when reconstructing
     // mass*quotient would overflow. Retain the original underflow scope.
     let remainder = (-quotient).mul_add(mass, duration);
     let correction = finite_derived(remainder / mass, scale_field)?;
     let scale = Dd::from_pair(quotient, correction);
-    rounded(
-        core::array::from_fn(|d| Dd::from_f64(position[d]) + momentum[d] * scale),
-        position_field,
-    )
+    Ok(momentum.map(|value| value * scale))
 }
 
 pub(super) fn rounded(values: [Dd; 3], field: &'static str) -> Result<Vec3, DynamicsError> {

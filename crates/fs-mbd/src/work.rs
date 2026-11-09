@@ -7,10 +7,14 @@ use fs_math::dd::Dd;
 
 /// Signed work and the mechanical-energy balance of a smooth rigid-body step.
 ///
-/// Applied world force is paired with the actual accepted COM displacement.
+/// Held and endpoint-Verlet world forces pair with the accepted COM displacement.
 /// Held-force work is therefore `F . (x1-x0)`; endpoint Verlet loads use the
 /// trapezoidal displacement quadrature `mean(F0,F1) . (x1-x0)`. The latter is
 /// a numerical quadrature, not an exact integral for an arbitrary force field.
+/// The explicitly prescribed affine-force lane instead integrates `F(t).v(t)`
+/// analytically along its retained translational path; its gravity-work account
+/// uses that path too. Gravitational storage always uses the represented endpoint
+/// positions, exposing any lost coordinate increment in the mechanical residual.
 /// Body torque uses the original integrator's conjugate angular increment:
 /// `dt * mean(omega0,omega1)` for implicit midpoint, or the sum of the native
 /// torque-kick impulse/mean-velocity pairings for split methods. Each kick's
@@ -35,11 +39,13 @@ pub struct StepWorkDiagnostics {
     pub applied_torque_work_j: f64,
     /// Signed applied force plus applied torque work [J], excluding gravity.
     pub applied_work_j: f64,
-    /// Conservative gravitational force work over the accepted displacement [J].
+    /// Conservative gravitational force work over the step's path [J].
     pub gravity_work_j: f64,
     /// Actual kinetic change between the represented endpoint momenta [J].
     pub kinetic_energy_change_j: f64,
-    /// Gravity potential change [J], equal to minus gravitational work.
+    /// Gravity potential change between the represented endpoint positions [J].
+    /// Lost affine-path coordinate increments can make this differ from minus
+    /// the independently integrated gravitational work.
     pub gravitational_potential_energy_change_j: f64,
     /// Actual kinetic plus gravity potential change [J].
     pub mechanical_energy_change_j: f64,
@@ -86,22 +92,6 @@ pub(super) fn finish(
     force_after: Vec3,
     torque_work: MomentumWork,
 ) -> Result<StepWorkDiagnostics, DynamicsError> {
-    // The step owner has already admitted the states and properties. Reuse the
-    // fixed-inertia storage form; work never comes from subtracting its totals.
-    let mut kinetic_change = MomentumWork::default();
-    kinetic_change.add_fixed_inertia(
-        properties.mass,
-        components(properties.principal_inertia_body),
-        properties.principal_to_body.components(),
-        [
-            components(before.linear_momentum_world),
-            components(before.angular_momentum_body),
-        ],
-        [
-            components(after.linear_momentum_world),
-            components(after.angular_momentum_body),
-        ],
-    );
     let mut force_work = MomentumWork::default();
     let mut gravity_work = MomentumWork::default();
     if force_before != Vec3::ZERO || force_after != Vec3::ZERO || gravity != Gravity::ZERO {
@@ -124,10 +114,114 @@ pub(super) fn finish(
             displacement,
         );
     }
+    finish_with_work(
+        before,
+        after,
+        properties,
+        force_work,
+        torque_work,
+        gravity_work,
+        gravity_work,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // The original stage inputs define one affine force history.
+pub(super) fn finish_affine(
+    before: RigidBodyState,
+    after: RigidBodyState,
+    properties: MassProperties,
+    gravity: Gravity,
+    force_before: Vec3,
+    force_after: Vec3,
+    torque_work: MomentumWork,
+    duration: f64,
+    displacement: [Dd; 3],
+) -> Result<StepWorkDiagnostics, DynamicsError> {
+    let first = components(force_before).map(Dd::from_f64);
+    let last = components(force_after).map(Dd::from_f64);
+    let weight = super::verlet::weight(gravity.acceleration_world, properties.mass);
+    let first_resultant = super::verlet::resultant_force(force_before, weight);
+    let last_resultant = super::verlet::resultant_force(force_after, weight);
+    let initial = components(before.linear_momentum_world).map(Dd::from_f64);
+    let h = Dd::from_f64(duration);
+    // F(s) = (1-s) F0 + s F1 and
+    // p(s) = p0 + h*((s-s²/2) F0 + s²/2 F1 + s*weight).
+    // Integrating each affine load basis against this quadratic velocity gives
+    // the two weighted displacements below. This is source quadrature, not an
+    // energy difference; it retains work even when its impulse rounds away.
+    let first_moment = core::array::from_fn(|d| {
+        initial[d] * Dd::from_f64(0.5)
+            + h * (first_resultant[d] / Dd::from_f64(8.0) + last_resultant[d] / Dd::from_f64(24.0))
+    });
+    let last_moment = core::array::from_fn(|d| {
+        initial[d] * Dd::from_f64(0.5)
+            + h * (first_resultant[d] / Dd::from_f64(24.0) * Dd::from_f64(5.0)
+                + last_resultant[d] / Dd::from_f64(8.0))
+    });
+    let first_displacement = super::verlet::drift_displacement(
+        first_moment,
+        properties.mass,
+        duration,
+        "affine_work.first_scale",
+    )?;
+    let last_displacement = super::verlet::drift_displacement(
+        last_moment,
+        properties.mass,
+        duration,
+        "affine_work.last_scale",
+    )?;
+    let mut force_work = MomentumWork::default();
+    force_work.add_compensated(first, first_displacement);
+    force_work.add_compensated(last, last_displacement);
+    let mut gravity_work = MomentumWork::default();
+    gravity_work.add_compensated(weight, displacement);
+    let old = components(before.pose.position_world);
+    let new = components(after.pose.position_world);
+    let mut stored_gravity_work = MomentumWork::default();
+    stored_gravity_work.add_compensated(
+        weight,
+        core::array::from_fn(|d| Dd::from_f64(new[d]) - Dd::from_f64(old[d])),
+    );
+    finish_with_work(
+        before,
+        after,
+        properties,
+        force_work,
+        torque_work,
+        gravity_work,
+        stored_gravity_work,
+    )
+}
+
+fn finish_with_work(
+    before: RigidBodyState,
+    after: RigidBodyState,
+    properties: MassProperties,
+    force_work: MomentumWork,
+    torque_work: MomentumWork,
+    gravity_work: MomentumWork,
+    stored_gravity_work: MomentumWork,
+) -> Result<StepWorkDiagnostics, DynamicsError> {
+    // The step owner has already admitted the states and properties. Reuse the
+    // fixed-inertia storage form; work never comes from subtracting its totals.
+    let mut kinetic_change = MomentumWork::default();
+    kinetic_change.add_fixed_inertia(
+        properties.mass,
+        components(properties.principal_inertia_body),
+        properties.principal_to_body.components(),
+        [
+            components(before.linear_momentum_world),
+            components(before.angular_momentum_body),
+        ],
+        [
+            components(after.linear_momentum_world),
+            components(after.angular_momentum_body),
+        ],
+    );
     let mut applied = force_work;
     applied.merge(torque_work);
     let mut mechanical_change = kinetic_change;
-    mechanical_change.subtract(gravity_work);
+    mechanical_change.subtract(stored_gravity_work);
     let residual = mechanical_change.difference(applied);
     let gravity_work_j = finite_derived(gravity_work.total().to_f64(), "step_work.gravity_j")?;
     Ok(StepWorkDiagnostics {
@@ -139,7 +233,10 @@ pub(super) fn finish(
             kinetic_change.total().to_f64(),
             "step_work.kinetic_change_j",
         )?,
-        gravitational_potential_energy_change_j: -gravity_work_j,
+        gravitational_potential_energy_change_j: -finite_derived(
+            stored_gravity_work.total().to_f64(),
+            "step_work.gravity_potential_change_j",
+        )?,
         mechanical_energy_change_j: finite_derived(
             mechanical_change.total().to_f64(),
             "step_work.mechanical_change_j",

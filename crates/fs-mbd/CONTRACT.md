@@ -100,6 +100,38 @@ linear/spin/orbital momentum, long-trajectory reversibility, analytic gravity
 ballistics and the external orbital angular impulse from uniform gravity.
 
 
+## Prescribed affine-force motion and work
+
+`RigidBodyIntegrator::step_affine_force` accepts a world-force history specified
+by its initial and final vectors, a held body torque, fixed physical inertia,
+and the integrator's constant gravity. It analytically integrates the affine
+force's momentum impulse and displacement first moment. For dimensionless time
+`s=t/h`, the translated momentum is
+`p(s)=p0+h*((s-s²/2)*F0+s²/2*F1+s*mass*g)`.
+This is an explicit source history, not an exact solve for a state-dependent
+force merely sampled at two endpoints.
+
+Signed applied work independently integrates `F(s) . p(s)/mass` with the affine
+force basis. Its gravitational cross term cannot be replaced by mean force
+times net displacement: a force ramp can supply nonzero work even when both
+its net impulse and the body's net displacement vanish. The gravity-work
+account uses the retained path, while gravitational potential change uses the
+represented endpoint positions. Kinetic storage likewise comes from the actual
+endpoint momenta. Lost state increments and the original rotational splitting
+error therefore remain visible in the mechanical work residual; none becomes
+heat, a source correction or a state projection.
+
+The original compensated held-body-torque kicks and full-inertia free drift
+own rotation unchanged. Each step uses fixed stack storage and no allocation,
+factorization or additional nonlinear solve. Callers may compose adjacent
+affine segments at their shared source endpoint. Arbitrary force histories,
+force discontinuity discovery, changing inertia, contacts and exact asymmetric
+rotation are not claimed. `tests/driven_work.rs` covers analytic 3-D forced
+motion, an independent Simpson power integral, zero-impulse energy transfer,
+braking, split continuation, full-inertia rotational parity and its unchanged
+defect, retained source work beside rounded storage, and input refusals.
+This advances `frankensim-ext-mbd-core-vqqt`; that broader bead remains open.
+
 ## Simultaneous internal-wrench networks and finite motion
 
 `spatial_loads::internal_impulse::network::apply_internal_wrench_network`
