@@ -297,6 +297,14 @@ the input grid and number of returned extrema. `tests/harmonic_resonance_survey.
 checks a coupled damped two-mass response with both resonances and its exact
 antiresonance, cached samples, and atomic budget/source/cancellation refusals.
 
+### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
+
+`refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.
+
+`refine_half_power_bandwidth_with_parameter_derivative` differentiates the two separately bracketed physical half-height crossings, their actual width and the observed response Q. Its threshold includes motion of the peak height, so changing source gain does not manufacture a linewidth change. The one or two final derivative calls are reserved before each search and included in its evaluation ceiling. Their H/H_omega samples must reproduce the search observations within 32 machine epsilons relative to their largest quadrature, without a unity floor. Full jets are never requested at every search trial. Original evaluator errors and cancellation remain atomic.
+
+`HarmonicTransferFieldParameterJet` and `HarmonicReceiverParameterJet` project complete coherent physical observations, retaining all source/receiver frequency, parameter and mixed product-rule terms. Real and complex fixed receivers use the same owner. Binary-normalized double-double contractions keep signed products scaled until cancellation; observation uses constant scratch and linear work without another physical solve. These derivatives are local smooth-branch responses, with no finite-step, peak-switching, forward-error or global completeness claim. Focused callback and receiver tests cover mechanical M/C/K peak shifts, exact two-mass cancellation, physical propagation delay, asymmetric widths/Q, gain invariance, extreme units, coherent overflow cancellation and bounded refusal semantics.
+
 ### `harmonic`: full forced response and resonance
 
 `harmonic::PreparedHarmonicInterference` prepares simultaneous coherent forces

@@ -26,6 +26,16 @@ pub use query::{
     survey_transfer_extrema_with_cancel,
 };
 
+mod sensitivity;
+pub use sensitivity::{
+    HalfPowerBandwidthParameterResponse, HarmonicTransferParameterJet,
+    TransferExtremumParameterResponse,
+    refine_half_power_bandwidth_with_parameter_derivative_with_cancel,
+    refine_transfer_extremum_with_parameter_derivative_with_cancel,
+};
+mod parameter_projection;
+pub use parameter_projection::{HarmonicReceiverParameterJet, HarmonicTransferFieldParameterJet};
+
 impl HarmonicTransferSample {
     /// Observe any fixed real linear receiver from a complete physical field
     /// and its frequency tangent. Values and weights retain their caller-owned
@@ -330,5 +340,50 @@ pub fn refine_half_power_bandwidth<E>(
         controls,
         || cx.checkpoint().is_err(),
         evaluate,
+    )
+}
+
+/// Refine and differentiate the actual driven peak or cancellation notch.
+///
+/// This executor-context entry uses the same bounded first-derivative search
+/// and one reserved final complete jet as its callback counterpart. Source,
+/// receiver and parameter must describe the same immutable physical model.
+pub fn refine_transfer_extremum_with_parameter_derivative<E>(
+    bracket_rad_s: (f64, f64),
+    controls: ResonanceControls,
+    cx: &Cx<'_>,
+    evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
+    evaluate_jet: impl FnMut(f64) -> Result<HarmonicTransferParameterJet, E>,
+) -> Result<TransferExtremumParameterResponse, ResonanceError<E>> {
+    refine_transfer_extremum_with_parameter_derivative_with_cancel(
+        bracket_rad_s,
+        controls,
+        || cx.checkpoint().is_err(),
+        evaluate,
+        evaluate_jet,
+    )
+}
+
+/// Differentiate both actual half-power crossings, width and observed Q.
+///
+/// Two final edge jets are reserved within this query's evaluation cap. The
+/// previously resolved peak retains its own independent evaluation count.
+pub fn refine_half_power_bandwidth_with_parameter_derivative<E>(
+    peak: &TransferExtremumParameterResponse,
+    lower_bracket_rad_s: (f64, f64),
+    upper_bracket_rad_s: (f64, f64),
+    controls: ResonanceControls,
+    cx: &Cx<'_>,
+    evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
+    evaluate_jet: impl FnMut(f64) -> Result<HarmonicTransferParameterJet, E>,
+) -> Result<HalfPowerBandwidthParameterResponse, ResonanceError<E>> {
+    refine_half_power_bandwidth_with_parameter_derivative_with_cancel(
+        peak,
+        lower_bracket_rad_s,
+        upper_bracket_rad_s,
+        controls,
+        || cx.checkpoint().is_err(),
+        evaluate,
+        evaluate_jet,
     )
 }

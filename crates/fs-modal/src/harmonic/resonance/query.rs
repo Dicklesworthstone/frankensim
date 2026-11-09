@@ -306,6 +306,27 @@ pub fn refine_half_power_bandwidth_with_cancel<E>(
     cancelled: impl FnMut() -> bool,
     evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
 ) -> Result<HalfPowerBandwidth, ResonanceError<E>> {
+    refine_half_power_bandwidth_samples_with_cancel(
+        peak,
+        lower_bracket_rad_s,
+        upper_bracket_rad_s,
+        controls,
+        cancelled,
+        evaluate,
+    )
+    .map(|(bandwidth, _)| bandwidth)
+}
+
+// Keep the final original samples for complete parameter-jet consistency checks.
+// This shares the same search, budget and constant scratch as the public query.
+pub(super) fn refine_half_power_bandwidth_samples_with_cancel<E>(
+    peak: &TransferExtremum,
+    lower_bracket_rad_s: (f64, f64),
+    upper_bracket_rad_s: (f64, f64),
+    controls: ResonanceControls,
+    cancelled: impl FnMut() -> bool,
+    evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
+) -> Result<(HalfPowerBandwidth, [HarmonicTransferSample; 2]), ResonanceError<E>> {
     let mut query = Query::new(controls, cancelled, evaluate)?;
     valid_interval(lower_bracket_rad_s)?;
     valid_interval(upper_bracket_rad_s)?;
@@ -358,15 +379,18 @@ pub fn refine_half_power_bandwidth_with_cancel<E>(
             "response linewidth or quality factor is not representable",
         ));
     }
-    Ok(HalfPowerBandwidth {
-        lower_angular_frequency_rad_s: lower.frequency,
-        upper_angular_frequency_rad_s: upper.frequency,
-        angular_bandwidth_rad_s: width,
-        response_quality_factor: quality,
-        lower_bracket_rad_s,
-        upper_bracket_rad_s,
-        evaluations: query.evaluations,
-    })
+    Ok((
+        HalfPowerBandwidth {
+            lower_angular_frequency_rad_s: lower.frequency,
+            upper_angular_frequency_rad_s: upper.frequency,
+            angular_bandwidth_rad_s: width,
+            response_quality_factor: quality,
+            lower_bracket_rad_s,
+            upper_bracket_rad_s,
+            evaluations: query.evaluations,
+        },
+        [lower.sample, upper.sample],
+    ))
 }
 
 fn component_scale(z: C64) -> f64 {
