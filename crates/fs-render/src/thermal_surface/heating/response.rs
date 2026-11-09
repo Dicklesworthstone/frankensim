@@ -8,7 +8,7 @@ use super::SurfaceHeatingError;
 use crate::conductor::{
     CoatingLayer, CoherentCoatingStack, ConductorOptics, MAX_COHERENT_STACK_LAYERS,
 };
-use crate::dielectric::DielectricCoatingStack;
+use crate::dielectric::{DielectricCoatingStack, DielectricGlass, DielectricSurface};
 use crate::polarization::Mueller;
 use crate::polarization::dielectric::fresnel_dielectric_polarized;
 use crate::thermal_surface::{GrayDiffuseThermalSurface, SpectralEmissivity};
@@ -141,6 +141,62 @@ impl<const N: usize> SurfacePowerResponse<N> {
             transmitted[lane] = polarized_power(response.transmission, s_power_fraction[lane])?;
         }
         Self::finish(hash, wavelengths_nm, reflected, transmitted, [0.0; N])
+    }
+
+    /// Smooth homogeneous glass with all incoherent internal reflections.
+    ///
+    /// The original real-interface/Beer model supplies positive bulk absorption
+    /// directly. Each polarization sums its own internal paths before mixing;
+    /// transmitted watts leave the specimen and never become deposited heat.
+    /// Thickness is normal to the parallel faces. For reverse illumination,
+    /// supply that side's actual incident/exit indices and incidence cosine.
+    /// Geometry and optics are resolved once here, outside thermal stepping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_incoherent_slab(
+        wavelengths_nm: [f64; N],
+        glass: &DielectricGlass,
+        thickness_m: f64,
+        incident_eta: [f64; N],
+        transmitted_eta: [f64; N],
+        incidence_cosine: f64,
+        s_power_fraction: [f64; N],
+        source_identity: ContentHash,
+    ) -> Result<Self, SurfaceHeatingError> {
+        validate_packet(&wavelengths_nm, &s_power_fraction)?;
+        let mut hash = response_hash(b"incoherent-material-slab", source_identity)?;
+        hash.update(
+            crate::tracer::Material::Dielectric {
+                glass: *glass,
+                surface: DielectricSurface::SMOOTH,
+            }
+            .content_identity()
+            .as_bytes(),
+        );
+        hash.update(&thickness_m.to_bits().to_le_bytes());
+        hash_geometry(
+            &mut hash,
+            incidence_cosine,
+            &incident_eta,
+            &s_power_fraction,
+        );
+        hash_values(&mut hash, transmitted_eta);
+        let mut reflected = [0.0; N];
+        let mut transmitted = [0.0; N];
+        let mut absorbed = [0.0; N];
+        for lane in 0..N {
+            let response = glass.incoherent_slab_response_between(
+                wavelengths_nm[lane],
+                thickness_m,
+                incidence_cosine,
+                incident_eta[lane],
+                transmitted_eta[lane],
+            )?;
+            let modes = [response.perpendicular, response.parallel];
+            reflected[lane] = mix(modes.map(|p| p.reflectance), s_power_fraction[lane]);
+            transmitted[lane] = mix(modes.map(|p| p.transmittance), s_power_fraction[lane]);
+            absorbed[lane] = mix(modes.map(|p| p.absorptance), s_power_fraction[lane]);
+        }
+        Self::finish(hash, wavelengths_nm, reflected, transmitted, absorbed)
     }
 
     /// Passive coherent films between two real-index half-spaces. Only film

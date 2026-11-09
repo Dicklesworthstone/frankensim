@@ -60,7 +60,10 @@ fn thermal_law(maximum_k: f64) -> SchottThermoOpticLaw {
     .unwrap()
 }
 
-fn schott_law(mechanical_maximum_k: f64, optical_maximum_k: f64) -> Arc<MaterialSlabLaw> {
+pub(super) fn schott_law(
+    mechanical_maximum_k: f64,
+    optical_maximum_k: f64,
+) -> Arc<MaterialSlabLaw> {
     let (card, original, mechanical) = reference_fixture(mechanical_maximum_k);
     Arc::new(
         MaterialSlabLaw::try_schott_with_reference_absorption(
@@ -83,7 +86,7 @@ fn schott_budget() -> NativeCoatingExchangeBudget {
     }
 }
 
-fn phase(wavelength_nm: f64, temperature_k: f64) -> f64 {
+pub(super) fn phase(wavelength_nm: f64, temperature_k: f64) -> f64 {
     let n0 = index(wavelength_nm, 300.0);
     let dt = temperature_k - 300.0;
     let l = wavelength_nm * 0.001;

@@ -1,7 +1,8 @@
-//! Independent native film/substrate states drive one coherent optical solve.
+//! Native material states drive coherent coatings and homogeneous glass slabs.
 //!
 //! Each constitutive law reads its own receiving cell. The original coherent
 //! owner then recomputes the entire stack, since interference couples all films.
+//! A material slab instead uses its original incoherent internal-reflection sum.
 //! Receiver/law pairs resolve once per interval; identical stack/binding/angle
 //! packets are shared across sources. Only changed optical constants invalidate
 //! packets, and dark intervals require domain validation without a Fresnel solve.
@@ -73,7 +74,33 @@ pub struct StatefulTransmittingSurfaceIlluminationSource<const N: usize> {
     pub power: SpectralPowerSchedule<N>,
 }
 
-/// Borrow inputs for one mixed opaque/transmitting coating observer. All
+/// Incident heating of one homogeneous, isothermal, smooth glass slab.
+///
+/// The same native cell supplies the accepted material temperature and receives
+/// the entire bulk absorption. It does not infer uniform optics from several
+/// different depth-cell temperatures. The original material law determines
+/// whether phase and absorption claims evolve together or the shared SCHOTT
+/// law changes phase with explicitly frozen reference absorption.
+///
+/// Exterior media, normal thickness and incidence geometry are fixed. Both
+/// interfaces, refracted Beer path lengths and all incoherent internal
+/// reflections update with the original glass. Incident watts already include
+/// interception/projection; outgoing reflected/transmitted watts remain separate.
+#[cfg(feature = "material-state")]
+#[derive(Clone, Debug)]
+pub struct StatefulMaterialSlabIlluminationSource<const N: usize> {
+    pub source_id: u64,
+    pub receiver: SurfaceHeatingReceiver,
+    pub optics: Arc<MaterialSlabLaw>,
+    pub thickness_m: f64,
+    pub incidence: SurfaceIncidence<N>,
+    pub transmitted_eta: [f64; N],
+    /// Original specimen/illumination geometry source, independent of optics.
+    pub source_identity: ContentHash,
+    pub power: SpectralPowerSchedule<N>,
+}
+
+/// Borrow inputs for one mixed coating/slab illumination observer. All
 /// retained laws, schedules and packets are owned by the resulting observer.
 #[derive(Clone, Copy, Debug)]
 pub enum CoatingSurfaceSource<'a, const N: usize> {
@@ -81,6 +108,8 @@ pub enum CoatingSurfaceSource<'a, const N: usize> {
     FixedTransmitting(&'a TransmittingSurfaceIlluminationSource<N>),
     StatefulOpaque(&'a StatefulCoatedSurfaceIlluminationSource<N>),
     StatefulTransmitting(&'a StatefulTransmittingSurfaceIlluminationSource<N>),
+    #[cfg(feature = "material-state")]
+    MaterialIncoherentSlab(&'a StatefulMaterialSlabIlluminationSource<N>),
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +123,14 @@ enum SourceExit<'a, const N: usize> {
         reverse: bool,
         source_identity: ContentHash,
     },
+    #[cfg(feature = "material-state")]
+    MaterialSlab {
+        receiver: SurfaceHeatingReceiver,
+        law: &'a Arc<MaterialSlabLaw>,
+        thickness_m: f64,
+        transmitted_eta: [f64; N],
+        source_identity: ContentHash,
+    },
 }
 
 impl<const N: usize> SourceExit<'_, N> {
@@ -101,6 +138,8 @@ impl<const N: usize> SourceExit<'_, N> {
         match self {
             Self::Opaque { receiver, .. } => Some(receiver),
             Self::Transmitting { .. } => None,
+            #[cfg(feature = "material-state")]
+            Self::MaterialSlab { receiver, .. } => Some(receiver),
         }
     }
 }
@@ -130,6 +169,8 @@ impl<'a, const N: usize> CoatingSurfaceSource<'a, N> {
             Self::FixedTransmitting(source) => source.source_id,
             Self::StatefulOpaque(source) => source.source_id,
             Self::StatefulTransmitting(source) => source.source_id,
+            #[cfg(feature = "material-state")]
+            Self::MaterialIncoherentSlab(source) => source.source_id,
         }
     }
     fn power(self) -> &'a SpectralPowerSchedule<N> {
@@ -138,6 +179,8 @@ impl<'a, const N: usize> CoatingSurfaceSource<'a, N> {
             Self::FixedTransmitting(source) => &source.power,
             Self::StatefulOpaque(source) => &source.power,
             Self::StatefulTransmitting(source) => &source.power,
+            #[cfg(feature = "material-state")]
+            Self::MaterialIncoherentSlab(source) => &source.power,
         }
     }
     fn stateful(self) -> Option<StatefulSource<'a, N>> {
@@ -163,6 +206,20 @@ impl<'a, const N: usize> CoatingSurfaceSource<'a, N> {
                 incidence: source.incidence,
                 power: &source.power,
             }),
+            #[cfg(feature = "material-state")]
+            Self::MaterialIncoherentSlab(source) => Some(StatefulSource {
+                source_id: source.source_id,
+                films: &[],
+                exit: SourceExit::MaterialSlab {
+                    receiver: source.receiver,
+                    law: &source.optics,
+                    thickness_m: source.thickness_m,
+                    transmitted_eta: source.transmitted_eta,
+                    source_identity: source.source_identity,
+                },
+                incidence: source.incidence,
+                power: &source.power,
+            }),
             _ => None,
         }
     }
@@ -172,23 +229,31 @@ impl<'a, const N: usize> CoatingSurfaceSource<'a, N> {
 enum Law {
     Film(Arc<SurfaceCoatingLaw>),
     Substrate(Arc<SurfaceConductorLaw>),
+    #[cfg(feature = "material-state")]
+    Slab(Arc<MaterialSlabLaw>),
 }
 #[derive(Clone, Debug, PartialEq)]
 enum Resolved {
     Film(CoherentAbsorbingCoating),
     Substrate(ConductorOptics),
+    #[cfg(feature = "material-state")]
+    Slab(crate::material_state::MaterialOpticalBinding),
 }
 impl Law {
     fn key(&self) -> (u8, ContentHash) {
         match self {
             Self::Film(law) => (0, law.identity()),
             Self::Substrate(law) => (1, law.identity()),
+            #[cfg(feature = "material-state")]
+            Self::Slab(law) => (2, law.identity()),
         }
     }
     fn rows(&self) -> usize {
         match self {
             Self::Film(law) => law.budget_size(),
             Self::Substrate(law) => law.budget_size(),
+            #[cfg(feature = "material-state")]
+            Self::Slab(law) => law.budget_size(),
         }
     }
     fn coordinate(
@@ -200,12 +265,16 @@ impl Law {
         match self {
             Self::Film(law) => law.coordinate_at(thermal, cell, material),
             Self::Substrate(law) => law.coordinate_at(thermal, cell, material),
+            #[cfg(feature = "material-state")]
+            Self::Slab(law) => law.coordinate_at(thermal, cell, material),
         }
     }
     fn resolve(&self, coordinate: f64) -> Result<Resolved, SurfaceHeatingError> {
         match self {
             Self::Film(law) => Ok(Resolved::Film(law.coating_at_coordinate(coordinate)?)),
             Self::Substrate(law) => Ok(Resolved::Substrate(law.optics_at_coordinate(coordinate)?)),
+            #[cfg(feature = "material-state")]
+            Self::Slab(law) => Ok(Resolved::Slab(law.at_temperature(coordinate)?)),
         }
     }
     fn validate(
@@ -221,6 +290,10 @@ impl Law {
             Self::Substrate(law) => law
                 .validate_native(thermal, cell, material)
                 .map(|value| value.map(Resolved::Substrate)),
+            #[cfg(feature = "material-state")]
+            Self::Slab(law) => Ok(Some(Resolved::Slab(
+                law.at_temperature(law.coordinate_at(thermal, cell, material)?)?,
+            ))),
         }
     }
 }
@@ -251,6 +324,25 @@ enum Exit<const N: usize> {
         reverse: bool,
         source_identity: ContentHash,
     },
+    #[cfg(feature = "material-state")]
+    MaterialSlab {
+        law: usize,
+        thickness_m: f64,
+        transmitted_eta: [f64; N],
+        source_identity: ContentHash,
+    },
+}
+
+#[cfg(feature = "material-state")]
+fn slab_glass(
+    binding: &crate::material_state::MaterialOpticalBinding,
+) -> Result<crate::dielectric::DielectricGlass, SurfaceHeatingError> {
+    match binding.material() {
+        crate::tracer::Material::Dielectric { glass, .. } => Ok(glass),
+        _ => Err(invalid(
+            "material slab requires its original dielectric family",
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -322,6 +414,32 @@ impl<const N: usize> Stack<N> {
                     *response.total(),
                     response.film_absorbed_fractions().iter().copied(),
                 ))
+            }
+            #[cfg(feature = "material-state")]
+            Exit::MaterialSlab {
+                law,
+                thickness_m,
+                transmitted_eta,
+                source_identity,
+            } => {
+                let Resolved::Slab(binding) = &resolved[*law] else {
+                    unreachable!("slab binding retains its native optical type");
+                };
+                let mut hash =
+                    DomainHasher::new("org.frankensim.render.material-slab-illumination.v1");
+                hash.update(source_identity.as_bytes());
+                hash.update(binding.identity().as_bytes());
+                let response = SurfacePowerResponse::from_incoherent_slab(
+                    self.incidence.wavelengths_nm,
+                    &slab_glass(binding)?,
+                    *thickness_m,
+                    self.incidence.incident_eta,
+                    *transmitted_eta,
+                    self.incidence.incidence_cosine,
+                    self.incidence.s_power_fraction,
+                    hash.finalize(),
+                )?;
+                Ok(self.packet(response, core::iter::once(*response.absorbed_fraction())))
             }
         }
     }
@@ -426,6 +544,8 @@ fn stack_identity<const N: usize>(source: StatefulSource<'_, N>) -> ContentHash 
     let mut hash = DomainHasher::new(match source.exit {
         SourceExit::Opaque { .. } => "org.frankensim.render.coating-feedback-stack.v1",
         SourceExit::Transmitting { .. } => "org.frankensim.render.transmitting-feedback-stack.v1",
+        #[cfg(feature = "material-state")]
+        SourceExit::MaterialSlab { .. } => "org.frankensim.render.slab-feedback-stack.v1",
     });
     hash.update(&(N as u64).to_le_bytes());
     hash.update(&source.incidence.incidence_cosine.to_bits().to_le_bytes());
@@ -493,6 +613,22 @@ fn stack_identity<const N: usize>(source: StatefulSource<'_, N>) -> ContentHash 
                 hash.update(&value.to_bits().to_le_bytes());
             }
         }
+        #[cfg(feature = "material-state")]
+        SourceExit::MaterialSlab {
+            receiver,
+            law,
+            thickness_m,
+            transmitted_eta,
+            source_identity,
+        } => {
+            receiver_hash(&mut hash, receiver, false);
+            hash.update(law.identity().as_bytes());
+            hash.update(source_identity.as_bytes());
+            hash.update(&thickness_m.to_bits().to_le_bytes());
+            for value in transmitted_eta {
+                hash.update(&value.to_bits().to_le_bytes());
+            }
+        }
     }
     hash.finalize()
 }
@@ -545,8 +681,8 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
     }
 
     /// Compose fixed and independently state-dependent opaque/transmitting
-    /// stacks through one native observer and shared response cache. Every
-    /// finite film retains its authored heat receiver under reverse incidence;
+    /// stacks and material slabs through one native observer and shared cache.
+    /// Every finite film retains its authored heat receiver under reverse incidence;
     /// a transmitting exit has no thermal destination. Distinct films may use
     /// temperature or exact-caloric-enthalpy laws, including latent plateaus.
     ///
@@ -574,6 +710,16 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
             checkpoint()?;
             if !source_ids.insert(source.id()) {
                 return Err(invalid("surface illumination source IDs must be unique"));
+            }
+            #[cfg(feature = "material-state")]
+            if let CoatingSurfaceSource::MaterialIncoherentSlab(source) = source
+                && (!source.thickness_m.is_finite()
+                    || source.thickness_m <= 0.0
+                    || source.source_identity == ContentHash([0; 32]))
+            {
+                return Err(invalid(
+                    "material slab heating needs positive finite thickness and original source identity",
+                ));
             }
             segments = segments
                 .checked_add(source.power().segment_count())
@@ -680,6 +826,29 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                         reverse,
                         source_identity,
                     },
+                    #[cfg(feature = "material-state")]
+                    SourceExit::MaterialSlab {
+                        receiver,
+                        law,
+                        thickness_m,
+                        transmitted_eta,
+                        source_identity,
+                    } => {
+                        let slot = bindings.bind(
+                            Law::Slab(Arc::clone(law)),
+                            receiver,
+                            thermal,
+                            max_total_optical_knots,
+                        )?;
+                        law_slots.insert(slot);
+                        cells.push(receiver.thermal_cell);
+                        Exit::MaterialSlab {
+                            law: slot,
+                            thickness_m,
+                            transmitted_eta,
+                            source_identity,
+                        }
+                    }
                 };
                 let stack = Stack {
                     films: films.into_boxed_slice(),
@@ -777,8 +946,18 @@ impl<const N: usize> CoatingFeedbackState<N> {
                     checkpoint()?;
                     for wavelength in self.model.stacks[group].incidence.wavelengths_nm {
                         match &optics {
-                            Resolved::Film(film) => film.complex_ior(wavelength)?,
-                            Resolved::Substrate(substrate) => substrate.complex_ior(wavelength)?,
+                            Resolved::Film(film) => {
+                                film.complex_ior(wavelength)?;
+                            }
+                            Resolved::Substrate(substrate) => {
+                                substrate.complex_ior(wavelength)?;
+                            }
+                            #[cfg(feature = "material-state")]
+                            Resolved::Slab(binding) => {
+                                let glass = slab_glass(binding)?;
+                                glass.ior().eval(wavelength)?;
+                                glass.absorption_ref().extinction_per_m(wavelength)?;
+                            }
                         };
                     }
                 }

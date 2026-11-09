@@ -211,6 +211,33 @@ impl MaterialSlabLaw {
                 .map_or(0, |source| source.reference_state().properties().len())
     }
 
+    /// Read the actual native receiver without projecting or fitting its state.
+    pub(super) fn coordinate_at(
+        &self,
+        thermal: &fs_thermal::enthalpy::DepositionSimulation<'_>,
+        cell: fs_thermal::enthalpy::CellId,
+        material: fs_thermal::enthalpy::MaterialId,
+    ) -> Result<f64, SurfaceHeatingError> {
+        let native = thermal
+            .cells()
+            .get(&cell)
+            .ok_or_else(|| invalid("material slab receiver must be an active native cell"))?;
+        if native.material_id != material {
+            return Err(invalid("material slab receiver material changed"));
+        }
+        let temperature_k = thermal.temperature_k(cell)?;
+        let (minimum_k, maximum_k) = self.temperature_bounds_k;
+        if !temperature_k.is_finite() || !(minimum_k..=maximum_k).contains(&temperature_k) {
+            return Err(SurfaceHeatingError::TemperatureDomain {
+                thermal_cell: cell,
+                temperature_k,
+                minimum_k,
+                maximum_k,
+            });
+        }
+        Ok(temperature_k)
+    }
+
     fn source_at_temperature(
         &self,
         temperature_k: f64,

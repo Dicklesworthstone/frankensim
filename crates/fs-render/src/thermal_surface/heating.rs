@@ -43,6 +43,8 @@ pub mod coating_exchange;
 /// Independently evolving film/substrate optics on the native thermal timeline.
 pub mod coating_state;
 use coating_state::CoatingFeedbackState;
+#[cfg(feature = "material-state")]
+pub use coating_state::StatefulMaterialSlabIlluminationSource;
 pub use coating_state::{
     CoatingOpticsModel, CoatingSurfaceSource, StatefulCoatedSurfaceIlluminationSource,
     StatefulCoatingLayer, StatefulTransmittingSurfaceIlluminationSource, SubstrateOpticsModel,

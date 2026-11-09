@@ -30,6 +30,7 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeSet;
 
+mod illumination;
 mod schott;
 
 const ID: ContentHash = ContentHash([213; 32]);

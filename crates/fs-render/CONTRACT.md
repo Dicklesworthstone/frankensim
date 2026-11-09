@@ -8846,8 +8846,29 @@ No supplied mechanical requirement is dropped, and its original domain remains
 binding. The original reference phase is corrected once through
 `MaterialThermoOpticBinding`, preserving thermal cycles and independent source
 identities. Optical plus mechanical requirement counts share the existing
-distinct-law budget. This mode reaches the same native emission and radiative
-exchange below; the separately frozen illumination/deposition owner is unchanged.
+distinct-law budget. This mode reaches the same native emission, radiative
+exchange and material-slab illumination below.
+
+`StatefulMaterialSlabIlluminationSource` enters `SurfaceOpticalHeating` through
+`CoatingSurfaceSource::MaterialIncoherentSlab`. One isothermal native cell
+supplies the accepted temperature and receives the complete positive slab
+absorption. The original source law updates phase and absorption together, or
+the explicitly selected SCHOTT mode updates phase with frozen reference
+absorption. Both real-index interfaces, refracted Beer path lengths and the
+complete incoherent internal-reflection series use that same glass snapshot.
+Independent s/p powers are summed before polarization mixing. Exterior media,
+positive normal thickness and interception geometry stay fixed; reflected and
+transmitted watts never become deposited heat. The same owner admits mixed
+coherent-coating and incoherent-slab sources without adding an optical interface.
+
+Original material laws, receiver/law resolution, identical response packets,
+source budgets, pulse transitions, energy accounts and transactional native
+advancement reuse the existing coating observer. Wavelength and temperature
+support remain binding at accepted endpoints and during darkness, including
+independent absorption support. This is accepted-start optical feedback and
+requires temporal refinement. It does not infer a homogeneous index from
+different depth-cell temperatures, add spatial thermal-lens transport, move
+geometry or duplicate separately composed radiative cooling.
 
 `NativeCoatingEmission::try_material_incoherent_slab` and
 `IsothermalCoatingStack::MaterialIncoherentSlab` feed the existing finite-band
