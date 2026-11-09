@@ -9,7 +9,7 @@ use super::{
 /// derivatives on the omega state, and -iE times the appropriate lower state.
 /// The closed generator and the imposed wave balance never certify themselves.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn original_higher_residual(
+pub(in crate::harmonic::scattering) fn original_higher_residual(
     owner: &ScatteringModel,
     omega: f64,
     higher: &TangentState,

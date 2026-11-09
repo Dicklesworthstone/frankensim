@@ -4413,3 +4413,28 @@ and fixed-extension exact memory decay over 20 relaxation times, invalid
 stretch, cancellation and atomic output. Six existing mapped-material tests
 also pass. Only the quadratic propagation is exact; nonlinear temporal error
 still needs refinement. No measured material/instrument fidelity is claimed.
+
+### Complete loaded-wave frequency curvature with three solves
+
+`ScatteringFactor::response_with_frequency_curvature` reuses one closed
+factor for the original state and its first two angular-frequency derivatives.
+Authored coherent source jets retain incident-wave and ordinary-input amplitude
+and phase dispersion. Every descriptor constraint and material-memory state
+survives; positive wave references are constant in frequency. Actual inputs,
+physical outputs, incident/outgoing waves and independent wave/conjugate-work
+balances include all three orders. Boundary feedback never becomes internal
+material heat. A linearized nonlinear image retains signed incremental-work
+semantics rather than asserting global passivity.
+
+The original unclosed second-order equations are audited with the recovered
+physical inputs. The existing five-order parameter response shares this same
+second-frequency solve. Curvature performs three state solves, without a dummy
+parameter direction or extra factorization, and admits its own lower resource
+bound before allocation. With n original states, m ports and k selected wave
+ports, the added payload bound is
+`3*(8*n*k+256*k+64*m)+256*(n+m+k)` bytes; work is
+`3*(2*n*n*(k+1)+n*m+k*k+32*m)+24*n*(n+m)+96*(m+k)`.
+Native curvature admission also applies. Cancellation, invalid source jets,
+original-row failure or insufficient capacity returns no partial response and
+leaves the factor reusable. These backward checks do not certify forward
+accuracy near a poorly conditioned response.
