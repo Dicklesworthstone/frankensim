@@ -26,7 +26,9 @@ pub struct PorousLayerField {
     pub volume_flow_m3_s: C64,
     /// Cycle-mean pore-viscous dissipation per total specimen volume [W/m3].
     pub viscous_dissipation_w_m3: f64,
-    /// Cycle-mean thermal-relaxation dissipation per specimen volume [W/m3].
+    /// Cycle-mean bulk-compliance dissipation per specimen volume [W/m3].
+    /// Includes pore heat diffusion and explicitly bound molecular relaxation,
+    /// coupled through the same material temperature field.
     pub thermal_dissipation_w_m3: f64,
 }
 
@@ -36,7 +38,7 @@ pub struct PorousLayerField {
 pub struct PorousLayerDissipation {
     /// Pore-viscous dissipation in the requested slab cell [W].
     pub viscous_power_w: f64,
-    /// Thermal-relaxation dissipation in the same cell [W].
+    /// Coupled pore-thermal and original molecular dissipation in the cell [W].
     pub thermal_power_w: f64,
     /// Sum of viscous and thermal power [W], suitable for a thermal cell source.
     pub absorbed_power_w: f64,

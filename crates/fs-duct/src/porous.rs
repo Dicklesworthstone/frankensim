@@ -19,6 +19,7 @@ use crate::fluid::FluidDuctError;
 use crate::{DuctError, Segment, SegmentWave};
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
+use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
 mod excitation;
@@ -43,6 +44,7 @@ fn finite(value: C64) -> bool {
 #[derive(Debug, Clone)]
 pub struct PorousLayer<'a> {
     material: &'a PorousFluidLaw,
+    relaxation: Option<&'a RelaxationState>,
     response: PorousFluidResponse,
     thickness_m: f64,
     area_m2: f64,
@@ -113,6 +115,85 @@ impl<'a> PorousLayer<'a> {
         reference_impedance: f64,
         tangential_wavenumber_rad_m: f64,
     ) -> Result<Self, FluidDuctError> {
+        Self::admit_geometry(
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )?;
+        Self::from_response(
+            material,
+            None,
+            material.effective_fluid(fluid, omega)?,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )
+    }
+
+    /// Prepare a finite porous layer with its original molecular gas source.
+    /// Molecular heat capacity and pore-wall heat diffusion share the native
+    /// material energy equation; their losses are not added as independent
+    /// attenuation fits. Pore viscosity and the skeleton's original support
+    /// remain unchanged. No reservoirs recovers `try_new` exactly.
+    pub fn try_new_relaxing(
+        material: &'a PorousFluidLaw,
+        relaxation: &'a RelaxationState,
+        omega: f64,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+    ) -> Result<Self, FluidDuctError> {
+        Self::try_new_relaxing_oblique(
+            material,
+            relaxation,
+            omega,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            0.0,
+        )
+    }
+
+    /// Original molecular/porous response for one conserved tangential mode.
+    /// Geometry, modal normalization and applicability are exactly those of
+    /// `try_new_oblique`; normal phase and refraction now follow the coupled
+    /// complex density and bulk modulus of this retained material source.
+    /// The same two-sided scattering and positive volume-heat owners consume
+    /// the response without another material query or an extra wall loss.
+    pub fn try_new_relaxing_oblique(
+        material: &'a PorousFluidLaw,
+        relaxation: &'a RelaxationState,
+        omega: f64,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<Self, FluidDuctError> {
+        Self::admit_geometry(
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )?;
+        Self::from_response(
+            material,
+            Some(relaxation),
+            material.effective_relaxing(relaxation, omega)?,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )
+    }
+
+    fn admit_geometry(
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<(), FluidDuctError> {
         if !thickness_m.is_finite() || thickness_m <= 0.0 || !area_m2.is_finite() || area_m2 <= 0.0
         {
             return Err(
@@ -123,7 +204,18 @@ impl<'a> PorousLayer<'a> {
             return Err(bad("porous tangential wavenumber must be finite and nonnegative").into());
         }
         TwoPort::through(reference_impedance)?;
-        let response = material.effective_fluid(fluid, omega)?;
+        Ok(())
+    }
+
+    fn from_response(
+        material: &'a PorousFluidLaw,
+        relaxation: Option<&'a RelaxationState>,
+        response: PorousFluidResponse,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<Self, FluidDuctError> {
         let (specific, wavenumber) = response.characteristic();
         let mut specific = specific.conj();
         let mut wavenumber = wavenumber.conj();
@@ -166,6 +258,7 @@ impl<'a> PorousLayer<'a> {
         )?;
         Ok(Self {
             material,
+            relaxation,
             response,
             thickness_m,
             area_m2,
@@ -182,6 +275,12 @@ impl<'a> PorousLayer<'a> {
 
     pub const fn material(&self) -> &'a PorousFluidLaw {
         self.material
+    }
+    /// Original molecular gas, when explicitly bound by a relaxing constructor.
+    /// Its absence means the original equilibrium porous response, not an
+    /// inferred reservoir model. An explicitly empty source is still retained.
+    pub const fn relaxation_state(&self) -> Option<&'a RelaxationState> {
+        self.relaxation
     }
     pub const fn material_response(&self) -> &PorousFluidResponse {
         &self.response

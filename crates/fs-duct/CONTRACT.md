@@ -3417,6 +3417,37 @@ checks coherent absorbed power against the original viscous/thermal volume-loss
 integral, composes split layers and an actual fluid air gap, recovers the existing
 rigid-backed material impedance, and exercises thin/opaque limits and refusal.
 
+### Molecular dispersion in finite porous transmission and heating
+
+`PorousLayer::try_new_relaxing` and `try_new_relaxing_oblique` retain the original
+`RelaxationState` alongside the porous skeleton. The shared native preparation
+consumes `PorousFluidLaw::effective_relaxing`: molecular calorics and pore-wall
+heat diffusion enter one temperature/compression equation, with unchanged pore
+viscous drag. No free-gas attenuation, additional tube-wall loss or fitted
+complex sound speed is added. The source's complete gas snapshot supplies the
+pore fluid, and the original porous frequency band remains binding. An empty
+reservoir source is still accessible through `relaxation_state` and recovers
+the equilibrium preparation, scattering, interior fields and heat exactly.
+
+The original forward-decaying normal wave retains the authored conserved
+tangential wavenumber, full specimen area and exp(-i omega t) pressure/flow
+convention. These prepared layers work directly in the existing two-sided
+`TwoPort`, coherent heterogeneous stacks, interior field and thermal-cell
+integral owners, and passive rear-load closure. All reuse the same response
+without another material query. The bulk-compliance heat includes the coupled
+pore-thermal and molecular mechanisms; it is neither a separately fitted loss
+nor a fluid/skeleton heat partition. Transmitted backing-load work remains
+separate from the specimen's irreversible heat. Existing rigid-frame,
+plane-wave, frozen-background and source-support limits apply.
+
+Focused tests in `porous/tests.rs` compare oblique complex reflection and
+transmission with independent interface equations, integrate both original
+positive volume-work densities under coherent two-sided illumination, check
+exact empty-source recovery and homogeneous subdivision, and close source,
+rear-load and specimen heat against an independent loaded-slab impedance.
+These tests are authored and syntax checked; native execution is pending the
+dependency/resource blocker.
+
 ### Heterogeneous finite-stack interior fields and heating
 
 `porous::PorousLayerStack` retains an ordered nonempty slice of original

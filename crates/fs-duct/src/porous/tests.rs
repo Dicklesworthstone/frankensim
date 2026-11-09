@@ -469,3 +469,287 @@ fn g0_opaque_thin_zero_drive_and_source_refusals_remain_finite() {
             .is_err()
     );
 }
+
+fn molecular_source(active: bool, time_scale: f64) -> RelaxationState {
+    use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
+    // Manufactured reservoir for a constitutive test, not measured air data.
+    let text = if active {
+        format!(
+            "declared 1 synthetic 1 vibration 1 900 1 power {} 293.15 0 200 500",
+            101_325.0 * 0.001 * time_scale,
+        )
+    } else {
+        "declared 1 synthetic 0".into()
+    };
+    let law = read_relaxation(&mut text.split_ascii_whitespace()).unwrap();
+    let medium = RelaxingMedium::new(gas(), vec![(law.species()[0].species.clone(), 1.0)]).unwrap();
+    law.evaluate(&medium).unwrap()
+}
+
+#[test]
+fn molecular_porous_slab_keeps_original_dispersion_and_oblique_interfaces() {
+    let source = molecular_source(true, 1.0);
+    let material = material();
+    let (area, length) = (0.004, 0.04);
+    let mut maximum_contrast = 0.0_f64;
+    for frequency in [200.0, 1100.0, 3500.0] {
+        let omega = core::f64::consts::TAU * frequency;
+        for sine in [0.0, 0.75] {
+            let kt = (omega / source.gas().sound_speed) * sine;
+            let reference =
+                source.gas().characteristic_impedance / (area * (1.0_f64 - sine * sine).sqrt());
+            let layer = PorousLayer::try_new_relaxing_oblique(
+                &material, &source, omega, length, area, reference, kt,
+            )
+            .unwrap();
+            assert!(std::ptr::eq(layer.material(), &material));
+            assert!(std::ptr::eq(layer.relaxation_state().unwrap(), &source));
+            let original = material.effective_relaxing(&source, omega).unwrap();
+            assert_eq!(
+                layer.material_response().dynamic_bulk_modulus_pa(),
+                original.dynamic_bulk_modulus_pa()
+            );
+            assert_eq!(
+                layer.material_response().dynamic_density_kg_m3(),
+                original.dynamic_density_kg_m3()
+            );
+            let rho = original.dynamic_density_kg_m3().conj();
+            let bulk = original.dynamic_bulk_modulus_pa().conj();
+            let q = ((rho / bulk).scale(omega * omega) - C64::from_re(kt * kt)).sqrt();
+            let z = rho.scale(omega) / q;
+            close(layer.normal_wavenumber_rad_m(), q, 3e-13);
+            close(layer.normal_specific_impedance_pa_s_m(), z, 3e-13);
+            let (r, t) = slab_reference(z.scale(1.0 / area), q, length, reference);
+            close(layer.two_port().scattering[0], r, 3e-12);
+            close(layer.two_port().scattering[2], t, 3e-12);
+            let plain = PorousLayer::try_new_oblique(
+                &material,
+                source.gas(),
+                omega,
+                length,
+                area,
+                reference,
+                kt,
+            )
+            .unwrap();
+            maximum_contrast = maximum_contrast.max((t - plain.two_port().scattering[2]).abs());
+            assert!(plain.relaxation_state().is_none());
+        }
+    }
+    assert!(
+        maximum_contrast > 1e-5,
+        "original molecular storage must reach finite transmission"
+    );
+    for frequency in [99.0, 4001.0] {
+        assert!(
+            PorousLayer::try_new_relaxing(
+                &material,
+                &source,
+                core::f64::consts::TAU * frequency,
+                length,
+                area,
+                100_000.0,
+            )
+            .is_err()
+        );
+    }
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            PorousLayer::try_new_relaxing(&material, &source, 6000.0, invalid, area, 100_000.0)
+                .is_err()
+        );
+        assert!(
+            PorousLayer::try_new_relaxing(&material, &source, 6000.0, length, invalid, 100_000.0)
+                .is_err()
+        );
+        assert!(
+            PorousLayer::try_new_relaxing(&material, &source, 6000.0, length, area, invalid)
+                .is_err()
+        );
+    }
+    assert!(
+        PorousLayer::try_new_relaxing_oblique(
+            &material, &source, 6000.0, length, area, 100_000.0, -1.0,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn molecular_porous_coherent_heat_matches_independent_oblique_volume_work() {
+    let source = molecular_source(true, 1.0);
+    let material = material();
+    let (area, length) = (0.004, 0.05);
+    let omega = core::f64::consts::TAU * 900.0;
+    let kt = 0.6 * omega / source.gas().sound_speed;
+    let reference = source.gas().characteristic_impedance / (0.8 * area);
+    let layer = PorousLayer::try_new_relaxing_oblique(
+        &material, &source, omega, length, area, reference, kt,
+    )
+    .unwrap();
+    let rho = layer.material_response().dynamic_density_kg_m3().conj();
+    let bulk = layer.material_response().dynamic_bulk_modulus_pa().conj();
+    let q = ((rho / bulk).scale(omega * omega) - C64::from_re(kt * kt)).sqrt();
+    let z = rho.scale(omega) / q;
+    let mut absorbed = Vec::new();
+    for incoming in [
+        [C64::ONE; 2],
+        [C64::ONE, -C64::ONE],
+        [C64::new(0.7, 0.3), C64::new(-0.2, 0.8)],
+    ] {
+        let excitation = layer.prepare_excitation(incoming).unwrap();
+        let boundary = excitation.boundary_power();
+        let left = (boundary.pressure_pa[0]
+            + z * boundary.inward_volume_flow_m3_s[0].scale(1.0 / area))
+        .scale(0.5);
+        let right = (boundary.pressure_pa[1]
+            + z * boundary.inward_volume_flow_m3_s[1].scale(1.0 / area))
+        .scale(0.5);
+        let mut integral = [0.0; 2];
+        let n = 512;
+        for i in 0..=n {
+            let x = length * i as f64 / n as f64;
+            let forward = left * phase(q, x);
+            let backward = right * phase(q, length - x);
+            let pressure = forward + backward;
+            let normal_velocity = (forward - backward) / z;
+            let tangential_velocity = pressure / rho * C64::from_re(kt / omega);
+            let field = excitation.at_depth(x).unwrap();
+            close(field.pressure_pa, pressure, 3e-12);
+            close(field.superficial_velocity_m_s, normal_velocity, 3e-12);
+            close(
+                field.tangential_superficial_velocity_m_s,
+                tangential_velocity,
+                3e-12,
+            );
+            let weight = if i == 0 || i == n {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            integral[0] += weight
+                * 0.5
+                * omega
+                * rho.im
+                * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
+            integral[1] += weight * 0.5 * omega * bulk.recip().im * pressure.norm_sq();
+        }
+        let integral = integral.map(|value| value * area * length / (3.0 * n as f64));
+        let native = excitation.dissipation_between(0.0, length).unwrap();
+        assert!(native.viscous_power_w > 0.0 && native.thermal_power_w > 0.0);
+        assert!((native.viscous_power_w / integral[0] - 1.0).abs() < 2e-9);
+        assert!((native.thermal_power_w / integral[1] - 1.0).abs() < 2e-9);
+        assert!((native.absorbed_power_w / boundary.absorbed_power_w - 1.0).abs() < 2e-11);
+        let first = excitation.dissipation_between(0.0, 0.017).unwrap();
+        let second = excitation.dissipation_between(0.017, length).unwrap();
+        assert!(
+            ((first.absorbed_power_w + second.absorbed_power_w) / native.absorbed_power_w - 1.0)
+                .abs()
+                < 3e-13
+        );
+        absorbed.push(native.absorbed_power_w);
+    }
+    assert!((absorbed[0] - absorbed[1]).abs() > 0.01 * absorbed[0]);
+}
+
+#[test]
+fn molecular_porous_stacks_preserve_empty_sources_subdivision_and_rear_load_work() {
+    let empty = molecular_source(false, 1.0);
+    let active = molecular_source(true, 1.0);
+    let changed = molecular_source(true, 4.0);
+    let material = material();
+    let (area, length) = (0.004, 0.06);
+    let omega = core::f64::consts::TAU * 1100.0;
+    let reference = empty.gas().characteristic_impedance / area;
+    for kt in [0.0, 0.6 * omega / empty.gas().sound_speed] {
+        let plain = PorousLayer::try_new_oblique(
+            &material,
+            empty.gas(),
+            omega,
+            length,
+            area,
+            reference,
+            kt,
+        )
+        .unwrap();
+        let retained = PorousLayer::try_new_relaxing_oblique(
+            &material, &empty, omega, length, area, reference, kt,
+        )
+        .unwrap();
+        assert!(std::ptr::eq(retained.relaxation_state().unwrap(), &empty));
+        assert_eq!(retained.two_port().scattering, plain.two_port().scattering);
+        let drive = [C64::new(0.7, -0.2), C64::new(-0.1, 0.5)];
+        let a = plain.prepare_excitation(drive).unwrap();
+        let b = retained.prepare_excitation(drive).unwrap();
+        assert_eq!(a.at_depth(0.023).unwrap(), b.at_depth(0.023).unwrap());
+        assert_eq!(
+            a.dissipation_between(0.005, 0.04).unwrap(),
+            b.dissipation_between(0.005, 0.04).unwrap()
+        );
+    }
+    let make = |state, depth| {
+        PorousLayer::try_new_relaxing(&material, state, omega, depth, area, reference).unwrap()
+    };
+    let one = [make(&active, length)];
+    let split = [make(&active, 0.017), make(&active, length - 0.017)];
+    let one_stack = PorousLayerStack::try_new(&one, ComposeOptions::default(), || false).unwrap();
+    let split_stack =
+        PorousLayerStack::try_new(&split, ComposeOptions::default(), || false).unwrap();
+    for (a, b) in one_stack
+        .two_port()
+        .scattering
+        .into_iter()
+        .zip(split_stack.two_port().scattering)
+    {
+        close(a, b, 3e-12);
+    }
+    let changed_layer = make(&changed, length);
+    assert!(
+        (changed_layer.two_port().scattering[2] - one[0].two_port().scattering[2]).abs() > 1e-6
+    );
+    let incident = C64::new(0.7, 0.2);
+    let load = C64::new(0.8 * reference, 0.3 * reference);
+    let termination = PassivePorousTermination::try_new_impedance(load).unwrap();
+    let a = one_stack
+        .prepare_terminated_excitation(incident, termination, || false)
+        .unwrap();
+    let b = split_stack
+        .prepare_terminated_excitation(incident, termination, || false)
+        .unwrap();
+    let (z, k) = one[0].material_response().characteristic();
+    let expected_impedance = loaded_slab(z.conj().scale(1.0 / area), k.conj(), length, load);
+    let expected_reflection = (expected_impedance - C64::from_re(reference))
+        / (expected_impedance + C64::from_re(reference));
+    close(
+        a.boundary_power().outgoing_pressure_pa[0],
+        expected_reflection * incident,
+        3e-12,
+    );
+    close(
+        b.boundary_power().outgoing_pressure_pa[0],
+        expected_reflection * incident,
+        3e-12,
+    );
+    for excitation in [&a, &b] {
+        let power = excitation.source_power();
+        assert!(power.load_absorbed_power_w > 0.0 && power.porous_absorbed_power_w > 0.0);
+        assert!(power.residual_w.abs() < 3e-13 * power.incident_power_w);
+        let rear = excitation.at_depth(length).unwrap().field;
+        let load_work = 0.5 * load.re * rear.volume_flow_m3_s.norm_sq();
+        assert!((power.load_absorbed_power_w / load_work - 1.0).abs() < 3e-12);
+    }
+    assert!(
+        (a.dissipation().absorbed_power_w / b.dissipation().absorbed_power_w - 1.0).abs() < 3e-12
+    );
+    close(
+        a.at_depth(0.031).unwrap().field.pressure_pa,
+        b.at_depth(0.031).unwrap().field.pressure_pa,
+        3e-12,
+    );
+    assert!(matches!(
+        split_stack.prepare_terminated_excitation(incident, termination, || true),
+        Err(DuctError::Cancelled { .. })
+    ));
+}
