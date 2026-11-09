@@ -10758,3 +10758,30 @@ identity, double-counting refusals and compact/source/cancellation boundaries.
 Their full Cargo execution remains unrun; pinned formatting and source/API
 review do not substitute for that execution. This is a sampled harmonic modal
 composition, without a causal time realization or continuum error certificate.
+
+## Coherent field heat over accepted thermal intervals
+
+`SpatialInterferenceHeating::advance_to_with_field_heat` explicitly reconstructs
+and integrates the original coherent reservoir fields for each native thermal
+cell. Its per-cell `AngularSpectrumHeatWindowLimits` admit time projections,
+original spatial integration and scratch before field reconstruction. The
+original continuous footprint, positive depth samples, material cards, source
+statistics and optical films remain authoritative. Source phase retains the
+accepted double-double epoch and the actual interval selected by the native
+thermal step. The EM interval query returns joules; no additional area, volume
+or duration scaling is applied at the thermal boundary.
+
+The field and cached-spectrum routes share cell order, the independent positive
+sum of cell source-ripple bounds, finite nonnegative energy admission, and one
+native heat debit. Original caloric laws, conduction, contacts, baths, authored
+sources and nonlinear acceptance still belong to the thermal owner. Refusal or
+cancellation publishes neither temperatures nor source-clock advancement.
+Frozen optics, through-thickness thermal resolution and expected-heat statistics
+retain the existing approximation boundaries; this query does not infer lateral
+thermal resolution, reservoir switch-on dynamics or thermo-optical feedback.
+
+Seven focused actual-source collector tests pass with warnings denied, including
+fourth-order dark-fringe joules, native cell order, retained sub-ulp source
+epochs, ripple refusal before field work, and cancellation. These exercise the
+shared harmonic source and accepted-interval energy seam. Full native material,
+field reconstruction and thermal-solver integration execution remains unrun.

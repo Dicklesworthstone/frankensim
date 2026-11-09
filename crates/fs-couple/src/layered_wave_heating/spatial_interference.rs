@@ -31,8 +31,8 @@ use fs_em::plane_wave::angular_spectrum::{
     AngularSpectrumAperture, AngularSpectrumError, AngularSpectrumExposureEnsemble,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureLayerLimits,
     AngularSpectrumHeatAreaQuadrature, AngularSpectrumHeatDepthSample,
-    AngularSpectrumHeatVolumeQuadrature, AngularSpectrumIntegratedHeatLimits,
-    PreparedAngularSpectrumExposureLayer,
+    AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
+    AngularSpectrumIntegratedHeatLimits, PreparedAngularSpectrumExposureLayer,
 };
 use fs_fft::harmonic_window::{PreparedHarmonicProductSpectrum, ProductSpectrumError};
 use fs_material::thermal::{
@@ -329,6 +329,58 @@ impl<'h, 'b, 'a, 'm> SpatialInterferenceHeating<'h, 'b, 'a, 'm> {
         conduction: LayerConductionConfig,
         solve: LayeredThermalSolveControls,
         workspace: &mut LayeredThermalWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInterferenceStep<'h, 't>, SpatialInterferenceHeatingError> {
+        self.advance_to_impl(
+            initial, target_s, temporal, None, conduction, solve, workspace, cancelled,
+        )
+    }
+
+    /// Advance the original thermal state using volume-integrated coherent
+    /// fields over its actual accepted interval. Each cell reuses its original
+    /// film, material, footprint and depth quadrature. The retained DD source
+    /// epoch enters the field phase without rounding to an f64 timestamp.
+    ///
+    /// This explicitly bounded path reconstructs original frequency planes at
+    /// each depth and projects their interference before spatial integration.
+    /// It adds no source heat twice and does not replace continuous rectangles
+    /// with field samples. `field_limits` apply separately to every native cell.
+    /// The cached spectra still supply the same independent source-ripple gate;
+    /// native nonlinear thermal acceptance and cancellation remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_field_heat<'t>(
+        &self,
+        initial: &SpatialInterferenceState<'_, 't>,
+        target_s: f64,
+        temporal: SpatialInterferenceHeatingControls,
+        field_limits: AngularSpectrumHeatWindowLimits,
+        conduction: LayerConductionConfig,
+        solve: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInterferenceStep<'h, 't>, SpatialInterferenceHeatingError> {
+        self.advance_to_impl(
+            initial,
+            target_s,
+            temporal,
+            Some(field_limits),
+            conduction,
+            solve,
+            workspace,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_to_impl<'t>(
+        &self,
+        initial: &SpatialInterferenceState<'_, 't>,
+        target_s: f64,
+        temporal: SpatialInterferenceHeatingControls,
+        field_limits: Option<AngularSpectrumHeatWindowLimits>,
+        conduction: LayerConductionConfig,
+        solve: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialInterferenceStep<'h, 't>, SpatialInterferenceHeatingError> {
         poll(&mut cancelled)?;
@@ -345,13 +397,44 @@ impl<'h, 'b, 'a, 'm> SpatialInterferenceHeating<'h, 'b, 'a, 'm> {
             || checkpoint(&mut cancelled),
         )?;
         let dt = thermal_step.duration_s();
-        let source = integrate_cells(
-            &self.spectra,
-            initial.source_time_s,
-            dt,
-            temporal,
-            &mut cancelled,
-        )?;
+        let source = if let Some(limits) = field_limits {
+            integrate_cells_with(
+                &self.spectra,
+                initial.source_time_s,
+                dt,
+                temporal,
+                &mut cancelled,
+                |index, _, start, duration, cancelled| {
+                    let film = self
+                        .owner
+                        .optical_layers()
+                        .layer(index)
+                        .ok_or(bad("original cell film is absent"))?;
+                    Ok(self.layers[index].integrated_heat_interval_from_clock_dd(
+                        AngularSpectrumHeatVolumeQuadrature {
+                            depth_span_m: [0.0, film.thickness_m],
+                            depth_samples: self.quadrature[index].depth_samples,
+                            transverse: AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(
+                                self.footprint,
+                            ),
+                        },
+                        AngularSpectrumExposureHeatChannel::Total,
+                        start,
+                        duration,
+                        limits,
+                        cancelled,
+                    )?)
+                },
+            )?
+        } else {
+            integrate_cells(
+                &self.spectra,
+                initial.source_time_s,
+                dt,
+                temporal,
+                &mut cancelled,
+            )?
+        };
         let thermal_step = thermal_step
             .with_cell_energy_j(&source.cell_energy_j, || checkpoint(&mut cancelled))?;
         let (thermal, _, heat_report) =
@@ -394,6 +477,36 @@ fn integrate_cells(
     controls: SpatialInterferenceHeatingControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<CellIntegrals, SpatialInterferenceHeatingError> {
+    integrate_cells_with(
+        spectra,
+        start_s,
+        duration_s,
+        controls,
+        cancelled,
+        |_, spectrum, start, duration, cancelled| {
+            Ok(spectrum
+                .causal_integral_from_clock_dd_cancellable(start, duration, 0.0, cancelled)?
+                .integral_dd())
+        },
+    )
+}
+
+// Both source representations share the actual interval, per-cell ripple
+// admission, nonnegative joule validation and one native thermal heat debit.
+fn integrate_cells_with<C: FnMut() -> bool>(
+    spectra: &[PreparedHarmonicProductSpectrum],
+    start_s: Dd,
+    duration_s: f64,
+    controls: SpatialInterferenceHeatingControls,
+    cancelled: &mut C,
+    mut integrate_energy: impl FnMut(
+        usize,
+        &PreparedHarmonicProductSpectrum,
+        Dd,
+        f64,
+        &mut C,
+    ) -> Result<Dd, SpatialInterferenceHeatingError>,
+) -> Result<CellIntegrals, SpatialInterferenceHeatingError> {
     poll(cancelled)?;
     if !duration_s.is_finite()
         || duration_s <= 0.0
@@ -416,7 +529,7 @@ fn integrate_cells(
     let mut cell_energy_j = reserve(spectra.len())?;
     let mut ripple_j = 0.0;
     let mut total_j = Dd::ZERO;
-    for spectrum in spectra {
+    for (index, spectrum) in spectra.iter().enumerate() {
         poll(cancelled)?;
         let bound = spectrum.input_ripple_bound_cancellable(duration_s, &mut *cancelled)?;
         ripple_j = outward_sum(ripple_j, bound);
@@ -426,9 +539,7 @@ fn integrate_cells(
                 tolerance_j: controls.maximum_source_ripple_j,
             });
         }
-        let energy = spectrum
-            .causal_integral_from_clock_dd_cancellable(start_s, duration_s, 0.0, &mut *cancelled)?
-            .integral_dd();
+        let energy = integrate_energy(index, spectrum, start_s, duration_s, &mut *cancelled)?;
         let value = energy.to_f64();
         if !finite(energy)
             || !value.is_finite()

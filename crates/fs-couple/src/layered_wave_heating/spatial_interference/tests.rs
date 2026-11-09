@@ -140,3 +140,144 @@ fn refusal_is_bounded_and_measures_are_never_renormalized() {
     assert!(match_measure(Dd::from_f64(0.5), Dd::ONE).is_err());
     assert!(match_measure(Dd::ONE, Dd::ONE).is_ok());
 }
+
+#[test]
+fn field_energy_retains_coherent_joules_in_native_cell_order() {
+    use fs_fft::harmonic_window::{
+        AngularHarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits,
+        HarmonicWindow,
+    };
+    let frequencies = [
+        562_949_953_421_312.0,
+        562_949_953_421_313.0,
+        562_949_953_421_314.0,
+    ];
+    let amplitudes = [1.0, -2.0, 1.0];
+    let source = |gain: f64| {
+        PreparedHarmonicProductSpectrum::from_angular_frequencies(
+            (0..3).flat_map(|i| {
+                (0..3).map(move |j| AngularHarmonicProductInput {
+                    left_angular_frequency_rad_s: frequencies[i],
+                    right_angular_frequency_rad_s: frequencies[j],
+                    left_amplitude: [Dd::from_f64(gain * amplitudes[i]), Dd::ZERO],
+                    right_amplitude: [Dd::from_f64(gain * amplitudes[j]), Dd::ZERO],
+                    law: HarmonicProductLaw::ProperComplex,
+                })
+            }),
+            HarmonicProductSpectrumLimits {
+                maximum_products: 9,
+                maximum_generated_terms: 9,
+                maximum_workspace_bytes: 4096,
+            },
+        )
+        .unwrap()
+    };
+    let spectra = [source(1.0), source(2.0)];
+    let duration = 1e-12_f64;
+    let start = Dd::from_f64(-0.5 * duration);
+    let mut order = Vec::new();
+    let actual = integrate_cells_with(
+        &spectra,
+        start,
+        duration,
+        controls(),
+        &mut || false,
+        |index, _, epoch, dt, cancelled| {
+            poll(cancelled)?;
+            order.push(index);
+            assert_eq!(epoch, start);
+            assert_eq!(dt, duration);
+            // The volume owner supplies joules from the original coherent
+            // fields. This native temporal factor isolates the cell-energy
+            // seam from unrelated material and geometric preparation.
+            let window = HarmonicWindow::new(epoch.to_f64(), dt).unwrap();
+            let band = window
+                .prepare_uniform_band_rad_s(&frequencies)
+                .unwrap()
+                .unwrap();
+            let fields =
+                amplitudes.map(|value| [Dd::from_f64(value * (index + 1) as f64), Dd::ZERO]);
+            Ok(band
+                .mean_square_parts_dd_scaled(&fields, Dd::from_f64(0.5))
+                .unwrap()
+                * Dd::from_f64(dt))
+        },
+    )
+    .unwrap();
+    let expected = duration.powi(5) / 160.0;
+    assert_eq!(order, [0, 1]);
+    assert!((actual.cell_energy_j[0] / expected - 1.0).abs() < 2e-10);
+    assert!((actual.cell_energy_j[1] / (4.0 * expected) - 1.0).abs() < 2e-10);
+    assert!((actual.total_j.to_f64() / (5.0 * expected) - 1.0).abs() < 2e-10);
+    assert_eq!(actual.end_s, start + Dd::from_f64(duration));
+    let cached = integrate_cells(&spectra, start, duration, controls(), &mut || false);
+    assert!(cached.is_err() || (cached.unwrap().cell_energy_j[0] / expected - 1.0).abs() > 0.5);
+}
+
+#[test]
+fn field_energy_preserves_dd_epoch_and_common_ripple_refusal() {
+    let start = Dd::from_pair(9_007_199_254_740_992.0, 0.125);
+    let duration = 0.25;
+    let sources = [spectrum(2.0, 0.0, 0.0, 1.0)];
+    let result = integrate_cells_with(
+        &sources,
+        start,
+        duration,
+        controls(),
+        &mut || false,
+        |_, _, epoch, dt, cancelled| {
+            poll(cancelled)?;
+            assert_eq!(epoch, start);
+            assert_eq!(dt, duration);
+            Ok(Dd::from_f64(0.3))
+        },
+    )
+    .unwrap();
+    assert_eq!(result.cell_energy_j, [0.3]);
+    assert_eq!(result.end_s, start + Dd::from_f64(duration));
+    assert_eq!(result.end_s.to_f64(), start.to_f64());
+
+    let varying = [spectrum(2.0, 1.0, 0.0, 3.0)];
+    let mut queries = 0;
+    let refused = integrate_cells_with(
+        &varying,
+        Dd::ZERO,
+        0.7,
+        SpatialInterferenceHeatingControls {
+            maximum_source_ripple_j: 0.0,
+            ..controls()
+        },
+        &mut || false,
+        |_, _, _, _, _| {
+            queries += 1;
+            Ok(Dd::ONE)
+        },
+    );
+    assert!(matches!(
+        refused,
+        Err(SpatialInterferenceHeatingError::SourceRipple { .. })
+    ));
+    assert_eq!(queries, 0);
+    assert!(
+        integrate_cells_with(
+            &sources,
+            start,
+            duration,
+            controls(),
+            &mut || false,
+            |_, _, _, _, _| Ok(-Dd::ONE),
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        integrate_cells_with(
+            &sources,
+            start,
+            duration,
+            controls(),
+            &mut || false,
+            |_, _, _, _, _| Err(SpatialInterferenceHeatingError::Cancelled),
+        ),
+        Err(SpatialInterferenceHeatingError::Cancelled)
+    ));
+}
