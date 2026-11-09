@@ -41,7 +41,8 @@ mod material;
 use material::PreparedFacet;
 pub use material::{
     TensorShellMaterialBudget, TensorShellMaterialField, TensorShellMaterialObserver,
-    TensorShellMaterialPoint,
+    TensorShellMaterialPoint, TensorShellMaterialSpectrumField, TensorShellMaterialSpectrumObserver,
+    TensorShellMaterialSpectrumPoint,
 };
 
 /// The original material, spatial or shared harmonic refusal.

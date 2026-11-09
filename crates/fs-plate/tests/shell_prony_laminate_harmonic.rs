@@ -1,5 +1,8 @@
 //! Offset and oriented layer physics in the original full-coordinate shell.
 
+#[path = "shell_prony_laminate_harmonic/spectrum.rs"]
+mod spectrum;
+
 use fs_exec::{CancelGate, Cx};
 use fs_material::elastic::OrthotropicElastic;
 use fs_material::laminate::{

@@ -2625,3 +2625,36 @@ terms. Layer integrals distinguish equal-mass dense faces/core; native checks
 cover beam independence, support reduction, equivalent P1-density inventory,
 field selection and nonrepresentable inertia refusal, including shared-node
 sparse accumulation overflow after finite element matrices.
+
+
+## Coherent original-layer shell material observation
+
+`TensorPronyShell::prepare_material_spectrum_observer` caches original CST/DKT
+geometry and complete plane-stress spectra for every homogeneous or laminated
+material layer. Supplied bare or loaded displacement banks need no additional
+mechanical factorization. Layer axes, offsets, thicknesses, original coordinate
+maps, anisotropic equilibrium stiffness, Kelvin viscosity and every Maxwell
+branch remain source-owned. Up to 64 authored positive-frequency lines need no
+common period; equal frequencies combine before constitutive admission.
+
+`observe_window` reports original layer-volume storage, direct storage change,
+independently integrated stress work and Kelvin/Maxwell heat over a uniform
+physical interval. Three triangle midpoint weights and two positive Gauss
+points per layer integrate the quadratic CST/DKT material fields in real
+arithmetic. Full recovered 3D waveform admission at every facet vertex and
+layer face precedes point publication, retaining strain violations that an
+interior-only check would miss. Drilling, kinetic and boundary work remain
+separate; no constitutive heat is inferred from a mechanical balance.
+
+`observe_window_with_bias` includes an explicitly relaxed static displacement
+field through the same original layer kinematics. Nonzero material bias requires
+original DC coverage and uses its own zero-frequency transverse constraint;
+AC lines retain their dispersive constraints. Static/AC storage and stress-work
+cross terms remain physical, while relaxed bias adds no dashpot heat. This does
+not establish geometric prestress, static force equilibrium, startup memory,
+thermal feedback or spatial convergence. Point, payload and conservative work
+caps precede allocations; cancellation/refusal leaves the prepared source intact.
+The focused regression fixtures cover rotated offset layers, independent
+real-field and alternative spatial integration, interval additivity, one-tone
+mean parity, static storage, coherent cancellation, face-domain admission and
+resource/cancellation behavior.

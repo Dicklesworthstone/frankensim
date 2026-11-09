@@ -6,6 +6,12 @@ use super::{
 };
 use fs_material::visco::{TensorPronyHarmonic, TensorPronyHarmonicPoint};
 
+mod spectrum;
+pub use spectrum::{
+    TensorShellMaterialSpectrumField, TensorShellMaterialSpectrumObserver,
+    TensorShellMaterialSpectrumPoint,
+};
+
 /// Additional material cache and one complete returned field. Original source
 /// geometry, the prepared mechanical factor and fixed-size stack are excluded.
 #[derive(Clone, Copy, Debug)]
@@ -14,8 +20,10 @@ pub struct TensorShellMaterialBudget {
     pub maximum_points: usize,
     /// Additional heap numerical payload, excluding allocator metadata.
     pub maximum_payload_bytes: usize,
-    /// Conservative preparation plus one observation allowance:
+    /// Single-frequency mean-field preparation plus one observation score:
     /// 4096*sum(1+branches) + 6*65536*sum(1+branches).
+    /// Coherent spectra use the authored-line bound documented by
+    /// `TensorPronyShell::prepare_material_spectrum_observer`.
     pub maximum_work: u64,
 }
 
@@ -76,11 +84,15 @@ impl PreparedFacet {
     }
 
     pub(super) fn strains(&self, displacement: &[C64]) -> [[C64; 6]; 3] {
+        self.strains_by(|r| displacement[r])
+    }
+
+    pub(super) fn strains_by(&self, mut displacement: impl FnMut(usize) -> C64) -> [[C64; 6]; 3] {
         let local: [C64; 18] = core::array::from_fn(|i| {
             let base = 6 * (i / 6) + 3 * ((i % 6) / 3);
             let terms: [(f64, C64); 3] = core::array::from_fn(|p| (
                 self.frame[i % 3][p],
-                self.coordinates[base + p].map_or(C64::ZERO, |r| displacement[r]),
+                self.coordinates[base + p].map_or(C64::ZERO, |r| displacement(r)),
             ));
             C64::new(
                 compensated_products(terms.iter().map(|(a, b)| (*a, b.re))),

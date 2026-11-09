@@ -170,6 +170,28 @@ impl TensorPronyShellSection {
         }
     }
 
+    /// The original material axes and signed faces are independent of frequency.
+    /// Both single-frequency recovery and coherent spectra use this same map.
+    pub(super) fn layer_geometry(
+        &self,
+        element: usize,
+        layer: usize,
+    ) -> Result<([f64; 2], [[f64; 3]; 3]), TensorShellHarmonicError> {
+        if let Some(section) = self.laminate() {
+            let geometry = &section.layer_integrals()[layer];
+            Ok((
+                [geometry.z_bottom_m, geometry.z_top_m],
+                section.principal_strain_transform(layer)
+                    .map_err(|source| TensorShellHarmonicError::Laminate { element, source })?,
+            ))
+        } else {
+            Ok((
+                [-0.5 * self.thickness_m, 0.5 * self.thickness_m],
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            ))
+        }
+    }
+
     pub(super) fn prepare(
         &self,
         element: usize,
@@ -188,20 +210,7 @@ impl TensorPronyShellSection {
                 .map_err(|source| self.material_error(element, layer, source))?;
             storage.push(*material.storage_pa());
             loss.push(*material.loss_pa());
-            let (z, to_principal) = if let Some(section) = self.laminate() {
-                let geometry = &section.layer_integrals()[layer];
-                (
-                    [geometry.z_bottom_m, geometry.z_top_m],
-                    section
-                        .principal_strain_transform(layer)
-                        .map_err(|source| TensorShellHarmonicError::Laminate { element, source })?,
-                )
-            } else {
-                (
-                    [-0.5 * self.thickness_m, 0.5 * self.thickness_m],
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                )
-            };
+            let (z, to_principal) = self.layer_geometry(element, layer)?;
             layers.push(PreparedLayer {
                 material,
                 z,
@@ -299,16 +308,7 @@ impl PreparedSection {
                 what: "original shell observation must lie inside its material layer",
             });
         }
-        let section_strain: [C64; 3] =
-            core::array::from_fn(|r| strain[r] + strain[r + 3].scale(z));
-        let principal = core::array::from_fn(|r| C64::new(
-            compensated_products(
-                (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].re)),
-            ),
-            compensated_products(
-                (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].im)),
-            ),
-        ));
+        let principal = principal_strain(strain, z, &prepared.to_principal);
         prepared.material.recover_strain(&principal)
     }
 
@@ -346,4 +346,20 @@ impl PreparedSection {
         }
         Ok(())
     }
+}
+
+/// CST membrane plus signed DKT curvature in the original layer material axes.
+pub(super) fn principal_strain(
+    strain: &[C64; 6], z: f64, to_principal: &[[f64; 3]; 3],
+) -> [C64; 3] {
+    let section_strain: [C64; 3] =
+        core::array::from_fn(|r| strain[r] + strain[r + 3].scale(z));
+    core::array::from_fn(|r| C64::new(
+        compensated_products(
+            (0..3).map(|i| (to_principal[r][i], section_strain[i].re)),
+        ),
+        compensated_products(
+            (0..3).map(|i| (to_principal[r][i], section_strain[i].im)),
+        ),
+    ))
 }

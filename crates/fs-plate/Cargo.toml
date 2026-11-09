@@ -12,6 +12,7 @@ layer = "L3"
 
 [dependencies]
 fs-exec = { path = "../fs-exec" }
+fs-fft = { path = "../fs-fft" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }

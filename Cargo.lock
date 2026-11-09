@@ -2405,6 +2405,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-fft",
  "fs-matdb",
  "fs-material",
  "fs-math",
