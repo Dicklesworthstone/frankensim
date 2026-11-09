@@ -3,6 +3,58 @@
 use super::*;
 
 impl IsotropicLinearDrag {
+    /// Conservative relative-speed bound over one prescribed affine-force path.
+    ///
+    /// For held bath velocity, let `S0=|v0-U|`, `lambda=c/m`, and let `A` be
+    /// the larger norm of the two supplied endpoint accelerations, including
+    /// gravity. The positive exponential convolution gives
+    /// `|v(t)-U| <= exp(-lambda*t)*S0 + integral_0^t exp(-lambda*u)du*A`.
+    /// This scalar comparison is monotone, so its maximum is at zero or at the
+    /// final time even when the actual vector velocity has an interior maximum.
+    /// It has the continuous zero-drag limit `S0+duration*A`.
+    ///
+    /// The bound may be conservative for opposing or turning force histories;
+    /// subdividing at their actual source endpoints can tighten admission. This
+    /// is floating-point model admission, not an interval certificate. Inputs
+    /// and fixed-spin assumptions are identical to [`Self::step_affine_force`].
+    pub fn affine_force_relative_speed_bound_m_s(
+        self,
+        state: RigidBodyState,
+        wrench_before: Wrench,
+        force_after_world: Vec3,
+        duration_s: f64,
+    ) -> Result<f64, LinearDragError> {
+        validate_affine_inputs(state, wrench_before, force_after_world, duration_s)?;
+        let mass = dd(self.properties.mass());
+        let momentum = components(state.linear_momentum_world()).map(dd);
+        let ambient = components(self.ambient_velocity_world).map(dd);
+        let gravity = components(self.gravity.acceleration_world()).map(dd);
+        let first = components(wrench_before.force_world).map(dd);
+        let last = components(force_after_world).map(dd);
+        let norm = |value: [Dd; 3]| -> Result<f64, LinearDragError> {
+            let value = vector(value)?;
+            scalar(dd(value.x.hypot(value.y).hypot(value.z)))
+        };
+        let initial = norm(core::array::from_fn(|i| {
+            (momentum[i] - mass * ambient[i]) / mass
+        }))?;
+        let acceleration = norm(core::array::from_fn(|i| {
+            (first[i] + mass * gravity[i]) / mass
+        }))?
+        .max(norm(core::array::from_fn(|i| {
+            (last[i] + mass * gravity[i]) / mass
+        }))?);
+        let moments = Moments::new(
+            self.translation_resistance_kg_s,
+            self.properties.mass(),
+            duration_s,
+        )?;
+        let endpoint = scalar(
+            attenuated(dd(initial), moments.exposure) + dd(acceleration) * moments.integral_s,
+        )?;
+        Ok(initial.max(endpoint))
+    }
+
     /// Advance a world force prescribed by its two endpoints over this interval.
     ///
     /// The force is `F(s)=(1-s)*wrench_before.force_world+s*force_after_world`,
@@ -32,19 +84,7 @@ impl IsotropicLinearDrag {
         force_after_world: Vec3,
         duration_s: f64,
     ) -> Result<LinearDragStep, LinearDragError> {
-        state.validate()?;
-        wrench_before.validate()?;
-        if !force_after_world.is_finite() {
-            return Err(DynamicsError::NonFinite("linear_drag.force_after_world").into());
-        }
-        if wrench_before.torque_body != Vec3::ZERO {
-            return Err(LinearDragError::Invalid(
-                "exact free-spin flow does not admit an applied torque",
-            ));
-        }
-        if !duration_s.is_finite() || duration_s <= 0.0 {
-            return Err(DynamicsError::InvalidStepDuration.into());
-        }
+        validate_affine_inputs(state, wrench_before, force_after_world, duration_s)?;
         if wrench_before.force_world == force_after_world {
             return self.step(state, wrench_before, duration_s);
         }
@@ -153,6 +193,28 @@ impl IsotropicLinearDrag {
         }
         self.finish(state, duration_s, path)
     }
+}
+
+fn validate_affine_inputs(
+    state: RigidBodyState,
+    wrench_before: Wrench,
+    force_after_world: Vec3,
+    duration_s: f64,
+) -> Result<(), LinearDragError> {
+    state.validate()?;
+    wrench_before.validate()?;
+    if !force_after_world.is_finite() {
+        return Err(DynamicsError::NonFinite("linear_drag.force_after_world").into());
+    }
+    if wrench_before.torque_body != Vec3::ZERO {
+        return Err(LinearDragError::Invalid(
+            "exact free-spin flow does not admit an applied torque",
+        ));
+    }
+    if !duration_s.is_finite() || duration_s <= 0.0 {
+        return Err(DynamicsError::InvalidStepDuration.into());
+    }
+    Ok(())
 }
 
 // Orthogonal projection onto {1,s-1/2} leaves a nonnegative residual norm.

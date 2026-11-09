@@ -231,3 +231,70 @@ fn held_force_parity_and_invalid_affine_inputs() {
         Wrench { force_world: first, torque_body: Vec3::new(0.0, 0.0, 1.0) },
         Vec3::ZERO, 1.0).is_err());
 }
+
+
+#[test]
+fn whole_interval_speed_bound_covers_an_interior_peak_with_zero_endpoint_slip() {
+    let p = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let initial = state(p, Vec3::ZERO, Vec3::ZERO);
+    let flow = IsotropicLinearDrag::new(p, Gravity::ZERO, Vec3::ZERO, 1.0, 0.0).unwrap();
+    let first = Vec3::new(1.0, 0.0, 0.0);
+    let last = Vec3::new(2.0 - core::f64::consts::E, 0.0, 0.0);
+    let step = flow.step_affine_force(initial, force(first), last, 1.0).unwrap();
+    let bound = flow
+        .affine_force_relative_speed_bound_m_s(initial, force(first), last, 1.0)
+        .unwrap();
+    // v(t)=e+(1-e)t-e*exp(-t): both endpoint slips vanish, but the
+    // derivative vanishes at an interior positive velocity maximum.
+    let peak_time = -(1.0 - (-1.0_f64).exp()).ln();
+    let peak = 1.0 + (1.0 - core::f64::consts::E) * peak_time;
+    close(step.state_after.linear_momentum_world().x, 0.0, 2e-14);
+    close(
+        analytic_velocity(
+            Vec3::ZERO, Vec3::ZERO, first, last, Vec3::ZERO,
+            1.0, 1.0, 1.0, peak_time,
+        ).x,
+        peak,
+        2e-14,
+    );
+    assert!(peak > 0.2);
+    assert!(peak < bound);
+    close(bound, -(-1.0_f64).exp_m1(), 2e-14);
+}
+
+#[test]
+fn speed_bound_retains_ballistic_limit_gravity_and_large_common_translation() {
+    let p = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0)).unwrap();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -0.25)).unwrap();
+    // Weight cancels the common z component: both acceleration norms are one.
+    let first = Vec3::new(2.0, 0.0, 0.5);
+    let last = Vec3::new(-2.0, 0.0, 0.5);
+    for boost in [Vec3::ZERO, Vec3::new(2.0_f64.powi(40), -2.0_f64.powi(39), 2.0_f64.powi(38))] {
+        let initial = state(p, boost.add(Vec3::new(0.0, 1.0, 0.0)), Vec3::ZERO);
+        for resistance in [0.0, 1e-20] {
+            let flow = IsotropicLinearDrag::new(p, gravity, boost, resistance, 0.0).unwrap();
+            let bound = flow
+                .affine_force_relative_speed_bound_m_s(initial, force(first), last, 0.01)
+                .unwrap();
+            close(bound, 1.01, 2e-14);
+        }
+        // A comparison trajectory that decreases retains the initial maximum.
+        let flow = IsotropicLinearDrag::new(p, gravity, boost, 4.0, 0.0).unwrap();
+        assert_eq!(
+            flow.affine_force_relative_speed_bound_m_s(initial, force(first), last, 10.0).unwrap(),
+            1.0,
+        );
+        assert!(flow.affine_force_relative_speed_bound_m_s(
+            initial,
+            Wrench { force_world: first, torque_body: Vec3::new(0.0, 0.0, 1.0) },
+            last,
+            1.0,
+        ).is_err());
+        assert!(flow.affine_force_relative_speed_bound_m_s(
+            initial, force(first), Vec3::new(f64::NAN, 0.0, 0.0), 1.0,
+        ).is_err());
+        assert!(flow.affine_force_relative_speed_bound_m_s(
+            initial, force(first), last, 0.0,
+        ).is_err());
+    }
+}

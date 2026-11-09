@@ -6,7 +6,7 @@
 //! The shared fluid snapshot supplies rho and mu; the original material body
 //! supplies mass and inertia. Native rigid-body mechanics owns all momentum,
 //! position and attitude updates. The ordinary entry closes its midpoint load
-//! relation; [`exact`] explicitly selects the native exact held relaxation.
+//! relation; [`exact`] explicitly selects native exact held or affine-force motion.
 //!
 //! References: R. Fitzpatrick, *Axisymmetric Stokes Flow Around a Solid Sphere*,
 //! equations (10.94), (10.125)-(10.128),
@@ -33,8 +33,12 @@ use fs_mbd::{
     DynamicsError, Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 
-/// Exact held Stokes velocity, displacement and free-spin relaxation.
+/// Exact held or affine-force Stokes motion and free-spin relaxation.
 pub mod exact;
+pub use exact::{
+    ExactCreepingAffineStep, ExactCreepingAffineStepControls, ExactCreepingStep,
+    ExactCreepingStepControls,
+};
 /// Nonrotating, quasi-steady sphere motion beyond the Stokes regime.
 pub mod finite_reynolds;
 /// Uniform Navier slip from the original ordered solid/fluid interface source.
@@ -68,6 +72,13 @@ pub enum CreepingFlowError {
         /// Fluid diffusion time divided by the fastest body relaxation time.
         diffusion_ratio: f64,
         /// Caller-declared maximum dimensionless ratio.
+        maximum: f64,
+    },
+    /// Prescribed force varies too fast for quasi-steady viscous response.
+    UnsteadyDrive {
+        /// Fluid diffusion time / caller-declared shortest force-variation time.
+        diffusion_ratio: f64,
+        /// Existing caller-declared maximum diffusion ratio.
         maximum: f64,
     },
     /// Independent kinetic/potential/viscous-work balance failed.

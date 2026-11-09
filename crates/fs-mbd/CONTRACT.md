@@ -9904,3 +9904,21 @@ thermal integration groups passed against the corrected fixed source. These
 are bounded isolated builds of the actual native MBD/time, pHS, linear-algebra
 and material/thermal numerical sources, with no numerical substitutes; they are
 not a full workspace build. Pinned Rust formatting passed for the new modules.
+
+### Complete affine-force relative-speed bound
+
+`IsotropicLinearDrag::affine_force_relative_speed_bound_m_s` admits the same
+held bath, gravity, inertia and zero-couple inputs as the exact affine-force
+flow. It supplies a conservative bound on the entire COM slip path, including
+interior extrema that endpoint-speed checks can miss. With `lambda=c/m`,
+`S0=|v0-U|`, and `A=max(|F0/m+g|,|F1/m+g|)`, positive exponential convolution
+gives the monotone scalar comparison
+`exp(-lambda*t)*S0 + A*integral_0^t exp(-lambda*u)du`; its maximum is the larger
+of the initial and final comparison values. The implementation uses the
+original compensated momentum subtraction and decay moments, including the
+continuous zero-drag limit `S0+duration*A`. This is a floating-point model
+upper bound, not an actual peak measurement or interval certificate. It does
+not make the mechanics core a material-regime or force-bandwidth authority.
+The focused affine regressions include a positive interior maximum between
+two zero-slip endpoints, gravity cancellation, zero/tiny resistance, and
+large common translation.

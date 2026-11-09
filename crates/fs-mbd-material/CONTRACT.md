@@ -2185,3 +2185,48 @@ separate gates. Late source, budget, energy or cancellation refusal publishes no
 new history. Shape/area remain fixed, and this retains the existing first-order
 source/free-flight/configuration split requiring independent timestep refinement;
 no reciprocal thermoelastic free-energy law is supplied.
+
+### Source-bound exact affine-force Stokes motion
+
+`CreepingSphere::step_exact_with_affine_force` sends an authored pair of world
+force endpoints through the original native affine-force drag flow. The
+original material mass/inertia, fluid transport snapshot, sphere geometry,
+selected Navier source, gravity and Archimedes force remain the physical
+owners. Radius, uniform bath velocity and source epoch are held during the
+interval. Free spin uses the native isotropic decay; applied torque,
+selected lift and nonspherical inertia refuse.
+
+`ExactCreepingAffineStepControls` requires the caller's shortest physical
+force-variation timescale, independent of numerical substep duration. The
+original fluid diffusion time divided by that source scale must fit the same
+declared diffusion allowance; `UnsteadyDrive` refuses a fast source. The
+admitted ratio is retained separately from the body's relaxation ratio.
+Two force endpoints cannot certify bandwidth, so this is explicit
+source-history regime admission. Refinement preserves the declared physical
+scale. Equal endpoints have no varying-drive requirement and report zero for
+that inactive ratio.
+
+The whole-path native positive-convolution slip bound supplies the original
+diameter-based Reynolds gate. It is reported explicitly as a conservative
+bound, because changing drive can leave both endpoint speeds small while
+violating the Stokes regime inside the interval. Equal force endpoints
+delegate to the existing exact held entry and retain its sharper endpoint
+admission and identical motion/work receipt. Existing source/geometry,
+rotational Reynolds, body-relaxation diffusion, work and cancellation gates
+still apply.
+
+External applied work is the native integrated force work less the held
+buoyancy contribution. Body gravity and buoyancy potential remain in the
+original stored-energy account; integrated native slip/spin heat and
+maintained-background work remain independent. Receipt rounding remains
+visible in the existing absolute work-defect gate. Force times are authored
+source boundaries; no feedback law, accelerating-fluid model, finite-bath
+recoil, added mass or Basset memory is inferred. The unchanged unsteady owner
+remains responsible for fluid inertia and causal history.
+
+Focused existing-source fixtures cover original material/Navier swaps,
+independent velocity/power integrals, an interior Reynolds violation between
+two zero-slip endpoints, held-path parity, shared-force-endpoint composition,
+late cancellation, and physical drive-scale refusal independent of subdivision.
+Synthetic fixture agreement is numerical model
+evidence, not measured-material validation.
