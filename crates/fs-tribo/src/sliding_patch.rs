@@ -248,12 +248,14 @@ fn shape_factors(speed: f64, edge_speed: f64) -> (f64, f64) {
         }
         (1.0 + force * square, moment * z / (3.0 * PI / 16.0))
     } else {
-        // Here 1 < epsilon < 2, so cancellation in the direct expression is
-        // modest. The far-slip region uses the series above.
+        // Use the same factored complement as asin(z). Near z=1, rounding
+        // (1/z)^2 before subtracting one corrupts the square-root term whose
+        // leading part cancels the angle complement in both Hertz integrals.
+        // The far-slip region uses the series above.
         let epsilon = 1.0 / z;
         let square = epsilon * epsilon;
         let angle = det::asin(z);
-        let root = det::sqrt(square - 1.0);
+        let root = det::sqrt((1.0 - z) * (1.0 + z)) / z;
         (
             (3.0 / (16.0 * epsilon)) * (square * (4.0 - square) * angle + (square + 2.0) * root),
             ((3.0 * square * square - 8.0 * square + 8.0) * angle + (6.0 - 3.0 * square) * root)

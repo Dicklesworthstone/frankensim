@@ -506,6 +506,35 @@ fn sliding_and_spinning_share_one_friction_capacity() {
 }
 
 #[test]
+fn slip_spin_rim_crossing_has_no_square_root_roundoff_jump() {
+    let original = patch(1.0, 1.0, 1.0);
+    let rim_force = 9.0 * PI / 32.0;
+    let rim_moment = 9.0 * PI / 128.0;
+    // The exact pressure integrals have derivatives +3*pi/32 and -3*pi/32
+    // with respect to epsilon at the rim. At these ulp-scale offsets the
+    // omitted quadratic term is below 1e-25; a spurious sqrt(epsilon-1)
+    // term would instead create a force/moment jump around 1e-9.
+    let derivative = 3.0 * PI / 32.0;
+    for ulps in [1_u64, 2, 4, 8, 64, 512] {
+        for edge_speed in [
+            f64::from_bits(1.0_f64.to_bits() - ulps),
+            f64::from_bits(1.0_f64.to_bits() + ulps),
+        ] {
+            let delta = edge_speed.recip() - 1.0;
+            for scale in [1e-8, 1.0, 1e8] {
+                let result = original.evaluate([scale, 0.0], scale * edge_speed).unwrap();
+                close(-result.force_n[0], rim_force + derivative * delta, 4e-15);
+                close(
+                    -result.spin_moment_nm,
+                    rim_moment - derivative * delta,
+                    4e-15,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn exact_wrench_matches_independent_hertz_surface_integrals() {
     let law = patch(3.2, 0.4, 0.7);
     for epsilon in [0.2, 0.75, 1.0, 1.5, 2.5, 20.0] {

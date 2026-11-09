@@ -1,5 +1,14 @@
 # CONTRACT: fs-tribo
 
+## Hertz slip/spin transition accuracy
+
+The closed-form Hertz traction uses the same factored complement
+`(1-z)*(1+z)` in its angle and square-root terms near unit slip/spin ratio.
+This preserves the cancellation in the original pressure integrals without
+snapping the branch or changing the friction law. The `sliding_patch` rim
+regression checks both sides at 1–512 ulps and three velocity scales against
+the exact rim force, moment and derivatives.
+
 ## Continuous Hertz sliding and spin through arrest
 
 `sliding_patch::contact::relaxation` integrates the original pressure-resolved

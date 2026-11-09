@@ -9,6 +9,8 @@
 
 /// Simultaneous original Hertz patches with shared finite-body recoil.
 pub mod multiple;
+/// Exact invariant-direction slip/spin trajectories through finite arrest.
+pub mod trajectory;
 
 use super::{
     ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, components,

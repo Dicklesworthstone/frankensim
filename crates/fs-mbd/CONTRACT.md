@@ -1,5 +1,24 @@
 # CONTRACT: fs-mbd
 
+## Finite-duration Hertz stopping trajectories
+
+`tangential_friction::hertz::trajectory` stages or applies the original Hertz
+shear/spin trajectory to two finite native bodies through an invariant-direction
+stopping event and its stationary remainder. Actual masses, full inertia,
+contact arms and tangent frame supply the complete mobility; one original
+pressure-resolved kinetic-law evaluation supplies the moving phase. Only that
+phase contributes impulse, displacement and physical loss. The existing
+compensated pair-impulse owner applies each body's resultants once.
+
+Actual native endpoint rates, moving-phase travel, point/couple work and
+linear/angular momentum independently check the candidate before publication.
+Normal rates remain exposed to the original normal owner. Poses, geometry, load
+and material coefficients stay fixed; external drive and curved slip/spin
+trajectories are outside this exact branch. Refusal or cancellation publishes
+neither body's candidate. The `hertz_trajectory` tests cover analytic sliding
+recoil, reduced-inertia spin heating, off-diagonal response, tangent-frame
+covariance, split intervals, unaffected bodies and atomic refusal.
+
 ## Exact held isotropic drag
 
 `linear_drag::IsotropicLinearDrag` advances the original native pose and momenta
