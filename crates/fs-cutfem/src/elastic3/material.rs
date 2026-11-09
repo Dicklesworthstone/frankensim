@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use fs_material::IsotropicElastic;
 use fs_material::elastic::acoustic::ElasticAcousticState;
+use fs_material::elastic::thermal::IsothermalThermoelasticState;
 
 use super::{ElasticityError3, ElasticityFormulation3};
 use crate::HexCell;
@@ -31,12 +32,23 @@ pub enum ElasticMaterialField3<'a> {
     /// The callback must be pure; an error aborts construction. It receives
     /// active cells, rather than a precomputed array in a guessed active order.
     ByCell(&'a dyn Fn(HexCell) -> Result<ElasticAcousticState, ElasticityError3>),
+    /// One complete fixed-temperature source potential, including its exact
+    /// isothermal C(T), integrated free strain and original reference density.
+    /// Use `prepare_thermoelastic` to obtain its matching mechanical load.
+    ThermoelasticUniform(&'a IsothermalThermoelasticState),
+    /// Cell-constant temperature/material states. Both stiffness and integrated
+    /// expansion come from each returned native source; no quadrature-level
+    /// temperature variation within that cell is implied.
+    ThermoelasticByCell(
+        &'a dyn Fn(HexCell) -> Result<IsothermalThermoelasticState, ElasticityError3>,
+    ),
 }
 
 /// A cache of already admitted material data, shared cheaply for uniform fields.
 #[derive(Clone, PartialEq)]
 pub(super) struct PreparedMaterial3 {
     state: ElasticAcousticState,
+    thermal: Option<IsothermalThermoelasticState>,
     engineering_stiffness: [[f64; 6]; 6],
     stiffness_bound: f64,
 }
@@ -85,6 +97,19 @@ impl ReferenceMaterial3 {
     }
 
     pub(super) fn from_state(state: ElasticAcousticState) -> Result<Self, ElasticityError3> {
+        Self::prepare(state, None)
+    }
+
+    pub(super) fn from_thermal(
+        thermal: IsothermalThermoelasticState,
+    ) -> Result<Self, ElasticityError3> {
+        Self::prepare(thermal.acoustic().clone(), Some(thermal))
+    }
+
+    fn prepare(
+        state: ElasticAcousticState,
+        thermal: Option<IsothermalThermoelasticState>,
+    ) -> Result<Self, ElasticityError3> {
         // For engineering strain and physical stress the work-conjugate map
         // is C_eng = D C_M D. Scaling only columns would double shear stresses.
         let factors = [
@@ -122,6 +147,7 @@ impl ReferenceMaterial3 {
         }
         Ok(Self::Source(Arc::new(PreparedMaterial3 {
             state,
+            thermal,
             engineering_stiffness,
             stiffness_bound,
         })))
@@ -221,6 +247,13 @@ impl ReferenceMaterial3 {
         }
     }
 
+    pub(super) fn thermal_state(&self) -> Option<&IsothermalThermoelasticState> {
+        match self {
+            Self::Legacy { .. } => None,
+            Self::Source(material) => material.thermal.as_ref(),
+        }
+    }
+
     /// Preserve the original material's tensor-norm domain, including native
     /// isotropic and orthotropic laws carried through a source-state adapter.
     /// Explicit Mandel-component boxes continue through their own admission.
@@ -258,6 +291,9 @@ pub(super) enum MaterialProvider3<'a> {
     Legacy(ReferenceMaterial3),
     Uniform(ReferenceMaterial3),
     ByCell(&'a dyn Fn(HexCell) -> Result<ElasticAcousticState, ElasticityError3>),
+    ThermoelasticByCell(
+        &'a dyn Fn(HexCell) -> Result<IsothermalThermoelasticState, ElasticityError3>,
+    ),
 }
 
 impl<'a> MaterialProvider3<'a> {
@@ -274,6 +310,12 @@ impl<'a> MaterialProvider3<'a> {
                 ReferenceMaterial3::from_state(state.clone()).map(Self::Uniform)
             }
             ElasticMaterialField3::ByCell(callback) => Ok(Self::ByCell(callback)),
+            ElasticMaterialField3::ThermoelasticUniform(state) => {
+                ReferenceMaterial3::from_thermal(state.clone()).map(Self::Uniform)
+            }
+            ElasticMaterialField3::ThermoelasticByCell(callback) => {
+                Ok(Self::ThermoelasticByCell(callback))
+            }
         }
     }
 
@@ -281,6 +323,9 @@ impl<'a> MaterialProvider3<'a> {
         match self {
             Self::Legacy(material) | Self::Uniform(material) => Ok(material.clone()),
             Self::ByCell(callback) => ReferenceMaterial3::from_state(callback(bounds)?),
+            Self::ThermoelasticByCell(callback) => {
+                ReferenceMaterial3::from_thermal(callback(bounds)?)
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ type Row = Vec<(OctreeNode3, f64)>;
 mod body;
 pub mod dirichlet;
 mod eigenstrain;
+mod thermal;
 pub mod enrichment;
 mod equilibrium;
 mod mass;

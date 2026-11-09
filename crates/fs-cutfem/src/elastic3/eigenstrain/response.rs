@@ -6,17 +6,19 @@ use super::{material_domain, material_stress, project_free};
 use crate::elastic3::strain_domain::FrobeniusStrainBall;
 use crate::elastic3::{Cell3, ElasticityError3, q1};
 
-/// All returned arrays use physical tensor shear, not Mandel coordinates.
-pub(super) struct PointResponse3 {
-    pub(super) strain: [f64; 6],
-    pub(super) elastic_strain: [f64; 6],
-    pub(super) constitutive_elastic_strain: [f64; 6],
-    pub(super) reference_stress: [f64; 6],
-    pub(super) stress: [f64; 6],
-    pub(super) energy_density: f64,
+/// Arrays use physical tensor shear except the explicitly named Mandel total.
+pub(in crate::elastic3) struct PointResponse3 {
+    pub(in crate::elastic3) strain: [f64; 6],
+    pub(in crate::elastic3) elastic_strain: [f64; 6],
+    pub(in crate::elastic3) constitutive_elastic_strain: [f64; 6],
+    /// Projected TOTAL strain in Mandel coordinates for the native potential.
+    pub(in crate::elastic3) constitutive_total_mandel: [f64; 6],
+    pub(in crate::elastic3) reference_stress: [f64; 6],
+    pub(in crate::elastic3) stress: [f64; 6],
+    pub(in crate::elastic3) energy_density: f64,
 }
 
-pub(super) fn physical_response(
+pub(in crate::elastic3) fn physical_response(
     cell: &Cell3,
     local: &[f64; 24],
     position: [f64; 3],
@@ -33,6 +35,17 @@ pub(super) fn physical_response(
             return Err(ElasticityError3::Invalid(
                 "total strain exceeds small-deformation budget; finite-deformation model required",
             ));
+        }
+        // A source thermal potential is calibrated in BOTH total and elastic
+        // strain. Compatible expansion must not bypass its total-strain box
+        // merely because the mechanical elastic strain is small or zero.
+        if let Some(thermal) = cell.material.thermal_state() {
+            let limit = thermal.source().maximum_absolute_mandel_strain();
+            if total.iter().any(|value| value.abs() > limit) {
+                return Err(ElasticityError3::Invalid(
+                    "total strain exceeds retained thermoelastic material domain",
+                ));
+            }
         }
     }
     let eigen = to_mandel(&free_strain);
@@ -62,6 +75,7 @@ pub(super) fn physical_response(
         strain: from_mandel(&strain),
         elastic_strain: from_mandel(&elastic),
         constitutive_elastic_strain,
+        constitutive_total_mandel: assumed,
         reference_stress,
         stress,
         energy_density,

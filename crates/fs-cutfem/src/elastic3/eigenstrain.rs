@@ -34,7 +34,7 @@ mod response;
 mod sensitivity;
 
 pub use prestress::PreparedPrestress3;
-use response::physical_response;
+pub(in crate::elastic3) use response::physical_response;
 
 pub(super) struct CellEigenstrain3 {
     /// Unscaled bulk and Nitsche load, including strongly constrained entries.
@@ -127,7 +127,11 @@ fn finite_strain(strain: [f64; 6]) -> Result<[f64; 6], ElasticityError3> {
     Ok(strain)
 }
 
-fn project_free(cell: &Cell3, mut strain: [f64; 6], mean_trace: f64) -> [f64; 6] {
+pub(in crate::elastic3) fn project_free(
+    cell: &Cell3,
+    mut strain: [f64; 6],
+    mean_trace: f64,
+) -> [f64; 6] {
     if cell.kinematics.is_projected() {
         let correction = (mean_trace - strain[..3].iter().sum::<f64>()) / 3.0;
         for value in &mut strain[..3] {
@@ -141,7 +145,7 @@ fn project_free(cell: &Cell3, mut strain: [f64; 6], mean_trace: f64) -> [f64; 6]
 // deviatoric modes avoids subtracting large hydrostatic stresses after thermal
 // expansion. No native elastic-domain check is applied to a free-strain load;
 // that domain belongs to the resulting elastic strain, not expansion alone.
-fn material_stress(cell: &Cell3, strain: [f64; 6]) -> [f64; 6] {
+pub(in crate::elastic3) fn material_stress(cell: &Cell3, strain: [f64; 6]) -> [f64; 6] {
     let isotropic = cell
         .kinematics
         .projected_moduli()
@@ -240,13 +244,20 @@ impl CutElasticity3 {
             poll(&mut checkpoint)?;
             let mut bulk_strains = Vec::with_capacity(cell.rules.bulk().len());
             let mut mean_trace = 0.0;
+            let mut reference_trace = None;
             for &(position, weight) in cell.rules.bulk() {
                 poll(&mut checkpoint)?;
                 let strain = finite_strain(field(id, position)?)?;
                 poll(&mut checkpoint)?;
-                mean_trace += (weight / cell.rules.volume()) * strain[..3].iter().sum::<f64>();
+                let trace = strain[..3].iter().sum::<f64>();
+                let reference = *reference_trace.get_or_insert(trace);
+                // Average differences from one sample. A constant thermal
+                // expansion then keeps its trace exactly, even when rounded
+                // quadrature weights do not sum to one after normalization.
+                mean_trace += (weight / cell.rules.volume()) * (trace - reference);
                 bulk_strains.push(strain);
             }
+            mean_trace += reference_trace.unwrap_or(0.0);
             if !mean_trace.is_finite() {
                 return Err(ElasticityError3::Invalid(
                     "eigenstrain mean dilatation overflow",
@@ -378,6 +389,8 @@ impl CutElasticity3 {
     /// Thus compatible free expansion may exceed a narrow elastic calibration
     /// while remaining within the user's small-deformation budget. Both actual
     /// and projected elastic strains must pass the original material envelope.
+    /// A retained thermoelastic source also requires both total strains to lie
+    /// inside its original total-strain component domain.
     /// These checks apply at retained bulk points; no between-point bound is
     /// asserted for an arbitrary sampled eigenstrain field.
     ///

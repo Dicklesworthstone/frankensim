@@ -1104,6 +1104,7 @@ pub mod stress;
 
 /// Prescribed thermal or transformation strain on the original material tensor.
 pub mod eigenstrain;
+pub mod thermal;
 pub use eigenstrain::PreparedPrestress3;
 
 /// Weak prescribed displacement on selected zero-level surface patches.

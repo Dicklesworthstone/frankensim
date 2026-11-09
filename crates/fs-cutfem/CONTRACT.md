@@ -861,3 +861,32 @@ and cancellation preserve the original operator and its preparations. Success
 rotates the common owner token: mass, body-load, eigenstrain and prestress caches
 must be prepared again. This operation commits an operator refresh only; a later
 equilibrium or thermal step has its own failure/commit semantics.
+
+
+## Native isothermal thermal-source fields
+
+`ElasticMaterialField3::ThermoelasticUniform` and `ThermoelasticByCell` retain
+one complete native source response per active cell. The original material owner
+supplies C(T), integrated free strain, reference density, identity, domains and
+thermal derivatives. Temperature and constitutive data are cell-constant;
+quadrature-level temperature variation within a cell is not implied. Explicit
+isotropy is preserved independently of thermal-expansion orientation.
+
+`prepare_thermoelastic` uses the existing free-strain bulk and negative Nitsche
+traction loads with that same C(T). Its result feeds the existing equilibrium,
+dynamics, design, stress and prestress APIs. Successful material refresh requires
+new preparation. B-bar averages trace differences from a retained sample, so a
+constant free dilatation survives normalization without an artificial offset.
+Shared physical recovery enforces the thermal source's TOTAL and ELASTIC Mandel
+component domains in addition to the caller's total Frobenius strain budget.
+
+`thermoelastic_response` evaluates the original native potential at the actual
+constitutive total strain and physical reference-volume weight; cell stiffness
+scales multiply extensive elastic free energy, entropy, internal energy and
+capacity exactly once. Capacity remains signed. The source's local mixed stress
+partial is returned separately from any solved-equilibrium derivative. These
+are physical bulk quantities: they exclude caloric charts, transport, numerical
+ghost/support storage and whole-system heat-step balance. Adaptive recovery uses
+the original homogeneous hanging reconstruction cell by cell. Allocation-free
+admission follows the same physical checks. Counts bound retained bulk output;
+cancellation returns no candidate observations.
