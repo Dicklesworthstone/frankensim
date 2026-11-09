@@ -7,6 +7,9 @@
 //! or scalar resistance adapters. No switching loss is reconstructed from a
 //! balance remainder, an efficiency, or the square of a mean current.
 
+/// Finite chemical energy, both motor shafts and source-bound device/material heat.
+pub mod battery_motor;
+
 mod devices;
 pub use devices::{DeviceConductionBinding, DeviceConductionKeys, DeviceConductionMaterial};
 

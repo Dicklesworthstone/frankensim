@@ -8282,6 +8282,41 @@ with every resistance held constant, and source-domain/quantity/limit,
 clock/budget/cancellation refusal. Its material curves are manufactured fixtures,
 not measured device qualification.
 
+### Finite battery-to-shaft commutation with material feedback
+
+`converter::commutation::battery_motor` connects the original nine-state
+finite battery/lead/converter/motor commutation owner to the shared finite-cell
+enthalpy driver. `CommutatedBatteryMotorThermalNetwork` retains five original
+resistance bindings, four existing seven-role device bundles and an explicit
+bearing receiver. `CommutatedBatteryMotorHeatNetwork` uses the same resolved
+path through the complete original `HeatAssembly`, including finite coolant,
+contact, radiation and reservoir transport.
+
+Every thermal proposal refreshes actual resistor/device material coefficients,
+then restarts the native gate program from the accepted chemical/polarization
+charge, three bus charges, two fluxes and both absolute shaft momenta. All
+fourteen native heats remain distinct in the report. Channel and diode heat
+enter their declared package once; shared receivers accumulate in double-double
+arithmetic. Optional wholly dissipative auxiliary receivers receive actual
+delivered work only, with one internal-transfer cancellation in the combined
+external account.
+
+Independent battery/lead/converter/output/magnetic/shaft/native/full energy
+gates precede deposition. A 33-value exact coefficient key includes five ordinary
+resistances and all device coefficients/limits; fresh source admission still
+runs on cache hits and every electrical subdivision charges the trial budget.
+The represented electrical/thermal endpoint must agree. Source/operating
+support, unowned electrical graph work, clock/budget or cancellation refusal
+publishes no physical history.
+
+Fixed OCV/storage, motor reciprocity and bearing drag, sampled device support
+and endpoint-feedback temporal accuracy retain the native limitations. No
+entropic battery heat, transition/recovery loss or unobserved-peak/safe-area
+qualification is inferred. Four focused regressions define independent
+motoring/regenerative fourteen-heat calorimetry, threshold-only feedback into
+motion, finite-liquid-coolant exchange and transactional refusal. Sources are
+manufactured fixtures, not measured device qualification.
+
 ## Finite source impedance, regulated demand and material heat
 
 `converter::voltage::power_load` adds `step_power_loaded_candidate` to the

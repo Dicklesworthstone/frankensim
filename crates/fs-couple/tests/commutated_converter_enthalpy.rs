@@ -1,4 +1,6 @@
 //! G1/G3/G4: independent diode calorimetry, source feedback and joint refusal.
+#[path = "commutated_converter_enthalpy/battery_motor.rs"]
+mod battery_motor;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 
