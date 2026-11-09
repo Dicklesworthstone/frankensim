@@ -6,7 +6,7 @@
 //! original CBIE/HBIE pair A*p=i*k*B*w, not a different spatial solver.
 //!
 //! For prescribed wall data h, write p=a*x+conj(b)*h/s and
-//! w=-b*x+conj(a)*h/s, s=|a|^2+|b|^2 >= 1/2. Two in-place column
+//! w=-b*x+conj(a)*h/s, s=|a|^2+|b|^2 > 0. Two in-place column
 //! transforms give (A*a+i*k*B*b)*x=(-A*conj(b)+i*k*B*conj(a))*h/s.
 //! Thus neither endpoint requires an infinite coefficient, a clipped law,
 //! extra dense matrix storage, nor an artificial wall resistance.
@@ -55,27 +55,66 @@ impl<'a> PreparedReflectionBoundary<'a> {
         declared_active: bool,
         formulation: Formulation,
     ) -> Result<Self, HelmholtzError> {
+        Self::prepare(
+            surface, k, medium, reflection.len(),
+            |index| {
+                let r = reflection[index];
+                if !finite(r) || (!declared_active && r.abs() > 1.0 + 64.0 * f64::EPSILON) {
+                    return Err(bad("one finite, declared-passive reflection per boundary panel required"));
+                }
+                Ok([(C64::ONE + r).scale(0.5), (C64::ONE - r).scale(0.5)])
+            },
+            declared_active, formulation,
+        )
+    }
+
+    /// Prepare from native `[p, rho*c*v_inward]` coordinates for each panel.
+    ///
+    /// Both entries use exp(-i omega t), with an arbitrary nonzero common
+    /// complex amplitude. They impose `w*p_total + p*rho*c*v_outward = 0`.
+    /// The pair is normalized once, without forming an impedance, admittance,
+    /// or `1 +/- R`. This retains weak material losses beside exact pressure
+    /// and flow nodes. Passive coordinates require `Re(p*conj(w)) >= 0`
+    /// within arithmetic roundoff; neither coordinate is clipped.
+    pub fn from_pressure_flow(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        coordinates: &[[C64; 2]],
+        declared_active: bool,
+        formulation: Formulation,
+    ) -> Result<Self, HelmholtzError> {
+        Self::prepare(
+            surface, k, medium, coordinates.len(),
+            |index| normalize_reflection_coordinates(coordinates[index], declared_active),
+            declared_active, formulation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        count: usize,
+        mut coordinate: impl FnMut(usize) -> Result<[C64; 2], HelmholtzError>,
+        declared_active: bool,
+        formulation: Formulation,
+    ) -> Result<Self, HelmholtzError> {
         let ppw = admit_resolution(surface, k)?;
         incident::validate_frequency(k, medium)?;
         validate_closed(surface)?;
         let n = surface.areas().len();
-        if reflection.len() != n
-            || reflection
-                .iter()
-                .any(|&r| !finite(r) || (!declared_active && r.abs() > 1.0 + 64.0 * f64::EPSILON))
-        {
-            return Err(bad(
-                "one finite, declared-passive reflection per boundary panel required",
-            ));
+        if count != n {
+            return Err(bad("one reflection coordinate pair per boundary panel required"));
         }
-        let pressure_coefficient: Vec<_> = reflection
-            .iter()
-            .map(|&r| (C64::ONE + r).scale(0.5))
-            .collect();
-        let flow_coefficient: Vec<_> = reflection
-            .iter()
-            .map(|&r| (C64::ONE - r).scale(0.5))
-            .collect();
+        let mut pressure_coefficient = Vec::with_capacity(n);
+        let mut flow_coefficient = Vec::with_capacity(n);
+        for index in 0..n {
+            let [pressure, flow] = coordinate(index)?;
+            pressure_coefficient.push(pressure);
+            flow_coefficient.push(flow);
+        }
         let inverse_norm: Vec<_> = pressure_coefficient
             .iter()
             .zip(&flow_coefficient)
@@ -84,7 +123,7 @@ impl<'a> PreparedReflectionBoundary<'a> {
         if inverse_norm.iter().any(|&s| !s.is_finite() || s <= 0.0) {
             return Err(bad("unrepresentable local reflection normalization"));
         }
-        let factor = if reflection.iter().all(|&r| r == C64::ONE) {
+        let factor = if flow_coefficient.iter().all(|&b| b == C64::ZERO) {
             ReflectionFactor::Rigid(PreparedBoundary::new(
                 surface,
                 k,
@@ -274,7 +313,12 @@ impl<'a> PreparedReflectionBoundary<'a> {
             // pressure-release patches then have exactly zero absorption.
             let p = self.pressure_coefficient[i] * amplitude;
             let v = (self.flow_coefficient[i] * amplitude).scale(inverse_rho_c);
-            work.add((p * v.conj()).scale(0.5 * area));
+            // Pair the constitutive coordinates before applying the solved
+            // amplitude: rotating two nearly reactive physical traces first
+            // would bury a weak resistance beneath separate rounding errors.
+            let conductance = (self.pressure_coefficient[i] * self.flow_coefficient[i].conj()).re;
+            work.add((amplitude.scale(conductance) * amplitude.conj())
+                .scale(0.5 * area * inverse_rho_c));
             apparent += 0.5 * p.abs() * v.abs() * area;
         }
         let work = work.finish().re;

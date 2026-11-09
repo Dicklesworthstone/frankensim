@@ -189,6 +189,18 @@ pub struct LayeredReflection {
     cosine: f64,
 }
 impl LayeredReflection {
+    /// Common-scaled `[pressure, Z0 * inward_normal_velocity]` at the surface.
+    ///
+    /// These bounded coordinates use exp(+i omega t) and retain the original
+    /// material trace without dividing by pressure or reconstructing `1 +/- R`.
+    /// Their common amplitude is arbitrary. A local boundary owner samples
+    /// normal incidence, then conjugates both coordinates for exp(-i omega t).
+    /// Zero pressure remains a valid pressure-release boundary, and weak
+    /// dissipative work survives when the reflected magnitude rounds to one.
+    pub fn normalized_surface_coordinates(&self) -> [C64; 2] {
+        [self.pressure, self.normalized_velocity.scale(self.cosine)]
+    }
+
     /// beta=Z0*v_n/p in exp(+i omega t). For a BEM owner with exp(-i omega t),
     /// conjugate ONCE. A pressure node has no representable finite admittance;
     /// reflection itself remains valid there. There is no panel-area factor.

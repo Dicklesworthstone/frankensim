@@ -23,6 +23,32 @@ pub use super::iterative::reflection::PreparedIterativeReflectionBoundary;
 mod reflection;
 pub use reflection::PreparedReflectionBoundary;
 
+// Bounded native [p, rho*c*v_inward] coordinates, with arbitrary common
+// complex amplitude. Re(p*conj(rho*c*v)) is the passive surface-work pairing.
+// Normalize components directly, rather than through R=(p-w)/(p+w), which
+// would erase a weak material coefficient when R rounds to either endpoint.
+pub(crate) fn normalize_reflection_coordinates(
+    [pressure, flow]: [C64; 2],
+    declared_active: bool,
+) -> Result<[C64; 2], HelmholtzError> {
+    if !finite(pressure) || !finite(flow) {
+        return Err(bad("reflection coordinates must be finite"));
+    }
+    let scale = pressure.re.abs().max(pressure.im.abs())
+        .max(flow.re.abs()).max(flow.im.abs());
+    if scale == 0.0 {
+        return Err(bad("reflection coordinates cannot both vanish"));
+    }
+    let p = C64::new(pressure.re / scale, pressure.im / scale);
+    let w = C64::new(flow.re / scale, flow.im / scale);
+    let work = (p * w.conj()).re;
+    let tolerance = 64.0 * f64::EPSILON * p.abs() * w.abs();
+    if !declared_active && work < -tolerance {
+        return Err(bad("undeclared active reflection coordinates"));
+    }
+    Ok([p, w])
+}
+
 /// Hook for a qualified nonlocal BL operator, e.g. a tangential surface
 /// Laplacian. It maps pressure [Pa] to rho*c*v_absorbed [Pa]. Its weighted
 /// quadratic form must be passive unless explicitly declared active. The
@@ -345,20 +371,20 @@ impl<'a> PorousRigidBoundary<'a> {
 ///
 /// The prepared material owner retains all source laws and the one coherent
 /// exterior-fluid snapshot. Its extended-reaction response is sampled only
-/// at normal incidence: this adapter applies that fixed admittance locally
+/// at normal incidence: this adapter applies that fixed pressure/flow law locally
 /// on every panel. It does not resolve lateral propagation within the stack,
 /// backing curvature, frame motion or exterior viscothermal attenuation.
 ///
 /// Material phasors use exp(+i omega t); BEM uses exp(-i omega t), hence the
-/// normalized admittance is conjugated. A pressure-node pole that cannot be
-/// represented by finite Robin data is explicitly refused by the material
-/// conversion, even though its pressure reflection remains well-defined.
+/// native pressure and normal-flow coordinates are conjugated together. These
+/// remain finite at pressure and flow nodes; neither an admittance division nor
+/// reconstruction from a rounded reflection coefficient is needed for a solve.
 #[derive(Clone, Copy)]
 pub struct PorousLayersBoundary<'stack, 'source> {
     layers: &'stack fs_material::porous::layers::RigidBackedLayers<'source>,
     medium: Medium,
     k: f64,
-    beta: C64,
+    response: fs_material::porous::layers::LayeredReflection,
 }
 
 impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
@@ -366,20 +392,19 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
     pub fn new(
         layers: &'stack fs_material::porous::layers::RigidBackedLayers<'source>,
     ) -> Result<Self, fs_material::MaterialError> {
-        let beta = layers.reflection(1.0)?.normalized_surface_admittance()?.conj();
+        let response = layers.reflection(1.0)?;
         let acoustic = layers.fluid().acoustic();
         let medium = Medium {
             density: acoustic.density_kg_m3(),
             sound_speed: acoustic.sound_speed_m_s(),
         };
         let k = layers.exterior_wavenumber_rad_m();
-        if !k.is_finite() || k <= 0.0 || !finite(beta) || beta.re < 0.0 {
+        if !k.is_finite() || k <= 0.0 {
             return Err(fs_material::MaterialError::State {
-                what: "porous-layer BEM boundary needs finite passive admittance and positive wavenumber"
-                    .into(),
+                what: "porous-layer BEM boundary needs positive finite wavenumber".into(),
             });
         }
-        Ok(Self { layers, medium, k, beta })
+        Ok(Self { layers, medium, k, response })
     }
 
     /// Original ordered stack, source laws and coherent fluid state.
@@ -399,8 +424,28 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
 
     /// Normal-incidence exp(-i omega t) coefficient for local Robin rows.
     /// This value also supports mixed rigid/coated panel assignments.
-    pub const fn normalized_admittance(&self) -> C64 {
-        self.beta
+    /// An exact pressure node refuses this conversion; the physical boundary
+    /// and its radiation/scattering solves remain well-defined there.
+    pub fn normalized_admittance(&self) -> Result<C64, fs_material::MaterialError> {
+        let beta = self.response.normalized_surface_admittance()?.conj();
+        if beta.re < 0.0 {
+            return Err(fs_material::MaterialError::State {
+                what: "porous-layer BEM admittance must be passive".into(),
+            });
+        }
+        Ok(beta)
+    }
+
+    /// Finite normal-incidence pressure reflection in exp(-i omega t).
+    pub const fn pressure_reflection(&self) -> C64 {
+        self.response.pressure_reflection.conj()
+    }
+
+    /// Original common-scaled `[p, rho*c*v_inward]`, in exp(-i omega t).
+    /// Use these coordinates for mixed rigid/coated reflection owners, including
+    /// pressure nodes and losses too weak to survive `1 +/- pressure_reflection`.
+    pub fn pressure_flow_coordinates(&self) -> [C64; 2] {
+        self.response.normalized_surface_coordinates().map(C64::conj)
     }
 
     /// Uniform stack through the existing dense closed-surface radiation owner.
@@ -411,15 +456,10 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
         formulation: Formulation,
     ) -> Result<BoundarySolution, HelmholtzError> {
         admit_resolution(surface, self.k)?;
-        let beta = vec![self.beta; surface.areas().len()];
-        solve_radiation_bc(
-            surface, self.k, self.medium,
-            SurfaceBc {
-                drive_velocity,
-                admittance: Admittance::Local { beta: &beta, declared_active: false },
-            },
-            formulation,
-        )
+        let coordinates = vec![self.pressure_flow_coordinates(); surface.areas().len()];
+        PreparedReflectionBoundary::from_pressure_flow(
+            surface, self.k, self.medium, &coordinates, false, formulation,
+        )?.solve(drive_velocity)
     }
 
     /// Uniform stack through the existing dense plane-wave scattering owner.
@@ -430,12 +470,20 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
         formulation: Formulation,
     ) -> Result<ScatteringSolution, HelmholtzError> {
         admit_resolution(surface, self.k)?;
-        let beta = vec![self.beta; surface.areas().len()];
-        solve_scattering_bc(
-            surface, self.k, self.medium,
-            Admittance::Local { beta: &beta, declared_active: false },
-            incident, formulation,
-        )
+        let coordinates = self.pressure_flow_coordinates();
+        if coordinates[1] == C64::ZERO {
+            return solve_scattering_bc(
+                surface, self.k, self.medium, Admittance::Rigid, incident, formulation,
+            );
+        }
+        validate_closed(surface)?;
+        let incident = IncidentTraces::from_admitted_field(
+            surface, self.k, self.medium, IncidentField::PlaneWave(incident), None,
+        )?;
+        let coordinates = vec![coordinates; surface.areas().len()];
+        PreparedReflectionBoundary::from_pressure_flow(
+            surface, self.k, self.medium, &coordinates, false, formulation,
+        )?.scatter(&incident)
     }
 
     /// The same local stack through the original bounded FMM/GMRES owner.
@@ -453,12 +501,21 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
         if gate.is_requested() {
             return Err(IterativeError::Cancelled { matvecs: 0 });
         }
-        let beta = vec![self.beta; surface.areas().len()];
-        solve_scattering_bc_iterative(
-            surface, self.k, self.medium,
-            Admittance::Local { beta: &beta, declared_active: false },
-            incident, formulation, options, gate,
-        )
+        super::iterative::admit(surface, self.k, self.medium, options)?;
+        let coordinates = self.pressure_flow_coordinates();
+        if coordinates[1] == C64::ZERO {
+            return solve_scattering_bc_iterative(
+                surface, self.k, self.medium, Admittance::Rigid, incident, formulation, options, gate,
+            );
+        }
+        validate_closed(surface)?;
+        let incident = IncidentTraces::from_admitted_field(
+            surface, self.k, self.medium, IncidentField::PlaneWave(incident), Some(gate),
+        )?;
+        let coordinates = vec![coordinates; surface.areas().len()];
+        PreparedIterativeReflectionBoundary::from_pressure_flow(
+            surface, self.k, self.medium, &coordinates, false, formulation, options, gate,
+        )?.scatter(&incident, gate)
     }
 }
 

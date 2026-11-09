@@ -748,7 +748,7 @@ impl LocalWall {
                 .normalized_admittance(),
             LocalWall::LayeredRigid { fluid, layers } => {
                 let prepared = prepare_layers(fluid, layers, omega)?;
-                PorousLayersBoundary::new(&prepared)?.normalized_admittance()
+                PorousLayersBoundary::new(&prepared)?.normalized_admittance()?
             }
             LocalWall::LayeredTransmitting { fluid, receiving_fluid, layers } => {
                 let prepared = prepare_transmitting(fluid, receiving_fluid, layers, omega)?;

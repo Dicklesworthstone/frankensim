@@ -2563,15 +2563,27 @@ the test definitions alone establish no passing numerical qualification.
 `fs_material::porous::layers::RigidBackedLayers` and carries its original
 porous source laws, layer order and coherent exterior fluid through those same
 dense radiation/scattering and iterative scattering routes. The adapter takes
-the stack's **normal-incidence** normalized admittance and conjugates it for
-the BEM phasor convention; all panel rows then use that fixed locally reacting
-coefficient. The material owner's angle-dependent, extended-reaction stack
-reflection remains a separate diagnostic, not a nonlocal BEM boundary model.
-Empty stacks reduce to rigid walls. A finite pressure reflection at a pressure
-node does not imply a representable finite Robin admittance: this conversion
-explicitly refuses such a pole. The porous-boundary tests also cover the
-single-layer reduction, porous/air-gap phase and wall work, dense/iterative
-agreement and original-fluid propagation.
+the stack's **normal-incidence** common-scaled pressure/normal-flow coordinates
+and conjugates both for the BEM phasor convention. Every panel uses that fixed
+locally reacting law. The existing dense and iterative reflection owners expose
+`from_pressure_flow` constructors; they normalize each pair once, then reuse
+their original CBIE/Burton-Miller matrices, transformed preconditioner, traces
+and work limits. Neither an admittance division nor reconstruction through
+`1 +/- R` occurs, so pressure nodes and small constitutive coefficients remain
+representable. Passive admission uses the pressure/flow work pairing; a common
+complex coordinate scale does not change the physical response.
+
+`normalized_admittance` is now an explicit fallible conversion: its pole still
+refuses, while the boundary's radiation and scattering solves remain finite.
+Surface work pairs the native material coefficients before applying the solved
+amplitude, preserving exactly reactive layers and weak resistive loss that a
+rounded reflected-power deficit would lose. The material owner's angular,
+extended-reaction response remains separate from this local boundary model.
+Empty stacks retain the original rigid path. The porous-boundary tests cover
+single-layer reduction, original-fluid propagation, quarter-wave pressure-node
+crossings, the independent Dirichlet trace, sub-roundoff resistance work,
+common complex scaling and dense/iterative agreement. These checks do not
+extend spatial-discretization accuracy or qualify a curved physical coating.
 
 
 ## Penetrable homogeneous-fluid interface

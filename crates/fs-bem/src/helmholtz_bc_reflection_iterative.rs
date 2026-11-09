@@ -7,7 +7,7 @@ use super::*;
 use crate::ComplexSum;
 use crate::helmholtz::bc::{
     Admittance, BoundarySolution, IncidentTraces, PreparedIterativeBoundary, ScatteringSolution,
-    validate_closed,
+    normalize_reflection_coordinates, validate_closed,
 };
 
 enum ReflectionFactor<'a> {
@@ -47,6 +47,57 @@ impl<'a> PreparedIterativeReflectionBoundary<'a> {
         options: &IterativeOptions,
         gate: &CancelGate,
     ) -> Result<Self, IterativeError> {
+        Self::prepare(
+            surface, k, medium, reflection.len(),
+            |index| {
+                let r = reflection[index];
+                if !finite(r) || (!declared_active && r.abs() > 1.0 + 64.0 * f64::EPSILON) {
+                    return Err(invalid("one finite, declared-passive reflection per panel required"));
+                }
+                Ok([(C64::ONE + r).scale(0.5), (C64::ONE - r).scale(0.5)])
+            },
+            declared_active, formulation, options, gate,
+        )
+    }
+
+    /// Native `[p, rho*c*v_inward]` coordinates in exp(-i omega t).
+    ///
+    /// Each pair is normalized without an impedance/admittance division or
+    /// reconstruction through `1 +/- R`. The same FMM layers, transformed
+    /// preconditioner, work limits and cancellation gates remain in use.
+    /// The common complex amplitude is arbitrary; passive surface work is
+    /// `Re(p*conj(rho*c*v_inward)) >= 0`, within arithmetic roundoff.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pressure_flow(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        coordinates: &[[C64; 2]],
+        declared_active: bool,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeError> {
+        Self::prepare(
+            surface, k, medium, coordinates.len(),
+            |index| normalize_reflection_coordinates(coordinates[index], declared_active)
+                .map_err(Into::into),
+            declared_active, formulation, options, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        count: usize,
+        mut coordinate: impl FnMut(usize) -> Result<[C64; 2], IterativeError>,
+        declared_active: bool,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeError> {
         let started = Instant::now();
         poll(gate)?;
         admit(surface, k, medium, options)?;
@@ -57,25 +108,19 @@ impl<'a> PreparedIterativeReflectionBoundary<'a> {
             ));
         }
         let rho_c = medium.density * medium.sound_speed;
-        if !rho_c.is_finite() || rho_c <= 0.0 || reflection.len() != surface.areas().len() {
+        if !rho_c.is_finite() || rho_c <= 0.0 || count != surface.areas().len() {
             return Err(invalid(
                 "finite characteristic impedance and one reflection per panel required",
             ));
         }
-        let mut pressure_coefficient = Vec::with_capacity(reflection.len());
-        let mut flow_coefficient = Vec::with_capacity(reflection.len());
-        let mut inverse_norm = Vec::with_capacity(reflection.len());
-        for (index, &r) in reflection.iter().enumerate() {
+        let mut pressure_coefficient = Vec::with_capacity(count);
+        let mut flow_coefficient = Vec::with_capacity(count);
+        let mut inverse_norm = Vec::with_capacity(count);
+        for index in 0..count {
             if index % 256 == 0 {
                 poll(gate)?;
             }
-            if !finite(r) || (!declared_active && r.abs() > 1.0 + 64.0 * f64::EPSILON) {
-                return Err(invalid(
-                    "one finite, declared-passive reflection per panel required",
-                ));
-            }
-            let a = (C64::ONE + r).scale(0.5);
-            let b = (C64::ONE - r).scale(0.5);
+            let [a, b] = coordinate(index)?;
             let inverse = 1.0 / (a.norm_sq() + b.norm_sq());
             if !inverse.is_finite() || inverse <= 0.0 {
                 return Err(invalid("unrepresentable reflection normalization"));
@@ -84,7 +129,7 @@ impl<'a> PreparedIterativeReflectionBoundary<'a> {
             flow_coefficient.push(b);
             inverse_norm.push(inverse);
         }
-        let factor = if reflection.iter().all(|&r| r == C64::ONE) {
+        let factor = if flow_coefficient.iter().all(|&b| b == C64::ZERO) {
             ReflectionFactor::Rigid(PreparedIterativeBoundary::new(
                 surface,
                 k,
@@ -112,8 +157,10 @@ impl<'a> PreparedIterativeReflectionBoundary<'a> {
             for word in [0x5245_464c, u64::from(declared_active)] {
                 operator.stamp = (operator.stamp ^ word).wrapping_mul(0x100000001b3);
             }
-            for r in reflection {
-                for word in [r.re.to_bits(), r.im.to_bits()] {
+            // Bind the actual prepared coordinates, including material loss
+            // too weak to survive a round trip through a rounded reflection.
+            for (&p, &w) in pressure_coefficient.iter().zip(&flow_coefficient) {
+                for word in [p.re.to_bits(), p.im.to_bits(), w.re.to_bits(), w.im.to_bits()] {
                     operator.stamp = (operator.stamp ^ word).wrapping_mul(0x100000001b3);
                 }
             }
@@ -388,7 +435,8 @@ impl<'a> PreparedIterativeReflectionBoundary<'a> {
             }
             let p = self.pressure_coefficient[i] * x;
             let v = (self.flow_coefficient[i] * x).scale(inverse_rho_c);
-            work.add((p * v.conj()).scale(0.5 * area));
+            let conductance = (self.pressure_coefficient[i] * self.flow_coefficient[i].conj()).re;
+            work.add((x.scale(conductance) * x.conj()).scale(0.5 * area * inverse_rho_c));
             apparent += 0.5 * p.abs() * v.abs() * area;
         }
         let work = work.finish().re;

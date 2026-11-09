@@ -186,9 +186,9 @@ fn layered_walls_keep_native_reflection_phase_air_gaps_and_layer_order() {
         assert_eq!(
             beta,
             vec![
-                native.normalized_admittance(),
+                native.normalized_admittance().unwrap(),
                 C64::ZERO,
-                native.normalized_admittance()
+                native.normalized_admittance().unwrap()
             ]
         );
         assert!(beta[0].re > 0.0);

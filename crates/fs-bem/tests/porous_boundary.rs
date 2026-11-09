@@ -172,13 +172,13 @@ fn layer_boundary_reduces_to_single_porous_coating_in_its_original_fluid() {
         let layered = PorousLayersBoundary::new(&stack).unwrap();
         let single = PorousRigidBoundary::new(&law, &fluid, TAU * 500.0, 0.06).unwrap();
         let scale = single.normalized_admittance().abs().max(1.0);
-        assert!((layered.normalized_admittance() - single.normalized_admittance()).abs()
+        assert!((layered.normalized_admittance().unwrap() - single.normalized_admittance()).abs()
             < 1e-12 * scale);
         assert!(std::ptr::eq(layered.layers(), &stack));
         assert_eq!(*layered.layers().fluid(), fluid);
         assert_eq!(layered.medium(), single.medium());
         assert_eq!(layered.wavenumber_rad_m(), single.wavenumber_rad_m());
-        let beta = layered.normalized_admittance();
+        let beta = layered.normalized_admittance().unwrap();
         let reflection = (C64::ONE - beta) / (C64::ONE + beta);
         assert!((reflection - stack.reflection(1.0).unwrap().pressure_reflection.conj()).abs()
             < 1e-12);
@@ -201,7 +201,7 @@ fn porous_gap_stack_drives_dense_and_iterative_robin_owners_with_physical_work()
     let stack = RigidBackedLayers::new(&fluid, TAU * 150.0, &layers).unwrap();
     let boundary = PorousLayersBoundary::new(&stack).unwrap();
     let normal = stack.reflection(1.0).unwrap();
-    let beta = boundary.normalized_admittance();
+    let beta = boundary.normalized_admittance().unwrap();
     // Independent conventional cos/sin transfer matrices for the porous
     // slab and fluid gap, evaluated in the BEM exp(-i omega t) convention.
     let expected_beta = C64::new(0.027714988312696837, -0.25759369018286377);
@@ -273,7 +273,7 @@ fn empty_layer_boundary_is_rigid_and_keeps_iterative_cancellation() {
     let fluid = fluid(1.7, 290.0, 2.1e-5);
     let stack = RigidBackedLayers::new(&fluid, TAU * 150.0, &[]).unwrap();
     let boundary = PorousLayersBoundary::new(&stack).unwrap();
-    assert_eq!(boundary.normalized_admittance(), C64::ZERO);
+    assert_eq!(boundary.normalized_admittance().unwrap(), C64::ZERO);
     assert_eq!(boundary.medium().density, 1.7);
     assert_eq!(boundary.medium().sound_speed, 290.0);
     assert_eq!(boundary.wavenumber_rad_m(), TAU * 150.0 / 290.0);
@@ -299,4 +299,166 @@ fn empty_layer_boundary_is_rigid_and_keeps_iterative_cancellation() {
         ),
         Err(IterativeError::Cancelled { matvecs: 0 })
     ));
+}
+
+fn reflection_options() -> fs_bem::helmholtz::IterativeOptions {
+    use fs_bem::helmholtz::{IterativeOptions, Preconditioner};
+    IterativeOptions {
+        tol: 2e-11,
+        restart: 40,
+        max_iters: 100,
+        leaf_capacity: 128,
+        precond: Preconditioner::NearFieldBlockJacobi { max_block_panels: 80 },
+        ..IterativeOptions::default()
+    }
+}
+
+#[test]
+fn quarter_wave_layer_crosses_pressure_nodes_without_artificial_loss() {
+    use fs_bem::helmholtz::bc::PorousLayersBoundary;
+    use fs_exec::CancelGate;
+    use fs_material::porous::layers::{Layer, RigidBackedLayers};
+
+    // G1/G3: the exact rigid-backed fluid layer has R=exp(2 i k d).
+    // Its quarter-wave pressure node is a physical boundary, not a pole in
+    // the scattered field. Both sides of the node retain the original phase.
+    let fluid = fluid(1.2, 340.0, 1.81e-5);
+    let k = 3.0;
+    let surface = SpherePanels::icosphere(0.15, 1).unwrap();
+    let incident = PlaneWave {
+        direction: [0.0, 0.0, 1.0],
+        amplitude_pa: C64::new(0.8, 0.2),
+    };
+    for offset in [-1e-8, 0.0, 1e-8] {
+        let phase = std::f64::consts::FRAC_PI_2 + offset;
+        let stack = RigidBackedLayers::new(
+            &fluid, k * 340.0, &[Layer::FluidGap { thickness_m: phase / k }],
+        ).unwrap();
+        let boundary = PorousLayersBoundary::new(&stack).unwrap();
+        let expected = C64::new((2.0 * phase).cos(), (2.0 * phase).sin());
+        assert!((boundary.pressure_reflection() - expected).abs() < 2e-15);
+        let [p, w] = boundary.pressure_flow_coordinates();
+        assert_eq!((p * w.conj()).re, 0.0);
+        assert!(p.abs() < 2e-8 && w.abs() >= 1.0);
+        let dense = boundary.solve_scattering(
+            &surface, incident, Formulation::BurtonMiller,
+        ).unwrap();
+        let total_p = dense.total_pressure_pa();
+        let total_v = dense.total_normal_velocity_m_s();
+        for (&pressure, &velocity) in total_p.iter().zip(&total_v) {
+            assert!((w * pressure + p * velocity.scale(408.0)).abs() < 2e-14);
+        }
+        assert_eq!(dense.absorbed_power_w, 0.0);
+        if offset == 0.0 {
+            assert!(boundary.normalized_admittance().unwrap().abs() > 1e14);
+            assert!(total_p.iter().all(|pressure| pressure.abs() < 2e-14));
+            let drive = vec![C64::from_re(0.01); surface.areas().len()];
+            let driven = boundary.solve_radiation(
+                &surface, &drive, Formulation::BurtonMiller,
+            ).unwrap();
+            assert!(driven.radiation.pressure.iter().all(|p| p.abs() < 2e-13));
+            assert!(driven.radiation.velocity.iter().all(|v| v.abs() < 2e-15));
+            assert_eq!(driven.absorbed_power_w, 0.0);
+        }
+        let (iterative, report, _) = boundary.solve_scattering_iterative(
+            &surface, incident, Formulation::BurtonMiller, &reflection_options(),
+            &CancelGate::new_clock_free(),
+        ).unwrap();
+        assert!(report.rel_residual < 1e-9);
+        assert_eq!(iterative.absorbed_power_w, 0.0);
+        for (&actual, &expected) in iterative.scattered.velocity.iter().zip(&dense.scattered.velocity) {
+            assert!((actual - expected).abs() < 2e-10);
+        }
+    }
+}
+
+#[test]
+fn native_coordinates_keep_exact_pressure_release_and_sub_roundoff_wall_loss() {
+    use fs_bem::helmholtz::bc::{
+        IncidentField, IncidentTraces, PreparedIterativeReflectionBoundary,
+        PreparedReflectionBoundary,
+    };
+    use fs_bem::helmholtz::Medium;
+    use fs_exec::CancelGate;
+
+    // G0/G1: p=0 imposes the independent Dirichlet oracle p_s=-p_incident.
+    // A small real Z/(rho*c) still dissipates rho*c*Re(Z/(rho*c))*|v|²/2,
+    // even when its reflection rounds to exactly -1. Use physical total
+    // velocity for that independent work check, never 1-|R|².
+    let surface = SpherePanels::icosphere(0.15, 1).unwrap();
+    let medium = Medium { density: 1.2, sound_speed: 340.0 };
+    let incident = IncidentTraces::from_field(
+        &surface, 3.0, medium,
+        IncidentField::PlaneWave(PlaneWave {
+            direction: [0.0, 0.0, 1.0],
+            amplitude_pa: C64::new(0.8, 0.2),
+        }),
+        1e-4,
+    ).unwrap();
+    let gate = CancelGate::new_clock_free();
+    for resistance in [0.0, 1e-20] {
+        let p = C64::from_re(resistance);
+        assert_eq!((p - C64::ONE) / (p + C64::ONE), -C64::ONE);
+        let coefficients = vec![[p, C64::ONE]; surface.areas().len()];
+        let dense = PreparedReflectionBoundary::from_pressure_flow(
+            &surface, 3.0, medium, &coefficients, false, Formulation::BurtonMiller,
+        ).unwrap().scatter(&incident).unwrap();
+        let expected_work: f64 = dense.total_normal_velocity_m_s().iter()
+            .zip(surface.areas())
+            .map(|(&v, &area)| 0.5 * 408.0 * resistance * v.norm_sq() * area)
+            .sum();
+        if resistance == 0.0 {
+            assert_eq!(dense.absorbed_power_w, 0.0);
+            assert!(dense.total_pressure_pa().iter().all(|p| p.abs() < 2e-15));
+        } else {
+            assert!(expected_work > 0.0 && dense.absorbed_power_w > 0.0);
+            assert!((dense.absorbed_power_w / expected_work - 1.0).abs() < 2e-12);
+        }
+        let (iterative, report, _) = PreparedIterativeReflectionBoundary::from_pressure_flow(
+            &surface, 3.0, medium, &coefficients, false, Formulation::BurtonMiller,
+            &reflection_options(), &gate,
+        ).unwrap().scatter(&incident, &gate).unwrap();
+        assert!(report.rel_residual < 1e-9);
+        assert!(iterative.absorbed_power_w >= 0.0);
+        assert!((iterative.absorbed_power_w - dense.absorbed_power_w).abs()
+            <= 1e-8 * dense.absorbed_power_w);
+        for (&actual, &expected) in iterative.scattered.velocity.iter().zip(&dense.scattered.velocity) {
+            assert!((actual - expected).abs() < 2e-10);
+        }
+    }
+}
+
+#[test]
+fn native_coordinates_preserve_common_complex_scaling_and_refuse_bad_laws() {
+    use fs_bem::helmholtz::bc::PreparedReflectionBoundary;
+    use fs_bem::helmholtz::Medium;
+
+    // G0/G3: a common nonzero complex scale is only a coordinate choice.
+    let surface = SpherePanels::icosphere(0.15, 0).unwrap();
+    let medium = Medium { density: 1.2, sound_speed: 340.0 };
+    let n = surface.areas().len();
+    let pair = [C64::new(0.2, -0.4), C64::new(1.0, 0.1)];
+    let drive = vec![C64::new(0.01, -0.003); n];
+    let base = PreparedReflectionBoundary::from_pressure_flow(
+        &surface, 3.0, medium, &vec![pair; n], false, Formulation::BurtonMiller,
+    ).unwrap().solve(&drive).unwrap();
+    for scale in [C64::new(0.6, 0.8), C64::from_re(1e100), C64::from_re(1e-100)] {
+        let scaled = pair.map(|value| value * scale);
+        let result = PreparedReflectionBoundary::from_pressure_flow(
+            &surface, 3.0, medium, &vec![scaled; n], false, Formulation::BurtonMiller,
+        ).unwrap().solve(&drive).unwrap();
+        for (&actual, &expected) in result.radiation.pressure.iter().zip(&base.radiation.pressure) {
+            assert!((actual - expected).abs() < 5e-12);
+        }
+        assert!((result.absorbed_power_w / base.absorbed_power_w - 1.0).abs() < 5e-12);
+    }
+    for invalid in [
+        [C64::ZERO, C64::ZERO],
+        [C64::new(f64::NAN, 0.0), C64::ONE],
+        [-C64::ONE, C64::ONE],
+    ] {
+        assert!(PreparedReflectionBoundary::from_pressure_flow(
+            &surface, 3.0, medium, &vec![invalid; n], false, Formulation::BurtonMiller,
+        ).is_err());
+    }
 }
