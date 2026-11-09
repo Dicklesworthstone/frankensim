@@ -1,5 +1,9 @@
 //! Coherent tone-bank derivatives using the original scalar numerical owners.
 
+mod affine;
+pub use affine::{ModalAffineTonePullback, ModalAffineToneSourcePullback};
+
+use super::super::sensitivity::AffineForceSensitivity;
 use super::{MAX_HARMONIC_TONES, PreparedModalTones, Sum, invalid};
 use crate::time::{
     HarmonicForcePhasePullback, LinearForceParameterSensitivity, ModalAcousticState,
@@ -14,10 +18,12 @@ pub struct ModalToneSensitivityBudget {
     /// Allocator bookkeeping and compiler stack layout are not measured.
     pub maximum_storage_bytes: usize,
     /// Sum of `8192+512*d` per mode/distinct tone, where d is the original
-    /// scalar preparation's number of interval doublings.
+    /// scalar preparation's number of interval doublings. Affine envelopes
+    /// instead use `24576+2048*d`, including quadratic clock moments.
     pub maximum_preparation_work: usize,
     /// One mode's forward or reverse query score: `512*(K+T)+512` for K
-    /// distinct and T original tones. These scores are not timing guarantees.
+    /// distinct and T original tones. Affine envelopes use `1024*(K+T)+1024`.
+    /// These scores are not timing guarantees.
     pub maximum_query_work: usize,
 }
 
@@ -34,7 +40,7 @@ pub struct ModalToneSourceSensitivity {
 /// Original coherent endpoint and local physical derivatives for one mode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalToneSensitivityFrame {
-    /// Exactly the original constant-tone bank endpoint.
+    /// Exactly the original bank endpoint under its prepared envelope law.
     pub state: ModalAcousticState,
     /// Independent k=omega^2 and physical c partials, with one initial state.
     pub parameters: LinearForceParameterSensitivity,
@@ -93,14 +99,16 @@ impl ModalTonePullback {
 pub struct PreparedModalToneSensitivity<'a> {
     bank: &'a PreparedModalTones,
     coefficients: Box<[PreparedHarmonicForceSensitivity]>,
+    affine: Option<Box<[AffineForceSensitivity]>>,
 }
 
 impl PreparedModalTones {
     /// Prepare all mode/distinct-tone derivatives under additional explicit
     /// resources. No bank, model or physical state is changed on refusal.
     ///
-    /// Affine envelopes refuse: their frequency derivative needs a quadratic
-    /// time envelope, which this constant-tone derivative owner does not supply.
+    /// Affine banks additionally prepare linear-envelope coefficient tangents
+    /// and exact quadratic-envelope clock moments. Their queries require both
+    /// endpoints through advance_mode_affine/pullback_mode_affine.
     /// Cancellation is polled before allocation and between scalar preparations.
     pub fn prepare_sensitivities(
         &self,
@@ -108,27 +116,33 @@ impl PreparedModalTones {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedModalToneSensitivity<'_>, ModalAcousticTimeError> {
         poll(&mut cancelled)?;
-        if self.affine {
-            return Err(invalid(
-                "tone sensitivities require constant quadrature envelopes",
-            ));
-        }
         let count = self
             .mode_count()
             .checked_mul(self.unique.len())
             .ok_or_else(|| invalid("tone sensitivity cache extent overflow"))?;
         let scalar_size = core::mem::size_of::<PreparedHarmonicForceSensitivity>();
-        let scratch = core::mem::size_of::<ModalToneSensitivityFrame>()
+        let affine_size = if self.affine {
+            core::mem::size_of::<AffineForceSensitivity>()
+        } else {
+            0
+        };
+        let mut scratch = core::mem::size_of::<ModalToneSensitivityFrame>()
             + core::mem::size_of::<ModalTonePullback>()
             + core::mem::size_of::<[[f64; 4]; MAX_HARMONIC_TONES]>()
             + core::mem::size_of::<[[f64; MAX_HARMONIC_TONES]; 2]>()
             + core::mem::size_of::<[Sum; 2 * MAX_HARMONIC_TONES]>()
             + core::mem::size_of::<[Sum; 5]>()
             + scalar_size;
-        let storage = (count as u128) * scalar_size as u128
+        if self.affine {
+            scratch += core::mem::size_of::<ModalAffineTonePullback>()
+                + core::mem::size_of::<[[f64; MAX_HARMONIC_TONES]; 2]>()
+                + affine_size;
+        }
+        let storage = (count as u128) * (scalar_size + affine_size) as u128
             + scratch as u128
             + core::mem::size_of::<PreparedModalToneSensitivity<'_>>() as u128
-            + core::mem::size_of::<Vec<PreparedHarmonicForceSensitivity>>() as u128;
+            + core::mem::size_of::<Vec<PreparedHarmonicForceSensitivity>>() as u128
+            + core::mem::size_of::<Vec<AffineForceSensitivity>>() as u128;
         cap(
             "tone sensitivity storage bytes",
             storage,
@@ -136,7 +150,8 @@ impl PreparedModalTones {
         )?;
         cap(
             "tone sensitivity query work score",
-            (512 * (self.unique.len() + self.tone_count()) + 512) as u128,
+            ((if self.affine { 1024 } else { 512 }) * (self.unique.len() + self.tone_count() + 1))
+                as u128,
             budget.maximum_query_work,
         )?;
         let mut work = 0u128;
@@ -153,7 +168,11 @@ impl PreparedModalTones {
                     scale *= 0.5;
                     doublings += 1;
                 }
-                work += 8192 + 512 * doublings;
+                work += if self.affine {
+                    24576 + 2048 * doublings
+                } else {
+                    8192 + 512 * doublings
+                };
                 cap(
                     "tone sensitivity preparation work score",
                     work,
@@ -163,16 +182,22 @@ impl PreparedModalTones {
         }
         poll(&mut cancelled)?;
         let mut coefficients = Vec::with_capacity(count);
+        let mut affine = self.affine.then(|| Vec::with_capacity(count));
         for mode in &self.modes {
             for motion in &mode.motion {
                 poll(&mut cancelled)?;
                 coefficients.push(motion.prepare_sensitivities()?);
+                if let Some(extra) = &mut affine {
+                    poll(&mut cancelled)?;
+                    extra.push(AffineForceSensitivity::prepare(motion)?);
+                }
             }
         }
         poll(&mut cancelled)?;
         Ok(PreparedModalToneSensitivity {
             bank: self,
             coefficients: coefficients.into_boxed_slice(),
+            affine: affine.map(Vec::into_boxed_slice),
         })
     }
 
@@ -216,6 +241,11 @@ impl PreparedModalToneSensitivity<'_> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ModalToneSensitivityFrame, ModalAcousticTimeError> {
         poll(&mut cancelled)?;
+        if self.bank.affine {
+            return Err(invalid(
+                "affine sensitivities require both envelope endpoints",
+            ));
+        }
         let mode = self
             .bank
             .modes

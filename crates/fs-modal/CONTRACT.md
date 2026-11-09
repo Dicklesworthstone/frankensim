@@ -1054,7 +1054,8 @@ close destructive beats, exact duplicate cancellation, resonance, multimode
 subdivision/replay, tiny near-DC heat, the active 32nd tone and budget refusals.
 
 `PreparedModalTones::prepare_sensitivities` cold-prepares optional exact
-constant-tone motion derivatives for every mode and distinct nominal frequency.
+constant-tone or affine-envelope motion derivatives for every mode and distinct
+nominal frequency.
 The returned `PreparedModalToneSensitivity` borrows the unchanged bank and
 reuses the original scalar harmonic sensitivity caches. `advance_mode` returns
 the original coherent endpoint, independent physical k/c partials, and each
@@ -1089,10 +1090,10 @@ Admission precedes allocation; cancellation is polled during admission, between
 scalar preparations and query contributions, and before publication. A refusal
 returns no partial derivative and changes no bank/model state. Pure mode queries
 leave physical state and observation admission to the caller, as do the original
-mode previews. Affine envelopes explicitly refuse because their frequency
-partial requires a quadratic time envelope; it is not approximated by this
-constant-tone entry. Work/heat, changing duration, basis/mass normalization and
-nonsmooth objective derivatives remain outside these motion partials.
+mode previews. Constant and affine preparation/query laws must agree. Work/heat,
+changing duration, basis/mass normalization and nonsmooth objective derivatives
+remain outside these motion partials; the separate scalar power API above owns
+constant-envelope work and heat gradients.
 
 G1/G3 checks in `tests/tone_sensitivities.rs` compare independent physical
 variational ODEs across free, resonant, critical, overdamped and near-frequency
@@ -1101,6 +1102,33 @@ cancellation; resolve tiny near-DC equilibrium damping derivatives relatively;
 and compare a multimode unequal-interval source/state reverse sweep with the
 complete interval and independent ODEs. Transpose, budget, affine-law and
 cancellation refusals cover reusable bank queries.
+
+For affine banks, `advance_mode_affine` retains the original coherent endpoint
+and returns k/c plus caller-ordered source-frequency/common-phase partials.
+`pullback_mode_affine` returns initial-state, both envelope-endpoint pairs,
+physical k/c and independent source-clock/phase cotangents. Both endpoint pairs
+use the interval-start carrier basis. Exact duplicates share nominal motion
+and mechanical tangents but retain independent source columns, including
+complete destructive cancellation.
+
+The affine owner differentiates the existing entire linear-envelope action
+and its doubling. Source-frequency differentiation integrates the required
+quadratic envelope. Separately doubled complementary Bernstein moments retain
+small start-envelope and clock responses after long decay without subtracting
+nearly equal constant/end moments. Aggregated k/c forcing still uses one held
+force imbalance and one homogeneous state. Source-clock queries contract the
+original endpoint pairs directly, so individually overflowing endpoint
+differences need not erase an admitted coalesced cancellation. Affine storage
+and preparation/query work scores are admitted separately; constant banks
+retain their smaller coefficient path. Warm queries allocate nothing and
+evaluate no transcendentals. Reverse trajectories sum adjacent knot
+contributions, transpose carrier-basis rotations and include the accumulated
+source-phase clock chain. Refusal and cancellation return no partial result.
+
+Six G1/G3 regressions in `tests/affine_tone_sensitivities.rs` cover independent
+variational ODEs, the complete endpoint transpose, constant-envelope reduction,
+duplicate cancellation, tiny near-DC damping, long-decay clock moments,
+unequal-step multimode reverse trajectories, and budget/law/cancellation reuse.
 
 `LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
 initial displacement/velocity and both endpoint forces, with frequency, damping

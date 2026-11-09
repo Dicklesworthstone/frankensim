@@ -3,8 +3,9 @@
 mod power;
 mod sensitivity;
 pub use sensitivity::{
-    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
-    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedModalToneSensitivity,
+    ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalTonePullback,
+    ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,
+    ModalToneSourceSensitivity, PreparedModalToneSensitivity,
 };
 
 use super::super::{

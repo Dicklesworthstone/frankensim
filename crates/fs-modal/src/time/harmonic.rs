@@ -15,7 +15,8 @@ mod runtime;
 mod sensitivity;
 mod tones;
 pub use energy::{
-    HarmonicForceFrame, HarmonicPowerGradient, PreparedHarmonicForce, PreparedHarmonicPowerSensitivity,
+    HarmonicForceFrame, HarmonicPowerGradient, PreparedHarmonicForce,
+    PreparedHarmonicPowerSensitivity,
 };
 pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
@@ -24,9 +25,10 @@ pub use sensitivity::{
     HarmonicForceSensitivityFrame, PreparedHarmonicForceSensitivity,
 };
 pub use tones::{
-    MAX_HARMONIC_TONES, ModalToneBudget, ModalTonePullback, ModalToneSensitivityBudget,
-    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
-    PreparedModalToneSensitivity, PreparedModalTones,
+    MAX_HARMONIC_TONES, ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalToneBudget,
+    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
+    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedModalToneSensitivity,
+    PreparedModalTones,
 };
 
 /// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where

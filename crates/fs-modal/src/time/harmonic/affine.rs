@@ -86,3 +86,109 @@ pub(super) fn double_delta(
         0.25 * (restoring * qs + flow.velocity_retention * vs + cv * sine + sv * cosine),
     ]
 }
+
+/// Complementary endpoint moments used by affine-envelope pullbacks.
+/// `u=t/h`: start integrates `1-u`, clock_start integrates `u*(1-u)` and
+/// clock_end integrates `u*u`, all multiplying the rotating quadratures.
+/// Keeping the complementary moments separately avoids subtracting nearly
+/// equal constant/ramp gains after a long physical decay.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EndpointMoments {
+    pub(super) start: [f64; 4],
+    pub(super) clock_start: [f64; 4],
+    pub(super) clock_end: [f64; 4],
+}
+
+impl EndpointMoments {
+    pub(super) fn small(
+        angle: f64,
+        drag: f64,
+        phase: f64,
+        force: [f64; 4],
+        delta: [f64; 4],
+    ) -> Self {
+        let mut quadratic = [0.0; 4];
+        for column in 0..2 {
+            // The original rotating linear-envelope action with one more
+            // polynomial level: D'=phase*J*D+2*Q, Q'=phase*J*Q.
+            let mut term = [0.0; 8];
+            term[6 + column] = 1.0;
+            for order in 1..=24 {
+                let inverse = 1.0 / f64::from(order);
+                term = [
+                    term[1] * inverse,
+                    (-angle * angle * term[0] - drag * term[1] + term[2]) * inverse,
+                    (phase * term[3] + term[4]) * inverse,
+                    (-phase * term[2] + term[5]) * inverse,
+                    (phase * term[5] + 2.0 * term[6]) * inverse,
+                    (-phase * term[4] + 2.0 * term[7]) * inverse,
+                    phase * term[7] * inverse,
+                    -phase * term[6] * inverse,
+                ];
+                quadratic[column] += term[0];
+                quadratic[2 + column] += term[1];
+            }
+        }
+        // These differences are well separated on the resolved small step;
+        // subsequent doublings never form a complementary moment by subtraction.
+        Self {
+            start: std::array::from_fn(|i| force[i] - delta[i]),
+            clock_start: std::array::from_fn(|i| delta[i] - quadratic[i]),
+            clock_end: quadratic,
+        }
+    }
+
+    pub(super) fn double(
+        self,
+        force: [f64; 4],
+        delta: [f64; 4],
+        flow: DampedTransition,
+        phase: f64,
+    ) -> Self {
+        let (sine, cosine) = det::sin_cos(phase);
+        let restoring = -(flow.angle * flow.b) * flow.angle;
+        let combine = |first: [f64; 4], second: [f64; 4], scale: f64| {
+            [
+                scale
+                    * (flow.position_retention * first[0] + flow.b * first[2] + cosine * second[0]
+                        - sine * second[1]),
+                scale
+                    * (flow.position_retention * first[1]
+                        + flow.b * first[3]
+                        + sine * second[0]
+                        + cosine * second[1]),
+                2.0 * scale
+                    * (restoring * first[0]
+                        + flow.velocity_retention * first[2]
+                        + cosine * second[2]
+                        - sine * second[3]),
+                2.0 * scale
+                    * (restoring * first[1]
+                        + flow.velocity_retention * first[3]
+                        + sine * second[2]
+                        + cosine * second[3]),
+            ]
+        };
+        Self {
+            // 1-u is (1+(1-v))/2 on the first half and (1-v)/2
+            // on the second, whose carrier has advanced by phase.
+            start: combine(
+                std::array::from_fn(|i| force[i] + self.start[i]),
+                self.start,
+                0.125,
+            ),
+            // u*(1-u) is (v+v*(1-v))/4, then ((1-v)+v*(1-v))/4.
+            clock_start: combine(
+                std::array::from_fn(|i| delta[i] + self.clock_start[i]),
+                std::array::from_fn(|i| self.start[i] + self.clock_start[i]),
+                0.0625,
+            ),
+            // u^2 is v^2/4, then (1+2*v+v^2)/4.
+            clock_end: combine(
+                self.clock_end,
+                std::array::from_fn(|i| force[i] + 2.0 * delta[i] + self.clock_end[i]),
+                0.0625,
+            ),
+        }
+    }
+}

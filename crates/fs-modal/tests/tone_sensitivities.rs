@@ -419,5 +419,10 @@ fn additional_budgets_affine_laws_and_cancelled_queries_refuse_without_mutation(
         ModalToneBudget::realtime_reference(),
     )
     .unwrap();
-    assert!(affine.prepare_sensitivities(budget(), || false).is_err());
+    let affine = affine.prepare_sensitivities(budget(), || false).unwrap();
+    assert!(
+        affine
+            .advance_mode(0, state(0.0, 0.0), &[1.0], &[0.0], || false)
+            .is_err()
+    );
 }

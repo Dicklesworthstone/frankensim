@@ -16,7 +16,9 @@ use crate::time::forcing::{
 };
 use fs_math::det;
 
+mod affine;
 mod clock;
+pub(super) use affine::AffineForceSensitivity;
 pub use clock::HarmonicForcePhasePullback;
 
 /// Endpoint partials in the original mass-normalized physical coordinates.
