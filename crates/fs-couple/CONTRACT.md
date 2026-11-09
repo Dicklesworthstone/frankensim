@@ -11599,6 +11599,70 @@ heat and three-cell thermal references plus retained-memory, source, late
 failure, retry and cancellation cases. Source checks do not establish executed
 runtime validation.
 
+
+## Endpoint source-density natural convection on finite enthalpy cells
+
+`LaminarEnthalpy::advance_boussinesq` adds natural convection to the original
+joint BDF1 momentum/rheology and finite enthalpy endpoint. Each actual thermal
+and objective-shear query retains its original coherent `ThermalFluidTransport`
+owner. The shared native `BoussinesqMaterial::try_new` and `BoussinesqConfig<2>`
+admit that source's density/Cp departures and preserve reference rho0/Cp with
+the SAME source's local dynamic viscosity and conductivity. The unprojected
+thermal source, original source object/receipts, and projected numerical view
+remain separately readable. No second density fit or material adapter is
+invented.
+
+The original triangle geometry, reference fluid mass and identity-bearing
+caloric law remain unchanged. That native caloric law still determines h(T)
+and stored energy; projected transport Cp never manufactures or replaces it.
+The caller associates the source with that caloric model and selects physically
+small departure bounds. These bounds admit the declared Boussinesq
+approximation; they are not a quantified modeling-error or validity certificate.
+
+Only `(rho_source - rho0)*gravity` is added to momentum. The held additional
+force must exclude buoyancy and the removed hydrostatic reference load.
+Boundary traction and returned pressure/reactions use
+`p_reduced = p_physical - rho0*gravity.(x-x_reference)`; physical absolute
+pressure/stress reconstruction requires the caller's explicit hydrostatic
+datum. The original native cell-force entry prepares viscosity and buoyancy
+together for each candidate and again for the final nonlinear residual,
+including original constrained reactions. No coordinate lookup or lagged
+thermal force is substituted.
+
+The existing sign-split mass/enthalpy transport, original bulk/slip heat,
+bounded nonlinear work and independent local/global thermal acceptance are
+shared with ordinary `advance`. Source gravity does not appear as a second
+thermal source. `report.buoyancy` separately retains the accepted force of each
+original cell, actual density/Cp departures, and the physical volume integral
+of force dot accepted affine BDM velocity. Its reported work is that endpoint
+power times the actual BDF1 interval. It is not gravitational-potential change,
+viscous heat or a whole-system passivity certificate.
+
+Source bounds, inconsistent thermal views, invalid/unrepresentable forces,
+native momentum/thermal failure, budgets and cancellation preserve both input
+histories. The ordinary fixed-density entry retains its public signature and
+thermal gates. Its previously invalid material-error variant was corrected to
+the original native `MaterialError::State` as a concrete compilation blocker.
+This remains fixed-mesh/reference-inventory, first-order Boussinesq coupling,
+without thermal expansion/remeshing, variable-mass transport or an inferred EOS.
+
+Independent bounded source/API and energy-account reviews checked the original
+projection, native force coupling and thermal accounting. Final compatibility
+checking corrected the import to the existing PUBLIC
+`fs_lbm::material::transport::boussinesq` path; no dependency or feature was
+added. The coupled regression groups specify zero-departure compatibility,
+endpoint heating with both signs of independent buoyancy work and unchanged
+native caloric storage, and source/departure/cancellation atomicity.
+
+After executor recovery, parser/formatter passes completed on the coupled
+production files and new regression child, and focused whitespace checks
+passed. The parent test module changed only by adding its child declaration.
+The native hydrostatic/circulation/refusal tests and coupled FEM/thermal tests
+remain UNEXECUTED. An earlier bounded genuine-source compiler run reached the
+native force entry and exposed two API errors that were corrected, but did not
+produce a complete native artifact. Recovery removed its temporary numerical
+dependencies; no broad rebuild or passing integration run is claimed.
+
 ## Conducting finite channel walls in molecular vessel recoil
 
 `GasRocketState::advance_effusion_channels_with_conduction` connects the

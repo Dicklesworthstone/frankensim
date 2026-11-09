@@ -1,5 +1,7 @@
 //! Independent control-volume, source-rheology and physical heat regressions.
 
+mod buoyancy;
+
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};

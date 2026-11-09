@@ -38,6 +38,10 @@ use crate::stokes_motion::heating::{StokesHeatFailure, StokesSlipHeatRoute, Stok
 mod binding;
 use binding::ThermalBinding;
 
+/// Source-density buoyancy on the same coupled native thermal/momentum owner.
+pub mod boussinesq;
+use boussinesq::LaminarBuoyancyReport;
+
 /// The accepted BDM velocity and its physical clock; neither is mutated.
 #[derive(Clone, Copy)]
 pub struct LaminarEnthalpyHistory<'a> {
@@ -167,6 +171,9 @@ pub struct LaminarEnthalpyReport<T> {
     /// Delta H - bulk heat - slip heat - net stream enthalpy - other heat.
     /// Internal advective/conductive transfers cancel; nothing is repaired.
     pub thermal_balance_residual_j: f64,
+    /// Present only for explicitly requested source-density buoyancy. Its
+    /// mechanical work is separate from every heat term above.
+    pub buoyancy: Option<LaminarBuoyancyReport>,
 }
 
 /// Joint accepted flow/material and thermal histories. A failed attempt never
@@ -208,6 +215,7 @@ struct Endpoint<G, T> {
     flow: MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
     exchange: T,
     powers_w: [f64; 4],
+    buoyancy: Option<LaminarBuoyancyReport>,
 }
 
 impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 'source, F> {
@@ -285,6 +293,57 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             &MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
         ) -> Result<LaminarHeatExchange<T>, E>,
     ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>> {
+        self.advance_with_flow(
+            cx, thermal, target_s, input, controls, energy_guess_j,
+            |temperatures, duration_s| {
+                self.flow.bdf1_navier_stokes_mixed_rheology_step(
+                    input.force_density, input.boundaries, input.history.velocity_m_s,
+                    duration_s, controls.momentum,
+                    |point, reference| {
+                        if cx.checkpoint().is_err() {
+                            return Err(material_error("coupled flow/enthalpy operation cancelled"));
+                        }
+                        let temperature = temperatures[point.cell];
+                        let source = resolve_material(point, temperature, self.flow.material())?;
+                        let material = thermal_source(source, temperature)?;
+                        if material.state.transport().density_kg_m3() != reference.density_kg_m3() {
+                            return Err(material_error("original fixed-density thermal flow must retain reference density"));
+                        }
+                        Ok(material)
+                    },
+                ).map(|flow| (flow, None))
+            },
+            exchange,
+        )
+    }
+
+    // The thermal residual, source/stream admission and transactional endpoint
+    // gates are shared unchanged by held forces and explicit material buoyancy.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn advance_with_flow<'m, G, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        input: LaminarEnthalpyInput<'_>,
+        controls: LaminarEnthalpyControls,
+        energy_guess_j: &[f64],
+        resolve_flow: impl Fn(
+            &[f64],
+            f64,
+        ) -> Result<
+            (
+                MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
+                Option<LaminarBuoyancyReport>,
+            ),
+            MaterialFluxError,
+        >,
+        exchange: impl Fn(
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
+            &MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
+        ) -> Result<LaminarHeatExchange<T>, E>,
+    ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>> {
         checkpoint(cx)?;
         let duration_s = target_s - thermal.time_s();
         if input.history.time_s != thermal.time_s()
@@ -336,43 +395,38 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 |candidate| {
                     self.binding.check(cx, self.system, candidate)?;
                     let temperatures = self.binding.temperatures(cx, candidate)?;
-                    let flow = self.flow.bdf1_navier_stokes_mixed_rheology_step(
-                        input.force_density, input.boundaries, input.history.velocity_m_s,
-                        duration_s, controls.momentum,
-                        |point, reference| {
-                            if cx.checkpoint().is_err() {
-                                return Err(material_error("coupled flow/enthalpy operation cancelled"));
-                            }
-                            let temperature = temperatures[point.cell];
-                            let source = resolve_material(point, temperature, self.flow.material())?;
-                            let state = source.thermal_transport_state()?;
-                            if state.transport() != source.transport_state()?
-                                || state.transport().density_kg_m3() != reference.density_kg_m3()
-                                || (state.temperature_k() - temperature).abs()
-                                    > 64.0 * f64::EPSILON * temperature.abs().max(state.temperature_k().abs())
-                            {
-                                return Err(material_error(
-                                    "source temperature, density and thermal/momentum transport must match the actual endpoint",
-                                ));
-                            }
-                            Ok(LaminarThermalMaterial { source, state })
-                        },
-                    );
+                    let flow = resolve_flow(&temperatures, duration_s);
                     checkpoint(cx)?;
-                    let flow = flow.map_err(LaminarEnthalpyError::Momentum)?;
-                    let response = exchange(cx, candidate, &flow).map_err(LaminarEnthalpyError::Exchange)?;
+                    let (flow, buoyancy) = flow.map_err(LaminarEnthalpyError::Momentum)?;
+                    let response =
+                        exchange(cx, candidate, &flow).map_err(LaminarEnthalpyError::Exchange)?;
                     checkpoint(cx)?;
                     let (coefficients, powers_w) = self.binding.coefficients(
-                        cx, self.system, candidate, &flow.step.solution, &routes, response,
+                        cx,
+                        self.system,
+                        candidate,
+                        &flow.step.solution,
+                        &routes,
+                        response,
                     )?;
                     let TransportStepCoefficients { heat, transfers } = coefficients;
                     let BoundaryStepCoefficients { bulk, boundaries } = heat;
-                    let StepCoefficients { sources_w, conductances_w_k, payload } = bulk;
+                    let StepCoefficients {
+                        sources_w,
+                        conductances_w_k,
+                        payload,
+                    } = bulk;
                     Ok(TransportStepCoefficients {
                         heat: BoundaryStepCoefficients {
                             bulk: StepCoefficients {
-                                sources_w, conductances_w_k,
-                                payload: Endpoint { flow, exchange: payload, powers_w },
+                                sources_w,
+                                conductances_w_k,
+                                payload: Endpoint {
+                                    flow,
+                                    exchange: payload,
+                                    powers_w,
+                                    buoyancy,
+                                },
                             },
                             boundaries,
                         },
@@ -447,13 +501,32 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
                 external_stream_enthalpy_j: energies[2],
                 other_external_heat_j: energies[3],
                 thermal_balance_residual_j: residual,
+                buoyancy: endpoint.buoyancy,
             },
         })
     }
 }
 
+// Freeze coherent original views once. Boussinesq projects THIS immutable
+// snapshot, not a second source query that could change density or viscosity.
+fn thermal_source<G: ThermalFluidTransport>(
+    source: G,
+    temperature_k: f64,
+) -> Result<LaminarThermalMaterial<G>, MaterialError> {
+    let state = source.thermal_transport_state()?;
+    if state.transport() != source.transport_state()?
+        || (state.temperature_k() - temperature_k).abs()
+            > 64.0 * f64::EPSILON * temperature_k.abs().max(state.temperature_k().abs())
+    {
+        return Err(material_error(
+            "source temperature and thermal/momentum transport must match the actual endpoint",
+        ));
+    }
+    Ok(LaminarThermalMaterial { source, state })
+}
+
 fn material_error(what: &str) -> MaterialError {
-    MaterialError::InvalidInput { what: what.into() }
+    MaterialError::State { what: what.into() }
 }
 fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
     cx.checkpoint().map_err(|_| DepositionError::Cancelled)

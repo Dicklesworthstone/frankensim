@@ -105,6 +105,10 @@ impl ThermalBinding {
         &self.cells
     }
 
+    pub(super) const fn depth_m(&self) -> f64 {
+        self.depth_m
+    }
+
     fn native<'a>(&self, system: &'a FluxSystem<'_>, time_s: f64) -> StokesHeatBinding<'a> {
         StokesHeatBinding {
             mesh: system.mesh,
