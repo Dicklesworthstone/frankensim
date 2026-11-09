@@ -32,6 +32,10 @@ use fs_material::{
 };
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Analytic coherent amplitude tangents and source-backed driven resonance.
+pub mod frequency;
+pub use frequency::{LayerAmplitudeDerivative, LayeredFrequencyResponse, LayeredResonanceObservation};
+
 mod illumination;
 pub use illumination::{
     CoherentLayerIllumination, IlluminationBudget, IncoherentLayerCascade, LayerIlluminationPower,
@@ -551,6 +555,9 @@ struct Slab {
     // scale=0 explicitly denotes the opaque front-interface limit.
     matrix: [[C64; 2]; 2],
     scale: C64,
+    // Bounded scale / exp(-i k_z d), retained for the analytic physical tangent.
+    // This avoids dividing by an underflowing propagator in frequency queries.
+    transfer_scale_over_propagator: C64,
     even_loss: f64,
     odd_loss: f64,
 }
@@ -558,6 +565,7 @@ impl Slab {
     const IDENTITY: Self = Self {
         matrix: [[C64::ONE, C64::ZERO], [C64::ZERO, C64::ONE]],
         scale: C64::ONE,
+        transfer_scale_over_propagator: C64::ONE,
         even_loss: 0.0,
         odd_loss: 0.0,
     };
@@ -676,6 +684,7 @@ impl Slab {
             return Ok(Self {
                 matrix: [[state[0], C64::ZERO], [state[1], C64::ZERO]],
                 scale: C64::ZERO,
+                transfer_scale_over_propagator: C64::ZERO,
                 even_loss: interface.transmitted_power_fraction,
                 odd_loss: interface.transmitted_power_fraction,
             });
@@ -829,6 +838,11 @@ impl Slab {
         Ok(Self {
             matrix,
             scale: transfer_scale,
+            transfer_scale_over_propagator: if reciprocal {
+                (s * coefficient).scale(1.0 / 8.0)
+            } else {
+                s.scale(1.0 / 8.0)
+            },
             even_loss,
             odd_loss,
         })

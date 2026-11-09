@@ -7782,3 +7782,33 @@ layer heat, darkness, invalid geometry, factor budgets and cancellation.
 `SpectralOpticalSource::LosslessAirRelativeSellmeier` borrows the shared material catalog law and an explicitly selected scalar magnetic source. The original `SpectralOpticalResponse` supplies absolute complex index with zero imaginary part, SI permittivity and existing interface/layer consumers. Its frequency jet converts the complete analytic ordinary wavelength curvature through the existing bulk-dispersion machinery, retaining group delay and group-velocity dispersion. Derivatives require an interior source frequency; monochromatic queries retain inclusive mapped support.
 
 The magnetic source must be unconditioned: the catalog's reference-air temperature and pressure do not establish the actual glass state. Refresh through unrelated material-card claims refuses explicitly. This source is an authored lossless approximation, not measured zero absorption or a causal time-domain model. Three shared material controls and five renderer-consumer controls passed. The native EM phase/group/GVD, SI permeability, exact-band and source-ownership regression is authored and signature-reviewed but remains unexecuted in this environment.
+
+### Dispersive coherent-film resonances
+
+`PlanarDielectricLayers::frequency_dispersion` returns analytic first angular-
+frequency derivatives of the native reflected and transmitted electric/magnetic
+amplitudes, retaining original dielectric source laws and scalar permeability
+snapshots. TE/TM and the existing fixed-angle/fixed-transverse-wave-number
+constraints use the same original material and incident-port derivatives.
+
+The tangent differentiates the native bounded E/H transfer in a fixed numerical
+gauge. Entire functions of the longitudinal phase squared preserve the finite
+critical-film limit; no growing propagation exponential or finite difference
+kernel is used. Double-double products audit the transfer/tangent rows.
+Stack recursion is linear in film count with no per-layer heap workspace;
+constitutive evaluations retain their own cost. Original 64-film admission
+remains active.
+
+`driven_resonance` reuses the shared peak/half-height search and rebuilds each
+original source at the actual sampled frequency. Its evaluation budget and
+cancellation remain explicit. Source validity bands, prepared-frequency
+restrictions and loss of propagating incidence refuse through native owners.
+Transmitted tangents are unavailable after propagation, gain or composed-field
+underflow, while the native opaque reflection limit remains usable.
+
+These are selected unit-incident-electric-field amplitude peaks and phase
+slopes. A transmitted-amplitude maximum need not maximize transmitted flux;
+its half-height quality factor need not equal a pole-decay quality factor.
+An exactly critical exit half-space retains the existing Fresnel derivative
+refusal, and no finite-band pulse, inferred material law or completeness claim
+is added.
