@@ -3524,6 +3524,40 @@ transactional unsupported-demand/exhaustion/cancellation recovery.
 `BatteryMotorStep` carries one actual native nine-state receipt, physical `BatteryFedInterval` constituent accounts, separate magnetic/rotor/stator storage and two shaft works, and ten physical heat owners (the prior eight electrical channels, winding copper and bearing friction). Independent battery/lead/converter/winding/mechanical/full balances gate publication; failed support, energy or cancellation checks publish none of the nine states. Commands retain stored state. The frozen averaged converter and linear commutated motor laws claim no PWM, magnetic saturation, controller or automatic shaft support. Work and heat use native discrete-effort quadrature; closure alone does not certify continuous-time accuracy. Regressions include an independent SI ODE reference with second-order state refinement, finite-inertia regeneration and atomic retry.
 
 
+### Finite-battery PWM motor drive
+
+`circuit::converter::switching::battery_motor` applies an authored complementary
+`SwitchInterval` schedule to the original nine-state `BatteryMotorDrive`.
+Chemical and polarization charge, all three bus charges, both winding fluxes
+and both absolute shaft momenta continue across every gate edge. Battery sag,
+finite SOC support, signed regeneration, auxiliary demand and shaft reactions
+participate in the same native solve.
+
+Preparation admits at most 64 physical intervals and 1–256 numerical subdivisions
+per interval, preserves each represented gate edge through a compensated last
+subdivision and caches identical binary-mode/duration native workspaces.
+Immutable OCV data retain their original shared owner. Commands may change per
+authored interval even when caches are shared; successful warm cycles allocate
+no new storage.
+
+`BatteryMotorSwitchCycleStep` sums the ten original physical heats and
+independent battery, converter, winding, electromagnetic, shaft and
+auxiliary-load work. Original storage is evaluated again at complete-cycle
+endpoints. Separate battery/lead/converter/output/winding/shaft,
+component-telescoping, native and full-cycle balances gate publication using
+actual transfers, not untouched storage. Means and final auxiliary-load point
+are labeled separately; no single algebraic certificate represents the cycle.
+Any refusal/cancellation leaves all nine caller coordinates untouched.
+
+The model is ideal complementary PWM with finite on-resistance and native
+discrete-effort quadrature. Subdivision refinement remains necessary; closure
+does not prove temporal accuracy. No dead time, diode/transition heat, device
+safe area, controller, shaft support or battery protection is inferred.
+Focused tests cover independent SI ODE and ten-heat second-order refinement,
+analytic finite-source regeneration with authored shaft reactions, original
+one-gate equivalence, per-edge commands and transactional source/cancellation
+refusal.
+
 ### Condensed external current at the finite converter output
 
 `AffineOutputCurrent` and `PreparedBatteryFedBuckBoost::step_affine_output_current_controlled` admit `I_into_bus = constant_a + slope_a_per_v * V_discrete` in the original six-state nonlinear equation. Positive current supplies the electrical subsystem. The held term uses the existing linear port; the voltage-dependent term supplies its exact analytic tangent and signed conjugate work through the native supplied-port owner. The existing held-current method shares this implementation with zero slope. Canonical battery/OCV, lead, converter and optional regulated-load accounts and eight heat owners are unchanged.

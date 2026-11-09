@@ -20,6 +20,8 @@ use super::{
 use crate::linear_exact::LinearSplitBudget;
 use crate::{PhsError, PreparedStepError, PreparedStepRecord, storage_energy_change};
 
+/// Prescribed gates from finite battery energy through both physical motor shafts.
+pub mod battery_motor;
 /// Prescribed gates with continuing finite-energy capacitor source/load states.
 pub mod capacitor_fed;
 /// Nonlinear regulated demand with explicit numerical refinement per gate interval.
