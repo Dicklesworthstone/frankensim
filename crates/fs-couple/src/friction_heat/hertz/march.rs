@@ -10,6 +10,7 @@
 use super::*;
 use fs_contact::interface_binding::thermal_friction::rate_dependent::SourceHertzFrictionError;
 use fs_math::dd::Dd;
+use fs_mbd::tangential_friction::hertz::driven::{RigidHertzDrivenError, RigidHertzDrivenReport};
 use fs_mbd::tangential_friction::hertz::rate_dependent::{
     RigidHertzRateTransientError, RigidHertzRateTransientReport,
 };
@@ -32,6 +33,7 @@ pub enum HertzHeatMarchMotion {
     InvariantDirection(RigidHertzTrajectoryReport),
     Curved(RigidHertzTransientReport),
     RateDependent(RigidHertzRateTransientReport),
+    Driven(RigidHertzDrivenReport),
 }
 impl HertzHeatMarchMotion {
     fn travel(&self, radius: f64) -> [f64; 3] {
@@ -44,12 +46,15 @@ impl HertzHeatMarchMotion {
             | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => {
                 (m.transient.slip_increment_m, m.transient.spin_increment_rad)
             }
+            Self::Driven(m) => (m.driven.slip_increment_m, m.driven.spin_increment_rad),
         };
         [slip[0], slip[1], radius * spin]
     }
     fn uncertainty(&self, radius: f64) -> [f64; 2] {
         match self {
-            Self::InvariantDirection(_) => [0.0; 2],
+            // Driven held-traction time resolution has a separate native
+            // refinement control, not an embedded trajectory error estimate.
+            Self::InvariantDirection(_) | Self::Driven(_) => [0.0; 2],
             Self::Curved(m)
             | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => [
                 m.transient.estimated_scaled_travel_error_m
@@ -60,6 +65,12 @@ impl HertzHeatMarchMotion {
                     ]),
                 m.transient.estimated_heat_error_j,
             ],
+        }
+    }
+    fn external_work_j(&self) -> f64 {
+        match self {
+            Self::Driven(m) => m.external_work_j,
+            _ => 0.0,
         }
     }
 }
@@ -73,6 +84,7 @@ pub struct HertzHeatMarchTolerance {
     pub cell_energy_j: f64,
     /// Euclidean norm of [net slip x, net slip y, radius * relative rotation].
     pub scaled_travel_m: f64,
+    /// Separate absolute error gate for friction heat AND external mechanical work.
     pub dissipated_j: f64,
     pub relative: f64,
 }
@@ -98,6 +110,9 @@ pub struct HertzHeatMarchDefect {
     pub cell_energy_j: f64,
     pub scaled_travel_m: f64,
     pub dissipated_j: f64,
+    pub external_mechanical_work_j: f64,
+    /// Different retained modes imply different future constitutive branches.
+    pub mode_disagreement: bool,
     pub normalized: f64,
 }
 pub struct HertzHeatMarchPhase<P, F = SourceHertzWrench> {
@@ -126,6 +141,8 @@ pub struct HeatedRigidHertzMarchCandidate<'m, P, F = SourceHertzWrench> {
     pub dissipated_j: f64,
     pub body_heat_j: [f64; 2],
     pub external_heat_j: f64,
+    /// Original continuous drive supply, including complementary body motion.
+    pub external_mechanical_work_j: f64,
     pub kinetic_energy_change_j: f64,
     pub thermal_energy_change_j: f64,
     /// Mechanical, thermal, and combined physical accounts, respectively.
@@ -137,6 +154,7 @@ pub enum HertzHeatMarchError<E> {
     InvariantDirection(RigidHertzHeatError<E, RigidHertzTrajectoryError>),
     Curved(RigidHertzHeatError<E, RigidHertzTransientError>),
     RateDependent(RigidHertzHeatError<E, RigidHertzRateTransientError, SourceHertzFrictionError>),
+    Driven(RigidHertzHeatError<E, RigidHertzDrivenError>),
     Dynamics(DynamicsError),
     Cancelled,
     Budget(&'static str),
@@ -155,19 +173,22 @@ impl<E: core::fmt::Debug> core::fmt::Display for HertzHeatMarchError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for HertzHeatMarchError<E> {}
 
-pub(super) struct Stage<'m, P, F> {
+pub(super) struct Stage<'m, P, F, H> {
     bodies: [RigidBodyState; 2],
     thermal: DepositionSimulation<'m>,
     receipt: HertzHeatMarchPhase<P, F>,
+    history: H,
 }
-pub(super) fn stage<'m, P, M, F>(
+pub(super) fn stage<'m, P, M, F, H>(
     c: HeatedRigidHertzCandidate<'m, P, M, F>,
     start_s: f64,
     motion: fn(M) -> HertzHeatMarchMotion,
-) -> Stage<'m, P, F> {
+    history: H,
+) -> Stage<'m, P, F, H> {
     Stage {
         bodies: c.bodies_after,
         thermal: c.thermal,
+        history,
         receipt: HertzHeatMarchPhase {
             start_s,
             end_s: c.target_time_s,
@@ -215,11 +236,12 @@ pub fn propose_rigid_hertz_heat_march<'m, P, E>(
         properties,
         contact,
         thermal,
+        (),
         duration_s,
         phase_controls,
         controls,
         temperature_guess_k,
-        |b, props, pair, h, dt, local, energy, guess| {
+        |b, props, pair, h, _, dt, local, energy, guess| {
             let start = h.time_s();
             Ok(match model {
                 HertzHeatMarchModel::InvariantDirection => stage(
@@ -229,6 +251,7 @@ pub fn propose_rigid_hertz_heat_march<'m, P, E>(
                     .map_err(HertzHeatMarchError::InvariantDirection)?,
                     start,
                     HertzHeatMarchMotion::InvariantDirection,
+                    (),
                 ),
                 HertzHeatMarchModel::Curved(path) => stage(
                     transient::propose_rigid_hertz_transient_heat(
@@ -238,20 +261,23 @@ pub fn propose_rigid_hertz_heat_march<'m, P, E>(
                     .map_err(HertzHeatMarchError::Curved)?,
                     start,
                     HertzHeatMarchMotion::Curved,
+                    (),
                 ),
             })
         },
         gate,
     )
+    .map(|(candidate, ())| candidate)
 }
 
 /// One checkpoint/refinement/physical-acceptance owner for every Hertz curve.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
+pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F, H: PartialEq>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     contact: RigidHertzHeatContact<'_, C>,
     thermal: &DepositionSimulation<'m>,
+    initial_history: H,
     duration_s: f64,
     phase_controls: RigidHertzHeatControls,
     controls: HertzHeatMarchControls,
@@ -261,13 +287,14 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
         &[MassProperties; 2],
         RigidHertzHeatContact<'_, C>,
         &DepositionSimulation<'m>,
+        &H,
         f64,
         RigidHertzHeatControls,
         &[f64],
         f64,
-    ) -> Result<Stage<'m, P, F>, HertzHeatMarchError<E>>,
+    ) -> Result<Stage<'m, P, F, H>, HertzHeatMarchError<E>>,
     gate: &CancelGate,
-) -> Result<HeatedRigidHertzMarchCandidate<'m, P, F>, HertzHeatMarchError<E>> {
+) -> Result<(HeatedRigidHertzMarchCandidate<'m, P, F>, H), HertzHeatMarchError<E>> {
     let poll = || {
         if gate.is_requested() {
             Err(HertzHeatMarchError::Cancelled)
@@ -321,13 +348,14 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
     pair.binding.body_a = 0;
     pair.binding.body_b = 1;
     let (mut accepted, mut cells) = (initial, thermal.clone());
+    let mut history = initial_history;
     let zero_energy = vec![0.0; thermal.cells().len()];
     let (mut ti, mut step_s) = (temperature_guess_k, controls.initial_step_s);
     let (mut attempts, mut rejected, mut trials) = (0usize, 0usize, 0usize);
     let mut phases = Vec::new();
     let mut maximum_defect = 0.0_f64;
-    // Net travel (3), friction heat, external heat, signed body heat (2).
-    let mut totals = [Dd::from_f64(0.0); 7];
+    // Net travel (3), friction heat, external heat, signed body heat (2), drive work.
+    let mut totals = [Dd::from_f64(0.0); 8];
     while cells.time_s() < target {
         poll()?;
         if attempts >= controls.maximum_attempts {
@@ -356,31 +384,44 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
                 "comparison clock is not representable",
             ));
         }
-        let mut phase =
-            |b: &[RigidBodyState; 2], h: &DepositionSimulation<'m>, stop: f64, guess: f64| {
-                poll()?;
-                let remaining = controls.maximum_thermal_trials - trials;
-                if remaining == 0 {
-                    return Err(HertzHeatMarchError::Budget("thermal trials"));
-                }
-                let mut local = phase_controls;
-                local.maximum_trials = local.maximum_trials.min(remaining);
-                let start = h.time_s();
-                let out =
-                    advance_phase(b, &props, pair, h, stop - start, local, &zero_energy, guess)?;
-                if out.thermal.time_s() != stop || out.receipt.trials > remaining {
-                    return Err(HertzHeatMarchError::Invalid(
-                        "phase clock or trial budget disagrees",
-                    ));
-                }
-                trials += out.receipt.trials;
-                Ok(out)
-            };
-        let coarse = phase(&accepted, &cells, end, ti)?;
-        let first = phase(&accepted, &cells, half, ti)?;
+        let mut phase = |b: &[RigidBodyState; 2],
+                         h: &DepositionSimulation<'m>,
+                         state: &H,
+                         stop: f64,
+                         guess: f64| {
+            poll()?;
+            let remaining = controls.maximum_thermal_trials - trials;
+            if remaining == 0 {
+                return Err(HertzHeatMarchError::Budget("thermal trials"));
+            }
+            let mut local = phase_controls;
+            local.maximum_trials = local.maximum_trials.min(remaining);
+            let start = h.time_s();
+            let out = advance_phase(
+                b,
+                &props,
+                pair,
+                h,
+                state,
+                stop - start,
+                local,
+                &zero_energy,
+                guess,
+            )?;
+            if out.thermal.time_s() != stop || out.receipt.trials > remaining {
+                return Err(HertzHeatMarchError::Invalid(
+                    "phase clock or trial budget disagrees",
+                ));
+            }
+            trials += out.receipt.trials;
+            Ok(out)
+        };
+        let coarse = phase(&accepted, &cells, &history, end, ti)?;
+        let first = phase(&accepted, &cells, &history, half, ti)?;
         let second = phase(
             &first.bodies,
             &first.thermal,
+            &first.history,
             end,
             first.receipt.heat.interfaces[0].interface_temperature_k,
         )?;
@@ -416,6 +457,7 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
                 phase.heat.external_heat_j,
                 phase.heat.interfaces[0].body_heat_j[0],
                 phase.heat.interfaces[0].body_heat_j[1],
+                phase.mechanical.external_work_j(),
             ]) {
                 *sum = *sum + Dd::from_f64(value);
             }
@@ -423,6 +465,7 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
         ti = second.receipt.heat.interfaces[0].interface_temperature_k;
         accepted = second.bodies;
         cells = second.thermal;
+        history = second.history;
         phases
             .try_reserve(2)
             .map_err(|_| HertzHeatMarchError::Invalid("accepted phase allocation refused"))?;
@@ -454,9 +497,9 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
                     - Dd::from_f64(old.specific_h_j_kg));
     }
     let residual_j = [
-        kinetic + totals[3],
+        kinetic + totals[3] - totals[7],
         stored - totals[3] - totals[4],
-        kinetic + stored - totals[4],
+        kinetic + stored - totals[4] - totals[7],
     ]
     .map(Dd::to_f64);
     if residual_j
@@ -473,24 +516,28 @@ pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
         ));
     }
     poll()?;
-    Ok(HeatedRigidHertzMarchCandidate {
-        binding,
-        bodies_after: accepted,
-        thermal: cells,
-        phases,
-        attempts,
-        rejected_attempts: rejected,
-        thermal_trials: trials,
-        maximum_accepted_normalized_defect: maximum_defect,
-        slip_increment_m: [sums[0], sums[1]],
-        spin_increment_rad: spin,
-        dissipated_j: sums[3],
-        body_heat_j: [sums[5], sums[6]],
-        external_heat_j: sums[4],
-        kinetic_energy_change_j: kinetic.to_f64(),
-        thermal_energy_change_j: stored.to_f64(),
-        energy_residual_j: residual_j,
-    })
+    Ok((
+        HeatedRigidHertzMarchCandidate {
+            binding,
+            bodies_after: accepted,
+            thermal: cells,
+            phases,
+            attempts,
+            rejected_attempts: rejected,
+            thermal_trials: trials,
+            maximum_accepted_normalized_defect: maximum_defect,
+            slip_increment_m: [sums[0], sums[1]],
+            spin_increment_rad: spin,
+            dissipated_j: sums[3],
+            body_heat_j: [sums[5], sums[6]],
+            external_heat_j: sums[4],
+            external_mechanical_work_j: sums[7],
+            kinetic_energy_change_j: kinetic.to_f64(),
+            thermal_energy_change_j: stored.to_f64(),
+            energy_residual_j: residual_j,
+        },
+        history,
+    ))
 }
 
 fn norm(v: [f64; 3]) -> f64 {
@@ -500,17 +547,25 @@ fn vector(v: Vec3) -> [f64; 3] {
     [v.x, v.y, v.z]
 }
 #[allow(clippy::too_many_arguments)]
-fn compare<P, E, F>(
+fn compare<P, E, F, H: PartialEq>(
     old: [RigidBodyState; 2],
     thermal: &DepositionSimulation<'_>,
-    coarse: &Stage<'_, P, F>,
-    first: &Stage<'_, P, F>,
-    fine: &Stage<'_, P, F>,
+    coarse: &Stage<'_, P, F, H>,
+    first: &Stage<'_, P, F, H>,
+    fine: &Stage<'_, P, F, H>,
     radius: f64,
     tolerance: HertzHeatMarchTolerance,
     gate: &CancelGate,
 ) -> Result<HertzHeatMarchDefect, HertzHeatMarchError<E>> {
-    let mut out = HertzHeatMarchDefect::default();
+    let mut out = HertzHeatMarchDefect {
+        mode_disagreement: coarse.history != fine.history,
+        ..HertzHeatMarchDefect::default()
+    };
+    if out.mode_disagreement {
+        // No velocity cutoff can erase static/kinetic hysteresis. The finite
+        // floor uses the existing bounded refinement/refusal path.
+        out.normalized = 2.0;
+    }
     let mut scale = |error: f64, absolute: f64, change: f64| {
         let denominator = absolute + tolerance.relative * change;
         if !error.is_finite() || !denominator.is_finite() || denominator <= 0.0 {
@@ -590,5 +645,13 @@ fn compare<P, E, F>(
     let f = first.receipt.heat.dissipated_j + fine.receipt.heat.dissipated_j;
     out.dissipated_j = (c - f).abs() + uncertainty[1];
     scale(out.dissipated_j, tolerance.dissipated_j, c.max(f))?;
+    let c = coarse.receipt.mechanical.external_work_j();
+    let f = first.receipt.mechanical.external_work_j() + fine.receipt.mechanical.external_work_j();
+    out.external_mechanical_work_j = (c - f).abs();
+    scale(
+        out.external_mechanical_work_j,
+        tolerance.dissipated_j,
+        c.abs().max(f.abs()),
+    )?;
     Ok(out)
 }

@@ -1,3 +1,30 @@
+## Driven Hertz friction, finite-cell heat and retained contact mode
+
+`friction_heat::hertz::driven` proposes original two-body driven shear/spin
+phases and adaptive finite-cell thermal continuation. Each common-face
+temperature trial resolves the same original static/kinetic source claims
+and restarts the captured body pair, external world forces/body torques, and
+explicit resting/sliding mode. Only original physical friction loss heats the
+finite cells. Signed full-body external work remains a separate supply,
+including common-body acceleration while a contact sticks without heating.
+
+The existing full/two-half thermal march carries the fine accepted mode,
+original body momenta and caloric state together. Coarse/fine disagreement in
+retained mode forces refinement even when numerical rate differences are small.
+Drive work has a separate coarse/fine defect and compensated accumulated account.
+Whole-span mechanical, thermal and combined balances separately check
+`Delta K + Q - W_drive`, `Delta U - Q - Q_external`, and
+`Delta K + Delta U - W_drive - Q_external`. Late refusal or cancellation
+publishes none of the private body, mode, material or thermal candidates.
+
+Geometry, inertia, load, radius and footprint remain held; native admission
+bounds closed normal motion over the complete phase. Thermal source sampling
+is per phase, with independently refined first-order curved mechanics. Neither
+exact thermal threshold timing, driven rate-weakening branch selection nor
+normal evolution is claimed. Focused tests cover static common-motion work,
+powered spin/arrest, thermal breakaway and discrete-mode disagreement,
+independent coupled motion/power/caloric refinement, and atomic retry.
+
 ## Canonical magnetic scenario boundaries
 
 `scenario_magnetic::magnetic_flux_boundary_at` and `solve_magnetic_flux3`

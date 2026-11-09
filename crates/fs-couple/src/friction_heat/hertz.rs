@@ -32,6 +32,8 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use fs_tribo::partial_slip::TangentFrame;
 use std::cell::Cell;
 
+/// Explicit continuous force/spin drive, accepted mode and finite-cell heat.
+pub mod driven;
 /// Time-resolved thermal feedback through accepted original Hertz phases.
 pub mod march;
 /// Source-resolved simultaneous Hertz patches on one finite body/heat island.
@@ -141,7 +143,7 @@ pub struct HeatedRigidHertzCandidate<'m, P, M = RigidHertzReport, F = SourceHert
     pub nonlinear: NewtonReport,
     pub trials: usize,
     pub target_time_s: f64,
-    /// Actual kinetic plus caloric change, minus outside heat.
+    /// Actual kinetic plus caloric change, minus outside heat and mechanical work.
     pub combined_energy_residual_j: f64,
 }
 

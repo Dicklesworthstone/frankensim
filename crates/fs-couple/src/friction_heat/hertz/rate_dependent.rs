@@ -134,11 +134,12 @@ pub fn propose_rigid_hertz_rate_heat_march<'m, P, E>(
         properties,
         contact,
         thermal,
+        (),
         duration_s,
         phase_controls.heat,
         controls,
         temperature_guess_k,
-        |b, props, pair, h, dt, heat, energy, temperature| {
+        |b, props, pair, h, _, dt, heat, energy, temperature| {
             let start = h.time_s();
             let candidate = propose_rigid_hertz_rate_heat(
                 b,
@@ -162,8 +163,10 @@ pub fn propose_rigid_hertz_rate_heat_march<'m, P, E>(
                 candidate,
                 start,
                 march::HertzHeatMarchMotion::RateDependent,
+                (),
             ))
         },
         gate,
     )
+    .map(|(candidate, ())| candidate)
 }

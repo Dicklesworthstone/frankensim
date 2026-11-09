@@ -1,5 +1,7 @@
 //! Source-resolved Hertz recoil and the original three-cell thermal fixture.
 
+#[path = "hertz/driven.rs"]
+mod driven;
 #[path = "hertz/rate_dependent.rs"]
 mod rate_dependent;
 #[path = "hertz/trajectory.rs"]
