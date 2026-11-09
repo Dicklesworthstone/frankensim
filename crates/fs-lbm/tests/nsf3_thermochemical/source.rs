@@ -47,6 +47,7 @@ pub fn model_with_temperature_limit(
         pressure_max,
         k_scale,
         temperature_max,
+        0.001,
     );
     from_packs(
         &[SpeciesPackRef {
@@ -64,8 +65,8 @@ pub fn model_with_temperature_limit(
 /// Water's thermal coefficients remain a synthetic coupling fixture.
 #[allow(dead_code)]
 pub fn moist_model(water_fraction: f64, a7: f64) -> ThermochemicalGasModel {
-    let carrier = source_packs("manufactured", 0.028, a7, 250000.0, 1.0, 700.0);
-    let water = source_packs("water", 0.01801528, a7, 250000.0, 1.0, 700.0);
+    let carrier = source_packs("manufactured", 0.028, a7, 250000.0, 1.0, 700.0, 0.001);
+    let water = source_packs("water", 0.01801528, a7, 250000.0, 1.0, 700.0, 0.001);
     from_packs(
         &[
             SpeciesPackRef {
@@ -89,6 +90,23 @@ pub fn moist_model(water_fraction: f64, a7: f64) -> ThermochemicalGasModel {
     .unwrap()
 }
 
+/// Same original source/card construction with exact constant Cp/R=3.
+#[allow(dead_code)]
+pub fn constant_cp_model(a7: f64, k_scale: f64) -> ThermochemicalGasModel {
+    let (species, nasa9, transport) =
+        source_packs("manufactured", 0.028, a7, 250000.0, k_scale, 700.0, 0.0);
+    from_packs(
+        &[SpeciesPackRef {
+            species: &species,
+            nasa9: Some(&nasa9),
+            transport: Some((&transport, MaterialPropertySelection::SingleClaimOnly)),
+        }],
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
 fn source_packs(
     name: &str,
     molar_mass: f64,
@@ -96,6 +114,7 @@ fn source_packs(
     pressure_max: f64,
     k_scale: f64,
     temperature_max: f64,
+    cp_slope: f64,
 ) -> (
     NormalizedSpeciesPack,
     NormalizedModelPack,
@@ -154,7 +173,7 @@ fn source_packs(
             LawParameter {
                 value: match i {
                     2 => 3.0,
-                    3 => 0.001,
+                    3 => cp_slope,
                     7 => a7,
                     _ => 0.0,
                 },

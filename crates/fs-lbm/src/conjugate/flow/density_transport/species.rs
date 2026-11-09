@@ -12,6 +12,12 @@ use crate::conjugate::krylov::bicgstab_ilu0_prepared;
 use fs_sparse::precond::{IluControlledError, ilu0_controlled};
 
 mod diffusion;
+#[cfg(feature = "enthalpy-coupling")]
+pub use diffusion::{
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
+    ThermochemicalSpeciesConductionStep,
+};
 pub use diffusion::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep,

@@ -50,6 +50,12 @@ pub use enthalpy::adaptive::{
     AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
 };
 mod gas;
+#[cfg(feature = "enthalpy-coupling")]
+pub use gas::{
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
+    ThermochemicalSpeciesConductionStep,
+};
 pub use gas::{
     BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource,
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,

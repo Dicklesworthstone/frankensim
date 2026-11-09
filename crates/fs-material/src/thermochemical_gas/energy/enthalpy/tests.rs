@@ -656,3 +656,6 @@ fn reconciled_regions_still_refuse_nonpositive_cv_at_the_selected_seam_endpoint(
     assert!(GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]), point(300.0, 100000.0),
         hot_controls(280.0, 3000.0)).is_err());
 }
+
+#[path = "tests/conduction.rs"]
+mod conduction;

@@ -22,6 +22,14 @@ use fs_qty::{Amount, Temperature};
 mod adaptive;
 mod boundary;
 pub use boundary::{BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalpyBoundarySource};
+#[cfg(feature = "enthalpy-coupling")]
+mod conduction;
+#[cfg(feature = "enthalpy-coupling")]
+pub use conduction::{
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
+    ThermochemicalSpeciesConductionStep,
+};
 mod diffusivity;
 pub use diffusivity::GasSpeciesDiffusivity;
 

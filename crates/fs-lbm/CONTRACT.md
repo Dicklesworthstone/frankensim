@@ -2856,3 +2856,49 @@ heat alone reaches enthalpy; native and original-cell energy identities include
 their distinct BE/scatter losses. Pinned syntax/scoped-format and independent
 scalar balance checks passed; native compilation/execution remains unverified
 under the dependency build limitation described above.
+
+### Source-bound gas Fourier conduction
+
+With `enthalpy-coupling`, `MaterialAdvectionStep::conduct_thermochemical_species`
+binds every accepted fluid-cell mass and composition to its original
+`GasEnthalpyLaw`, then advances total m*h through the existing native
+tensor-caloric backward-Euler or SDIRK2 owner. The original safeguarded
+NASA inverse supplies T(h,Y) and the same query's analytic Cp throughout
+Newton iteration. Formation energy remains in h; Fourier heat is deposited
+once through the native stored-energy update. Zero species diffusivity does
+not suppress this independent heat mechanism.
+
+Each opening complete material state supplies a held isotropic conductivity.
+Endpoint preparation refreshes temperature, conductivity and diffusivity for
+continuation. Temperature-dependent conductivity therefore retains first-order
+freezing error even when the held-law interval uses SDIRK2; this entry does not
+invent a nonlinear mixture Kirchhoff integral. Both SDIRK stages use the same
+authored thermal setup. Original heat-flux, face-temperature, film, source,
+contact and sink semantics apply. Fixed cell temperatures derive prescribed h
+from the same gas law and must satisfy the native inverse-consistency tolerance.
+
+One immutable caloric model is constructed per cell per interval. Trial
+queries reuse its original source law without cloning material tables or
+resolving transport. Fallibly reserved arrays and a shared caloric-query
+allowance bound adapter allocation failure and inverse work; the complete
+per-cell model/card storage and native spatial solver storage remain additional.
+Every inverse retains the original root iteration ceiling and cancellation gate.
+The absolute native interval energy closure plus initial and endpoint caloric
+residuals must fit the declared joule allowance. Independently, the sum of each
+cell's largest actual trial inverse residual times its mass must fit that
+allowance. These source residuals are diagnostics, never extra physical heat.
+Local equations retain the native thermal solver tolerances.
+
+This entry admits only fluid voxels with positive accepted carrier mass.
+The native heterogeneous caloric API remains the owner for positive-mass
+solid storage. Source pressure, composition and carrier inventory are fixed
+during this heat component; EOS density is diagnostic. This is not a sealed
+rigid-volume internal-energy/Cv pressure evolution. Any source, numerical,
+work, energy or cancellation refusal returns no partial candidate.
+
+Original-source regressions are authored for graded unequal-mass BE/SDIRK
+heat modes, nonlinear NASA storage and formation-reference covariance,
+uniform/source/temperature-boundary limits, fixed-cell storage heat, and
+query/source-domain/cancellation refusals. Source parsing and scoped format
+checks passed; native compilation and integration execution remain unverified
+because the available filesystem is full and DSR/RCH are unavailable.

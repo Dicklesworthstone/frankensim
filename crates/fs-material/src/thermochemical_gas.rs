@@ -195,6 +195,15 @@ impl ThermochemicalGasModel {
     /// surviving NASA-9, transport, water and pack identity is retained.
     /// This changes an immutable constitutive model, not parcel mass or energy.
     pub fn with_mole_amounts(&self, amounts: &[fs_qty::Amount]) -> Result<Self, MaterialError> {
+        self.with_composition(self.mole_composition_from_amounts(amounts)?)
+    }
+
+    // Shared original amount conversion for complete gas models and immutable
+    // caloric laws. Producing only the composition avoids cloning source cards
+    // once here and again when a cell's caloric law is constructed.
+    pub(crate) fn mole_composition_from_amounts(
+        &self, amounts: &[fs_qty::Amount],
+    ) -> Result<fs_thermochem::Composition, MaterialError> {
         if amounts.len() != self.thermodynamics.components().len()
             || amounts.iter().any(|amount| !amount.value().is_finite() || amount.value() < 0.0)
         {
@@ -217,7 +226,7 @@ impl ThermochemicalGasModel {
         let composition = fs_thermochem::Composition::new(
             fs_thermochem::CompositionBasis::MoleFraction, fractions,
         ).map_err(|error| failure("generated mole composition", error))?;
-        self.with_composition(composition)
+        Ok(composition)
     }
 
     /// Resolve a declared vapor in equilibrium with liquid water. The caller

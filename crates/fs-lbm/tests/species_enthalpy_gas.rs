@@ -323,3 +323,7 @@ mod boundary;
 
 #[path = "species_enthalpy_gas/boundary_adaptive.rs"]
 mod boundary_adaptive;
+
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "species_enthalpy_gas/conduction.rs"]
+mod conduction;

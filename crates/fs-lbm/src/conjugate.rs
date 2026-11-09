@@ -106,6 +106,12 @@ mod energy;
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
 mod flow;
+#[cfg(feature = "enthalpy-coupling")]
+pub use flow::{
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
+    ThermochemicalSpeciesConductionStep,
+};
 pub(crate) use flow::scale_rows;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use flow::{

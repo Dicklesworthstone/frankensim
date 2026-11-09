@@ -31,6 +31,21 @@ impl GasEnthalpySolution {
     pub fn iterations(&self) -> usize { self.iterations }
 }
 
+/// Caloric-only result on one original fixed-composition enthalpy branch.
+///
+/// The safeguarded inverse already evaluates Cp and its signed h residual.
+/// Reusing that sample avoids a second inverse, material-card resolution or
+/// source-table clone during a nonlinear thermal iteration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasEnthalpyCaloricState {
+    pub temperature_k: f64,
+    /// Original mass-specific Cp [J/(kg K)], never a finite difference.
+    pub heat_capacity_j_kg_k: f64,
+    /// Original h(T,p) minus the requested h [J/kg].
+    pub residual_j_kg: f64,
+    pub iterations: usize,
+}
+
 fn temperature(
     model: &ThermochemicalGasModel, context: &QueryPoint, enthalpy_j_kg: f64,
     controls: GasEnergySolve, cancelled: &mut impl FnMut() -> bool,
@@ -331,6 +346,19 @@ impl GasEnthalpyLaw {
         Self::from_compositions(source, mass_composition, mole_composition, context, controls)
     }
 
+    /// Bind actual canonical species amounts without constructing an
+    /// intermediate full material model. The SAME original generated-simplex
+    /// owner used by ThermochemicalGasModel::with_mole_amounts converts them.
+    /// Exact absence remains in the full law descriptor; no trace species,
+    /// changed formation reference or additional source-bank clone is introduced.
+    pub fn from_mole_amounts(
+        source: &ThermochemicalGasModel, amounts: &[fs_qty::Amount],
+        context: QueryPoint, controls: GasEnergySolve,
+    ) -> Result<Self, GasEnergyError> {
+        let composition = source.mole_composition_from_amounts(amounts)?;
+        Self::from_mole(source, composition, context, controls)
+    }
+
     fn from_compositions(
         source: &ThermochemicalGasModel, mass_composition: Composition,
         mole_composition: Composition, context: QueryPoint, controls: GasEnergySolve,
@@ -448,6 +476,42 @@ impl GasEnthalpyLaw {
         let h = properties.h().value() / properties.molar_mass().value();
         if !h.is_finite() { return Err(GasEnergyError::Invalid("source enthalpy is not finite")); }
         Ok(h)
+    }
+
+    /// Finite, strictly increasing h endpoints of the original admitted
+    /// temperature bracket. No extrapolation or fitted caloric bounds.
+    pub fn enthalpy_bounds_j_kg(&self) -> Result<[f64; 2], GasEnergyError> {
+        let bounds = [
+            self.enthalpy_at_temperature(self.controls.minimum_temperature_k)?,
+            self.enthalpy_at_temperature(self.controls.maximum_temperature_k)?,
+        ];
+        if bounds[0] >= bounds[1] {
+            return Err(GasEnergyError::Invalid(
+                "source enthalpy bracket needs a representable positive extent",
+            ));
+        }
+        Ok(bounds)
+    }
+
+    /// One original safeguarded inverse and its existing Cp/residual sample.
+    ///
+    /// This query resolves calorics only. It allocates no transport receipts
+    /// and neither clones a source bank nor replaces its NASA-9 evaluator.
+    /// Pressure, composition, temperature support and iteration limits remain
+    /// those of this immutable law; cancellation is polled inside the inverse.
+    pub fn caloric_at_enthalpy(
+        &self, enthalpy_j_kg: f64, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasEnthalpyCaloricState, GasEnergyError> {
+        let solved = temperature(
+            &self.model, &self.context, enthalpy_j_kg, self.controls, &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(GasEnthalpyCaloricState {
+            temperature_k: solved.temperature_k,
+            heat_capacity_j_kg_k: solved.sample.tangent,
+            residual_j_kg: solved.sample.residual,
+            iterations: solved.iterations,
+        })
     }
 
     /// Full common state at the specified h and retained p.

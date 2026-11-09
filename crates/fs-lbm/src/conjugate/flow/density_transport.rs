@@ -8,6 +8,12 @@ use crate::conjugate::krylov::bicgstab_ilu0;
 use fs_sparse::{Coo, Csr};
 
 mod species;
+#[cfg(feature = "enthalpy-coupling")]
+pub use species::{
+    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
+    ThermochemicalSpeciesConductionStep,
+};
 pub use species::{
     AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     AdaptiveBoundarySpeciesDiffusionStep, BoundarySpeciesDiffusionStep,
