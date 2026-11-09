@@ -1,5 +1,8 @@
 //! Reversible narrow-beam potential oracles; synthetic sources, not measurements.
 
+#[path = "laminate_beam_thermoelastic/exchange.rs"]
+mod exchange;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

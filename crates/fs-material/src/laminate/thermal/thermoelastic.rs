@@ -597,6 +597,15 @@ impl ResolvedLaminaThermoelastic {
     pub fn free_strain(&self) -> [f64; 3] {
         [self.free[0], self.free[1], 0.0]
     }
+    /// Original principal free-strain derivatives `[alpha, alpha_T]`, in
+    /// engineering order `[11,22,gamma12]`. These are the same cached source
+    /// derivatives used by the potential, not differences of endpoint strains.
+    pub fn free_strain_temperature_derivatives(&self) -> [[f64; 3]; 2] {
+        [
+            [self.alpha[0].v, self.alpha[1].v, 0.0],
+            [self.alpha[0].d, self.alpha[1].d, 0.0],
+        ]
+    }
     /// In-plane-only potential for native laminate thickness integration.
     pub fn in_plane_state(
         &self,

@@ -24,10 +24,13 @@ use crate::laminate::thermal::source::{
     LaminaElasticSource, LaminaExpansionSource, ResolvedLaminateThermal,
 };
 use crate::laminate::thermal::thermoelastic::{
-    AffineLaminaThermoelastic, ResolvedLaminaThermoelastic,
+    AffineLaminaThermoelastic, LaminaThermoelasticState, ResolvedLaminaThermoelastic,
 };
 use fs_math::det;
 use std::sync::Arc;
+
+pub mod exchange;
+pub use exchange::LaminateBeamThermoelasticExchange;
 
 /// Refusal before a complete potential or thermal response is exposed.
 #[derive(Debug)]
@@ -57,11 +60,20 @@ struct Layer {
     sin: f64,
     cos: f64,
     limit: f64,
+    temperature_range: [f64; 2],
     minimum_capacity: f64,
     // Scaled Cholesky metric for a nonnegative b_q^T Q_qq^-1 b_q.
     lateral_scale: [f64; 2],
     lateral_ratio: f64,
     lateral_root: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Point {
+    y: f64,
+    volume: f64,
+    elastic_x: f64,
+    state: LaminaThermoelasticState,
 }
 
 /// Current source-pinned potential of the same admitted beam closure.
@@ -200,6 +212,7 @@ impl ResolvedLaminateBeamThermoelastic {
                 sin,
                 cos,
                 limit: law.maximum_absolute_engineering_strain(),
+                temperature_range: law.temperature_range_k(),
                 minimum_capacity,
                 lateral_scale,
                 lateral_ratio,
@@ -250,6 +263,47 @@ impl ResolvedLaminateBeamThermoelastic {
         kappa: f64,
     ) -> Result<LaminateBeamThermoelasticState, LaminateBeamThermoelasticError> {
         let prepared = self.layer(layer)?;
+        let reduction = self.beam.layers[layer];
+        let mut response = LaminateBeamThermoelasticState::default();
+        for point in self.layer_points(layer, eps0, kappa)? {
+            let at = point.state;
+            let b = section_stress(
+                at.stress_temperature_derivative_pa_k,
+                prepared.sin,
+                prepared.cos,
+            );
+            let axial_t = (-reduction.relaxation[0])
+                .mul_add(b[1], (-reduction.relaxation[1]).mul_add(b[2], b[0]));
+            let first = b[1] / prepared.lateral_scale[0];
+            let second = (-prepared.lateral_ratio).mul_add(first, b[2] / prepared.lateral_scale[1])
+                / prepared.lateral_root;
+            let correction = prepared.resolved.temperature_k()
+                * point.volume
+                * (first * first + second * second);
+            let stress = reduction.axial_pa * point.elastic_x;
+            let force = point.volume * stress;
+            let force_t = point.volume * axial_t;
+            response.add(LaminateBeamThermoelasticState {
+                axial_force_n: force,
+                bending_moment_n_m: -point.y * force,
+                free_energy_j_m: at.free_energy_j,
+                entropy_j_m_k: at.entropy_j_k,
+                internal_energy_j_m: at.internal_energy_j,
+                heat_capacity_j_m_k: at.heat_capacity_j_k + correction,
+                generalized_force_temperature_derivative: [force_t, -point.y * force_t],
+            });
+        }
+        response.checked()
+    }
+
+    // Shared original quadrature and envelope for states and finite exchanges.
+    fn layer_points(
+        &self,
+        layer: usize,
+        eps0: f64,
+        kappa: f64,
+    ) -> Result<[Point; 2], LaminateBeamThermoelasticError> {
+        let prepared = self.layer(layer)?;
         let faces = self
             .beam
             .layer_strain_faces(layer, eps0, kappa)
@@ -274,8 +328,7 @@ impl ResolvedLaminateBeamThermoelastic {
         let sample = &self.beam.source.samples[layer];
         let reduction = self.beam.layers[layer];
         let volume = self.beam.width_m * sample.weight_m;
-        let mut response = LaminateBeamThermoelasticState::default();
-        for p in 0..2 {
+        let at_point = |p: usize| -> Result<Point, LaminateBeamThermoelasticError> {
             let y = sample.z[p] - self.beam.axis_offset_m;
             let total_x = (-y).mul_add(kappa, eps0);
             let elastic_x = total_x - sample.free[p][0];
@@ -288,32 +341,14 @@ impl ResolvedLaminateBeamThermoelastic {
                 .resolved
                 .in_plane_state(principal_strain(total, prepared.sin, prepared.cos), volume)
                 .map_err(|source| LaminateBeamThermoelasticError::Source { layer, source })?;
-            let b = section_stress(
-                at.stress_temperature_derivative_pa_k,
-                prepared.sin,
-                prepared.cos,
-            );
-            let axial_t = (-reduction.relaxation[0])
-                .mul_add(b[1], (-reduction.relaxation[1]).mul_add(b[2], b[0]));
-            let first = b[1] / prepared.lateral_scale[0];
-            let second = (-prepared.lateral_ratio).mul_add(first, b[2] / prepared.lateral_scale[1])
-                / prepared.lateral_root;
-            let correction =
-                prepared.resolved.temperature_k() * volume * (first * first + second * second);
-            let stress = reduction.axial_pa * elastic_x;
-            let force = volume * stress;
-            let force_t = volume * axial_t;
-            response.add(LaminateBeamThermoelasticState {
-                axial_force_n: force,
-                bending_moment_n_m: -y * force,
-                free_energy_j_m: at.free_energy_j,
-                entropy_j_m_k: at.entropy_j_k,
-                internal_energy_j_m: at.internal_energy_j,
-                heat_capacity_j_m_k: at.heat_capacity_j_k + correction,
-                generalized_force_temperature_derivative: [force_t, -y * force_t],
-            });
-        }
-        response.checked()
+            Ok(Point {
+                y,
+                volume,
+                elastic_x,
+                state: at,
+            })
+        };
+        Ok([at_point(0)?, at_point(1)?])
     }
 
     /// Sum all original layers, retaining per-layer temperature weights in U.
