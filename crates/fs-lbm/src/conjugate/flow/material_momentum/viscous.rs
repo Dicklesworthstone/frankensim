@@ -327,6 +327,66 @@ impl FlowField {
         )
     }
 
+    /// Add resolved-velocity SGS to the original-source reservoir advance.
+    ///
+    /// The opposed mouths retain normal traction and zero tangential velocity
+    /// trace. Cell gradients and reciprocal mouth half-edge gradients use
+    /// those same boundary kinematics; the selected Smagorinsky, WALE or
+    /// Vreman closure is refreshed before each native residual check. Actual
+    /// cell `rho = M/V` supplies dynamic SGS stress and each material's cap,
+    /// while the original physical half-cell masses supply mouth inertia.
+    ///
+    /// Molecular stress retains `2 mu D`. Its heat alone enters enthalpy;
+    /// the added `2 rho nu_t dev(D)` transfers resolved kinetic energy into
+    /// the separate SGS ledger. Both shares use the same harmonic total
+    /// stress at material jumps, including two-cell mouth half-edges. The
+    /// following force/projection stage applies the original spatial pressure
+    /// profile exactly once and retains its independent work account.
+    ///
+    /// This shares the existing first-order frozen-source split, exploratory
+    /// SGS policy and opposed-reservoir scope. It supplies no incoming
+    /// turbulence spectrum, evolved subgrid-energy store or wall function.
+    /// A zero model coefficient is the exact molecular reservoir path.
+    ///
+    /// # Errors
+    /// Boundary/profile authority, source, closure, local cap, nonlinear
+    /// stress, energy, caloric, transport or cancellation refusal publishes
+    /// no state and leaves the original inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_viscosity_sgs_and_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        sgs: FvSgsConfig,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        let axis = Self::admit_material_viscosity_pressure_mouth(
+            faces,
+            viscosity.boundaries,
+            input.boundary_velocity_m_s,
+        )?;
+        self.advance_viscous_material(
+            domain,
+            faces,
+            Some(profile),
+            Some(axis),
+            input,
+            viscosity,
+            None,
+            Some(sgs),
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
     /// The independent shear/bulk response with the same opposed reservoir
     /// normal traction and zero tangential trace as the existing pressure entry.
     /// The viscous stage uses zero total normal traction, including bulk stress;

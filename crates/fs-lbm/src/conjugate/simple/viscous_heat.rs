@@ -686,10 +686,9 @@ impl Solver<'_> {
             || self.molecular_viscosity.len() != self.domain.cell_count()
             || self.molecular_bulk_viscosity.len() != self.domain.cell_count()
             || self.eddy_viscosity.len() != self.domain.cell_count()
-            || self.pressure_work_axis.is_some()
         {
             return Err(invalid_power(
-                "material SGS power requires closed original molecular, bulk and SGS fields",
+                "material SGS power requires original molecular, bulk and SGS fields",
             ));
         }
         self.sample_stress_power::<false, true>(gate)
@@ -896,7 +895,7 @@ impl Solver<'_> {
                 }
             }
         }
-        self.pressure_mouth_heat(&mut heat, &mut quadrature_w, gate)?;
+        self.pressure_mouth_power::<SGS>(&mut heat, &mut sgs_transfer, &mut quadrature_w, gate)?;
         let molecular_heat_w = finite_value("viscous_heat.molecular", heat.iter().sum())?;
         let sgs_transfer_w = finite_value("viscous_heat.sgs_transfer", sgs_transfer.iter().sum())?;
         Ok(MolecularPower {

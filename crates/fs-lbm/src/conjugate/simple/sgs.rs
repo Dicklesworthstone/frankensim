@@ -14,6 +14,7 @@ use crate::sgs3::{SgsConfig, SgsModel, SgsUse, eddy_viscosity, vreman_eddy_visco
 use fs_exec::CancelGate;
 
 mod edges;
+mod pressure;
 
 /// Explicit exploration controls for transient finite-volume flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,6 +59,9 @@ pub(super) struct State {
     gradients: Vec<[[f64; 3]; 3]>,
     /// One viscosity per interior edge; indexed by its remaining axis.
     shear_eddy: [Vec<f64>; 3],
+    /// Opposed reservoir half-edges, indexed by tangential axis and side.
+    /// Empty outside the explicitly admitted normal-traction boundary mode.
+    mouth_eddy: [Vec<f64>; 3],
     /// Scalar-filter cache for Smagorinsky/WALE. Vreman borrows directional
     /// geometry instead, avoiding a redundant three-vector per cell.
     filter_width: Vec<f64>,
@@ -244,6 +248,7 @@ impl Solver<'_> {
             velocity: vec![[0.0; 3]; self.domain.cell_count()],
             gradients: vec![[[0.0; 3]; 3]; self.domain.cell_count()],
             shear_eddy: edges::storage(self.n),
+            mouth_eddy: pressure::storage(self.n, self.pressure_work_axis)?,
         });
         Ok(())
     }
@@ -284,6 +289,7 @@ impl Solver<'_> {
             }
         }
         self.admit_sgs_edge_material(state, molecular, gate)?;
+        self.admit_sgs_pressure_material(state, molecular, gate)?;
         Ok(())
     }
 
@@ -340,6 +346,7 @@ impl Solver<'_> {
                 self.eddy_viscosity[cell] = eddy;
             }
             self.update_sgs_edges(&mut state, gate)?;
+            self.update_sgs_pressure_mouths(&mut state, gate)?;
             Ok(())
         })();
         self.sgs = Some(state);
@@ -366,6 +373,15 @@ impl Solver<'_> {
                 match self.faces[direction] {
                     FvBoundary::Wall { velocity } | FvBoundary::Inlet { velocity } => {
                         Sample::Value(velocity[component])
+                    }
+                    FvBoundary::Outlet | FvBoundary::Pressure { .. }
+                        if self.pressure_work_axis == Some(axis) && component != axis =>
+                    {
+                        // This boundary prescribes normal traction and a
+                        // zero tangential TRACE at the actual half-cell
+                        // distance. Legacy zero-gradient openings retain
+                        // their original sampling below.
+                        Sample::Value(0.0)
                     }
                     FvBoundary::Symmetry | FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
                         Sample::ZeroGradient
@@ -398,8 +414,8 @@ impl Solver<'_> {
 }
 
 #[cfg(test)]
+mod density_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod vreman_tests;
-#[cfg(test)]
-mod density_tests;

@@ -5,8 +5,10 @@
 //! or the explicit independent-bulk response 2 mu dev(D) + zeta div(u) I.
 //! Both retain harmonic material jumps, half-cell walls and matching heat.
 //! The source opt-in resolves viscosity at the accepted native endpoint shear.
-//! The closed SGS opt-in adds a deviatoric modeled stress using actual cell
-//! density and reports its energy transfer separately from molecular heating.
+//! The SGS opt-in adds a deviatoric modeled stress using actual cell density
+//! and reports its energy transfer separately from molecular heating. Reservoir
+//! mouths retain normal traction and a zero tangential velocity trace; their
+//! boundary closure and half-edge power use the same native stress coefficient.
 
 mod rheology;
 pub(in crate::conjugate) use rheology::{
@@ -198,8 +200,10 @@ pub(in crate::conjugate) fn kick(
     kick_with_refresh(domain, input, controls, gate, |_| Ok(()))
 }
 
-/// Add closed, resolved-gradient SGS on the original material inertia and
-/// stress owner. Source molecular heat and modeled SGS transfer stay separate.
+/// Add resolved-gradient SGS on the original material inertia and stress owner.
+/// Closed walls/symmetry and one opposed reservoir-traction pair retain their
+/// original boundary kinematics. Source molecular heat and modeled SGS transfer
+/// stay separate, including the two-cell half-edges at reservoir mouths.
 pub(in crate::conjugate) fn kick_with_sgs(
     domain: &VoxelDomain,
     input: NativeMaterialViscosityInput<'_>,
@@ -212,16 +216,7 @@ pub(in crate::conjugate) fn kick_with_sgs(
     if sgs.model.coefficient() == 0.0 {
         return kick(domain, input, controls, gate);
     }
-    if input.pressure_mouth_axis.is_some()
-        || input
-            .boundaries
-            .iter()
-            .any(|boundary| !matches!(boundary, FvBoundary::Wall { .. } | FvBoundary::Symmetry))
-    {
-        return Err(refuse(
-            "material SGS requires closed wall/symmetry boundaries",
-        ));
-    }
+    admit_split_boundaries(input.boundaries, input.pressure_mouth_axis)?;
     let mass = input.mass_kg;
     let mut initialized = false;
     kick_with_refresh(domain, input, controls, gate, |solver| {

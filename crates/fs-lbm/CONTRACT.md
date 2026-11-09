@@ -2663,3 +2663,47 @@ and any pressure/volume evolution.
 `BoussinesqOpenGrid3::{step_serial_with_material_transport_and_sgs,advance_serial_with_material_transport_and_sgs}` compose the original material and local SGS owners in one native transaction. Each accepted opening temperature resolves the original source once; its bounded density/Cp projection and retained SI scaling produce fresh molecular viscosity/conductivity rates. The existing Smagorinsky/WALE/Vreman preparation interprets the opening populations with their own accepted spatial total force, adds local eddy viscosity and `alpha_t=nu_t/Pr_t`, and retains the original collision family, higher-mode rates and TRT wall-placement rule. The material workspace remains molecular; repeated steps never recycle augmented SGS fields as molecular input. The separate SGS workspace carries the actual effective fields.
 
 The original native thermal/force stage advances once. Material queries at actual final temperatures, all source/storage/closure/thermal/force admissions and the common final cancellation gate precede joint publication of flow, heat, finite-wall history, force epochs and receipts. A changing endpoint background remains caller-owned on refusal and exchanges with the old background only on success. Returned evidence contains both concrete material-source epochs, the original heat/force receipt, and the separate modeled-stress and turbulent-heat diagnostics. Both reusable workspaces may contain refused scratch; neither is accepted physical state. Existing material sample/output caps and SGS workspace/ratio caps remain in force. Molecular and modeled coefficients are held over the interval; reference heat storage, affine buoyancy, thermal splitting and the prohibition on depositing modeled or body-force work as heat are unchanged.
+
+## Material SGS through pressure-reservoir mouths
+
+`FlowField::advance_material_momentum_with_viscosity_sgs_and_pressure_profile`
+composes original-source molecular momentum, resolved-gradient SGS and the
+existing spatial pressure/material-transport owner. Exactly one opposed pair
+of reservoir mouths prescribes normal traction and zero tangential velocity.
+Actual cell M/V supplies SGS dynamic viscosity and every material-ratio cap;
+the original physical boundary half-cell masses still supply inertia.
+
+Cell gradients use the admitted tangential trace. Each mouth shear half-edge
+evaluates the selected Smagorinsky, WALE or Vreman closure from its native
+reciprocal differences: boundary normal velocity along the mouth and tangent
+velocity against the zero trace over the normal half-cell distance. Remaining
+tensor entries and filter widths use the original graded-volume interpolation
+policy, not a claim of an exact surface gradient. Separate low/high caches
+preserve different closures even with one cell between the reservoirs.
+Surface-sized storage is checked and fallibly allocated; refresh/admission
+polls cancellation. Closure evaluation occurs once per native refresh and
+both reciprocal momentum rows reuse the same coefficient.
+
+The two adjacent total viscosities `mu + (M/V) nu_t` enter the original
+width-weighted harmonic mouth stress. Its physical half-edge power is divided
+by total material resistance, then into local molecular heat and modeled SGS
+transfer. Only molecular heat enters h. Every adjacent material independently
+constrains the mouth closure, including endpoint molecular admission. The
+following original force/projection stage applies the spatial reservoir load
+once; pressure work, time/scatter losses and SGS transfer remain separate.
+
+Zero coefficients recover the original molecular reservoir advance exactly.
+The entry retains the existing first-order frozen-source split, exploration
+policy, atomic refusal and fixed-geometry boundary scope. It supplies no inlet
+turbulence spectrum, subgrid-energy storage/cascade equation, wall function or
+variable-density total-energy qualification.
+
+Ten focused regression groups are authored: graded boundary traces, all six
+normal/tangent permutations and three closures, actual-density edge limits,
+heterogeneous traction/heat partition, reciprocal derivative cancellation,
+native half-cell decay, bidirectional inventory transport, nonuniform pressure
+loading and datum invariance, disabled models and refusal/replay. Pinned
+nightly syntax checks, scoped formatting and independent scalar energy
+arithmetic passed. Native compilation and execution remain unverified after
+the upstream asupersync build limitation; no test-pass or performance claim is
+made for these unexecuted regressions.

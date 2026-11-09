@@ -823,4 +823,5 @@ fn viscous_reservoir_scope_pressure_authority_and_cancellation_refuse_atomically
 }
 
 mod bulk_sgs;
+mod pressure_sgs;
 mod sgs;

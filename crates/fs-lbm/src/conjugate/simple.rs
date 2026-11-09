@@ -2288,7 +2288,7 @@ impl<'a> Solver<'a> {
                         0.5 * (row_width + width(d, next))
                     };
                     let edge_mu = if outside && self.pressure_work_axis == Some(d) {
-                        self.pressure_mouth_mu(a, minus_cell, plus_cell)
+                        self.pressure_mouth_mu(a, minus_cell, plus_cell, plus)
                     } else if pressure_mouth_row && !outside {
                         let mut next = plus_cell;
                         if plus {
@@ -2302,7 +2302,7 @@ impl<'a> Solver<'a> {
                             } else {
                                 (next, plus_cell)
                             };
-                            self.pressure_mouth_mu(d, m, p)
+                            self.pressure_mouth_mu(d, m, p, f[a] == self.n[a])
                         } else {
                             self.edge_mu(minus_cell, plus_cell, d, plus)
                         }

@@ -5,7 +5,9 @@
 //! static-pressure/zero-gradient opening, nor a zero-shear-traction boundary.
 //! A mouth shear half-edge uses gamma=du_n/dt+du_t/dn, including the zero
 //! tangential trace at distance h_n/2. Both momentum rows and local heat use
-//! the same two-cell harmonic viscosity and physical half-edge volume.
+//! the same two-cell harmonic viscosity and physical half-edge volume. Material
+//! SGS uses the native mouth-edge closure in that total viscosity; resistance
+//! fractions split molecular heat from modeled transfer without heating it twice.
 use super::*;
 
 /// Quasisteady source-viscosity flow through opposed reservoir-traction mouths.
@@ -125,18 +127,24 @@ impl Solver<'_> {
         tangent: usize,
         minus: [usize; 3],
         plus: [usize; 3],
+        high: bool,
     ) -> f64 {
         let wm = self.domain.width(tangent, minus[tangent]);
         let wp = self.domain.width(tangent, plus[tangent]);
-        let mm = self.mu_eff(minus);
-        let mp = self.mu_eff(plus);
+        let [mm, mp] = if let Some(eddy) = self.pressure_mouth_sgs_eddy(tangent, minus, plus, high)
+        {
+            [minus, plus].map(|p| self.sgs_total_viscosity(cell_of(self.n, p), eddy))
+        } else {
+            [self.mu_eff(minus), self.mu_eff(plus)]
+        };
         let minimum = mm.min(mp);
         minimum / ((wm / (wm + wp)) * (minimum / mm) + (wp / (wm + wp)) * (minimum / mp))
     }
 
-    pub(super) fn pressure_mouth_heat(
+    pub(super) fn pressure_mouth_power<const SGS: bool>(
         &self,
         heat: &mut [f64],
+        sgs_transfer: &mut [f64],
         quadrature: &mut f64,
         gate: &CancelGate,
     ) -> Result<(), ChtError> {
@@ -173,12 +181,33 @@ impl Solver<'_> {
                         / ld;
                     let tangent = self.vel[d][self.cell_face(d, minus, true)];
                     let gamma = normal + inward * tangent / la;
-                    let mu = self.pressure_mouth_mu(d, minus, plus);
+                    let mu = self.pressure_mouth_mu(d, minus, plus, side == 1);
                     let power = finite_value(
                         "pressure_heat.mouth_shear",
                         mu * la * ld * domain.width(3 - a - d, plus[3 - a - d]) * gamma * gamma,
                     )?;
                     *quadrature = finite_value("pressure_heat.shear_sum", *quadrature + power)?;
+                    if SGS {
+                        let eddy = self
+                            .pressure_mouth_sgs_eddy(d, minus, plus, side == 1)
+                            .ok_or_else(|| {
+                                invalid_power("material SGS mouth lacks its native edge closure")
+                            })?;
+                        let partition =
+                            material_sgs::mouth_power(self, [minus, plus], d, eddy, power)?;
+                        for (at, [molecular, modeled]) in [minus, plus].into_iter().zip(partition) {
+                            let cell = cell_of(self.n, at);
+                            heat[cell] = finite_value(
+                                "pressure_heat.molecular_shear",
+                                heat[cell] + molecular,
+                            )?;
+                            sgs_transfer[cell] = finite_value(
+                                "pressure_heat.sgs_transfer",
+                                sgs_transfer[cell] + modeled,
+                            )?;
+                        }
+                        continue;
+                    }
                     let minimum = self.mu_eff(minus).min(self.mu_eff(plus));
                     let weights = [
                         wm / (wm + wp) * minimum / self.mu_eff(minus),

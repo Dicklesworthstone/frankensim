@@ -73,5 +73,41 @@ pub(super) fn edge_power(
     Ok(partition)
 }
 
+/// One reservoir-mouth half-edge has two material subvolumes. The common
+/// normal half-width and third-axis width cancel from their resistance ratio;
+/// only the original tangent widths and TOTAL dynamic viscosities remain.
+pub(super) fn mouth_power(
+    solver: &Solver<'_>,
+    cells: [[usize; 3]; 2],
+    tangent: usize,
+    eddy: f64,
+    power: f64,
+) -> Result<[[f64; 2]; 2], ChtError> {
+    let widths = cells.map(|p| solver.domain.width(tangent, p[tangent]));
+    let width = widths[0] + widths[1];
+    let totals = cells.map(|p| solver.sgs_total_viscosity(cell_of(solver.n, p), eddy));
+    let minimum = totals[0].min(totals[1]);
+    let weights: [f64; 2] = core::array::from_fn(|i| (widths[i] / width) * (minimum / totals[i]));
+    let sum = weights[0] + weights[1];
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(invalid_power(
+            "unrepresentable material SGS mouth resistance partition",
+        ));
+    }
+    let mut partition = [[0.0; 2]; 2];
+    for i in 0..2 {
+        partition[i] = split_power(
+            solver,
+            cell_of(solver.n, cells[i]),
+            eddy,
+            power * (weights[i] / sum),
+        )?;
+    }
+    Ok(partition)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pressure_tests;
