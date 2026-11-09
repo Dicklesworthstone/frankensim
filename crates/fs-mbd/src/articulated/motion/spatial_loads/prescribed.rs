@@ -7,6 +7,9 @@
 /// Bounded implicit midpoint for stiff supported connections and smooth feedback.
 pub mod implicit;
 
+/// Static force balance on the original supported mechanism and attachment laws.
+pub mod equilibrium;
+
 use super::super::prescribed::{
     EffortLaw, EvaluatedPrescribedStep, PrescribedBaseMotionError, PrescribedBaseMotionState,
     PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, external_sources,

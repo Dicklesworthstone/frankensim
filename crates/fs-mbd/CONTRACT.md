@@ -359,6 +359,51 @@ apply. Rotating supports preserve the world direction and actual application
 point of external loads; scalar root joints remain admissible. The targeted
 regression entry is `cargo test -p fs-mbd --test articulated_prescribed_spatial`.
 
+## Static equilibrium on supported articulated mechanisms
+
+`articulated::motion::spatial_loads::prescribed::equilibrium` solves the
+original zero-rate RNEA holding effort minus actual actuator effort. World
+gravity, link-frame wrenches, world point forces/couples, finite axial links
+and diagonal or full passive six-axis bushings use the same geometry and
+constitutive evaluator as supported time evolution. `equilibrate_with_effort`
+accepts the original smooth supported-motion effort callback; its elapsed time
+is zero and its absolute clock is held. Repeated trial calls must not advance
+accepted material or control history.
+
+Every joint has explicit positive coordinate and effort scales in its original
+SI units. Newton--Krylov and directional finite differences belong to
+`fs-solver`; there is no assembled generalized mass or Jacobian. Initial
+coordinates are preserved exactly by solving scaled increments. Independent
+final RNEA evaluation must meet the absolute scaled force 2-norm tolerance;
+relative initial-residual stopping cannot weaken it. The result retains each
+physical joint residual, required/applied efforts, original attachment storage
+and the complete support wrench. Support extraction is shared with the original
+time-evolution owner, including scalar-root actuator transmission.
+
+The seed must have zero rates and base acceleration. Returned coordinates and
+zero rates explicitly initialize the native state while preserving its clock
+and support pose. No elapsed time, relaxation work, damping heat or loss is
+inferred from movement between the seed and solution. The result can continue
+through the unchanged supported time integrators. Native joint limits and
+attachment chart refusals apply to every trial and numerical stencil.
+
+Work is bounded by 4096 links, the original attachment inventory bounds,
+64 Newton attempts, 64 Krylov vectors and 16384 residual evaluations. Every
+evaluation, including final verification, consumes the caller's budget and
+polls cancellation around bounded native passes. All-fixed models recover
+support with no artificial zero-dimensional solve. A loaded singular mechanism
+does not publish an equilibrium; a balanced neutral or unstable root may be
+accepted without a stability, uniqueness or reachability claim. Contact,
+hard-stop reactions, Coulomb sticking, moving-support relative equilibria and
+closed-loop constraints remain separate owners. Numerical derivatives are not
+analytic tangents or adjoints.
+
+`cargo test -p fs-mbd --test articulated_equilibrium` covers G1 loaded axial
+extension and support force, finite-angle gravitational torque, reciprocal
+translation/rotation coupling and physical rescaling, plus G0 no-drift native
+continuation, original effort callbacks, all-fixed reactions, singular-load
+refusal, budget exhaustion, cancellation and seed immutability.
+
 ## Continuous prescribed-base articulated motion
 
 `articulated::motion::prescribed` advances the original compact joint state

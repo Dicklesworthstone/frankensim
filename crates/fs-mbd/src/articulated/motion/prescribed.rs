@@ -491,20 +491,8 @@ pub(super) fn finish_step(
         &midpoint_load.body_wrench,
     )?;
     poll(cancelled)?;
-    // Use the original root transform directly: subtracting two world poses
-    // could erase its arm under a large common translation. The root wrench
-    // already includes actuator transmission; adding it again double-counts work.
-    let root = &model.links()[0];
-    let root_coordinate = model
-        .dof_index(0)
-        .map_or(0.0, |i| midpoint.joint_position[i]);
-    let base_from_root = root
-        .parent_from_child_zero()
-        .compose(root.joint().motion(root_coordinate)?)?;
-    let support_wrench_body = inverse.body_wrench[0].transform_by(&base_from_root);
-    let support_wrench_world = support_wrench_body.transform_by(&midpoint.base.world_from_base);
-    validate_wrench(support_wrench_body, "prescribed_motion.support_body")?;
-    validate_wrench(support_wrench_world, "prescribed_motion.support_world")?;
+    let (support_wrench_body, support_wrench_world, base_from_root) =
+        support_wrenches(model, &midpoint, inverse.body_wrench[0])?;
     // Integrate the actual midpoint reaction, independently of endpoint momentum.
     // Do not round a small root couple into a large world-origin force moment.
     let mut support = SpatialSum::default();
@@ -669,6 +657,27 @@ fn held_stage<'a>(
         stored_energy: 0.0,
         dissipation_power: 0.0,
     })
+}
+
+// Shared by native motion and static equilibrium; neither constructs a heavy
+// surrogate support or adds internal actuator transmission a second time.
+pub(super) fn support_wrenches(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    root_wrench: Wrench,
+) -> Result<(Wrench, Wrench, Se3), PrescribedBaseMotionError> {
+    // Use the original root transform: subtracting world poses could erase its
+    // lever arm under a large common translation.
+    let root = &model.links()[0];
+    let root_coordinate = model.dof_index(0).map_or(0.0, |i| state.joint_position[i]);
+    let base_from_root = root
+        .parent_from_child_zero()
+        .compose(root.joint().motion(root_coordinate)?)?;
+    let body = root_wrench.transform_by(&base_from_root);
+    let world = body.transform_by(&state.base.world_from_base);
+    validate_wrench(body, "prescribed_motion.support_body")?;
+    validate_wrench(world, "prescribed_motion.support_world")?;
+    Ok((body, world, base_from_root))
 }
 
 pub(super) fn admit_stage(stage: &PrescribedStage<'_>) -> Result<(), PrescribedBaseMotionError> {
