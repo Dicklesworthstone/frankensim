@@ -2,6 +2,8 @@
 
 #[path = "laminate_beam_thermoelastic/exchange.rs"]
 mod exchange;
+#[path = "laminate_beam_thermoelastic/square.rs"]
+mod square;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

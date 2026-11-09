@@ -14,7 +14,8 @@
 //! a second sensible-heat inventory or implement thermal time integration.
 //! The complete smooth source interval must be admitted by the existing affine
 //! owner. Principal axes must align with the beam (within rotation roundoff),
-//! or both elastic and expansion source symmetries must be explicitly isotropic.
+//! both elastic and expansion sources must be explicitly isotropic, or original
+//! square-symmetric in-plane sources must align their diagonals with the beam.
 //! Accidental off-axis alignment at one temperature cannot admit a thermal path.
 
 use super::PreparedLaminateBeam;
@@ -185,9 +186,11 @@ impl ResolvedLaminateBeamThermoelastic {
             let aligned = sin.abs().min(cos.abs()) <= 16.0 * f64::EPSILON;
             let isotropic = matches!(&input.elasticity, LaminaElasticSource::Isotropic(_))
                 && input.expansion == LaminaExpansionSource::Isotropic;
-            if !aligned && !isotropic {
+            let square_diagonal = (sin.abs() - cos.abs()).abs() <= 16.0 * f64::EPSILON
+                && law.is_square_symmetric_in_plane();
+            if !aligned && !isotropic && !square_diagonal {
                 return Err(invalid(
-                    "off-axis beam thermal paths require explicitly isotropic elastic and expansion sources",
+                    "off-axis beam paths require isotropic sources or exact square symmetry in a diagonal frame",
                 ));
             }
             let source_error = |source| LaminateBeamThermoelasticError::Source { layer, source };

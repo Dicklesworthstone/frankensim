@@ -79,6 +79,37 @@ struct Coefficient {
     endpoints: [f64; 2],
     constant_over_interval: bool,
 }
+
+fn original_temperature_line(
+    source: &BoundLaminaSource,
+    state: &ResolvedMaterialStatePoint,
+    name: &str,
+    range: [f64; 2],
+) -> Result<Vec<(f64, f64)>, ThermoelasticError> {
+    let property = state.property(name).expect("coefficient was resolved");
+    let selected = property.answer().receipt.selected;
+    let claim = source
+        .input()
+        .card
+        .claims()
+        .claim(selected)
+        .ok_or(invalid("original layer coefficient claim is absent"))?;
+    let point = |t| {
+        state
+            .query()
+            .with("T", t)
+            .map_err(|_| invalid("layer temperature convention is invalid"))
+    };
+    Ok(pinned_temperature_line(
+        &source.input().card,
+        &claim.key,
+        "T",
+        &point(range[0])?,
+        &point(range[1])?,
+        selected,
+    )?)
+}
+
 impl Coefficient {
     fn new(
         source: &BoundLaminaSource,
@@ -101,30 +132,9 @@ impl Coefficient {
         // native operator needs the stronger statement that every original
         // support-knot value is exactly constant, not just a zero fitted slope.
         let constant_over_interval = if slope == 0.0 {
-            let property = state.property(name).expect("coefficient was resolved");
-            let selected = property.answer().receipt.selected;
-            let claim = source
-                .input()
-                .card
-                .claims()
-                .claim(selected)
-                .ok_or(invalid("original layer coefficient claim is absent"))?;
-            let point = |t| {
-                state
-                    .query()
-                    .with("T", t)
-                    .map_err(|_| invalid("layer temperature convention is invalid"))
-            };
-            pinned_temperature_line(
-                &source.input().card,
-                &claim.key,
-                "T",
-                &point(range[0])?,
-                &point(range[1])?,
-                selected,
-            )?
-            .iter()
-            .all(|(_, value)| *value == reference)
+            original_temperature_line(source, state, name, range)?
+                .iter()
+                .all(|(_, value)| *value == reference)
         } else {
             false
         };
@@ -136,6 +146,24 @@ impl Coefficient {
             endpoints,
             constant_over_interval,
         })
+    }
+
+    fn matches_source_over_interval(
+        &self,
+        other: &Self,
+        source: &BoundLaminaSource,
+        state: &ResolvedMaterialStatePoint,
+        range: [f64; 2],
+    ) -> Result<bool, ThermoelasticError> {
+        // Affinity allows representation-scale residuals. Symmetry needs the
+        // stronger equality of original native source profiles, not a fitted
+        // slope or equal values at the current temperature. Different source
+        // partitions conservatively refuse this optional symmetry admission.
+        Ok(self.reference == other.reference
+            && self.slope == other.slope
+            && self.endpoints == other.endpoints
+            && original_temperature_line(source, state, &self.name, range)?
+                == original_temperature_line(source, state, &other.name, range)?)
     }
     fn at(
         &self,
@@ -183,6 +211,7 @@ pub struct AffineLaminaThermoelastic {
     elastic: Vec<Coefficient>,
     expansion: Vec<Coefficient>,
     curvature_bound: f64,
+    square_symmetric_in_plane: bool,
 }
 impl AffineLaminaThermoelastic {
     /// The explicit component envelope applies to BOTH total and elastic
@@ -261,9 +290,25 @@ impl AffineLaminaThermoelastic {
             elastic,
             expansion,
             curvature_bound: 0.0,
+            square_symmetric_in_plane: false,
         };
         law.admit_isotropic_interval()?;
         law.curvature_bound = law.bound_curvature()?;
+        law.square_symmetric_in_plane = matches!(
+            &source.input().elasticity,
+            LaminaElasticSource::OrthotropicPlane12
+        ) && law.elastic[0].matches_source_over_interval(
+            &law.elastic[1],
+            source,
+            source.reference_elasticity(),
+            temperature_range_k,
+        )? && (law.expansion.len() == 1
+            || law.expansion[0].matches_source_over_interval(
+                &law.expansion[1],
+                source,
+                source.reference_expansion().reference(),
+                temperature_range_k,
+            )?);
         // Original endpoint/path owners retain full support, positivity and
         // consumer admissibility; density is never part of these refreshes.
         for t in temperature_range_k {
@@ -291,6 +336,13 @@ impl AffineLaminaThermoelastic {
     /// source interval, using exact zero source slopes rather than samples.
     pub fn is_temperature_independent_elasticity(&self) -> bool {
         self.elastic.iter().all(|c| c.constant_over_interval)
+    }
+
+    /// Exact original E1=E2 and alpha1=alpha2 profiles throughout the admitted
+    /// interval, which contains the expansion reference temperature. G12 may
+    /// remain anisotropic: only principal and diagonal frames are shear-aligned.
+    pub(super) const fn is_square_symmetric_in_plane(&self) -> bool {
+        self.square_symmetric_in_plane
     }
     /// Conservative elastic contribution to fixed-strain heat capacity over
     /// the complete interval/envelope. Add to the actual caloric capacity and
