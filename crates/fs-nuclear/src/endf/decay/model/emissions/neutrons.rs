@@ -20,7 +20,10 @@
 
 use std::sync::Arc;
 
-use super::{DecayEmissionCoverage, PreparedDecayEmission, visit};
+use super::{BurnupDecayEmission, DecayEmissionCoverage, PreparedDecayEmission, visit};
+use crate::burnup::BurnupModel;
+use crate::diffusion::burnup::DiffusionBurnupError;
+use crate::diffusion::burnup::decay::BurnupDecayNeutronEmission;
 use crate::diffusion::decay::{DecayNeutronEmission, DecayNeutronError};
 use crate::endf::EndfError;
 use crate::endf::decay::spectra::DecayRadiation;
@@ -70,6 +73,66 @@ impl EvaluatedDecayNeutrons {
     pub fn projection(&self) -> &[DecayNeutronProjection] {
         &self.projection
     }
+
+    /// Preserve this evaluated neutron source in its original finite burnup
+    /// inventory, where neutron reactions may remove emitters or create them.
+    ///
+    /// The complete original nuclide order, identities, half-lives and decay
+    /// channels must match. Additional neutron reactions and reordered reactions
+    /// are admitted by the existing evaluated burnup binding; no new isotope,
+    /// decay branch, energy route or zero-emission declaration is inferred here.
+    /// The neutron grid must match the kinetic model used for projection.
+    pub fn bind_burnup(
+        self: &Arc<Self>,
+        data_id: String,
+        model: Arc<BurnupModel>,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<EvaluatedBurnupDecayNeutrons, DecayNeutronBindingError> {
+        checkpoint()?;
+        if model.groups().as_ref() != self.kinetic_model.diffusion().groups().as_ref() {
+            return Err(DecayNeutronBindingError::Invalid(
+                "burnup neutrons require the original kinetic projection grid",
+            ));
+        }
+        let burnup_binding = self
+            .source
+            .bind_burnup(Arc::clone(&model), &mut checkpoint)?;
+        let emission = Arc::new(BurnupDecayNeutronEmission::new(
+            data_id,
+            model,
+            self.emission.neutron_yields().to_vec(),
+        )?);
+        checkpoint()?;
+        Ok(EvaluatedBurnupDecayNeutrons {
+            source: Arc::clone(self),
+            burnup_binding,
+            emission,
+        })
+    }
+}
+
+/// One evaluated emission bound to the exact finite-inventory model. The
+/// original evaluated source and validated decay-channel mapping remain
+/// available; neither populations nor reaction histories are copied here.
+#[derive(Clone, Debug)]
+pub struct EvaluatedBurnupDecayNeutrons {
+    source: Arc<EvaluatedDecayNeutrons>,
+    burnup_binding: BurnupDecayEmission,
+    emission: Arc<BurnupDecayNeutronEmission>,
+}
+
+impl EvaluatedBurnupDecayNeutrons {
+    pub fn source(&self) -> &Arc<EvaluatedDecayNeutrons> {
+        &self.source
+    }
+    /// Validated original decay channels, including their unchanged energy
+    /// routes. This map can audit the same accepted burnup report independently.
+    pub fn burnup_binding(&self) -> &BurnupDecayEmission {
+        &self.burnup_binding
+    }
+    pub fn emission(&self) -> &Arc<BurnupDecayNeutronEmission> {
+        &self.emission
+    }
 }
 
 /// Refusal before publishing a partially bound neutron source.
@@ -101,6 +164,7 @@ pub enum DecayNeutronBindingError {
     },
     Source(EndfError),
     Coupling(DecayNeutronError),
+    BurnupCoupling(DiffusionBurnupError),
 }
 
 impl From<EndfError> for DecayNeutronBindingError {
@@ -116,6 +180,11 @@ impl From<FissionError> for DecayNeutronBindingError {
 impl From<DecayNeutronError> for DecayNeutronBindingError {
     fn from(error: DecayNeutronError) -> Self {
         Self::Coupling(error)
+    }
+}
+impl From<DiffusionBurnupError> for DecayNeutronBindingError {
+    fn from(error: DiffusionBurnupError) -> Self {
+        Self::BurnupCoupling(error)
     }
 }
 impl core::fmt::Display for DecayNeutronBindingError {

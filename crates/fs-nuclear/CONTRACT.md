@@ -3356,3 +3356,19 @@ energy/source separation, native material heating, restart and refusal. The
 affected native test selection passed 114 tests, including the separately
 bound evaluated-spectrum extension; whole-workspace and full thermal-extension
 gates remain unclaimed.
+
+## Evaluated spectra on finite emitting inventories
+
+`EvaluatedDecayNeutrons::bind_burnup` retains the original evaluated emission,
+kinetic projection and strict `BurnupDecayEmission` mapping while supplying
+the finite stock's `BurnupDecayNeutronEmission`. Original nuclide order,
+identities, half-lives, products, branch fractions, energy routes and neutron
+grid must match. Reordered decay channels and appended neutron-induced
+reactions are admitted; neither new isotope data nor a missing-spectrum zero
+is inferred. Projected parent-wide yields retain their original count and
+energy moments without a second branch factor.
+
+Two additional native regressions pass for evaluated emission with competing
+finite capture, reordered decay channels, changed identity/energy/grid refusal
+and late cancellation. They test the admitted mapping and manufactured
+equations rather than evaluated-isotope calibration.

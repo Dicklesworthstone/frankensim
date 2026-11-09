@@ -5,6 +5,10 @@ use super::super::super::{
 };
 use super::super::DecayEmissionLimits;
 use super::*;
+use crate::EnergyChannels;
+use crate::burnup::{
+    BurnupBudget, BurnupData, BurnupInventory, BurnupLimits, BurnupRate, BurnupReaction,
+};
 use crate::decay::{DecayBudget, DecayInventory};
 use crate::diffusion::decay::{DecayNeutronBudget, DecayNeutronSource, DecayNeutronState};
 use crate::diffusion::{
@@ -12,7 +16,7 @@ use crate::diffusion::{
     DiffusionReactionKind, DiffusionState,
 };
 use crate::endf::decay::{DecayEvaluation, EndfDecayReadLimits, EndfDecaySelection};
-use crate::irradiation::NeutronGroups;
+use crate::irradiation::{GroupFlux, NeutronGroups};
 use fs_la::decay::DecayLimits;
 
 const EV: f64 = 1.602_176_634e-19;
@@ -421,4 +425,137 @@ fn preparation_is_bounded_and_late_cancellation_preserves_immutable_inputs() {
             FissionError::Budget(_)
         )))
     ));
+}
+
+fn burnup_data(source: &EvaluatedDecayNeutrons) -> BurnupData {
+    source
+        .source()
+        .assembly()
+        .burnup_data(
+            Arc::clone(source.kinetic_model().diffusion().groups()),
+            250.0,
+            1500.0,
+            || Ok(()),
+        )
+        .unwrap()
+}
+
+#[test]
+fn burnup_binding_retains_evaluation_with_reordered_decay_and_finite_capture() {
+    let original = source(true, true, false, 4.0, true);
+    let projected = Arc::new(bind(&original, kinetic(&[2.0 * EV, 4.0 * EV], 0.0), &[]).unwrap());
+    let mut data = burnup_data(&projected);
+    data.reactions.push(BurnupReaction {
+        data_id: "manufactured-emitter-capture".into(),
+        parent: 1,
+        rate: BurnupRate::Capture {
+            cross_sections_m2: vec![0.2, 0.4],
+        },
+        // Capture products explicitly leave this finite tracked network.
+        products: vec![],
+        energy_per_event: EnergyChannels::default(),
+    });
+    data.reactions.reverse();
+    let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+    let bound = projected
+        .bind_burnup(
+            "evaluated-finite-emitter".into(),
+            Arc::clone(&model),
+            || Ok(()),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(bound.source(), &projected));
+    assert!(Arc::ptr_eq(bound.burnup_binding().model(), &model));
+    assert!(Arc::ptr_eq(bound.emission().model(), &model));
+    assert_eq!(bound.emission().data_id(), "evaluated-finite-emitter");
+    assert_eq!(
+        bound.emission().neutron_yields(),
+        projected.emission().neutron_yields()
+    );
+    let initial = BurnupInventory::new(Arc::clone(&model), vec![0.0, 100.0]).unwrap();
+    let flux = GroupFlux::new(Arc::clone(model.groups()), vec![1.0, 1.0]).unwrap();
+    let (_, report) = initial
+        .trial(
+            1.0,
+            &flux,
+            300.0,
+            BurnupBudget {
+                limits: BurnupLimits::default(),
+                nuclei_tolerance: 1e-8,
+                energy_tolerance_j: 1e-25,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let emitted = bound
+        .burnup_binding()
+        .from_burnup_step(&model, &report, || Ok(()))
+        .unwrap();
+    let lambda = std::f64::consts::LN_2 / 2.0;
+    let expected_decays = 100.0 * lambda / (lambda + 0.6) * -(-(lambda + 0.6)).exp_m1();
+    close(report.decays, expected_decays, 3e-11);
+    assert!(report.captures > 0.0);
+    close(
+        emitted.emitted_particles.iter().sum(),
+        expected_decays,
+        3e-11,
+    );
+    close(
+        emitted.emitted_energy_j.iter().sum(),
+        3.0 * EV * expected_decays,
+        3e-11,
+    );
+}
+
+#[test]
+fn burnup_binding_refuses_changed_identity_energy_grid_and_late_cancellation() {
+    let original = source(true, true, false, 4.0, true);
+    let projected = Arc::new(bind(&original, kinetic(&[2.0 * EV, 4.0 * EV], 0.0), &[]).unwrap());
+    let data = burnup_data(&projected);
+    let mut wrong_identity = data.clone();
+    wrong_identity.nuclides[0].id = NuclideId::new(11, 28, 0).unwrap();
+    let mut wrong_energy = data.clone();
+    wrong_energy.reactions[0].energy_per_event.radiation_j += EV;
+    for changed in [wrong_identity, wrong_energy] {
+        let model = Arc::new(BurnupModel::new(changed, BurnupLimits::default()).unwrap());
+        assert!(matches!(
+            projected.bind_burnup("incompatible".into(), model, || Ok(())),
+            Err(DecayNeutronBindingError::Source(_))
+        ));
+    }
+    let mut wrong_grid = data.clone();
+    wrong_grid.groups = Arc::new(
+        NeutronGroups::new(
+            "different-neutron-grid".into(),
+            data.groups.edges_j().to_vec(),
+        )
+        .unwrap(),
+    );
+    let model = Arc::new(BurnupModel::new(wrong_grid, BurnupLimits::default()).unwrap());
+    assert!(matches!(
+        projected.bind_burnup("incompatible-grid".into(), model, || Ok(())),
+        Err(DecayNeutronBindingError::Invalid(_))
+    ));
+    let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+    let mut calls = 0;
+    let cancelled = projected.bind_burnup("cancelled".into(), Arc::clone(&model), || {
+        calls += 1;
+        if calls >= 4 {
+            Err(FissionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(calls, 4);
+    assert!(matches!(
+        cancelled,
+        Err(DecayNeutronBindingError::Source(EndfError::Physics(
+            FissionError::Cancelled
+        )))
+    ));
+    assert!(
+        projected
+            .bind_burnup("accepted".into(), model, || Ok(()))
+            .is_ok()
+    );
 }
