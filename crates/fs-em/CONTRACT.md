@@ -7528,13 +7528,22 @@ exactly zero local GVD within a linear wavelength segment. Dielectric intensity
 absorption is differentiated before conversion to extinction: constant alpha
 has exactly zero attenuation slope/curvature even though extinction varies.
 Water curvature comes from the original material owner at fixed T and density.
-Molecular-gas derivatives retain the original Cauchy component laws and nonlinear
-Lorentz–Lorenz mixing at fixed actual partial number densities. Preparation
+Molecular-mixture derivatives retain the original Cauchy component laws and
+nonlinear Lorentz–Lorenz mixing at fixed actual partial number densities. Preparation
 caches the wavelength jet; bulk queries at the exact prepared carrier supply
 group delay, GVD and GDD without refitting, allocation or frequency differences.
 Vacuum and nondispersive composition have exactly zero GVD. Original source-band
 endpoints remain valid for monochromatic transport but refuse two-sided
 dispersion; no gas absorption or equation-of-state update is inferred.
+`MolecularGasOpticalResponse::try_lossless_ciddor_air` also retains the original
+NIST Ciddor material law at fixed absolute temperature, pressure and composition.
+Its cached phase/group indices and spectral curvature drive the same native
+Maxwell interface, layer, angular-mode and bulk dispersion owners. The constructor
+explicitly selects a lossless coherent approximation. Magnetic source conditions
+must be matching static temperature/pressure or legacy kelvin T; unknown
+conditions, including a proxy mass density, refuse. Original atmospheric support,
+exact carrier admission and source-state identity remain binding. The material
+owner's optical density correction does not replace a fluid equation of state.
 Band endpoints and unequal adjacent table slopes refuse two-sided derivatives;
 smooth knots remain admitted. These are local original-law derivatives, not
 measured derivative accuracy, a causal reservoir or broadband-pulse error bounds.

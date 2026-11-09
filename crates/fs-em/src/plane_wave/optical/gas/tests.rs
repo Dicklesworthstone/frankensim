@@ -199,6 +199,225 @@ fn beam_limits() -> AngularSpectrumLimits {
 }
 
 #[test]
+fn g1_ciddor_air_source_derivatives_reach_bulk_and_interface_maxwell() {
+    let port = port();
+    for (x, co2, temperature_k, pressure_pa, lambda) in [
+        (0.0, 450.0, 293.15, 101_325.0, 633.0),
+        (0.025, 700.0, 313.15, 85_000.0, 410.0),
+        (0.09, 2000.0, 353.15, 110_000.0, 1550.0),
+    ] {
+        let air = CiddorAir::try_new(x, co2).unwrap();
+        let omega = FREQUENCY_WAVELENGTH_NM / lambda;
+        for mu in [MU, 2.3 * MU] {
+            let magnetic = magnetic(mu);
+            let response = MolecularGasOpticalResponse::try_lossless_ciddor_air(
+                air,
+                temperature_k,
+                pressure_pa,
+                &magnetic,
+                omega,
+            )
+            .unwrap();
+            let lambda = response.wavelength_nm();
+            let sample = air
+                .prepare(lambda)
+                .unwrap()
+                .sample(temperature_k, pressure_pa)
+                .unwrap();
+            assert_eq!(response.phase_index(), sample.phase_index);
+            assert_eq!(response.group_index(), sample.group_index);
+            assert!(response.group_index() > response.phase_index());
+            assert!(
+                matches!(response.source(), MolecularGasOpticalSource::CiddorAir {
+                composition, temperature_k: t, pressure_pa: p,
+            } if composition == air && t == temperature_k && p == pressure_pa)
+            );
+            assert!(core::ptr::eq(response.material(), &magnetic));
+            let law = DielectricResponse::MolecularGasOptical(response);
+            let jet = law.bulk_dispersion(omega).unwrap();
+            near(
+                jet.group_slowness_s_m() * VACUUM_SPEED_M_S,
+                sample.group_index,
+                8e-16,
+            );
+            near(
+                jet.group_velocity_dispersion_s2_m() * omega * VACUUM_SPEED_M_S,
+                lambda.powi(2) * sample.wavelength_second_derivative_per_nm2,
+                3e-18,
+            );
+            let first = lambda * sample.wavelength_derivative_per_nm;
+            let second = lambda.powi(2) * sample.wavelength_second_derivative_per_nm2;
+            let [e1, e2] = jet.scaled_permittivity_derivatives_f_m();
+            let scale = mu * VACUUM_SPEED_M_S.powi(2);
+            near(
+                jet.permittivity_f_m().re * scale,
+                sample.phase_index.powi(2),
+                2e-15,
+            );
+            near(e1.re * scale, -2.0 * sample.phase_index * first, 3e-18);
+            near(
+                e2.re * scale,
+                2.0 * (first * first + sample.phase_index * (second + 2.0 * first)),
+                3e-18,
+            );
+            assert_eq!(jet.wavenumber_rad_m().im, 0.0);
+            assert_eq!(jet.wavenumber_second_derivative_s2_m().im, 0.0);
+            let path = jet.propagation(10_000.0).unwrap();
+            assert!(path.group_delay_s > path.phase_delay_s);
+            assert!(path.group_delay_dispersion_s2 > 0.0);
+            let interface = PlanarDielectricInterface::try_new(&port, law).unwrap();
+            let ci = 0.8_f64;
+            let q = (sample.phase_index.powi(2) - (1.0 - ci * ci)).sqrt();
+            for polarization in [Polarization::Te, Polarization::Tm] {
+                let yi = admittance(polarization, 1.0, ci, MU);
+                let yt = admittance(polarization, sample.phase_index, q, mu);
+                let result = interface.response(omega, ci, polarization).unwrap();
+                complex_near(
+                    result.reflected_tangential_e,
+                    C64::from_re((yi - yt) / (yi + yt)),
+                    4e-15,
+                );
+                near(
+                    result.transmitted_normal_wavenumber_rad_m.re * VACUUM_SPEED_M_S / omega,
+                    q,
+                    3e-15,
+                );
+                near(
+                    result.reflected_power_fraction + result.transmitted_power_fraction,
+                    1.0,
+                    4e-15,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_ciddor_air_carrier_source_band_state_and_identity_are_preserved() {
+    let magnetic = magnetic(MU);
+    let air = CiddorAir::try_new(0.012, 450.0).unwrap();
+    let omega = FREQUENCY_WAVELENGTH_NM / 550.0;
+    let make = |composition, t, p, frequency| {
+        MolecularGasOpticalResponse::try_lossless_ciddor_air(
+            composition,
+            t,
+            p,
+            &magnetic,
+            frequency,
+        )
+    };
+    let response = make(air, 293.15, 101_325.0, omega).unwrap();
+    assert!(
+        response
+            .same_source(make(air, 293.15, 101_325.0, FREQUENCY_WAVELENGTH_NM / 1550.0).unwrap())
+    );
+    for (composition, t, p) in [
+        (air, 294.15, 101_325.0),
+        (air, 293.15, 102_325.0),
+        (CiddorAir::try_new(0.013, 450.0).unwrap(), 293.15, 101_325.0),
+        (CiddorAir::try_new(0.012, 451.0).unwrap(), 293.15, 101_325.0),
+    ] {
+        assert!(!response.same_source(make(composition, t, p, omega).unwrap()));
+    }
+    for wrong in [omega.next_up(), omega.next_down(), 0.0, f64::NAN] {
+        assert!(response.permittivity_f_m(wrong).is_err());
+        assert!(
+            DielectricResponse::MolecularGasOptical(response)
+                .bulk_dispersion(wrong)
+                .is_err()
+        );
+    }
+    for lambda in AIR_WAVELENGTH_RANGE_NM {
+        let frequency = FREQUENCY_WAVELENGTH_NM / lambda;
+        let edge = make(air, 293.15, 101_325.0, frequency).unwrap();
+        assert!(edge.permittivity_f_m(frequency).is_ok());
+        assert!(
+            DielectricResponse::MolecularGasOptical(edge)
+                .bulk_dispersion(frequency)
+                .is_err()
+        );
+    }
+    for frequency in [
+        (FREQUENCY_WAVELENGTH_NM / AIR_WAVELENGTH_RANGE_NM[1]).next_down(),
+        (FREQUENCY_WAVELENGTH_NM / AIR_WAVELENGTH_RANGE_NM[0]).next_up(),
+        0.0,
+        f64::NAN,
+    ] {
+        assert!(make(air, 293.15, 101_325.0, frequency).is_err());
+    }
+    for (t, p) in [
+        (233.14, 101_325.0),
+        (373.16, 101_325.0),
+        (f64::NAN, 101_325.0),
+        (293.15, 59_999.0),
+        (293.15, 120_001.0),
+        (293.15, f64::INFINITY),
+    ] {
+        assert!(make(air, t, p, omega).is_err());
+    }
+}
+
+#[test]
+fn g0_ciddor_air_checks_original_magnetic_conditions_without_inventing_density() {
+    let air = CiddorAir::try_new(0.012, 450.0).unwrap();
+    let omega = FREQUENCY_WAVELENGTH_NM / 550.0;
+    for (kind, value) in [
+        (QuantityKind::AbsoluteTemperature, 293.15),
+        (QuantityKind::Pressure, 101_325.0),
+        (QuantityKind::MassConcentration, 1.0),
+    ] {
+        let quantity = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        for factor in [1.0, 1.1] {
+            let magnetic = snapshot(
+                &[(
+                    MAGNETIC_PERMEABILITY_PROPERTY,
+                    MAGNETIC_PERMEABILITY_DIMS,
+                    MU,
+                )],
+                QueryPoint::new()
+                    .with_quantity("condition", quantity, factor * value)
+                    .unwrap(),
+                ValidityDomain::unconstrained().with_quantity(
+                    "condition",
+                    quantity,
+                    0.5 * value,
+                    2.0 * value,
+                ),
+            );
+            assert_eq!(
+                MolecularGasOpticalResponse::try_lossless_ciddor_air(
+                    air, 293.15, 101_325.0, &magnetic, omega,
+                )
+                .is_ok(),
+                factor == 1.0 && kind != QuantityKind::MassConcentration,
+            );
+        }
+    }
+    for (axis, value, admitted) in [
+        ("T", 293.15, true),
+        ("T", 300.0, false),
+        ("P", 101_325.0, false),
+    ] {
+        let magnetic = snapshot(
+            &[(
+                MAGNETIC_PERMEABILITY_PROPERTY,
+                MAGNETIC_PERMEABILITY_DIMS,
+                MU,
+            )],
+            QueryPoint::new().with(axis, value).unwrap(),
+            ValidityDomain::unconstrained(),
+        );
+        assert_eq!(
+            MolecularGasOpticalResponse::try_lossless_ciddor_air(
+                air, 293.15, 101_325.0, &magnetic, omega,
+            )
+            .is_ok(),
+            admitted,
+        );
+    }
+}
+
+#[test]
 fn g1_molecular_bulk_jet_retains_cauchy_group_delay_and_gvd_in_both_density_bases() {
     let (_, model) = fixture();
     let numbers = [2.5e25, 0.0];

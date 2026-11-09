@@ -1,13 +1,14 @@
 //! Original molecular refraction in homogeneous monochromatic Maxwell waves.
 //!
-//! The material owner evaluates Lorentz--Lorenz and any sourced molecular
-//! dispersion once. With exp(+i omega t), epsilon=n_phase²/(mu*c0²); group
+//! The material owner evaluates its molecular mixture or atmospheric law
+//! once. With exp(+i omega t), epsilon=n_phase²/(mu*c0²); group
 //! index is a distinct propagation derivative, never the phase constitutive
 //! coefficient. The caller explicitly chooses a lossless coherent-medium
 //! approximation: molecular scattering is NOT converted into absorption.
 
 use super::{FREQUENCY_WAVELENGTH_NM, ReflectionError, VACUUM_SPEED_M_S, dispersion, positive};
 use fs_material::{
+    air_refraction::{CiddorAir, WAVELENGTH_RANGE_NM as AIR_WAVELENGTH_RANGE_NM},
     field_storage::linear_magnetic_permeability,
     gas_scattering::{
         RayleighGasState,
@@ -21,7 +22,7 @@ use fs_qty::{
     semantic::{QuantityKind, ValueForm},
 };
 
-/// Original immutable molecular sources, with no reconstructed species or EOS.
+/// Original immutable gas sources, with no reconstructed species or fluid EOS.
 #[derive(Clone, Copy, Debug)]
 pub enum MolecularGasOpticalSource<'a> {
     /// The exact accepted gas state and its fixed composition/optical sources.
@@ -32,6 +33,12 @@ pub enum MolecularGasOpticalSource<'a> {
         model: &'a MolecularRefractionModel,
         partial_densities: &'a [f64],
         basis: PartialDensityBasis,
+    },
+    /// Original atmospheric composition and homogeneous thermodynamic state.
+    CiddorAir {
+        composition: CiddorAir,
+        temperature_k: f64,
+        pressure_pa: f64,
     },
 }
 
@@ -132,6 +139,44 @@ impl<'a> MolecularGasOpticalResponse<'a> {
         )
     }
 
+    /// Choose the lossless coherent approximation for the original Ciddor
+    /// atmospheric-air law. Temperature [K], absolute pressure [Pa], water
+    /// mole fraction and dry-air CO2 remain fixed during spectral derivatives.
+    /// The named material law supplies its own optical density correction;
+    /// no fluid EOS, mass density, absorption or scattering is inferred.
+    /// Magnetic conditions may name only matching static temperature/pressure
+    /// (or legacy kelvin `T`); composition remains owned by the air source.
+    pub fn try_lossless_ciddor_air(
+        composition: CiddorAir,
+        temperature_k: f64,
+        pressure_pa: f64,
+        magnetic: &'a ResolvedMaterialStatePoint,
+        omega_rad_s: f64,
+    ) -> Result<Self, ReflectionError> {
+        let wavelength_nm = wavelength(omega_rad_s, AIR_WAVELENGTH_RANGE_NM)?;
+        let sample = composition
+            .prepare(wavelength_nm)
+            .and_then(|prepared| prepared.sample(temperature_k, pressure_pa))
+            .map_err(|_| bad("Ciddor air state is outside its original refraction domain"))?;
+        admit_air_conditions(temperature_k, pressure_pa, magnetic)?;
+        Self::prepare(
+            MolecularGasOpticalSource::CiddorAir {
+                composition,
+                temperature_k,
+                pressure_pa,
+            },
+            magnetic,
+            omega_rad_s,
+            wavelength_nm,
+            sample.phase_index,
+            sample.group_index,
+            [
+                wavelength_nm * sample.wavelength_derivative_per_nm,
+                wavelength_nm.powi(2) * sample.wavelength_second_derivative_per_nm2,
+            ],
+        )
+    }
+
     fn prepare(
         source: MolecularGasOpticalSource<'a>,
         magnetic: &'a ResolvedMaterialStatePoint,
@@ -203,6 +248,7 @@ impl<'a> MolecularGasOpticalResponse<'a> {
         self.admit_frequency(omega)?;
         let band = match self.source {
             MolecularGasOpticalSource::FixedComposition(_) => [380.0, 780.0],
+            MolecularGasOpticalSource::CiddorAir { .. } => AIR_WAVELENGTH_RANGE_NM,
             MolecularGasOpticalSource::PartialDensities { model, .. } => {
                 model.wavelength_range_nm()
             }
@@ -249,6 +295,18 @@ impl<'a> MolecularGasOpticalResponse<'a> {
                         basis: bb,
                     },
                 ) => core::ptr::eq(a, b) && ab == bb && ar == br,
+                (
+                    MolecularGasOpticalSource::CiddorAir {
+                        composition: a,
+                        temperature_k: at,
+                        pressure_pa: ap,
+                    },
+                    MolecularGasOpticalSource::CiddorAir {
+                        composition: b,
+                        temperature_k: bt,
+                        pressure_pa: bp,
+                    },
+                ) => a == b && at == bt && ap == bp,
                 _ => false,
             }
     }
@@ -291,6 +349,37 @@ fn admit_fixed_conditions(
         };
         if *value != expected {
             return Err(bad("molecular gas and magnetic source conditions disagree"));
+        }
+    }
+    Ok(())
+}
+
+fn admit_air_conditions(
+    temperature_k: f64,
+    pressure_pa: f64,
+    magnetic: &ResolvedMaterialStatePoint,
+) -> Result<(), ReflectionError> {
+    for (axis, value) in magnetic.query_point() {
+        let quantity = magnetic.axis_quantities().get(axis).copied();
+        let expected = match quantity.and_then(QuantitySpec::semantic_type) {
+            Some(ty) if ty.form() == ValueForm::Static => match ty.kind() {
+                QuantityKind::AbsoluteTemperature => temperature_k,
+                QuantityKind::Pressure => pressure_pa,
+                _ => return Err(bad("Ciddor air magnetic source has an unmapped condition")),
+            },
+            None if axis == "T"
+                && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS)) =>
+            {
+                temperature_k
+            }
+            _ => {
+                return Err(bad(
+                    "Ciddor air magnetic source needs original static conditions",
+                ));
+            }
+        };
+        if *value != expected {
+            return Err(bad("Ciddor air and magnetic source conditions disagree"));
         }
     }
     Ok(())

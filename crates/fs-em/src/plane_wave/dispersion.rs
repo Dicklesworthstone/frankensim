@@ -70,8 +70,9 @@ impl<'a> DielectricResponse<'a> {
     /// the cached native frequency and response must already be admitted.
     /// Optical derivatives retain Cauchy, Sellmeier, linear wavelength tables
     /// or the original IAPWS water law; endpoints and nonsmooth knots refuse.
-    /// Frequency-prepared molecular gases retain their original fixed-density
-    /// Lorentz--Lorenz derivatives at the SAME admitted interior frequency.
+    /// Frequency-prepared gases retain their original derivatives at the SAME
+    /// admitted interior frequency: fixed partial densities for molecular
+    /// Lorentz--Lorenz mixtures, or fixed T/P/composition for Ciddor air.
     pub fn bulk_dispersion(self, omega_rad_s: f64) -> Result<BulkWaveDispersion<'a>> {
         let omega = positive(omega_rad_s)?;
         let optical = match self {
