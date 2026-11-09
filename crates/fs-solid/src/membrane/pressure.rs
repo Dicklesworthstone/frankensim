@@ -54,16 +54,29 @@ impl MembranePatch {
         pressure_pa: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<[f64; 3]>, MembraneError> {
-        poll(&mut cancelled)?;
+        let mut force = vec![[0.0; 3]; self.mesh.nodes.len()];
+        self.pressure_load_into_n(displacement_m, pressure_pa, &mut force, &mut cancelled)?;
+        Ok(force)
+    }
+
+    /// Shared current-area assembly into the time owner's retained workspace.
+    pub(super) fn pressure_load_into_n(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: f64,
+        force: &mut [[f64; 3]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), MembraneError> {
+        poll(cancelled)?;
         let n = self.mesh.nodes.len();
-        if !pressure_pa.is_finite() || !finite_vectors(displacement_m, n) {
+        if !pressure_pa.is_finite() || !finite_vectors(displacement_m, n) || force.len() != n {
             return Err(MembraneError::Invalid(
-                "finite pressure jump and per-node displacement required",
+                "finite pressure jump, per-node displacement and complete force workspace required",
             ));
         }
-        let mut force = vec![[0.0; 3]; n];
+        force.fill([0.0; 3]);
         for (index, e) in self.elements.iter().enumerate() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let [a, b] = self.pressure_edges(e.nodes, displacement_m);
             let area = cross(a, b);
             self.admit_pressure_area(index, area)?;
@@ -73,11 +86,11 @@ impl MembranePatch {
                 }
             }
         }
-        if !finite_vectors(&force, n) {
+        if !finite_vectors(force, n) {
             return Err(MembraneError::Invalid("unrepresentable pressure load"));
         }
-        poll(&mut cancelled)?;
-        Ok(force)
+        poll(cancelled)?;
+        Ok(())
     }
 
     /// Exact matrix-free derivative of `pressure_load_n` with respect to the
@@ -145,13 +158,49 @@ impl MembranePatch {
                 "finite pressure jump and segment endpoints required",
             ));
         }
+        self.pressure_segment_work_j(
+            before_m,
+            pressure_pa,
+            |node| std::array::from_fn(|i| after_m[node][i] - before_m[node][i]),
+            &mut cancelled,
+        )
+    }
+
+    /// Work over the original resolved drift, even if adding that increment to
+    /// a translated absolute displacement would round it away. The pressure
+    /// owner still integrates the same changing triangle area analytically.
+    pub(super) fn pressure_work_from_increment_j(
+        &self,
+        before_m: &[[f64; 3]],
+        increment_m: &[[f64; 3]],
+        pressure_pa: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, MembraneError> {
+        poll(cancelled)?;
+        let n = self.mesh.nodes.len();
+        if !pressure_pa.is_finite()
+            || !finite_vectors(before_m, n)
+            || !finite_vectors(increment_m, n)
+        {
+            return Err(MembraneError::Invalid(
+                "finite pressure jump, initial displacement and drift required",
+            ));
+        }
+        self.pressure_segment_work_j(before_m, pressure_pa, |node| increment_m[node], cancelled)
+    }
+
+    fn pressure_segment_work_j(
+        &self,
+        before_m: &[[f64; 3]],
+        pressure_pa: f64,
+        change_at: impl Fn(usize) -> [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, MembraneError> {
         let mut work = 0.0;
         for e in &self.elements {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let [a, b] = self.pressure_edges(e.nodes, before_m);
-            let change: [[f64; 3]; 3] = e
-                .nodes
-                .map(|node| std::array::from_fn(|i| after_m[node][i] - before_m[node][i]));
+            let change = e.nodes.map(&change_at);
             let da = std::array::from_fn(|i| change[1][i] - change[0][i]);
             let db = std::array::from_fn(|i| change[2][i] - change[0][i]);
             let c0 = cross(a, b);
@@ -167,7 +216,7 @@ impl MembranePatch {
         if !work.is_finite() {
             return Err(MembraneError::Invalid("unrepresentable pressure work"));
         }
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(work)
     }
 

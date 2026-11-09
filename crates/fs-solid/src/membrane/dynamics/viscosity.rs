@@ -40,6 +40,8 @@ pub struct DampedMembraneStep {
     pub strain_energy_j: f64,
     pub kinetic_energy_j: f64,
     pub dead_load_work_j: f64,
+    /// Current-area pressure work during the original elastic drift [J].
+    pub pressure_work_j: f64,
     /// Analytically integrated nonnegative material heat over the split flow.
     pub dissipated_j: f64,
     /// Mechanical-energy change + heat - held-load work [J].
@@ -225,6 +227,22 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
         &mut self,
         dt_s: f64,
         dead_load_n: &[[f64; 3]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DampedMembraneStep> {
+        self.step_with_pressure(dt_s, dead_load_n, 0.0, cancelled)
+    }
+
+    /// Compose the same material damping with held follower pressure in the
+    /// original elastic map. Pressure does work only during its geometric
+    /// drift, not during the two fixed-geometry damping stages. That work is
+    /// reported separately and never counted as material heat. Current-area
+    /// traction, free-perimeter path work and support impulses retain
+    /// [`MembraneMotion::step_with_pressure`]'s semantics and limitations.
+    pub fn step_with_pressure(
+        &mut self,
+        dt_s: f64,
+        dead_load_n: &[[f64; 3]],
+        pressure_pa: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DampedMembraneStep> {
         poll(&mut cancelled)?;
@@ -235,17 +253,20 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
             || 0.25 * dt_s == 0.0
             || !next_time.is_finite()
             || next_time == self.motion.time_s
+            || !pressure_pa.is_finite()
             || !crate::membrane::finite_vectors(dead_load_n, self.motion.displacement_m.len())
         {
             return Err(invalid(
-                "resolved positive membrane time step and finite complete loads required",
+                "resolved positive membrane time step, finite pressure and complete loads required",
             ));
         }
         copy_state(&self.motion, &mut self.trial);
         self.trial_element_dissipated_j.fill(0.0);
         let mut mass_solves = 0;
         let first = self.damping_stage(0.5 * dt_s, &mut mass_solves, &mut cancelled)?;
-        let elastic = self.trial.step(dt_s, dead_load_n, &mut cancelled)?;
+        let elastic =
+            self.trial
+                .step_with_pressure(dt_s, dead_load_n, pressure_pa, &mut cancelled)?;
         let last = self.damping_stage(0.5 * dt_s, &mut mass_solves, &mut cancelled)?;
         let dissipated_j = first.heat + last.heat;
         let energy_defect_j = first.defect + elastic.energy_defect_j + last.defect;
@@ -295,6 +316,7 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
             strain_energy_j: self.motion.strain_energy_j,
             kinetic_energy_j: self.motion.kinetic_energy_j,
             dead_load_work_j: elastic.dead_load_work_j,
+            pressure_work_j: elastic.pressure_work_j,
             dissipated_j,
             energy_defect_j,
             support_impulse_n_s,

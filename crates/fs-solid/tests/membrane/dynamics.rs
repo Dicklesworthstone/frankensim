@@ -211,6 +211,214 @@ fn uniform_force_work_is_independent_of_translation_below_the_position_ulp() {
 }
 
 #[test]
+fn pressure_accelerates_a_free_sheet_and_retains_work_below_the_position_ulp() {
+    let patch = ballistic_patch();
+    let dt = 2.0_f64.powi(-30);
+    let pressure = 12.0;
+    let acceleration = pressure / 3.0; // pressure / reference areal density
+    let expected_work = 0.5 * patch.reference_mass_kg() * acceleration * acceleration * dt * dt;
+    let zero = [[0.0; 3]; 5];
+    for origin in [0.0, 1.0, 1e6] {
+        let initial = vec![[0.0, 0.0, origin]; 5];
+        let mut motion = MembraneMotion::new(&patch, &[], &initial, &zero, 0.0, || false).unwrap();
+        let step = motion
+            .step_with_pressure(dt, &zero, pressure, || false)
+            .unwrap();
+        close(step.pressure_work_j, expected_work, 0.0, 1e-13);
+        close(step.kinetic_energy_j, expected_work, 0.0, 1e-13);
+        close(step.energy_defect_j, 0.0, 1e-13 * expected_work, 0.0);
+        assert_eq!(step.dead_load_work_j, 0.0);
+        assert_eq!(step.support_impulse_n_s, [0.0; 3]);
+        for velocity in motion.velocity_m_s() {
+            close(velocity[2], acceleration * dt, 0.0, 1e-13);
+        }
+        if origin != 0.0 {
+            assert_eq!(motion.displacement_m(), initial.as_slice());
+        }
+        let reverse = motion
+            .step_with_pressure(-dt, &zero, pressure, || false)
+            .unwrap();
+        close(reverse.pressure_work_j, -expected_work, 0.0, 1e-13);
+        close(reverse.energy_defect_j, 0.0, 1e-13 * expected_work, 0.0);
+        assert_eq!(motion.displacement_m(), initial.as_slice());
+        assert_eq!(motion.velocity_m_s(), &zero);
+    }
+}
+
+#[test]
+fn pressure_uses_both_current_areas_and_integrates_the_changing_area_work() {
+    let patch = ballistic_patch();
+    let dt = 0.001;
+    let rate = 2.0;
+    let pressure = 12.0;
+    let acceleration = pressure / 3.0;
+    let expansion = rate * dt;
+    let rise = 0.5 * acceleration * dt * dt;
+    let zero = [[0.0; 3]; 5];
+    let velocity: Vec<_> = patch
+        .mesh()
+        .nodes
+        .iter()
+        .map(|x| [rate * x[0], rate * x[1], 0.0])
+        .collect();
+    let mut motion = MembraneMotion::new(&patch, &[], &zero, &velocity, 0.0, || false).unwrap();
+    let step = motion
+        .step_with_pressure(dt, &zero, pressure, || false)
+        .unwrap();
+    // The first drift expands every in-plane coordinate by 1+rate*dt.
+    // The sheet remains flat, so material forces have no z component.
+    let expected_velocity = 0.5 * dt * acceleration * (1.0 + (1.0 + expansion).powi(2));
+    let expected_work =
+        pressure * (1.0 / 32.0) * rise * (1.0 + expansion + expansion * expansion / 3.0);
+    for (u, v) in motion.displacement_m().iter().zip(motion.velocity_m_s()) {
+        close(u[2], rise, 1e-20, 1e-13);
+        close(v[2], expected_velocity, 1e-16, 1e-13);
+    }
+    close(step.pressure_work_j, expected_work, 1e-20, 1e-13);
+    let frozen_work = pressure * (1.0 / 32.0) * rise;
+    assert!((step.pressure_work_j - frozen_work).abs() > 1e-9);
+    let midpoint_work = frozen_work * (1.0 + 0.5 * expansion).powi(2);
+    assert!((step.pressure_work_j - midpoint_work).abs() > 1e-13);
+}
+
+#[test]
+fn pressure_loaded_nonlinear_motion_matches_the_pyramid_force_and_support_balance() {
+    use fs_solid::membrane::dynamics::ConsistentMassBudget;
+    use fs_solid::membrane::inertia::MembraneMassImage;
+    let patch = patch(8000.0, 8000.0, 4000.0, 0.2, 0.0);
+    let stretch = 1.02_f64;
+    let q0 = 0.006_f64;
+    let v0 = -0.3;
+    let dt = 1e-5;
+    let u = initial(stretch, q0);
+    let mut v = [[0.0; 3]; 5];
+    v[0][2] = v0;
+    let zero = [[0.0; 3]; 5];
+    let fixed = prescribed(stretch);
+    let area = 0.02 * stretch * stretch;
+    let restoring = |q: f64| 16000.0 * (stretch * stretch - 1.0) * q + 3_200_000.0 * q.powi(3);
+    for consistent in [false, true] {
+        let mass = if consistent {
+            0.2 * 0.02 / 6.0
+        } else {
+            0.2 * 0.02 / 3.0
+        };
+        for pressure in [-200.0, 200.0] {
+            let mut motion = if consistent {
+                MembraneMotion::new_with_consistent_inertia(
+                    &patch,
+                    &fixed,
+                    &u,
+                    &v,
+                    0.0,
+                    ConsistentMassBudget {
+                        max_nodes_per_axis: 5,
+                    },
+                    || false,
+                )
+                .unwrap()
+            } else {
+                MembraneMotion::new(&patch, &fixed, &u, &v, 0.0, || false).unwrap()
+            };
+            let before_energy = motion.strain_energy_j() + motion.kinetic_energy_j();
+            let half = v0 + 0.5 * dt * (pressure * area / 3.0 - restoring(q0)) / mass;
+            let q1 = q0 + dt * half;
+            let v1 = half + 0.5 * dt * (pressure * area / 3.0 - restoring(q1)) / mass;
+            let step = motion
+                .step_with_pressure(dt, &zero, pressure, || false)
+                .unwrap();
+            close(motion.displacement_m()[0][2], q1, 1e-16, 1e-13);
+            close(motion.velocity_m_s()[0][2], v1, 1e-12, 1e-12);
+            close(
+                step.pressure_work_j,
+                pressure * area * dt * half / 3.0,
+                1e-16,
+                1e-13,
+            );
+            close(
+                step.energy_defect_j,
+                step.strain_energy_j + step.kinetic_energy_j - before_energy - step.pressure_work_j,
+                1e-15,
+                1e-9,
+            );
+            // The complete physical momentum uses column sums of the selected
+            // reference mass, including supported rows in the consistent case.
+            let image = if consistent {
+                MembraneMassImage::Consistent
+            } else {
+                MembraneMassImage::Lumped
+            };
+            let delta_v: Vec<_> = motion
+                .velocity_m_s()
+                .iter()
+                .zip(v)
+                .map(|(a, b)| std::array::from_fn(|axis| a[axis] - b[axis]))
+                .collect();
+            let momentum = patch
+                .reference_mass_apply(image, &delta_v, || false)
+                .unwrap();
+            let total: f64 = momentum.iter().map(|p| p[2]).sum();
+            close(
+                total,
+                dt * pressure * area + step.support_impulse_n_s[2],
+                1e-15,
+                1e-11,
+            );
+            motion
+                .step_with_pressure(-dt, &zero, pressure, || false)
+                .unwrap();
+            close(motion.displacement_m()[0][2], q0, 1e-16, 1e-13);
+            close(motion.velocity_m_s()[0][2], v0, 1e-12, 1e-12);
+        }
+    }
+}
+
+#[test]
+fn pressure_refusal_is_transactional_and_zero_pressure_preserves_the_original_map() {
+    let patch = ballistic_patch();
+    let zero = [[0.0; 3]; 5];
+    let mut motion = MembraneMotion::new(&patch, &[], &zero, &zero, 0.0, || false).unwrap();
+    let mut original = motion.clone();
+    for pressure in [f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(
+            motion
+                .step_with_pressure(0.01, &zero, pressure, || false)
+                .is_err()
+        );
+        assert_eq!(motion.displacement_m(), &zero);
+        assert_eq!(motion.velocity_m_s(), &zero);
+        assert_eq!(motion.time_s(), 0.0);
+    }
+    let mut polls = 0;
+    assert!(matches!(
+        motion.step_with_pressure(1e-5, &zero, 12.0, || {
+            polls += 1;
+            polls == 6
+        }),
+        Err(MembraneError::Cancelled)
+    ));
+    assert_eq!(motion.displacement_m(), &zero);
+    assert_eq!(motion.velocity_m_s(), &zero);
+    assert_eq!(motion.time_s(), 0.0);
+    assert_eq!(
+        motion
+            .step_with_pressure(1e-5, &zero, 0.0, || false)
+            .unwrap(),
+        original.step(1e-5, &zero, || false).unwrap()
+    );
+    assert_eq!(
+        motion
+            .step_with_pressure(1e-5, &zero, 12.0, || false)
+            .unwrap(),
+        original
+            .step_with_pressure(1e-5, &zero, 12.0, || false)
+            .unwrap()
+    );
+    assert_eq!(motion.displacement_m(), original.displacement_m());
+    assert_eq!(motion.velocity_m_s(), original.velocity_m_s());
+}
+
+#[test]
 fn small_work_survives_a_large_orthogonal_kinetic_background() {
     let patch = ballistic_patch();
     let dt = 2.0_f64.powi(-30);
@@ -299,12 +507,7 @@ fn held_load_work_and_support_impulse_close_the_actual_step() {
     let drift = 0.5 * 1e-5_f64.powi(2) * (-2.0 - initial_gradient) / p.nodal_mass_kg()[0];
     let step = motion.step(1e-5, &loads, || false).unwrap();
     let after = momenta(&motion).0;
-    close(
-        step.dead_load_work_j,
-        -2.0 * drift,
-        0.0,
-        1e-14,
-    );
+    close(step.dead_load_work_j, -2.0 * drift, 0.0, 1e-14);
     close(
         step.energy_defect_j,
         motion.strain_energy_j() + motion.kinetic_energy_j() - old_energy - step.dead_load_work_j,

@@ -1914,9 +1914,28 @@ strain-storage/integration error remains in the signed numerical defect. Station
 supports do no work. This second-order symplectic explicit lane introduces no
 physical damping and does not claim exact energy conservation, automatic time
 step stability, real-time throughput, spatial convergence or experimental
-validation. Moving supports, follower pressure, contact and material-history
+validation. Moving supports, contact and material-history
 evolution are outside this entry. The original native constitutive costs and
 admission domains still apply.
+
+`MembraneMotion::step_with_pressure` adds a held signed pressure difference
+through the original current-area triangle owner at both force kicks. It uses
+the selected lumped, dense-consistent or sparse-consistent reference inertia;
+pressure changes neither inventory nor the material law. Positive pressure
+acts along the current reference-oriented normal, initially +z. Loads at
+stationary supports are retained in their impulse account. Zero pressure
+preserves the original entry's arithmetic.
+
+Pressure work has its own returned account, separate from dead loads, stored
+energy and the signed numerical defect. The native exact quadratic-area
+integral uses the original resolved kinematic drift, retaining physical work
+even below the absolute-position ULP. One prepared node buffer serves both
+endpoint forces and full-space drift; warm pressure steps introduce no global
+matrix or pressure-work allocation. With fixed perimeter this is conservative
+pressure-volume work. A free perimeter is also admitted for the positional
+force map, with explicit path-dependent work and no symplecticity claim. No
+gas inventory, acoustic stiffness, fluid inertia, continuum-error certificate
+or physical reservoir evolution is inferred.
 
 G1/G3 regressions in `tests/membrane/dynamics.rs` compare a four-triangle sheet
 against the independent nonlinear Duffing energy-integral period on three time
@@ -1926,6 +1945,10 @@ time reversal, held-load work/support impulse, checkpoint replay and refusal
 rollback. Ballistic work is also checked below the position ULP at translated
 origins and against a large orthogonal kinetic background. These are
 manufactured mechanics checks, not measured drum sounds.
+Pressure regressions additionally compare changing-area kicks and exact drift
+work, a signed-pressure nonlinear pyramid under both reference mass images,
+complete support impulse, time reversal, refusal rollback and a damped scalar
+source law with separate physical heat.
 
 ## Original interface friction in quasistatic obstacle contact
 
@@ -2633,9 +2656,14 @@ Lumped channel work is local and linear in triangle count; consistent channels
 reuse the original mass inverse and retain M_cf delta_v in support impulses.
 Prepared state/scratch buffers are reused; cancelled or refused trials publish
 neither motion nor heat. Per-element and accumulated physical heat are separate
-from the signed numerical defect. This is not the full coupled exponential,
-a nonlinear stability/phase certificate, follower-pressure coupling, material
-temperature evolution or an inferred source-bandwidth qualification.
+from the signed numerical defect. `step_with_pressure` composes those same
+loss stages around the original current-area pressure step. Pressure work
+occurs only during the elastic drift and is retained separately from physical
+heat, including the pressure forces on supports. The scalar-source regression
+checks both signs of pressure with lumped and consistent reference inertia.
+This is not the full coupled exponential, a nonlinear stability/phase
+certificate, fluid-reservoir evolution, material temperature evolution or an
+inferred source-bandwidth qualification.
 
 ## Variable-amplitude critical-plane Miner damage on native J2 histories
 

@@ -172,6 +172,71 @@ fn finite_amplitude_heat_work_and_support_impulse_match_the_scalar_source_law() 
     }
 }
 
+#[test]
+fn pressure_drives_the_native_damped_membrane_without_becoming_material_heat() {
+    let (p, laws) = patch([20_000.0, 20_000.0, 20_000.0, 0.0, 0.0, 0.0], 0.002, 0.0);
+    let viscosity = MembraneViscosity::new(&p, laws, (0.0, 1000.0), || false).unwrap();
+    let loads = [[0.0; 3], [0.0, 0.0, 0.7], [0.0; 3]];
+    let dt = 0.04;
+    for consistent in [false, true] {
+        let mass = if consistent { 0.5 } else { 1.0 };
+        for pressure in [-2.0, 2.0] {
+            let mut z = 0.2;
+            let mut v = -0.3;
+            let mut motion = DampedMembraneMotion::new(
+                &viscosity,
+                scalar_motion(&p, z, v, consistent),
+                budget(),
+                || false,
+            )
+            .unwrap();
+            for _ in 0..4 {
+                // x_b=(1.08,0,z), x_c=(0,1,0): each triangle vertex
+                // receives p*(-z,0,1.08)/6. Only b_z is free.
+                let expected = scalar_step(z, v, mass, dt, 0.7 + 0.18 * pressure);
+                let step = motion
+                    .step_with_pressure(dt, &loads, pressure, || false)
+                    .unwrap();
+                close(motion.motion().displacement_m()[1][2], expected.z);
+                close(motion.motion().velocity_m_s()[1][2], expected.v);
+                close(step.pressure_work_j, 0.18 * pressure * (expected.z - z));
+                close(step.dead_load_work_j, 0.7 * (expected.z - z));
+                close(step.dissipated_j, expected.heat);
+                close(step.energy_defect_j, expected.defect);
+                close(
+                    scalar_energy(expected.z) - scalar_energy(z)
+                        + 0.5 * mass * (expected.v - v) * (expected.v + v)
+                        + step.dissipated_j
+                        - step.dead_load_work_j
+                        - step.pressure_work_j,
+                    step.energy_defect_j,
+                );
+                // Includes pressure on the two supported vertices and M_cf.
+                close(
+                    step.support_impulse_n_s[2],
+                    expected.v - v - dt * (0.7 + 0.54 * pressure),
+                );
+                close(
+                    step.support_impulse_n_s[0],
+                    0.25 * dt * pressure * (z + expected.z),
+                );
+                close(step.support_impulse_n_s[1], 0.0);
+                z = expected.z;
+                v = expected.v;
+            }
+            let before = motion.motion().displacement_m().to_vec();
+            let before_heat = motion.cumulative_dissipated_j();
+            assert!(
+                motion
+                    .step_with_pressure(dt, &loads, f64::NAN, || false)
+                    .is_err()
+            );
+            assert_eq!(motion.motion().displacement_m(), before);
+            assert_eq!(motion.cumulative_dissipated_j(), before_heat);
+        }
+    }
+}
+
 // Independent two-coordinate continuous equations from F0=(1.08,.12,z),
 // F1=(-.04,.94,w), A=.5, h=.002, and the full authored viscosity tensor.
 // The last coordinate integrates physical heat, independently of energy balance.

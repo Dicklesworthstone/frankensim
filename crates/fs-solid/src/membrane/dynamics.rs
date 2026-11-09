@@ -12,7 +12,10 @@
 //! This explicit, second-order lane needs a resolved time step. Its signed
 //! energy/work defect is integration error, not dissipated heat. Symplecticity
 //! does not establish nonlinear stability or mesh/time convergence. Moving
-//! supports, follower pressure, contact, and material history are not included.
+//! supports, contact, and material history are not included. Held signed
+//! pressure uses current-area forces at both kicks and exact work over the
+//! resolved straight drift. On a free perimeter this force is nonconservative;
+//! no symplectic or path-independent pressure-work claim applies there.
 
 use super::{MembraneError, MembranePatch, finite_vectors, inertia::MembraneMassImage, poll};
 use fs_solver::op::LinearOp;
@@ -82,6 +85,9 @@ pub struct MembraneStep {
     /// Work of the held load over the resolved kinematic drift [J], even when
     /// adding that displacement to the absolute position rounds it away.
     pub dead_load_work_j: f64,
+    /// Work of held current-area pressure over the resolved straight drift [J].
+    /// It is separate from dead-load work and from numerical integration error.
+    pub pressure_work_j: f64,
     /// Change in total mechanical energy minus external work [J]. This is a
     /// signed numerical defect; no physical dissipation is introduced.
     pub energy_defect_j: f64,
@@ -117,6 +123,8 @@ pub struct MembraneMotion<'a> {
     trial_displacement: Vec<[f64; 3]>,
     gradient: Vec<[f64; 3]>,
     trial_gradient: Vec<[f64; 3]>,
+    // Reused for endpoint pressure forces, then for the resolved full drift.
+    pressure_scratch: Vec<[f64; 3]>,
     scratch: Vec<f64>,
 }
 
@@ -362,6 +370,7 @@ impl<'a> MembraneMotion<'a> {
             trial_displacement: displacement_m.to_vec(),
             gradient,
             trial_gradient: vec![[0.0; 3]; nodes],
+            pressure_scratch: vec![[0.0; 3]; nodes],
             scratch: vec![0.0; scratch_size],
         })
     }
@@ -418,6 +427,33 @@ impl<'a> MembraneMotion<'a> {
         &mut self,
         dt_s: f64,
         dead_load_n: &[[f64; 3]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneStep, MembraneError> {
+        self.step_with_pressure(dt_s, dead_load_n, 0.0, cancelled)
+    }
+
+    /// Advance the same original momentum map with held signed pressure [Pa].
+    /// Positive pressure acts along the current reference-oriented normal,
+    /// initially +z. It is a pressure difference, not an absolute gas pressure.
+    ///
+    /// Both endpoint kicks assemble the original current-area traction,
+    /// including loads at prescribed nodes in the support impulse. Work is
+    /// integrated exactly along the resolved straight drift, retaining changing
+    /// face areas and increments below the absolute-position ULP. With moving
+    /// perimeter nodes this is path-dependent work; the positional-force Verlet
+    /// map remains second order and reversible, but is not claimed symplectic.
+    /// A fixed perimeter recovers the native conservative pressure-volume load.
+    ///
+    /// Pressure may change between calls. No gas inventory, acoustic stiffness,
+    /// fluid inertia, or pressure-dependent material state is inferred. Pressure
+    /// assembly and work reuse prepared O(nodes) storage; a rejected step leaves
+    /// the complete accepted mechanical state unchanged. Zero pressure follows
+    /// the original unloaded arithmetic path.
+    pub fn step_with_pressure(
+        &mut self,
+        dt_s: f64,
+        dead_load_n: &[[f64; 3]],
+        pressure_pa: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneStep, MembraneError> {
         poll(&mut cancelled)?;
@@ -426,10 +462,11 @@ impl<'a> MembraneMotion<'a> {
             || dt_s == 0.0
             || !next_time.is_finite()
             || next_time == self.time_s
+            || !pressure_pa.is_finite()
             || !finite_vectors(dead_load_n, self.displacement_m.len())
         {
             return Err(MembraneError::Invalid(
-                "finite nonzero representable time advance and finite nodal dead loads required",
+                "finite nonzero representable time advance, pressure and nodal dead loads required",
             ));
         }
         self.trial_q.copy_from_slice(&self.q);
@@ -441,14 +478,18 @@ impl<'a> MembraneMotion<'a> {
         let energy = Cell::new(self.strain_energy_j);
         let support_sum = Cell::new([0.0; 3]);
         let first_kick = Cell::new(true);
-        let buffers = RefCell::new((&mut self.trial_displacement, &mut self.trial_gradient));
+        let buffers = RefCell::new((
+            &mut self.trial_displacement,
+            &mut self.trial_gradient,
+            &mut self.pressure_scratch,
+        ));
         let force = |q: &[f64], output: &mut [f64]| {
             output.fill(f64::NAN);
             if stopped.borrow().is_some() {
                 return;
             }
             let mut buffers = buffers.borrow_mut();
-            let (u, trial_gradient) = &mut *buffers;
+            let (u, trial_gradient, pressure) = &mut *buffers;
             for (&dof, &value) in self.free.iter().zip(q) {
                 u[dof / 3][dof % 3] = value;
             }
@@ -469,14 +510,32 @@ impl<'a> MembraneMotion<'a> {
                 }
                 trial_gradient
             };
+            if pressure_pa != 0.0 {
+                if let Err(error) =
+                    self.patch
+                        .pressure_load_into_n(u, pressure_pa, pressure, &mut || {
+                            (control.borrow_mut())()
+                        })
+                {
+                    *stopped.borrow_mut() = Some(error);
+                    return;
+                }
+            }
             for (out, &dof) in output.iter_mut().zip(&self.free) {
-                *out = dead_load_n[dof / 3][dof % 3] - gradient[dof / 3][dof % 3];
+                let mut applied = dead_load_n[dof / 3][dof % 3];
+                if pressure_pa != 0.0 {
+                    applied += pressure[dof / 3][dof % 3];
+                }
+                *out = applied - gradient[dof / 3][dof % 3];
             }
             let mut reactions = support_sum.get();
             for (dof, &held) in self.fixed.iter().enumerate() {
                 if held {
-                    reactions[dof % 3] +=
-                        gradient[dof / 3][dof % 3] - dead_load_n[dof / 3][dof % 3];
+                    let mut applied = dead_load_n[dof / 3][dof % 3];
+                    if pressure_pa != 0.0 {
+                        applied += pressure[dof / 3][dof % 3];
+                    }
+                    reactions[dof % 3] += gradient[dof / 3][dof % 3] - applied;
                 }
             }
             support_sum.set(reactions);
@@ -515,6 +574,20 @@ impl<'a> MembraneMotion<'a> {
             .zip(displacement)
             .map(|(&dof, &increment)| dead_load_n[dof / 3][dof % 3] * increment)
             .sum();
+        let pressure_work_j = if pressure_pa == 0.0 {
+            0.0
+        } else {
+            self.pressure_scratch.fill([0.0; 3]);
+            for (&dof, &increment) in self.free.iter().zip(displacement) {
+                self.pressure_scratch[dof / 3][dof % 3] = increment;
+            }
+            self.patch.pressure_work_from_increment_j(
+                &self.displacement_m,
+                &self.pressure_scratch,
+                pressure_pa,
+                &mut cancelled,
+            )?
+        };
         let energy_defect_j = kinetic_change(
             &self.momentum,
             &self.trial_momentum,
@@ -523,7 +596,8 @@ impl<'a> MembraneMotion<'a> {
             &self.velocity_m_s,
             &self.trial_velocity,
         ) + (strain_energy_j - self.strain_energy_j)
-            - dead_load_work_j;
+            - dead_load_work_j
+            - pressure_work_j;
         let mut support_impulse_n_s = support_sum.get().map(|f| (0.5 * dt_s) * f);
         if self.inverse_mass.has_support_coupling() {
             // The drift observation has already supplied the held-load work,
@@ -557,6 +631,7 @@ impl<'a> MembraneMotion<'a> {
             strain_energy_j,
             kinetic_energy_j + strain_energy_j,
             dead_load_work_j,
+            pressure_work_j,
             energy_defect_j,
         ]
         .iter()
@@ -597,6 +672,7 @@ impl<'a> MembraneMotion<'a> {
             strain_energy_j,
             kinetic_energy_j,
             dead_load_work_j,
+            pressure_work_j,
             energy_defect_j,
             support_impulse_n_s,
         })
