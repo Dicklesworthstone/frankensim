@@ -28,6 +28,9 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 use fs_thermal::luminescence::transfer::{SingletTripletDecay, SingletTripletError};
 
+/// Source-bound molecular absorption into the singlet and triplet states.
+pub mod pump;
+
 /// Original `[singlet, triplet]` excitation energies relative to one ground-state
 /// datum, in joules per excitation, not joules per mole or activation barriers.
 pub const PHOSPHORESCENCE_ENERGY_PROPERTIES: [&str; 2] = [

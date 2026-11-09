@@ -1,5 +1,8 @@
 //! G0/G1/G3 source admission and physical quenching using manufactured claims.
 
+#[path = "phosphorescence/pump.rs"]
+mod pump;
+
 use fs_evidence::ValidityDomain;
 use fs_la::decay::DecayLimits;
 use fs_matdb::{
