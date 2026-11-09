@@ -253,6 +253,18 @@ impl SpectralDielectricAbsorptionTemperaturePath {
         self.prepared.source_knot_count
     }
 
+    // The phase-temperature owner uses these SAME prepared source lines. It
+    // neither re-queries claims nor copies a second interpolation/resolution
+    // path; every auxiliary requirement remains in the original bundle.
+    pub(in crate::state_point::spectral_optics) fn source_line(
+        &self,
+        name: &str,
+    ) -> Option<&[(f64, f64)]> {
+        self.prepared.source.resolved().properties().iter()
+            .position(|property| property.requirement().name() == name)
+            .map(|index| self.prepared.lines[index].as_slice())
+    }
+
     /// Exact intersection of the original moving bands over the full path.
     /// None is permitted: each individual temperature may still have a valid
     /// spectrum. One shared endpoint is a usable monochromatic intersection.
@@ -320,7 +332,7 @@ impl Prepared {
     }
 }
 
-fn line_value(
+pub(in crate::state_point::spectral_optics) fn line_value(
     knots: &[(f64, f64)],
     temperature_k: f64,
 ) -> Result<f64, AbsorptionTemperatureSampleError> {

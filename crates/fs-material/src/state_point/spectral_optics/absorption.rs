@@ -11,6 +11,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 
 mod temperature;
+pub(super) use temperature::line_value;
 pub use temperature::{
     AbsorptionTemperaturePathError, AbsorptionTemperatureSampleError,
     SpectralDielectricAbsorptionTemperaturePath,

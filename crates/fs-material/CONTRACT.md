@@ -24233,3 +24233,36 @@ ODE references for all four ordered planes, retained-memory and tiny-interval
 heat, pure-Kelvin cubic startup, DD subdivision, duplicate cancellation and
 transactional/domain refusals. These tests require native execution; source
 review or formatting alone is not numerical validation.
+
+## Original tabulated thermal-refraction cells
+
+`SpectralDielectricTemperaturePath` prepares the existing nine original
+wavelength/index/absorption claim roles over one typed absolute-temperature
+interval. It reuses the pinned absorption-line owner on the complete original
+resolved bundle, retaining every auxiliary requirement, fixed physical
+coordinate, source receipt and actual interpolation breakpoint. Source-knot
+budget and cancellation remain atomic. All phase values must satisfy the native
+`n >= 1`, `n² <= f64::MAX/64` domain throughout their original lines;
+positive values alone do not establish a usable geometric-optics index.
+The cached maximum original wavelength gap includes every source-breakpoint
+extremum, so consumers can retain their interpolation-gap ceiling throughout
+thermal motion of the measured grid.
+
+A monochromatic `PreparedSpectralDielectricTemperatureCell` admits the entire
+declared temperature interval only when its active wavelength, index and loss
+lines are exactly affine and the original moving wavelength bracket stays
+fixed. Exact equal-slope continuation is admitted; genuine temperature cusps
+and interior moving-knot crossings refuse derivative preparation. Phase-only
+values remain available at source cusps. Thermal endpoints use the derivative
+from inside the admitted cell. Stationary interior spectral knots retain
+thermal jets, with group index absent when original spectral slopes disagree.
+
+Hot samples evaluate original phase, independently sourced intensity absorption,
+`n_g = n - lambda dn/dlambda`, and analytic first/second temperature
+derivatives of the rational moving-grid interpolant without material queries,
+allocation, finite differences or refitting. Finite nonpositive group indices
+remain source derivatives for consumers to admit or refuse for their clocks.
+Transparent spectra retain finite source support; a disjoint global wavelength
+intersection does not erase valid individual-temperature value queries. This
+owner supplies source optics, not a temperature solver, birefringence model,
+complex-interface law, uncertainty enclosure or invented smooth continuation.

@@ -30,6 +30,12 @@ pub use absorption::{
     resolve_spectral_dielectric_absorption_state_point,
 };
 
+mod temperature;
+pub use temperature::{
+    PreparedSpectralDielectricTemperatureCell, SpectralDielectricTemperatureError,
+    SpectralDielectricTemperaturePath, SpectralDielectricTemperatureSample,
+};
+
 /// Number of original knots retained by each finite-band optical table.
 pub const SPECTRAL_OPTICAL_SAMPLE_COUNT: usize = 9;
 
