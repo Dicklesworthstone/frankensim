@@ -10,6 +10,59 @@ use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 use super::transient::{FilmDrive, FilmStep, FilmStepLimits, TransientFilm, TransientFilmError};
 use super::{FilmError, FilmMaterial, NusseltFilm, ShearedFilm};
 
+#[cfg(feature = "thin-film-evolution")]
+use super::evolution::{
+    ThinFilmControls, ThinFilmError, ThinFilmGeometry, ThinFilmLimits, ThinFilmLine, ThinFilmStep,
+};
+
+/// Evolving longitudinal thickness retaining the exact admitted Newtonian
+/// liquid source, viscosity basis, query and capillarity declaration.
+#[cfg(feature = "thin-film-evolution")]
+#[derive(Debug)]
+pub struct MaterialThinFilmLine<'a> {
+    liquid: MaterialFilmLiquid<'a>,
+    flow: ThinFilmLine,
+}
+
+#[cfg(feature = "thin-film-evolution")]
+impl<'a> MaterialThinFilmLine<'a> {
+    /// Original immutable source, including all material/property receipts.
+    pub const fn liquid(&self) -> MaterialFilmLiquid<'a> {
+        self.liquid
+    }
+
+    /// Accepted native height inventory, physical clock and film geometry.
+    pub const fn flow(&self) -> &ThinFilmLine {
+        &self.flow
+    }
+
+    /// Evolve the original thickness inventory under the same source density,
+    /// viscosity and surface tension. Native volume, support, work and
+    /// cancellation gates decide acceptance. Temperature/composition remain
+    /// frozen; no caloric law or rheological approximation is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance(
+        &mut self,
+        target_s: f64,
+        acceleration_m_s2: f64,
+        surface_shear_pa: &[f64],
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        height_guess_m: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmStep, ThinFilmError> {
+        self.flow.advance(
+            target_s,
+            acceleration_m_s2,
+            surface_shear_pa,
+            limits,
+            controls,
+            height_guess_m,
+            cancelled,
+        )
+    }
+}
+
 /// Resolved film inertia retaining the original immutable liquid source.
 #[derive(Debug)]
 pub struct MaterialTransientFilm<'a> {
@@ -154,6 +207,22 @@ impl<'a> MaterialFilmLiquid<'a> {
         Ok(MaterialTransientFilm {
             liquid: self,
             flow: TransientFilm::new(self.coefficients(), thickness_m, cells)?,
+        })
+    }
+
+    /// Prepare native longitudinal thickness evolution from this exact source.
+    /// The Newtonian constructor receives the original SI coefficients directly;
+    /// no surrogate Carreau parameters, source selection or heat capacity enters.
+    #[cfg(feature = "thin-film-evolution")]
+    pub fn thin_film_line(
+        self,
+        geometry: ThinFilmGeometry,
+        heights_m: Vec<f64>,
+        time_s: f64,
+    ) -> Result<MaterialThinFilmLine<'a>, ThinFilmError> {
+        Ok(MaterialThinFilmLine {
+            liquid: self,
+            flow: ThinFilmLine::newtonian(self.coefficients(), geometry, heights_m, time_s)?,
         })
     }
 }

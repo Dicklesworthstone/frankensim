@@ -332,6 +332,101 @@ fn source_bound_transient_films_retain_their_material_and_resolved_momentum() {
     }
 }
 
+#[cfg(feature = "thin-film-evolution")]
+#[test]
+fn source_bound_thickness_evolution_keeps_original_liquid_and_native_conservation() {
+    use fs_lbm::film::evolution::{
+        ThinFilmBoundary, ThinFilmControls, ThinFilmError, ThinFilmGeometry, ThinFilmLimits,
+        ThinFilmLine,
+    };
+
+    let geometry = ThinFilmGeometry {
+        spacing_m: 0.01,
+        normal_acceleration_m_s2: 3.0,
+        boundary: ThinFilmBoundary::Periodic,
+    };
+    let limits = ThinFilmLimits {
+        minimum_thickness_m: 5e-5,
+        maximum_thickness_m: 2e-4,
+        characteristic_length_m: 0.04,
+        maximum_height_to_length: 0.01,
+        maximum_slope: 0.01,
+        maximum_reduced_reynolds: 0.1,
+    };
+    let controls = ThinFilmControls::default();
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        let card = card(basis, true, false);
+        let source = resolve(&card, basis, LiquidCapillarity::Sourced);
+        let liquid = MaterialFilmLiquid::try_new(&source).unwrap();
+        let heights = vec![1e-4, 1.05e-4, 9.5e-5, 1e-4];
+        let mut bound = liquid
+            .thin_film_line(geometry, heights.clone(), 0.0)
+            .unwrap();
+        let mut native =
+            ThinFilmLine::newtonian(liquid.coefficients(), geometry, heights, 0.0).unwrap();
+        let shear = vec![1e-4; bound.flow().face_count()];
+        for acceleration in [4.0, -4.0, 0.0] {
+            let target = bound.flow().accepted_time_s() + 0.001;
+            let guess = bound.flow().heights_m().to_vec();
+            let report = bound
+                .advance(
+                    target,
+                    acceleration,
+                    &shear,
+                    limits,
+                    controls,
+                    &guess,
+                    || false,
+                )
+                .unwrap();
+            let reference = native
+                .advance(
+                    target,
+                    acceleration,
+                    &shear,
+                    limits,
+                    controls,
+                    &guess,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(bound.flow().heights_m(), native.heights_m());
+            assert_eq!(bound.flow().accepted_time_s(), native.accepted_time_s());
+            assert_eq!(report.faces, reference.faces);
+            assert_eq!(report.volume_change_m2, reference.volume_change_m2);
+            assert_eq!(report.viscous_heat_j_per_m, reference.viscous_heat_j_per_m);
+            assert!(report.volume_change_m2.abs() <= controls.volume_tolerance_m2);
+            assert!(report.energy_residual_j_per_m.abs() <= controls.energy_tolerance_j_per_m);
+            assert!(core::ptr::eq(bound.liquid().material(), &source));
+            assert_eq!(bound.liquid().material().viscosity_basis(), basis);
+            assert_eq!(
+                bound.liquid().material().material().card_identity(),
+                card.content_hash()
+            );
+        }
+        let accepted = bound.flow().heights_m().to_vec();
+        let time = bound.flow().accepted_time_s();
+        assert!(matches!(
+            bound.advance(
+                time + 0.001,
+                0.0,
+                &shear,
+                limits,
+                controls,
+                &accepted,
+                || true
+            ),
+            Err(ThinFilmError::Cancelled)
+        ));
+        assert_eq!(bound.flow().heights_m(), accepted);
+        assert_eq!(bound.flow().accepted_time_s(), time);
+        assert!(core::ptr::eq(bound.liquid().material(), &source));
+    }
+}
+
 #[test]
 fn pinned_temperature_update_changes_all_coefficients_without_losing_context() {
     let card = card(LiquidViscosityBasis::Dynamic, true, false);

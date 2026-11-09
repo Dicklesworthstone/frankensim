@@ -769,6 +769,64 @@ zero gravity, density/viscosity similarity, pressure-datum invariance and
 invalid/cancelled construction. Both dimensions use one temporary profile
 value per wet layer and add no work or retained storage to time stepping.
 
+## Conservative streamwise laminar-film evolution
+
+With `thin-film-evolution`, `film::evolution::ThinFilmLine` advances actual
+strictly wet cell thickness by `h_t + q_x = 0` on a uniform periodic or closed
+line. The face force combines held tangential gravity with the gradient of
+`p = rho*g_normal*h - sigma*h_xx`. Original Newtonian `ShearedFilm` or prepared
+thermal Carreau-Yasuda slit profiles supply the flux, surface speed, wall
+stress and physical viscous heat together. Each original Carreau face source
+is prepared once at its frozen temperature; changing height reuses that
+preparation. Pressure forcing and surface traction enter one nonlinear
+profile without apparent-viscosity replacement or superposed flows.
+
+Godunov selection evaluates both neighboring heights and, when present, the
+original flux's interior turning point `h = -tau_surface/force`. This admits
+opposing body/shear forcing and counterflow without assuming a monotone flux.
+The same selected profile supplies all work accounts. Matrix-free backward
+Euler solves normalized height changes with the native fallible finite-
+difference/Newton-Krylov owner. Every face transfers equal and opposite
+volume between cells; closed ends have no flux and natural zero-slope
+capillary boundaries. No clipping, mass repair or post-solve rescaling enters.
+
+The step independently admits each cell balance, total volume change and
+`Delta E + E(delta h) + viscous_heat - body_work - surface_work`, all in
+physical SI units per unit out-of-plane width. `E` is the discrete quadratic
+gravitational plus capillary energy. The nonnegative `E(delta h)` is the
+backward-Euler numerical energy defect and remains separate from actual
+viscous heat. These accounts use the accepted native profiles, not rejected
+Newton or Godunov candidates.
+
+Authored wetness, height/physical-length and slope limits screen the accepted
+opening state and every proposed height. Candidate profiles also pass a
+reduced-inertia limit using actual profile extrema, including interior
+counterflow, and the minimum original viscosity; its ceiling must be below one.
+Height, slope and
+inertia screens are model admission, not calibrated accuracy guarantees.
+Whole-call endpoint/profile budgets include all finite-difference probes and
+discarded face states; native constitutive work remains separately bounded.
+Cancellation, unsupported sources, failed solves or failed conservation gates
+preserve all accepted heights and time, including the final publication poll.
+
+`MaterialFilmLiquid::thin_film_line` retains the exact borrowed original liquid
+source and its receipts while passing its original SI density, Newtonian
+viscosity and surface tension into this same owner. The reduction assumes a
+stationary planar wall, quasi-steady wall-normal momentum, small slopes,
+fixed density and uniform surface tension. It omits startup momentum storage,
+wetting/contact lines, rupture, evaporation, transverse structure and thermal
+evolution. Face temperatures and imposed surface traction are authored held
+inputs. First-order time/transport still require refinement for accuracy.
+
+Five focused production-source regression groups pass: independent discrete
+Fourier gravity/capillary decay, closed leveling and energy, original shifted
+Carreau profiles against independent quadrature, both signs of the interior
+Godunov turning point, and atomic source/budget/final-cancellation retry.
+The numerical source-linked build executes the original material, math and
+solver implementations; runtime-context paths are uninhabitable in that
+projection. The source-bound liquid integration regression is added but its
+full native crate/dependency execution is not claimed.
+
 ## Original-law shear-free Carreau film base
 
 `film::carreau::CarreauFilm` resolves a positive prescribed flux per width at

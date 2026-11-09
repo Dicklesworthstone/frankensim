@@ -16,6 +16,9 @@
 
 /// Nonlinear shear-free films of the original thermal Carreau-Yasuda law.
 pub mod carreau;
+/// Conservative streamwise thickness, capillary/gravity and original-law flux.
+#[cfg(feature = "thin-film-evolution")]
+pub mod evolution;
 /// Original liquid-source coefficients for the same Newtonian film owner.
 pub mod material;
 /// Signed surface traction driving the same planar Newtonian base flow.
