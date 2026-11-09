@@ -1213,3 +1213,52 @@ axes; this interface makes no broader allocation or performance guarantee.
 Independent rectangular DFT/round-trip and interruption/retry fixtures cover
 the shared path. The hardness-contact consumer uses bounded padded axes below
 that six-step threshold and retains its own original physical residual checks.
+
+## Positive short-band uniform-exposure interference
+
+`HarmonicWindow::prepare_uniform_band_hz` provides a cached positive temporal
+factor for a coherent analytic field, using the original authored frequencies
+in hertz and the existing double-double shutter clock. It removes only a common
+carrier before phase reduction. Each retained Legendre mode is projected from
+the complex source amplitudes before any power is formed, so a weak multitone
+null does not depend on subtracting rounded bright pair powers. The companion
+complex cross moment uses the same modes for mutual coherence. Independent
+source banks remain separate caller-owned contractions.
+
+Admission is deliberately bounded: a uniform window, 3 through 64 tones, and
+`pi * duration * (max_hz - min_hz) / 2 <= 0.5`. Unsupported bands return
+`None` so existing pair kernels retain their original role. The allocation-free
+`uniform_band_mode_count_hz` preflight reports the retained mode count before
+preparation. The factor uses at most 17 modes, O(tones * modes) retained storage,
+and fixed observation scratch. Logical work is `(tones + 1) * modes` for power,
+`(2 * tones + 1) * modes` for a complex cross moment, and
+`(2 * tones + 4) * modes` for a two-axis coherency. Each projection has at most
+1088 terms; consumers own work admission and cancellation checks around this
+bounded leaf.
+
+`project_parts_dd` returns unweighted coefficients, omitting each mode's common
+`(-i)^mode` phase only because it cancels from second moments.
+`mode_cross_parts_dd` applies the complete integer weight
+`2 * mode + 1` and complex conjugation. Scalar powers, complex crosses and
+Jones outer products therefore share the same contraction. The weight is
+applied before scalar multiplication can underflow, scaling the smaller
+operand to avoid unnecessary overflow. These are analytic-field moments:
+there is no implicit real-peak factor of one half. Shape, index, nonfinite-input
+and overflowing intermediate/result values return explicit errors. This path
+does not add a new underflow-refusal policy.
+
+The exact-arithmetic power in omitted Legendre modes is bounded by
+`5e-50 * (sum_i |A_i|)^2` for admitted bands. This is only the modal-tail bound.
+The separate 17-term small-argument spherical-Bessel series, floating
+arithmetic, phase reduction and cancellation within individual modal
+coefficients are not included in it. No relative-accuracy certificate at an
+arbitrary null, general shutter approximation or change to the two-tone path
+is claimed.
+
+Five focused regressions and all 67 existing harmonic-window/spectrum tests
+pass in native execution against the actual math and harmonic owners. They
+cover the positive fourth-order three-tone null down to a 1e-12-second shutter,
+independent quadrature near the admission boundary, complex Hermitian and
+shared-modal identities, large-epoch/common-carrier invariance, work counts,
+large amplitudes, weighted subnormal power, boundary fallback and refusals.
+This targeted execution does not replace the unavailable full Cargo/DSR gate.

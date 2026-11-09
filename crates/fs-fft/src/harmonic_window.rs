@@ -11,6 +11,11 @@
 
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod band;
+pub use band::{
+    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
+    PreparedUniformHarmonicBand,
+};
 mod spectrum;
 pub use spectrum::{
     AngularHarmonicProductInput, HarmonicProductInput, HarmonicProductLaw,
@@ -30,6 +35,8 @@ pub enum WindowError {
     InvalidFrequency,
     /// Both components of each amplitude must be finite.
     NonFiniteAmplitude,
+    /// Field or scratch dimensions do not match the prepared coherent band.
+    InvalidBandShape,
     /// A phase product, amplitude rotation or result exceeds floating range.
     Unrepresentable,
 }
@@ -40,6 +47,7 @@ impl core::fmt::Display for WindowError {
             Self::InvalidWindow => "harmonic window needs a finite start/end and positive duration",
             Self::InvalidFrequency => "harmonic angular frequency must be finite",
             Self::NonFiniteAmplitude => "harmonic peak amplitude must be finite",
+            Self::InvalidBandShape => "harmonic band field/scratch dimensions do not match",
             Self::Unrepresentable => "harmonic window moment is not representable",
         })
     }
