@@ -60,8 +60,14 @@ pub enum TransientCarreauTransportError<E> {
     /// The authored drive source refused a prepared thermal endpoint.
     Drive(E),
     Exchange(E),
-    MechanicalEnergy { residual_j: f64, tolerance_j: f64 },
-    CombinedEnergy { residual_j: f64, tolerance_j: f64 },
+    MechanicalEnergy {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
+    CombinedEnergy {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
 }
 impl<E: core::fmt::Debug> core::fmt::Display for TransientCarreauTransportError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -503,29 +509,32 @@ impl TransientRegionalCarreauTransport {
         let mut next_regional = self.regional.clone();
         next_regional.graph = prepared.source.graph().clone();
         thermal_checkpoint(cx)?;
-        Ok((TransientRegionalCarreauStep {
-            next: Self {
-                momentum: prepared.source,
-                regional: next_regional,
-            },
-            momentum: prepared.state,
-            thermal: next_thermal,
-            report: TransientRegionalCarreauReport {
-                hydraulics: prepared.hydraulics,
-                thermal: ImplicitTransportReport {
-                    heat: prepared.exchange,
-                    thermal: audit,
-                    maximum_cell_residual_j,
-                    endpoint_evaluations,
-                    nonlinear,
+        Ok((
+            TransientRegionalCarreauStep {
+                next: Self {
+                    momentum: prepared.source,
+                    regional: next_regional,
                 },
-                external_stream_enthalpy_j: prepared.external_stream_enthalpy_j,
-                other_heat_j: prepared.other_heat_j,
-                combined_energy_residual_j: combined,
-                combined_energy_tolerance_j: allowance,
-                total_branch_solves: total_branch_solves.get(),
+                momentum: prepared.state,
+                thermal: next_thermal,
+                report: TransientRegionalCarreauReport {
+                    hydraulics: prepared.hydraulics,
+                    thermal: ImplicitTransportReport {
+                        heat: prepared.exchange,
+                        thermal: audit,
+                        maximum_cell_residual_j,
+                        endpoint_evaluations,
+                        nonlinear,
+                    },
+                    external_stream_enthalpy_j: prepared.external_stream_enthalpy_j,
+                    other_heat_j: prepared.other_heat_j,
+                    combined_energy_residual_j: combined,
+                    combined_energy_tolerance_j: allowance,
+                    total_branch_solves: total_branch_solves.get(),
+                },
             },
-        }, prepared.drive))
+            prepared.drive,
+        ))
     }
 }
 

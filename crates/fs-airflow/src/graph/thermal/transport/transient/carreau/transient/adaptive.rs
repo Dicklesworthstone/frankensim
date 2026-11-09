@@ -16,9 +16,10 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 
 use super::{
     CarreauTransportExchange, FixedPressure, FlowInjection, ImplicitTransportError,
-    TransientCarreauGraph, TransientCarreauState, TransientCarreauStep, TransientCarreauTransportError,
-    TransientCarreauWorkspace, TransientRegionalCarreauControls, TransientRegionalCarreauReport,
-    TransientRegionalCarreauStep, TransientRegionalCarreauTransport, thermal_checkpoint,
+    TransientCarreauGraph, TransientCarreauState, TransientCarreauStep,
+    TransientCarreauTransportError, TransientCarreauWorkspace, TransientRegionalCarreauControls,
+    TransientRegionalCarreauReport, TransientRegionalCarreauStep,
+    TransientRegionalCarreauTransport, thermal_checkpoint,
 };
 
 /// Local discretization, counterflow resolution and total work limits.
@@ -352,11 +353,12 @@ pub fn advance_resolved_with_thermal_drive<'m, T, E>(
 }
 
 type ThermalDrive<'a, 'm, E> = dyn Fn(
-    &Cx<'_>,
-    f64,
-    &DepositionSimulation<'m>,
-    &TransientCarreauGraph,
-) -> Result<RegionalCarreauDrive, E> + 'a;
+        &Cx<'_>,
+        f64,
+        &DepositionSimulation<'m>,
+        &TransientCarreauGraph,
+    ) -> Result<RegionalCarreauDrive, E>
+    + 'a;
 
 enum DriveResolver<'a, 'm, E> {
     Prescribed(&'a dyn Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>),
@@ -602,7 +604,9 @@ fn native_step<'m, T, E>(
     let guess = vec![0.0; thermal.cells().len()];
     let result = match drive {
         DriveResolver::Prescribed(resolve) => {
-            work.drive_evaluations = work.drive_evaluations.checked_add(1)
+            work.drive_evaluations = work
+                .drive_evaluations
+                .checked_add(1)
                 .ok_or_else(|| limit("drive evaluation count limit", *work))?;
             let sample = RegionalCarreauDriveSample {
                 start_s,
@@ -620,12 +624,19 @@ fn native_step<'m, T, E>(
                 })?,
             };
             checkpoint(cx)?;
-            let result = owner.advance_with_resolved_drive(
-                cx, thermal, state, workspace, target_s, step, &guess,
-                |_, _, _| Ok::<_, E>(&sample.drive),
-                |cx, candidate, flow, _| exchange(cx, candidate, flow, &sample),
-            )
-            .map(|(result, _)| result);
+            let result = owner
+                .advance_with_resolved_drive(
+                    cx,
+                    thermal,
+                    state,
+                    workspace,
+                    target_s,
+                    step,
+                    &guess,
+                    |_, _, _| Ok::<_, E>(&sample.drive),
+                    |cx, candidate, flow, _| exchange(cx, candidate, flow, &sample),
+                )
+                .map(|(result, _)| result);
             result.map(|result| (result, sample))
         }
         DriveResolver::Thermal(resolve) => {
@@ -633,7 +644,13 @@ fn native_step<'m, T, E>(
             // Count before querying so a source refusal is included as work.
             let evaluations = Cell::new(0usize);
             let result = owner.advance_with_resolved_drive(
-                cx, thermal, state, workspace, target_s, step, &guess,
+                cx,
+                thermal,
+                state,
+                workspace,
+                target_s,
+                step,
+                &guess,
                 |cx, candidate, source| {
                     evaluations.set(evaluations.get() + 1);
                     resolve(cx, sample_time_s, candidate, source).map(|drive| {
@@ -648,7 +665,9 @@ fn native_step<'m, T, E>(
                 },
                 |cx, candidate, flow, sample| exchange(cx, candidate, flow, sample),
             );
-            work.drive_evaluations = work.drive_evaluations.checked_add(evaluations.get())
+            work.drive_evaluations = work
+                .drive_evaluations
+                .checked_add(evaluations.get())
                 .ok_or_else(|| limit("drive evaluation count limit", *work))?;
             result
         }

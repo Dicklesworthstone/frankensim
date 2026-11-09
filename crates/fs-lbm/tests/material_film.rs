@@ -1256,3 +1256,7 @@ fn g3_implicit_viscous_material_jet_keeps_original_coefficients_and_native_evolu
         assert!(core::ptr::eq(bound.material(), &source));
     }
 }
+
+#[cfg(feature = "thin-film-evolution")]
+#[path = "material_film/adaptive.rs"]
+mod adaptive_film;

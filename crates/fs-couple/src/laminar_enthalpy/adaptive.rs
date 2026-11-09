@@ -125,7 +125,9 @@ impl<'m, G, T> LaminarAdaptiveCandidate<'m, G, T> {
     pub fn report(&self) -> &LaminarAdaptiveReport<T> {
         &self.report
     }
-    pub fn into_parts(self) -> (
+    pub fn into_parts(
+        self,
+    ) -> (
         DepositionSimulation<'m>,
         MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
         LaminarAdaptiveReport<T>,
@@ -181,16 +183,27 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         controls: LaminarAdaptiveControls,
         resolve_material: impl Fn(MaterialFluxRheologyPoint, f64, &F) -> Result<G, MaterialError>,
         exchange: impl Fn(
-            &Cx<'_>, &DepositionSimulation<'m>,
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
             &MaterialNavierStokesRheologyStep<LaminarThermalMaterial<G>>,
         ) -> Result<LaminarHeatExchange<T>, E>,
     ) -> Result<LaminarAdaptiveCandidate<'m, G, T>, LaminarAdaptiveError<E>> {
         self.advance_adaptive_native(
-            cx, thermal, target_s, input.history, controls,
+            cx,
+            thermal,
+            target_s,
+            input.history,
+            controls,
             |old, end, history, step, guess| {
                 self.advance(
-                    cx, old, end, LaminarEnthalpyInput { history, ..input },
-                    step, guess, &resolve_material, &exchange,
+                    cx,
+                    old,
+                    end,
+                    LaminarEnthalpyInput { history, ..input },
+                    step,
+                    guess,
+                    &resolve_material,
+                    &exchange,
                 )
             },
         )
@@ -210,18 +223,30 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         controls: LaminarAdaptiveControls,
         resolve_material: impl Fn(MaterialFluxRheologyPoint, f64, &F) -> Result<G, MaterialError>,
         exchange: impl Fn(
-            &Cx<'_>, &DepositionSimulation<'m>,
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
             &MaterialNavierStokesRheologyStep<
                 LaminarThermalMaterial<boussinesq::LaminarBoussinesqProjection<G>>,
             >,
         ) -> Result<LaminarHeatExchange<T>, E>,
     ) -> Result<LaminarBoussinesqAdaptiveCandidate<'m, G, T>, LaminarAdaptiveError<E>> {
         self.advance_adaptive_native(
-            cx, thermal, target_s, input.history, controls,
+            cx,
+            thermal,
+            target_s,
+            input.history,
+            controls,
             |old, end, history, step, guess| {
                 self.advance_boussinesq(
-                    cx, old, end, LaminarEnthalpyInput { history, ..input },
-                    config, step, guess, &resolve_material, &exchange,
+                    cx,
+                    old,
+                    end,
+                    LaminarEnthalpyInput { history, ..input },
+                    config,
+                    step,
+                    guess,
+                    &resolve_material,
+                    &exchange,
                 )
             },
         )
@@ -236,8 +261,11 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         history: LaminarEnthalpyHistory<'_>,
         controls: LaminarAdaptiveControls,
         native: impl Fn(
-            &DepositionSimulation<'m>, f64, LaminarEnthalpyHistory<'_>,
-            LaminarEnthalpyControls, &[f64],
+            &DepositionSimulation<'m>,
+            f64,
+            LaminarEnthalpyHistory<'_>,
+            LaminarEnthalpyControls,
+            &[f64],
         ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
     ) -> Result<LaminarAdaptiveCandidate<'m, G, T>, LaminarAdaptiveError<E>> {
         let mut work = LaminarAdaptiveWork::default();
@@ -253,7 +281,9 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             || history.velocity_m_s.iter().any(|x| !x.is_finite())
         {
             return Err(failed(
-                LaminarAdaptiveFailure::Invalid("finite bounded controls and matching complete histories required"),
+                LaminarAdaptiveFailure::Invalid(
+                    "finite bounded controls and matching complete histories required",
+                ),
                 work,
             ));
         }
@@ -266,7 +296,9 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
         let mut current = initial.clone();
         let mut velocity = history.velocity_m_s.to_vec();
         let mut final_flow = None;
-        let accepted_limit = controls.maximum_accepted_steps.min(initial.budget().max_substeps);
+        let accepted_limit = controls
+            .maximum_accepted_steps
+            .min(initial.budget().max_substeps);
         let mut steps = Vec::new();
         let mut estimates = Vec::new();
         let mut account = Account::default();
@@ -296,67 +328,110 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             if !(start_s < middle_s && middle_s < end_s) {
                 return Err(failed(LaminarAdaptiveFailure::UnrepresentableTime, work));
             }
-            let correction = order.fine_error_correction(
-                middle_s - start_s, end_s - middle_s,
-            ).ok_or_else(|| failed(LaminarAdaptiveFailure::UnrepresentableTime, work))?;
-            let old = LaminarEnthalpyHistory { velocity_m_s: &velocity, time_s: start_s };
+            let correction = order
+                .fine_error_correction(middle_s - start_s, end_s - middle_s)
+                .ok_or_else(|| failed(LaminarAdaptiveFailure::UnrepresentableTime, work))?;
+            let old = LaminarEnthalpyHistory {
+                velocity_m_s: &velocity,
+                time_s: start_s,
+            };
             let coarse = native_step(&native, &current, end_s, old, controls, &guess, &mut work)?;
-            let first = native_step(&native, &current, middle_s, old, controls, &guess, &mut work)?;
+            let first = native_step(
+                &native, &current, middle_s, old, controls, &guess, &mut work,
+            )?;
             let fine = native_step(
-                &native, first.thermal(), end_s,
+                &native,
+                first.thermal(),
+                end_s,
                 LaminarEnthalpyHistory {
                     velocity_m_s: first.flow().step.solution.velocity_dofs(),
                     time_s: middle_s,
                 },
-                controls, &guess, &mut work,
+                controls,
+                &guess,
+                &mut work,
             )?;
             let estimate = compare(
-                cx, self.system, &current, &velocity, &coarse, &first, &fine,
-                correction, controls,
-            ).map_err(|error| failed_native(error, 0, work))?;
+                cx,
+                self.system,
+                &current,
+                &velocity,
+                &coarse,
+                &first,
+                &fine,
+                correction,
+                controls,
+            )
+            .map_err(|error| failed_native(error, 0, work))?;
             let error = estimate.maximum_error_ratio();
             if error > 1.0 {
                 work.rejected_comparisons += 1;
                 let floor = controls.minimum_step_s.min(remaining);
                 let span = end_s - start_s;
                 if span <= floor {
-                    return Err(failed(LaminarAdaptiveFailure::AccuracyFloor(estimate), work));
+                    return Err(failed(
+                        LaminarAdaptiveFailure::AccuracyFloor(estimate),
+                        work,
+                    ));
                 }
-                let reduction = order.rejected_reduction_factor(error)
+                let reduction = order
+                    .rejected_reduction_factor(error)
                     .ok_or_else(|| failed(LaminarAdaptiveFailure::UnrepresentableTime, work))?;
                 let reduced = (span * reduction).max(floor);
                 if !(reduced < span && start_s + reduced < end_s) {
-                    return Err(failed(LaminarAdaptiveFailure::AccuracyFloor(estimate), work));
+                    return Err(failed(
+                        LaminarAdaptiveFailure::AccuracyFloor(estimate),
+                        work,
+                    ));
                 }
                 proposal = reduced;
                 continue;
             }
             let (_, _, first_report) = first.into_parts();
             let (next, flow, fine_report) = fine.into_parts();
-            account.add(&first_report).map_err(|error| failed_native(error, 0, work))?;
-            account.add(&fine_report).map_err(|error| failed_native(error, 0, work))?;
-            steps.push(LaminarAdaptiveStep { start_s, end_s: middle_s, report: first_report });
-            steps.push(LaminarAdaptiveStep { start_s: middle_s, end_s, report: fine_report });
+            account
+                .add(&first_report)
+                .map_err(|error| failed_native(error, 0, work))?;
+            account
+                .add(&fine_report)
+                .map_err(|error| failed_native(error, 0, work))?;
+            steps.push(LaminarAdaptiveStep {
+                start_s,
+                end_s: middle_s,
+                report: first_report,
+            });
+            steps.push(LaminarAdaptiveStep {
+                start_s: middle_s,
+                end_s,
+                report: fine_report,
+            });
             estimates.push(estimate);
             velocity = flow.step.solution.velocity_dofs().to_vec();
             current = next;
             final_flow = Some(flow);
-            let growth = order.accepted_growth_factor(error)
+            let growth = order
+                .accepted_growth_factor(error)
                 .ok_or_else(|| failed(LaminarAdaptiveFailure::UnrepresentableTime, work))?;
             proposal = ((end_s - start_s).min(controls.maximum_step_s / growth) * growth)
                 .clamp(controls.minimum_step_s, controls.maximum_step_s);
         }
-        let values = account.finish(cx, initial, &current, controls.window_tolerance_j)
+        let values = account
+            .finish(cx, initial, &current, controls.window_tolerance_j)
             .map_err(|error| failed_native(error, 0, work))?;
         checkpoint(cx).map_err(|error| failed_native(error, 0, work))?;
-        let flow = final_flow.ok_or_else(|| failed(
-            LaminarAdaptiveFailure::Invalid("empty adaptive trajectory"), work,
-        ))?;
+        let flow = final_flow.ok_or_else(|| {
+            failed(
+                LaminarAdaptiveFailure::Invalid("empty adaptive trajectory"),
+                work,
+            )
+        })?;
         Ok(LaminarAdaptiveCandidate {
             thermal: current,
             flow,
             report: LaminarAdaptiveReport {
-                steps, estimates, work,
+                steps,
+                estimates,
+                work,
                 suggested_step_s: proposal,
                 stored_energy_change_j: values[0],
                 bulk_viscous_heat_j: values[1],
@@ -371,11 +446,18 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
 }
 
 fn valid_controls(c: LaminarAdaptiveControls) -> bool {
-    [c.initial_step_s, c.minimum_step_s, c.maximum_step_s,
-        c.energy_absolute_tolerance_j, c.temperature_absolute_tolerance_k,
-        c.velocity_absolute_tolerance_m_s, c.transfer_absolute_tolerance_j,
-        c.window_tolerance_j]
-        .iter().all(|x| x.is_finite() && *x > 0.0)
+    [
+        c.initial_step_s,
+        c.minimum_step_s,
+        c.maximum_step_s,
+        c.energy_absolute_tolerance_j,
+        c.temperature_absolute_tolerance_k,
+        c.velocity_absolute_tolerance_m_s,
+        c.transfer_absolute_tolerance_j,
+        c.window_tolerance_j,
+    ]
+    .iter()
+    .all(|x| x.is_finite() && *x > 0.0)
         && c.minimum_step_s <= c.initial_step_s
         && c.initial_step_s <= c.maximum_step_s
         && c.relative_tolerance.is_finite()
@@ -390,8 +472,11 @@ fn valid_controls(c: LaminarAdaptiveControls) -> bool {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn native_step<'m, G, T, E>(
     native: &impl Fn(
-        &DepositionSimulation<'m>, f64, LaminarEnthalpyHistory<'_>,
-        LaminarEnthalpyControls, &[f64],
+        &DepositionSimulation<'m>,
+        f64,
+        LaminarEnthalpyHistory<'_>,
+        LaminarEnthalpyControls,
+        &[f64],
     ) -> Result<LaminarEnthalpyCandidate<'m, G, T>, LaminarEnthalpyError<E>>,
     thermal: &DepositionSimulation<'m>,
     target_s: f64,
@@ -420,11 +505,22 @@ fn native_step<'m, G, T, E>(
     Ok(solved)
 }
 
-fn failed<E>(failure: LaminarAdaptiveFailure<E>, work: LaminarAdaptiveWork) -> LaminarAdaptiveError<E> {
+fn failed<E>(
+    failure: LaminarAdaptiveFailure<E>,
+    work: LaminarAdaptiveWork,
+) -> LaminarAdaptiveError<E> {
     LaminarAdaptiveError { failure, work }
 }
 fn failed_native<E>(
-    error: LaminarEnthalpyError<E>, endpoint_allowance: usize, work: LaminarAdaptiveWork,
+    error: LaminarEnthalpyError<E>,
+    endpoint_allowance: usize,
+    work: LaminarAdaptiveWork,
 ) -> LaminarAdaptiveError<E> {
-    failed(LaminarAdaptiveFailure::Native { error, endpoint_allowance }, work)
+    failed(
+        LaminarAdaptiveFailure::Native {
+            error,
+            endpoint_allowance,
+        },
+        work,
+    )
 }

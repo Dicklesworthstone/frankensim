@@ -27,6 +27,9 @@ use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport
 
 use super::{FilmError, FilmMaterial, ShearedFilm};
 
+/// Error-controlled evolution under explicitly scheduled original sources.
+pub mod adaptive;
+
 /// Streamwise topology. Nonperiodic ends have natural zero-slope capillarity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThinFilmBoundary {
@@ -232,6 +235,12 @@ pub struct ThinFilmLine {
     source: Source,
     heights: Vec<f64>,
     time: f64,
+}
+
+#[derive(Default)]
+struct Work {
+    endpoints: Cell<usize>,
+    profiles: Cell<u64>,
 }
 
 struct Evaluation {
@@ -444,6 +453,32 @@ impl ThinFilmLine {
         height_guess_m: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<ThinFilmStep, ThinFilmError> {
+        self.advance_metered(
+            target_s,
+            acceleration_m_s2,
+            surface_shear_pa,
+            ends,
+            limits,
+            controls,
+            height_guess_m,
+            &Work::default(),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_metered(
+        &mut self,
+        target_s: f64,
+        acceleration_m_s2: f64,
+        surface_shear_pa: &[f64],
+        ends: Option<ThinFilmOpenEnds>,
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        height_guess_m: &[f64],
+        work: &Work,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmStep, ThinFilmError> {
         let checkpoint = RefCell::new(cancelled);
         let stopped = Cell::new(false);
         let check = || {
@@ -488,8 +523,10 @@ impl ThinFilmLine {
         let body = finite(self.density * acceleration_m_s2)?;
         let gravity = finite(self.density * self.geometry.normal_acceleration_m_s2)?;
         let count = self.heights.len();
-        let evaluations = Cell::new(0usize);
-        let profiles = Cell::new(0u64);
+        let evaluations = &work.endpoints;
+        let profiles = &work.profiles;
+        let opening_evaluations = evaluations.get();
+        let opening_profiles = profiles.get();
         let profile = |source, height, force, traction| {
             check()?;
             if profiles.get() >= controls.maximum_profile_evaluations {
@@ -676,28 +713,8 @@ impl ThinFilmLine {
                 tolerance_m2: controls.volume_tolerance_m2,
             });
         }
-        let mut change = Dd::from_f64(0.0);
-        let mut defect = Dd::from_f64(0.0);
-        for i in 0..count {
-            if i % 128 == 0 {
-                check()?;
-            }
-            change = change
-                + Dd::from_f64(finite(
-                    0.5 * gravity * dx * delta[i] * (accepted.heights[i] + self.heights[i]),
-                )?);
-            defect = defect + Dd::from_f64(finite(0.5 * gravity * dx * delta[i] * delta[i])?);
-        }
-        for i in 0..self.face_count() {
-            let j = (i + 1) % count;
-            let old = self.heights[j] - self.heights[i];
-            let new = accepted.heights[j] - accepted.heights[i];
-            let d = delta[j] - delta[i];
-            change = change + Dd::from_f64(finite(0.5 * self.tension / dx * d * (new + old))?);
-            defect = defect + Dd::from_f64(finite(0.5 * self.tension / dx * d * d)?);
-        }
-        let stored_energy_change_j_per_m = finite(change.to_f64())?;
-        let backward_euler_energy_defect_j_per_m = finite(defect.to_f64())?;
+        let (stored_energy_change_j_per_m, backward_euler_energy_defect_j_per_m) =
+            self.energy_terms(&self.heights, &accepted.heights, &delta, &check)?;
         // Open half-cells complete the physical length: (N-1)*dx+2*(dx/2).
         // Their original losses/work must accompany their pressure-driven flux.
         let weighted_profiles = || {
@@ -758,13 +775,45 @@ impl ThinFilmLine {
             maximum_slope: accepted.slope,
             maximum_height_to_length: accepted.aspect,
             maximum_reduced_reynolds: accepted.reynolds,
-            endpoint_evaluations: evaluations.get(),
-            profile_evaluations: profiles.get(),
+            endpoint_evaluations: evaluations.get() - opening_evaluations,
+            profile_evaluations: profiles.get() - opening_profiles,
             nonlinear: result.report,
         };
         self.heights = accepted.heights;
         self.time = target_s;
         Ok(report)
+    }
+
+    // Exact quadratic storage arithmetic shared by single and adaptive accounts.
+    fn energy_terms(
+        &self,
+        old: &[f64],
+        new: &[f64],
+        delta: &[f64],
+        check: &dyn Fn() -> Result<(), ThinFilmError>,
+    ) -> Result<(f64, f64), ThinFilmError> {
+        let count = old.len();
+        let dx = self.geometry.spacing_m;
+        let gravity = finite(self.density * self.geometry.normal_acceleration_m_s2)?;
+        let mut change = Dd::from_f64(0.0);
+        let mut defect = Dd::from_f64(0.0);
+        for i in 0..count {
+            if i % 128 == 0 {
+                check()?;
+            }
+            change =
+                change + Dd::from_f64(finite(0.5 * gravity * dx * delta[i] * (new[i] + old[i]))?);
+            defect = defect + Dd::from_f64(finite(0.5 * gravity * dx * delta[i] * delta[i])?);
+        }
+        for i in 0..self.face_count() {
+            let j = (i + 1) % count;
+            let old = old[j] - old[i];
+            let new = new[j] - new[i];
+            let d = delta[j] - delta[i];
+            change = change + Dd::from_f64(finite(0.5 * self.tension / dx * d * (new + old))?);
+            defect = defect + Dd::from_f64(finite(0.5 * self.tension / dx * d * d)?);
+        }
+        Ok((finite(change.to_f64())?, finite(defect.to_f64())?))
     }
 
     fn admit_heights(

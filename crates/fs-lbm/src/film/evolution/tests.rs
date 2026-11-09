@@ -7,6 +7,8 @@ use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
 #[path = "tests/open.rs"]
 mod open;
+#[path = "tests/adaptive.rs"]
+mod adaptive;
 
 fn geometry(boundary: ThinFilmBoundary, normal: f64) -> ThinFilmGeometry {
     ThinFilmGeometry {

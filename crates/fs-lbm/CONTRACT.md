@@ -3908,3 +3908,61 @@ independent scalar reference, latent energy adaptation at constant temperature,
 forcing transitions and prescribed phase inventory, and late work/source/
 cancellation refusals. These new native tests are authored and syntax-parsed;
 they have not been compiled or executed in this environment.
+
+### Adaptive scheduled evolution of original laminar films
+
+`film::evolution::adaptive` advances the original conservative film owner
+through authored continuous drive segments. Each comparison uses one original
+backward-Euler interval and its two actual representable halves. Only the
+native fine trajectory is accepted; no extrapolated height, replacement
+mobility or rejected-trial heat is published. The existing
+`ConductionTimeOrder::First` supplies unequal-span error correction and
+accepted/rejected step factors through the existing shared thermal dependency.
+
+Local error covers height changes and every original face's signed integrated
+volume, viscous heat, body work, surface work and individual reservoir work.
+Channels are compared before summation, so constant height and opposing work
+do not hide their sampled transfer discrepancy. These are local indicators,
+not rigorous global bounds or proof that arbitrary source oscillations,
+spatial error or constitutive uncertainty have been resolved.
+
+The drive query carries an exact time and segment index. A query at a segment's
+closing event selects its left limit; the next interval selects the following
+segment. No comparison crosses an authored event. An endpoint exactly one
+floating-point successor below an event or target snaps to that exact time,
+using its actual span in all native solves, work and error calculations.
+`suggested_dt_s` exposes the final comparison-width proposal for continuation.
+
+Every Carreau query explicitly supplies temperatures for all original profile
+sources, including both open ends. Rebinding retains each original law,
+support and shear envelope; identical temperature bits reuse preparation.
+Newtonian source owners require no temperature vector and retain their frozen
+properties. Density, surface tension and normal gravity remain fixed. This is
+prescribed source-temperature evolution, not thermal storage, an EOS or
+thermal expansion. The quasi-steady, fully wet, small-slope film and its
+original laminar-regime admission remain unchanged; fast momentum transients,
+contact lines and rupture require other owners.
+
+Native endpoint/profile ceilings apply to the complete adaptive call,
+including coarse, rejected and failed work. Only temporal inaccuracy and
+original Newton nonconvergence may refine. Source, physical regime,
+conservation, cancellation and work refusals remain terminal. Final volume and
+stored-energy changes are independently recomputed from opening/final heights
+and reconciled with accepted-only transport/work. Original backward-Euler
+numerical defects remain separate from viscous heat. Any refusal preserves
+heights, source temperatures and time, including after a private accepted
+prefix. The material wrapper retains the same borrowed original source and
+receipts while using this native adaptive path.
+
+Four native regression groups are authored for analytic throughflow and
+counterflow transport/heat, gravity/capillary mode decay, exact decimal events
+with original Carreau temperatures, and work/source/cancellation rollback.
+A source-bound integration regression covers both original viscosity bases,
+native parity and retained source identity. After executor recovery, the
+existing original-source recipe compiled the current film, material, math,
+solver and shared time-order sources without warnings. All 13 evolution tests
+passed: four new adaptive groups and nine existing groups, with 33 unrelated
+tests filtered. Rust formatting and focused whitespace checks passed. The
+separate full material-source wrapper integration remains authored and
+unexecuted. This is focused original-source verification, not a full Cargo,
+DSR or asynchronous-runtime integration result.

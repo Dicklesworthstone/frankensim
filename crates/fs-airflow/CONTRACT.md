@@ -6509,13 +6509,20 @@ equation of state or thermal expansion model. No flow-dependent pump-curve solve
 shaft/controller history, moving valve topology, cavitation or changed free-node
 injection constraint is supplied.
 
-Three focused regression definitions cover prescribed-drive parity and query
-semantics; original-viscosity head feedback against independent annular momentum
-and nonlinear caloric balances, including recovering head work and nonbinary
-events; and late source/cancellation refusals, endpoint budgets and retry.
-The new source and tests were inspected statically against native APIs. Their
-compilation, formatter check and execution are not claimed while the execution
-workspace is unavailable.
+Four focused regressions cover prescribed-drive parity and query semantics;
+original-viscosity head feedback against independent annular momentum and
+nonlinear caloric balances, including recovering head work and nonbinary events;
+late source/cancellation refusals, endpoint budgets and retry; and exact authored
+event arrival under decimal interval caps in both drive modes.
+
+The unchanged bounded original-source recipe compiled the network implementation
+and passed all 62 selected tests, including these four regressions. It links the
+original rheology, radial momentum, caloric transport, nonlinear solver and
+numerical dependencies with an existing context-only cancellation facade.
+Full-workspace Cargo and native asupersync/runtime integration remain unverified.
+Pinned rustfmt parsed and formatted the four network files, and its subsequent
+check passed; only whitespace and optional trailing commas changed, leaving the
+physical source, tests and independent numerical oracles unchanged.
 
 
 ### Adaptive conjugate finite-cell convection

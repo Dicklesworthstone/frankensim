@@ -18,7 +18,7 @@ enthalpy-coupling = ["dep:fs-conduction"]
 # Optional nonlinear endpoint feedback; the existing explicit path is unchanged.
 implicit-enthalpy-coupling = ["enthalpy-coupling", "dep:fs-solver"]
 # Nonlinear conservative free-surface thickness on the original film profiles.
-thin-film-evolution = ["dep:fs-solver"]
+thin-film-evolution = ["dep:fs-solver", "dep:fs-conduction"]
 
 [dependencies]
 # Preserve the existing import spelling while selecting ONLY the shared

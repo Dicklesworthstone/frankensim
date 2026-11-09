@@ -11,6 +11,11 @@ use super::transient::{FilmDrive, FilmStep, FilmStepLimits, TransientFilm, Trans
 use super::{FilmError, FilmMaterial, NusseltFilm, ShearedFilm};
 
 #[cfg(feature = "thin-film-evolution")]
+use super::evolution::adaptive::{
+    ThinFilmAdaptiveControls, ThinFilmAdaptiveError, ThinFilmAdaptiveReport, ThinFilmDrive,
+    ThinFilmDriveQuery,
+};
+#[cfg(feature = "thin-film-evolution")]
 use super::evolution::{
     ThinFilmControls, ThinFilmError, ThinFilmGeometry, ThinFilmLimits, ThinFilmLine,
     ThinFilmOpenEnds, ThinFilmStep,
@@ -86,6 +91,32 @@ impl<'a> MaterialThinFilmLine<'a> {
             limits,
             controls,
             height_guess_m,
+            cancelled,
+        )
+    }
+    /// Adapt the same source-bound Newtonian film to an authored load schedule.
+    /// The original liquid query/receipts remain frozen. Drive temperatures
+    /// must be None; a new source state cannot replace this borrowed owner.
+    /// Native fine-step accounts, source refusals and whole-call atomicity are
+    /// inherited without a separate transport or viscosity implementation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive<E>(
+        &mut self,
+        target_s: f64,
+        event_times_s: &[f64],
+        limits: ThinFilmLimits,
+        controls: ThinFilmControls,
+        adaptive: ThinFilmAdaptiveControls,
+        resolve: impl FnMut(ThinFilmDriveQuery) -> Result<ThinFilmDrive, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ThinFilmAdaptiveReport, ThinFilmAdaptiveError<E>> {
+        self.flow.advance_adaptive(
+            target_s,
+            event_times_s,
+            limits,
+            controls,
+            adaptive,
+            resolve,
             cancelled,
         )
     }

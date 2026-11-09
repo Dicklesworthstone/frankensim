@@ -13128,10 +13128,12 @@ acceleration with independent accepted-interval velocity/work quadrature and
 24 J original caloric heating; fixed-temperature flow whose time-varying
 stream heat and explicit cooling cancel; bounded work/source/late-cancellation
 rollback; and original pending-event left limits, decimal endpoint rounding
-and accuracy-floor refusal. The new Rust source and these tests have received
-bounded source/API review only in this session: executor availability
-prevented parser/formatter, compiler and native FEM/thermal test execution.
-No passing integration-test claim is made.
+and accuracy-floor refusal. Bounded source/API review found no concrete blocker. All five changed
+coupled Rust files passed the pinned Rust formatter and a subsequent
+rustfmt --check with edition 2024 and skip_children=true. Those checks parse
+and format the source; they do not type-check or execute it. Native FEM/thermal
+compilation and integration tests remain unexecuted in this session. No passing
+integration-test claim is made.
 
 ## Nonlinear membrane damping in the original exponential impact solve
 
