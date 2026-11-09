@@ -11142,3 +11142,48 @@ mass/energy balances, complete rollback and source/approximation refusal.
 The joint phase/temperature/heat response also converges under 16/32/64-cell
 and 80/40/20 ns refinement. This is focused numerical verification; the
 complete workspace and experimental validation were not run.
+
+## Multicomponent spatial demixing with explicit interface energy
+
+The experimental miscibility module now has a separate
+`multicomponent::phase_field::MulticomponentPhaseFieldNetwork`
+owner for nonconvex original regular-solution liquids. It retains the original
+full-species thermodynamic model, complete positive pair diffusivities and
+coupled Maxwell–Stefan molar-frame solver. Every original component remains an
+independent compensated inventory. Common fixed partial molar volume preserves
+rigid cell capacity; unequal molar masses do not make this a barycentric frame.
+
+A finite positive constant energetic coefficient kappa [J/m] defines each edge
+energy as kappa A/(4 d) times the sum over all species of squared mole-fraction
+jumps. This species-symmetric normalization reduces exactly to the existing
+binary kappa A/(2 d) convention. The cell chemical gradient is the derivative of
+that same discrete energy, divided by the actual admitted cell molar inventory.
+One canonical edge pass assembles all gradient potentials in O(edges * species)
+work before the shared original force/friction sweep. The sufficient bulk
+convexity bound remains diagnostic for this owner; public homogeneous network
+construction still requires it. No raw nonconvex homogeneous network or field
+escapes through the public phase-field API.
+
+The synchronous explicit candidate applies all paired component transfers
+before checking positivity. Publication requires independent species/capacity
+balances and the actual change in bulk Gibbs plus interfacial energy within one
+offered energy allowance. Bulk and interface increments are reported separately
+and evaluated through stable differences. A valid smoothing step can increase
+bulk Gibbs while decreasing total free energy. Initial chemical dissipation is
+a rate diagnostic, not a substitute for the finite-step energy audit.
+
+Common strictly positive species support remains required. No component is
+seeded, clipped, reconstructed from a carrier or replaced by equilibrium phase
+fractions. The scalar energetic gradient model does not assert independently
+calibrated pair surface tensions, variable-kappa physics, nucleation, spatial
+convergence, unconditional time stability or hydrodynamic capillary work.
+Prescribed-flow advection is not exposed by this owner. Checked additional
+workspace covers interfacial geometry and simultaneous potential/candidate
+storage; canonical loops retain bounded cancellation checks.
+
+Focused G0/G3 regression sources include discrete spinodal dispersion,
+short-wave damping with increasing bulk Gibbs, independent unequal-pair ternary
+friction and dissipation equations, binary normalization, component permutation,
+all-species conservation through the supported species limit, scoped nonconvex
+admission, workspace limits and transactional refusal. These numerical oracles
+do not constitute experimental calibration or a G2 physical benchmark.

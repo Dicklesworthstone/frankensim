@@ -41,6 +41,9 @@ pub mod transport;
 /// Local-temperature species and heat exchange using the original caloric law.
 pub mod nonisothermal;
 
+/// Nonconvex liquids with explicit species-symmetric interfacial energy.
+pub mod phase_field;
+
 /// Original liquid material properties retained through accepted endpoints.
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
@@ -240,9 +243,39 @@ impl MulticomponentMiscibilityNetwork {
         temperature: Temperature,
         concentration: AmountConcentration,
         cells: Vec<MulticomponentMiscibilityCell>,
+        faces: Vec<MulticomponentMiscibilityFace>,
+        diffusivity_matrices: Vec<Vec<f64>>,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::prepare(
+            model,
+            transport,
+            temperature,
+            concentration,
+            cells,
+            faces,
+            diffusivity_matrices,
+            maximum_workspace_bytes,
+            true,
+            cancelled,
+        )
+    }
+
+    /// Shared graph preparation. Only the positive-gradient-energy owner may
+    /// request nonconvex preparation, and it never exposes this raw network or
+    /// its raw fields. Public homogeneous construction retains its convexity gate.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        model: MulticomponentRegularSolutionV1,
+        transport: MaxwellStefanV1,
+        temperature: Temperature,
+        concentration: AmountConcentration,
+        cells: Vec<MulticomponentMiscibilityCell>,
         mut faces: Vec<MulticomponentMiscibilityFace>,
         diffusivity_matrices: Vec<Vec<f64>>,
         maximum_workspace_bytes: usize,
+        require_convexity: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(&mut cancelled)?;
@@ -357,7 +390,7 @@ impl MulticomponentMiscibilityNetwork {
                 "global simplex curvature lower bound",
             )?
         };
-        if convexity_lower_bound <= 64.0 * f64::EPSILON * n as f64 {
+        if require_convexity && convexity_lower_bound <= 64.0 * f64::EPSILON * n as f64 {
             return Err(MulticomponentMiscibilityError::Convexity {
                 lower_bound: convexity_lower_bound,
             });
@@ -561,8 +594,8 @@ impl MulticomponentMiscibilityField {
         Ok((components, capacity, energy))
     }
 
-    /// Shared independent-inventory account. Thermal evolution owns its H/S
-    /// audit and must not apply the reference-temperature Gibbs inequality.
+    /// Shared independent-inventory account. Thermal and interfacial owners
+    /// apply their complete energy audits without a homogeneous Gibbs gate.
     fn inventory_balances(
         &self,
         next: &Self,

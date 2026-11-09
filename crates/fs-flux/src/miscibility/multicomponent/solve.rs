@@ -48,8 +48,34 @@ pub(super) fn rates(
     controls: MulticomponentMiscibilitySolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Rates> {
+    rates_with_gradient(initial, None, controls, cancelled)
+}
+
+/// The interface owner supplies cell-major extra chemical potentials divided by
+/// RT. Bulk forces, the molar gauge, pair friction and receipts remain one kernel.
+pub(super) fn rates_with_gradient(
+    initial: &MulticomponentMiscibilityField,
+    extra_reduced_potentials: Option<&[f64]>,
+    controls: MulticomponentMiscibilitySolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Rates> {
     poll(cancelled)?;
     admit_controls(controls)?;
+    if let Some(potentials) = extra_reduced_potentials {
+        if potentials.len() != initial.fractions.len() {
+            return Err(MulticomponentMiscibilityError::Invalid(
+                "one extra chemical potential per cell and original species required",
+            ));
+        }
+        for row in potentials.chunks(initial.network.species_count()) {
+            poll(cancelled)?;
+            if row.iter().any(|value| !value.is_finite()) {
+                return Err(MulticomponentMiscibilityError::Arithmetic(
+                    "finite interfacial chemical potentials required",
+                ));
+            }
+        }
+    }
     let network = initial.network();
     let n = network.species_count();
     let mut fluxes = vec![0.0; network.faces().len() * n];
@@ -84,6 +110,12 @@ pub(super) fn rates(
                 jump.add(finite(
                     network.owner.chi[s * n + t] * (right[t] - left[t]),
                     "original excess chemical jump",
+                )?)?;
+            }
+            if let Some(potentials) = extra_reduced_potentials {
+                jump.add(finite(
+                    potentials[j * n + s] - potentials[i * n + s],
+                    "interfacial chemical jump",
                 )?)?;
             }
             // The common excess-Gibbs term in every chemical potential is a
@@ -158,6 +190,30 @@ pub(super) fn candidate_from_rates(
     controls: MulticomponentMiscibilitySolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<MulticomponentMiscibilityCandidate> {
+    let candidate =
+        conservative_candidate_from_rates(initial, duration_s, rates, controls, cancelled)?;
+    if candidate.step.free_energy_change_j > controls.free_energy_tolerance_j {
+        return Err(MulticomponentMiscibilityError::FreeEnergy {
+            change_j: candidate.step.free_energy_change_j,
+            tolerance_j: controls.free_energy_tolerance_j,
+        });
+    }
+    poll(cancelled)?;
+    Ok(candidate)
+}
+
+/// Shared paired inventory update and homogeneous energy increment. The caller
+/// must apply its own complete thermodynamic gate before publishing this private
+/// candidate: bulk Gibbs for homogeneous liquids, bulk plus interface energy
+/// for the phase-field owner. Applying a bulk-only gate here would incorrectly
+/// refuse physical smoothing that spends interface energy to increase bulk G.
+pub(super) fn conservative_candidate_from_rates(
+    initial: &MulticomponentMiscibilityField,
+    duration_s: f64,
+    rates: &Rates,
+    controls: MulticomponentMiscibilitySolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<MulticomponentMiscibilityCandidate> {
     poll(cancelled)?;
     admit_controls(controls)?;
     let elapsed = admit_duration(initial, duration_s)?;
@@ -214,8 +270,9 @@ pub(super) fn candidate_from_rates(
         field.fractions[cell * n..(cell + 1) * n].copy_from_slice(&fractions[..n]);
     }
     field.elapsed_s = elapsed;
-    let (component_residual_mol, maximum_capacity_residual_mol, free_energy_change_j) =
-        initial.balances(&field, controls, cancelled)?;
+    let (component_residual_mol, maximum_capacity_residual_mol) =
+        initial.inventory_balances(&field, controls.amount_balance_tolerance_mol, cancelled)?;
+    let free_energy_change_j = free_energy_change(initial, &field, cancelled)?;
     poll(cancelled)?;
     Ok(MulticomponentMiscibilityCandidate {
         field,
