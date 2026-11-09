@@ -3803,3 +3803,39 @@ Source reconstruction, finite exterior-volume selection, inviscid stationary
 source assumptions and propagation convergence remain separate obligations.
 This finite recorded prefix does not reconstruct Welch phases, infer unrecorded
 prehistory, supply a later material tail or claim a calibrated live audio stream.
+
+## Exact straight-edge plane-wave diffraction
+
+`diffraction::HalfPlaneDiffraction` solves Sommerfeld's ideal half-plane
+problem in the local physical frame `x >= 0, y = 0`, with its edge along z.
+It binds the original `FluidAcousticState`, positive frequency and a unit
+incident propagation direction; both rigid and pressure-release sheets are
+available. Edge-parallel phase is separated analytically, so skew incidence
+retains the physical transverse wavelength. Signed `y = +0` and `y = -0`
+select the two distinct sheet faces; the open half-plane remains continuous.
+
+The coherent total solution includes incident, reflected and diffracted
+fields through the illuminated, transition and shadow regions. Analytic
+Cartesian Euler velocity retains the `1/sqrt(r)` edge term. Pressure and
+velocity feed the existing `CoherentCompactField` and `HarmonicFieldLine<3>`
+observations without a visibility mask, second propagation delay or pressure
+squared substitute for signed energy flux. The exact edge and exactly grazing
+incidence refuse. This is an infinite, zero-thickness, stationary ideal sheet;
+finite barriers, impedance, point-source incidence, arbitrary wedges, losses,
+flow and source loading remain separate models.
+
+The implementation follows Sommerfeld A3--A4 in
+[the NIST half-plane study](https://pmc.ncbi.nlm.nih.gov/articles/PMC4844525/).
+Its small-argument Fresnel series uses DD accumulation; the large-argument
+incomplete-gamma continued fraction ([DLMF 8.9.2](https://dlmf.nist.gov/8.9.E2))
+retains the scaled tail directly. Shared deterministic phase reduction and
+the analytic common edge phase avoid cancellation of two rounded large
+phases. Work is allocation-free and bounded by two 256-term transition
+evaluations, with cancellation at most eight iterations apart. Numerical
+convergence is floating-point evidence, not an interval or null-relative bound.
+
+`diffraction::tests` checks independent Fresnel/Faddeeva landmarks and full
+Sommerfeld reference values, both faces' exact boundary conditions, analytic
+velocity against independent pressure derivatives, the full Helmholtz residual,
+illuminated/shadow/transition asymptotic limits, skew incidence, material density
+scaling, observation-line parity and domain/cancellation refusals (G1/G2/G3).

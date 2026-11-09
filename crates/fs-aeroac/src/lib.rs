@@ -63,6 +63,8 @@ pub mod bessel;
 pub mod bickley;
 pub mod curle2d;
 pub mod curle3d;
+/// Full-wave ideal half-plane diffraction with coherent pressure and velocity.
+pub mod diffraction;
 pub mod forced_jet;
 pub mod jetcard;
 pub mod jetlab;
