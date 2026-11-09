@@ -374,6 +374,25 @@ impl HyperProblem<'_> {
         &self,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_mean_dilatation_impl(None, cx)
+    }
+
+    /// Continue the same condensed Q1 equilibrium from an admitted field.
+    /// The original reference, material, pressure condensation and absolute
+    /// support targets remain unchanged.
+    pub fn solve_mean_dilatation_from(
+        &self,
+        initial_displacement: &[[f64; 2]],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_mean_dilatation_impl(Some(initial_displacement), cx)
+    }
+
+    fn solve_mean_dilatation_impl(
+        &self,
+        initial_displacement: Option<&[[f64; 2]]>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
         let prepared = Prepared::new(self, cx)?;
         if !self.settings.tol.is_finite()
             || self.settings.tol <= 0.0
@@ -385,7 +404,10 @@ impl HyperProblem<'_> {
                 "mean-dilatation Newton controls must be finite and positive",
             ));
         }
-        self.solve_with_projection(Some(super::Reduction::MeanDilatation(&prepared, cx)))
+        self.solve_with_projection_from(
+            Some(super::Reduction::MeanDilatation(&prepared, cx)),
+            initial_displacement,
+        )
     }
 
     /// Unconstrained forces and exact condensed-energy Hessian, per unit thickness.

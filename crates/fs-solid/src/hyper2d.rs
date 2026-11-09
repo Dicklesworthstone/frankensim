@@ -51,6 +51,8 @@ pub mod mean_dilatation;
 pub mod plane_stress;
 /// Retained finite-plastic P1/Q1 sheet forming with solved transverse thickness.
 pub mod plastic;
+/// Loaded equilibria and their original consistent-mass tangent spectra.
+pub mod vibration;
 /// Persistent finite-strain viscoelastic P1/Q1 histories and physical intervals.
 pub mod visco;
 
@@ -172,6 +174,16 @@ pub trait PlaneMaterial: FiniteStrainPotential + IncompressiblePlaneStressPotent
     fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
         None
     }
+
+    /// Original stored-energy owner, when this potential is elastic.
+    ///
+    /// Vibration uses this only to admit physical elastic storage; assembly
+    /// still calls this complete plane material, including its reference map.
+    /// Frozen inelastic incremental potentials must retain the default `None`:
+    /// their algorithmic Hessian is not an elastic vibration stiffness.
+    fn elastic_potential(&self) -> Option<&dyn HyperelasticMaterial> {
+        None
+    }
 }
 
 fn validate_native(material: &Hyperelastic) -> Result<(), fs_material::MaterialError> {
@@ -186,11 +198,19 @@ impl PlaneMaterial for Hyperelastic {
     fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
         Some(self)
     }
+
+    fn elastic_potential(&self) -> Option<&dyn HyperelasticMaterial> {
+        Some(self)
+    }
 }
 
 impl PlaneMaterial for ResolvedHyperelastic {
     fn native_hyperelastic(&self) -> Option<&Hyperelastic> {
         Some(self.hyperelastic())
+    }
+
+    fn elastic_potential(&self) -> Option<&dyn HyperelasticMaterial> {
+        Some(self)
     }
 }
 
@@ -199,6 +219,10 @@ impl<L: HyperelasticMaterial + IncompressiblePlaneStressPotential + ?Sized> Plan
 {
     fn validate_plane_material(&self) -> Result<(), fs_material::MaterialError> {
         validate_native(self.material().hyperelastic())
+    }
+
+    fn elastic_potential(&self) -> Option<&dyn HyperelasticMaterial> {
+        Some(self)
     }
 }
 
