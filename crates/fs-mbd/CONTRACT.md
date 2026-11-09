@@ -802,6 +802,29 @@ across force scales, nonbinary static equilibrium, an unstable quarter-period
 particular orbit and growing perturbations, full mutual inertia, coordinate
 congruence and cycle origin, singularity, small-force resolution and cancellation.
 
+`rotordynamics::periodic::power::prepare_forced_power_cycle` adds physical
+power to those original held-load cycles. Native maps and periodic-orbit solves
+still own motion; the shared `fs-phs` stable Gramian kernel independently caches
+integrals of applied `f.v`, signed `v.C.v`, and nonconservative `v.K_skew.q`.
+Warm evaluation uses only O(segments*n²) contractions. Polarized original
+endpoint quadratic forms independently measure kinetic and symmetric-K storage
+increments. Every K switch, including the final-to-first period seam, retains
+`q.(K_next-K_old).q/2` as parameter work at unchanged state. The full-cycle
+balance uses first-segment storage on both sides; average watts divide each
+physical work channel by the complete period. This resolves actuator and
+stiffness-modulator consumption without inventing another physical solver.
+
+Signed active-bearing and circulatory-stiffness work is never heat; exact skew G
+does no work but remains in the motion equation. Native mass, residual, resolvent
+and cancellation gates remain active, with whole-query budgets for all cached
+forms. Each segment, accumulated absolute segment defects and the independent
+whole-cycle energy residual pass the authored energy allowance before publication.
+G1/G3 regressions cover exponential velocity reversal and analytical damping
+loss, parametric resonance and extraction at the period seam, active C,
+circulatory K, periodic square-wave power, true segment refinement and refusal.
+No continuous-modulation, Fourier-power, peak-power, physical heat routing,
+positive-storage, attraction or certified state-error claim follows.
+
 `rotordynamics::periodic::prepare_harmonic_cycle` drives those SAME physical
 segments with continuous `Fc*cos(omega*t) + Fs*sin(omega*t)` forces/torques.
 The positive integer harmonic order (at most 1024) fixes

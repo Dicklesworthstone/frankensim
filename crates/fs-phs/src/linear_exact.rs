@@ -223,6 +223,45 @@ pub struct DenseExponentialBudget {
     pub max_multiply_terms: u64,
 }
 
+/// The original linear flow and an independently integrated signed observation.
+/// For `x'=A x`, `integral` is `integral exp(A t)^T C exp(A t) dt`.
+/// C need not be positive: an observed work channel is not necessarily heat.
+pub struct QuadraticFlowIntegral {
+    pub transition: Vec<f64>,
+    pub integral: Vec<f64>,
+}
+
+/// Reuse the exact quadratic owner's stable Gramian doubling for an original
+/// linear generator and signed quadratic observation, without inventing a
+/// Hamiltonian or requiring a positive storage form. No inverse propagator is
+/// formed. The caller owns coordinate scaling, physical interpretation and an
+/// independent energy check; this is a numerical integral, not a passivity proof.
+///
+/// Admission reserves 24 dense matrices (including compensated workspace and
+/// caller inputs) and 256 matrix-product scalar terms per n cubed, covering
+/// 32 Taylor stages and 48 doublings. A term may use compensated arithmetic.
+/// This cold call is indivisible; callers poll cancellation on either side.
+pub fn quadratic_flow_integral_with_budget(
+    generator: &[f64],
+    observation: &[f64],
+    n: usize,
+    duration: f64,
+    budget: DenseExponentialBudget,
+) -> Result<QuadraticFlowIntegral, PhsError> {
+    let bytes = n.checked_mul(n).and_then(|v| v.checked_mul(24 * 8))
+        .ok_or_else(|| refuse("quadratic flow workspace overflow"))?;
+    let work = (n as u64).checked_pow(3).and_then(|v| v.checked_mul(256))
+        .ok_or_else(|| refuse("quadratic flow work overflow"))?;
+    if n == 0 || n > budget.max_dimension || budget.max_dimension > 256
+        || bytes > budget.max_dense_bytes || work > budget.max_multiply_terms
+    {
+        return Err(refuse("quadratic flow dense byte/work admission"));
+    }
+    let flow = gramian::flow_integral(generator, observation, n, duration)
+        .map_err(refuse)?;
+    Ok(QuadraticFlowIntegral { transition: flow.transition, integral: flow.loss_integral })
+}
+
 /// Hard capacity of the explicit budgeted cold path; defaults remain 256. 6144 is the 2d x 2d Van Loan operator of a
 /// 3072-dimensional generator (fs-couple's 1024 prepared modes, three coordinates each).
 pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 6144;
