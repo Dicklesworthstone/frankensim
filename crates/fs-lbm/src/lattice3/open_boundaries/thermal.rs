@@ -230,7 +230,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         Ok(OpenThermalStep3 { momentum, heat })
     }
 
-    fn admit_thermal_faces(
+    pub(in crate::lattice3::open_boundaries) fn admit_thermal_faces(
         &self,
         thermal: ThermalOpenBoundaries3,
     ) -> Result<(), OpenThermalError3<L::Error>> {

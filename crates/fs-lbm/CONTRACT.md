@@ -3680,3 +3680,41 @@ Second-order convergence applies to smooth frozen-field trajectories only.
 Unsteady velocity/source sampling, history-remap accuracy and the complete
 physical solver are not upgraded or newly qualified. This adds no inflow
 memory, large-Courant qualification, SGS-energy model or DNS calibration.
+
+## Porous momentum and native thermal velocity epochs
+
+`ResistanceOpenGrid3::{prepare_thermal_field, step_serial_with_thermal,
+step_serial_with_thermal_tensor_diffusion}` binds the original D3Q7 thermal
+carrier to the accepted implicit porous momentum owner. No independent
+force-only step or replacement advection/collision kernel is introduced.
+The returned `ResistanceOpenThermalStep3` retains the complete original
+resistance momentum/work receipt and independent thermal balance.
+
+Opening thermal collision, flux-history correction, reservoir transport and
+the first source half-kick use each cell's accepted physical velocity,
+including its retained implicit half force. The porous owner stages its
+original collision/pull, constitutive endpoint solve, complete wall/periodic
+account and work admission once. The closing heat half-kick then uses the
+staged populations and their actual resolved endpoint force. Raw population
+momentum and a frozen opening force are not substituted for that velocity.
+
+Scalar relaxation and uniform/per-cell SPD diffusivity tensors retain the
+existing thermal definitions. Thermal tensors are resolved in grid axes
+independently of porous principal axes. Existing reservoir/backflow data,
+stationary finite-wall conduction, immersed storage, temperature/kinetic
+budgets and moving-finite-wall refusals remain authoritative. Geometry,
+solid masks, boundary ownership and accepted step counts must agree.
+
+The composition reuses all native and thermal scratch. Populations,
+force/drag history, finite thermal state, flux history, both receipts and
+time counters publish only after every momentum, thermal and cancellation
+gate succeeds. A thermal refusal after staging momentum preserves both
+accepted states and permits the same deterministic retry.
+
+This is passive fixed-reference-capacity heat transport under held porous
+laws and fixed geometry. The caller's heat source remains explicit; relative
+drag dissipation, skeleton work and mechanical wall work are reported without
+an inferred fluid/solid heat partition. Temperature-dependent resistance,
+porosity evolution, compressible enthalpy and a total transported fluid-energy
+balance are outside this composition. The source ordering is the existing
+partitioned native ordering, without a new temporal-order claim.
