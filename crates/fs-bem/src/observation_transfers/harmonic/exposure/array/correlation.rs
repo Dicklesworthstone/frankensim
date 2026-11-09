@@ -6,6 +6,8 @@
 
 use super::*;
 
+mod band;
+
 /// Ceiling on authored channel/lag requests, including repeats.
 pub const MAX_PRESSURE_CORRELATION_PAIRS: usize = 65_536;
 
@@ -26,12 +28,15 @@ pub struct HarmonicPressureCorrelationLimits {
     pub maximum_channel_pairs: usize,
     /// One delay phasor and one complex contraction per pair/retained line.
     pub maximum_prepare_products: usize,
-    /// Four linear real contractions per pair/line, one real or proper
-    /// product per ordered frequency pair, and one readout term per factor.
+    /// Four linear real contractions per pair/line, one readout term per
+    /// factor, and the larger of the original ordered-pair contraction and
+    /// bounded field projection. Requested first channels share projected
+    /// modes; signed-lag second channels retain their own field projections.
     pub maximum_query_products: usize,
     /// Logical retained pair/lag payload, bank headers, query accumulators
-    /// and one returned observation. Stack scalars and allocator overhead
-    /// are excluded.
+    /// and one returned observation. Eligible banks also reserve the fixed
+    /// temporal factor, profile preparation and first-channel mode cache.
+    /// Stack scalars and allocator overhead are excluded.
     pub maximum_workspace_bytes: usize,
 }
 
@@ -60,10 +65,11 @@ struct CorrelationBank {
 /// Reusable signed-lag observation of an existing directional/delayed array.
 ///
 /// All lag phases and complex channel shifts are prepared once. Repeated
-/// windows use the existing analytic real/proper product kernels without
-/// delay trigonometry, BEM solves, a source covariance matrix or a time grid.
-/// Window kernels are shared across all requested pairs. Selected pairs
-/// avoid constructing an unrequested dense channel matrix.
+/// windows project eligible coherent fields before their signed products;
+/// wider bands use the original analytic real/proper pair kernels. Neither
+/// path requires delay trigonometry, BEM solves, a source covariance matrix
+/// or a time grid. Temporal factors and requested first-channel projections
+/// are shared across pairs, without constructing a dense channel matrix.
 pub struct PreparedHarmonicPressureCorrelations<'array, 'field> {
     array: &'array PreparedHarmonicPressureArray<'field>,
     pairs: Vec<HarmonicPressureCorrelationPair>,
@@ -139,6 +145,7 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
         poll(&mut cancelled)?;
         admit(pairs.len(), MAX_PRESSURE_CORRELATION_PAIRS)?;
         admit(pairs.len(), limits.maximum_channel_pairs)?;
+        let mut first_channels = [false; MAX_PRESSURE_ARRAY_CHANNELS];
         for pair in pairs {
             poll(&mut cancelled)?;
             if pair.first >= array.channels.len()
@@ -149,25 +156,28 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                     "pressure correlation needs original channels and a finite signed lag",
                 ));
             }
+            first_channels[pair.first] = true;
         }
+        let first_count = first_channels.iter().filter(|&&used| used).count();
         let mut lines = 0usize;
-        let mut frequency_pairs = 0usize;
+        let mut temporal_products = 0usize;
+        let mut band_scratch = 0usize;
         for bank in &array.banks {
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
-            frequency_pairs = bank
-                .lines
-                .len()
-                .checked_mul(bank.lines.len())
-                .and_then(|p| frequency_pairs.checked_add(p))
+            let (products, scratch) =
+                band::admission(bank.lines.len(), pairs.len(), first_count, bank.statistics)?;
+            temporal_products = temporal_products
+                .checked_add(products)
                 .ok_or_else(overflow)?;
+            band_scratch = band_scratch.max(scratch);
         }
         let shifted_count = pairs.len().checked_mul(lines).ok_or_else(overflow)?;
         let prepare_products = shifted_count.checked_mul(2).ok_or_else(overflow)?;
         let query_products = lines
             .checked_mul(4)
-            .and_then(|p| p.checked_add(frequency_pairs))
             .and_then(|p| p.checked_add(array.banks.len() - 1))
             .and_then(|p| p.checked_mul(pairs.len()))
+            .and_then(|p| p.checked_add(temporal_products))
             .ok_or_else(overflow)?;
         admit(prepare_products, MAX_PRODUCTS)?;
         admit(prepare_products, limits.maximum_prepare_products)?;
@@ -190,6 +200,11 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                         + core::mem::size_of::<[Dd; 5]>()
                         + core::mem::size_of::<[[Dd; 2]; 2]>(),
                 )?)
+            })
+            .and_then(|v| {
+                v.checked_add(
+                    band_scratch.max(core::mem::size_of::<[bool; MAX_PRESSURE_ARRAY_CHANNELS]>()),
+                )
             })
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
@@ -277,23 +292,38 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
         for (bank_index, (bank, lagged)) in self.array.banks.iter().zip(&self.banks).enumerate() {
             poll(&mut cancelled)?;
             integrated.fill([[Dd::ZERO; 2]; 2]);
-            for (line_index, line) in bank.lines.iter().enumerate() {
-                poll(&mut cancelled)?;
-                let dc = window
-                    .product_kernel(line.omega, 0.0)
-                    .map_err(window_error)?;
-                for (i, (pair, sums)) in self.pairs.iter().zip(&mut integrated).enumerate() {
-                    if i % 64 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    let b = lagged.shifted[line_index * n + i];
-                    for (sum, a) in sums.iter_mut().zip([line.amplitudes[pair.first], b]) {
-                        sum[0] = sum[0]
-                            + dc.mean_real_product_parts_dd(a, [Dd::ONE, Dd::ZERO])
-                                .map_err(window_error)?;
-                        sum[1] = sum[1]
-                            + dc.mean_real_product_parts_dd([a[1], -a[0]], [Dd::ONE, Dd::ZERO])
-                                .map_err(window_error)?;
+            let projected = band::accumulate(
+                bank,
+                lagged,
+                &self.pairs,
+                window,
+                bank_index != 0,
+                &mut sums,
+                &mut integrated,
+                &mut cancelled,
+            )?;
+            // A proper field factor removes only a common carrier from its
+            // second moments. Its mode zero is not the absolute-clock mean
+            // used for covariance of the two averaged readouts.
+            if !projected || bank.statistics == HarmonicExposureFactorStatistics::ProperComplex {
+                for (line_index, line) in bank.lines.iter().enumerate() {
+                    poll(&mut cancelled)?;
+                    let dc = window
+                        .product_kernel(line.omega, 0.0)
+                        .map_err(window_error)?;
+                    for (i, (pair, sums)) in self.pairs.iter().zip(&mut integrated).enumerate() {
+                        if i % 64 == 0 {
+                            poll(&mut cancelled)?;
+                        }
+                        let b = lagged.shifted[line_index * n + i];
+                        for (sum, a) in sums.iter_mut().zip([line.amplitudes[pair.first], b]) {
+                            sum[0] = sum[0]
+                                + dc.mean_real_product_parts_dd(a, [Dd::ONE, Dd::ZERO])
+                                    .map_err(window_error)?;
+                            sum[1] = sum[1]
+                                + dc.mean_real_product_parts_dd([a[1], -a[0]], [Dd::ONE, Dd::ZERO])
+                                    .map_err(window_error)?;
+                        }
                     }
                 }
             }
@@ -310,6 +340,9 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                     }
                     sum[4] = sum[4] + zero.product(a[0], a[1])?;
                 }
+            }
+            if projected {
+                continue;
             }
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
@@ -372,3 +405,6 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -4523,3 +4523,36 @@ BEM checks pass against the new shared core, including signed surface exchange,
 physical interval energy, real-factor readout covariance and one-tone fallback.
 The full BEM solver/workspace suite and separate pair-correlation observer remain
 outside this execution boundary.
+
+### Selected signed-lag pressure correlations: coherent temporal projection
+
+`PreparedHarmonicPressureCorrelations` now projects eligible uniform/triangular
+channel fields before taking signed cross products. Real banks retain absolute
+carrier sum terms; proper banks use their declared one-half conjugate-product
+law. The originally prepared signed lag, microphone/calibration response and
+source clock remain unchanged. One temporal factor serves the bank, and each
+requested first channel is projected once and cached across its pairs. Each
+lagged second-channel signal is projected separately; repeated requests retain
+authored order. Wider bands and one-tone banks retain the original pair kernels.
+
+Preparation admits the larger of ordered frequency-pair and bounded 17-mode
+projection work, including the requested-first-channel cache and fixed profile
+scratch. Repeated queries add no heap buffers beyond the existing accumulators
+and returned correlations. Cancellation publishes no partial observation.
+Real-factor averaged-readout covariance uses the actual weighted field mean;
+proper averaged-readout covariance keeps the original absolute-carrier linear
+kernels. The latter is not a relative-error certificate at a deeply cancelled
+high-carrier readout; temporal second-moment stability does not establish that
+separate linear-readout claim.
+
+Five focused tests execute the complete correlation preparation/query methods
+and new projection helper with the actual shared harmonic-window and DD math
+implementations. They cover a two-tone 1ps dark field with signed lags, real and
+proper factors, signed cross products, original-carrier readout statistics at
+an admitted conditioning, independent time integration, wide-band/one-tone
+fallback, shifted-window lag reciprocity, repeated pairs, exact work/workspace
+boundaries and cancellation/replay. The old correlation observer returns
+9.183549615799121e-41 Pa² for the centered uniform `cos(t)-cos(2t)` 1ps self
+product; the physical leading value and repaired result are 2.8125e-50 Pa².
+The focused carrier uses narrow outer metadata adapters; a native BEM solve,
+complete array-construction pipeline and full workspace build were not run.
