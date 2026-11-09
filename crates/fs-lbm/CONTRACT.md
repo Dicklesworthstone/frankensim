@@ -2951,3 +2951,49 @@ reverse-face inflow and continuation, immutable source/context binding,
 resource/partition/cancellation refusal, exact absence and solid entries.
 Pinned source parsing and scoped formatting passed; native type checking and
 execution remain unverified under the build/storage limitation above.
+
+## Sensor-protected dynamic WALE
+
+`PeriodicDynamicSgs::with_wale` and `ChannelDynamicSgs::with_wale` explicitly
+select the Baya Toda--Truffin--Nicoud shear/vortex-sensor formulation
+(ECCOMAS CFD 2010, sections 5.1--5.2, equations 24--26;
+https://imag.umontpellier.fr/~nicoud/PDF/ECCOMAS_BayaToda.pdf).
+The existing full-gradient WALE kernel replaces the momentum rate in the
+original Favre--Germano identity. For `D = dev(sym(G G))` and `S = sym(G)`,
+the sensor is `(D:D)^(3/2) / ((D:D)^(3/2) + (S:S)^3)`. Above the authored
+threshold, the existing spatial or homogeneous-plane least-squares fit
+supplies C_w squared. At or below it, an authored nonnegative fixed C_w
+squared is selected before dividing the ill-conditioned near-wall
+contractions. Threshold and fixed C_w are explicit; the paper's examples
+are 0.09 and 0.5. There is no unprotected dynamic-WALE default or new
+coefficient clipping. Existing no-backscatter and coefficient/molecular-ratio
+admission policies remain authoritative.
+
+The independent scalar identity retains its original strain rate and
+arithmetic. Momentum WALE does not silently change heat or species mixing.
+The extra numerical payload is two scalars per cell (WALE rate and SVS):
+16 bytes/cell, giving 152 nominal bytes/cell for momentum. Original
+Smagorinsky storage remains 136 bytes/cell, with no optional-array allocation.
+Actual retained capacities, geometry, finite arithmetic and cancellation
+continue through the existing bounded owners.
+
+`NsfGrid3::with_dynamic_wale_thermal_sgs` and
+`with_channel_dynamic_wale_thermal_sgs` attach that momentum choice alongside
+the original independent heat fit. The required numerical payload is 216
+nominal bytes/cell; `required_dynamic_wale_sgs_workspace_bytes` reports it.
+`dynamic_wale_config` exposes the selected policy. The periodic/channel
+builders preserve the original same-state force correction, current wall
+data, half-cell derivatives, conservative energy faces and publication
+transaction. No separate PDE, physical timestep or thermal wall law is added.
+
+All 100 actual-source SGS tests passed in a focused native build with the
+complete production math crate and original model, Vreman, tangent and dynamic
+subtrees. Six new groups use independent physical-space filter/tensor oracles,
+check all channel normals and rectangular geometry, the cubic near-wall rate,
+unit and Galilean transformations, bitwise preservation of the independent
+heat fit, and cancellation/retry with reusable storage. Three NSF owner
+regression groups are authored and format-parsed but were not compiled or
+executed in this environment; the shared numerical tests do not establish
+full NSF/runtime integration. This remains exploratory LES, without a wall
+function, shock closure, complete compressible SGS-energy model, DNS
+calibration or acceptance-render qualification.

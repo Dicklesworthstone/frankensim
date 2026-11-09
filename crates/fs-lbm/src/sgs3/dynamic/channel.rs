@@ -126,6 +126,26 @@ impl ChannelDynamicSgs {
         PeriodicDynamicSgs::required_bytes(cells)
     }
 
+    /// Nominal sensor-protected dynamic WALE payload: 152 bytes per fluid cell.
+    pub fn required_wale_bytes(cells: usize) -> Result<usize, DynamicSgsError> {
+        PeriodicDynamicSgs::required_wale_bytes(cells)
+    }
+
+    /// Select the published SVS-protected WALE fit without changing the
+    /// tangential filter, homogeneous-plane averaging, or wall stencils.
+    pub fn with_wale(
+        mut self,
+        config: DynamicWaleConfig,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        self.inner = self.inner.with_wale(config, maximum_bytes)?;
+        Ok(self)
+    }
+
+    pub fn wale_config(&self) -> Option<DynamicWaleConfig> {
+        self.inner.wale_config()
+    }
+
     pub fn new(
         shape: [usize; 3],
         spacing: f64,
@@ -175,7 +195,8 @@ impl ChannelDynamicSgs {
         self.inner.viscosities()
     }
 
-    /// Plane-fitted nonnegative C_s squared for a consuming face strain.
+    /// Plane-fitted nonnegative C_s squared, or sensor-selected C_w squared.
+    /// WALE consumers must multiply its full-gradient rate, not |S|.
     /// Valid only after successful preparation; out-of-grid indices return None.
     pub fn coefficient_squared(&self, cell: usize) -> Option<f64> {
         self.inner.coefficient_squared(cell)

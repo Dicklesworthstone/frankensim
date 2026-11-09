@@ -12,12 +12,14 @@ use crate::sgs3::dynamic::channel::{
     ScalarWall,
 };
 use crate::sgs3::dynamic::scalar::{DynamicScalarConfig, PeriodicDynamicScalar};
-use crate::sgs3::dynamic::{DynamicSgsConfig, DynamicSgsError, PeriodicDynamicSgs};
+use crate::sgs3::dynamic::{
+    DynamicSgsConfig, DynamicSgsError, DynamicWaleConfig, PeriodicDynamicSgs,
+};
 use std::sync::{Arc, Mutex};
 
 mod lagrangian;
-pub use lagrangian::NsfLagrangianThermalSgsConfig;
 use crate::sgs3::dynamic::lagrangian::scalar::LagrangianDynamicScalar;
+pub use lagrangian::NsfLagrangianThermalSgsConfig;
 
 /// Independently fitted momentum and temperature diffusivity. Coefficient and
 /// molecular-ratio bounds are admissions, not coefficient clamps.
@@ -106,8 +108,13 @@ impl DynamicTransport {
             DynamicState::Channel { workspace, .. } if workspace.is_poisoned() => {
                 return Err(NsfError::Input("channel NSF workspace lock poisoned"));
             }
-            DynamicState::Lagrangian { config, normal_axis, workspace } => {
-                let fork = workspace.lock()
+            DynamicState::Lagrangian {
+                config,
+                normal_axis,
+                workspace,
+            } => {
+                let fork = workspace
+                    .lock()
                     .map_err(|_| NsfError::Input("Lagrangian NSF workspace lock poisoned"))?
                     .fork_for_trial(self.bytes)
                     .map_err(NsfError::DynamicSgs)?;
@@ -140,6 +147,20 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .map_err(NsfError::DynamicSgs)
     }
 
+    /// Added numerical payload for sensor-protected dynamic WALE momentum
+    /// and the original independent heat fit: 216 nominal bytes per cell.
+    pub fn required_dynamic_wale_sgs_workspace_bytes(&self) -> Result<usize, NsfError> {
+        PeriodicDynamicSgs::required_wale_bytes(self.n)
+            .and_then(|momentum| {
+                momentum
+                    .checked_add(PeriodicDynamicScalar::required_bytes(self.n)?)
+                    .ok_or(DynamicSgsError::Invalid(
+                        "NSF dynamic WALE workspace overflow",
+                    ))
+            })
+            .map_err(NsfError::DynamicSgs)
+    }
+
     /// Fit periodic subgrid momentum and heat in the existing NSF predictor
     /// and accepted endpoint. Fully periodic, all-fluid domains with at least
     /// three cells per axis are required. The source-owned shear/bulk physics,
@@ -150,11 +171,39 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// or extend its Mach, thermal or stability qualification. Local and dynamic
     /// SGS controls are mutually exclusive. No wall or shock model is supplied.
     pub fn with_dynamic_thermal_sgs(
-        mut self,
+        self,
         config: NsfDynamicThermalSgsConfig,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, NsfError> {
+        self.with_periodic_dynamic_model(config, None, maximum_workspace_bytes)
+    }
+
+    /// Dynamic WALE momentum with the published shear/vortex sensor and the
+    /// existing independently fitted heat diffusivity. `wale` explicitly
+    /// supplies the sensor threshold and protected C_w; momentum bounds apply
+    /// to C_w squared. The original periodic geometry, force-corrected
+    /// same-state preparation, energy faces and rollback semantics are retained.
+    /// This exploratory closure adds no shock or compressible SGS energy model.
+    pub fn with_dynamic_wale_thermal_sgs(
+        self,
+        config: NsfDynamicThermalSgsConfig,
+        wale: DynamicWaleConfig,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
+        self.with_periodic_dynamic_model(config, Some(wale), maximum_workspace_bytes)
+    }
+
+    fn with_periodic_dynamic_model(
+        mut self,
+        config: NsfDynamicThermalSgsConfig,
+        wale: Option<DynamicWaleConfig>,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
         config.validate()?;
+        if let Some(wale) = wale {
+            wale.validate_bound(config.momentum.maximum_coefficient_squared)
+                .map_err(NsfError::DynamicSgs)?;
+        }
         if self.sgs.is_some() || self.dynamic_sgs.is_some() {
             return Err(NsfError::Input(
                 "attach dynamic SGS to a molecular NSF grid",
@@ -181,9 +230,20 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 Ok(())
             }
         };
-        admit(self.required_dynamic_sgs_workspace_bytes()?)?;
+        admit(if wale.is_some() {
+            self.required_dynamic_wale_sgs_workspace_bytes()?
+        } else {
+            self.required_dynamic_sgs_workspace_bytes()?
+        })?;
         let momentum = PeriodicDynamicSgs::new(self.spec.dims, 1.0, maximum_workspace_bytes)
             .map_err(NsfError::DynamicSgs)?;
+        let momentum = if let Some(wale) = wale {
+            momentum
+                .with_wale(wale, maximum_workspace_bytes)
+                .map_err(NsfError::DynamicSgs)?
+        } else {
+            momentum
+        };
         let heat = PeriodicDynamicScalar::new(self.spec.dims, maximum_workspace_bytes)
             .map_err(NsfError::DynamicSgs)?;
         let bytes = momentum
@@ -222,11 +282,39 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// authoritative. Open boundaries and interior solids are unsupported.
     /// The reusable numerical workspace costs 200 nominal bytes per fluid cell.
     pub fn with_channel_dynamic_thermal_sgs(
-        mut self,
+        self,
         config: NsfChannelDynamicThermalSgsConfig,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, NsfError> {
+        self.with_channel_dynamic_model(config, None, maximum_workspace_bytes)
+    }
+
+    /// Sensor-protected dynamic WALE on the existing resolved channel, with
+    /// explicit SVS threshold and fixed near-wall C_w. Homogeneous-plane
+    /// Germano averages determine C_w squared only above that local sensor
+    /// threshold. The original wall velocities, half-cell derivatives, scalar
+    /// wall policies, independent heat fit and total wall-work ledger remain
+    /// authoritative. No wall function or channel calibration is supplied.
+    pub fn with_channel_dynamic_wale_thermal_sgs(
+        self,
+        config: NsfChannelDynamicThermalSgsConfig,
+        wale: DynamicWaleConfig,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
+        self.with_channel_dynamic_model(config, Some(wale), maximum_workspace_bytes)
+    }
+
+    fn with_channel_dynamic_model(
+        mut self,
+        config: NsfChannelDynamicThermalSgsConfig,
+        wale: Option<DynamicWaleConfig>,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
         config.validate()?;
+        if let Some(wale) = wale {
+            wale.validate_bound(config.momentum.maximum_coefficient_squared)
+                .map_err(NsfError::DynamicSgs)?;
+        }
         if self.sgs.is_some() || self.dynamic_sgs.is_some() {
             return Err(NsfError::Input(
                 "attach dynamic SGS to a molecular NSF grid",
@@ -262,17 +350,28 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 Ok(())
             }
         };
-        let required = ChannelDynamicSgs::required_bytes(self.n)
-            .and_then(|momentum| {
-                momentum
-                    .checked_add(ChannelDynamicScalar::required_bytes(self.n)?)
-                    .ok_or(DynamicSgsError::Invalid("NSF channel workspace overflow"))
-            })
-            .map_err(NsfError::DynamicSgs)?;
+        let required = if wale.is_some() {
+            ChannelDynamicSgs::required_wale_bytes(self.n)
+        } else {
+            ChannelDynamicSgs::required_bytes(self.n)
+        }
+        .and_then(|momentum| {
+            momentum
+                .checked_add(ChannelDynamicScalar::required_bytes(self.n)?)
+                .ok_or(DynamicSgsError::Invalid("NSF channel workspace overflow"))
+        })
+        .map_err(NsfError::DynamicSgs)?;
         admit(required)?;
         let momentum =
             ChannelDynamicSgs::new(self.spec.dims, 1.0, normal_axis, maximum_workspace_bytes)
                 .map_err(NsfError::DynamicSgs)?;
+        let momentum = if let Some(wale) = wale {
+            momentum
+                .with_wale(wale, maximum_workspace_bytes)
+                .map_err(NsfError::DynamicSgs)?
+        } else {
+            momentum
+        };
         let heat = ChannelDynamicScalar::new(self.spec.dims, normal_axis, maximum_workspace_bytes)
             .map_err(NsfError::DynamicSgs)?;
         let bytes = momentum
@@ -334,6 +433,24 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         match &self.dynamic_sgs.as_ref()?.state {
             DynamicState::Channel { config, .. } => Some(*config),
             DynamicState::Periodic { .. } | DynamicState::Lagrangian { .. } => None,
+        }
+    }
+
+    /// The selected instantaneous WALE policy. None means that this grid
+    /// uses another closure (or molecular transport alone).
+    pub fn dynamic_wale_config(&self) -> Result<Option<DynamicWaleConfig>, NsfError> {
+        match self.dynamic_sgs.as_ref().map(|dynamic| &dynamic.state) {
+            Some(DynamicState::Periodic { workspace, .. }) => Ok(workspace
+                .lock()
+                .map_err(|_| NsfError::Input("dynamic NSF workspace lock poisoned"))?
+                .momentum
+                .wale_config()),
+            Some(DynamicState::Channel { workspace, .. }) => Ok(workspace
+                .lock()
+                .map_err(|_| NsfError::Input("channel NSF workspace lock poisoned"))?
+                .momentum
+                .wale_config()),
+            _ => Ok(None),
         }
     }
 
@@ -410,15 +527,30 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     config.momentum.maximum_eddy_to_molecular,
                 )
             }
-            DynamicState::Lagrangian { config, normal_axis, workspace } => {
-                let mut workspace = workspace.lock()
+            DynamicState::Lagrangian {
+                config,
+                normal_axis,
+                workspace,
+            } => {
+                let mut workspace = workspace
+                    .lock()
                     .map_err(|_| NsfError::Input("Lagrangian NSF workspace lock poisoned"))?;
                 let trial = self.prepare_lagrangian_trial(
-                    &mut workspace, *config, *normal_axis, dynamic.sample_time,
-                    rho, velocity, theta, || false,
+                    &mut workspace,
+                    *config,
+                    *normal_axis,
+                    dynamic.sample_time,
+                    rho,
+                    velocity,
+                    theta,
+                    || false,
                 )?;
                 self.dynamic_transport_field(
-                    rho, theta, material, trial.viscosities(), trial.diffusivities(),
+                    rho,
+                    theta,
+                    material,
+                    trial.viscosities(),
+                    trial.diffusivities(),
                     config.momentum.maximum_eddy_to_molecular,
                 )
             }
@@ -585,3 +717,6 @@ mod tests;
 
 #[cfg(test)]
 mod channel_tests;
+
+#[cfg(test)]
+mod wale_tests;

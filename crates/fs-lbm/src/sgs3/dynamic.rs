@@ -43,6 +43,11 @@ pub mod lagrangian;
 
 use channel::{FilterGeometry, ScalarWall};
 
+/// Sensor-protected full-gradient WALE on the same nonlocal filters.
+#[path = "dynamic/wale.rs"]
+pub mod wale;
+pub use wale::DynamicWaleConfig;
+
 /// Numerator and denominator are averaged separately, never their ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicAveraging {
@@ -55,7 +60,7 @@ pub enum DynamicAveraging {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DynamicSgsConfig {
     pub averaging: DynamicAveraging,
-    /// Upper admission bound on C_s squared, not on C_s.
+    /// Upper admission bound on C_s squared (or C_w squared with WALE).
     pub maximum_coefficient_squared: f64,
     /// Used by the consuming solver; never a viscosity clamp.
     pub maximum_eddy_to_molecular: f64,
@@ -110,6 +115,8 @@ impl std::error::Error for DynamicSgsError {}
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DynamicSgsReport {
     pub maximum_coefficient_squared: f64,
+    /// Before nonnegative clipping. Sensor-protected WALE cells contribute
+    /// their authored fixed C_w squared instead of an ill-conditioned fit.
     pub minimum_raw_coefficient_squared: f64,
     /// Cells where a negative least-squares coefficient was set to zero.
     pub backscatter_limited_cells: usize,
@@ -140,6 +147,7 @@ pub struct PeriodicDynamicSgs {
     // Before fitting, this otherwise unused output stores the normalized
     // donor density with its test-box weight. No additional field is needed.
     viscosity: Vec<f64>,
+    wale: Option<wale::WaleWorkspace>,
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +225,18 @@ fn strain<const N: usize>(
     cell: usize,
     u: &[[f64; N]],
 ) -> Result<(f64, [f64; 6]), DynamicSgsError> {
+    strain_and_gradient(shape, metric, geometry, walls, cell, u)
+        .map(|(rate, strain, _)| (rate, strain))
+}
+
+fn strain_and_gradient<const N: usize>(
+    shape: [usize; 3],
+    metric: [f64; 3],
+    geometry: FilterGeometry,
+    walls: [[f64; 3]; 2],
+    cell: usize,
+    u: &[[f64; N]],
+) -> Result<(f64, [f64; 6], [[f64; 3]; 3]), DynamicSgsError> {
     let at = coordinates(shape, cell);
     let mut g = [[0.0; 3]; 3];
     for axis in 0..3 {
@@ -243,7 +263,7 @@ fn strain<const N: usize>(
             reason: "unrepresentable normalized strain contraction",
         });
     }
-    Ok((rate, deviator(s)))
+    Ok((rate, deviator(s), g))
 }
 
 // Split off binary exponents before forming the volume. All intermediate
@@ -342,6 +362,7 @@ impl PeriodicDynamicSgs {
             strain_rate: allocated(n, 0.0)?,
             contraction: allocated(n, [0.0; 2])?,
             viscosity: allocated(n, 0.0)?,
+            wale: None,
         };
         let required = result.workspace_bytes();
         if required > maximum_bytes {
@@ -407,7 +428,11 @@ impl PeriodicDynamicSgs {
             + 6 * self.basis.capacity()
             + self.strain_rate.capacity()
             + 2 * self.contraction.capacity()
-            + self.viscosity.capacity())
+            + self.viscosity.capacity()
+            + self
+                .wale
+                .as_ref()
+                .map_or(0, |wale| 2 * wale.response.capacity()))
             * core::mem::size_of::<f64>()
     }
 
@@ -425,10 +450,11 @@ impl PeriodicDynamicSgs {
         &self.viscosity
     }
 
-    /// Fitted nonnegative C_s squared, independent of the cell-centered strain.
+    /// Selected nonnegative C_s squared, or C_w squared with dynamic WALE.
     /// Finite-volume consumers can apply this coefficient to their own face
     /// strain instead of interpolating a cell viscosity that misses alternating
-    /// shear. Valid only after successful preparation, like viscosities.
+    /// shear. WALE consumers must use the full-gradient WALE rate, not |S|.
+    /// Valid only after successful preparation, like viscosities.
     /// Out-of-grid indices return None.
     pub fn coefficient_squared(&self, cell: usize) -> Option<f64> {
         self.basis.get(cell).map(|basis| basis[0])
@@ -476,6 +502,10 @@ impl PeriodicDynamicSgs {
     ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
+        if let Some(wale) = &self.wale {
+            wale.config
+                .validate_bound(config.maximum_coefficient_squared)?;
+        }
         let (scales, domain) =
             self.prepare_contractions(density, velocity, walls, &mut cancelled)?;
         if scales.velocity == 0.0 {
@@ -484,10 +514,16 @@ impl PeriodicDynamicSgs {
                 values.fill(0.0);
             }
             poll(&mut cancelled, 0)?;
-            return Ok((DynamicSgsReport {
-                undetermined_cells: self.viscosity.len(),
-                ..DynamicSgsReport::default()
-            }, scales));
+            let coefficient = self.wale.as_ref().map_or(0.0, |wale| wale.fixed_squared);
+            return Ok((
+                DynamicSgsReport {
+                    maximum_coefficient_squared: coefficient,
+                    minimum_raw_coefficient_squared: coefficient,
+                    undetermined_cells: self.viscosity.len(),
+                    ..DynamicSgsReport::default()
+                },
+                scales,
+            ));
         }
         let report = self.fit_prepared(config, scales, domain, &mut cancelled)?;
         Ok((report, scales))
@@ -557,7 +593,10 @@ impl PeriodicDynamicSgs {
                 poll(&mut cancelled, cell)?;
                 self.strain_rate[cell] = 0.0;
                 self.contraction[cell] = [0.0; 2];
-                self.basis[cell][0] = 0.0;
+                self.basis[cell][0] = self.wale.as_ref().map_or(0.0, |wale| wale.fixed_squared);
+                if let Some(wale) = &mut self.wale {
+                    wale.response[cell] = [0.0; 2];
+                }
             }
             poll(&mut cancelled, 0)?;
             return Ok((
@@ -588,7 +627,7 @@ impl PeriodicDynamicSgs {
         let ratio_squared = self.geometry.ratio_squared();
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
-            let (rate, s) = strain(
+            let (rate, s, g) = strain_and_gradient(
                 self.shape,
                 self.derivative_metric,
                 self.geometry,
@@ -597,6 +636,13 @@ impl PeriodicDynamicSgs {
                 &self.velocity,
             )?;
             self.strain_rate[cell] = rate;
+            let rate = if let Some(wale) = &mut self.wale {
+                let rate = wale::rate(g, cell)?;
+                wale.response[cell] = [rate, wale::sensor(g)];
+                rate
+            } else {
+                rate
+            };
             let rho = density[cell] / density_scale;
             self.basis[cell] = s.map(|v| rho * rate * v);
             if s.iter().zip(self.basis[cell]).any(|(s, b)| {
@@ -655,7 +701,7 @@ impl PeriodicDynamicSgs {
                     a[k] += self.basis[j][k];
                 }
             });
-            let (rate, s) = strain(
+            let (rate, s, g) = strain_and_gradient(
                 self.shape,
                 self.derivative_metric,
                 self.geometry,
@@ -663,6 +709,11 @@ impl PeriodicDynamicSgs {
                 cell,
                 &self.filtered,
             )?;
+            let rate = if self.wale.is_some() {
+                wale::rate(g, cell)?
+            } else {
+                rate
+            };
             let m = core::array::from_fn(|k| 2.0 * (a[k] - ratio_squared * mean[3] * rate * s[k]));
             let pair = [contract(deviator(l), m), contract(m, m)];
             if pair.iter().any(|v| !v.is_finite())
@@ -731,8 +782,18 @@ impl PeriodicDynamicSgs {
                     reason: "unrepresentable averaged least-squares contraction",
                 });
             }
-            let raw = if pair[1] == 0.0 {
+            if pair[1] == 0.0 {
                 report.undetermined_cells += 1;
+            }
+            // Select the published protected branch before dividing: its
+            // near-wall Germano ratio is precisely the ill-conditioned case.
+            let fixed = self.wale.as_ref().and_then(|wale| {
+                (wale.response[cell][1] <= wale.config.sensor_threshold)
+                    .then_some(wale.fixed_squared)
+            });
+            let raw = if let Some(coefficient) = fixed {
+                coefficient
+            } else if pair[1] == 0.0 {
                 0.0
             } else {
                 pair[0] / pair[1]
@@ -756,7 +817,11 @@ impl PeriodicDynamicSgs {
                     maximum: config.maximum_coefficient_squared,
                 });
             }
-            let nu = coefficient * self.strain_rate[cell] * scales.velocity * self.filter_width;
+            let rate = self
+                .wale
+                .as_ref()
+                .map_or(self.strain_rate[cell], |wale| wale.response[cell][0]);
+            let nu = coefficient * rate * scales.velocity * self.filter_width;
             if !nu.is_finite() {
                 return Err(DynamicSgsError::Cell {
                     cell,
