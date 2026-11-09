@@ -5,6 +5,12 @@
 use super::*;
 use crate::harmonic::C64;
 
+mod parameter;
+pub use parameter::{
+    DissipationParameterAction, DissipationParameterEvaluation,
+    PreparedDissipationParameterDirection,
+};
+
 /// Read-only callbacks with the SAME independent state/effort directions as
 /// StepWorkspace::step_into_dissipative_controlled. Every output entry must be
 /// filled; false, nonfinite or incomplete results refuse the complete image.
@@ -14,7 +20,9 @@ use crate::harmonic::C64;
 pub struct NonlinearDissipation<'a> {
     pub flow: &'a dyn Fn(&[f64], &[f64], &mut [f64]) -> bool,
     pub tangent: &'a dyn Fn(&[f64], &[f64], &[f64], &[f64], &mut [f64]) -> bool,
-    /// Exactly n total state-direction actions. No truncation or finite differences.
+    /// Action allowance per operation: equilibrium/periodic tangents require n
+    /// total state directions; a fixed-state parameter query requires one.
+    /// No truncation or finite differences.
     /// Callback internals are caller-owned, not a measured FLOP/wall-time budget.
     pub max_tangent_actions: usize,
 }

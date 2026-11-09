@@ -4457,3 +4457,37 @@ Native curvature admission also applies. Cancellation, invalid source jets,
 original-row failure or insufficient capacity returns no partial response and
 leaves the factor reusable. These backward checks do not certify forward
 accuracy near a poorly conditioned response.
+
+
+### Original nonlinear-loss parameter work and complete physical directions
+
+`NonlinearDissipation::prepare_parameter_direction` binds a signed explicit
+partial D_p(x,e) at fixed original state and effort. A missing explicit partial
+means the constitutive law is held fixed; the complete effort chain D_e*e_p
+still enters. `PreparedDissipationParameterDirection::evaluate` uses the
+original pointwise e dot D admission and original tangent callback with a zero
+independent state direction. All memory coordinates remain. It returns borrowed
+original flow, effort-chain and direct-flow images plus independently contracted
+power and power derivative e_p dot D + e dot(D_e e_p + D_p). Neither parameter
+work nor incremental slopes are constrained to be nonnegative.
+
+Preparation retains four n-vectors, respects the native harmonic dimension cap
+and requires one permitted original tangent action per query. Warm owner calls
+allocate nothing; callbacks retain their own resource behavior. Incomplete or
+nonfinite original flow, tangent or parameter output refuses. Cancellation
+returns no evaluation and permits reuse. No numerical differentiation or
+one-sided corner representative is substituted.
+
+`PreparedPhsParameterDirection::vector_field_with_dissipation_from_effort_into`
+contracts (J-R)e_p+(J_p-R_p)e+G_p*u+G*u_p-D_e*e_p-D_p using the SAME compensated
+row owner as the ordinary physical direction. The two loss contributions remain
+separate until final rounding, retaining weak motion when large physical terms
+oppose them. The previous no-D operation keeps its original arithmetic.
+
+Four G0/G1 tests pass natively: simultaneous physical matrices/drive/effort and
+constitutive parameter changes against independently perturbed source equations;
+fixed-law effort chains and signed heat derivatives; weak unit-sized flow/work
+beside opposing 2^54 contributions; and incomplete source actions, action limits,
+active-loss refusal, cancellation and reuse. These are local smooth parameter
+derivatives; they do not establish global material validity or physical
+admissibility of a finite parameter update.

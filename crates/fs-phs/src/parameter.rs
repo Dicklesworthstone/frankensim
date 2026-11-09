@@ -271,12 +271,43 @@ impl PreparedPhsParameterDirection<'_, '_> {
         input_derivative: &[f64],
         out: &mut [f64],
     ) -> Result<(), PhsError> {
+        self.parameter_field_into(effort, effort_derivative, input, input_derivative, None, out)
+    }
+
+    /// Complete original parameter field with nonlinear internal resistance:
+    /// `(J-R)e_p+(J_p-R_p)e+G_p u+G u_p-D_e e_p-D_p`.
+    /// The two loss directions are kept separate until the SAME compensated
+    /// row contraction finishes. No intermediate physical field or total loss
+    /// derivative is rounded before opposing terms have met. The original
+    /// nonlinear-loss owner supplies and admits these complete directions.
+    /// No allocation; O(n²+n*ports) work and constant numerical scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn vector_field_with_dissipation_from_effort_into(
+        &self,
+        effort: &[f64],
+        effort_derivative: &[f64],
+        input: &[f64],
+        input_derivative: &[f64],
+        effort_chain: &[f64],
+        direct_flow: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), PhsError> {
+        self.parameter_field_into(effort, effort_derivative, input, input_derivative,
+            Some((effort_chain, direct_flow)), out)
+    }
+
+    fn parameter_field_into(
+        &self, effort: &[f64], effort_derivative: &[f64], input: &[f64],
+        input_derivative: &[f64], loss: Option<(&[f64], &[f64])>, out: &mut [f64],
+    ) -> Result<(), PhsError> {
         let (n, m) = (self.system.n, self.system.m);
         if effort.len() != n
             || effort_derivative.len() != n
             || out.len() != n
             || input.len() != m
             || input_derivative.len() != m
+            || loss.is_some_and(|(chain, direct)| chain.len() != n || direct.len() != n
+                || chain.iter().chain(direct).any(|v| !v.is_finite()))
             || effort
                 .iter()
                 .chain(effort_derivative)
@@ -314,6 +345,10 @@ impl PreparedPhsParameterDirection<'_, '_> {
                     product(g[index], input[port])?;
                 }
                 product(self.system.g[index], input_derivative[port])?;
+            }
+            if let Some((chain, direct)) = loss {
+                product(-1.0, chain[row])?;
+                product(-1.0, direct[row])?;
             }
             *value = sum
                 .value()

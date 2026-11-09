@@ -12,7 +12,10 @@ use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
 /// Matrix-free original stationary equations for the shared nonlinear solver.
 pub mod stationary;
 mod dissipation;
-pub use dissipation::NonlinearDissipation;
+pub use dissipation::{
+    DissipationParameterAction, DissipationParameterEvaluation, NonlinearDissipation,
+    PreparedDissipationParameterDirection,
+};
 
 /// A stationary point and its held input in the source's ORIGINAL coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +47,8 @@ pub enum LinearizationError {
     HessianRefused { column: usize },
     /// None denotes the original resisting force; Some denotes its total tangent.
     DissipationRefused { column: Option<usize> },
+    /// The original fixed-state/fixed-effort parameter law refused its image.
+    DissipationParameterRefused { what: &'static str },
     /// The ORIGINAL law supplies energy at this point, not a negative tangent.
     ActiveDissipation { power_w: f64, roundoff_bound_w: f64 },
     Harmonic(HarmonicError),
