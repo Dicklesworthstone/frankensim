@@ -922,6 +922,16 @@ unrelated nuclide; the original width-based truncation allowance is preserved.
 Application returns populations, integrated counts and the uncorrected population
 balance residual without mutating caller data. Plans are reusable across cells.
 
+When every radioactive parent feeds only stable daughters, preparation constructs
+the original-order maps directly from independent scalar survival/loss factors.
+Uniform production uses the same owner's independently evaluated mean-age factors,
+so fresh source material retains its distribution of ages. Duplicate branches
+retain compensated accumulation. This path needs no common scaled interval,
+uniformization terms or matrix squaring, and reports zero series terms and
+squarings. Unrelated fast and slow parents therefore cannot cause a scaled-rate
+hierarchy refusal. Map validation, work limits, cancellation and representability
+checks still apply. Networks with decaying daughters retain the general solver.
+
 Node/edge, series, squaring and scalar-work limits bound preparation, with
 cooperative cancellation. Nonnegative maps, closed population columns, per-node
 transfer balances and acyclic visit-count bounds are numerical admission checks,
@@ -958,8 +968,9 @@ checks the source maps. Existing homogeneous preparation does not allocate or
 compute these optional blocks.
 
 Maps remain bounded by one, with O(nodes squared) retained storage and
-application work; preparation still grows logarithmically with the fastest
-dimensionless rate. The original work, memory-shape and cancellation limits
+application work; general-chain preparation still grows logarithmically with
+the fastest dimensionless rate. Direct-to-stable mixtures use the closed-form
+construction above. The original work, memory-shape and cancellation limits
 apply to the extra operations. Sources supply total produced counts per
 application, independently of preparation. Rate-times-duration conversion and
 physical energy destinations belong to the physical owner.

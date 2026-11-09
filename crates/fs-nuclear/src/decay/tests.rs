@@ -460,11 +460,15 @@ fn g4_energy_product_roundoff_and_propagation_range_refuse_without_publication()
     let report = inventory.advance(1.0, budget(), || Ok(())).unwrap();
     assert!(report.energy_roundoff_j > 0.0);
     close(report.released.deposited_j, 0.7);
-    let rate_one = model(
-        vec![node("parent", 1.0), node("stable", 0.0)],
-        vec![branch(0, 1, 1.0, channels(1.0, 0.0, 0.0))],
+    // General daughter ingrowth still cannot amplify an erased coefficient.
+    let chain = model(
+        vec![node("parent", 1.0), node("daughter", 1.0), node("stable", 0.0)],
+        vec![
+            branch(0, 1, 1.0, channels(1.0, 0.0, 0.0)),
+            branch(1, 2, 1.0, channels(1.0, 0.0, 0.0)),
+        ],
     );
-    let mut huge = DecayInventory::new(rate_one, vec![1e200, 0.0]).unwrap();
+    let mut huge = DecayInventory::new(chain, vec![1e200, 0.0, 0.0]).unwrap();
     let saved = huge.clone();
     assert!(matches!(
         huge.advance(800.0, budget(), || Ok(())),
@@ -473,4 +477,64 @@ fn g4_energy_product_roundoff_and_propagation_range_refuse_without_publication()
         ))
     ));
     assert_eq!(huge, saved);
+
+    // Same-node scalar survival is recoverable and reaches the original
+    // physical counts and energy accounts without bypassing their budgets.
+    let rate_one = model(
+        vec![node("parent", 1.0), node("stable", 0.0)],
+        vec![branch(0, 1, 1.0, channels(1.0, 0.0, 0.0))],
+    );
+    let mut late = DecayInventory::new(rate_one, vec![1e200, 0.0]).unwrap();
+    let report = late.advance(800.0, budget(), || Ok(())).unwrap();
+    close(late.populations()[0], (1e200_f64.ln() - 800.0).exp());
+    close(late.populations()[1], 1e200);
+    close(report.decays[0], 1e200);
+    close_channels(report.released, channels(1e200, 0.0, 0.0));
+}
+
+#[test]
+fn g1_terminal_half_life_maps_preserve_inventory_production_and_energy() {
+    let model = single(Time::new(2.0), channels(2.0, 3.0, 5.0));
+    let mut limits = budget();
+    limits.propagation.maximum_squarings = 0;
+    limits.propagation.maximum_series_terms = 1;
+    let prepared = model.prepare(10.0, limits.propagation, || Ok(())).unwrap();
+    assert_eq!(prepared.propagator().squarings(), 0);
+    assert_eq!(prepared.propagator().series_terms(), 0);
+
+    let initial = DecayInventory::new(Arc::clone(&model), vec![128.0, 0.0]).unwrap();
+    let (cooled, report) = initial
+        .trial_prepared(&prepared, limits, || Ok(()))
+        .unwrap();
+    // Five original half-lives leave four parents and 124 stable daughters.
+    close(cooled.populations()[0], 4.0);
+    close(cooled.populations()[1], 124.0);
+    close(report.decays[0], 124.0);
+    close_channels(report.released, channels(248.0, 372.0, 620.0));
+    close(cooled.activity_bq().unwrap()[0], 2.0 * core::f64::consts::LN_2);
+    assert_eq!(initial.populations(), &[128.0, 0.0]);
+
+    let fed = model
+        .prepare_production(2.0, limits.propagation, || Ok(()))
+        .unwrap();
+    assert_eq!(fed.propagator().homogeneous_plan().squarings(), 0);
+    assert_eq!(fed.propagator().homogeneous_plan().series_terms(), 0);
+    let empty = DecayInventory::new(Arc::clone(&model), vec![0.0, 0.0]).unwrap();
+    let (supplied, report) = empty
+        .trial_production_prepared(&fed, &[10.0, 0.0], limits, || Ok(()))
+        .unwrap();
+    // The source creates twenty nuclei uniformly over one half-life. Fresh
+    // nuclei have not all aged for the complete interval.
+    let surviving = 10.0 / core::f64::consts::LN_2;
+    let decayed = 20.0 - surviving;
+    close(supplied.populations()[0], surviving);
+    close(supplied.populations()[1], decayed);
+    close(report.decay.decays[0], decayed);
+    close_channels(
+        report.decay.released,
+        channels(2.0 * decayed, 3.0 * decayed, 5.0 * decayed),
+    );
+    assert_eq!(report.produced_nuclei, [20.0, 0.0]);
+    assert_eq!(supplied.cumulative_produced_nuclei(), [20.0, 0.0]);
+    assert_eq!(empty.populations(), &[0.0, 0.0]);
 }

@@ -90,7 +90,7 @@ fn distinct_physical_branches_may_share_the_same_daughter() {
 #[test]
 fn tiny_transformations_survive_a_rounded_unchanged_parent() {
     for fast_rate in [1e-20, 1e20] {
-        // The second disconnected chain changes the preparation scale only.
+        // The disconnected parent spans an unrelated physical decay time scale.
         let plan = prepare(&[1e-20, 0.0, fast_rate, 0.0],
             &[edge(0, 1, 1.0), edge(2, 3, 1.0)], 1.0);
         let answer = plan.apply(&[1.0, 0.0, 0.0, 0.0]).unwrap();
@@ -232,7 +232,8 @@ fn incomplete_cyclic_invalid_or_unrepresentable_networks_refuse() {
 
 #[test]
 fn explicit_budgets_and_late_cancellation_refuse_transactionally() {
-    let rates = [1.0, 0.0]; let edges = [edge(0, 1, 1.0)];
+    let rates = [1.0, 2.0, 0.0];
+    let edges = [edge(0, 1, 1.0), edge(1, 2, 1.0)];
     for limits in [
         DecayLimits { maximum_nodes: 1, ..DecayLimits::default() },
         DecayLimits { maximum_squarings: 0, ..DecayLimits::default() },
@@ -249,12 +250,12 @@ fn explicit_budgets_and_late_cancellation_refuse_transactionally() {
         calls += 1; calls == 12
     }), Err(DecayError::Cancelled)));
     let plan = prepare(&rates, &edges, 1.0);
-    let initial = [2.0, 3.0]; let mut calls = 0;
+    let initial = [2.0, 3.0, 0.0]; let mut calls = 0;
     assert_eq!(plan.apply_with_cancel(&initial, || { calls += 1; calls == 3 }),
         Err(DecayError::Cancelled));
-    assert_eq!(initial, [2.0, 3.0]);
-    assert!(plan.apply(&[-1.0, 1.0]).is_err());
-    assert!(plan.apply(&[f64::MAX, f64::MAX]).is_err());
+    assert_eq!(initial, [2.0, 3.0, 0.0]);
+    assert!(plan.apply(&[-1.0, 1.0, 0.0]).is_err());
+    assert!(plan.apply(&[f64::MAX, f64::MAX, 0.0]).is_err());
     let again = prepare(&rates, &edges, 1.0);
     assert_eq!(again.transition_matrix(), plan.transition_matrix());
     assert_eq!(again.integrated_decay_matrix(), plan.integrated_decay_matrix());
@@ -334,4 +335,99 @@ fn recovered_diagonal_tails_compose_and_reach_the_source_owner() {
     relative(answer.populations[0], whole.populations[0], 3e-13);
     relative(answer.populations[1], whole.populations[1], 5e-14);
     relative(answer.decays[0], whole.decays[0], 5e-14);
+}
+
+#[test]
+fn terminal_daughters_keep_independent_clocks_and_uniform_source_ages() {
+    let n = MAX_DECAY_NODES;
+    let mut rates: Vec<_> = (0..n).map(|i| 0.25 + i as f64 / n as f64).collect();
+    rates[0] = 0.0;
+    rates[n - 1] = 0.0;
+    rates[1] = 1e-200;
+    rates[2] = 1e200;
+    let mut edges = Vec::new();
+    for parent in 1..n - 1 {
+        edges.extend([
+            edge(parent, 0, 0.25),
+            edge(parent, n - 1, 0.25),
+            edge(parent, 0, 0.5),
+        ]);
+    }
+    let limits = DecayLimits {
+        maximum_squarings: 0, maximum_series_terms: 1, ..DecayLimits::default()
+    };
+    let source = source::DecaySourcePlan::prepare(&rates, &edges, 1.0, limits, || false).unwrap();
+    let plan = source.homogeneous_plan();
+    assert_eq!((plan.squarings(), plan.series_terms()), (0, 0));
+    let initial = vec![1.0; n];
+    let closed = plan.apply(&initial).unwrap();
+    let fed = source.apply(&vec![0.0; n], &initial).unwrap();
+    let mut closed_loss = 0.0;
+    let mut source_loss = 0.0;
+    for i in 1..n - 1 {
+        let x = rates[i];
+        let loss = -(-x).exp_m1();
+        let retained = -(-x).exp_m1() / x;
+        let lost_source = if x < 1e-100 { 0.5 * x } else { 1.0 - retained };
+        relative(closed.populations[i], (-x).exp(), 5e-14);
+        relative(closed.decays[i], loss, 5e-14);
+        relative(fed.populations[i], retained, 5e-14);
+        relative(fed.decays[i], lost_source, 5e-14);
+        closed_loss += loss;
+        source_loss += lost_source;
+    }
+    for (i, fraction) in [(0, 0.75), (n - 1, 0.25)] {
+        relative(closed.populations[i], 1.0 + fraction * closed_loss, 5e-14);
+        relative(fed.populations[i], 1.0 + fraction * source_loss, 5e-14);
+        assert_eq!((closed.decays[i], fed.decays[i]), (0.0, 0.0));
+    }
+    // These tiny transfers must remain in the maps even though larger parents
+    // feed the same original-order stable daughter.
+    relative(plan.transition_matrix()[1], 7.5e-201, 5e-14);
+    relative(source.source_population_matrix()[1], 3.75e-201, 5e-14);
+}
+
+#[test]
+fn terminal_daughter_maps_agree_with_the_general_network_owner() {
+    let direct = source::DecaySourcePlan::prepare(
+        &[0.0, 0.3, 0.7], &[edge(1, 0, 1.0), edge(2, 0, 1.0)],
+        2.0, DecayLimits::default(), || false,
+    ).unwrap();
+    // An unoccupied additional chain selects the general implementation without
+    // changing the original three nodes' physical trajectory.
+    let general = source::DecaySourcePlan::prepare(
+        &[0.0, 0.3, 0.7, 2.0, 3.0],
+        &[edge(1, 0, 1.0), edge(2, 0, 1.0), edge(3, 4, 1.0), edge(4, 0, 1.0)],
+        2.0, DecayLimits::default(), || false,
+    ).unwrap();
+    assert_eq!(direct.homogeneous_plan().series_terms(), 0);
+    assert!(general.homogeneous_plan().series_terms() > 0);
+    let a = direct.apply(&[4.0, 20.0, 7.0], &[0.0, 9.0, 2.0]).unwrap();
+    let b = general.apply(&[4.0, 20.0, 7.0, 0.0, 0.0], &[0.0, 9.0, 2.0, 0.0, 0.0]).unwrap();
+    for i in 0..3 {
+        relative(a.populations[i], b.populations[i], 3e-13);
+        relative(a.decays[i], b.decays[i], 3e-13);
+    }
+}
+
+#[test]
+fn terminal_daughter_preparation_retains_work_and_cancellation_limits() {
+    let rates = [0.0, 1e-200, 1e200];
+    let edges = [edge(1, 0, 1.0), edge(2, 0, 1.0)];
+    let limits = DecayLimits {
+        maximum_squarings: 0, maximum_series_terms: 1, ..DecayLimits::default()
+    };
+    let mut calls = 0;
+    let plan = DecayPlan::prepare(&rates, &edges, 1.0, limits, || {
+        calls += 1; false
+    }).unwrap();
+    let tight = DecayLimits { maximum_work: plan.preparation_work() - 1, ..limits };
+    assert!(matches!(DecayPlan::prepare(&rates, &edges, 1.0, tight, || false),
+        Err(DecayError::Budget { .. })));
+    for cancel_at in [2, calls / 2, calls] {
+        let mut current = 0;
+        assert!(matches!(DecayPlan::prepare(&rates, &edges, 1.0, limits, || {
+            current += 1; current == cancel_at
+        }), Err(DecayError::Cancelled)));
+    }
 }

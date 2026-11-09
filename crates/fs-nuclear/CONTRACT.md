@@ -500,7 +500,11 @@ Numerical propagation remains owned by `fs_la::decay::DecayPlan`: bounded
 nonnegative uniformization, exact survival/loss diagonals at every composition
 scale, equal-rate support, arbitrary original node order, work limits and
 cooperative cancellation. `DecayModel::prepare` retains both endpoint and
-integrated-count maps. Reusing a `PreparedDecay` avoids repeated matrix
+integrated-count maps. Direct branches into stable daughters use that owner's
+closed-form maps, including uniform-production age factors, with no series or
+matrix squaring. Genuine radioactive daughter chains keep the general positive
+propagator. Both paths retain the same population and energy accounts.
+Reusing a `PreparedDecay` avoids repeated matrix
 preparation; application costs O(nodes squared + branches). The same immutable
 model Arc and numerical limits must be retained. Source-bound maps cannot be
 silently applied to inventories carrying different half-lives or branch energies.

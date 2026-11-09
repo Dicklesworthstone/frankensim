@@ -12,7 +12,9 @@
 //! created during the interval. Counts are never recovered by subtracting two
 //! nearly equal inventories. P and C use the caller's original node order.
 //!
-//! Uniformization at max(lambda)*h <= 1/2 uses only nonnegative terms, followed
+//! Parents feeding only stable daughters use closed-form survival/loss maps,
+//! including exact mean-age source factors, with no common rate scaling.
+//! General chains use nonnegative uniformization at max(lambda)*h <= 1/2 followed
 //! by triangular semigroup composition P(2h)=P(h)P(h) and
 //! C(2h)=C(h)+C(h)P(h). Exact scalar exp/expm1 diagonals are reinserted at
 //! EVERY scale: a slow parent's tiny loss must not disappear because another
@@ -285,6 +287,17 @@ impl DecayPlan {
                 return Err(DecayError::Invalid("all decaying-parent branch fractions must sum to one"));
             }
         }
+        // Once every daughter is stable, each parent is an independent scalar
+        // decay law. No global fastest rate, time subdivision or series is
+        // needed, including for disconnected parents with extreme time scales.
+        if duration_s > 0.0
+            && !edges.is_empty()
+            && edges.iter().all(|edge| rates_per_s[edge.daughter] == 0.0)
+        {
+            return Self::prepare_terminal_daughters(
+                rates_per_s, edges, duration_s, limits, with_source, work, &mut cancelled,
+            );
+        }
         let mut order = Vec::with_capacity(n);
         let mut selected = vec![false; n];
         for _ in 0..n {
@@ -486,6 +499,114 @@ impl DecayPlan {
         Ok((Self { nodes: n, duration_s, transition: pnext, integrated: cnext, squarings,
             series_terms, work, tolerance: limits.relative_tolerance,
             tails: original_tails, rates: rates_per_s.to_vec() }, source_maps))
+    }
+
+    // Inputs and branch closure have already passed prepare_impl admission.
+    // Stable daughters cannot transform again, so only diagonal parent counts
+    // and one-step population transfers are nonzero.
+    fn prepare_terminal_daughters(
+        rates: &[f64],
+        edges: &[DecayEdge],
+        duration_s: f64,
+        limits: DecayLimits,
+        with_source: bool,
+        mut work: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, Option<source::SourceMaps>), DecayError> {
+        let n = rates.len();
+        // Charge initialization and all bounded temporary/map allocations before
+        // constructing them. Matrix admission retains its original work charges.
+        charge(
+            &mut work,
+            (8 + 6 * usize::from(with_source)) * n * n + n + edges.len(),
+            limits.maximum_work,
+        )?;
+        let mut transition = vec![0.0; n * n];
+        let mut integrated = vec![0.0; n * n];
+        let mut tails = vec![TailBound::NONE; n * n];
+        let mut incoming = vec![Vec::new(); n];
+        let mut transfers = vec![Sum::default(); n * n];
+        let mut source_transfers = with_source.then(|| vec![Sum::default(); n * n]);
+        let mut source_maps = with_source.then(|| source::SourceMaps::identity(n));
+
+        for (i, &rate) in rates.iter().enumerate() {
+            poll(cancelled)?;
+            charge(&mut work, 16 + 16 * usize::from(with_source), limits.maximum_work)?;
+            let at = i * n + i;
+            (transition[at], integrated[at]) = diagonal(rate, duration_s);
+            tails[at] = TailBound {
+                reachable: true,
+                minimum_rate: rate,
+                maximum_steps: 0,
+            };
+            if let Some(maps) = &mut source_maps {
+                (maps.population[at], maps.decays[at]) =
+                    source::source_diagonal(rate, duration_s);
+            }
+        }
+        for edge in edges {
+            poll(cancelled)?;
+            charge(&mut work, 24 + 16 * usize::from(with_source), limits.maximum_work)?;
+            let parent = edge.parent;
+            let at = edge.daughter * n + parent;
+            let loss = integrated[parent * n + parent];
+            if loss * edge.branch_fraction == 0.0 {
+                return Err(DecayError::Unrepresentable(
+                    "positive direct branch at the interval",
+                ));
+            }
+            transfers[at].product(edge.branch_fraction, loss);
+            if let Some((totals, maps)) = source_transfers.as_mut().zip(source_maps.as_ref()) {
+                // Mean-age loss is evaluated independently of source survival;
+                // subtracting a rounded phi from one would erase tiny counts.
+                totals[at].product(edge.branch_fraction, maps.decays[parent * n + parent]);
+            }
+            incoming[edge.daughter].push(Incoming {
+                parent,
+                fraction: edge.branch_fraction,
+                probability: edge.branch_fraction,
+            });
+            tails[at] = TailBound {
+                reachable: true,
+                minimum_rate: 0.0,
+                maximum_steps: 1,
+            };
+        }
+        for i in 0..n {
+            poll(cancelled)?;
+            charge(&mut work, (2 + 2 * usize::from(with_source)) * n, limits.maximum_work)?;
+            for j in 0..n {
+                if i == j { continue; }
+                let at = i * n + j;
+                transition[at] = transfers[at].total();
+                if let Some((maps, totals)) = source_maps.as_mut().zip(source_transfers.as_ref()) {
+                    maps.population[at] = totals[at].total();
+                }
+            }
+        }
+        validate_maps(
+            &transition, &integrated, &incoming, n, limits.relative_tolerance,
+            &mut work, limits.maximum_work, cancelled,
+        )?;
+        if let Some(maps) = &source_maps {
+            validate_maps(
+                &maps.population, &maps.decays, &incoming, n, limits.relative_tolerance,
+                &mut work, limits.maximum_work, cancelled,
+            )?;
+        }
+        poll(cancelled)?;
+        Ok((Self {
+            nodes: n,
+            duration_s,
+            transition,
+            integrated,
+            squarings: 0,
+            series_terms: 0,
+            work,
+            tolerance: limits.relative_tolerance,
+            tails,
+            rates: rates.to_vec(),
+        }, source_maps))
     }
 
     #[must_use] pub const fn node_count(&self) -> usize { self.nodes }

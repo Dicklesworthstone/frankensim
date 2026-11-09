@@ -7,8 +7,9 @@
 //!
 //! These normalized maps have coefficients in [0,1] for the admitted DAG.
 //! They avoid storing time-dimensional maps or forming an inverse tiny rate.
-//! The original nonnegative uniformization also integrates the source blocks;
-//! no quadrature, invented source half-life or instantaneous injection is used.
+//! General chains integrate source blocks with the original nonnegative
+//! uniformization; direct stable daughters use closed-form mean-age factors.
+//! No quadrature, invented source half-life or instantaneous injection is used.
 //! Work, topology, cancellation and numerical admission share the original
 //! owner. Zero/subnormal coefficients cannot be amplified by large injections;
 //! unlike exhausted initial inventories, a continuing feed has no vanished-tail
@@ -320,7 +321,7 @@ impl SourceMaps {
 
 // phi=(1-exp(-x))/x and its independently evaluated complement. Reinsert
 // these at every scale, including when a much faster unrelated node sets h.
-fn source_diagonal(rate: f64, time: f64) -> (f64, f64) {
+pub(super) fn source_diagonal(rate: f64, time: f64) -> (f64, f64) {
     if rate == 0.0 || time == 0.0 {
         return (1.0, 0.0);
     }
