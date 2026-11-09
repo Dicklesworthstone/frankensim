@@ -1,5 +1,6 @@
 //! Endpoint shear rheology on original material inertia and caloric history.
 
+use super::super::super::resistance::{admit_mobile_phase, source_mobile_viscosity};
 use super::*;
 use crate::conjugate::FvSgsConfig;
 use crate::conjugate::flow::material_momentum::PreparedMaterialRheology;
@@ -199,6 +200,7 @@ impl FlowField {
             let source = resolve_endpoint_rheology_sources(
                 domain,
                 curve,
+                None,
                 |cell| {
                     input.volume.phase_states[cell]
                         .ok_or_else(|| refuse("endpoint rheology needs an original fluid phase"))
@@ -314,6 +316,7 @@ pub(in crate::conjugate::flow) fn admit_endpoint_rheology_phase(
 pub(in crate::conjugate::flow) fn resolve_endpoint_rheology_sources(
     domain: &VoxelDomain,
     curve: &EquilibriumEnthalpyPhaseCurve,
+    mobile_law: Option<&fs_material::phase::mushy::MushyPhaseLaw<'_>>,
     phase_at: impl Fn(usize) -> Result<EquilibriumPhaseState, ChtError>,
     rates: &[f64],
     resolve: &mut impl FnMut(
@@ -341,7 +344,13 @@ pub(in crate::conjugate::flow) fn resolve_endpoint_rheology_sources(
             continue;
         }
         let phase = phase_at(cell)?;
-        admit_endpoint_rheology_phase(curve, phase)?;
+        let mobile = match mobile_law {
+            Some(law) => Some(admit_mobile_phase(law, &phase)?),
+            None => {
+                admit_endpoint_rheology_phase(curve, phase)?;
+                None
+            }
+        };
         let rate = rates[cell];
         if !rate.is_finite() || rate < 0.0 {
             return Err(refuse("invalid native endpoint shear rate"));
@@ -362,7 +371,9 @@ pub(in crate::conjugate::flow) fn resolve_endpoint_rheology_sources(
                 "rheology source must match the exact endpoint phase and density",
             ));
         }
-        if source.mobility().mobile().is_none_or(|state| {
+        if let Some(mobile) = mobile {
+            source_mobile_viscosity(mobile, &source)?;
+        } else if source.mobility().mobile().is_none_or(|state| {
             state.inverse_permeability_per_m2 != 0.0 || state.volumes.liquid != 1.0
         }) {
             return Err(refuse(

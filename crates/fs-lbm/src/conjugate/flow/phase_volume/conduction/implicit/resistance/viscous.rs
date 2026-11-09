@@ -1,7 +1,7 @@
 //! Implicit spatial heat with both original physical dissipation owners.
 
 mod feedback;
-pub use feedback::ImplicitThermoviscousResistiveThermalVolumeMomentumStep;
+pub use feedback::{ImplicitThermorheologicalResistiveThermalVolumeMomentumStep, ImplicitThermoviscousResistiveThermalVolumeMomentumStep};
 
 use super::*;
 use crate::conjugate::{

@@ -675,7 +675,7 @@ pub(in super::super) fn feedback_phase_at(
     }
 }
 
-fn remaining_molecular_controls(
+pub(in super::super) fn remaining_molecular_controls(
     mut controls: MaterialViscosityControls,
     work: &ThermalViscosityFeedbackReport,
 ) -> Result<MaterialViscosityControls, ChtError> {
@@ -688,7 +688,7 @@ fn remaining_molecular_controls(
     Ok(controls)
 }
 
-fn add_molecular_work(
+pub(in super::super) fn add_molecular_work(
     work: &mut ThermalViscosityFeedbackReport,
     viscous: &PreparedMaterialViscosity,
 ) -> Result<(), ChtError> {
@@ -827,7 +827,7 @@ fn physical_heat_mismatch(
     Ok((signed, absolute))
 }
 
-fn add_work(count: &mut usize, added: usize) -> Result<(), ChtError> {
+pub(in super::super) fn add_work(count: &mut usize, added: usize) -> Result<(), ChtError> {
     *count = count
         .checked_add(added)
         .ok_or_else(|| refuse("thermal viscosity work count overflow"))?;

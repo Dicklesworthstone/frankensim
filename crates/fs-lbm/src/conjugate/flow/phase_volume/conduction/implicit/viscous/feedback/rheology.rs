@@ -330,6 +330,7 @@ impl FlowField {
                     let sources = resolve_endpoint_rheology_sources(
                         domain,
                         curve,
+                        None,
                         |cell| {
                             phases[cell].ok_or_else(|| {
                                 refuse("endpoint rheology needs a native fluid phase")

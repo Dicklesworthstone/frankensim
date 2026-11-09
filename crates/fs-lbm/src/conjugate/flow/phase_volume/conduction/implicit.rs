@@ -45,6 +45,7 @@ pub use resistance::{
     ImplicitConductiveResistiveThermalVolumeMomentumStep,
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
     ImplicitConjugateViscousResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+    ImplicitThermorheologicalResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
 };
 

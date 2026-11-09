@@ -2752,6 +2752,64 @@ with the same factored preparation. Focused execution uses original physical
 kernels; full workspace Cargo/execution-context integration remains a separate
 verification gate.
 
+## Joint thermal and endpoint-rate response in evolving mushy flow
+
+`FlowField::advance_isotropic_implicit_conjugate_thermorheological_phase_resistance_thermal_volume_momentum_with_baths`
+returns `ImplicitThermorheologicalResistiveThermalVolumeMomentumStep`. It extends
+the native mobile-mushy thermal/Darcy composition with a true nonlinear molecular
+endpoint solve at each exact native caloric state. The molecular resolver receives
+the supplied phase and physical RMS `sqrt(2 dev(D):dev(D))` in 1/s, and returns
+original source evidence plus independent bulk response. The existing coupled
+momentum rows refresh those coefficients after every sweep; acceptance checks the
+true nonlinear row residual and physical stress heat at the accepted endpoint,
+not a small coefficient change. That physical heat closes the same original
+implicit fluid/finite-solid thermal interval.
+
+Original mass, momentum and M/V face inertia stay fixed across every nested
+trial. Temperature- or phase-dependent source density belongs to the source
+viscosity conversion and exact phase evidence; it never replaces original mass.
+Exact phase, chart/material identity, source density and mobile law/transport
+admission are shared with the existing native owner. Source admission is now
+separate from forming a Darcy coefficient: a molecular law is not rejected
+because its UNUSED `mu * inverse_permeability` would overflow. Real Darcy
+consumers and the existing shared-source thermal-only entry retain that product
+and its original representability gate.
+
+The new API requires a separate `resolve_resistance(cell, transported_phase)`
+callback for the explicitly supplied pore-scale Darcy response. A macroscopic
+molecular shear rate does not determine pore shear. The implementation never
+fabricates a zero or frozen molecular rate for Darcy and never substitutes one
+source family for the other. Both source families retain the same material chart,
+current density and phase-support evidence; their accepted receipts remain
+distinct. Molecular temperature/rate response closes before Darcy, pressure and
+transport, while Darcy constitutive response closes at transported phase. This
+remains the declared first-order mechanical split requiring refinement.
+
+The generic native coupled owner carries the accepted rheological rate receipt
+through its exact heat and Darcy trial without re-query. Whole-call source-field
+updates, per-cell molecular plus Darcy queries, molecular sweeps, heat trials,
+residual evaluations and Krylov work include discarded nested attempts. Physical
+molecular and Darcy heat enter once; assembly, heat mismatch, implicit thermal,
+transport and constitutive defects retain the original non-cancelling shared
+caloric/work gates. Boundary work and numerical losses remain distinct. No new
+SGS, moving skeleton, free-surface, exact-solid momentum or unsplit flow claim is
+introduced. Existing liquid-only and thermal-only entries retain their scopes.
+
+G1/G3 tests use a manufactured NONisothermal, density-changing mobile mixture,
+a genuine molecular temperature/rate source surface and an independently
+authored pore response. They check exact accepted source/rate agreement, true
+native momentum residual, original-M nonlinear mechanics against a separate
+native reference and a deliberately wrong hot-density inertia, physical heat,
+finite-wall storage, compatible volume source and conservative fluid/advection
+mass/enthalpy balance. A source-admission discriminator keeps a finite molecular
+response despite an overflowing unused drag product, admits the independent
+Darcy law, and verifies that real Darcy and legacy thermal-only product guards
+still refuse. G4 checks late molecular and Darcy source refusal, cancellation
+after actual heat work, whole-call work exhaustion and exact retry from unchanged
+histories. Native focused execution also retains the existing liquid thermal/rate
+and thermal-only mushy regressions; full workspace Cargo/execution-context
+integration remains a separate verification gate.
+
 ## Actual-material-density SGS momentum and separated energy transfer
 
 `FlowField::advance_material_momentum_with_viscosity_and_sgs` composes the

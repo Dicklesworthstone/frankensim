@@ -14,6 +14,7 @@ use fs_material::phase::transport::ResolvedPhaseTransportState;
 mod viscous;
 pub use viscous::{
     ImplicitConjugateViscousResistiveThermalVolumeMomentumStep,
+    ImplicitThermorheologicalResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
 };
 

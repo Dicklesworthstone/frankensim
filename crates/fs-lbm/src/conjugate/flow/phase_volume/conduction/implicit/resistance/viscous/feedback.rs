@@ -1,5 +1,8 @@
 //! Thermal molecular response inside the original mushy/Darcy heat timeline.
 
+mod rheology;
+pub use rheology::ImplicitThermorheologicalResistiveThermalVolumeMomentumStep;
+
 use super::*;
 use std::cell::RefCell;
 
@@ -74,6 +77,113 @@ impl FlowField {
             &EquilibriumPhaseState,
         ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
     ) -> Result<ImplicitThermoviscousResistiveThermalVolumeMomentumStep, ChtError> {
+        // The thermal-only entry retains one sequential source resolver for
+        // both molecular stress and its declared phase-resistance response.
+        let resolver = RefCell::new(resolve);
+        self.advance_implicit_resistive_thermal_feedback(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            law,
+            input,
+            boundaries,
+            controls,
+            viscosity_controls,
+            solve,
+            feedback,
+            workspace,
+            gate,
+            |cell, phase| (resolver.borrow_mut())(cell, phase).map(|(source, _)| source),
+            |faces,
+             mouth,
+             heat,
+             previous: Option<PreparedThermalFeedback<(ThermalViscositySources, ())>>,
+             work| {
+                let sources = resolve_thermal_sources(
+                    domain,
+                    law.curve(),
+                    Some(law),
+                    |cell| feedback_phase_at(law.curve(), input, heat, cell),
+                    &mut *resolver.borrow_mut(),
+                    work,
+                    gate,
+                )?;
+                let viscosity = match previous {
+                    Some(previous)
+                        if previous.sources.0.shear_pa_s == sources.shear_pa_s
+                            && previous.sources.0.bulk_pa_s == sources.bulk_pa_s =>
+                    {
+                        previous.viscosity
+                    }
+                    _ => self.prepare_thermoviscous_momentum(
+                        domain,
+                        faces,
+                        mouth,
+                        input,
+                        boundaries,
+                        ConductiveThermalVolumeMomentumControls {
+                            evolution: controls.resistance.thermal,
+                            max_conductive_faces: controls.max_conductive_faces,
+                        },
+                        viscosity_controls,
+                        &sources,
+                        work,
+                        gate,
+                    )?,
+                };
+                Ok(PreparedThermalFeedback {
+                    viscosity,
+                    sources: (sources, ()),
+                })
+            },
+        )
+        .map(|(evolution, ())| evolution)
+    }
+
+    /// Shared original-history molecular/heat/Darcy owner. A native molecular
+    /// preparation returns exact sources plus an opaque accepted receipt; only
+    /// the receipt belonging to the accepted thermal and Darcy trial escapes.
+    /// The independent resistance callback retains its transported-phase owner.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn advance_implicit_resistive_thermal_feedback<S>(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        law: &MushyPhaseLaw<'_>,
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        controls: ConductiveResistiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        mut resolve_resistance: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+        ) -> Result<ResolvedPhaseTransportState, ChtError>,
+        mut prepare_molecular: impl FnMut(
+            [FlowFace; 6],
+            Option<usize>,
+            Option<&PreparedImplicitHeat>,
+            Option<PreparedThermalFeedback<(ThermalViscositySources, S)>>,
+            &mut ThermalViscosityFeedbackReport,
+        ) -> Result<
+            PreparedThermalFeedback<(ThermalViscositySources, S)>,
+            ChtError,
+        >,
+    ) -> Result<(ImplicitThermoviscousResistiveThermalVolumeMomentumStep, S), ChtError> {
         let heat_budget =
             admit_viscous_thermal_input(domain, input, controls.resistance.thermal, gate)?;
         if conductivity.caloric_curve().identity() != law.curve().identity()
@@ -101,9 +211,6 @@ impl FlowField {
             max_conductive_faces: controls.max_conductive_faces,
         };
         let mut work = ThermalViscosityFeedbackReport::default();
-        // Both callbacks are invoked sequentially by the existing native owner.
-        // Retain one source resolver rather than cloning mutable material state.
-        let resolver = RefCell::new(resolve);
         let mut darcy_source_evaluations = 0_usize;
         let (evolution, receipt) = self
             .advance_resolved_phase_resistance_thermal_volume_with_heat(
@@ -118,7 +225,7 @@ impl FlowField {
                     darcy_source_evaluations = darcy_source_evaluations
                         .checked_add(1)
                         .ok_or_else(|| refuse("thermal viscosity source work overflow"))?;
-                    (resolver.borrow_mut())(cell, phase).map(|(source, _)| source)
+                    resolve_resistance(cell, phase)
                 },
                 |heat| {
                     let trial_input = ThermalVolumeMomentumInput {
@@ -144,42 +251,7 @@ impl FlowField {
                         workspace,
                         gate,
                         &mut work,
-                        |faces,
-                         mouth,
-                         heat,
-                         previous: Option<PreparedThermalFeedback<ThermalViscositySources>>,
-                         work| {
-                            let sources = resolve_thermal_sources(
-                                domain,
-                                law.curve(),
-                                Some(law),
-                                |cell| feedback_phase_at(law.curve(), trial_input, heat, cell),
-                                &mut *resolver.borrow_mut(),
-                                work,
-                                gate,
-                            )?;
-                            let viscosity = match previous {
-                                Some(previous)
-                                    if previous.sources.shear_pa_s == sources.shear_pa_s
-                                        && previous.sources.bulk_pa_s == sources.bulk_pa_s =>
-                                {
-                                    previous.viscosity
-                                }
-                                _ => self.prepare_thermoviscous_momentum(
-                                    domain,
-                                    faces,
-                                    mouth,
-                                    input,
-                                    boundaries,
-                                    thermal_controls,
-                                    viscosity_controls,
-                                    &sources,
-                                    work,
-                                    gate,
-                                )?,
-                            };
-                            Ok(PreparedThermalFeedback { viscosity, sources })
-                        },
+                        &mut prepare_molecular,
                     )?;
                     let molecular_heat_defect =
                         prepared.assembly + Dd::from_f64(prepared.coupling_defect_j);
@@ -217,9 +289,10 @@ impl FlowField {
         let transformed_defect = (Dd::from_f64(coupling_defect)
             + Dd::from_f64(report.conduction.absolute_enthalpy_defect_j))
         .to_f64();
+        let (sources, native_receipt) = mechanical.sources;
         let evolution = Self::finish_viscous_phase_resistance_thermal_volume(
             evolution,
-            mechanical.sources.original,
+            sources.original,
             mechanical.viscosity,
             assembly,
             transformed_defect,
@@ -257,17 +330,20 @@ impl FlowField {
             residual_evaluations: work.heat_residual_evaluations,
         };
         poll(gate)?;
-        Ok(ImplicitThermoviscousResistiveThermalVolumeMomentumStep {
-            evolution: ImplicitConjugateViscousResistiveThermalVolumeMomentumStep {
-                evolution,
-                conductive_enthalpy_increment_j: increments,
-                solid_endpoints,
-                report,
-                work: heat_work,
+        Ok((
+            ImplicitThermoviscousResistiveThermalVolumeMomentumStep {
+                evolution: ImplicitConjugateViscousResistiveThermalVolumeMomentumStep {
+                    evolution,
+                    conductive_enthalpy_increment_j: increments,
+                    solid_endpoints,
+                    report,
+                    work: heat_work,
+                },
+                bulk_viscosity_pa_s: sources.bulk_pa_s,
+                used_molecular_heat_j,
+                feedback: work,
             },
-            bulk_viscosity_pa_s: mechanical.sources.bulk_pa_s,
-            used_molecular_heat_j,
-            feedback: work,
-        })
+            native_receipt,
+        ))
     }
 }

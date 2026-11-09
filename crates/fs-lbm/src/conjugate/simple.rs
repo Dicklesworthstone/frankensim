@@ -1766,7 +1766,7 @@ impl<'a> Solver<'a> {
     /// first). A passing mismatch leaves the delivery unchanged.
     fn update_fan(&mut self, mass: f64, momentum: f64) {
         let tolerance = self.config.tolerance;
-        let Some(fan) = self.fan.as_mut() else {
+        let Some(fan) = self.fan.as_ref() else {
             return;
         };
         let gate = tolerance.max(1e-3 * fan.residual.min(1.0));
@@ -1791,6 +1791,9 @@ impl<'a> Solver<'a> {
             .abs()
             .max(mean.abs())
             .max(f64::MIN_POSITIVE);
+        let Some(fan) = self.fan.as_mut() else {
+            return;
+        };
         fan.residual = mismatch.abs() / scale;
         if fan.residual <= tolerance {
             return;

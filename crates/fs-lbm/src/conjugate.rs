@@ -130,6 +130,7 @@ pub use flow::{
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
     ImplicitThermorheologicalThermalVolumeMomentumStep,
+    ImplicitThermorheologicalResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
     ThermalViscosityFeedbackReport,

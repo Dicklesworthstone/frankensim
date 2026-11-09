@@ -25,6 +25,7 @@ pub use implicit::{
     ImplicitConjugateViscousThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
     ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
     ImplicitThermalVolumeWorkspace, ImplicitThermorheologicalThermalVolumeMomentumStep,
+    ImplicitThermorheologicalResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousResistiveThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
     ThermalViscosityFeedbackReport, ThermalVolumeBathExchange, ThermalVolumeBoundaries,

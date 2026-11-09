@@ -1,5 +1,7 @@
 //! Source-density changes affect viscosity without replacing original inertia.
 
+mod rheology;
+
 use super::*;
 
 #[test]

@@ -270,6 +270,27 @@ pub(in crate::conjugate::flow) fn source_resistance(
     mobile: MushyPhaseState,
     source: &ResolvedPhaseTransportState,
 ) -> Result<f64, ChtError> {
+    let viscosity = source_mobile_viscosity(mobile, source)?;
+    let inverse = mobile.inverse_permeability_per_m2;
+    let beta = if inverse == 0.0 {
+        0.0
+    } else {
+        viscosity * inverse
+    };
+    finite("flow.thermal_phase_resistance_beta", beta)?;
+    if inverse != 0.0 && beta <= 0.0 {
+        return Err(refuse("nonzero phase resistance is not representable"));
+    }
+    Ok(beta)
+}
+
+/// Admit exact phase, law, current source density and mobile transport without
+/// assigning a pore-scale drag law. Molecular and Darcy responses may be
+/// independently specified; only a Darcy consumer must form mu/K.
+pub(in crate::conjugate::flow) fn source_mobile_viscosity(
+    mobile: MushyPhaseState,
+    source: &ResolvedPhaseTransportState,
+) -> Result<f64, ChtError> {
     let phase = &mobile.phase;
     if *source.mobility() != PhaseMobility::Mobile(mobile)
         || *source.phase_state() != *phase
@@ -289,17 +310,7 @@ pub(in crate::conjugate::flow) fn source_resistance(
     }
     let viscosity = transport.dynamic_viscosity_pa_s();
     finite_positive("flow.thermal_resistance_dynamic_viscosity", viscosity)?;
-    let inverse = mobile.inverse_permeability_per_m2;
-    let beta = if inverse == 0.0 {
-        0.0
-    } else {
-        viscosity * inverse
-    };
-    finite("flow.thermal_phase_resistance_beta", beta)?;
-    if inverse != 0.0 && beta <= 0.0 {
-        return Err(refuse("nonzero phase resistance is not representable"));
-    }
-    Ok(beta)
+    Ok(viscosity)
 }
 
 #[cfg(test)]
