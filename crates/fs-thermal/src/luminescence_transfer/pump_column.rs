@@ -465,10 +465,12 @@ impl<const B: usize> SaturablePumpColumn<B> {
     }
 }
 
+#[path = "pump_column/cell.rs"]
+pub(super) mod cell;
+
 struct Trial<const B: usize> {
     step: PumpColumnCellStep<B>,
     transmitted_rates: [f64; B],
-    mean_ground: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,255 +484,51 @@ fn solve_cell<const B: usize>(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Trial<B>, SingletTripletError> {
-    let mut total = Sum::default();
-    for value in populations {
-        total.add(value)?;
-    }
-    let total = total.value()?;
-    let active = duration > 0.0
-        && total > 0.0
-        && (0..B).any(|lane| {
-            incoming[lane] > 0.0 && cell.optical_depth_per_ground[lane].iter().any(|&x| x > 0.0)
-        });
-    if !active {
-        return evaluate(
-            cell,
-            populations,
-            incoming,
-            photon_energies,
-            duration,
-            populations[0],
-            limits,
-            evaluations,
-            cancelled,
-        );
-    }
-    let mut low = 0.0;
-    let mut high = total;
-    let mut f_low = 0.0;
-    let mut f_high = 0.0;
-    for iteration in 0..limits.maximum_root_iterations {
-        poll(cancelled)?;
-        let guess = if iteration == 0 {
-            low
-        } else if iteration == 1 {
-            high
-        } else if iteration % 4 == 0 {
-            low + 0.5 * (high - low)
-        } else {
-            let scale = f64::max(f_low, -f_high);
-            let weight = (f_low / scale) / (f_low / scale - f_high / scale);
-            let candidate = low + weight * (high - low);
-            if candidate > low && candidate < high {
-                candidate
-            } else {
-                low + 0.5 * (high - low)
-            }
-        };
-        let trial = evaluate(
-            cell,
-            populations,
-            incoming,
-            photon_energies,
-            duration,
-            guess,
-            limits,
-            evaluations,
-            cancelled,
-        )?;
-        let residual = finite(trial.mean_ground - guess, "mean ground residual")?;
-        let close = residual.abs()
-            <= 0.0625 * limits.kinetic.relative_tolerance * trial.mean_ground.max(guess);
-        let photons_close = admit_photons(
-            trial.step.incident_photons,
-            trial.step.transmitted_photons,
-            trial.step.absorbed_photons,
-            trial.step.passive_absorbed_photons,
-            trial.step.photon_residual,
-            0.25 * limits.kinetic.relative_tolerance,
-        )
-        .is_ok();
-        if close && photons_close {
-            return Ok(trial);
-        }
-        if residual > 0.0 {
-            low = guess;
-            f_low = residual;
-        } else {
-            high = guess;
-            f_high = residual;
-        }
-    }
-    cap(
-        "pump column ground-residence iterations",
-        limits.maximum_root_iterations.saturating_add(1),
-        limits.maximum_root_iterations,
+    let channels: [_; B] = std::array::from_fn(|lane| cell::Channel {
+        incident_rate: incoming[lane],
+        energy: photon_energies[lane],
+        depth: cell.optical_depth_per_ground[lane],
+        passive_depth: cell.passive_optical_depth[lane],
+    });
+    let trial = cell::solve(
+        cell.model, populations, &channels, duration, limits, evaluations, cancelled,
     )?;
-    unreachable!("exceeded root iteration cap")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn evaluate<const B: usize>(
-    cell: &SaturablePumpCell<B>,
-    populations: [f64; 3],
-    incoming: [f64; B],
-    photon_energies: [f64; B],
-    duration: f64,
-    mean_ground: f64,
-    limits: PumpColumnLimits,
-    evaluations: &mut usize,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Trial<B>, SingletTripletError> {
-    *evaluations = evaluations
-        .checked_add(1)
-        .ok_or(SingletTripletError::Unrepresentable(
-            "pump column evaluation counter",
-        ))?;
-    cap(
-        "pump column cell evaluations",
-        *evaluations,
-        limits.maximum_cell_evaluations,
-    )?;
-    poll(cancelled)?;
-    let mut hazards = [[0.0; 2]; B];
-    let mut rates = [Sum::default(); 2];
-    let mut incident = [0.0; B];
-    let mut outgoing = [0.0; B];
-    let mut transmitted_rates = [0.0; B];
-    let mut passive = [0.0; B];
-    for lane in 0..B {
-        let depth = finite(
-            mean_ground * cell.optical_depth_per_ground[lane].iter().sum::<f64>()
-                + cell.passive_optical_depth[lane],
-            "pump optical depth",
-        )?;
-        let mean_transmission = if depth == 0.0 {
-            1.0
-        } else {
-            decayed_fraction(depth) / depth
-        };
-        incident[lane] = positive_product(incoming[lane], duration, "incident photons")?;
-        transmitted_rates[lane] = attenuate(incoming[lane], depth);
-        outgoing[lane] = attenuate(incident[lane], depth);
-        if transmitted_rates[lane] == 0.0 && outgoing[lane] > 0.0 {
-            return Err(SingletTripletError::Unrepresentable(
-                "transmitted photon rate",
-            ));
-        }
-        passive[lane] = product3(
-            incident[lane],
-            cell.passive_optical_depth[lane],
-            mean_transmission,
-        )?;
-        for target in 0..2 {
-            hazards[lane][target] = product3(
-                incoming[lane],
-                cell.optical_depth_per_ground[lane][target],
-                mean_transmission,
-            )?;
-            rates[target].add(hazards[lane][target])?;
-        }
-    }
-    let rates = values(rates)?;
-    // State-energy injection is an internal kinetic coordinate. Reconstruct
-    // BOTH original pump energy and excess heat from each spectral event below;
-    // averaging photon energies first can erase a weak positive heat branch.
-    let plan = SaturableSingletTripletPlan::prepare_with_population_integrals(
-        cell.model,
-        rates,
-        cell.model.excitation_energies_j(),
-        duration,
-        limits.kinetic,
-        &mut *cancelled,
-    )?;
-    let mut kinetics = plan.advance_with_cancel(populations, &mut *cancelled)?;
-    let residence = plan.integrate_populations_with_cancel(populations, &mut *cancelled)?;
-    let mean_ground = if duration == 0.0 {
-        populations[0]
-    } else {
-        finite(residence[0] / duration, "mean ground population")?
-    };
-    let mut absorbed = [0.0; B];
-    let mut pump_energy = [Sum::default(); 2];
-    let mut pump_heat = [Sum::default(); 2];
-    for lane in 0..B {
-        let mut events = Sum::default();
-        for target in 0..2 {
-            if rates[target] > 0.0 {
-                let weight = hazards[lane][target] / rates[target];
-                if hazards[lane][target] > 0.0 && weight == 0.0 {
-                    return Err(SingletTripletError::Unrepresentable(
-                        "spectral pump branching",
-                    ));
-                }
-                let count =
-                    positive_product(kinetics.pump_events[target], weight, "spectral pump events")?;
-                events.add(count)?;
-                pump_energy[target].add(positive_product(
-                    count,
-                    photon_energies[lane],
-                    "spectral pump energy",
-                )?)?;
-                let excess = if hazards[lane][target] > 0.0 {
-                    photon_energies[lane] - cell.model.excitation_energies_j()[target]
-                } else {
-                    0.0
-                };
-                pump_heat[target].add(positive_product(
-                    count,
-                    excess,
-                    "spectral pump excess heat",
-                )?)?;
-            }
-        }
-        absorbed[lane] = events.value()?;
-    }
-    kinetics.absorbed_pump_energy_j = values(pump_energy)?;
-    kinetics.pump_relaxation_heat_j = values(pump_heat)?;
-    kinetics.residual_j = kinetic_energy_residual(
-        cell.model,
-        populations,
-        &kinetics,
-        limits.kinetic.relative_tolerance,
-    )?;
-    let passive_energy = energies(passive, photon_energies)?;
-    let mut heat = Sum::default();
-    for value in passive_energy {
-        heat.add(value)?;
-    }
+    let incident = std::array::from_fn(|lane| trial.channels[lane].incident);
+    let transmitted = std::array::from_fn(|lane| trial.channels[lane].transmitted);
+    let absorbed = std::array::from_fn(|lane| trial.channels[lane].absorbed);
+    let passive = std::array::from_fn(|lane| trial.channels[lane].passive);
     Ok(Trial {
         step: PumpColumnCellStep {
-            kinetics,
+            kinetics: trial.kinetics,
             incident_photons: incident,
-            transmitted_photons: outgoing,
+            transmitted_photons: transmitted,
             absorbed_photons: absorbed,
             passive_absorbed_photons: passive,
             incident_energy_j: energies(incident, photon_energies)?,
-            transmitted_energy_j: energies(outgoing, photon_energies)?,
+            transmitted_energy_j: energies(transmitted, photon_energies)?,
             absorbed_energy_j: energies(absorbed, photon_energies)?,
-            passive_absorbed_energy_j: passive_energy,
-            photon_residual: photon_balance(incident, outgoing, absorbed, passive)?,
-            passive_heat_j: heat.value()?,
+            passive_absorbed_energy_j: energies(passive, photon_energies)?,
+            photon_residual: std::array::from_fn(|lane| trial.channels[lane].residual),
+            passive_heat_j: trial.passive_heat_j,
         },
-        transmitted_rates,
-        mean_ground,
+        transmitted_rates: std::array::from_fn(|lane| trial.channels[lane].transmitted_rate),
     })
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), SingletTripletError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), SingletTripletError> {
         let (sum, error) = fs_math::eft::two_sum(self.value, value);
         self.value = finite(sum, "pump column partial sum")?;
         self.correction = finite(self.correction + error, "pump column sum correction")?;
         Ok(())
     }
-    fn value(self) -> Result<f64, SingletTripletError> {
+    pub(super) fn value(self) -> Result<f64, SingletTripletError> {
         finite(self.value + self.correction, "pump column sum")
     }
 }
@@ -740,16 +538,7 @@ struct CellTotals<const B: usize> {
     transmitted: [Sum; B],
     absorbed: [Sum; B],
     passive: [Sum; B],
-    pump_events: [Sum; 2],
-    pump_energy: [Sum; 2],
-    pump_heat: [Sum; 2],
-    radiative_events: [Sum; 2],
-    dark_events: [Sum; 2],
-    crossing_events: [Sum; 2],
-    radiative_energy: [Sum; 2],
-    dark_heat: [Sum; 2],
-    crossing_heat: Sum,
-    reverse_heat: Sum,
+    kinetics: KineticTotals,
 }
 
 impl<const B: usize> CellTotals<B> {
@@ -759,16 +548,7 @@ impl<const B: usize> CellTotals<B> {
             transmitted: [Sum::default(); B],
             absorbed: [Sum::default(); B],
             passive: [Sum::default(); B],
-            pump_events: [Sum::default(); 2],
-            pump_energy: [Sum::default(); 2],
-            pump_heat: [Sum::default(); 2],
-            radiative_events: [Sum::default(); 2],
-            dark_events: [Sum::default(); 2],
-            crossing_events: [Sum::default(); 2],
-            radiative_energy: [Sum::default(); 2],
-            dark_heat: [Sum::default(); 2],
-            crossing_heat: Sum::default(),
-            reverse_heat: Sum::default(),
+            kinetics: KineticTotals::new(),
         }
     }
 
@@ -777,17 +557,7 @@ impl<const B: usize> CellTotals<B> {
         add_values(&mut self.transmitted, step.transmitted_photons)?;
         add_values(&mut self.absorbed, step.absorbed_photons)?;
         add_values(&mut self.passive, step.passive_absorbed_photons)?;
-        let k = &step.kinetics;
-        add_values(&mut self.pump_events, k.pump_events)?;
-        add_values(&mut self.pump_energy, k.absorbed_pump_energy_j)?;
-        add_values(&mut self.pump_heat, k.pump_relaxation_heat_j)?;
-        add_values(&mut self.radiative_events, k.radiative_events)?;
-        add_values(&mut self.dark_events, k.nonradiative_events)?;
-        add_values(&mut self.crossing_events, k.crossing_events)?;
-        add_values(&mut self.radiative_energy, k.radiative_decay_energy_j)?;
-        add_values(&mut self.dark_heat, k.nonradiative_heat_j)?;
-        self.crossing_heat.add(k.crossing_heat_j)?;
-        self.reverse_heat.add(k.reverse_crossing_heat_absorbed_j)?;
+        self.kinetics.add(&step.kinetics)?;
         Ok(())
     }
 
@@ -799,50 +569,7 @@ impl<const B: usize> CellTotals<B> {
         photon_energies: [f64; B],
         tolerance: f64,
     ) -> Result<PumpColumnCellStep<B>, SingletTripletError> {
-        let mut kinetics = SaturableSingletTripletStep {
-            populations,
-            pump_events: values(self.pump_events)?,
-            absorbed_pump_energy_j: values(self.pump_energy)?,
-            pump_relaxation_heat_j: values(self.pump_heat)?,
-            radiative_events: values(self.radiative_events)?,
-            nonradiative_events: values(self.dark_events)?,
-            crossing_events: values(self.crossing_events)?,
-            stored_energy_j: energies(
-                [populations[1], populations[2]],
-                model.excitation_energies_j(),
-            )?,
-            radiative_decay_energy_j: values(self.radiative_energy)?,
-            nonradiative_heat_j: values(self.dark_heat)?,
-            crossing_heat_j: self.crossing_heat.value()?,
-            reverse_crossing_heat_absorbed_j: self.reverse_heat.value()?,
-            population_residual: 0.0,
-            residual_j: 0.0,
-        };
-        super::admit_population_balance(
-            &[initial[1], initial[2]],
-            &kinetics.pump_events,
-            &[populations[1], populations[2]],
-            &kinetics.radiative_events,
-            &kinetics.nonradiative_events,
-            tolerance,
-        )?;
-        let mut population_residual = Sum::default();
-        let mut population_scale = Sum::default();
-        for i in 0..3 {
-            population_residual.add(populations[i])?;
-            population_residual.add(-initial[i])?;
-            population_scale.add(populations[i])?;
-            population_scale.add(initial[i])?;
-        }
-        kinetics.population_residual = population_residual.value()?;
-        let allowance = tolerance * population_scale.value()?;
-        if kinetics.population_residual.abs() > allowance {
-            return Err(SingletTripletError::PopulationBalance {
-                residual: kinetics.population_residual,
-                allowance,
-            });
-        }
-        kinetics.residual_j = kinetic_energy_residual(model, initial, &kinetics, tolerance)?;
+        let kinetics = self.kinetics.finish(model, initial, populations, tolerance)?;
         let incident = values(self.incident)?;
         let transmitted = values(self.transmitted)?;
         let absorbed = values(self.absorbed)?;
@@ -891,7 +618,106 @@ impl<const B: usize> CellTotals<B> {
     }
 }
 
-fn values<const N: usize>(sums: [Sum; N]) -> Result<[f64; N], SingletTripletError> {
+/// Shared compensated physical history; one entry per original emitter cell.
+pub(super) struct KineticTotals {
+    pump_events: [Sum; 2],
+    pump_energy: [Sum; 2],
+    pump_heat: [Sum; 2],
+    radiative_events: [Sum; 2],
+    dark_events: [Sum; 2],
+    crossing_events: [Sum; 2],
+    radiative_energy: [Sum; 2],
+    dark_heat: [Sum; 2],
+    crossing_heat: Sum,
+    reverse_heat: Sum,
+}
+
+impl KineticTotals {
+    pub(super) fn new() -> Self {
+        Self {
+            pump_events: [Sum::default(); 2],
+            pump_energy: [Sum::default(); 2],
+            pump_heat: [Sum::default(); 2],
+            radiative_events: [Sum::default(); 2],
+            dark_events: [Sum::default(); 2],
+            crossing_events: [Sum::default(); 2],
+            radiative_energy: [Sum::default(); 2],
+            dark_heat: [Sum::default(); 2],
+            crossing_heat: Sum::default(),
+            reverse_heat: Sum::default(),
+        }
+    }
+
+    pub(super) fn add(&mut self, k: &SaturableSingletTripletStep) -> Result<(), SingletTripletError> {
+        add_values(&mut self.pump_events, k.pump_events)?;
+        add_values(&mut self.pump_energy, k.absorbed_pump_energy_j)?;
+        add_values(&mut self.pump_heat, k.pump_relaxation_heat_j)?;
+        add_values(&mut self.radiative_events, k.radiative_events)?;
+        add_values(&mut self.dark_events, k.nonradiative_events)?;
+        add_values(&mut self.crossing_events, k.crossing_events)?;
+        add_values(&mut self.radiative_energy, k.radiative_decay_energy_j)?;
+        add_values(&mut self.dark_heat, k.nonradiative_heat_j)?;
+        self.crossing_heat.add(k.crossing_heat_j)?;
+        self.reverse_heat.add(k.reverse_crossing_heat_absorbed_j)?;
+        Ok(())
+    }
+
+    pub(super) fn finish(
+        self,
+        model: SingletTripletDecay,
+        initial: [f64; 3],
+        populations: [f64; 3],
+        tolerance: f64,
+    ) -> Result<SaturableSingletTripletStep, SingletTripletError> {
+        let mut kinetics = SaturableSingletTripletStep {
+            populations,
+            pump_events: values(self.pump_events)?,
+            absorbed_pump_energy_j: values(self.pump_energy)?,
+            pump_relaxation_heat_j: values(self.pump_heat)?,
+            radiative_events: values(self.radiative_events)?,
+            nonradiative_events: values(self.dark_events)?,
+            crossing_events: values(self.crossing_events)?,
+            stored_energy_j: energies(
+                [populations[1], populations[2]],
+                model.excitation_energies_j(),
+            )?,
+            radiative_decay_energy_j: values(self.radiative_energy)?,
+            nonradiative_heat_j: values(self.dark_heat)?,
+            crossing_heat_j: self.crossing_heat.value()?,
+            reverse_crossing_heat_absorbed_j: self.reverse_heat.value()?,
+            population_residual: 0.0,
+            residual_j: 0.0,
+        };
+        super::admit_population_balance(
+            &[initial[1], initial[2]],
+            &kinetics.pump_events,
+            &[populations[1], populations[2]],
+            &kinetics.radiative_events,
+            &kinetics.nonradiative_events,
+            tolerance,
+        )?;
+        let mut population_residual = Sum::default();
+        let mut population_scale = Sum::default();
+        for i in 0..3 {
+            population_residual.add(populations[i])?;
+            population_residual.add(-initial[i])?;
+            population_scale.add(populations[i])?;
+            population_scale.add(initial[i])?;
+        }
+        kinetics.population_residual = population_residual.value()?;
+        let allowance = tolerance * population_scale.value()?;
+        if kinetics.population_residual.abs() > allowance {
+            return Err(SingletTripletError::PopulationBalance {
+                residual: kinetics.population_residual,
+                allowance,
+            });
+        }
+        kinetics.residual_j = kinetic_energy_residual(model, initial, &kinetics, tolerance)?;
+        Ok(kinetics)
+    }
+}
+
+pub(super) fn values<const N: usize>(sums: [Sum; N]) -> Result<[f64; N], SingletTripletError> {
     let mut result = [0.0; N];
     for (destination, sum) in result.iter_mut().zip(sums) {
         *destination = sum.value()?;
@@ -899,7 +725,7 @@ fn values<const N: usize>(sums: [Sum; N]) -> Result<[f64; N], SingletTripletErro
     Ok(result)
 }
 
-fn add_values<const N: usize>(
+pub(super) fn add_values<const N: usize>(
     sums: &mut [Sum; N],
     values: [f64; N],
 ) -> Result<(), SingletTripletError> {
@@ -909,7 +735,7 @@ fn add_values<const N: usize>(
     Ok(())
 }
 
-fn energies<const N: usize>(
+pub(super) fn energies<const N: usize>(
     photons: [f64; N],
     quantum: [f64; N],
 ) -> Result<[f64; N], SingletTripletError> {
@@ -920,7 +746,7 @@ fn energies<const N: usize>(
     Ok(result)
 }
 
-fn photon_balance<const N: usize>(
+pub(super) fn photon_balance<const N: usize>(
     incident: [f64; N],
     transmitted: [f64; N],
     absorbed: [f64; N],
@@ -942,7 +768,7 @@ fn photon_balance<const N: usize>(
     Ok(result)
 }
 
-fn admit_photons<const N: usize>(
+pub(super) fn admit_photons<const N: usize>(
     incident: [f64; N],
     transmitted: [f64; N],
     absorbed: [f64; N],
@@ -971,7 +797,7 @@ fn admit_photons<const N: usize>(
     Ok(())
 }
 
-fn admit_energy(residual_j: f64, scale: f64, tolerance: f64) -> Result<(), SingletTripletError> {
+pub(super) fn admit_energy(residual_j: f64, scale: f64, tolerance: f64) -> Result<(), SingletTripletError> {
     let allowance_j = tolerance * scale;
     if residual_j.abs() > allowance_j {
         return Err(SingletTripletError::EnergyBalance {
@@ -982,7 +808,7 @@ fn admit_energy(residual_j: f64, scale: f64, tolerance: f64) -> Result<(), Singl
     Ok(())
 }
 
-fn kinetic_energy_residual(
+pub(super) fn kinetic_energy_residual(
     model: SingletTripletDecay,
     initial: [f64; 3],
     kinetics: &SaturableSingletTripletStep,
@@ -1020,7 +846,7 @@ fn kinetic_energy_residual(
 
 // Avoid needlessly overflowing an intermediate when the complete positive
 // product is representable. Required positive products may not vanish.
-fn product3(a: f64, b: f64, c: f64) -> Result<f64, SingletTripletError> {
+pub(super) fn product3(a: f64, b: f64, c: f64) -> Result<f64, SingletTripletError> {
     if a == 0.0 || b == 0.0 || c == 0.0 {
         return Ok(0.0);
     }
@@ -1035,7 +861,7 @@ fn product3(a: f64, b: f64, c: f64) -> Result<f64, SingletTripletError> {
     ))
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SingletTripletError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SingletTripletError> {
     if cancelled() {
         Err(DecayError::Cancelled.into())
     } else {
@@ -1043,7 +869,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SingletTripletError>
     }
 }
 
-fn cap(quantity: &'static str, required: usize, maximum: usize) -> Result<(), SingletTripletError> {
+pub(super) fn cap(quantity: &'static str, required: usize, maximum: usize) -> Result<(), SingletTripletError> {
     if required > maximum {
         Err(DecayError::Budget {
             quantity,

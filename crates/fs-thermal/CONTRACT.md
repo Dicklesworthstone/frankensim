@@ -4127,3 +4127,55 @@ nonnegative finite D are required; positive unrepresentable conductance refuses.
 Sh=2 delegates to the original D/r method exactly, and D=0 remains sealed.
 A focused regression specifies exact stagnant arithmetic, dimensional
 conversion and invalid inputs. This new test has not been executed.
+
+## Simultaneous beams sharing finite luminescent populations
+
+`luminescence::transfer::pump_beams::SaturablePumpBeams` extends the same
+photon-conservative cell closure to multiple incoherent or phase-averaged
+spectral beams. A path lists original cell indices and its own molecular and
+passive optical depths. An original cell has one kinetic inventory and one
+accepted history, regardless of how many paths overlap it. All incident
+channels contribute to the same ground-state pumping hazards; no beam
+independently advances or replenishes a copied emitter population.
+
+The original scalar residence solve and stiff three-state propagator are shared
+with `SaturablePumpColumn`. Acyclic path dependencies use a topological sweep.
+Counterpropagating and other cyclic paths use bounded physical source iteration
+on the common interval-mean ground inventories. Every trial restarts from the
+same initial populations. Accepted common-field residence and per-channel
+photon residuals must satisfy the original kinetic tolerance. Failed cyclic
+grids are discarded and temporally refined. All scalar preparations, including
+failed source iterations and coarse grids, count against the aggregate work
+budget. Only the converged finer physical history contributes accounts.
+Pump-off and fixed passive transport use one exact history per unique cell and
+skip source iteration and temporal comparison, even for cyclic geometry.
+
+Each beam retains separate original spectral incident, transmitted, molecular
+and passive photon/energy ledgers. Molecular pump events, destination energies,
+weak positive relaxation-heat branches, fluorescence/phosphorescence release,
+stored excitation and passive heat remain tied to the one shared cell history.
+Internal segment passage is not an external energy input. Per-beam photon
+closure and whole-system energy closure are audited independently; a residual
+is never normalized away or deposited as heat. Empty paths and empty model sets
+are supported under explicit positive admission bounds; repeated indices within
+one beam, unsupported photon energies and exceeded budgets are refused without
+mutating caller populations.
+
+The physical boundary remains quasistatic directed transport with spatially
+homogeneous original cells and fixed constitutive coefficients during each
+call. Molecular depth per ground emitter is cross section times ray length
+divided by the original cell volume. Spatial refinement and the caller's native
+thermal/pulse clock remain separate accuracy requirements. Coherent standing
+waves, pump scattering/reflection, stimulated emission, excited-state
+absorption and active recycling of emitted light are not modeled.
+
+Seven new focused regressions cover identical-path power splitting, original
+column equivalence, unique-cell afterglow, passive spectral overlap and empty
+paths, weak energetic beams, admission/cancellation/budgets, and two independent
+opposed-beam analytic cases. The transient case uses distinct destinations and
+photon energies; the steady recovering case spans one million radiative
+lifetimes without limiting cumulative pump events to the emitter inventory.
+These new tests are authored but have not been executed: the native executor
+became unavailable during this extension. The shared local refactor reached
+native type checking before the test compiler was externally terminated; no
+new native pass count is claimed.

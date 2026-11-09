@@ -33,6 +33,8 @@ pub mod annihilation;
 pub mod saturation;
 
 /// Directed pump depletion through the original finite emitter inventories.
+#[path = "luminescence_transfer/pump_beams.rs"]
+pub mod pump_beams;
 #[path = "luminescence_transfer/pump_column.rs"]
 pub mod pump_column;
 
