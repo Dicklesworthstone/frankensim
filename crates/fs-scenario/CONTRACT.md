@@ -1752,3 +1752,24 @@ dissipative coupling. All 38 RANS module tests and 8 existing RANS integration
 tests passed in the focused pinned native build using the original card and
 BLAKE3 implementation. Full Cargo/workspace and empirical turbulent heat
 transfer validation were not run.
+
+## Cartesian tensor execution and native stress loading
+
+`TensorPayload::world_tensor_at` executes the existing 3-by-3 Cartesian tensor
+carrier with the same fixed/held/linear history owner as scalar and vector
+payloads. Both indices transform as `R T R^T`; translation contributes nothing,
+and frame evaluation retains physical time when source values clamp or wrap.
+Exact symmetric inputs remain exactly symmetric; nonsymmetric inputs are not
+projected. Original quantity and parity metadata survive. Other shapes/bases,
+reference resets, distributions and nonfinite arithmetic refuse before
+publication. The sampler allocates no history and retains the 256-frame cap
+and existing checkpoint boundaries. The canonical payload and BC vocabularies
+are unchanged.
+
+`fs-solid::loads3::history::SurfaceHistory3::Stress` owns physical stress
+admission and reference-face traction. The focused `tensor_execution` tests
+specify two-index rotation, canonical replay, physical-time sampling and
+cancellation/refusal behavior. Source syntax was checked with pinned rustfmt
+before the execution environment disconnected. Cargo typechecking and test
+execution remain unverified; no passing runtime or scientific-validation
+claim is made for this new path.

@@ -12,8 +12,10 @@
 use super::*;
 use super::fields::AccelerationField3;
 use fs_qty::Dims;
+use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, TimeSignal};
-use fs_scenario::payload::{OrientationParity, Payload, QuantityContract, VectorPayload};
+use fs_scenario::payload::{OrientationParity, Payload, QuantityContract, TensorPayload, VectorPayload};
+use fs_scenario::tensor::TensorEvaluationError;
 use fs_scenario::vector::VectorEvaluationError;
 use std::ops::ControlFlow;
 
@@ -26,6 +28,10 @@ pub enum SurfaceHistory3<'a> {
     Fixed(SurfaceLoad3<'a>),
     Traction { faces: &'a [usize], value: &'a VectorPayload },
     Pressure { faces: &'a [usize], value: &'a TimeSignal },
+    /// A spatially uniform, symmetric ordinary stress history. Both Cartesian
+    /// indices rotate from its declared frame; each reference face then applies
+    /// its own outward normal through the original surface-load integral.
+    Stress { faces: &'a [usize], value: &'a TensorPayload },
 }
 impl<'a> SurfaceHistory3<'a> {
     /// Consume the existing Elasticity/Neumann vector row, on explicitly
@@ -63,6 +69,7 @@ pub enum LoadHistoryError3 {
     Scenario(String),
     Quantity { expected: Dims, found: QuantityContract },
     Vector(VectorEvaluationError),
+    Tensor(TensorEvaluationError),
     Loads(LoadError3),
     Cancelled,
 }
@@ -190,6 +197,27 @@ impl TetLoadHistory3<'_> {
                         return Err(LoadHistoryError3::Quantity { expected: TRACTION_DIMS, found: QuantityContract::Dimensions(pressure.dims) });
                     }
                     SurfaceLoad3::Pressure { faces, pascals: pressure.value }
+                }
+                SurfaceHistory3::Stress { faces, value } => {
+                    let contract = value.meta().contract();
+                    let admitted = match contract {
+                        QuantityContract::Dimensions(dims) => dims == TRACTION_DIMS,
+                        QuantityContract::Semantic(kind) => kind.kind() == QuantityKind::Stress
+                            && matches!(kind.form(), ValueForm::Static | ValueForm::Instantaneous),
+                        QuantityContract::Heterogeneous => false,
+                    };
+                    if !admitted {
+                        return Err(LoadHistoryError3::Quantity { expected: TRACTION_DIMS, found: contract });
+                    }
+                    if value.meta().orientation() != OrientationParity::Even {
+                        return Err(LoadHistoryError3::Invalid("ordinary stress requires an even-parity tensor"));
+                    }
+                    let mut checkpoint = || if cx.checkpoint().is_err() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) };
+                    let sampled = value.world_tensor_at(self.frames, time_s, &mut checkpoint).map_err(|error| {
+                        if error == TensorEvaluationError::Cancelled { LoadHistoryError3::Cancelled }
+                        else { LoadHistoryError3::Tensor(error) }
+                    })?;
+                    SurfaceLoad3::Stress { faces, pascals: sampled.values }
                 }
             });
         }

@@ -6,7 +6,7 @@
 use super::*;
 use crate::loads3::transient::events::LoadJump3;
 use fs_scenario::frame::{Frame, FrameId, FrameMotion, WORLD};
-use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation};
+use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation, TensorPayload};
 use fs_scenario::signal::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, LinearChirp};
 
 mod recorded;
@@ -178,6 +178,7 @@ impl<'a> EventLoadHistory3<'a> {
             match row {
                 SurfaceHistory3::Fixed(_) => {}
                 SurfaceHistory3::Traction { value, .. } => index.vector(value)?,
+                SurfaceHistory3::Stress { value, .. } => index.tensor(value)?,
                 SurfaceHistory3::Pressure { value, .. } => {
                     index.signal(value, Some(DEFAULT_MAXIMUM_CYCLES_PER_STEP))?;
                 }
@@ -382,15 +383,18 @@ impl<'a> EventLoadHistory3<'a> {
         }
         let mut vectors = Vec::with_capacity(self.history.surfaces.len());
         let mut pressures = Vec::with_capacity(self.history.surfaces.len());
+        let mut tensors = Vec::with_capacity(self.history.surfaces.len());
         for row in self.history.surfaces {
             checkpoint(cx)?;
             vectors.push(match row { SurfaceHistory3::Traction { value, .. } => vector_before(value, time)?, _ => None });
             pressures.push(match row { SurfaceHistory3::Pressure { value, .. } => Some(TimeSignal::Constant(before(value, time)?)), _ => None });
+            tensors.push(match row { SurfaceHistory3::Stress { value, .. } => tensor_before(value, time)?, _ => None });
         }
         let surfaces: Vec<_> = self.history.surfaces.iter().enumerate().map(|(i, row)| match *row {
             SurfaceHistory3::Fixed(value) => SurfaceHistory3::Fixed(value),
             SurfaceHistory3::Traction { faces, value } => SurfaceHistory3::Traction { faces, value: vectors[i].as_ref().unwrap_or(value) },
             SurfaceHistory3::Pressure { faces, value } => SurfaceHistory3::Pressure { faces, value: pressures[i].as_ref().unwrap_or(value) },
+            SurfaceHistory3::Stress { faces, value } => SurfaceHistory3::Stress { faces, value: tensors[i].as_ref().unwrap_or(value) },
         }).collect();
         let volume_value = match self.history.volume {
             VolumeHistory3::Fixed(_) | VolumeHistory3::FixedAcceleration(_) => None,
@@ -510,14 +514,25 @@ impl<'history> Index<'history, '_, '_> {
     fn vector(&mut self, vector: &VectorPayload) -> Result<(), TransientHistoryError3> {
         if vector.components() != 3 { return Err(invalid("event loads need three-component vectors")); }
         self.reference_frame(vector.meta().frame())?;
-        match vector.source() {
+        self.component_history(vector.source(), 3)
+    }
+    fn tensor(&mut self, tensor: &TensorPayload) -> Result<(), TransientHistoryError3> {
+        if tensor.rows() != 3 || tensor.columns() != 3 {
+            return Err(invalid("event stress loads need 3-by-3 tensor components"));
+        }
+        self.reference_frame(tensor.meta().frame())?;
+        self.component_history(tensor.source(), 9)
+    }
+    fn component_history(&mut self, source: &SampleSource<Vec<QtyAny>>, components: usize)
+        -> Result<(), TransientHistoryError3> {
+        match source {
             SampleSource::Fixed(values) => self.charge(values.len())?,
             SampleSource::Distribution { .. } => return Err(invalid("event loads require explicit histories, not distributions")),
             SampleSource::Table { times, outside, .. } => {
                 if *outside == OutsideDomainPolicy::Periodic {
-                    return Err(invalid("unroll periodic vector histories into a finite table or use explicit load jumps"));
+                    return Err(invalid("unroll periodic component histories into a finite table or use explicit load jumps"));
                 }
-                self.charge(times.len().checked_mul(4).ok_or_else(|| invalid("event vector size overflow"))?)?;
+                self.charge(times.len().checked_mul(components + 1).ok_or_else(|| invalid("event component size overflow"))?)?;
                 for (i, time) in times.iter().enumerate() {
                     if i % 256 == 0 { checkpoint(self.cx)?; }
                     self.knots.push(time.value);
@@ -561,15 +576,27 @@ fn before(signal: &TimeSignal, time: f64) -> Result<QtyAny, TransientHistoryErro
     }
     Ok(value)
 }
-fn vector_before(vector: &VectorPayload, time: f64) -> Result<Option<VectorPayload>, TransientHistoryError3> {
-    if let SampleSource::Table { times, values, interpolation: TableInterpolation::StepLeft, .. } = vector.source() {
+fn held_before(source: &SampleSource<Vec<QtyAny>>, time: f64) -> Option<&Vec<QtyAny>> {
+    if let SampleSource::Table { times, values, interpolation: TableInterpolation::StepLeft, .. } = source {
         let i = times.partition_point(|t| t.value < time);
         if i > 0 && times.get(i).is_some_and(|t| t.value == time) {
-            return VectorPayload::new(vector.meta().clone(), SampleSource::Fixed(values[i-1].clone()))
-                .map(Some).map_err(|e| LoadHistoryError3::Scenario(e.to_string()).into());
+            return Some(&values[i-1]);
         }
     }
-    Ok(None)
+    None
+}
+fn vector_before(vector: &VectorPayload, time: f64) -> Result<Option<VectorPayload>, TransientHistoryError3> {
+    held_before(vector.source(), time).map(|value| {
+        VectorPayload::new(vector.meta().clone(), SampleSource::Fixed(value.clone()))
+            .map_err(|e| TransientHistoryError3::from(LoadHistoryError3::Scenario(e.to_string())))
+    }).transpose()
+}
+fn tensor_before(tensor: &TensorPayload, time: f64) -> Result<Option<TensorPayload>, TransientHistoryError3> {
+    held_before(tensor.source(), time).map(|value| {
+        TensorPayload::new(tensor.meta().clone(), tensor.rows(), tensor.columns(),
+            SampleSource::Fixed(value.clone()))
+            .map_err(|e| TransientHistoryError3::from(LoadHistoryError3::Scenario(e.to_string())))
+    }).transpose()
 }
 
 /// Original accepted interval, plus an optional finite endpoint force or

@@ -3,9 +3,10 @@ use fs_alloc::{ArenaConfig,ArenaPool};
 use fs_exec::{Budget,CancelGate,Cx,ExecMode,StreamKey};
 use fs_ga::Vec3;
 use fs_qty::{Dims,QtyAny};
+use fs_qty::semantic::{QuantityKind,SemanticType,ValueForm};
 use fs_scenario::{Frame,FrameId,FrameMotion,FrameTree,TimeSignal,WORLD};
 use fs_scenario::payload::{OrientationParity,OutsideDomainPolicy,PayloadId,PayloadMeta,
-    QuantityContract,ReferenceSemantics,SampleSource,TableInterpolation,VectorPayload};
+    QuantityContract,ReferenceSemantics,SampleSource,TableInterpolation,TensorPayload,VectorPayload};
 use fs_solid::linear3::*;
 use fs_solid::loads3::{SurfaceLoad3,TetLoadGeometry3,VolumeLoad3};
 use fs_solid::loads3::history::{ACCELERATION_DIMS,FORCE_DENSITY_DIMS,TRACTION_DIMS,
@@ -32,6 +33,59 @@ fn source(dims:Dims,frame:FrameId,a:[f64;3],b:[f64;3],outside:OutsideDomainPolic
 fn problem<'a>(material:&'a TetElasticMaterial,fixed:&'a[usize])->TetLinearElasticProblem<'a> {
     TetLinearElasticProblem {nodes_m:&NODES,tetrahedra:&TETS,materials:TetMaterialField::Uniform(material),
         fixed_dofs:fixed,budget:TetAssemblyBudget::default()}
+}
+
+
+#[test]
+fn g1_tensor_stress_history_drives_native_inertia_and_retains_atomic_refusals() {
+    with_cx(false, |cx| {
+        let mat = TetElasticMaterial::try_new(6.0, 60.0, 0.0, [74; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&mat, &fixed);
+        let g = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let face = [g.faces().iter().position(|f| f.nodes == [1, 2, 3]).unwrap()];
+        let tensor = |kind| {
+            let meta = PayloadMeta::new(QuantityContract::Semantic(SemanticType::new(kind, ValueForm::Instantaneous)),
+                PayloadId::new("basis/world-cartesian").unwrap(), WORLD,
+                OrientationParity::Even, ReferenceSemantics::Continuous).unwrap();
+            TensorPayload::new(meta, 3, 3, SampleSource::table(
+                vec![QtyAny::new(0.0, Dims([0, 0, 1, 0, 0, 0])), QtyAny::new(1.0, Dims([0, 0, 1, 0, 0, 0]))],
+                [0.006, 0.012].map(|sigma| (0..9).map(|i| QtyAny::new(if i == 0 { sigma } else { 0.0 }, TRACTION_DIMS)).collect()).to_vec(),
+                TableInterpolation::Linear, OutsideDomainPolicy::Refuse).unwrap()).unwrap()
+        };
+        let value = tensor(QuantityKind::Stress);
+        let rows = [SurfaceHistory3::Stress { faces: &face, value: &value }];
+        let frames = FrameTree::new();
+        let history = TetLoadHistory3 { surfaces: &rows, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames };
+        // On this sloped face A*n_x=1/2. Every P1 face node therefore carries
+        // sigma_xx/6 in x; retain the restrained nodes in the independent load.
+        let manual = |t: f64| g.assemble(&[], VolumeLoad3::None,
+            &[(3, 0.001*(1.0+t)), (6, 0.001*(1.0+t)), (9, 0.001*(1.0+t))], cx).unwrap();
+        let mut scheduled = history.begin_transient(&g, &p, None, 0.0, &ZERO, &ZERO, Default::default(), cx).unwrap();
+        let mut direct = manual(0.0).begin_transient(&p, None, 0.0, &ZERO, &ZERO, Default::default(), cx).unwrap();
+        for _ in 0..100 {
+            let time = scheduled.state().time_s + 0.002;
+            scheduled.advance_history(&history, 0.002, cx).unwrap();
+            direct.advance(&manual(time), 0.002, cx).unwrap();
+            for (a, b) in scheduled.state().displacement.iter().zip(&direct.state().displacement) {
+                assert!((a-b).abs() < 1e-12);
+            }
+        }
+        // Independent one-DOF oscillator: M=0.1, K=10, F=0.001*(1+t).
+        let t = scheduled.state().time_s;
+        let expected = 1e-4*((1.0-(10.0*t).cos())+t-(10.0*t).sin()/10.0);
+        assert!((scheduled.state().displacement[0]-expected).abs() < 1e-8);
+        assert!(scheduled.state().velocity[0].abs() > 1e-5);
+        let before = scheduled.state().clone();
+        let bad_value = tensor(QuantityKind::Pressure);
+        let bad_rows = [SurfaceHistory3::Stress { faces: &face, value: &bad_value }];
+        let bad = TetLoadHistory3 { surfaces: &bad_rows, ..history };
+        assert!(scheduled.advance_history(&bad, 0.002, cx).is_err());
+        assert!(scheduled.advance_history(&history, 2.0, cx).is_err());
+        with_cx(true, |cancelled| assert!(scheduled.advance_history(&history, 0.002, cancelled).is_err()));
+        assert_eq!(scheduled.state(), &before);
+    });
 }
 
 #[test]
@@ -119,5 +173,51 @@ fn g4_history_refusals_and_cancellation_leave_the_accepted_clock_and_motion_unch
         assert_eq!(run.state(),&before);
         let mut resumed=run.clone();assert_eq!(run.advance_history(&history,0.01,cx).unwrap(),resumed.advance_history(&history,0.01,cx).unwrap());
         assert_eq!(run.state(),resumed.state());
+    });
+}
+
+#[test]
+fn g3_held_tensor_stress_keeps_event_knots_and_exact_left_limits() {
+    use fs_solid::loads3::history::dynamics::events::EventLoadHistory3;
+    with_cx(false, |cx| {
+        let mat = TetElasticMaterial::try_new(6.0, 60.0, 0.0, [74; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&mat, &fixed);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let face = [geometry.faces().iter().position(|f| f.nodes == [1, 2, 3]).unwrap()];
+        let meta = PayloadMeta::new(QuantityContract::Dimensions(TRACTION_DIMS),
+            PayloadId::new("basis/world-cartesian").unwrap(), WORLD,
+            OrientationParity::Even, ReferenceSemantics::Continuous).unwrap();
+        let tensor = TensorPayload::new(meta, 3, 3, SampleSource::table(
+            [0.0, 0.125, 0.25].map(|t| QtyAny::new(t, Dims([0, 0, 1, 0, 0, 0]))).to_vec(),
+            [0.0, 0.02, 0.0].map(|pressure| (0..9).map(|i| QtyAny::new(
+                if i / 3 == i % 3 { -pressure } else { 0.0 }, TRACTION_DIMS)).collect()).to_vec(),
+            TableInterpolation::StepLeft, OutsideDomainPolicy::Clamp).unwrap()).unwrap();
+        let surfaces = [SurfaceHistory3::Stress { faces: &face, value: &tensor }];
+        let frames = FrameTree::new();
+        let history = TetLoadHistory3 { surfaces: &surfaces,
+            volume: VolumeHistory3::Fixed(VolumeLoad3::None), nodal_forces_n: &[], frames: &frames };
+        // The same event budget counts all nine components and one time per row.
+        assert!(EventLoadHistory3::new(history, 29, cx).is_err());
+        let schedule = EventLoadHistory3::new(history, 30, cx).unwrap();
+        assert_eq!(schedule.knots_s(), &[0.0, 0.125, 0.25]);
+        let empty = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let loaded = geometry.assemble(&[SurfaceLoad3::Pressure { faces: &face, pascals: 0.02 }],
+            VolumeLoad3::None, &[], cx).unwrap();
+        let mut direct = empty.begin_transient(&p, None, 0.0, &ZERO, &ZERO, Default::default(), cx).unwrap();
+        let mut scheduled = schedule.begin_transient(&geometry, &p, None, 0.0, &ZERO, &ZERO, Default::default(), cx).unwrap();
+        direct.advance_to_load_jump(&empty, &loaded, 0.125, cx).unwrap();
+        let first = scheduled.advance_to(0.5, 0.5, cx).unwrap();
+        assert_eq!(first.end_time_s, 0.125);
+        assert!(first.jump.is_some());
+        assert_eq!(scheduled.run().state(), direct.state());
+        assert_eq!(scheduled.run().state().displacement, vec![0.0]);
+        assert_eq!(scheduled.run().state().velocity, vec![0.0]);
+        direct.advance_to_load_jump(&loaded, &empty, 0.125, cx).unwrap();
+        let second = scheduled.advance_to(0.5, 0.5, cx).unwrap();
+        assert_eq!(second.end_time_s, 0.25);
+        assert!(second.jump.is_some());
+        assert_eq!(scheduled.run().state(), direct.state());
+        assert!(scheduled.run().state().velocity[0].abs() > 1e-5);
     });
 }

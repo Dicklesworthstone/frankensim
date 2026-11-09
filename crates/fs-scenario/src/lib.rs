@@ -43,6 +43,8 @@ mod sample;
 pub mod scalar;
 pub mod sensor;
 pub mod signal;
+/// Executable Cartesian samples of the existing typed tensor payloads.
+pub mod tensor;
 /// Executable Cartesian samples of the existing typed vector payloads.
 pub mod vector;
 

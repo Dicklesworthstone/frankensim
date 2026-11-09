@@ -200,7 +200,16 @@ impl<'m> TetLoadGeometry3<'m> {
         let mut used = vec![false; self.faces.len()];
         for row in surfaces {
             poll(cx)?;
-            let ids = match *row { SurfaceLoad3::Traction { faces, .. } | SurfaceLoad3::Pressure { faces, .. } => faces };
+            let ids = match *row { SurfaceLoad3::Traction { faces, .. } | SurfaceLoad3::Pressure { faces, .. }
+                | SurfaceLoad3::Stress { faces, .. } => faces };
+            if let SurfaceLoad3::Stress { pascals, .. } = *row {
+                for i in 0..3 { for j in 0..3 {
+                    finite(pascals[i][j])?;
+                    if pascals[i][j] != pascals[j][i] {
+                        return Err(LoadError3::Invalid("ordinary stress loading requires a symmetric tensor"));
+                    }
+                } }
+            }
             if ids.is_empty() || ids.len() > self.faces.len() { return Err(LoadError3::Invalid("surface selection must be nonempty and bounded")); }
             for &id in ids {
                 poll(cx)?;
@@ -209,6 +218,7 @@ impl<'m> TetLoadGeometry3<'m> {
                 let traction = vector(match *row {
                     SurfaceLoad3::Traction { pascals, .. } => pascals,
                     SurfaceLoad3::Pressure { pascals, .. } => face.outward_normal.map(|n| -pascals*n),
+                    SurfaceLoad3::Stress { pascals, .. } => pascals.map(|row| dot(row, face.outward_normal)),
                 })?;
                 for &node in &face.nodes { for c in 0..3 {
                     let contribution = finite((face.area_m2 / 3.0) * traction[c])?;
@@ -245,6 +255,11 @@ pub enum SurfaceLoad3<'a> {
     Traction { faces: &'a [usize], pascals: [f64; 3] },
     /// Positive pressure compresses the solid on its reference exterior.
     Pressure { faces: &'a [usize], pascals: f64 },
+    /// Symmetric ordinary stress in WORLD Cartesian components. Integrates
+    /// `sigma * n_ref` with each exterior face's actual outward normal; tensile
+    /// normal stress is positive. This is a prescribed reference dead load,
+    /// not a finite-deformation Cauchy-to-Piola conversion or follower load.
+    Stress { faces: &'a [usize], pascals: [[f64; 3]; 3] },
 }
 #[derive(Debug, Clone, Copy)]
 pub enum VolumeLoad3<'a> {

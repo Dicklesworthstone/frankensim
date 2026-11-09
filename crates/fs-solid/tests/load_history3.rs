@@ -5,10 +5,11 @@ use support::{block, with_cx};
 use fs_blake3::ContentHash;
 use fs_ga::Vec3;
 use fs_qty::{Dims, QtyAny};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, Frame, FrameId, FrameMotion, FrameTree,
     Physics, TimeSignal, WORLD};
 use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, Payload, PayloadId,
-    PayloadMeta, QuantityContract, ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload};
+    PayloadMeta, QuantityContract, ReferenceSemantics, SampleSource, TableInterpolation, TensorPayload, VectorPayload};
 use fs_solid::linear3::{TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
     TetThermalStrainField, TetThermalStrainState};
 use fs_solid::loads3::{SurfaceLoad3, TetLoadGeometry3, VolumeLoad3};
@@ -36,6 +37,99 @@ fn rotating() -> FrameTree {
         motion: FrameMotion::Rotating { axis: [0.0, 0.0, 1.0], center: Vec3::new(1e6, -2e6, 0.0),
             rate: QtyAny::new(std::f64::consts::FRAC_PI_2, Dims([0, 0, -1, 0, 0, 0])) } });
     frames
+}
+
+
+fn stress_source(frame: FrameId, a: [[f64; 3]; 3], b: [[f64; 3]; 3], kind: QuantityKind) -> TensorPayload {
+    let meta = PayloadMeta::new(QuantityContract::Semantic(SemanticType::new(kind, ValueForm::Instantaneous)),
+        PayloadId::new("basis/frame-cartesian").unwrap(), frame, OrientationParity::Even,
+        ReferenceSemantics::Continuous).unwrap();
+    TensorPayload::new(meta, 3, 3, SampleSource::table(
+        vec![QtyAny::new(0.0, TIME), QtyAny::new(1.0, TIME)],
+        [a, b].map(|tensor| tensor.into_iter().flatten().map(|v| QtyAny::new(v, TRACTION_DIMS)).collect()).to_vec(),
+        TableInterpolation::Linear, OutsideDomainPolicy::Clamp).unwrap()).unwrap()
+}
+
+#[test]
+fn g1_tensor_stress_reaches_native_affine_equilibrium_and_balanced_boundary_work() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let mat = material(2.0);
+    let frames = FrameTree::new();
+    let sigma = [[10.0, 0.0, 0.0], [0.0; 3], [0.0; 3]];
+    let value = stress_source(WORLD, sigma, sigma, QuantityKind::Stress);
+    // Remove only rigid modes; the remaining DOFs admit exact Poisson contraction.
+    let problem = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[0, 1, 2, 4, 5, 8], budget: Default::default() };
+    with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&nodes, &tets, problem.budget, 4, cx).unwrap();
+        let faces: Vec<_> = (0..geometry.faces().len()).collect();
+        let surfaces = [SurfaceHistory3::Stress { faces: &faces, value: &value }];
+        let history = TetLoadHistory3 { surfaces: &surfaces, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames };
+        let load = history.at(&geometry, &problem, 0.5, cx).unwrap();
+        let (force, moment) = load.resultant([0.0; 3], cx).unwrap();
+        for v in force.into_iter().chain(moment) { close(v, 0.0, 1e-12); }
+        let solution = load.solve(TetThermalStrainField::Uniform(&thermal()), Default::default(),
+            ContentHash([9; 32]), 0.1, cx).unwrap();
+        for (position, displacement) in nodes.iter().zip(solution.displacement.displacement_m()) {
+            for (actual, expected) in displacement.iter().zip([1e-5*position[0], -2.5e-6*position[1], -2.5e-6*position[2]]) {
+                close(*actual, expected, 1e-12);
+            }
+        }
+        for r in solution.support_reactions_n.iter().flatten() { close(*r, 0.0, 1e-9); }
+        // An isotropic compressive stress is the native pressure law, including
+        // its outward-normal sign on every sloped or coordinate-aligned face.
+        let hydrostatic = [[-7.0, 0.0, 0.0], [0.0, -7.0, 0.0], [0.0, 0.0, -7.0]];
+        let a = geometry.assemble(&[SurfaceLoad3::Stress { faces: &faces, pascals: hydrostatic }],
+            VolumeLoad3::None, &[], cx).unwrap();
+        let b = geometry.assemble(&[SurfaceLoad3::Pressure { faces: &faces, pascals: 7.0 }],
+            VolumeLoad3::None, &[], cx).unwrap();
+        assert_eq!(a.nodal_forces_n(), b.nodal_forces_n());
+    });
+}
+
+#[test]
+fn g3_stress_history_rotates_both_indices_and_uses_each_actual_reference_normal() {
+    let mesh = block([1; 3], [1.0; 3]); let mat = material(2.0); let frames = rotating();
+    let value = stress_source(FrameId(1), [[10.0, 0.0, 0.0], [0.0; 3], [0.0; 3]],
+        [[20.0, 0.0, 0.0], [0.0; 3], [0.0; 3]], QuantityKind::Stress);
+    let p = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[], budget: Default::default() };
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, p.budget, 100, cx).unwrap();
+        let right: Vec<_> = g.faces().iter().enumerate().filter_map(|(i, f)| (f.outward_normal[0] > 0.99).then_some(i)).collect();
+        let rows = [SurfaceHistory3::Stress { faces: &right, value: &value }];
+        let history = TetLoadHistory3 { surfaces: &rows, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames };
+        for (t, expected) in [(0.0, [10.0, 0.0, 0.0]), (0.5, [7.5, 7.5, 0.0]),
+            (1.0, [0.0; 3]), (2.0, [20.0, 0.0, 0.0])] {
+            let (force, moment) = history.at(&g, &p, t, cx).unwrap().resultant([0.0; 3], cx).unwrap();
+            for (a, b) in force.into_iter().zip(expected) { close(a, b, 1e-10); }
+            let expected_moment = [-0.5*expected[1], 0.5*expected[0], expected[1]-0.5*expected[0]];
+            for (a, b) in moment.into_iter().zip(expected_moment) { close(a, b, 1e-10); }
+        }
+    });
+}
+
+#[test]
+fn g0_stress_history_refuses_pressure_semantic_aliases_and_nonsymmetric_tensors() {
+    let mesh = block([1; 3], [1.0; 3]); let mat = material(2.0); let frames = FrameTree::new();
+    let symmetric = [[1.0; 3]; 3];
+    let pressure = stress_source(WORLD, symmetric, symmetric, QuantityKind::Pressure);
+    let unsymmetric = [[1.0, 2.0, 0.0], [1.0, 1.0, 0.0], [0.0; 3]];
+    let stress = stress_source(WORLD, unsymmetric, unsymmetric, QuantityKind::Stress);
+    let p = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[], budget: Default::default() };
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, p.budget, 100, cx).unwrap();
+        for value in [&pressure, &stress] {
+            let rows = [SurfaceHistory3::Stress { faces: &[0], value }];
+            let history = TetLoadHistory3 { surfaces: &rows, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+                nodal_forces_n: &[], frames: &frames };
+            assert!(history.at(&g, &p, 0.5, cx).is_err());
+        }
+    });
 }
 
 #[test]

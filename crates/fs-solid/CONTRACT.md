@@ -14088,3 +14088,36 @@ both refusal of a new rigid offset and preservation of an already accepted one.
 ### Graded reference density through hexahedral thermal prestress
 
 `Hex8ElasticProblem` and `HexElasticProblem` expose `solve_thermal_tangent_with_reference_density` and `solve_thermal_tangent_with_reference_density_and_prescribed_dofs`. The positive Q1 eight-corner reference inventory reaches consistent prestressed mass through the native graded assembler; changed elastic-material density never refreshes that inventory. The prescribed-support entry retains physical nonzero support displacement and homogeneous incremental vibration supports. Hex8 preserves Standard/BBar and `max(3, stiffness_points_per_dir)` mass integration. Hex20/27 retain independent explicit mass quadrature and their original affine/curved admission. Density and mass-rule admission precede equilibrium. The complete profile and mass order bind prestress and configuration identities, including inventory whose moments are hidden by support elimination. Native thermal equilibrium, stress recovery and signed geometric stiffness retain their existing owners and limits; these entries add no finite-strain, follower-load or modal-transfer capability.
+
+## Typed tensor stress histories on native reference surfaces
+
+`loads3::SurfaceLoad3::Stress` maps a finite symmetric WORLD tensor to each
+selected exterior face's traction `sigma * n_ref`, then uses the existing P1
+surface-force integral. Tensile stress is positive; `sigma=-p I` is the same
+load as positive inward pressure. The original geometry owner supplies normals
+away from the incident tetrahedron, independent of connectivity winding.
+
+`loads3::history::SurfaceHistory3::Stress` consumes the existing scenario tensor
+carrier and shared history/frame evaluator. It admits dimension-only Pa or
+exact semantic Stress in static/instantaneous form, with even parity and a
+symmetric sampled tensor. Pressure semantic aliases, amplitude forms, skew
+tensors and unsupported source/frame policies refuse. Both tensor indices
+rotate; no source table is cloned or rescanned at each ordinary endpoint.
+Static equilibrium, reactions, support histories and sparse Newmark trajectories
+reuse this load path with their existing transactional publication and
+cancellation. Event-aligned trajectories use the shared component-history
+index, account for all nine components, retain exact held left limits and
+register the tensor's frame ancestry. Periodic tables require an explicit
+unrolled schedule, just as existing vector event histories do.
+
+Focused regressions in `load_history3` specify an independent affine elastic
+solution, closed-boundary force/moment balance, hydrostatic equivalence and
+rotating stress resultants. `transient_history3` specifies independent nodal
+forcing, an analytic ramp-driven oscillator, held stress jumps, event-budget
+accounting and late-refusal/cancellation rollback. These tests have not executed:
+Cargo typechecking and runtime verification were blocked when the build
+environment disconnected during dependency preparation. The pre-recovery
+source was syntax-checked with pinned rustfmt; the recovered event-scheduler
+extension has source review only. This is uniform prescribed reference dead
+loading in the small-strain owner; it does not infer follower geometry,
+spatial stress interpolation or a finite-deformation Cauchy-to-Piola conversion.
