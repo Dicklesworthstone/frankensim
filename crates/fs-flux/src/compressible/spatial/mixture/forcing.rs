@@ -214,6 +214,60 @@ pub(super) fn acoustic_rate(p: Primitive, grid: &CartesianGrid) -> Result<f64, E
     Ok(rate)
 }
 
+/// Physical source admission uses lab velocity; its acoustic budget uses the
+/// actual two moving faces of each cell, including a deforming interval.
+pub(super) fn moving_acoustic_rate(
+    p: Primitive,
+    grid: &CartesianGrid,
+    index: usize,
+    motion: MeshMotion,
+) -> Result<f64, Error> {
+    if motion == MeshMotion::default() {
+        return acoustic_rate(p, grid);
+    }
+    let coordinates = grid.coordinates(index);
+    let rate: f64 = (0..3)
+        .map(|axis| {
+            let lo = motion.velocity(grid, axis, coordinates[axis]);
+            let hi = motion.velocity(grid, axis, coordinates[axis] + 1);
+            ((p.velocity[axis] - lo)
+                .abs()
+                .max((p.velocity[axis] - hi).abs())
+                + p.sound_speed)
+                / grid.spacing[axis]
+        })
+        .sum();
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(Error::Invalid(
+            "unrepresentable forced moving mixture acoustic rate",
+        ));
+    }
+    Ok(rate)
+}
+
+/// Admit the final state of a moving source composition after molecular or
+/// reacting work, retaining physical Mach and mesh-relative acoustic bounds.
+pub(super) fn admit_moving_field(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    states: &[f64],
+    control: ForceControl3d,
+    motion: MeshMotion,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    let mut rate: f64 = 0.0;
+    for (i, row) in states.chunks_exact(gas.species_count() + 4).enumerate() {
+        if i % 64 == 0 {
+            stepping::poll::<Error>(cancelled)?;
+        }
+        let p = cell(row, gas.species_count()).primitive(gas, &mut *cancelled)?;
+        control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+        rate = rate.max(moving_acoustic_rate(p, grid, i, motion)?);
+    }
+    stepping::poll::<Error>(cancelled)?;
+    Ok(rate)
+}
+
 /// Admit an enclosing composition's final physical state after chemistry or
 /// molecular heating, rather than only its central forced Euler endpoint.
 pub(super) fn admit_field(

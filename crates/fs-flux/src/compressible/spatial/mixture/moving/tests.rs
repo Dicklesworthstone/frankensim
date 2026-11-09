@@ -3,6 +3,8 @@ use crate::compressible::AxisBoundaries;
 use crate::compressible::mixture::tests::{close, gas, source, standard};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod forced;
+
 const OPEN: AxisBoundaries = AxisBoundaries::Ends {
     lower: BoundaryCondition::Transmissive,
     upper: BoundaryCondition::Transmissive,

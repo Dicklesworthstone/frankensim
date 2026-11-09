@@ -43,8 +43,13 @@ pub mod reactive;
 pub mod vorticity;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
-pub use reservoir::{FiniteReservoir, FiniteReservoirHeat, FiniteReservoirReport, ReservoirBoundary};
-pub use super::super::mixture::{FiniteReservoirHeatReport, FiniteReservoirInventory, FiniteReservoirTransfer, WallControl, WallThermal};
+pub use super::super::mixture::{
+    FiniteReservoirHeatReport, FiniteReservoirInventory, FiniteReservoirTransfer, WallControl,
+    WallThermal,
+};
+pub use reservoir::{
+    FiniteReservoir, FiniteReservoirHeat, FiniteReservoirReport, ReservoirBoundary,
+};
 /// Prepared physical-face reservoir traces for spatially varying inflow.
 pub mod reservoir_profiles;
 pub use reservoir_profiles::ReservoirFaceState;
@@ -259,7 +264,9 @@ impl MixtureEuler3d {
                 .checked_mul(size_of::<f64>())?
                 .checked_add(grid.len().checked_mul(size_of::<Primitive>())?)?
                 .checked_add(faces.checked_mul(size_of::<FaceFlux>())?)?
-                .checked_add(size_of::<super::super::mixture::finite::FiniteReservoirs<3, 6>>())
+                .checked_add(size_of::<
+                    super::super::mixture::finite::FiniteReservoirs<3, 6>,
+                >())
         };
         checked().ok_or(Error::Invalid("volumetric species workspace size overflow"))
     }
@@ -911,7 +918,11 @@ fn rk_stage(
         boundaries,
         reservoirs,
         trial_profiles,
-        if final_stage { FiniteStage::Trial } else { FiniteStage::TransportStart },
+        if final_stage {
+            FiniteStage::Trial
+        } else {
+            FiniteStage::TransportStart
+        },
         if final_stage { &work.stage } else { original },
         &mut work.primitive,
         &mut work.slopes,
@@ -1090,7 +1101,12 @@ fn spatial_with_motion(
         }
         if let Some(control) = force_control {
             control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
-            cell_rate = cell_rate.max(forcing::acoustic_rate(*p, grid)?);
+            let local = if let Some(motion) = motion {
+                forcing::moving_acoustic_rate(*p, grid, k, motion)?
+            } else {
+                forcing::acoustic_rate(*p, grid)?
+            };
+            cell_rate = cell_rate.max(local);
         }
     }
     let value = |k: usize, d: usize| {
@@ -1175,6 +1191,21 @@ fn spatial_with_motion(
         let first_order = reconstruction == Reconstruction::FirstOrder;
         let receipt = if let Some(motion) = motion {
             let speed = motion.face_velocity(grid, axis, face.index);
+            // Use the source's primitive constructor for the physical face
+            // sound speed. No caloric inversion or new face storage is needed.
+            let mut admit_trace = |values: &[f64]| -> Result<(), Error> {
+                if let Some(control) = force_control {
+                    let p = gas.spatial_conserved_into(
+                        normal_primitive(values, n, axis),
+                        &mut check[..width],
+                    )?;
+                    control.admit_velocity::<Error>(
+                        [values[n], values[n + 1], values[n + 2]],
+                        p.sound_speed,
+                    )?;
+                }
+                Ok(())
+            };
             match face.kind {
                 cartesian::FaceKind::Interior { left: l, right: r } => {
                     if first_order {
@@ -1188,6 +1219,8 @@ fn spatial_with_motion(
                     } else {
                         face_trace(l, 0.5, &mut left[..width]);
                         face_trace(r, -0.5, &mut right[..width]);
+                        admit_trace(&left[..width])?;
+                        admit_trace(&right[..width])?;
                         gas.moving_hllc_spatial_flux_from_primitive(
                             normal_primitive(&left[..width], n, axis),
                             normal_primitive(&right[..width], n, axis),
@@ -1204,6 +1237,7 @@ fn spatial_with_motion(
                 } => {
                     if !first_order {
                         face_trace(k, 0.5 * sign, &mut left[..width]);
+                        admit_trace(&left[..width])?;
                     }
                     match (first_order, condition) {
                         (true, BoundaryCondition::Reflecting) => gas.moving_wall_spatial_flux(
@@ -1409,8 +1443,8 @@ fn spatial_with_motion(
         if let cartesian::FaceKind::Boundary { sign, .. } = face.kind {
             let slot = 2 * axis + usize::from(sign > 0.0);
             if let Some(volume) = reservoirs.finite.volume(slot) {
-                let increment = 0.5 * grid.face_area(BoundarySide::ALL[slot])
-                    * receipt.signal_speed / volume;
+                let increment =
+                    0.5 * grid.face_area(BoundarySide::ALL[slot]) * receipt.signal_speed / volume;
                 let y = increment - finite_corrections[slot];
                 let next = finite_rates[slot] + y;
                 finite_corrections[slot] = (next - finite_rates[slot]) - y;

@@ -11916,3 +11916,31 @@ only after the final cancellation checkpoint. Cellwise force coefficients are
 held in original cell order throughout motion and retries. Existing closed or
 periodic moving-domain and single-axis affine-deformation restrictions remain
 authoritative.
+
+
+### Body impulse and work in moving three-dimensional mixtures
+
+`spatial::mixture::MixtureEuler3d::step_moving_with_forcing` composes the
+original held mechanical source half-kicks around conservative ALE transport.
+The first kick uses the old physical cell volume; the second uses the actual
+new volume. Acceleration acts on stage mass, while force density acts on stage
+volume. Canonical species and their original energy references are preserved
+by the kicks. The native source law supplies represented vector impulse and
+kinetic work, including its midpoint or exact Coriolis behavior.
+
+The mixture step report retains all body impulses and work separately from
+moving-boundary transfer. Referenced and restored physical energy residuals
+include that source exactly once. Every forced cell, source endpoint, RK stage
+and reconstructed physical trace obeys the caller's laboratory Mach bound.
+Moving acoustic CFL uses the actual velocities of both faces of each deforming
+cell. The face check consumes the original mixture primitive constructor and
+its sound speed without a nonlinear caloric inversion.
+
+Prepared source scratch and native extensive RK buffers are reused. Every
+refusal retries both source halves and ALE from accepted state; gas, geometry,
+clock, boundary loads and reports publish only after the final checkpoint.
+Zero force delegates to original moving transport; zero motion delegates to
+stationary forced transport. Cellwise coefficients are held in original cell
+order over each attempted interval. Existing domain restrictions remain in
+force; this entry does not imply hydrostatic balancing, force-field resampling
+or a moving-frame transformation.

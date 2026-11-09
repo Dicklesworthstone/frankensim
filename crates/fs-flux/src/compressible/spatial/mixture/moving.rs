@@ -33,11 +33,71 @@ impl MixtureEuler3d {
         maximum_duration: Time,
         controls: StepControl,
         motion: MeshMotion,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         if motion == MeshMotion::default() {
             return self.step(maximum_duration, controls, cancelled);
         }
+        self.step_moving_impl(maximum_duration, controls, motion, None, cancelled)
+    }
+
+    /// Compose held mechanical source kicks with conservative moving volumes.
+    ///
+    /// The original exact kinetic-work kicks surround native ALE transport.
+    /// Acceleration uses the actual species mass at each half; force density
+    /// uses that half's actual old or new volume. Physical Mach admission and
+    /// mesh-relative acoustic limits apply to source, RK and face states.
+    /// Species and their energy references are unchanged by either kick, and
+    /// the source impulse/work remain separate from boundary exchange.
+    ///
+    /// Every retry restarts both kicks and ALE from accepted storage. The
+    /// supplied workspace is prepared once and retains the first kicked field.
+    /// Zero force follows the unforced moving path; zero motion follows the
+    /// original forced stationary path. Publication remains atomic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_moving_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        motion: MeshMotion,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        if motion == MeshMotion::default() {
+            return self.step_with_forcing(
+                maximum_duration,
+                controls,
+                force,
+                force_controls,
+                workspace,
+                cancelled,
+            );
+        }
+        stepping::poll::<Error>(&mut cancelled)?;
+        force_controls.admit::<Error>()?;
+        workspace.admit(self)?;
+        if !force.admit::<Error>(self.cell_count(), &mut cancelled)? {
+            return self.step_moving(maximum_duration, controls, motion, cancelled);
+        }
+        self.step_moving_impl(
+            maximum_duration,
+            controls,
+            motion,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    fn step_moving_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        motion: MeshMotion,
+        mut forcing: Option<forcing::Context<'_, '_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
         stepping::poll::<Error>(&mut cancelled)?;
         self.admit_motion(motion)?;
         if !positive(maximum_duration.value())
@@ -58,6 +118,9 @@ impl MixtureEuler3d {
             .enumerate()
         {
             *p = cell(q, n).primitive(&self.gas, &mut cancelled)?;
+            if let Some((_, control, _)) = forcing.as_ref() {
+                control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             let c = grid.coordinates(k);
             let local: f64 = (0..3)
                 .map(|axis| {
@@ -79,6 +142,7 @@ impl MixtureEuler3d {
         }
         let before = checked_totals(&self.states, &grid, n, &mut cancelled)?;
         let mut next_grid = grid;
+        let mut source_change = ForceChange3d::default();
         let accepted = stepping::advance::<Error, _>(
             maximum_duration.value(),
             self.time,
@@ -90,26 +154,80 @@ impl MixtureEuler3d {
                     fs_gas::dynamics::Error::Invalid(reason) => Error::Invalid(reason),
                     _ => Error::Invalid("moving mixture geometry"),
                 })?;
-                let stats = attempt(
-                    &self.gas,
-                    &grid,
-                    &next,
-                    self.boundaries,
-                    &self.reservoirs,
-                    motion,
-                    &self.states,
-                    &mut self.work,
-                    dt,
-                    controls.cfl,
-                    reconstruction,
-                    cancelled,
-                )?;
+                let stats = if let Some((force, control, workspace)) = forcing.as_mut() {
+                    copy_values(&self.states, &mut workspace.kicked, cancelled)?;
+                    let mut source = forcing::Accumulator::default();
+                    forcing::kick_field(
+                        &self.gas,
+                        &grid,
+                        &mut workspace.kicked,
+                        *force,
+                        *control,
+                        0.5 * dt,
+                        &mut source,
+                        false,
+                        cancelled,
+                    )?;
+                    let mut stats = attempt_with_forcing(
+                        &self.gas,
+                        &grid,
+                        &next,
+                        self.boundaries,
+                        &self.reservoirs,
+                        motion,
+                        &workspace.kicked,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        Some(*control),
+                        cancelled,
+                    )?;
+                    forcing::kick_field(
+                        &self.gas,
+                        &next,
+                        &mut self.work.candidate,
+                        *force,
+                        *control,
+                        0.5 * dt,
+                        &mut source,
+                        false,
+                        cancelled,
+                    )?;
+                    let final_rate = forcing::admit_moving_field(
+                        &self.gas,
+                        &next,
+                        &self.work.candidate,
+                        *control,
+                        motion,
+                        cancelled,
+                    )?;
+                    stepping::check_cfl::<Error>(final_rate * dt, controls.cfl)?;
+                    stats.rate = stats.rate.max(final_rate);
+                    source_change = source.finish()?;
+                    stats
+                } else {
+                    attempt(
+                        &self.gas,
+                        &grid,
+                        &next,
+                        self.boundaries,
+                        &self.reservoirs,
+                        motion,
+                        &self.states,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        cancelled,
+                    )?
+                };
                 next_grid = next;
                 Ok(stats)
             },
         )?;
         let after = checked_totals(&self.work.candidate, &next_grid, n, &mut cancelled)?;
-        let report = reported_step(
+        let mut report = reported_step(
             &self.gas,
             before,
             after,
@@ -120,6 +238,24 @@ impl MixtureEuler3d {
             accepted.reconstruction != controls.reconstruction,
             &mut cancelled,
         )?;
+        if forcing.is_some() {
+            report.source_change = source_change;
+            for axis in 0..3 {
+                report.conservation_residual.momentum[axis] -= source_change.impulse[axis];
+            }
+            report.conservation_residual.energy -= source_change.work;
+            report.absolute_energy_residual_j =
+                report.conservation_residual.absolute_energy(&self.gas)?;
+            if !report
+                .conservation_residual
+                .momentum
+                .iter()
+                .all(|v| v.is_finite())
+                || !report.conservation_residual.energy.is_finite()
+            {
+                return Err(Error::Invalid("moving mixture forced balance overflow"));
+            }
+        }
         stepping::poll::<Error>(&mut cancelled)?;
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
@@ -206,6 +342,39 @@ pub(super) fn attempt(
     reconstruction: Reconstruction,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
+    attempt_with_forcing(
+        gas,
+        original_grid,
+        next_grid,
+        boundaries,
+        reservoirs,
+        motion,
+        states,
+        work,
+        dt,
+        cfl,
+        reconstruction,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_forcing(
+    gas: &MixtureGas,
+    original_grid: &CartesianGrid,
+    next_grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
+    motion: MeshMotion,
+    states: &[f64],
+    work: &mut Workspace,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl3d>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<stepping::StageStats, Error> {
     let width = gas.species_count() + 4;
     stepping::rk2(cancelled, |final_stage, cancelled| {
         let grid = if final_stage {
@@ -214,7 +383,7 @@ pub(super) fn attempt(
             original_grid
         };
         let input = if final_stage { &work.stage[..] } else { states };
-        let stats = spatial_with_motion(
+        let mut stats = spatial_with_motion(
             gas,
             grid,
             boundaries,
@@ -227,13 +396,13 @@ pub(super) fn attempt(
             &mut work.flux,
             &mut work.metadata,
             reconstruction,
-            None,
+            force_control,
             None,
             Some(motion),
             cancelled,
         )?;
         stepping::check_cfl::<Error>(stats.rate * dt, cfl)?;
-        if final_stage {
+        let updated_rate = if final_stage {
             update(
                 gas,
                 original_grid,
@@ -245,8 +414,10 @@ pub(super) fn attempt(
                 &mut work.candidate,
                 dt,
                 true,
+                force_control,
+                motion,
                 cancelled,
-            )?;
+            )?
         } else {
             update(
                 gas,
@@ -259,8 +430,14 @@ pub(super) fn attempt(
                 &mut work.stage,
                 dt,
                 false,
+                force_control,
+                motion,
                 cancelled,
-            )?;
+            )?
+        };
+        if force_control.is_some() {
+            stepping::check_cfl::<Error>(updated_rate * dt, cfl)?;
+            stats.rate = stats.rate.max(updated_rate);
         }
         cartesian::capture::<Error>(
             grid,
@@ -290,14 +467,17 @@ fn update(
     output: &mut [f64],
     dt: f64,
     final_stage: bool,
+    force_control: Option<ForceControl3d>,
+    motion: MeshMotion,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Error> {
+) -> Result<f64, Error> {
     let n = gas.species_count();
     let width = n + 4;
     let v0 = original_grid.cell_volume();
     let vs = stage_grid.cell_volume();
     let v1 = next_grid.cell_volume();
     let mut row = [0.0; WIDTH_LIMIT];
+    let mut rate: f64 = 0.0;
     cartesian::divergence::<WIDTH_LIMIT, Error, _>(
         stage_grid,
         width,
@@ -314,11 +494,16 @@ fn update(
                     forward / v1
                 };
             }
-            cell(&row[..width], n).primitive(gas, &mut *cancelled)?;
+            let p = cell(&row[..width], n).primitive(gas, &mut *cancelled)?;
+            if let Some(control) = force_control {
+                control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+                rate = rate.max(forcing::moving_acoustic_rate(p, next_grid, k, motion)?);
+            }
             output[start..start + width].copy_from_slice(&row[..width]);
             Ok(())
         },
-    )
+    )?;
+    Ok(rate)
 }
 
 #[cfg(test)]
