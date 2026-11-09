@@ -133,3 +133,83 @@ impl MixtureEuler3d {
             .report(side_index(side.axis(), side.sign()))
     }
 }
+
+/// Author an original gas/wall heat contact for an already bound finite tank.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteReservoirHeat {
+    pub side: BoundarySide,
+    /// Original prescribed-temperature bath or finite constant-capacity wall.
+    /// A caloric contact requires its material source and is not admitted here.
+    pub thermal: WallThermal,
+}
+
+impl MixtureEuler3d {
+    /// Total numerical capacity after preparing this many finite-tank heat sources.
+    pub fn required_workspace_bytes_with_finite_reservoir_heat(
+        &self,
+        count: usize,
+    ) -> Result<usize, Error> {
+        self.workspace_bytes
+            .checked_add(FiniteReservoirs::<3, 6>::additional_heat_bytes(&self.gas, count)?)
+            .ok_or(Error::Invalid("finite mixture thermal workspace overflow"))
+    }
+
+    /// Couple selected finite tanks to original implicit wall heat exchange.
+    ///
+    /// Bind once before stepping, after finite-tank binding. Each selected side
+    /// has independent prescribed-temperature or finite-capacity wall storage.
+    /// The original source admits all thermal inputs and uses the tank's actual
+    /// species and Cp(T) before and after port mixing.
+    ///
+    /// One implicit heat half precedes the native SSP port stages and another
+    /// follows them. The first heated pressure drives the first residual; the
+    /// evolved tank drives the second. Source splitting does not upgrade the
+    /// original backward-Euler heat law beyond first-order temporal accuracy.
+    ///
+    /// The complete wall and tank source receipt shares the field's retries,
+    /// cancellation and final publication. Accepted getters never expose a
+    /// rejected wall/temperature candidate. Existing prepared clone/reset paths
+    /// retain both gas and finite-wall histories. No reaction heat, extra port
+    /// enthalpy, volume work or external heat from a finite wall is inferred.
+    /// Warm source stages reuse one additional species buffer per heated side.
+    pub fn with_finite_reservoir_heat(
+        mut self,
+        inputs: &[FiniteReservoirHeat],
+        controls: WallControl,
+        maximum_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        stepping::poll::<Error>(&mut cancelled)?;
+        if self.time != 0.0 || self.last_step.is_some() || self.reservoirs.finite.has_heat() {
+            return Err(Error::Invalid("finite tank heat binds once before the first step"));
+        }
+        let required = self.required_workspace_bytes_with_finite_reservoir_heat(inputs.len())?;
+        if required > maximum_workspace_bytes || required > MAX_MIXTURE_WORKSPACE_BYTES {
+            return Err(Error::Invalid("finite mixture thermal total workspace budget"));
+        }
+        let before = self.reservoirs.finite.workspace_bytes();
+        for input in inputs {
+            self.reservoirs.finite.bind_heat(
+                &self.gas,
+                side_index(input.side.axis(), input.side.sign()),
+                input.thermal,
+                controls,
+                &mut cancelled,
+            )?;
+        }
+        let bytes = self.workspace_bytes.checked_sub(before)
+            .and_then(|bytes| bytes.checked_add(self.reservoirs.finite.workspace_bytes()))
+            .ok_or(Error::Invalid("finite mixture thermal workspace overflow"))?;
+        if bytes > maximum_workspace_bytes || bytes > MAX_MIXTURE_WORKSPACE_BYTES {
+            return Err(Error::Invalid("finite mixture thermal allocated workspace budget"));
+        }
+        stepping::poll::<Error>(&mut cancelled)?;
+        self.workspace_bytes = bytes;
+        Ok(self)
+    }
+
+    /// Accepted original thermal contact, including the evolved finite-wall temperature.
+    pub fn finite_reservoir_thermal(&self, side: BoundarySide) -> Option<WallThermal> {
+        self.reservoirs.finite.thermal(side_index(side.axis(), side.sign()))
+    }
+}

@@ -2,7 +2,7 @@
 use super::*;
 use super::finite::FiniteReservoirs;
 mod finite;
-pub use finite::FiniteReservoir;
+pub use finite::{FiniteReservoir, FiniteReservoirHeat};
 use crate::compressible::molecular::MolecularWall2d;
 use crate::compressible::{AxisBoundaries, SIDES};
 use fs_gas::multicomponent::dissipation::DissipationError;
@@ -169,7 +169,7 @@ impl Reservoirs {
         sign: f64,
         species: usize,
     ) -> Option<fs_gas::multicomponent::Cell<'_>> {
-        self.stagnation_cell_at(axis, sign, species, false)
+        self.stagnation_cell_at(axis, sign, species, FiniteStage::Accepted)
     }
 
     pub(super) fn stagnation_cell_at(
@@ -177,10 +177,10 @@ impl Reservoirs {
         axis: usize,
         sign: f64,
         species: usize,
-        trial: bool,
+        stage: FiniteStage,
     ) -> Option<fs_gas::multicomponent::Cell<'_>> {
         let slot = side_index(axis, sign);
-        if let Some(state) = self.finite.state(slot, trial) {
+        if let Some(state) = self.finite.state_at(slot, stage) {
             return Some(state);
         }
         if !self.stagnation[slot] {

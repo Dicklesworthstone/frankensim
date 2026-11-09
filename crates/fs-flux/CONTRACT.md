@@ -11698,3 +11698,54 @@ acoustic source remain shared, and a refused candidate or final cancellation
 publishes no gas/phase/liquid history.
 
 Fresh verification after the executor returned: the focused original-source material lane passed 33/33 tests, including all four conserved-gas groups, and the native `caloric-cavitation` lane passed 105/105 cavitation tests, including all six new mixed-gas groups and the retained pure-vapor, liquid, caloric, population and cluster regressions. Sources were scoped-formatted with Rust 2024 rustfmt. These local fallback lanes compile the actual product modules through the retained focused facades; DSR/RCH are unavailable, and no full-workspace or release-gate result is claimed.
+
+
+## Thermal pressure feedback in finite Cartesian mixture tanks
+
+Both `mixture::MixtureEuler2d` and `spatial::mixture::MixtureEuler3d` can
+author `FiniteReservoirHeat` on already bound stationary finite tanks.
+`with_finite_reservoir_heat` binds each original `WallThermal` and common
+`WallControl` before stepping. The builder re-admits total numerical storage;
+one prepared species buffer per heated side supplements the existing accepted
+and private inventories. Large accepted/trial receipts remain in the original
+prepared Vec storage rather than on every field owner's stack.
+
+The original `fs-gas::multicomponent::network::Plenum::heat_candidate_into` supplies each heat
+half. The first half heats or cools the accepted tank and wall before the first
+native SSP residual. The full first port transfer supplies the second-stage
+tank; the weighted final transfer then receives the second original heat half.
+Actual mixed composition, Cp(T), energy references, choking, backflow and both
+Cartesian shears stay under the original gas source. Heated face signals enter
+the existing field and compact-volume CFL checks. A rejected attempt restarts
+both gas and wall from accepted storage.
+
+Finite-wall heat is internal to tank plus wall. Prescribed-temperature bath
+heat is external. `FiniteReservoirHeatReport` retains original before/after
+thermal contacts, the summed source receipt and the coupled gas/wall residual.
+The native port transfer still carries full total energy and support impulse;
+no duplicate enthalpy, mechanical work or reaction heat is added. Tank pressure,
+field cells, wall temperature, receipts and accepted getters publish together
+after the composing owner's last cancellation poll. Public observations use
+accepted inventory explicitly. Prepared clone/reset copies retain wall storage,
+controls and accepted receipts without successful warm-step allocations.
+
+The thermal source is the original backward-Euler law and remains first order
+in time. Symmetric composition with the second-order native port method does
+not upgrade that wall-source order. The feature supports prescribed baths and
+constant-capacity finite walls; a caloric wall without its immutable material
+binding refuses through the original source. Tank chemistry, changing volume,
+internal thermal gradients and finite mixing times remain outside this owner.
+
+Six new actual-source native groups passed: finite-wall heating/cooling and
+pressure-driven flow on all ten 2D/3D sides with both reconstructions; external
+bath balances and adiabatic bit parity; last-poll rollback and deterministic
+retry; prepared heated storage and split restore; budgets and source refusals;
+and hot-wall CFL retry equivalence to a direct accepted interval. All twelve
+existing shared/planar/spatial finite-mixture groups passed, including off-stack
+storage, two-stage convergence, support work and small-tank admission. The same
+bounded inviscid closure also passed the seven frozen-planar finite-tank groups.
+It retains the actual field reconstruction, forcing, hydrostatics, native RK
+and timed-stage implementations with original source kernels. Molecular and
+reactive orchestration, material-wall wrappers and unrelated dependency owners
+were not compiled or executed; prepared split-copy behavior is verified at its
+shared storage seam. This is not a full workspace Cargo/DSR gate.

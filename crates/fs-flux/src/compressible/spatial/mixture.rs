@@ -10,6 +10,7 @@
 //! entropy/invariant-domain theorem or general contact preservation near shocks.
 
 pub use super::super::mixture::MAX_MIXTURE_WORKSPACE_BYTES;
+use super::super::mixture::finite::FiniteStage;
 use super::super::{
     cartesian as stepping,
     mixture::{allocated, sum},
@@ -42,8 +43,8 @@ pub mod reactive;
 pub mod vorticity;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
-pub use reservoir::{FiniteReservoir, FiniteReservoirReport, ReservoirBoundary};
-pub use super::super::mixture::{FiniteReservoirInventory, FiniteReservoirTransfer};
+pub use reservoir::{FiniteReservoir, FiniteReservoirHeat, FiniteReservoirReport, ReservoirBoundary};
+pub use super::super::mixture::{FiniteReservoirHeatReport, FiniteReservoirInventory, FiniteReservoirTransfer, WallControl, WallThermal};
 /// Prepared physical-face reservoir traces for spatially varying inflow.
 pub mod reservoir_profiles;
 pub use reservoir_profiles::ReservoirFaceState;
@@ -901,13 +902,16 @@ fn rk_stage(
     final_stage: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
+    if !final_stage {
+        reservoirs.finite.begin_heat(gas, dt, cancelled)?;
+    }
     let mut stats = spatial_with_contact(
         gas,
         grid,
         boundaries,
         reservoirs,
         trial_profiles,
-        final_stage,
+        if final_stage { FiniteStage::Trial } else { FiniteStage::TransportStart },
         if final_stage { &work.stage } else { original },
         &mut work.primitive,
         &mut work.slopes,
@@ -974,6 +978,9 @@ fn rk_stage(
         if final_stage { 1.0 } else { 2.0 },
         cancelled,
     )?;
+    if final_stage {
+        reservoirs.finite.finish_heat(gas, dt, cancelled)?;
+    }
     Ok(stats)
 }
 
@@ -998,7 +1005,7 @@ fn spatial(
         boundaries,
         reservoirs,
         false,
-        false,
+        FiniteStage::Accepted,
         states,
         primitive,
         slopes,
@@ -1018,7 +1025,7 @@ fn spatial_with_contact(
     boundaries: Boundaries3d,
     reservoirs: &reservoir::Reservoirs,
     trial_profiles: bool,
-    trial_finite: bool,
+    finite_stage: FiniteStage,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -1035,7 +1042,7 @@ fn spatial_with_contact(
         boundaries,
         reservoirs,
         trial_profiles,
-        trial_finite,
+        finite_stage,
         states,
         primitive,
         slopes,
@@ -1056,7 +1063,7 @@ fn spatial_with_motion(
     boundaries: Boundaries3d,
     reservoirs: &reservoir::Reservoirs,
     trial_profiles: bool,
-    trial_finite: bool,
+    finite_stage: FiniteStage,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -1261,7 +1268,7 @@ fn spatial_with_motion(
                     let [a, b] = tangents(axis);
                     let boundary_face = c[a] + grid.shape[a] * c[b];
                     if let Some(reservoir) =
-                        reservoirs.stagnation_cell_at(axis, sign, n, trial_finite)
+                        reservoirs.stagnation_cell_at(axis, sign, n, finite_stage)
                     {
                         if first_order {
                             gas.reservoir_spatial_flux(

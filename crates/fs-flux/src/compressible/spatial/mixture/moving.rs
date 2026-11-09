@@ -220,7 +220,7 @@ pub(super) fn attempt(
             boundaries,
             reservoirs,
             false,
-            false,
+            FiniteStage::Accepted,
             input,
             &mut work.primitive,
             &mut work.slopes,

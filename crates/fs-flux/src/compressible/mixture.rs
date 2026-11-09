@@ -14,8 +14,10 @@ pub mod molecular;
 pub mod reactive;
 pub(in crate::compressible) mod finite;
 mod reservoir;
-pub use finite::{FiniteReservoirInventory, FiniteReservoirTransfer};
-pub use reservoir::{FiniteReservoir, ReservoirBoundary};
+pub use finite::{FiniteReservoirHeatReport, FiniteReservoirInventory, FiniteReservoirTransfer};
+use finite::FiniteStage;
+pub use fs_gas::multicomponent::wall_exchange::{WallControl, WallThermal};
+pub use reservoir::{FiniteReservoir, FiniteReservoirHeat, ReservoirBoundary};
 /// Accepted finite-tank exchange in two Cartesian dimensions.
 pub type FiniteReservoirReport = finite::FiniteReservoirReport<2>;
 /// Conservative acceleration and body-force work on the original mixture owner.
@@ -762,12 +764,15 @@ fn attempt_with_contact(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     cartesian::rk2(cancelled, |final_stage, cancelled| {
+        if !final_stage {
+            reservoirs.finite.begin_heat(gas, dt, cancelled)?;
+        }
         let mut stats = spatial_with_contact(
             gas,
             grid,
             boundaries,
             reservoirs,
-            final_stage,
+            if final_stage { FiniteStage::Trial } else { FiniteStage::TransportStart },
             if final_stage { &work.stage } else { original },
             &mut work.primitive,
             &mut work.slopes,
@@ -844,6 +849,9 @@ fn attempt_with_contact(
             if final_stage { 1.0 } else { 2.0 },
             cancelled,
         )?;
+        if final_stage {
+            reservoirs.finite.finish_heat(gas, dt, cancelled)?;
+        }
         Ok(stats)
     })
 }
@@ -870,7 +878,7 @@ fn spatial(
         grid,
         boundaries,
         reservoirs,
-        false,
+        FiniteStage::Accepted,
         states,
         primitive,
         slopes,
@@ -891,7 +899,7 @@ fn spatial_with_contact(
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
     reservoirs: &reservoir::Reservoirs,
-    trial_finite: bool,
+    finite_stage: FiniteStage,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -1027,7 +1035,7 @@ fn spatial_with_contact(
                 sign,
                 condition,
             } => {
-                if let Some(reservoir) = reservoirs.stagnation_cell_at(axis, sign, n, trial_finite) {
+                if let Some(reservoir) = reservoirs.stagnation_cell_at(axis, sign, n, finite_stage) {
                     if first_order {
                         gas.reservoir_normal_flux(
                             q(k),

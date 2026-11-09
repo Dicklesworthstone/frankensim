@@ -5,6 +5,11 @@
 
 use fs_gas::multicomponent::network::Plenum;
 use fs_gas::multicomponent::{Cell, Conserved, Error, MAX_SPECIES, MixtureGas, Primitive};
+use fs_gas::multicomponent::wall_exchange::{WallCellReport, WallControl, WallThermal};
+
+mod heat;
+pub use heat::FiniteReservoirHeatReport;
+pub(in crate::compressible) use heat::FiniteStage;
 
 /// Extensive, stationary tank inventory in the original canonical species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,10 +79,12 @@ pub struct FiniteReservoirReport<const D: usize> {
     pub before: FiniteReservoirInventory,
     pub after: FiniteReservoirInventory,
     pub transfer: FiniteReservoirTransfer<D>,
+    /// Original thermal-source receipt when this tank has an authored wall/bath.
+    pub heat: Option<FiniteReservoirHeatReport>,
     /// Per-species inventory change less the native signed face transfer [kg].
     pub species_residual_kg: [f64; MAX_SPECIES],
     pub mass_residual_kg: f64,
-    /// Referenced internal-energy change less native total-energy transfer [J].
+    /// Referenced internal-energy change less port energy and authored wall heat [J].
     pub energy_residual_j: f64,
     /// The same residual restored to the original chemical-energy gauge [J].
     pub absolute_energy_residual_j: f64,
@@ -97,6 +104,13 @@ pub(in crate::compressible) struct FiniteReservoirs<const D: usize, const S: usi
     reports: [Vec<FiniteReservoirReport<D>>; S],
     trial_reports: [Vec<FiniteReservoirReport<D>>; S],
     allocated_bytes: usize,
+    // Only heated sides allocate a third inventory. It is the unpublished
+    // transport start, then is reused for the final thermal endpoint.
+    heat_base: [Option<Plenum>; S],
+    heat_state: [Option<WallThermal>; S],
+    trial_heat_state: [Option<WallThermal>; S],
+    heat_controls: [Option<WallControl>; S],
+    trial_heat_reports: [Option<WallCellReport>; S],
 }
 impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
     pub(in crate::compressible) fn empty() -> Self {
@@ -108,6 +122,11 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             reports: std::array::from_fn(|_| Vec::new()),
             trial_reports: std::array::from_fn(|_| Vec::new()),
             allocated_bytes: 0,
+            heat_base: std::array::from_fn(|_| None),
+            heat_state: [None; S],
+            trial_heat_state: [None; S],
+            heat_controls: [None; S],
+            trial_heat_reports: [None; S],
         }
     }
 
@@ -307,7 +326,11 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             let after = self.trial[slot]
                 .as_mut()
                 .expect("prepared finite mixture output");
-            before.exchange_candidate_into(
+            let start = self.heat_base[slot].as_ref().unwrap_or(before);
+            if self.heat_state[slot].is_some() && self.trial_heat_reports[slot].is_none() {
+                return Err(Error::Invalid("finite tank heat stage was not prepared"));
+            }
+            start.exchange_candidate_into(
                 gas,
                 &totals[..n],
                 totals[width - 1],
@@ -334,8 +357,9 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
                     - before_inventory.species_masses[d]
                     - transfer.species_masses[d];
             }
+            let heat_to_gas_j = self.trial_heat_reports[slot].map_or(0.0, |q| q.heat_to_gas_j);
             let energy_residual_j =
-                after_inventory.energy - before_inventory.energy - transfer.energy;
+                after_inventory.energy - before_inventory.energy - transfer.energy - heat_to_gas_j;
             let mass_residual_kg = sum(species_residual_kg[..n].iter().copied());
             let absolute_energy_residual_j =
                 absolute_energy(gas, n, &species_residual_kg, energy_residual_j)?;
@@ -349,12 +373,14 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
                     "unrepresentable finite mixture port balance",
                 ));
             }
+            let heat = self.heat_receipt(slot, energy_residual_j);
             self.trial_primitive[slot] = Some(primitive);
             self.trial_reports[slot].clear();
             self.trial_reports[slot].push(FiniteReservoirReport {
                 before: before_inventory,
                 after: after_inventory,
                 transfer,
+                heat,
                 species_residual_kg,
                 mass_residual_kg,
                 energy_residual_j,
@@ -370,6 +396,7 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
             if self.accepted[slot].is_some() {
                 std::mem::swap(&mut self.accepted[slot], &mut self.trial[slot]);
                 self.primitive[slot] = self.trial_primitive[slot];
+                self.heat_state[slot] = self.trial_heat_state[slot];
                 std::mem::swap(&mut self.reports[slot], &mut self.trial_reports[slot]);
             }
         }
@@ -384,6 +411,9 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
         for slot in 0..S {
             if let Some(tank) = &self.accepted[slot] {
                 result.bind(gas, slot, tank.volume_m3(), tank.state(), cancelled)?;
+                if let Some(thermal) = self.heat_state[slot] {
+                    result.bind_heat(gas, slot, thermal, self.heat_controls[slot].expect("bound heat control"), cancelled)?;
+                }
                 result.reports[slot].extend_from_slice(&self.reports[slot]);
                 result.trial_reports[slot].extend_from_slice(&self.reports[slot]);
             }
@@ -402,7 +432,9 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
     ) -> Result<(), Error> {
         poll(cancelled)?;
         for slot in 0..S {
-            if self.has_side(slot) != source.has_side(slot) {
+            if self.has_side(slot) != source.has_side(slot)
+                || self.heat_state[slot].is_some() != source.heat_state[slot].is_some()
+            {
                 return Err(Error::Invalid(
                     "prepared finite mixture reservoir bindings differ",
                 ));
@@ -421,11 +453,13 @@ impl<const D: usize, const S: usize> FiniteReservoirs<D, S> {
                     &mut *cancelled,
                 )?;
                 self.trial_primitive[slot] = source.primitive[slot];
+                self.trial_heat_state[slot] = source.heat_state[slot];
                 self.trial_reports[slot].clear();
                 self.trial_reports[slot].extend_from_slice(&source.reports[slot]);
             }
         }
         poll(cancelled)?;
+        self.heat_controls = source.heat_controls;
         self.publish();
         Ok(())
     }
