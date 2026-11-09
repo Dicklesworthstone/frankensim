@@ -1130,3 +1130,14 @@ unequal rates, tiny intervals, overflowing rate sums, subnormal rates and
 source/residence semigroup composition. Work limits, exact-yield admission and
 late cancellation remain mandatory. These are numerical tests of the admitted
 two-state model, not physical calibration or a certified forward-error bound.
+
+## Representable late reaction survivors
+
+`ReactionPlan::apply` scales noncyclic same-node survival through the shared
+`fs_math::decay::attenuate` owner before a cached exponential rounds away.
+Self-products use their original net removal rate; integrated event counts
+retain the actual removal rate. Uniform-source application reuses this same
+homogeneous path. General ingrowth, cyclic return and count coefficients keep
+their existing conservative representability checks. Native regressions cover
+large and subunit inventories, net self-return, interval composition, continuing
+production, cancellation and unchanged refusal of unrepresented non-scalar tails.

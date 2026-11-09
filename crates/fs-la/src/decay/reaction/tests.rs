@@ -132,6 +132,68 @@ fn self_return_and_self_multiplication_keep_their_actual_event_counts() {
 }
 
 #[test]
+fn scalar_late_survivors_scale_before_exponential_underflow() {
+    for time in [709.0, 800.0, 1000.0, 1400.0] {
+        for (rate, branches) in [(1.0, vec![]), (2.0, vec![edge(0, 0, 0.5)])] {
+            let prepared = plan(&[rate], &branches, time);
+            let answer = prepared.apply(&[1e300]).unwrap();
+            let expected = (1e300_f64.ln() - time).exp();
+            near(answer.populations[0] / expected, 1.0, 3e-13);
+            near(answer.removals[0], rate * 1e300, 2e-14);
+        }
+    }
+    // A subunit population can also retain the least representable survivor.
+    assert_eq!(
+        plan(&[1.0], &[], 744.1).apply(&[0.4]).unwrap().populations[0],
+        f64::from_bits(1),
+    );
+}
+
+#[test]
+fn scalar_late_survivors_compose_and_reach_uniform_source_application() {
+    let half = plan(&[1.0], &[], 400.0);
+    let first = half.apply(&[1e300]).unwrap();
+    let split = half.apply(&first.populations).unwrap();
+    let whole = plan(&[1.0], &[], 800.0).apply(&[1e300]).unwrap();
+    near(whole.populations[0], split.populations[0], 3e-13);
+    let source =
+        source::ReactionSourcePlan::prepare(&[1.0], &[], 800.0, DecayLimits::default(), || false)
+            .unwrap();
+    let answer = source.apply(&[1e300], &[1e-45]).unwrap();
+    near(
+        answer.populations[0],
+        whole.populations[0] + 1e-45 / 800.0,
+        3e-13,
+    );
+    let mut calls = 0;
+    assert_eq!(
+        source
+            .homogeneous_plan()
+            .apply_with_cancel(&[1e300], || {
+                calls += 1;
+                calls == 3
+            })
+            .unwrap_err(),
+        DecayError::Cancelled,
+    );
+}
+
+#[test]
+fn scalar_tail_recovery_does_not_authorize_ingrowth_or_cyclic_tail_recovery() {
+    for prepared in [
+        plan(&[1.0, 1.0], &[edge(0, 1, 1.0)], 800.0),
+        plan(&[1.0, 1.0], &[edge(0, 1, 0.5), edge(1, 0, 0.5)], 2000.0),
+    ] {
+        assert!(matches!(
+            prepared.apply(&[1e300, 0.0]),
+            Err(DecayError::Unrepresentable(
+                "inventory may amplify an unrepresented reaction population"
+            )),
+        ));
+    }
+}
+
+#[test]
 fn unrelated_stiff_component_does_not_erase_slow_removal() {
     let prepared = plan(
         &[1.0e-20, 0.0, 1.0e20, 0.0],

@@ -26,6 +26,8 @@
 //! A closed two-state exchange uses its exact equilibrium and transient modes,
 //! retaining repeated-event and uniform-source residence integrals without
 //! accumulating roundoff over arbitrarily many exchange lifetimes.
+//! Noncyclic same-node survival uses the original scalar attenuation owner to
+//! preserve a representable inventory even when its cached exponential vanishes.
 
 use super::{
     DecayError, DecayLimits, MAX_DECAY_EDGES, MAX_DECAY_NODES, MAX_SERIES_TERMS, MAX_SQUARINGS,
@@ -648,7 +650,8 @@ impl ReactionPlan {
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
     }
-    /// Row-major P: endpoint populations per initial constituent.
+    /// Row-major P: endpoint populations per initial constituent. Use `apply`
+    /// to preserve scaled noncyclic same-node survivors after late underflow.
     #[must_use]
     pub fn transition_matrix(&self) -> &[f64] {
         &self.transition
@@ -682,8 +685,9 @@ impl ReactionPlan {
         self.apply_with_cancel(populations, || false)
     }
 
-    /// Apply without mutating input. Large populations may not silently amplify
-    /// an underflowed map coefficient; only proved exhausted DAG tails are exempt.
+    /// Apply without mutating input. Noncyclic same-node survival scales its
+    /// scalar exponential before a late tail rounds away. Other unrepresented
+    /// population/count coefficients retain their original range checks.
     pub fn apply_with_cancel(
         &self,
         populations: &[f64],
@@ -704,9 +708,16 @@ impl ReactionPlan {
             let mut count = Sum::default();
             for (j, &initial) in populations.iter().enumerate() {
                 let at = i * n + j;
+                // A noncyclic diagonal has no returning path. Its tail entry
+                // retains the exact admitted net rate, including self-products.
+                // Cyclic diagonals keep an unknown (zero-rate) tail bound.
+                let scaled_diagonal = i == j
+                    && self.transition[at] < f64::MIN_POSITIVE
+                    && self.tails[at].minimum_rate > 0.0;
                 if self.duration_s > 0.0 && initial > 1.0 && self.reachable[at] {
                     let p = self.transition[at];
-                    if (p == 0.0 || p.is_subnormal())
+                    if !scaled_diagonal
+                        && (p == 0.0 || p.is_subnormal())
                         && !(p == 0.0 && self.tails[at].vanishes(initial, self.duration_s))
                     {
                         return Err(DecayError::Unrepresentable(
@@ -720,7 +731,14 @@ impl ReactionPlan {
                         ));
                     }
                 }
-                amount.product(self.transition[at], initial);
+                if scaled_diagonal {
+                    amount.add(fs_math::decay::attenuate(
+                        initial,
+                        self.tails[at].minimum_rate * self.duration_s,
+                    ));
+                } else {
+                    amount.product(self.transition[at], initial);
+                }
                 count.product(self.integrated[at], initial);
             }
             endpoint[i] = amount.total();
