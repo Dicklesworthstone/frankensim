@@ -35,6 +35,8 @@ use fs_sparse::{Coo, Csr};
 use std::collections::BTreeSet;
 
 mod physics;
+/// Original source columns on the existing complete sparse midpoint timeline.
+pub mod sources;
 use physics::{SparseForms, SparseMidpoint, bound, poll};
 pub use physics::{
     SparseStructuralTimeEnergy, SparseStructuralTimeError, SparseStructuralTimeLimits,

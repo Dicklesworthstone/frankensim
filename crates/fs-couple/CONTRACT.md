@@ -8463,6 +8463,44 @@ test is authored but unexecuted because the missing frankenscipy/fsci-special
 manifest blocks Cargo loading. This native evidence does not establish complete
 outer-adapter compilation or broader MR56 qualification.
 
+### Physical source columns on original structural/acoustic timelines
+
+`HeterogeneousHelmholtzFe::prepare_source_loads` retains the original real
+quadratic boundary-velocity and distributed volume-injection columns for a
+complete pressure-potential pencil. Its exact heterogeneous material/geometry
+binding, original source-count caps, byte ceiling and per-projection product
+ceiling are admitted before column allocation. Signed and zero-integral
+sources retain every original pressure coefficient. Cached row-wise compensated
+sums require no geometric quadrature, material query or new spatial state.
+This map supplies full-coordinate owners without pressure-release elimination.
+
+`with_sources` binds those columns to the existing exact structural/interior,
+explicit-Maxwell and sparse midpoint preparations. Ordinary and hereditary
+`step_into` paths reuse the original native workspace plus one pressure-load
+buffer and allocate nothing during stepping. Sparse forwarding adds only the
+bounded source-column map and O(N_pressure) load scratch; it never constructs
+dense spatial M/K/C forms. The original integrators, all pressure/structural
+coordinates, reciprocal interface blocks and every retained Maxwell history
+remain unchanged.
+
+Boundary amplitudes are actual inward velocities [m/s]; volume amplitudes are
+actual volume flows [m³/s]. Exact owners hold them over the declared interval;
+the sparse owner receives their midpoint values. The pressure-potential RHS
+receives the original projected flow without density, frequency or phasor
+scaling. Existing acoustic input work already includes the physical pressure
+trajectory integral dotted with the held load, or the native midpoint work,
+exactly once. A source may remove stored compression energy. Material/wall heat
+and every branch's original work, stored energy and relaxation heat remain
+separate from that signed input.
+
+Native state/workspace and branch-array bindings, complete physical balances
+and final cancellation admission still control publication. Rejection leaves
+the accepted fields, histories and clock unchanged. These are prescribed real
+source amplitudes on the original frozen linear geometry/material laws, not a
+conversion of a frequency-local impedance into a transient law. Source time
+resolution, sparse midpoint convergence and spatial accuracy remain independent
+obligations; source preparation does not establish those accuracies.
+
 ### Exact full-field cavity evolution with original relaxation memory
 
 `StructuralInterior::prepare_relaxation_exact_time` passes the complete original

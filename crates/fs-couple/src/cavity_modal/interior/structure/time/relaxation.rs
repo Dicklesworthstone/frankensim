@@ -13,6 +13,9 @@ pub use fs_modal::relaxation_modes::MaxwellDampingBranch;
 use fs_phs::PhsError;
 use fs_phs::linear_exact::DenseExponentialBudget;
 
+/// Original injection through the native full-state hereditary propagator.
+pub mod sources;
+
 /// Bounds on original coordinates, histories and the complete exact cache.
 #[derive(Clone, Copy, Debug)]
 pub struct StructuralInteriorRelaxationTimeLimits {

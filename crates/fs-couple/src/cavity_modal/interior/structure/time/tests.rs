@@ -10,6 +10,9 @@ use fs_math::c64::C64;
 use fs_modal::harmonic::HarmonicResponseControls;
 use fs_sparse::{Coo, Csr};
 
+#[path = "source_tests.rs"]
+mod source_tests;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     let pool = ArenaPool::new(ArenaConfig::default());

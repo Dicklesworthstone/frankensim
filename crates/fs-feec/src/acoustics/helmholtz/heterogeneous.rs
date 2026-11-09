@@ -71,6 +71,9 @@ pub use source::{MAX_VOLUME_SOURCES, VolumeVelocitySource};
 pub(super) mod boundary_source;
 pub use boundary_source::{BoundaryVelocitySource, MAX_BOUNDARY_SOURCES};
 
+mod source_loads;
+pub use source_loads::{PreparedPressureSourceLoads, PressureSourceLoadLimits};
+
 mod boundary_admittance;
 pub use boundary_admittance::relaxation::{
     MAX_ADMITTANCE_RELAXATION_TERMS, SpatialRelaxingBoundary,

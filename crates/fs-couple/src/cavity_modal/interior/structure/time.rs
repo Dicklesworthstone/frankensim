@@ -31,6 +31,8 @@ use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
 
 /// Complete original coordinates with explicit causal Maxwell histories.
 pub mod relaxation;
+/// Original physical source columns driving the native accepted timeline.
+pub mod sources;
 
 /// Admission of all original coordinates and the native exact trajectory cache.
 #[derive(Clone, Copy, Debug)]
