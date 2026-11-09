@@ -9808,3 +9808,33 @@ any subsequent density sample or finite endpoint publication. The original
 reservoir implementation lives in one dependency-light leaf and is reexported
 through all existing public paths; rocket and converging consumers retain the
 same physical owner.
+
+## Prepared compact-plenum wall heat candidates
+
+`multicomponent::network::Plenum::heat_candidate_into` applies the original
+implicit gas/wall source to a stationary finite mixture inventory and an
+already allocated output. It retains every canonical species density and
+physical volume. The existing `WallThermal` and `WallControl` own thermal
+admission, nonlinear caloric work and residual budgets; the adapter supplies
+`WallDrag::None` and adds no mechanical work, reaction heat or port enthalpy.
+Prescribed-temperature reservoirs and original constant-capacity finite walls
+are supported. A caloric wall without its immutable material-law binding
+refuses through that same source; no replacement wall EOS is inferred.
+
+The returned `WallUpdate` carries the candidate wall temperature and original
+heat, finite-wall energy and external-bath balance. A composing field must
+publish wall and gas together. The last cancellation poll precedes all output
+writes, and successful warm calls reuse the output species buffer. The method
+changes no clock. The existing backward-Euler heat source remains first order,
+including when a caller places it symmetrically around conservative transport.
+Typed `multicomponent::Error::Thermal` retains original refusal details;
+thermal cancellation maps directly to the existing `Cancelled` transaction.
+
+Three focused actual-source native groups cover independent two-body implicit
+heating/cooling and stiff limits, variable Cp and extreme formation-reference
+invariance, prescribed-bath accounting, retained zero species and output
+storage, last-poll rollback and the original extreme-conductance precision
+refusal. The bounded build retains the original caloric and scalar wall
+algorithms; unrelated material/shared-wall/chemistry/network orchestration and
+their error payload dependencies are outside that slice. This is not a full
+workspace Cargo/DSR gate or an experimental heat-transfer validation claim.

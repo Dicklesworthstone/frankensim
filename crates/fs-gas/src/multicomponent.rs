@@ -133,6 +133,8 @@ pub enum Error {
     CharacteristicPath(&'static str),
     /// Physical mesh admission refused.
     Geometry(crate::dynamics::Error),
+    /// The original implicit gas/wall source refused its state or work budget.
+    Thermal(Box<wall_exchange::WallExchangeError>),
     /// Sensible energy falls outside the source temperature interval.
     EnergyDomain,
     /// The bounded temperature inversion did not converge.
@@ -173,6 +175,14 @@ impl From<ThermochemErrorV1> for Error {
 impl From<crate::dynamics::Error> for Error {
     fn from(value: crate::dynamics::Error) -> Self {
         Self::Geometry(value)
+    }
+}
+impl From<wall_exchange::WallExchangeError> for Error {
+    fn from(value: wall_exchange::WallExchangeError) -> Self {
+        match value {
+            wall_exchange::WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Thermal(Box::new(other)),
+        }
     }
 }
 fn positive(x: f64) -> bool {

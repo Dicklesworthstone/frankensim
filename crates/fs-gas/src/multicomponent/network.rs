@@ -30,6 +30,7 @@ use fs_qty::Time;
 
 mod coupled;
 mod exchange;
+mod heat;
 mod entropy;
 mod forcing;
 mod step;
