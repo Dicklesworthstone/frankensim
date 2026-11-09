@@ -76,6 +76,7 @@ impl ImplicitAdvectionStage<'_> {
 /// One immutable original flux evaluation and its physical outflow topology.
 pub(super) struct StationaryAdvection {
     pub(super) transport: TransportStepCoefficients<()>,
+    pub(super) sources: SourcePowers,
     pub(super) directions: Vec<(CellId, CellId)>,
     pub(super) outlets: Vec<CellId>,
 }
@@ -96,7 +97,7 @@ impl ImplicitAdvection {
         }
         let stage = self.stage(thermal.time_s(), checkpoint)?;
         let (directions, outlets) = stage.flow.stationary_bulk_support(&mut *checkpoint)?;
-        let (transport, tangent, _) = self.endpoint(
+        let (transport, sources, tangent, _) = self.endpoint(
             thermal,
             &stage,
             index,
@@ -109,6 +110,7 @@ impl ImplicitAdvection {
         checkpoint()?;
         Ok(StationaryAdvection {
             transport,
+            sources,
             directions,
             outlets,
         })
@@ -142,6 +144,7 @@ impl ImplicitAdvection {
     ) -> Result<
         (
             TransportStepCoefficients<()>,
+            SourcePowers,
             Vec<(usize, usize, f64)>,
             Option<EndpointAdvectionEntropy>,
         ),
@@ -168,15 +171,12 @@ impl ImplicitAdvection {
         let reconstruction = self.reconstruction.as_ref().filter(|_| stage.multiplier != 0.0);
         let Some(reconstruction) = reconstruction else {
             if self.entropy && with_entropy {
-                let (transport, entropy) =
-                    flow.endpoint_transport_entropy_state(thermal, checkpoint)?;
-                return Ok((transport, tangent, Some(entropy)));
+                let (transport, sources, entropy) =
+                    flow.endpoint_transport_entropy_source_powers(thermal, checkpoint)?;
+                return Ok((transport, sources, tangent, Some(entropy)));
             }
-            return Ok((
-                flow.endpoint_transport(thermal, checkpoint)?,
-                tangent,
-                None,
-            ));
+            let (transport, sources) = flow.endpoint_transport_source_powers(thermal, checkpoint)?;
+            return Ok((transport, sources, tangent, None));
         };
         // Reuse the original fused endpoint query. An active entropy bound
         // differentiates its exact caloric integral with these analytic dT/dh
@@ -186,7 +186,7 @@ impl ImplicitAdvection {
             let state = caloric_states.get(i).ok_or(DepositionError::Arithmetic)?;
             Ok((state.temperature_k, state.temperature_slope_kg_k_j))
         };
-        let (transport, rates, flow_entropy) = flow.reconstructed_endpoint_with_calorics(
+        let (transport, sources, rates, flow_entropy) = flow.reconstructed_endpoint_source_powers(
             thermal,
             reconstruction,
             true,
@@ -205,7 +205,7 @@ impl ImplicitAdvection {
             }
             tangent.push((index[&row], index[&col], derivative));
         }
-        Ok((transport, tangent, flow_entropy))
+        Ok((transport, sources, tangent, flow_entropy))
     }
 }
 

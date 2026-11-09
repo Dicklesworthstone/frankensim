@@ -15,7 +15,7 @@ use super::liquid::LiquidEnthalpyCarrier;
 use super::species::StationarySpecies;
 use super::{Advected, MassBoundary, MassFlow, SelectiveOutlet, boundary_enthalpy_power_terms, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation,
-    EnergyAudit, MaterialId, StepConfig};
+    EnergyAudit, MaterialId, SourcePowers, StepConfig};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
 use crate::enthalpy::entropy::{AdvectiveEntropyContribution, EntropyAudit, EntropyObserver};
 use std::collections::BTreeMap;
@@ -87,11 +87,24 @@ impl EndpointAdvectionEntropy {
         transport: &TransportStepCoefficients<()>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
+        self.reconcile_transport_source_powers(transport, &SourcePowers::default(), checkpoint)
+    }
+
+    pub(in crate::enthalpy) fn reconcile_transport_source_powers(
+        &mut self,
+        transport: &TransportStepCoefficients<()>,
+        sources: &SourcePowers,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
         let mut at_cell = Sum::default();
         for (&id, &watts) in &transport.heat.bulk.sources_w {
             checkpoint()?;
             at_cell.add(finite(watts / temperature(&self.temperatures, id)?)?)?;
         }
+        sources.visit(&mut |id, watts| {
+            checkpoint()?;
+            at_cell.add(finite(watts / temperature(&self.temperatures, id)?)?)
+        })?;
         for transfer in &transport.transfers {
             checkpoint()?;
             at_cell.add(finite(
@@ -101,9 +114,12 @@ impl EndpointAdvectionEntropy {
                 transfer.power_w / temperature(&self.temperatures, transfer.b)?,
             )?)?;
         }
-        self.rates.balance_residual_w_k = finite(
-            at_cell.total()? - self.rates.boundary_entropy_input_w_k - self.rates.upwind_mixing_w_k,
-        )?;
+        // Classification may itself have a much larger scalar account than
+        // the remaining balance. Subtract before the final rounding so the
+        // original stream low component remains visible in this residue.
+        at_cell.add(-self.rates.boundary_entropy_input_w_k)?;
+        at_cell.add(-self.rates.upwind_mixing_w_k)?;
+        self.rates.balance_residual_w_k = at_cell.total()?;
         Ok(())
     }
 }
@@ -159,9 +175,25 @@ impl Advected<()> {
         thermal: &DepositionSimulation<'_>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(TransportStepCoefficients<()>, EndpointAdvectionEntropy), DepositionError> {
+        let (mut transport, sources, mut entropy) =
+            self.endpoint_transport_entropy_source_powers(thermal, &mut checkpoint)?;
+        transport.heat.bulk.sources_w = sources.rounded()?;
+        entropy.reconcile_transport(&transport, &mut checkpoint)?;
+        Ok((transport, entropy))
+    }
+
+    /// The same physical endpoint with its original stream power components.
+    /// Native consumers retain these through their complete source reduction;
+    /// the legacy map wrapper reconciles only its final scalar readback.
+    pub(in crate::enthalpy) fn endpoint_transport_entropy_source_powers(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, SourcePowers, EndpointAdvectionEntropy), DepositionError> {
         checkpoint()?;
         self.admit_implicit_transport()?;
-        let transport = self.endpoint_transport(thermal, &mut checkpoint)?;
+        let (transport, sources) =
+            self.endpoint_transport_source_powers(thermal, &mut checkpoint)?;
         let mut enthalpies = BTreeMap::new();
         let mut temperatures = BTreeMap::new();
         for (i, (&id, cell)) in thermal.cells().iter().enumerate() {
@@ -187,9 +219,9 @@ impl Advected<()> {
             balance_residual_w_k: 0.0,
         };
         let mut entropy = EndpointAdvectionEntropy { rates, temperatures };
-        entropy.reconcile_transport(&transport, &mut checkpoint)?;
+        entropy.reconcile_transport_source_powers(&transport, &sources, &mut checkpoint)?;
         checkpoint()?;
-        Ok((transport, entropy))
+        Ok((transport, sources, entropy))
     }
 }
 

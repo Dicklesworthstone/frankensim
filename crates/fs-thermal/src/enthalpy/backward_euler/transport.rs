@@ -41,19 +41,33 @@ impl Advected<()> {
     pub fn endpoint_transport(
         &self,
         thermal: &DepositionSimulation<'_>,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<TransportStepCoefficients<()>, DepositionError> {
+        let (mut transport, sources) =
+            self.endpoint_transport_source_powers(thermal, checkpoint)?;
+        transport.heat.bulk.sources_w = sources.rounded()?;
+        Ok(transport)
+    }
+
+    /// Preserve independent stream contributions until the native endpoint
+    /// combines them with its other physical sources. The scalar compatibility
+    /// view above is materialized only after this one original flow evaluation.
+    pub(in crate::enthalpy) fn endpoint_transport_source_powers(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, SourcePowers), DepositionError> {
         checkpoint()?;
         let mut proposal = self.clone();
         proposal.begin()?;
-        let sources_w = proposal.sources(thermal, &mut checkpoint)?;
+        let sources = SourcePowers::capture(thermal, &mut proposal, &mut checkpoint)?;
         let transfers = proposal.heat_transfers(thermal, &mut checkpoint)?;
         checkpoint()?;
-        Ok(TransportStepCoefficients {
-            heat: StepCoefficients { sources_w, conductances_w_k: BTreeMap::new(),
+        Ok((TransportStepCoefficients {
+            heat: StepCoefficients { sources_w: BTreeMap::new(), conductances_w_k: BTreeMap::new(),
                 payload: () }.into(),
             transfers,
-        })
+        }, sources))
     }
 }
 

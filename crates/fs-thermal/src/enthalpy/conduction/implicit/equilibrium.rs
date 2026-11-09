@@ -327,13 +327,10 @@ impl<'a> ImplicitConductionChain<'a> {
             Some(&endpoint.link_values),
             checkpoint,
         )?;
+        let mut sources = SourcePowers::default();
         for (&id, source) in &endpoint.heat_source_states {
             checkpoint()?;
-            rates
-                .watts
-                .get_mut(&id)
-                .ok_or(DepositionError::Arithmetic)?
-                .add(source.power_w)?;
+            sources.add(thermal, id, source.power_w)?;
         }
         if let (Some(source), Some(state)) = (
             &self.coupled_heat_source,
@@ -341,22 +338,21 @@ impl<'a> ImplicitConductionChain<'a> {
         ) {
             for (&id, &power) in source.cells.iter().zip(&state.powers_w) {
                 checkpoint()?;
-                rates
-                    .watts
-                    .get_mut(&id)
-                    .ok_or(DepositionError::Arithmetic)?
-                    .add(power)?;
+                sources.add(thermal, id, power)?;
             }
         }
         if let Some(flow) = &endpoint.stationary_advection {
+            flow.sources.visit(&mut |id, watts| {
+                checkpoint()?;
+                sources.add(thermal, id, watts)
+            })?;
             for (&id, &power) in &flow.transport.heat.bulk.sources_w {
                 checkpoint()?;
-                rates
-                    .watts
-                    .get_mut(&id)
-                    .ok_or(DepositionError::Arithmetic)?
-                    .add(power)?;
+                sources.add(thermal, id, power)?;
             }
+        }
+        thermal.add_rate_source_powers(&mut rates, &sources, checkpoint)?;
+        if let Some(flow) = &endpoint.stationary_advection {
             for transfer in &flow.transport.transfers {
                 checkpoint()?;
                 rates

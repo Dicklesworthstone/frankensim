@@ -100,18 +100,20 @@ impl EntropyAudit {
     }
 
     pub(in crate::enthalpy) fn refresh_temporal_defect(&mut self) -> Result<(), DepositionError> {
-        self.temporal_defect_j_k = finite(
-            self.thermal_storage_change_j_k
-                - self.reservoir_entropy_input_j_k
-                - self.conduction_generation_j_k
-                - self.unclassified_source_at_cell_j_k,
-        )?;
-        if let Some(advection) = self.advection {
-            self.temporal_defect_j_k = finite(
-                self.temporal_defect_j_k - advection.boundary_entropy_input_j_k
-                    - advection.upwind_mixing_j_k - advection.balance_residual_j_k,
-            )?;
+        // Preserve small storage/transport residues until independently owned
+        // source and reservoir contributions have cancelled in the full account.
+        let mut defect = observe::EnergySum::default();
+        for value in [self.thermal_storage_change_j_k,
+            -self.reservoir_entropy_input_j_k, -self.conduction_generation_j_k,
+            -self.unclassified_source_at_cell_j_k] {
+            defect.add(value)?;
         }
+        if let Some(advection) = self.advection {
+            defect.add(-advection.boundary_entropy_input_j_k)?;
+            defect.add(-advection.upwind_mixing_j_k)?;
+            defect.add(-advection.balance_residual_j_k)?;
+        }
+        self.temporal_defect_j_k = defect.value()?;
         Ok(())
     }
 }
@@ -145,26 +147,6 @@ impl DepositionSimulation<'_> {
     // Authored/generated/interval watts and directed transfers share the same
     // at-cell temperature. Retain their signed operands until after they have
     // cancelled, including the low component when dividing by temperature.
-    pub(super) fn entropy_source_powers(
-        &self,
-        generated: &BTreeMap<CellId, f64>,
-        interval: &BTreeMap<CellId, f64>,
-        transfers: &[HeatTransfer],
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(BTreeMap<CellId, observe::EnergySum>, bool), DepositionError> {
-        let mut generated_terms = SourcePowers::default();
-        let mut interval_terms = SourcePowers::default();
-        for (&id, &watts) in generated {
-            checkpoint()?;
-            generated_terms.add(self, id, watts)?;
-        }
-        for (&id, &watts) in interval {
-            checkpoint()?;
-            interval_terms.add(self, id, watts)?;
-        }
-        self.entropy_source_contributions(&generated_terms, &interval_terms, transfers, checkpoint)
-    }
-
     pub(super) fn entropy_source_contributions(
         &self,
         generated: &SourcePowers,

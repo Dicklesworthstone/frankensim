@@ -1008,7 +1008,7 @@ impl<'a> ImplicitConductionChain<'a> {
             if let Some(advection) = &self.advection {
                 let stage = advection_stage.ok_or(DepositionError::Arithmetic)?;
                 endpoint.advection_multiplier = stage.multiplier;
-                let (transport, tangent, flow_entropy) = advection.endpoint(
+                let (transport, flow_sources, tangent, flow_entropy) = advection.endpoint(
                     thermal, stage, &self.index, &endpoint.states, entropy,
                     &mut || (checkpoint.borrow_mut())(),
                 )?;
@@ -1031,6 +1031,10 @@ impl<'a> ImplicitConductionChain<'a> {
                     (checkpoint.borrow_mut())()?;
                     sources.add(thermal, id, watts)?;
                 }
+                flow_sources.visit(&mut |id, watts| {
+                    (checkpoint.borrow_mut())()?;
+                    sources.add(thermal, id, watts)
+                })?;
                 transfers.extend(transport.transfers);
             }
             Ok::<_, ImplicitConductionError>((BoundaryExchangeStepCoefficients {

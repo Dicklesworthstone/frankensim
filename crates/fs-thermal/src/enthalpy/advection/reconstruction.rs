@@ -30,7 +30,8 @@ use super::entropy::{AdvectionEntropyRates, EndpointAdvectionEntropy, Sum};
 use super::{Advected, finite, invalid};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
 use crate::enthalpy::{
-    CellGeometry, CellId, DepositionError, DepositionSimulation, MaterialId, ThermalStorageBasis,
+    CellGeometry, CellId, DepositionError, DepositionSimulation, MaterialId, SourcePowers,
+    ThermalStorageBasis,
 };
 use std::collections::BTreeMap;
 
@@ -522,6 +523,36 @@ impl Advected<()> {
         ),
         DepositionError,
     > {
+        let (mut endpoint, sources, tangent, mut entropy) = self.reconstructed_endpoint_source_powers(
+            thermal, reconstruction, differentiate, with_entropy, calorics, &mut checkpoint,
+        )?;
+        endpoint.heat.bulk.sources_w = sources.rounded()?;
+        if let Some(entropy) = &mut entropy {
+            entropy.reconcile_transport(&endpoint, &mut checkpoint)?;
+        }
+        Ok((endpoint, tangent, entropy))
+    }
+
+    /// Reconstruct the original internal transfers without rounding the
+    /// independent boundary streams before other endpoint sources join them.
+    /// Flux, tangent and entropy still share one physical flow evaluation.
+    pub(in crate::enthalpy) fn reconstructed_endpoint_source_powers(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        reconstruction: &LimitedEnthalpyReconstruction,
+        differentiate: bool,
+        with_entropy: bool,
+        calorics: Option<&ReconstructionCalorics<'_>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (
+            TransportStepCoefficients<()>,
+            SourcePowers,
+            Vec<(CellId, CellId, f64)>,
+            Option<EndpointAdvectionEntropy>,
+        ),
+        DepositionError,
+    > {
         checkpoint()?;
         if !reconstruction.is_empty() {
             reconstruction.admit(thermal, self, &mut checkpoint)?;
@@ -531,15 +562,17 @@ impl Advected<()> {
                 ));
             }
         }
-        let (mut endpoint, mut entropy) = if with_entropy {
-            let (transport, entropy) =
-                self.endpoint_transport_entropy_state(thermal, &mut checkpoint)?;
-            (transport, Some(entropy))
+        let (mut endpoint, sources, mut entropy) = if with_entropy {
+            let (transport, sources, entropy) =
+                self.endpoint_transport_entropy_source_powers(thermal, &mut checkpoint)?;
+            (transport, sources, Some(entropy))
         } else {
-            (self.endpoint_transport(thermal, &mut checkpoint)?, None)
+            let (transport, sources) =
+                self.endpoint_transport_source_powers(thermal, &mut checkpoint)?;
+            (transport, sources, None)
         };
         if reconstruction.is_empty() {
-            return Ok((endpoint, Vec::new(), entropy));
+            return Ok((endpoint, sources, Vec::new(), entropy));
         }
         let mut tangent = Vec::new();
         let mut entropy_correction = Sum::default();
@@ -625,10 +658,10 @@ impl Advected<()> {
         if let Some(entropy) = &mut entropy {
             entropy.rates.upwind_mixing_w_k =
                 finite(entropy.rates.upwind_mixing_w_k + entropy_correction.total()?)?;
-            entropy.reconcile_transport(&endpoint, &mut checkpoint)?;
+            entropy.reconcile_transport_source_powers(&endpoint, &sources, &mut checkpoint)?;
         }
         checkpoint()?;
-        Ok((endpoint, tangent, entropy))
+        Ok((endpoint, sources, tangent, entropy))
     }
 }
 

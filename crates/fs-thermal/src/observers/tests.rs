@@ -652,6 +652,173 @@ fn g1_local_and_coupled_endpoint_sources_survive_be_and_both_sdirk_stages() {
     }
 }
 
+struct LatentFlowLaw;
+static LATENT_FLOW: LatentFlowLaw = LatentFlowLaw;
+impl ThermalLaw for LatentFlowLaw {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if !(0.0..=2.0_f64.powi(81)).contains(&h) { return Err(DepositionError::MaterialDomain); }
+        Ok(1.0)
+    }
+    fn maximum_temperature_slope(&self) -> f64 { 0.0 }
+    fn specific_entropy_change_j_kg_k(&self, a: f64, b: f64) -> Result<Option<f64>, DepositionError> {
+        self.temperature_k(a)?;
+        self.temperature_k(b)?;
+        Ok(Some(b-a))
+    }
+}
+impl crate::enthalpy::conduction::ConductivityLaw for LatentFlowLaw {
+    fn conductivity_w_m_k(&self, h: f64) -> Result<f64, DepositionError> {
+        self.temperature_k(h)?;
+        Ok(1.0)
+    }
+}
+impl implicit::ImplicitConductionLaw for LatentFlowLaw {
+    fn caloric_law(&self) -> &dyn ThermalLaw { self }
+    fn conductivity_law(&self) -> &dyn crate::enthalpy::conduction::ConductivityLaw { self }
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] { [0.0, 2.0_f64.powi(81)] }
+    fn state_at_specific_enthalpy(&self, h: f64)
+        -> Result<implicit::ImplicitConductionState, DepositionError> {
+        Ok(implicit::ImplicitConductionState { temperature_k: self.temperature_k(h)?,
+            temperature_slope_kg_k_j: 0.0, conductivity_w_m_k: 1.0,
+            conductivity_slope_kg_w_m_k_j: 0.0 })
+    }
+}
+
+fn latent_flow_network(cells: usize, authored_w: f64) -> (DepositionSimulation<'static>,
+    crate::enthalpy::conduction::ConductionObserver<'static>) {
+    use crate::enthalpy::conduction::{ConductionObserver, ConductiveLink};
+    let mut events = Vec::new();
+    for id in 1..=cells as u64 {
+        events.push(TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
+            id: CellId(id), material_id: MaterialId(1), body_id: 1, segment_id: id,
+            mass_kg: 1.0, specific_h_j_kg: 0.0,
+            geometry: CellGeometry { start_m: [id as f64, 0.0, 0.0],
+                end_m: [id as f64+1.0, 0.0, 0.0], volume_m3: 1.0, surface_area_m2: 6.0 },
+            boundary: Boundary { ambient_k: 1.0, htc_w_m2_k: 0.0, reservoir: None,
+                source_w: if id == 1 { authored_w } else { 0.0 } },
+        }) });
+    }
+    let mut links = Vec::new();
+    for id in 1..cells as u64 {
+        events.push(TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
+            id, a: CellId(id), b: CellId(id+1), area_m2: 1.0, conductance_w_k: 0.0,
+        }) });
+        links.push(ConductiveLink { link_id: id, half_distances_m: [0.5; 2],
+            contact_resistance_m2_k_w: 0.0 });
+    }
+    let thermal = DepositionSimulation::new(events, &[(MaterialId(1), &LATENT_FLOW)],
+        DepositionBudget { max_cells: cells, max_links: cells.max(2),
+            max_events: cells*2, max_substeps: 100 }).unwrap()
+        .advance_to(0.0, config(), || Ok(())).unwrap().0;
+    let conduction = ConductionObserver::new(&thermal, &[(MaterialId(1), &LATENT_FLOW)],
+        &links, &[], || Ok(())).unwrap();
+    (thermal, conduction)
+}
+
+fn latent_flow(cells: usize, high_inlet_h: f64) -> crate::enthalpy::advection::Advected<()> {
+    use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
+    let flows = (1..cells as u64).map(|id| MassFlow {
+        id: 100+id, a: CellId(id), b: CellId(id+1), kg_s: 2.0,
+    }).collect();
+    Advected::new((), flows, cells+2).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 1, cell: CellId(1), kg_s: 1.0,
+            material_id: MaterialId(1), specific_h_j_kg: high_inlet_h },
+        MassBoundary::Inlet { id: 2, cell: CellId(1), kg_s: 1.0,
+            material_id: MaterialId(1), specific_h_j_kg: 3.0 },
+        MassBoundary::Outlet { id: 3, cell: CellId(cells as u64), kg_s: 2.0 },
+    ], cells+2).unwrap()
+}
+
+#[test]
+fn g1_native_latent_flow_retains_stream_heat_entropy_and_stationary_balance() {
+    let large = 2.0_f64.powi(80);
+    let (thermal, conduction) = latent_flow_network(1, -large);
+    let flow = latent_flow(1, large);
+    let chain = implicit::ImplicitConductionChain::new(&thermal, &conduction,
+        &[(MaterialId(1), &LATENT_FLOW)], || Ok(())).unwrap()
+        .with_implicit_advection(&thermal, &flow, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(&thermal, || Ok(())).unwrap();
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(1).unwrap();
+    let mut polls = 0;
+    let (next, report) = chain.advance_to(&thermal, 1.0, implicit_source_controls(),
+        &mut workspace, || { polls += 1; Ok(()) }).unwrap();
+    // One accepted kilogram obeys h_new = (L+3-2*h_new)-L.
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+    assert_eq!(next.temperature_k(CellId(1)).unwrap(), 1.0);
+    assert_eq!(report.energy.external_heat_j, 1.0);
+    assert_eq!(report.energy.residual_j, 0.0);
+    assert_eq!(report.entropy.thermal_storage_change_j_k, 1.0);
+    assert_eq!(report.entropy.unclassified_source_at_cell_j_k, -large);
+    let advective = report.entropy.advection.unwrap();
+    assert_eq!(advective.boundary_entropy_input_j_k, large);
+    assert_eq!(advective.upwind_mixing_j_k, 0.0);
+    assert_eq!(advective.balance_residual_j_k, 1.0);
+    assert_eq!(report.entropy.temporal_defect_j_k, 0.0);
+    // The compatibility API reports the rounded scalar that it returns;
+    // native stepping retains the additional stream component independently.
+    let (readback, entropy) = flow.endpoint_transport_with_entropy(&next, || Ok(())).unwrap();
+    assert_eq!(readback.heat.bulk.sources_w[&CellId(1)], large);
+    assert_eq!(entropy.balance_residual_w_k, 0.0);
+    let operating = chain.solve_operating_point(&thermal,
+        implicit::equilibrium::ThermalOperatingControls {
+            maximum_newton_iterations: 12, maximum_backtracks: 12,
+            maximum_residual_evaluations: 100, cell_tolerance_w: 1e-10, total_tolerance_w: 1e-9,
+        }, &mut workspace, || Ok(())).unwrap();
+    assert_eq!(operating.specific_enthalpies_j_kg(), &[1.5]);
+    assert_eq!(operating.net_powers_w(), &[0.0]);
+    let mut seen = 0;
+    assert!(chain.advance_to(&thermal, 1.0, implicit_source_controls(), &mut workspace,
+        || { seen += 1; if seen == polls { Err(DepositionError::Cancelled) } else { Ok(()) } }).is_err());
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    assert_eq!(flow.audit(), Default::default());
+}
+
+#[test]
+fn g1_reconstructed_latent_flow_shares_the_original_source_and_entropy_owners() {
+    use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
+    let large = 2.0_f64.powi(80);
+    let (thermal, conduction) = latent_flow_network(3, -large);
+    let (reference, reference_conduction) = latent_flow_network(3, 0.0);
+    let flow = latent_flow(3, large);
+    let reference_flow = latent_flow(3, 0.0);
+    let reconstruction = LimitedEnthalpyReconstruction::try_new(&thermal,
+        &[AxialCellStencil { previous: CellId(1), cell: CellId(2), next: CellId(3) }],
+        1, || Ok(())).unwrap().with_thermal_entropy_limit();
+    let build = |state, conduction, flow| implicit::ImplicitConductionGraph::new(
+        state, conduction, &[(MaterialId(1), &LATENT_FLOW)],
+        implicit::ImplicitConductionLinearControls::default(), || Ok(())).unwrap()
+        .with_implicit_advection_reconstruction(state, flow, &reconstruction, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(state, || Ok(())).unwrap();
+    let mut workspace = implicit::ImplicitConductionWorkspace::new(3).unwrap();
+    let (expected, expected_report) = build(&reference, &reference_conduction, &reference_flow)
+        .advance_to(&reference, 1.0, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    let (next, report) = build(&thermal, &conduction, &flow)
+        .advance_to(&thermal, 1.0, implicit_source_controls(), &mut workspace, || Ok(())).unwrap();
+    // Active left-sided minmod face: h1=1; 4*h2=3; 3*h3=3*h2-1.
+    for (index, h) in [1.0, 0.75, 5.0/12.0].into_iter().enumerate() {
+        let id = CellId(index as u64+1);
+        near(next.cells()[&id].specific_h_j_kg, h);
+        near(next.cells()[&id].specific_h_j_kg, expected.cells()[&id].specific_h_j_kg);
+        assert_eq!(next.temperature_k(id).unwrap(), 1.0);
+    }
+    near(report.energy.external_heat_j, 13.0/6.0);
+    near(report.energy.external_heat_j, expected_report.energy.external_heat_j);
+    near(report.energy.residual_j, 0.0);
+    near(report.entropy.thermal_storage_change_j_k, 13.0/6.0);
+    near(report.entropy.advection.unwrap().balance_residual_j_k, 13.0/6.0);
+    near(report.entropy.temporal_defect_j_k, 0.0);
+    let upwind = flow.endpoint_transport(&next, || Ok(())).unwrap();
+    let (limited, entropy) = flow.endpoint_transport_with_reconstruction_and_entropy(
+        &next, &reconstruction, || Ok(())).unwrap();
+    assert_ne!(limited.transfers, upwind.transfers);
+    assert_eq!(limited.heat.bulk.sources_w[&CellId(1)], large);
+    assert!(entropy.balance_residual_w_k.is_finite());
+    assert_eq!(thermal.time_s(), 0.0);
+    assert!(thermal.cells().values().all(|cell| cell.specific_h_j_kg == 0.0));
+    assert_eq!(flow.audit(), Default::default());
+}
+
 #[test]
 fn g4_streamed_physical_heat_preserves_all_owners_on_late_refusal_and_retry() {
     let large = 2.0_f64.powi(80);
