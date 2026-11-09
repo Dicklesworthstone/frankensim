@@ -87,6 +87,14 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+fn mean_area(a: [f64; 3], b: [f64; 3], da: [f64; 3], db: [f64; 3]) -> [f64; 3] {
+    let c0 = cross(a, b);
+    let c1a = cross(da, b);
+    let c1b = cross(a, db);
+    let c2 = cross(da, db);
+    std::array::from_fn(|i| c0[i] + 0.5 * (c1a[i] + c1b[i]) + c2[i] / 3.0)
+}
+
 impl MembranePatch {
     fn admit_pressure_area(&self, element: usize, area: [f64; 3]) -> Result<(), MembraneError> {
         let ratio = area[0].hypot(area[1]).hypot(area[2]) / (2.0 * self.elements[element].area);
@@ -214,6 +222,111 @@ impl MembranePatch {
         Ok(force)
     }
 
+    /// Mean current-area pressure force along a STRAIGHT displacement segment.
+    ///
+    /// Pressure samples stay fixed in material coordinates. The current area
+    /// vector is quadratic on this path, so this mean is integrated exactly.
+    /// Its nodal dot product with `after_m-before_m` equals the original
+    /// `pressure_work_j` up to floating-point summation. For uniform pressure
+    /// and a fixed perimeter, unit pressure supplies a discrete volume gradient.
+    /// This is a path average, not the instantaneous force at the midpoint.
+    ///
+    /// Both endpoint areas are admitted. This operator alone does not certify
+    /// intermediate material states or make a nonuniform profile conservative.
+    pub fn pressure_segment_load_n<'p>(
+        &self,
+        before_m: &[[f64; 3]],
+        after_m: &[[f64; 3]],
+        pressure: impl Into<MembranePressure<'p>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MembraneError> {
+        self.pressure_segment_action(before_m, after_m, None, pressure.into(), &mut cancelled)
+    }
+
+    /// Exact directional derivative of `pressure_segment_load_n` with respect
+    /// to its AFTER endpoint, holding the BEFORE endpoint and pressure fixed.
+    /// The direction is an endpoint displacement [m], without a hidden time or
+    /// midpoint factor. A midpoint coordinate with `q1=2*q_mid-q0` therefore
+    /// contributes twice this action by the chain rule.
+    pub fn pressure_segment_tangent_apply<'p>(
+        &self,
+        before_m: &[[f64; 3]],
+        after_m: &[[f64; 3]],
+        direction_m: &[[f64; 3]],
+        pressure: impl Into<MembranePressure<'p>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MembraneError> {
+        self.pressure_segment_action(
+            before_m,
+            after_m,
+            Some(direction_m),
+            pressure.into(),
+            &mut cancelled,
+        )
+    }
+
+    fn pressure_segment_action(
+        &self,
+        before_m: &[[f64; 3]],
+        after_m: &[[f64; 3]],
+        direction_m: Option<&[[f64; 3]]>,
+        pressure: MembranePressure<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MembraneError> {
+        poll(cancelled)?;
+        let n = self.mesh.nodes.len();
+        pressure.validate(self.elements.len(), cancelled)?;
+        if !finite_vectors(before_m, n)
+            || !finite_vectors(after_m, n)
+            || direction_m.is_some_and(|direction| !finite_vectors(direction, n))
+        {
+            return Err(MembraneError::Invalid(
+                "finite complete pressure-segment endpoints and tangent direction required",
+            ));
+        }
+        let mut force = vec![[0.0; 3]; n];
+        for (index, e) in self.elements.iter().enumerate() {
+            poll(cancelled)?;
+            let [a, b] = self.pressure_edges(e.nodes, before_m);
+            let [end_a, end_b] = self.pressure_edges(e.nodes, after_m);
+            self.admit_pressure_area(index, cross(a, b))?;
+            self.admit_pressure_area(index, cross(end_a, end_b))?;
+            let change = e.nodes.map(|node| {
+                std::array::from_fn::<_, 3, _>(|i| after_m[node][i] - before_m[node][i])
+            });
+            let da = std::array::from_fn(|i| change[1][i] - change[0][i]);
+            let db = std::array::from_fn(|i| change[2][i] - change[0][i]);
+            let area = if let Some(direction) = direction_m {
+                let ha =
+                    std::array::from_fn(|i| direction[e.nodes[1]][i] - direction[e.nodes[0]][i]);
+                let hb =
+                    std::array::from_fn(|i| direction[e.nodes[2]][i] - direction[e.nodes[0]][i]);
+                let first = cross(ha, b);
+                let second = cross(a, hb);
+                let quadratic_a = cross(ha, db);
+                let quadratic_b = cross(da, hb);
+                std::array::from_fn(|i| {
+                    0.5 * (first[i] + second[i]) + (quadratic_a[i] + quadratic_b[i]) / 3.0
+                })
+            } else {
+                mean_area(a, b, da, db)
+            };
+            let weights = pressure.weights(index);
+            for (local, &node) in e.nodes.iter().enumerate() {
+                for axis in 0..3 {
+                    force[node][axis] += weights[local] * area[axis];
+                }
+            }
+        }
+        if !finite_vectors(&force, n) {
+            return Err(MembraneError::Invalid(
+                "unrepresentable pressure-segment action",
+            ));
+        }
+        poll(cancelled)?;
+        Ok(force)
+    }
+
     /// Exact pressure work [J] along a STRAIGHT nodal-displacement segment at
     /// held material pressure. The area vector is quadratic along the segment,
     /// so its mean is integrated analytically. Uniform pressure with a fixed
@@ -279,14 +392,11 @@ impl MembranePatch {
             let change = e.nodes.map(&change_at);
             let da = std::array::from_fn(|i| change[1][i] - change[0][i]);
             let db = std::array::from_fn(|i| change[2][i] - change[0][i]);
-            let c0 = cross(a, b);
-            let c1a = cross(da, b);
-            let c1b = cross(a, db);
-            let c2 = cross(da, db);
+            let area = mean_area(a, b, da, db);
             let samples = pressure.samples(index);
             let weights = pressure.weights(index);
             for i in 0..3 {
-                let mean_area = c0[i] + 0.5 * (c1a[i] + c1b[i]) + c2[i] / 3.0;
+                let mean_area = area[i];
                 if samples[0] == samples[1] && samples[0] == samples[2] {
                     // Retain the original uniform-pressure arithmetic exactly.
                     work += (samples[0] / 6.0)

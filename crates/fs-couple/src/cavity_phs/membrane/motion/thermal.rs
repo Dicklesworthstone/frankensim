@@ -21,7 +21,7 @@ pub struct GasMembraneThermalControls {
     pub maximum_krylov_restart: usize,
     /// Finite nonnegative enclosing storage-minus-work-minus-heat allowance.
     pub energy_tolerance_j: f64,
-    /// Separate finite nonnegative midpoint-traction/volume-work allowance.
+    /// Separate finite nonnegative path-traction/volume-work allowance.
     pub pressure_work_tolerance_j: f64,
 }
 impl GasMembraneThermalControls {
@@ -81,7 +81,7 @@ pub struct GasMembraneThermalStep {
     pub swept_volume_change_m3: f64,
     pub exterior_pressure_work_j: f64,
     pub dead_load_work_j: f64,
-    /// Stage-traction work minus native gas work plus held-reservoir work.
+    /// Path-mean traction work minus native gas work plus held-reservoir work.
     pub pressure_work_defect_j: f64,
     /// Delta K + Delta E_membrane + both Delta U + reservoir work - dead work - heat.
     pub integration_defect_j: f64,
@@ -94,10 +94,12 @@ pub struct GasMembraneThermalStep {
 ///
 /// The native gas owner uses midpoint in (internal energy, volume), while native
 /// generalized-alpha at rho_inf=1 uses midpoint mechanical coordinates. For a
-/// curved chart, V(q_mid) need not equal (V_old+V_new)/2 and midpoint traction
-/// need not integrate to exact swept-volume work. Both the resulting pressure
-/// work mismatch and total numerical energy defect are measured and gated;
-/// neither is heat or physical damping. Time refinement remains necessary.
+/// curved chart, V(q_mid) need not equal (V_old+V_new)/2. Pressure therefore
+/// multiplies the exact path mean of the original volume gradient, whose work
+/// is p_mid*(V_new-V_old). The same geometric derivative enters native Newton
+/// actions. Pressure-transfer roundoff and the remaining mechanical integration
+/// defect are measured independently and gated; neither becomes heat or damping.
+/// Material forces still use midpoint coordinates. Time refinement is required.
 ///
 /// No isentropic tangent is substituted under heating. Heat is prescribed
 /// energy from/to an external owner, not a reservoir-temperature or transport
@@ -213,7 +215,7 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         kinetic(&self.masses_kg, &candidate.v)?;
         let mut kinetic_change = Dd::from_f64(0.0);
         let mut dead_work = Dd::from_f64(0.0);
-        let mut stage_volume_work = Dd::from_f64(0.0);
+        let mut pressure_volume_work = Dd::from_f64(0.0);
         for (i, &dof) in self.model.free_dofs.iter().enumerate() {
             let dq = candidate.q[i] - self.state.q[i];
             kinetic_change = kinetic_change
@@ -223,8 +225,8 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
                         * (candidate.v[i] - self.state.v[i]),
                 );
             dead_work = dead_work + Dd::from_f64(dead_load_n[dof / 3][dof % 3] * dq);
-            stage_volume_work =
-                stage_volume_work + Dd::from_f64(trial.stage.gradient[dof / 3][dof % 3] * dq);
+            pressure_volume_work = pressure_volume_work
+                + Dd::from_f64(trial.mean_volume_gradient[dof / 3][dof % 3] * dq);
         }
         let membrane_change = Dd::from_f64(trial.endpoint.strain_energy_j)
             - Dd::from_f64(self.accepted.strain_energy_j);
@@ -238,7 +240,7 @@ impl<'m, 'p> GasMembraneThermalMotion<'m, 'p> {
         let opposing = trial.exterior.as_ref().map(|gas| gas.report);
         let extra_storage = opposing.map_or(0.0, |gas| gas.stored_energy_change_j);
         let extra_work = opposing.map_or(0.0, |gas| gas.work_by_gas_j);
-        let pressure_defect = (Dd::from_f64(trial.net_pressure_pa * stage_volume_work.to_f64())
+        let pressure_defect = (Dd::from_f64(trial.net_pressure_pa * pressure_volume_work.to_f64())
             - Dd::from_f64(trial.gas.report.work_by_gas_j)
             - Dd::from_f64(extra_work)
             + Dd::from_f64(reservoir_work))

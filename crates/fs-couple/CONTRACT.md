@@ -1,3 +1,35 @@
+## Work-consistent gas pressure on nonlinear heated membranes
+
+The existing `GasMembraneThermalMotion` couples each original ideal or
+homogeneous Peng--Robinson parcel's midpoint heat/volume pressure to the exact
+path mean of the native membrane volume gradient. The shared `fs-solid`
+pressure owner integrates the changing oriented triangle areas analytically.
+Its nodal force dotted with the accepted displacement transfers
+`p_mid*(V_new-V_old)`; a curved volume chart no longer introduces the former
+midpoint-area pressure-work defect.
+
+Native matrix-free Newton actions differentiate this same force. Both the
+endpoint-volume derivative of the source pressure and the endpoint derivative
+of the mean geometry include the `q1=2*q_stage-q_old` chain rule. Original
+gas calorics, pressure derivatives, heating, opposing chamber ownership and
+source admission are unchanged. Physical endpoint residuals retain the true
+endpoint area and pressure. The two retained geometry-force vectors replace
+the former stage/endpoint gradients without adding a trajectory-sized cache.
+
+Pressure-transfer roundoff and the full mechanical/caloric energy defect keep
+their independent existing gates. No residual is subtracted, deposited as heat,
+or used to rescale momentum. Material forces still use midpoint geometry, so
+nonlinear structural integration error and time refinement remain necessary.
+This is a spatially uniform gas with fixed perimeter and stationary supports;
+it adds no fluid inertia/waves, moving enclosure, phase change or thermal law.
+
+Existing coupled regression definitions retain original ideal/PR caloric and
+tangent comparisons, verify two-gas pressure closure while mechanical error
+refines, and preserve source/energy/cancellation rollback. Their full dependency
+closure was not executed here. Two tests of the actual native pressure kernel
+passed, including the cubic fixed-rim work identity and endpoint chain rule;
+that evidence does not establish the complete coupled integration.
+
 ## Ambient cooling around modal dry contact
 
 The finite-cell modal dry-contact transaction applies each original Robin

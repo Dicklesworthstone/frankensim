@@ -1890,6 +1890,32 @@ energy for light/heavy sheet inventories across 560 orders of mass ratio.
 No measured-material, real-time throughput or continuum-error qualification
 is inferred from these manufactured cases.
 
+## Exact pressure traction over finite membrane displacement
+
+`pressure_segment_load_n` integrates the original current-area pressure force
+over a straight nodal-displacement segment. It accepts the same scalar or
+material P1 pressure data and retains the original pressure moments. The area
+vector is quadratic along that path; the same analytic mean is shared with
+`pressure_work_j`. Dotting the mean nodal load with the complete displacement
+therefore reproduces the original path work up to floating-point accumulation.
+For uniform pressure and fixed perimeter, unit pressure supplies a discrete
+gradient of the exact swept volume.
+
+`pressure_segment_tangent_apply` differentiates that mean force with respect
+to the AFTER endpoint, keeping the BEFORE endpoint and pressure fixed. At
+coincident endpoints it is one half of the instantaneous follower tangent.
+A coupled midpoint coordinate with `q1=2*q_mid-q0` must apply its own factor
+of two. Both endpoint areas, complete finite data and cancellation are admitted;
+these operators do not certify intermediate constitutive states or make
+nonuniform pressure conservative.
+
+Two focused G1/G3/G4 pressure-kernel regressions compiled and passed using the
+actual production `pressure.rs` with geometry-only fixture containers. They
+cover cubic fixed-rim swept-volume work that midpoint geometry misses, exact
+Gauss integration, reversed paths, signed P1 force derivatives, the coincident
+endpoint factor, rigid translation and refusal. Complete material/motion
+integration remains a separate dependency-limited validation obligation.
+
 ## Spatially resolved follower pressure on nonlinear membranes
 
 `MembranePressure::TriangleLinear` borrows three signed pressure-jump samples

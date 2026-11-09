@@ -535,3 +535,238 @@ fn material_pressure_profile_tangent_and_path_work_match_independent_quadrature(
         "nonuniform fixed-rim work cannot be treated as p*dV"
     );
 }
+
+fn curved_pressure_segment() -> (MembranePatch, Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let mut nodes = Vec::new();
+    let mut elems = Vec::new();
+    for y in 0..4 {
+        for x in 0..4 {
+            nodes.push([0.1 * x as f64, 0.1 * y as f64]);
+        }
+    }
+    for y in 0..3 {
+        for x in 0..3 {
+            let a = 4 * y + x;
+            elems.push(vec![a, a + 1, a + 5]);
+            elems.push(vec![a, a + 5, a + 4]);
+        }
+    }
+    let count = elems.len();
+    let p = MembranePatch::try_new(
+        Mesh2 {
+            nodes,
+            elems,
+            patches: vec![],
+        },
+        vec![sheet(8000.0, 8000.0, 4000.0, 0.2); count],
+        vec![0.0; count],
+        domain(),
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let mut before = vec![[0.0; 3]; 16];
+    let mut after = before.clone();
+    // The outer perimeter stays fixed, while an interior triangle has three
+    // moving vertices. This gives a genuinely cubic swept-volume polynomial.
+    for (node, height, increment) in [
+        (5, 0.004, [0.0012, -0.0007, 0.0021]),
+        (6, 0.007, [-0.0008, 0.0014, -0.0011]),
+        (9, 0.008, [0.0006, 0.0009, -0.0017]),
+        (10, 0.006, [-0.0015, -0.0004, 0.0008]),
+    ] {
+        before[node][2] = height;
+        after[node] = std::array::from_fn(|i| before[node][i] + increment[i]);
+    }
+    (p, before, after)
+}
+
+/// G1/G3: the exact path-mean traction exchanges the SAME cubic swept volume
+/// as its gas port. Midpoint geometry alone demonstrably loses pressure work.
+#[test]
+fn mean_pressure_traction_closes_curved_cavity_work_without_a_correction() {
+    let (p, before, after) = curved_pressure_segment();
+    let pressure = 130000.0;
+    let delta: Vec<_> = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]))
+        .collect();
+    let mean = p
+        .pressure_segment_load_n(&before, &after, pressure, || false)
+        .unwrap();
+    let work: f64 = mean
+        .iter()
+        .flatten()
+        .zip(delta.iter().flatten())
+        .map(|(f, d)| f * d)
+        .sum();
+    let exact = p
+        .pressure_work_j(&before, &after, pressure, || false)
+        .unwrap();
+    close(work, exact, 1e-13, 1e-12);
+    let midpoint: Vec<_> = before
+        .iter()
+        .zip(&delta)
+        .map(|(a, d)| std::array::from_fn::<_, 3, _>(|i| a[i] + 0.5 * d[i]))
+        .collect();
+    let middle = p.pressure_load_n(&midpoint, pressure, || false).unwrap();
+    let midpoint_work: f64 = middle
+        .iter()
+        .flatten()
+        .zip(delta.iter().flatten())
+        .map(|(f, d)| f * d)
+        .sum();
+    assert!(
+        (midpoint_work - exact).abs() > 1e-8,
+        "fixture must expose midpoint pressure-work loss: {midpoint_work:e}, {exact:e}"
+    );
+    let reverse = p
+        .pressure_segment_load_n(&after, &before, pressure, || false)
+        .unwrap();
+    let mut quadrature = vec![[0.0; 3]; before.len()];
+    for t in [0.5 - (1.0_f64 / 12.0).sqrt(), 0.5 + (1.0_f64 / 12.0).sqrt()] {
+        let u: Vec<_> = before
+            .iter()
+            .zip(&delta)
+            .map(|(a, d)| std::array::from_fn::<_, 3, _>(|i| a[i] + t * d[i]))
+            .collect();
+        let force = p.pressure_load_n(&u, pressure, || false).unwrap();
+        for (sum, f) in quadrature.iter_mut().flatten().zip(force.iter().flatten()) {
+            *sum += 0.5 * f;
+        }
+    }
+    for ((mean, reverse), quadrature) in mean
+        .iter()
+        .flatten()
+        .zip(reverse.iter().flatten())
+        .zip(quadrature.iter().flatten())
+    {
+        close(*mean, *reverse, 1e-11, 1e-13);
+        close(*mean, *quadrature, 1e-11, 1e-13);
+    }
+    assert_eq!(
+        p.pressure_segment_load_n(&before, &before, pressure, || false)
+            .unwrap(),
+        p.pressure_load_n(&before, pressure, || false).unwrap()
+    );
+}
+
+/// G1/G3/G4: endpoint differentiation retains its one-half coincident-endpoint
+/// limit, signed material profiles, rigid translations and admission behavior.
+#[test]
+fn mean_pressure_endpoint_tangent_matches_force_differences_and_midpoint_chain_rule() {
+    let p = patch(8000.0, 2000.0, 500.0, 0.2, 0.37);
+    let before = displaced();
+    let change = [
+        [0.003, -0.002, 0.004],
+        [0.001, 0.0, 0.002],
+        [0.0, -0.001, 0.003],
+        [-0.002, 0.001, 0.0],
+        [0.001, 0.002, -0.001],
+    ];
+    let after: Vec<_> = before
+        .iter()
+        .zip(change)
+        .map(|(a, d)| std::array::from_fn::<_, 3, _>(|i| a[i] + d[i]))
+        .collect();
+    let direction = [
+        [0.2, -0.1, 0.4],
+        [-0.1, 0.3, -0.2],
+        [0.1, 0.2, 0.3],
+        [0.3, -0.2, -0.1],
+        [-0.2, 0.1, 0.2],
+    ];
+    let samples = [
+        [3.0, 9.0, -3.0],
+        [-2.0, 6.0, 1.0],
+        [9.0, 0.0, 4.0],
+        [3.0, -7.0, 2.0],
+    ];
+    for pressure in [
+        MembranePressure::Uniform(-1400.0),
+        MembranePressure::TriangleLinear(&samples),
+    ] {
+        let h = 1e-7;
+        let at = |scale: f64| {
+            after
+                .iter()
+                .zip(&direction)
+                .map(|(u, d)| std::array::from_fn::<_, 3, _>(|i| u[i] + scale * d[i]))
+                .collect::<Vec<_>>()
+        };
+        let lo = p
+            .pressure_segment_load_n(&before, &at(-h), pressure, || false)
+            .unwrap();
+        let hi = p
+            .pressure_segment_load_n(&before, &at(h), pressure, || false)
+            .unwrap();
+        let tangent = p
+            .pressure_segment_tangent_apply(&before, &after, &direction, pressure, || false)
+            .unwrap();
+        for ((a, b), t) in lo
+            .iter()
+            .flatten()
+            .zip(hi.iter().flatten())
+            .zip(tangent.iter().flatten())
+        {
+            close((b - a) / (2.0 * h), *t, 1e-8, 2e-8);
+        }
+        let coincident = p
+            .pressure_segment_tangent_apply(&before, &before, &direction, pressure, || false)
+            .unwrap();
+        let instantaneous = p
+            .pressure_tangent_apply(&before, &direction, pressure, || false)
+            .unwrap();
+        for (a, b) in coincident
+            .iter()
+            .flatten()
+            .zip(instantaneous.iter().flatten())
+        {
+            close(2.0 * a, *b, 1e-13, 1e-13);
+        }
+        let rigid = p
+            .pressure_segment_tangent_apply(
+                &before,
+                &after,
+                &[[0.2, -0.1, 0.3]; 5],
+                pressure,
+                || false,
+            )
+            .unwrap();
+        assert!(rigid.iter().flatten().all(|v| *v == 0.0));
+        let mean = p
+            .pressure_segment_load_n(&before, &after, pressure, || false)
+            .unwrap();
+        let work: f64 = mean
+            .iter()
+            .flatten()
+            .zip(change.iter().flatten())
+            .map(|(f, d)| f * d)
+            .sum();
+        close(
+            work,
+            p.pressure_work_j(&before, &after, pressure, || false)
+                .unwrap(),
+            1e-14,
+            1e-12,
+        );
+    }
+    assert!(matches!(
+        p.pressure_segment_load_n(&before, &after, 1.0, || true),
+        Err(MembraneError::Cancelled)
+    ));
+    assert!(
+        p.pressure_segment_tangent_apply(&before, &after, &[[f64::NAN; 3]; 5], 1.0, || false)
+            .is_err()
+    );
+    assert!(
+        p.pressure_segment_load_n(
+            &before,
+            &after,
+            MembranePressure::TriangleLinear(&[]),
+            || false
+        )
+        .is_err()
+    );
+}

@@ -209,7 +209,7 @@ impl<C: FnMut() -> bool> SecondOrderProblem for ThermalOperator<'_, '_, C> {
         let trial = cache.as_ref().expect("prepared heat/volume trial");
         for (out, &i) in output.iter_mut().zip(&self.model.free_dofs) {
             *out = trial.stage.internal[i / 3][i % 3]
-                - trial.net_pressure_pa * trial.stage.gradient[i / 3][i % 3];
+                - trial.net_pressure_pa * trial.mean_volume_gradient[i / 3][i % 3];
         }
     }
     fn tangent_apply(&self, q: &[f64], direction: &[f64], output: &mut [f64]) {
@@ -220,6 +220,7 @@ impl<C: FnMut() -> bool> SecondOrderProblem for ThermalOperator<'_, '_, C> {
         let cache = self.cache.borrow();
         match cache.as_ref().expect("prepared thermal trial").tangent(
             self.model,
+            &self.initial.displacement_m,
             direction,
             &mut || self.cancelled(),
         ) {

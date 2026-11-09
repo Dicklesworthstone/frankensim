@@ -45,7 +45,6 @@ fn heat_volume(
 pub(super) struct Geometry {
     pub displacement: Vec<[f64; 3]>,
     pub internal: Vec<[f64; 3]>,
-    pub gradient: Vec<[f64; 3]>,
     pub strain_energy_j: f64,
     pub volume: f64,
     pub exterior_volume: Option<f64>,
@@ -87,13 +86,9 @@ pub(super) fn geometry(
         .sealed_exterior()
         .map(|gas| admitted(gas.gas.volume_m3(), -sweep, gas.volume_interval_m3))
         .transpose()?;
-    let gradient = model
-        .patch
-        .pressure_load_n(&displacement, 1.0, &mut *cancelled)?;
     Ok(Geometry {
         displacement,
         internal: membrane.internal_gradient_n,
-        gradient,
         strain_energy_j: membrane.strain_energy_j,
         volume,
         exterior_volume,
@@ -103,6 +98,10 @@ pub(super) fn geometry(
 pub(super) struct Trial {
     pub stage: Geometry,
     pub endpoint: Geometry,
+    /// Exact path mean of grad(V), work-conjugate to the complete displacement.
+    pub mean_volume_gradient: Vec<[f64; 3]>,
+    /// Endpoint gradient for the native gas derivative and physical readback.
+    pub endpoint_volume_gradient: Vec<[f64; 3]>,
     pub gas: GasStep,
     pub exterior: Option<GasStep>,
     pub exterior_midpoint_pa: f64,
@@ -122,6 +121,16 @@ impl Trial {
     ) -> Result<Self, GasMembraneMotionError> {
         let stage = geometry(model, stage_q, &mut *cancelled)?;
         let endpoint = geometry(model, endpoint_q, &mut *cancelled)?;
+        let mean_volume_gradient = model.patch.pressure_segment_load_n(
+            &initial.displacement_m,
+            &endpoint.displacement,
+            1.0,
+            &mut *cancelled,
+        )?;
+        let endpoint_volume_gradient =
+            model
+                .patch
+                .pressure_load_n(&endpoint.displacement, 1.0, &mut *cancelled)?;
         let gas = heat_volume(
             &initial.gas,
             endpoint.volume,
@@ -147,6 +156,8 @@ impl Trial {
         Ok(Self {
             stage,
             endpoint,
+            mean_volume_gradient,
+            endpoint_volume_gradient,
             gas,
             exterior,
             exterior_midpoint_pa,
@@ -157,6 +168,7 @@ impl Trial {
     pub(super) fn tangent(
         &self,
         model: &GasMembrane<'_>,
+        initial_displacement: &[[f64; 3]],
         direction: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f64>, GasMembraneMotionError> {
@@ -170,32 +182,34 @@ impl Trial {
             model
                 .patch
                 .tangent_apply(&self.stage.displacement, &full, &mut *cancelled)?;
-        let geometric = model.patch.pressure_tangent_apply(
-            &self.stage.displacement,
+        let geometric = model.patch.pressure_segment_tangent_apply(
+            initial_displacement,
+            &self.endpoint.displacement,
             &full,
             self.net_pressure_pa,
             &mut *cancelled,
         )?;
         let mut dv = Dd::from_f64(0.0);
         for (&dof, &d) in model.free_dofs.iter().zip(direction) {
-            dv = dv + Dd::from_f64(self.endpoint.gradient[dof / 3][dof % 3] * d);
+            dv = dv + Dd::from_f64(self.endpoint_volume_gradient[dof / 3][dof % 3] * d);
         }
         let derivative = self.gas.report.pressure_final_volume_derivative_pa_m3
             + self
                 .exterior
                 .as_ref()
                 .map_or(0.0, |gas| gas.report.pressure_final_volume_derivative_pa_m3);
-        // The native source derivative holds interval heat fixed. Its endpoint
-        // is q1=2*q_stage-q_old, while pressure traction acts at q_stage.
-        // This cross-gradient action is generally NONSYMMETRIC.
+        // The source derivative holds interval heat fixed. q1=2*q_stage-q_old,
+        // so BOTH endpoint-volume and mean-geometry derivatives receive a factor
+        // of two. The pressure force uses the exact path mean of grad(V).
+        // This source/geometry cross-gradient action is generally NONSYMMETRIC.
         let dp = derivative * (2.0 * dv.to_f64());
         let action: Vec<_> = model
             .free_dofs
             .iter()
             .map(|&i| {
                 internal[i / 3][i % 3]
-                    - geometric[i / 3][i % 3]
-                    - dp * self.stage.gradient[i / 3][i % 3]
+                    - 2.0 * geometric[i / 3][i % 3]
+                    - dp * self.mean_volume_gradient[i / 3][i % 3]
             })
             .collect();
         if action.iter().any(|x| !x.is_finite()) {
@@ -227,7 +241,7 @@ impl Trial {
         let mut residual_n = self.endpoint.internal;
         for ((row, gradient), loads) in residual_n
             .iter_mut()
-            .zip(&self.endpoint.gradient)
+            .zip(&self.endpoint_volume_gradient)
             .zip(loads)
         {
             for axis in 0..3 {

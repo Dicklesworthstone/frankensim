@@ -79,7 +79,7 @@ pub enum GasMembraneMotionError {
         defect_j: f64,
         allowance_j: f64,
     },
-    /// Midpoint traction and native swept-volume work differ beyond allowance.
+    /// Path-mean traction and native swept-volume work differ beyond allowance.
     PressureWork { defect_j: f64, allowance_j: f64 },
     Cancelled,
 }

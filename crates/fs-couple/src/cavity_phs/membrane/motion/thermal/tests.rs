@@ -210,18 +210,26 @@ fn curved_heated_tangent_uses_native_ideal_and_pr_discrete_derivatives() {
         .collect();
     let a = trial_at(&lo);
     let b = trial_at(&hi);
-    let tangent = trial.tangent(&model, &direction, &mut || false).unwrap();
+    let tangent = trial
+        .tangent(
+            &model,
+            &motion.accepted().displacement_m,
+            &direction,
+            &mut || false,
+        )
+        .unwrap();
     for (&dof, actual) in model.free_dofs().iter().zip(tangent) {
         let force = |t: &gas::Trial| {
             t.stage.internal[dof / 3][dof % 3]
-                - t.net_pressure_pa * t.stage.gradient[dof / 3][dof % 3]
+                - t.net_pressure_pa * t.mean_volume_gradient[dof / 3][dof % 3]
         };
         near(actual, (force(&b) - force(&a)) / (2.0 * h), 2e-2, 5e-6);
     }
     let full = model.expand(&direction, true);
     let geometric = patch
-        .pressure_tangent_apply(
-            &trial.stage.displacement,
+        .pressure_segment_tangent_apply(
+            &motion.accepted().displacement_m,
+            &trial.endpoint.displacement,
             &full,
             trial.net_pressure_pa,
             || false,
@@ -278,7 +286,7 @@ fn analytic_energy(old: &MembraneGas, new: &MembraneGas) -> f64 {
 }
 
 #[test]
-fn two_gas_heat_work_accounts_and_curved_pressure_error_refine_with_native_steps() {
+fn two_gas_curved_motion_closes_pressure_work_while_mechanical_error_refines() {
     let (patch, reference, fixed, velocity) = curved_geometry();
     let model = GasMembrane::with_sealed_exterior(
         &patch,
@@ -301,6 +309,7 @@ fn two_gas_heat_work_accounts_and_curved_pressure_error_refine_with_native_steps
         .residual_n;
     let settings = GasMembraneThermalControls {
         exterior_gas: Some(controls().gas),
+        pressure_work_tolerance_j: 1e-11,
         ..controls()
     };
     let run = |steps: usize| {
@@ -316,6 +325,7 @@ fn two_gas_heat_work_accounts_and_curved_pressure_error_refine_with_native_steps
         .into_thermal();
         let dt = 8e-5 / (steps as f64);
         let mut maximum_pressure_defect = 0.0_f64;
+        let mut maximum_midpoint_defect = 0.0_f64;
         for _ in 0..steps {
             let before = motion.accepted().clone();
             let k0 = motion.kinetic_energy_j().unwrap();
@@ -359,12 +369,37 @@ fn two_gas_heat_work_accounts_and_curved_pressure_error_refine_with_native_steps
             );
             maximum_pressure_defect =
                 maximum_pressure_defect.max(frame.pressure_work_defect_j.abs());
+            // Independent discarded-midpoint comparison: the original cubic
+            // chart must actually exercise the geometric pressure correction.
+            let midpoint: Vec<_> = before
+                .displacement_m
+                .iter()
+                .zip(&after.displacement_m)
+                .map(|(a, b)| std::array::from_fn::<_, 3, _>(|i| a[i] + 0.5 * (b[i] - a[i])))
+                .collect();
+            let gradient = patch.pressure_load_n(&midpoint, 1.0, || false).unwrap();
+            let midpoint_volume: f64 = gradient
+                .iter()
+                .zip(&before.displacement_m)
+                .zip(&after.displacement_m)
+                .flat_map(|((g, a), b)| (0..3).map(move |i| g[i] * (b[i] - a[i])))
+                .sum();
+            let midpoint_defect = (frame.midpoint_pressure_pa
+                - frame.exterior_midpoint_pressure_pa)
+                * midpoint_volume
+                - frame.gas.work_by_gas_j
+                - frame.exterior_gas.unwrap().work_by_gas_j;
+            maximum_midpoint_defect = maximum_midpoint_defect.max(midpoint_defect.abs());
         }
-        (motion.state().q.clone(), maximum_pressure_defect)
+        (
+            motion.state().q.clone(),
+            maximum_pressure_defect,
+            maximum_midpoint_defect,
+        )
     };
-    let (coarse, ec) = run(4);
-    let (fine, ef) = run(8);
-    let (reference, er) = run(16);
+    let (coarse, ec, midpoint_coarse) = run(4);
+    let (fine, ef, _) = run(8);
+    let (reference, er, _) = run(16);
     let distance = |q: &[f64]| {
         q.iter()
             .zip(&reference)
@@ -374,8 +409,12 @@ fn two_gas_heat_work_accounts_and_curved_pressure_error_refine_with_native_steps
     };
     assert!(distance(&coarse) > 2.5 * distance(&fine));
     assert!(
-        ec > 1e-12 && ec > 3.0 * ef && ef > 3.0 * er,
-        "pressure errors: {ec:e}, {ef:e}, {er:e}"
+        ec < 1e-11 && ef < 1e-11 && er < 1e-11,
+        "pressure transfer residuals: {ec:e}, {ef:e}, {er:e}"
+    );
+    assert!(
+        midpoint_coarse > 1e-12 && ec < 0.1 * midpoint_coarse,
+        "path mean {ec:e} must resolve the actual midpoint defect {midpoint_coarse:e}"
     );
 }
 
@@ -424,21 +463,30 @@ fn source_and_late_work_energy_cancel_refusals_preserve_both_gases_and_history()
         assert_eq!(motion.state(), &state);
         assert_eq!(motion.accepted(), &accepted);
     };
-    assert!(matches!(
-        motion.step(
-            2e-5,
-            &loads,
-            0.04,
-            Some(-0.01),
-            GasMembraneThermalControls {
-                pressure_work_tolerance_j: 0.0,
-                ..settings
-            },
-            || false
-        ),
-        Err(GasMembraneMotionError::PressureWork { .. })
-    ));
-    unchanged(&motion);
+    let mut work_probe = motion.clone();
+    let work = work_probe
+        .step(2e-5, &loads, 0.04, Some(-0.01), settings, || false)
+        .unwrap();
+    assert!(work.pressure_work_defect_j.abs() < 1e-11);
+    // The transfer gate still refuses actual roundoff when requested. Exact
+    // zero closure is valid and must not be required to manufacture an error.
+    if work.pressure_work_defect_j != 0.0 {
+        assert!(matches!(
+            motion.step(
+                2e-5,
+                &loads,
+                0.04,
+                Some(-0.01),
+                GasMembraneThermalControls {
+                    pressure_work_tolerance_j: 0.5 * work.pressure_work_defect_j.abs(),
+                    ..settings
+                },
+                || false
+            ),
+            Err(GasMembraneMotionError::PressureWork { .. })
+        ));
+        unchanged(&motion);
+    }
     assert!(matches!(
         motion.step(
             2e-5,
