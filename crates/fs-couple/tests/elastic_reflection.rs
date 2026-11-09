@@ -11,6 +11,8 @@ use fs_phs::{WallPin, wall_specific_impedance};
 mod coating;
 #[path = "elastic_reflection/oriented.rs"]
 mod oriented;
+#[path = "elastic_reflection/transient.rs"]
+mod transient;
 
 fn solid(scale: f64) -> ElasticAcousticState {
     ElasticAcousticState::from_bulk_and_shear(

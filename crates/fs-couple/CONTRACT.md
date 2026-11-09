@@ -6955,6 +6955,35 @@ storage, a full rotated-support fixture against an independent 70-digit
 continuum transfer exponential, and source-domain/cancellation refusals.
 Native compilation and execution status are reported separately.
 
+### Causal transient reflection from the original support motion
+
+`elastic_reflection::PreparedTransientElasticReflection` retains all six
+principal displacement/velocity coordinates of the original oriented pins.
+Normal-incidence real P/SV/SH characteristics couple through the original
+material impedances to those coordinates. The existing native
+`PreparedQuadraticFlow` owns exact held-input evolution, exponential and
+trajectory-integral preparation under explicit dimension/byte/work limits.
+Warm steps use fixed-size buffers and perform no factorization or allocation.
+Compatible prepared durations can continue the same original state.
+
+Original pin heat, outgoing-wave energy and changes in kinetic/spring storage
+remain separate accounts on one trajectory. Outgoing-wave work uses independent
+quadratic and linear observations, never a residual energy balance. Real
+instantaneous wave power has no phasor cycle-average factor. A pulse can leave
+stored support motion that later radiates even when incident input is zero;
+lossless pins emit this energy without creating fictitious heat.
+
+The source-domain check bounds incoming/emitted strain throughout the interval
+using the passive envelope `H(t) <= H(initial) + incoming wave energy`, rather
+than checking only endpoints. Refusal or cancellation preserves accepted
+motion and time. This remains a stationary local boundary at normal incidence
+in a lossless isotropic solid; oblique history kernels, resolved coating time
+propagation and previously emitted spatial fields belong to their own owners.
+Five focused regression definitions cover the analytic pulse and causal tail,
+rotated interval composition, lossless radiation, transactional/source/budget
+refusals and interval-wide strain admission. Native execution is reported
+separately from formula, source and formatter checks.
+
 ## Compact outlet reaction from an impedance wall
 
 `compact_wall_radiation::PreparedCompactWallRadiation` closes original finite-pressure or prescribed-flow network sources against the complete exterior impedance of one or more unflanged compact circular outlets. Each diagonal retains `fs-duct`'s native unflanged radiation impedance, every off-diagonal retains the original 3D monopole mutual impedance, and every pair, including the finite diagonal self return, receives the original spherical impedance-wall response. These use the same fluid, frequency, peak phasor and physical volume-flow units. Reciprocal pairs are evaluated once; all reflected preparations share one aggregate work allowance and retain their native error diagnostics. Cancellation or refusal publishes no partial matrix.

@@ -1,4 +1,4 @@
-//! Frequency-dependent elastic reflection from the original passive wall mechanics.
+//! Coherent and transient elastic reflection from original passive wall mechanics.
 //!
 //! The solid keeps its source-bound stiffness, density, identity and strain domain.
 //! Normal and tangential supports use the same [`WallPin`] and
@@ -11,14 +11,22 @@
 //! independent principal supports and their original rotation. A pin is an
 //! explicitly authored reduced support. The coating owner resolves an original
 //! finite elastic layer in front of that support, including its full interior
-//! fields; the pins themselves do not imply a measured material, finite shell
-//! or transient history.
+//! fields; the pins themselves do not imply a measured material or finite shell.
+//! The normal-incidence transient owner evolves their original displacement and
+//! velocity, including causal re-emission and integrated physical work.
 
 mod coating;
 pub use coating::{OscillatorBackedElasticCoating, SupportedElasticCoatingResponse};
 mod oriented;
 pub use oriented::{
     OrientedOscillatorSupport, OrientedOscillatorSupportedSurface, OrientedSupportedElasticResponse,
+};
+mod transient;
+pub use transient::{
+    PreparedTransientElasticReflection, TransientElasticReflectionError,
+    TransientElasticReflectionFrame, TransientElasticReflectionLimits,
+    TransientElasticReflectionWork, TransientElasticReflectionWorkspace,
+    TransientElasticSupportEnergy, TransientElasticSupportState,
 };
 
 use fs_material::MaterialError;
