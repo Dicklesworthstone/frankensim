@@ -6,7 +6,9 @@
 //! circulation remains a physical unknown: A is never projected independently
 //! of the electrical potential. Conducting components have independent floating
 //! potentials and insulating natural current boundaries, including internal
-//! conductor/insulator interfaces. Tangential A traces stay fixed.
+//! conductor/insulator interfaces. Tangential A traces are held unless an
+//! explicit endpoint drive advances their original support; its reaction work
+//! is accounted separately from impressed-current and electrode supply.
 //!
 //! The base step holds linear/recoil material, conductivity and Eulerian
 //! occupancy fixed. The nonlinear child supplies reversible saturation; the
@@ -36,7 +38,7 @@ pub mod thermal;
 mod winding_kernel;
 
 use super::super::{SpatialMagneticError, SpatialMagneticMaterial, dot, finite, invalid, poll};
-use super::{SpatialVectorField, SpatialVectorMagnetostatics, apply};
+use super::{SpatialVectorField, SpatialVectorMagnetostatics, VectorMagneticBoundary, apply};
 use coupling::{Coupling, Geometry, admit_step};
 use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
 use fs_solver::{
@@ -102,6 +104,9 @@ pub struct SpatialInductionStep {
     pub heat_j: f64,
     pub mechanical_work_j: f64,
     pub impressed_work_j: f64,
+    /// Work entering through the prescribed tangential magnetic trace [J].
+    /// Zero for a held trace; never included in Ohmic heat or volume-source work.
+    pub magnetic_boundary_work_j: f64,
     /// Electrical work entering through physical conductor electrodes [J].
     pub terminal_work_j: f64,
     /// Native weak electrode currents, distinct from impressed volume sources.
@@ -387,6 +392,66 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         )
     }
 
+    /// Drive Faraday induction by a piecewise-linear tangential A history on
+    /// exactly the original prescribed exterior support. Edge values are line
+    /// integrals [Wb], in the same orientation as `VectorMagneticBoundary`.
+    ///
+    /// The known -dA/dt enters both field and charge equations, including
+    /// conductor cells touching the driven boundary. Boundary reaction work
+    /// closes the original magnetic/Ohmic/Lorentz balance separately from
+    /// impressed-current supply. The accepted endpoint becomes the held trace
+    /// of subsequent ordinary steps; rejected candidates publish no history.
+    /// Geometry, relative gauge, material occupancy and electric boundaries
+    /// remain unchanged. This is not a moving-boundary or full-wave model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boundary_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.step_boundary_prepared_candidate(
+            Arc::clone(&self.prepared),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            endpoint_boundary,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_boundary_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        let trace = prepared.boundary_endpoint(
+            geometry(&prepared.problem),
+            endpoint_boundary,
+            cancelled,
+        )?;
+        self.step_trace_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            None,
+            Some(&trace),
+            cancelled,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn step_prepared_candidate(
         &self,
@@ -417,6 +482,30 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         duration_s: f64,
         controls: SpatialInductionControls,
         terminal_drive: Option<&TerminalDrive<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.step_trace_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            terminal_drive,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_trace_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        terminal_drive: Option<&TerminalDrive<'_>>,
+        boundary_endpoint: Option<&[Option<f64>]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionCandidate<'m, C>> {
         poll(cancelled)?;
@@ -456,6 +545,18 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let old_field = field(original, &self.potential_wb, cancelled)?;
         let stored_before_j = old_field.stored_energy_j;
         let b0 = old_field.flux_density_t;
+        let boundary_delta = boundary_endpoint
+            .map(|trace| {
+                trace
+                    .iter()
+                    .zip(&self.potential_wb)
+                    .map(|(value, &old)| value.map_or(Ok(0.0), |next| finite(next - old)))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let boundary_changes = boundary_delta
+            .as_ref()
+            .is_some_and(|delta| delta.iter().any(|&v| v != 0.0));
         let old_magnetic = apply(&original.stiffness, &self.potential_wb, cancelled)?;
         let refreshed_magnetic = apply(&problem.stiffness, &self.potential_wb, cancelled)?;
         let mut rhs = vec![0.0; n];
@@ -467,6 +568,39 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 )?;
             }
         }
+        // The prescribed increment is part of the SAME A, not a detached
+        // imposed E field. Its magnetic and conductive terms load the free
+        // equations; its curl also participates in the midpoint motional EMF.
+        let motion_base_b = if boundary_changes {
+            let delta = boundary_delta.as_ref().unwrap();
+            let known_magnetic = apply(&problem.stiffness, delta, cancelled)?;
+            for (edge, index) in p.edge_unknown.iter().enumerate() {
+                if let Some(i) = *index {
+                    rhs[i] = finite(rhs[i] - 0.5 * known_magnetic[edge])?;
+                }
+            }
+            for (rhs, known) in rhs
+                .iter_mut()
+                .zip(p.boundary_current_drive(g, delta, duration_s, cancelled)?)
+            {
+                *rhs = finite(*rhs + known)?;
+            }
+            let db = g.flux(delta, cancelled)?;
+            Some(
+                b0.iter()
+                    .zip(db)
+                    .map(|(old, delta)| {
+                        let mut mid = [0.0; 3];
+                        for j in 0..3 {
+                            mid[j] = finite(old[j] + 0.5 * delta[j])?;
+                        }
+                        Ok(mid)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
         if let Some(drive) = terminal_drive {
             if let Some(potential) = drive.prescribed_potentials() {
                 for (rhs, known) in rhs.iter_mut().zip(p.potential_drive(potential, cancelled)?) {
@@ -478,7 +612,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let (motion, drive, maximum_cell_magnetic_peclet) = p.motion(
             g,
             velocity_m_s,
-            &b0,
+            motion_base_b.as_deref().unwrap_or(&b0),
             &problem.permeability_bound,
             controls.maximum_cell_magnetic_peclet,
             cancelled,
@@ -590,6 +724,14 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         }
         let mut next = self.potential_wb.clone();
         let mut delta = vec![0.0; next.len()];
+        if let Some(trace) = boundary_endpoint {
+            for (e, value) in trace.iter().enumerate() {
+                if let Some(value) = value {
+                    next[e] = *value;
+                    delta[e] = boundary_delta.as_ref().unwrap()[e];
+                }
+            }
+        }
         for (e, index) in p.edge_unknown.iter().enumerate() {
             if let Some(i) = *index {
                 next[e] = finite(next[e] + x[i])?;
@@ -624,15 +766,24 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 (vec![], 0.0, current.maximum_charge_residual_a)
             };
         let mut maximum_ampere_residual_a = 0.0_f64;
+        let mut magnetic_boundary_work_j = 0.0;
         for e in 0..mesh.edges.len() {
             poll(cancelled)?;
-            if !p.fixed_edges[e] {
+            if !p.fixed_edges[e] || boundary_changes {
                 let residual = finite(
                     f64::midpoint(old_magnetic[e], endpoint_magnetic[e])
                         - f64::midpoint(original.remanence_load[e], problem.remanence_load[e])
                         - load[e]
                         - current.edge_current_a[e],
                 )?;
+                if p.fixed_edges[e] {
+                    // This is the magnetic Dirichlet reaction, positive into
+                    // the field. Electrode work belongs to the charge equation
+                    // and remains separate from this Poynting boundary account.
+                    magnetic_boundary_work_j =
+                        finite(delta[e].mul_add(residual, magnetic_boundary_work_j))?;
+                    continue;
+                }
                 maximum_ampere_residual_a = maximum_ampere_residual_a.max(residual.abs());
                 if p.physical_mass_diagonal[e] == 0.0
                     && (endpoint_magnetic[e] - problem.remanence_load[e] - endpoint_load[e]).abs()
@@ -690,12 +841,13 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let energy_residual_j = finite(
             stored_after_j - stored_before_j + current.heat_j + current.mechanical_work_j
                 - impressed_work_j
+                - magnetic_boundary_work_j
                 - terminal_work_j
                 - parameter_work_j,
         )?;
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(invalid(
-                "magnetic, Ohmic, Lorentz, terminal and impressed work do not close",
+                "magnetic, Ohmic, Lorentz, boundary, terminal and impressed work do not close",
             ));
         }
         poll(cancelled)?;
@@ -717,6 +869,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 heat_j: current.heat_j,
                 mechanical_work_j: current.mechanical_work_j,
                 impressed_work_j,
+                magnetic_boundary_work_j,
                 terminal_work_j,
                 terminals,
                 energy_residual_j,

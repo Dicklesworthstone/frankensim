@@ -3140,6 +3140,32 @@ feedback/Ohmic/Lorentz work, separated floating conductors, fixed-recoil energy
 and source limits, and bounded/cancelled deterministic rollback. Synthetic
 materials qualify equations and discretization, not empirical devices.
 
+### Prescribed magnetic boundary excitation
+
+`SpatialInduction::step_with_boundary_candidate` advances a piecewise-linear
+tangential-A trace on exactly the original exterior edge support. The known
+`-delta_A/dt` enters the same Whitney magnetic and floating-charge equations;
+the midpoint boundary curl also enters `v cross B`. The original gauge,
+conducting components and sparse operators are retained. Accepted endpoints
+become the held trace of subsequent ordinary steps, preserving eddy-current
+memory through a ramp followed by a hold. Support changes and conflicting or
+nonfinite face traces refuse transactionally.
+
+`magnetic_boundary_work_j` is the signed original magnetic reaction paired
+with the boundary increment. It is a separate external supply in
+`delta W + Q_Ohmic + W_mechanical = W_impressed + W_boundary + W_terminal + W_parameter`.
+It is neither impressed volume-current work nor a thermal credit. The material
+trial and `step_with_materials_and_boundary_candidate` retain the same split
+under source-pinned conductivity/permeability refresh. Physical electrodes,
+nonlinear/hysteretic evolution and moving geometry do not acquire a new
+boundary-drive API by implication.
+
+G0/G1 fixtures check uniform-field storage and signed boundary supply, an
+independently integrated one-tetrahedron P1 Faraday/charge/Ohmic oracle,
+time-dependent gradient cancellation, ramp-to-hold diffusion, fixed-trace
+equivalence and rejected-candidate rollback. These are numerical-model checks,
+not an external-coil model or an empirical induction-heating qualification.
+
 ### Physical electrodes on three-dimensional inducing conductors
 
 `induction::terminals::SpatialTerminalInduction` attaches disjoint equipotential

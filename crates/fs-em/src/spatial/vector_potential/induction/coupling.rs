@@ -5,7 +5,7 @@
 //! this module supplies no replacement magnetic material or time integrator.
 
 use super::super::super::{SpatialGeometry, cross, dot, invalid, norm, poll, sub};
-use super::super::{CellVectors, VectorTopology, apply};
+use super::super::{CellVectors, VectorMagneticBoundary, VectorTopology, apply};
 use super::{
     Result, SpatialInductionCell, SpatialInductionControls, SpatialInductionLimits, add, csr,
     finite, positive, product, row_map,
@@ -13,7 +13,7 @@ use super::{
 use fs_material::conductor::spatial::{SpatialConductivity, SpatialConductorMaterial};
 use fs_rep_mesh::TetComplex;
 use fs_sparse::Csr;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Copy)]
 pub(super) struct Geometry<'a> {
@@ -113,6 +113,97 @@ pub(super) fn fixed_trace_components(
         .collect())
 }
 impl<C: SpatialConductorMaterial> Coupling<C> {
+    /// Values on exactly the original fixed tangential-A support. Changing
+    /// that support would change the relative gauge and is a different problem.
+    pub fn boundary_endpoint(
+        &self,
+        g: Geometry<'_>,
+        boundary: &VectorMagneticBoundary,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Option<f64>>> {
+        poll(cancelled)?;
+        if boundary.potential.len() > g.geometry.faces.len() {
+            return Err(invalid("bounded original magnetic boundary required"));
+        }
+        let topology = VectorTopology {
+            geometry: g.geometry,
+            cells: g.cells,
+        };
+        let mut endpoint = vec![None; self.fixed_edges.len()];
+        let mut faces = BTreeSet::new();
+        for trace in &boundary.potential {
+            poll(cancelled)?;
+            if g.geometry
+                .faces
+                .get(trace.face)
+                .is_none_or(|f| f.cells.len() != 1)
+                || !faces.insert(trace.face)
+                || trace.edge_integrals_wb.iter().any(|v| !v.is_finite())
+            {
+                return Err(invalid(
+                    "unique exterior magnetic faces with finite edge integrals required",
+                ));
+            }
+            let edges = topology
+                .face_edges(trace.face)
+                .ok_or_else(|| invalid("missing original magnetic trace edge"))?;
+            for (edge, value) in edges.into_iter().zip(trace.edge_integrals_wb) {
+                if !self.fixed_edges[edge] || endpoint[edge].is_some_and(|old| old != value) {
+                    return Err(invalid(
+                        "magnetic endpoint changed support or conflicts on a shared edge",
+                    ));
+                }
+                endpoint[edge] = Some(value);
+            }
+        }
+        for (value, &fixed) in endpoint.iter().zip(&self.fixed_edges) {
+            poll(cancelled)?;
+            if value.is_some() != fixed {
+                return Err(invalid("complete original magnetic trace required"));
+            }
+        }
+        Ok(endpoint)
+    }
+
+    /// Known -dA/dt forcing on BOTH the magnetic and charge rows, integrated
+    /// with the same conductivity and Whitney basis as every unknown increment.
+    pub fn boundary_current_drive(
+        &self,
+        g: Geometry<'_>,
+        delta_wb: &[f64],
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
+        let mut drive = vec![0.0; self.mass.nrows()];
+        for c in &self.cells {
+            poll(cancelled)?;
+            let mut electric = [[0.0; 3]; 4];
+            for (k, value) in electric.iter_mut().enumerate() {
+                for (j, entry) in value.iter_mut().enumerate() {
+                    for a in 0..6 {
+                        *entry = finite(
+                            *entry - delta_wb[g.cells[c.cell].edges[a]] / dt * c.basis[k][a][j],
+                        )?;
+                    }
+                }
+            }
+            for a in 0..10 {
+                if let Some(i) = c.indices[a] {
+                    drive[i] = finite(
+                        drive[i]
+                            + conductivity_product(
+                                c.sigma,
+                                c.basis.map(|q| q[a]),
+                                electric,
+                                c.volume,
+                            ),
+                    )?;
+                }
+            }
+        }
+        Ok(drive)
+    }
+
     /// Prepare once from a source-admitted field's actual trace and cochain.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(

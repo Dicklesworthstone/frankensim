@@ -1,5 +1,7 @@
 //! Independent A-phi induction oracles on actual 3D Whitney fields.
 //! Synthetic materials qualify equations/discretization, not empirical devices.
+#[path = "spatial_induction/boundary.rs"]
+mod boundary;
 #[path = "spatial_induction/harmonic.rs"]
 mod harmonic;
 #[cfg(feature = "magnetic-hysteresis")]

@@ -14,7 +14,7 @@ pub mod harmonic;
 use super::super::super::{SpatialMagneticMaterial, invalid, poll};
 use super::{
     MagneticOwner, Prepared, Result, SpatialInduction, SpatialInductionCandidate,
-    SpatialInductionControls, coupling::Geometry,
+    SpatialInductionControls, VectorMagneticBoundary, coupling::Geometry,
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
@@ -56,6 +56,30 @@ impl<'m, C: SpatialConductorMaterial> SpatialInductionMaterialTrial<'_, 'm, C> {
             Arc::clone(&self.prepared),
             endpoint_current_a_m2,
             velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Drive the original magnetic trace while using these endpoint source
+    /// coefficients. Every trial retains the same old A, material and clock;
+    /// magnetic boundary supply and material parameter work remain distinct.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boundary_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.original.step_boundary_prepared_candidate(
+            Arc::clone(&self.prepared),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            endpoint_boundary,
             duration_s,
             controls,
             cancelled,
@@ -110,6 +134,35 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             .step_candidate(
                 endpoint_current_a_m2,
                 velocity_m_s,
+                duration_s,
+                controls,
+                cancelled,
+            )
+    }
+
+    /// Joint source-temperature refresh and prescribed magnetic excitation.
+    /// The original midpoint A–phi solve includes the known boundary -dA/dt
+    /// in charge conservation and Ohmic heat. Its magnetic-boundary supply is
+    /// separate from the reversible parameter transfer returned to a caloric
+    /// consumer; neither is relabeled as physical dissipation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_and_boundary_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        endpoint_boundary: &VectorMagneticBoundary,
+        duration_s: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.prepare_materials_trial(materials, conductors, assembly, cancelled)?
+            .step_with_boundary_candidate(
+                endpoint_current_a_m2,
+                velocity_m_s,
+                endpoint_boundary,
                 duration_s,
                 controls,
                 cancelled,
