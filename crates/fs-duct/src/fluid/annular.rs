@@ -36,6 +36,8 @@ pub mod excitation;
 pub mod field;
 /// Molecular heat storage solved together with the original annular wall diffusion.
 pub mod molecular;
+/// Finite wall temperature, storage and heat transfer in the same radial acoustic operator.
+pub mod thermal_wall;
 
 /// Bounds the geometry, each native linear-solve tile and all frequency work.
 pub const MAX_ANNULAR_ELEMENTS: usize = 4096;

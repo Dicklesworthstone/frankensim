@@ -136,6 +136,58 @@ quadrature, coherent axial integration and partitions, cubic molecular loss
 at pressure nodes, opaque segments, exact empty-reservoir reduction,
 isothermal suppression, fast/frozen reservoir limits, and native refusals.
 
+### Finite thermal storage and heat transfer at annular walls
+
+`AnnularSection::prepare_thermal_wall_fields[_controlled]` binds an original
+gas to independent inner and outer thermal boundaries. The molecular
+counterpart uses the original `RelaxationState::caloric_response` in the same
+energy equation. The boundary is explicitly isothermal, adiabatic, or a
+finite areal heat capacity `C_A` with conductance `G` to the unchanged
+background bath. Perfect local gas/wall thermal contact gives
+`q_out=(G-i*omega*C_A)*T_wall` in the native convention. Gas conduction is
+resolved by the original radial operator, so no guessed gas-film distance,
+second thermal shunt, fitted molecular loss or extra bulk viscosity is added.
+
+Both boundary temperatures are retained in the SAME weighted radial P1
+mass/stiffness matrix and native complex tridiagonal solve. Wall capacity
+adds reversible storage; wall conductance adds positive bath exchange.
+Insulated walls preserve the exact uniform thermal field, while mechanical
+walls remain no-slip. The prepared result exposes the native wave and
+finite-length `TwoPort`, local gas velocity/temperature and gradients,
+wall temperature, outward fluid-to-wall heat flux, bath heat flux, and
+cycle-mean wall thermal storage. Isothermal flux uses the original weak
+boundary reaction, without substituting an adjacent-cell gradient.
+
+Analytic positive P1 integrals separate shear, fluid Fourier availability
+loss, original molecular availability loss and each wall's bath-exchange
+availability loss. Their sum is checked independently against the acoustic
+pressure/flow shunt and series work. Wall storage is
+`2*pi*r*C_A*|T_wall|²/(4*T0)` per axial metre and contributes no dissipative
+power. Fourier, molecular and bath-exchange acoustic losses are not
+automatically caloric deposition or a prediction of mean thermal transport.
+
+Preparation is O(N); cell, wall and whole-section queries are O(1), allocate
+nothing and perform no material evaluation or new solve. The existing
+`AnnularAdmission` requires at least `320*(elements+1)+4096` payload bytes
+for this path. Polls occur every 64 cells and around the bounded native solve
+of at most 4097 nodes. Original transverse-phase, cell-diffusion-phase and
+residual admissions remain; radial refinement is the spatial accuracy axis.
+
+Finite wall coefficients are explicit boundary data with no inferred material
+authority. The one-temperature wall requires a justified lumped-capacity
+domain; through-thickness or axial solid conduction, contact resistance,
+thermoelastic motion, radiation and evolving background temperatures remain
+outside this boundary model. The original linear continuum, fully developed,
+plane-pressure annular assumptions also remain.
+
+`tests/annular_thermal_walls.rs` compares finite and mixed thermal boundaries
+with independent dimensional radial ODE integration on a three-rung P1 mesh
+ladder; recovers isothermal and insulated limits; tests shared gas/wall
+capacity, oscillatory heat-flux/storage identities, separate positive-channel
+power balance and physical-volume quadrature; and checks material binding,
+payload, invalid coefficients and bounded cancellation. Manufactured
+reservoir data establish numerical constitutive checks, not measured accuracy.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). 1D viscothermal duct/horn acoustics
