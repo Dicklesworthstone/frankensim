@@ -19,6 +19,9 @@
 /// Original normal branch events with retained spring release and fresh recontact.
 pub mod events;
 
+/// Original material-temperature continuation at held approach and twist.
+pub mod temperature;
+
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};

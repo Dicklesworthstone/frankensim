@@ -3,6 +3,9 @@
 mod common;
 #[path = "adhesive_rolling/events.rs"]
 mod events;
+
+#[path = "adhesive_rolling/temperature.rs"]
+mod temperature;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::rolling::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};

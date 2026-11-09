@@ -14,8 +14,10 @@
 //! work needed to change rolling stiffness. It does not add reciprocal normal
 //! loading or solve a relaxed mixed-mode contact area. The [`events`] owner
 //! carries this memory through original normal attachment and detachment with
-//! explicit outgoing release. Temperature or a changing rolling axis need
-//! other history/work owners. No net-load cutoff is applied.
+//! explicit outgoing release. The [`temperature`] continuation retains loaded
+//! memory through original material queries with explicit parameter work.
+//! A changing rolling axis requires its own history owner. No net-load cutoff
+//! is applied.
 
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use fs_blake3::{ContentHash, DomainHasher};
@@ -28,6 +30,9 @@ use std::sync::Arc;
 
 /// Original normal attachment, loaded separation and stress-free recontact.
 pub mod events;
+
+/// Original material-temperature continuation at held approach and angle.
+pub mod temperature;
 
 /// Independent rolling calibration and small-shift approximation ceiling.
 /// Neither field is inferred from bulk elasticity or work of adhesion.

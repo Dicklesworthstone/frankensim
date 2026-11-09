@@ -4,6 +4,9 @@ mod common;
 
 #[path = "adhesive_torsion/events.rs"]
 mod events;
+
+#[path = "adhesive_torsion/temperature.rs"]
+mod temperature;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::torsion::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};

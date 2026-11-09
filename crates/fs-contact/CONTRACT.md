@@ -4616,3 +4616,29 @@ This is an explicit prescribed-area, homogeneous-twist approximation. It does no
 The sealed lifecycle retains separate double-double cumulative normal-release, torsion-release and plastic-loss accounts. Detached angular travel creates no contact work or future preload. Recontact starts an unstrained spring, retaining previous energy accounts. Zero angular travel authenticates a marginal attached state; normal continuation at the exact fold owns detachment. Identity, applicability or arithmetic refusal publishes no successor.
 
 This keeps the prescribed-mode-I, homogeneous-twist approximation. It does not locate a coupled I/III fold, recruit stress-free annuli, assign heat destinations or create body impulses. Five G1/G3/G4 integration groups cover independent fold-energy formulas, fresh recontact, exact thresholds/overshoot/subdivision, weak history/work and refusal. Pinned formatting and recursive syntax/module resolution passed; these cross-crate integration tests were not compiled or executed under the existing unavailable remote runners and shared memory/disk limits.
+
+## Sourced temperature continuation of loaded angular contacts
+
+`rolling::temperature` and `torsion::temperature` consume the original sealed
+JKR thermal refresh at held indentation and angular coordinate. Admission
+checks the complete original source and canonical endpoint, attached branches,
+zero normal actuator work, exact approach, unchanged geometry/envelope/range,
+and original ordered material/interface cards. The same queried normal owner
+supplies the new attached area, adhesion and bulk elastic response.
+
+Rolling refreshes its original W/E* spring; bonded torsion refreshes both bulk
+shear moduli and reruns its declared maximum G_III/W screen. Critical shift or
+twist and all approximation ceilings stay fixed; their thermal validity remains
+an explicit calibration responsibility. Complete double-double spring/angle
+history survives. The report keeps original and refreshed owner identities,
+normal endpoints, and separate normal/angular storage and signed parameter
+work. No mechanical angular increment, plastic loss, snap or heat is introduced.
+The refreshed source bundle moves into the successor without another deep copy.
+
+Six focused integration cases cover independently manufactured bulk/interface
+temperature laws, no-op and exact round-trip memory, subsequent reverse yield,
+wrong owner/state/endpoint/control, original query domains and material order,
+and renewed rolling/torsion applicability refusal. Formatting/parser checks
+passed; these new cross-crate cases were not compiled or executed in the
+resource-constrained session. This is attached-endpoint continuation, not a
+thermal-path stability, reciprocal mixed-mode or caloric entropy model.
