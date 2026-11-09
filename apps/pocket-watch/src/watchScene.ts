@@ -65,9 +65,28 @@ function bSplineCubic(p0: number, p1: number, p2: number, p3: number, t: number)
 }
 
 /**
+ * Mitchell-Netravali (B = 1/3, C = 1/3) cubic filter clamped to the local [min, max] convex hull.
+ * Combines 1/3 C^2 B-Spline + 2/3 Catmull-Rom so free-surface heightfields are completely free of
+ * grid-line creases while preserving full droplet peak height and crisp Young-Laplace meniscus edges.
+ */
+function mitchellNetravaliClamped(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const w0 = (-7.0 * t3 + 15.0 * t2 - 9.0 * t + 1.0) / 18.0;
+  const w1 = (21.0 * t3 - 36.0 * t2 + 16.0) / 18.0;
+  const w2 = (-21.0 * t3 + 27.0 * t2 + 9.0 * t + 1.0) / 18.0;
+  const w3 = (7.0 * t3 - 6.0 * t2) / 18.0;
+  const raw = w0 * p0 + w1 * p1 + w2 * p2 + w3 * p3;
+  const lo = Math.min(p0, p1, p2, p3);
+  const hi = Math.max(p0, p1, p2, p3);
+  return Math.max(lo, Math.min(hi, raw));
+}
+
+/**
  * Smoothly sample a 2D scalar field on the `48 x 48` PDE grid at world coordinates `(xMm, yMm)`
- * using C^2-continuous Bicubic B-Spline interpolation so free-surface molten & solidified gold
- * pools render with organic Young-Laplace meniscus contours and continuous specular curvature.
+ * using convex-hull-clamped Bicubic Mitchell-Netravali (B=1/3, C=1/3) interpolation so free-surface
+ * molten & solidified gold pools render with organic Young-Laplace meniscus contours, full peak height,
+ * and continuous specular curvature.
  */
 function sampleSmoothPdeField(
   gridData: Float32Array,
@@ -89,16 +108,16 @@ function sampleSmoothPdeField(
     return gridData[(yClamp * GRID_N + xClamp) * 7 + ch] ?? 0.0;
   };
 
-  // Evaluate 4x4 C^2 Bicubic B-Spline patch (strictly convex-hull preserving, zero ringing)
+  // Evaluate 4x4 Bicubic Mitchell-Netravali patch (convex-hull bounded, zero ringing)
   const rowVals = [0, 0, 0, 0];
   for (let m = -1; m <= 2; m++) {
     const v0 = readCell(ix0 - 1, iy0 + m);
     const v1 = readCell(ix0, iy0 + m);
     const v2 = readCell(ix0 + 1, iy0 + m);
     const v3 = readCell(ix0 + 2, iy0 + m);
-    rowVals[m + 1] = bSplineCubic(v0, v1, v2, v3, fx);
+    rowVals[m + 1] = mitchellNetravaliClamped(v0, v1, v2, v3, fx);
   }
-  const val = bSplineCubic(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, fy);
+  const val = mitchellNetravaliClamped(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, fy);
   return ch === 0 ? Math.max(70.0, val) : Math.max(0.0, val);
 }
 
@@ -2296,10 +2315,23 @@ export class PocketWatchScene {
     const pos = posAttr.array as Float32Array;
     const col = colAttr.array as Float32Array;
 
+    const readRawNode = (izClamped: number, tWrapped: number, ch: number): number =>
+      caseShellData[(izClamped * CASE_N_THETA + tWrapped) * 6 + ch]!;
+
     const sampleNodeField = (iz: number, it: number, ch: number): number => {
-      const zClamped = Math.max(0, Math.min(CASE_N_Z - 1, iz));
       const tWrapped = ((it % CASE_N_THETA) + CASE_N_THETA) % CASE_N_THETA;
-      return caseShellData[(zClamped * CASE_N_THETA + tWrapped) * 6 + ch]!;
+      // Phantom endpoint reflection for spatial coordinates (ch <= 2) so the C^2 cubic B-spline
+      // interpolates the exact top and bottom bezel rims (z = +/-3.8 mm, R = 23.0 mm) with zero gap:
+      if (ch <= 2) {
+        if (iz < 0) {
+          return 2.0 * readRawNode(0, tWrapped, ch) - readRawNode(1, tWrapped, ch);
+        }
+        if (iz >= CASE_N_Z) {
+          return 2.0 * readRawNode(CASE_N_Z - 1, tWrapped, ch) - readRawNode(CASE_N_Z - 2, tWrapped, ch);
+        }
+      }
+      const zClamped = Math.max(0, Math.min(CASE_N_Z - 1, iz));
+      return readRawNode(zClamped, tWrapped, ch);
     };
 
     const sampleShellSmooth = (uTheta: number, vZ: number, ch: number): number => {

@@ -1766,7 +1766,14 @@ impl MultiphysicsState {
         crystal.frost_thickness_um = frost_crystal;
     }
 
-    fn recompute_modifiers(&mut self) {
+    pub(crate) fn recompute_modifiers(&mut self) {
+        let hs_mat = if self.inputs.compensated_hairspring {
+            WatchMaterialId::Invar36Ni
+        } else {
+            WatchMaterialId::HighCarbonSteel
+        };
+        self.nodes[WatchNodeId::HairspringBreguet as usize].material = hs_mat;
+
         let t_plate = self.nodes[WatchNodeId::MainplateBrass as usize].temperature_k;
         let t_barrel = self.nodes[WatchNodeId::BarrelMainspring as usize].temperature_k;
         let t_train = self.nodes[WatchNodeId::GoingTrainWheels as usize].temperature_k;

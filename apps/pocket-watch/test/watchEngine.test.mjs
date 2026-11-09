@@ -37,6 +37,12 @@ test("WASM PocketWatchSim — chronometer timekeeping, winding, and all 5 multip
   assert.ok(sim.mic_loudness_phon() >= 0.0, "expected non-negative loudness level (phon)");
   assert.ok(sim.mic_sharpness_acum() >= 0.0, "expected non-negative DIN sharpness (acum)");
   assert.ok(sim.rate_sensitivity_s_day_per_k() < -1.0, "expected negative thermoelastic rate sensitivity d(rate)/dT");
+  sim.set_compensated_hairspring(true);
+  assert.ok(
+    Math.abs(sim.rate_sensitivity_s_day_per_k()) < Math.abs(-1.0),
+    "expected set_compensated_hairspring(true) to immediately update d(rate)/dT even while paused",
+  );
+  sim.set_compensated_hairspring(false);
   assert.ok(sim.rate_interval_lo_s_day() <= sim.rate_interval_hi_s_day(), "expected valid interval rate bounds");
   assert.ok(sim.balance_aero_drag_s_inv() > 0.0, "expected positive Stokes-Stuart oscillating-cylinder aero drag");
   assert.ok(sim.cosc_e_value() > 0.0, "expected positive COSC e-process wealth");

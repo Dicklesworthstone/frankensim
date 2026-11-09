@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:cf": "tsc --noEmit && vite build --base /chronometer/ --outDir dist-cf/chronometer --emptyOutDir && cp cloudflare/_headers dist-cf/_headers",
+    "build:cf": "tsc --noEmit && vite build --base /chronometer/ --outDir dist-cf/chronometer --emptyOutDir && cp cloudflare/_headers dist-cf/_headers && cp cloudflare/.assetsignore dist-cf/.assetsignore",
     "deploy:cf": "npm run build:cf && npx wrangler deploy --config cloudflare/wrangler.jsonc",
     "preview": "vite preview",
     "lint": "tsc --noEmit",

@@ -110,6 +110,8 @@ impl PocketWatchSim {
         self.multiphysics.inputs.magnet_enabled = enabled;
         self.multiphysics.inputs.magnet_strength = strength.clamp(0.0, 2.0);
         self.multiphysics.inputs.magnet_pos_mm = [x_mm, y_mm, z_mm];
+        self.multiphysics.recompute_modifiers();
+        self.pack_snapshot();
     }
 
     /// Fire the alternating-field degaussing coil to wipe out residual ferromagnetic remanence $M_{\text{rem}}$.
@@ -121,6 +123,8 @@ impl PocketWatchSim {
     /// Toggle between traditional High-Carbon Blued Steel (`false`) and Compensated Invar/Fe-36Ni (`true`) hairspring.
     pub fn set_compensated_hairspring(&mut self, compensated: bool) {
         self.multiphysics.inputs.compensated_hairspring = compensated;
+        self.multiphysics.recompute_modifiers();
+        self.pack_snapshot();
     }
 
     /// Position the 3D studio measurement microphone in watch coordinates ($\text{mm}$) and set gain.
