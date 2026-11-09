@@ -20,6 +20,9 @@ use fs_math::det;
 /// One finite integer-stoichiometry salt and its original acid/base families.
 pub mod salt;
 
+/// Finite-rate mineral exchange with fast original aqueous speciation.
+pub mod kinetics;
+
 /// Source-bound, exactly conserved hydrolysis phase and its aqueous owner.
 #[derive(Clone, Debug)]
 pub struct HydrolysisPrecipitation {

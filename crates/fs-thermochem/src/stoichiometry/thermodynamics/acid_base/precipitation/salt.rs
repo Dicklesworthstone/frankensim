@@ -532,7 +532,7 @@ impl SaltPrecipitation {
 // stoichiometry. Comparing rounded M/p and F/q alone can tie even when
 // reconstructing the other stock would produce a negative excess. The
 // two-product residuals retain the sign of p*F-q*M without an invented floor.
-fn partition_basis(metal: f64, family: f64, p: u32, q: u32) -> Result<(f64, f64, bool)> {
+pub(super) fn partition_basis(metal: f64, family: f64, p: u32, q: u32) -> Result<(f64, f64, bool)> {
     if p == 1 && q == 1 {
         return Ok((metal.min(family), (metal - family).abs(), metal <= family));
     }

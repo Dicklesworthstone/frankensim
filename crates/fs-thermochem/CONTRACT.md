@@ -1425,6 +1425,47 @@ limited to 298.15 K and 100000 Pa; no hot pressure-oxidation extrapolation is
 inferred. Fe/As component and charge closure are distinct from finite-solvent
 H/O conservation.
 
+## Finite-rate ionic dissolution and crystal growth
+
+`acid_base::precipitation::kinetics::MineralKineticsV1` binds one original
+`SaltPrecipitation` or `HydrolysisPrecipitation` source to an explicitly supplied
+`MineralSurfaceRateV1`. Actual dissolved component stocks and actual solid
+formula units are declared separately. Preparation and basis changes equilibrate
+only water ions and analytical acid/base families; they do not move mineral
+mass or force a present crystal to saturation. The complete analytical stocks,
+original spectator identities and source model remain attached to the state.
+
+The selected fixed-surface constitutive law is `du/dt = K_A*(1-Omega)`, where
+u is dissolved solid formula equivalents, `Omega = IAP/K_dissolution`, and
+K_A has units mol formula units/s. For a salt, the original integer coefficients
+supply `ln(Omega) = p*ln(a_M) + q*ln(a_A) + ln(K_precipitation)`; hydrolysis
+uses `ln(a_M) - z*ln(a_H) + ln(K_precipitation)`. The original aqueous owner
+solves charge balance and every acid-family fraction at each candidate
+inventory. Thus pH, common-ion excess and protonation affect the rate through
+the actual free-ion activities, with no invented neutral saturation fit.
+
+`ExistingSolidOnly` blocks spontaneous crystal creation when the actual solid
+stock is zero. `SeededSurface` explicitly declares a persistent growth surface
+without supplying any component moles. Neither option infers a nucleation law
+or an empirical kinetic coefficient from equilibrium formation energies.
+This is the unit-affinity-exponent form of the empirical mineral rate family
+described in the USGS PHREEQC theory, [Rate Expressions](https://wwwbrr.cr.usgs.gov/projects/GWC_coupled/phreeqc/html/final-20.html).
+Its thermodynamic sign is consistent with the original reaction affinity;
+material applicability and the surface coefficient remain caller declarations.
+
+One bounded implicit scalar phase stage reuses the prepared original aqueous
+solver. Full-step/two-half-step comparison controls the accepted time evolution;
+only the accepted fine trajectory is published. Separate root, time and aqueous
+work limits, original pH uncertainty and cancellation remain explicit. Reports
+retain actual aqueous speciation, phase/component balances, saturation and work
+counts. Solid exhaustion is a bounded endpoint, not a claimed exact continuous
+event time. A failed or cancelled advance leaves its input state unchanged.
+
+This capability holds source temperature, pressure and ideal activity conventions
+fixed, and omits competing minerals, additional dissolved complexes, nonideal
+ionic activities, reaction heat, finite-solvent H/O balance and evolving particle
+geometry.
+
 ## Coupled source-backed ideal aqueous acid/base speciation
 
 `stoichiometry::thermodynamics::acid_base::IdealAcidBaseSystem` couples

@@ -23,6 +23,9 @@ pub(super) struct AcidBaseTrial {
     iterations: usize,
 }
 impl AcidBaseTrial {
+    pub(super) fn proton_activity(&self) -> f64 {
+        self.point.h
+    }
     pub(super) fn ph(&self) -> f64 {
         self.point.ph
     }
