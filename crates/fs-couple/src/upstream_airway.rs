@@ -1,8 +1,8 @@
 //! The airway upstream of a valve: a passive linear duct between the valve junction and a pressure source at its far
 //! end, as the valve sees it sample by sample. The glottis is the first user
 //! ([`crate::glottis::GlottalIsland::with_upstream`]): the trachea and the bronchial tree below the folds, the lungs at
-//! the far end. A reed or lip junction can take the same seam with a mouth behind it ([`UpstreamPort`]); nothing here
-//! names a valve.
+//! the far end. A reed or lip junction can take the same seam with a mouth, a vocal tract and the tree behind it
+//! ([`AirwayChain::ahead_of`], [`UpstreamPort`]); nothing here names a valve.
 //!
 //! **Geometry.** An [`AirwayChain`] is a list of [`AirwaySection`]s, valve side first. A section is `count` identical
 //! cylinders in parallel, each `length` long and of `radius`, with an optional locally reacting wall pin on each tube's
@@ -48,10 +48,19 @@
 //! [`AirwayChain::weibel_saab_2021_b`] takes the first `generations` of it. How many a model needs is a convergence
 //! question its caller answers and states. The far end of the last generation taken is held at the source pressure.
 //!
+//! **A duct ahead of the tree.** A reed or a pair of lips sits at the mouth, not at the folds: between it and the
+//! trachea lie the mouth, the vocal tract and the glottis, held open. [`AirwayChain::ahead_of`] puts one chain in front
+//! of another, valve side first, so a duct (each entry of an area function an [`AirwaySection::from_area`] cylinder of
+//! the same area, the glottal opening a section of its own) followed by [`AirwayChain::weibel_saab_2021_b`] is one
+//! chain, with the source pressure held at the tree's far end and `Z_s` the duct's first section's. Everything above
+//! applies to it unchanged; the realization never asks where a section came from. No duct is supplied here: the shape of
+//! a player's tract and glottis while playing is a measurement the caller brings and names (a sung vowel is not one).
+//!
 //! Limits, not hidden: cylinders with no wall or one locally reacting wall pin on every tube (no measured per-generation
 //! wall is carried here); a symmetric tree (the real bronchial tree is not); plane waves in every tube, with no junction
-//! mass or branching loss; a stationary gas (no mean flow and no lung-volume change over a note); and the far end an
-//! ideal pressure source (no alveolar compliance).
+//! mass or branching loss, and no end correction or separation loss where the area steps between two sections; a
+//! stationary gas (no mean flow and no lung-volume change over a note), so an open glottis ahead of the tree carries no
+//! jet loss; and the far end an ideal pressure source (no alveolar compliance).
 
 use crate::driving_point::{
     DrivingPointError, LineDc, LineLadder, LineRealization, PoleState, realize_characteristic_response,
@@ -106,6 +115,24 @@ pub struct AirwaySection {
     pub count: u32,
     /// Locally reacting wall pin on each tube's perimeter; `None` is a rigid wall.
     pub wall: Option<WallPin>,
+}
+
+impl AirwaySection {
+    /// `count` identical tubes `length_m` long, each of cross-sectional area `area_m2`: one entry of an area function as
+    /// the cylinder of the same area, `radius = sqrt(area / pi)` (module doc, a duct ahead of the tree).
+    ///
+    /// # Errors
+    /// A non-positive or non-finite length or area, or a zero count.
+    pub fn from_area(length_m: f64, area_m2: f64, count: u32, wall: Option<WallPin>) -> Result<Self, DrivingPointError> {
+        let ok = |x: f64| x > 0.0 && x.is_finite();
+        let radius_m = (area_m2 / core::f64::consts::PI).sqrt();
+        if !(ok(length_m) && ok(area_m2) && ok(radius_m) && count >= 1) {
+            return Err(DrivingPointError::Invalid {
+                what: "an airway section from an area needs a positive finite length and area and at least one tube",
+            });
+        }
+        Ok(Self { length_m, radius_m, count, wall })
+    }
 }
 
 /// An airway from the valve (first section) to the source pressure at the last section's far end.
@@ -184,6 +211,20 @@ impl AirwayChain {
             })
             .collect();
         Self::new(sections, LossModel::Bessel)
+    }
+
+    /// This chain with `far` beyond its far end, valve side first (module doc, a duct ahead of the tree): a duct at the
+    /// valve ahead of the airway below it. The source pressure moves to `far`'s far end; `Z_s` stays this chain's first
+    /// section's.
+    ///
+    /// # Errors
+    /// The two chains carry different gas loss models.
+    pub fn ahead_of(mut self, far: &Self) -> Result<Self, DrivingPointError> {
+        if self.loss != far.loss {
+            return Err(DrivingPointError::Invalid { what: "an airway joins only chains of one gas loss model" });
+        }
+        self.sections.extend_from_slice(&far.sections);
+        Ok(self)
     }
 
     /// The sections, valve side first.
@@ -841,11 +882,9 @@ mod tests {
         assert!(worst_fir < 1.0e-3, "the FIRs depart from R and G by {worst_fir:e}");
     }
 
-    /// Passivity: with no source pressure, the energy the valve's flow puts into the airway, `sum p (-U) dt` from rest,
-    /// never falls below zero under a seeded white flow, at every sample.
-    #[test]
-    fn ua_004_the_airway_never_returns_more_energy_than_it_was_given() {
-        let (_, mut airway) = weibel_airway();
+    /// One second of seeded white flow into `airway` with no source pressure: the energy absorbed, `sum p (-U) dt` from
+    /// rest, its scale `sum |p U| dt`, and the lowest running ratio of the two.
+    fn white_flow_work(airway: &mut UpstreamAirway) -> (f64, f64, f64) {
         let dt = 1.0 / f64::from(RATE);
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
         let mut uniform = || {
@@ -863,6 +902,15 @@ mod tests {
             scale += (p * flow).abs() * dt;
             worst = worst.min(absorbed / scale.max(1.0e-300));
         }
+        (absorbed, scale, worst)
+    }
+
+    /// Passivity: with no source pressure, the energy the valve's flow puts into the airway, `sum p (-U) dt` from rest,
+    /// never falls below zero under a seeded white flow, at every sample.
+    #[test]
+    fn ua_004_the_airway_never_returns_more_energy_than_it_was_given() {
+        let (_, mut airway) = weibel_airway();
+        let (absorbed, scale, worst) = white_flow_work(&mut airway);
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"ua-004-airway-passivity\",\"absorbed_j\":{absorbed:e},\"scale_j\":{scale:e},\"worst_running_ratio\":{worst:e}}}"
         );
@@ -881,5 +929,105 @@ mod tests {
             assert_eq!(port.in_series(0.0), port);
             assert_eq!(port.in_series(0.0).open_circuit_pa.to_bits(), f64::to_bits(p));
         }
+    }
+
+    /// A manufactured duct ahead of the tree, NOT a measured tract: a 40 mm by 3 cm^2 cavity, a 100 mm by 2 cm^2 tube
+    /// and a 5 mm by 0.5 cm^2 opening, each from its area, all with the cards' wall.
+    fn fixture_duct() -> AirwayChain {
+        let w = Some(wall());
+        let sections = [(0.040, 3.0e-4), (0.100, 2.0e-4), (0.005, 0.5e-4)]
+            .iter()
+            .map(|&(length, area)| AirwaySection::from_area(length, area, 1, w).expect("section"))
+            .collect();
+        AirwayChain::new(sections, LossModel::Bessel).expect("duct")
+    }
+
+    /// A duct ahead of the tree is the duct loaded by the tree. Its input impedance against fs-duct's loaded duct (the
+    /// same three cylinders, the tree's own `Z_in` as the load, Helmholtz basis solutions rather than this module's
+    /// telegraph matrix); its sections, `Z_s`, path length and DC resistance against the two chains'. An area section
+    /// has its area; mixed loss models and bad areas refuse.
+    #[test]
+    fn ua_006_a_duct_ahead_of_the_tree_is_the_duct_loaded_by_the_tree() {
+        let gas = air();
+        let duct = fixture_duct();
+        let tree = AirwayChain::weibel_saab_2021_b(17, Some(wall())).expect("tree");
+        let joined = duct.clone().ahead_of(&tree).expect("joined");
+        let cylinders = Duct {
+            segments: duct
+                .sections()
+                .iter()
+                .map(|s| Segment::Cylinder { radius: s.radius_m, length: s.length_m })
+                .collect(),
+        };
+        let mut worst_z = 0.0_f64;
+        for f in [20.0, 180.0, 640.0, 1400.0, 2100.0, 4400.0, 11000.0] {
+            let omega = core::f64::consts::TAU * f;
+            let z_tree = tree.input_impedance(&gas, omega).expect("tree z");
+            let reference = input_impedance_load(&cylinders, &gas, omega, LossModel::Bessel, z_tree, Some(&wall()))
+                .expect("loaded duct")
+                .impedance;
+            worst_z = worst_z.max(rel(joined.input_impedance(&gas, omega).expect("z"), reference));
+        }
+        let n = duct.sections().len();
+        assert_eq!(&joined.sections()[..n], duct.sections());
+        assert_eq!(&joined.sections()[n..], tree.sections());
+        assert_eq!(joined.port_impedance(&gas).to_bits(), duct.port_impedance(&gas).to_bits());
+        let path_miss = (joined.path_length_m() - (duct.path_length_m() + tree.path_length_m())).abs();
+        let r_sum = duct.dc_resistance(&gas) + tree.dc_resistance(&gas);
+        let dc_miss = (joined.dc_resistance(&gas) - r_sum).abs() / r_sum;
+        let area_miss = duct
+            .sections()
+            .iter()
+            .zip([3.0e-4, 2.0e-4, 0.5e-4])
+            .map(|(s, area)| (core::f64::consts::PI * s.radius_m * s.radius_m - area).abs() / area)
+            .fold(0.0_f64, f64::max);
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"ua-006-duct-ahead-of-tree\",\"worst_rel_loaded_duct\":{worst_z:e},\"path_miss_m\":{path_miss:e},\"dc_rel_miss\":{dc_miss:e},\"area_rel_miss\":{area_miss:e}}}"
+        );
+        assert!(worst_z < 1.0e-9, "the joined chain misses the duct loaded by the tree by {worst_z:e}");
+        assert!(path_miss < 1.0e-15 && dc_miss < 1.0e-13, "path {path_miss:e} m, DC {dc_miss:e}");
+        assert!(area_miss < 4.0 * f64::EPSILON, "an area section misses its area by {area_miss:e}");
+        let lossless = AirwayChain::new(duct.sections().to_vec(), LossModel::Lossless).expect("lossless duct");
+        assert!(lossless.ahead_of(&tree).is_err(), "mixed loss models must refuse");
+        let refused = [(0.01, 0.0, 1), (0.01, -1.0e-4, 1), (0.0, 1.0e-4, 1), (0.01, f64::NAN, 1), (0.01, 1.0e-4, 0)];
+        for (length, area, count) in refused {
+            assert!(AirwaySection::from_area(length, area, count, None).is_err(), "({length}, {area}, {count})");
+        }
+    }
+
+    /// The port behind a duct ahead of the tree is the same port: realized on the same ladders, a steady flow reads
+    /// `P_s - R_dc U` with the joined Poiseuille sum, and a seeded white flow never draws energy out of it.
+    #[test]
+    fn ua_007_a_duct_ahead_of_the_tree_realizes_as_a_passive_port() {
+        let gas = air();
+        let chain = fixture_duct()
+            .ahead_of(&AirwayChain::weibel_saab_2021_b(17, Some(wall())).expect("tree"))
+            .expect("joined");
+        let mut airway = UpstreamAirway::realize(&chain, &gas, RATE, &ladder()).expect("joined airway realizes");
+        let settle = airway.reflectance_taps().len() + airway.source_taps().len() + 8;
+        let r_dc = chain.dc_resistance(&gas);
+        let (p_lung, flow) = (800.0, 2.0e-4);
+        let (_, p_open) = hold(&mut airway, p_lung, 0.0, settle);
+        let open_miss = (p_open - p_lung).abs() / p_lung;
+        let (port, p_flow) = hold(&mut airway, p_lung, flow, settle);
+        let drop_miss = (p_flow - (p_lung - r_dc * flow)).abs() / p_lung;
+        let thevenin_flow = (port.pressure_pa(flow) - p_flow).abs() / p_lung;
+        let mut fresh = UpstreamAirway::realize(&chain, &gas, RATE, &ladder()).expect("joined airway realizes");
+        let (absorbed, scale, worst) = white_flow_work(&mut fresh);
+        let receipt = airway.receipt();
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"ua-007-duct-ahead-of-tree-port\",\"sections\":{},\"r_dc\":{r_dc:e},\"zs\":{:e},\"r0\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"open_miss\":{open_miss:e},\"drop_miss\":{drop_miss:e},\"thevenin_flow\":{thevenin_flow:e},\"absorbed_j\":{absorbed:e},\"scale_j\":{scale:e},\"worst_running_ratio\":{worst:e}}}",
+            receipt.sections,
+            receipt.port_impedance,
+            receipt.same_sample_reflection,
+            receipt.reflectance.n_fft,
+            receipt.source_taps
+        );
+        assert_eq!(receipt.sections, 3 + 17);
+        assert!(open_miss < 1.0e-9, "no flow must read P_s ({open_miss:e})");
+        assert!(drop_miss < 1.0e-9, "a steady flow must read P_s - R_dc U ({drop_miss:e})");
+        assert!(thevenin_flow < 1.0e-12, "the port and the commit disagree ({thevenin_flow:e})");
+        assert!(absorbed > 0.0, "a lossy airway absorbs ({absorbed:e})");
+        assert!(worst > -1.0e-9, "the airway returned more than it was given (running ratio {worst:e})");
     }
 }
