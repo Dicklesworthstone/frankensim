@@ -37,6 +37,9 @@ pub mod planar;
 /// Physical bulk viscous heat on the original finite-cell thermal timeline.
 pub mod heating;
 
+/// Native heat powers drive source-bound instantaneous liquid expansion.
+pub mod thermal_dilation;
+
 /// Source viscosity sampled from the original finite thermal cells each interval.
 pub mod feedback;
 

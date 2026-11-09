@@ -9,6 +9,9 @@ mod feedback;
 #[path = "stokes_motion_heat/planar_feedback.rs"]
 mod planar_feedback;
 
+#[path = "stokes_motion_heat/thermal_dilation.rs"]
+mod thermal_dilation;
+
 use std::collections::BTreeMap;
 
 use fs_couple::stokes_motion::heating::{
