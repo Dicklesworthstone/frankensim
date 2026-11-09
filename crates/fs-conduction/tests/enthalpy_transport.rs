@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "enthalpy_transport/nodal_heat.rs"]
+mod nodal_heat;
+
 #[path = "enthalpy_transport/entropy.rs"]
 mod entropy;
 #[path = "enthalpy_transport/nodal_density.rs"]

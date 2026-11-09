@@ -892,6 +892,46 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
     }
 
+    /// Add signed assembled interval heat to the original heterogeneous nodal
+    /// residual, keeping every vertex's original caloric chart and inventory.
+    /// Existing volumetric sources, contact and boundary heat remain additive.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_nodal_heat(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        nodal_heat_j: &[fs_math::dd::Dd],
+    ) -> Result<super::nodal_heat::NodalHeatStep, EnthalpyError> {
+        self.inner.advance_with_nodal_heat(
+            cx, problem, interfaces, old_specific_h, dt_s, config, nodal_heat_j,
+        )
+    }
+
+    /// Measure an endpoint with freshly evaluated signed nodal interval heat.
+    /// This performs no solve and applies no residual/energy acceptance gate;
+    /// an outer constitutive owner must check both local and total balances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_nodal_heat(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        nodal_heat_j: &[fs_math::dd::Dd],
+    ) -> Result<super::nodal_heat::NodalHeatEndpoint, EnthalpyError> {
+        self.inner.evaluate_endpoint_with_nodal_heat(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, nodal_heat_j,
+        )
+    }
+
     /// Advance with the original per-vertex caloric charts and an additional
     /// discrete entropy admission. This shares the uniform owner's operator,
     /// storage and transaction; no homogenized material or entropy is inferred.

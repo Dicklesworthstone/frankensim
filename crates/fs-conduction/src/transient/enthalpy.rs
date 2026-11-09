@@ -44,6 +44,8 @@
 
 /// Prescribed spectral heating on the original spatial enthalpy balance.
 pub mod interference;
+/// Signed interval heat on the original nodal residual and energy account.
+pub mod nodal_heat;
 
 /// Implicit endpoint derivatives through the accepted physical balance.
 pub mod adjoint;
