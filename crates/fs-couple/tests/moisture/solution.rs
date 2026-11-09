@@ -17,6 +17,8 @@ mod electrolyte;
 mod kinetics;
 #[path = "solution/shared.rs"]
 mod shared;
+#[path = "solution/slab_sdirk.rs"]
+mod slab_sdirk;
 
 pub(super) const WATER_VOLUME: f64 = 18e-6;
 const WATER_MOLAR_MASS: f64 = 0.018;

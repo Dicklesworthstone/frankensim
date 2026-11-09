@@ -10,6 +10,8 @@ mod sdirk;
 mod finite_sdirk;
 #[path = "adaptive/slab_sdirk.rs"]
 mod slab_sdirk;
+#[path = "adaptive/solution_slab_sdirk.rs"]
+mod solution_slab_sdirk;
 #[path = "adaptive/shared.rs"]
 mod shared;
 

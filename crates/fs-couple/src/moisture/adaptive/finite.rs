@@ -9,7 +9,7 @@ use crate::moisture::{
     },
     solution::{
         CartesianSolutionMoistureStep, CartesianSolutionSdirk2Step, FiniteMoistureSolution,
-        SolutionMoistureError, SolutionMoistureSolve, SolutionMoistureStep,
+        SlabSolutionSdirk2Step, SolutionMoistureError, SolutionMoistureSolve, SolutionMoistureStep,
     },
 };
 
@@ -360,6 +360,59 @@ impl FiniteMoistureSolution {
             cx,
         )?;
         Ok((reservoir, field, report))
+    }
+
+    /// Complete a physical duration with native second-order slab diffusion
+    /// and the same evolving finite solution inventory at every implicit stage.
+    ///
+    /// The existing controller checks each cell, solvent mass and activity
+    /// separately. Pure solvent still has a finite water inventory even though
+    /// its activity is constant. The second-order step-doubling estimator and
+    /// cubic growth rule admit only the two physical half-step endpoints; their
+    /// weighted transfers alone enter the fixed whole-duration water account.
+    ///
+    /// Each proposal charges both implicit stages. Source refusal, cancellation
+    /// or a late work limit discards all private progress. Original algebraic
+    /// phase/source admission is unchanged; finite-rate phase stocks remain
+    /// explicitly refused. Local smooth-branch accuracy is not a global error
+    /// certificate or a guarantee of order across phase transitions.
+    pub fn advance_sdirk2_adaptive_to(
+        &self,
+        moisture: &MoistureSlab,
+        target_s: f64,
+        faces: &[Option<DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        physical: SolutionMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            MoistureSlab,
+            MoistureAdvanceReport<SlabSolutionSdirk2Step, 2>,
+        ),
+        MoistureAdvanceError<SolutionMoistureError>,
+    > {
+        checkpoint(cx)?;
+        let initial = (self.clone(), moisture.clone());
+        let ((reservoir, field), report) = evolve_fields_with_method(
+            &initial,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                let (bath, field, step) = state
+                    .0
+                    .advance_sdirk2(&state.1, dt, faces, transport, nonlinear, physical, cx)?
+                    .into_parts();
+                Ok(((bath, field), OneReport(step)))
+            },
+            solution_snapshot::<MoistureSlab, 2>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        Ok((reservoir, field, report.summary.map_step(|step| step.0)))
     }
 
     /// Complete Cartesian uptake/desorption and finite-solution concentration

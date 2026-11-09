@@ -7,7 +7,8 @@ use crate::moisture::reservoir::water_sum;
 mod sdirk;
 pub use sdirk::{
     CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,
-    SharedCartesianSolutionSdirk2Candidate,
+    SharedCartesianSolutionSdirk2Candidate, SharedSlabSolutionSdirk2Candidate,
+    SlabSolutionSdirk2Candidate, SlabSolutionSdirk2Step,
 };
 
 /// One common solution debit, with all signed specimen transfers retained in

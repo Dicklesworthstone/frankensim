@@ -3631,6 +3631,26 @@ probes. Only accepted physical half-interval transfers enter the face ledger.
 One fixed whole-duration water budget admits both endpoints together; a failed
 duration returns no partial bath or field.
 
+Native slabs use `advance_sdirk2` and `advance_shared_sdirk2` through the
+same finite-solution root and existing tridiagonal diffusion owner. Each
+specimen retains its original material, geometry, surface laws and ordinary
+integration mode, including optional Kirchhoff transport. Aggregate cells are
+bounded before private staging; full diagnostic first-stage fields are released
+after their physical loads and native receipts are extracted. The same
+algebraic-phase admission and explicit finite-rate kinetic refusal apply.
+
+`advance_sdirk2_adaptive_to` and `advance_shared_sdirk2_adaptive_to` bind
+those native slabs to the existing second-order controller. Every cell,
+solvent mass and activity has an independent local error scale, including
+pure solvent whose activity stays exactly one. Only accepted physical half
+intervals enter the cumulative signed water accounts; both stages are charged
+for every attempted proposal. A late work limit or refusal discards the whole
+duration. Added authored fixtures in `tests/moisture/solution/slab_sdirk.rs`
+and `tests/moisture/adaptive/solution_slab_sdirk.rs` specify pure/phase-buffered
+limits, original nonideal activity/osmotic response, second-order refinement,
+opposing specimens and transactional refusal; they do not supply experimental
+validation or a global/phase-crossing temporal guarantee.
+
 G1/G4 regression definitions cover independently integrated finite-bath
 relaxation/refinement, equilibrium phase buffering and solute conservation,
 opposing shared specimen transfers, kinetic/cancellation refusals, and adaptive

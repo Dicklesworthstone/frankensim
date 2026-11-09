@@ -70,7 +70,8 @@ pub use radial::{
 pub use shared::{
     CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,
     SharedCartesianSolutionMoistureCandidate, SharedCartesianSolutionSdirk2Candidate,
-    SharedSolutionMoistureCandidate, SharedSolutionMoistureStep,
+    SharedSlabSolutionSdirk2Candidate, SharedSolutionMoistureCandidate,
+    SharedSolutionMoistureStep, SlabSolutionSdirk2Candidate, SlabSolutionSdirk2Step,
 };
 
 use super::{
