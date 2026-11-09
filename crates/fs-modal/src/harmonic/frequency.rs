@@ -35,7 +35,10 @@ pub struct HarmonicFrequencyControls {
     /// An exactly diagonal unloaded modal owner uses 320*n instead.
     /// Compact loading uses 64*(n*n*p+n*p+p*p+k*k)+256*(n+p+k), including
     /// streamed original-entry audits and the k-dimensional bordered solves.
-    /// The factorization was admitted when preparing the owner.
+    /// Coupled LU/compact owners multiply this score by three, reserving at
+    /// most two same-factor residual corrections per solve. Scalar-only
+    /// owners retain the original score. The factorization was admitted
+    /// when preparing the owner.
     pub maximum_work: u64,
 }
 
@@ -127,7 +130,14 @@ impl PreparedHarmonicResponse {
             .compact_port_factor
             .as_ref()
             .map_or(0, |factor| factor.dimension());
-        admit(self.n, ports, self.layout, core, controls)?;
+        admit(
+            self.n,
+            ports,
+            self.layout,
+            core,
+            self.factor.is_some() || self.compact_port_factor.is_some(),
+            controls,
+        )?;
         let (solution, force_exponent, relative) = self.solve_force(force, cx)?;
         let response = self.observe(force, &solution, force_exponent, relative, cx)?;
         let state_exponent = vector_exponent(&solution);
@@ -442,6 +452,7 @@ fn admit(
     p: usize,
     layout: MatrixLayout,
     core: usize,
+    coupled_factor: bool,
     controls: HarmonicFrequencyControls,
 ) -> Result<(), HarmonicResponseError> {
     let (nn, pp) = (n as u128, p as u128);

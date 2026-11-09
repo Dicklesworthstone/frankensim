@@ -23,6 +23,9 @@ pub struct HarmonicFrequencyCurvatureControls {
     /// physical observations and original-equation audits. Unloaded diagonal
     /// owners use 1280*n. Compact loading substitutes n*n*p for n*n and adds
     /// 256*k*k+1024*k for the existing k-dimensional bordered factor.
+    /// Coupled LU/compact owners multiply the complete score by three to
+    /// reserve at most two same-factor residual corrections per solve;
+    /// scalar-only owners retain the original score.
     pub maximum_work: u64,
 }
 
@@ -469,6 +472,11 @@ fn admit(
         n * n
     };
     let work = 256 * (structural + n * p + p * p + k * k) + 1024 * (n + p + k);
+    let work = if owner.factor.is_some() || owner.compact_port_factor.is_some() {
+        3 * work
+    } else {
+        work
+    };
     let requested =
         u64::try_from(work).map_err(|_| invalid("frequency curvature work extent overflow"))?;
     if requested > controls.maximum_work {

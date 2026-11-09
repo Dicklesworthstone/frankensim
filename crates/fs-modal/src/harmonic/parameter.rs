@@ -31,6 +31,9 @@ pub struct HarmonicParameterControls {
     /// audits and binary-normalized physical power contractions.
     /// A changing port map/impedance or loaded frequency adds
     /// 256*(n*p+p*p)+256*p; changing frequency also adds 192*n*n+256*n.
+    /// Coupled LU/compact owners multiply the complete score by three,
+    /// reserving at most two same-factor residual corrections per solve.
+    /// Scalar-only owners retain the original score.
     pub maximum_work: u64,
 }
 
@@ -532,6 +535,11 @@ impl PreparedHarmonicResponse {
             } else {
                 0
             };
+        let work = if self.factor.is_some() || self.compact_port_factor.is_some() {
+            3 * work
+        } else {
+            work
+        };
         let requested = u64::try_from(work).map_err(|_| invalid("parameter work overflow"))?;
         if requested > controls.maximum_work {
             return Err(HarmonicResponseError::WorkBudget {

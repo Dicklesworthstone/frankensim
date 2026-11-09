@@ -318,6 +318,27 @@ the input grid and number of returned extrema. `tests/harmonic_resonance_survey.
 checks a coupled damped two-mass response with both resonances and its exact
 antiresonance, cached samples, and atomic budget/source/cancellation refusals.
 
+### `harmonic`: bounded residual correction at cancellation notches
+
+A coupled LU or compact solve that exceeds the caller's componentwise backward-error
+limit may take at most two residual corrections with the same admitted factor.
+Each correction uses the original dynamic operator and binary-normalized
+double-double residual products, then rechecks the original residual gate before
+publication. This recovers weak physical responses near cancellation notches
+without changing damping, the source, the operator or the acceptance threshold.
+Scalar-only owners retain their direct complex divisions and existing linear
+work caps.
+
+Correction scratch is two length-n complex vectors, within the existing payload
+allowances. The coupled frequency, curvature and parameter work scores reserve
+three times their documented baseline score for the bounded extra solves and
+audits. Scalar-only owners retain their original work scores, including the
+linear diagonal-bank limits. Cancellation or failure after the final pass still
+returns no response and leaves the prepared owner reusable. Focused tests cover
+the passive two-mass notch, its frequency tangent, coherent source phase and
+extreme force units. The weak-coordinate forward comparison follows the authored
+componentwise residual gate; that gate is not a blanket forward-error bound.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.

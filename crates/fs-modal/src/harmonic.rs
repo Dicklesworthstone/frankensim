@@ -33,6 +33,7 @@ mod impedance;
 use impedance::PreparedPortImpedance;
 mod compact;
 use compact::CompactPortFactor;
+mod refinement;
 pub use impedance::{HarmonicPortControls, HarmonicPortResponse, admit_passive_port_impedance};
 mod frequency;
 pub use frequency::{
@@ -743,6 +744,8 @@ impl PreparedHarmonicResponse {
 
     /// Solve a new peak-force phasor using the prepared frequency's factor.
     /// Generalized forces and outputs remain in the source pencil's coordinates.
+    /// Up to two residual corrections reuse that factor when needed to meet
+    /// the unchanged caller-authored componentwise backward-error threshold.
     /// Returns no partial response on cancellation, overflow or residual refusal.
     pub fn solve(
         &self,
@@ -794,11 +797,40 @@ impl PreparedHarmonicResponse {
     ) -> Result<(Vec<C64>, f64), HarmonicResponseError> {
         poll(cx)?;
         let mut solution = rhs.to_vec();
+        self.solve_factored(&mut solution, cx)?;
+        let mut relative_residual = backward_error(self, &solution, rhs, cx)?;
+        for _ in 0..2 {
+            if relative_residual <= self.maximum_relative_residual
+                || self.factor.is_none() && self.compact_port_factor.is_none()
+            {
+                break;
+            }
+            refinement::correct(self, &mut solution, rhs, cx)?;
+            relative_residual = backward_error(self, &solution, rhs, cx)?;
+        }
+        if relative_residual > self.maximum_relative_residual {
+            return Err(HarmonicResponseError::Residual {
+                measured: relative_residual,
+                limit: self.maximum_relative_residual,
+            });
+        }
+        poll(cx)?;
+        Ok((solution, relative_residual))
+    }
+
+    // The immutable LU/compact/scalar dispatch serves primal, tangent and
+    // bounded residual-correction solves without any new factorization.
+    fn solve_factored(
+        &self,
+        solution: &mut [C64],
+        cx: &Cx<'_>,
+    ) -> Result<(), HarmonicResponseError> {
+        poll(cx)?;
         if let Some(compact) = &self.compact_port_factor {
-            compact.solve(&self.operator, &mut solution, cx)?;
+            compact.solve(&self.operator, solution, cx)?;
         } else if let Some(factor) = &self.factor {
             factor
-                .solve_with_cancel(&mut solution, || cx.checkpoint().is_err())
+                .solve_with_cancel(solution, || cx.checkpoint().is_err())
                 .map_err(|e| lu_error(e, self.angular_frequency_rad_s))?;
         } else {
             for (i, value) in solution.iter_mut().enumerate() {
@@ -809,14 +841,7 @@ impl PreparedHarmonicResponse {
         if solution.iter().any(|z| !finite(*z)) {
             return Err(invalid("harmonic solution is not representable"));
         }
-        let relative_residual = backward_error(self, &solution, rhs, cx)?;
-        if relative_residual > self.maximum_relative_residual {
-            return Err(HarmonicResponseError::Residual {
-                measured: relative_residual,
-                limit: self.maximum_relative_residual,
-            });
-        }
-        Ok((solution, relative_residual))
+        poll(cx)
     }
 
     fn observe(
