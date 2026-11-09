@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 
 use fs_blake3::ContentHash;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+use fs_cutfem::elastic3::thermal::ThermalJacobianLimits3;
 use fs_cutfem::elastic3::{
     CutElasticity3, ElasticMaterialField3, ElasticityError3, ElasticityFormulation3,
     ElasticityOptions3, MaterialRefreshLimits3,
@@ -34,6 +35,14 @@ use fs_solver::op::LinearOp;
 
 const POINTS: usize = 100_000;
 const TOTAL_STRAIN: f64 = 0.1;
+
+fn jacobian_limits() -> ThermalJacobianLimits3 {
+    ThermalJacobianLimits3 {
+        max_points: POINTS,
+        max_workspace_components: 1_000_000,
+        max_action_terms: 1_000_000,
+    }
+}
 
 fn poll() -> ControlFlow<()> {
     ControlFlow::Continue(())
@@ -1094,4 +1103,242 @@ fn complete_thermal_adjoint_admits_budgets_and_cancels_after_the_objective() {
         Err(ElasticityError3::Invalid(_))
     ));
     assert_eq!(op.scales(), original);
+}
+
+fn temperature_direction([x, y, z]: [f64; 3]) -> f64 {
+    0.4 + 0.8 * x - 1.2 * y + 0.5 * z
+}
+
+fn local_direction(bounds: &[([f64; 3], [f64; 3])], point: [f64; 3]) -> f64 {
+    let (lo, _) = bounds.iter().find(|(lo, hi)| {
+        (0..3).all(|a| lo[a] <= point[a] && point[a] < hi[a])
+    }).expect("selected quadrature point is interior to its owning leaf");
+    temperature_direction(*lo)
+}
+
+#[test]
+fn prepared_temperature_block_matches_full_residual_jvp_and_direct_vjp() {
+    for formulation in [ElasticityFormulation3::Displacement, ElasticityFormulation3::BBar] {
+        for with_motion in [false, true] {
+            let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+            let mut op = cartesian(&law, formulation);
+            let scales: Vec<_> = (0..op.cells()).map(|i| 0.6 + 0.03 * i as f64).collect();
+            op.set_scales(&scales).unwrap();
+            let (u, dual) = fields(op.nodes());
+            let bounds: Vec<_> = op.cell_nodes().iter()
+                .map(|nodes| (op.nodes()[nodes[0]], op.nodes()[nodes[7]])).collect();
+            let direction: Vec<_> = bounds.iter().map(|(lo, _)| temperature_direction(*lo)).collect();
+            let calls = std::cell::Cell::new(0usize);
+            let counted_motion = |p, n| {
+                calls.set(calls.get() + 1);
+                support_motion(p, n)
+            };
+            let prepared = if with_motion {
+                op.prepare_thermal_residual_jacobian_with_motion(&u, &counted_motion,
+                    Some(&support_motion_slope), TOTAL_STRAIN, jacobian_limits(), poll).unwrap()
+            } else {
+                op.prepare_thermal_residual_jacobian(&u, TOTAL_STRAIN, jacobian_limits(), poll).unwrap()
+            };
+            assert_eq!(prepared.n(), op.n());
+            assert_eq!(prepared.temperatures(), op.cells());
+            let samples = calls.get();
+            if with_motion { assert!(samples > 0); }
+            let mut jvp = vec![91.0; op.n()];
+            let mut vjp = vec![92.0; op.cells()];
+            op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut jvp, poll).unwrap();
+            op.thermal_residual_temperature_transpose_into(&prepared, &dual, &mut vjp, poll).unwrap();
+            assert_eq!(calls.get(), samples, "reuse never re-queries the prescribed boundary");
+            let direct = if with_motion {
+                op.thermal_residual_temperature_pullback_with_motion(&u, &dual, &support_motion,
+                    Some(&support_motion_slope), TOTAL_STRAIN, POINTS, poll).unwrap()
+            } else {
+                op.thermal_residual_temperature_pullback(&u, &dual, TOTAL_STRAIN, POINTS, poll).unwrap()
+            };
+            for (actual, expected) in vjp.iter().zip(&direct) {
+                close(*actual, *expected, 3e-11, 1e-11);
+            }
+            close(dot(&dual, &jvp), dot(&direction, &vjp), 3e-12, 1e-12);
+            for (node, &fixed) in op.fixed().iter().enumerate() {
+                if fixed { assert_eq!(&jvp[3 * node..3 * node + 3], &[0.0; 3]); }
+            }
+            let h = 0.001;
+            let mut residuals = Vec::new();
+            for sign in [-1.0, 1.0] {
+                let materials = |cell: HexCell| Ok(hot(&law,
+                    temperature(cell) + sign * h * temperature_direction(cell.lo())));
+                op.refresh_material_field(ElasticMaterialField3::ThermoelasticByCell(&materials),
+                    MaterialRefreshLimits3::default(), poll).unwrap();
+                let mut residual = cartesian_residual(&op, &u);
+                if with_motion {
+                    let displaced = |p, n| {
+                        let base = support_motion(p, n);
+                        let slope = support_motion_slope(p, n);
+                        let delta = sign * h * local_direction(&bounds, p);
+                        std::array::from_fn(|c| base[c] + delta * slope[c])
+                    };
+                    subtract_motion(&op, &mut residual, &displaced);
+                }
+                residuals.push(residual);
+            }
+            for i in 0..op.n() {
+                close(jvp[i], (residuals[1][i] - residuals[0][i]) / (2.0 * h), 4e-6, 3e-8);
+            }
+        }
+    }
+}
+
+#[test]
+fn adaptive_prepared_temperature_block_preserves_hanging_transpose_and_moving_supports() {
+    for formulation in [ElasticityFormulation3::Displacement, ElasticityFormulation3::BBar] {
+        let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+        let tree = Octree3::uniform(1, 4, 4096).unwrap();
+        let tree = tree.refined(&[*tree.leaves().iter().next().unwrap()], poll).unwrap();
+        let materials = |cell| Ok(hot(&law, temperature(cell)));
+        let mut op = control(|control| AdaptiveElasticity3::build_with_material_field_and_embedded_dirichlet(
+            domain(), &tree, &Top(0.73), ElasticMaterialField3::ThermoelasticByCell(&materials),
+            &|p| p[0] == 0.0, &|_, normal| normal[2] > 0.5,
+            ElasticityOptions3 { formulation, ghost_gamma: 2.7, ..Default::default() },
+            Default::default(), Default::default(), control).unwrap());
+        assert!(op.physical_nodes().len() > op.nodes().len());
+        let scales: Vec<_> = (0..op.cells()).map(|i| 0.5 + 0.02 * i as f64).collect();
+        op.set_scales(&scales).unwrap();
+        let (u, dual) = fields(op.nodes());
+        let bounds: Vec<_> = op.cell_nodes().iter()
+            .map(|nodes| (op.physical_nodes()[nodes[0]], op.physical_nodes()[nodes[7]])).collect();
+        let direction: Vec<_> = bounds.iter().map(|(lo, _)| temperature_direction(*lo)).collect();
+        let prepared = op.prepare_thermal_residual_jacobian_with_motion(&u, &support_motion,
+            Some(&support_motion_slope), TOTAL_STRAIN, jacobian_limits(), poll).unwrap();
+        let mut jvp = vec![0.0; op.n()];
+        let mut vjp = vec![0.0; op.cells()];
+        op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut jvp, poll).unwrap();
+        op.thermal_residual_temperature_transpose_into(&prepared, &dual, &mut vjp, poll).unwrap();
+        let direct = op.thermal_residual_temperature_pullback_with_motion(&u, &dual, &support_motion,
+            Some(&support_motion_slope), TOTAL_STRAIN, POINTS, poll).unwrap();
+        for (actual, expected) in vjp.iter().zip(&direct) {
+            close(*actual, *expected, 4e-11, 2e-11);
+        }
+        close(dot(&dual, &jvp), dot(&direction, &vjp), 4e-12, 2e-12);
+        let h = 0.001;
+        let mut residuals = Vec::new();
+        for sign in [-1.0, 1.0] {
+            let materials = |cell: HexCell| Ok(hot(&law,
+                temperature(cell) + sign * h * temperature_direction(cell.lo())));
+            op.refresh_material_field(ElasticMaterialField3::ThermoelasticByCell(&materials),
+                MaterialRefreshLimits3::default(), poll).unwrap();
+            let mut residual = vec![0.0; op.n()];
+            op.apply(&u, &mut residual);
+            let eigenstrain = op.prepare_thermoelastic(POINTS, poll).unwrap();
+            for (value, force) in residual.iter_mut().zip(op.eigenstrain_load(&eigenstrain, poll).unwrap()) {
+                *value -= force;
+            }
+            let displaced = |p, n| {
+                let base = support_motion(p, n);
+                let slope = support_motion_slope(p, n);
+                let delta = sign * h * local_direction(&bounds, p);
+                std::array::from_fn(|c| base[c] + delta * slope[c])
+            };
+            for (value, force) in residual.iter_mut().zip(op.prescribed_displacement_load(&displaced, poll).unwrap()) {
+                *value -= force;
+            }
+            residuals.push(residual);
+        }
+        for i in 0..op.n() {
+            close(jvp[i], (residuals[1][i] - residuals[0][i]) / (2.0 * h), 5e-6, 4e-8);
+        }
+    }
+}
+
+#[test]
+fn prepared_temperature_block_refuses_stale_owners_scales_and_invalid_actions() {
+    let law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+    let mut op = cartesian(&law, ElasticityFormulation3::Displacement);
+    let (u, dual) = fields(op.nodes());
+    let prepared = op.prepare_thermal_residual_jacobian(&u, TOTAL_STRAIN, jacobian_limits(), poll).unwrap();
+    let direction = vec![0.5; op.cells()];
+    let sentinel = vec![19.0; op.n()];
+    let mut output = sentinel.clone();
+    let another = cartesian(&law, ElasticityFormulation3::Displacement);
+    assert!(another.thermal_residual_temperature_apply_into(&prepared, &direction, &mut output, poll).is_err());
+    assert_eq!(output, sentinel);
+    op.set_scales(&vec![0.7; op.cells()]).unwrap();
+    assert!(op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut output, poll).is_err());
+    assert_eq!(output, sentinel);
+    op.set_scales(&vec![1.0; op.cells()]).unwrap(); // Exact restoration remains usable.
+    let bad = vec![f64::NAN; op.cells()];
+    assert!(op.thermal_residual_temperature_apply_into(&prepared, &bad, &mut output, poll).is_err());
+    assert_eq!(output, sentinel);
+    assert!(op.thermal_residual_temperature_apply_into(&prepared, &direction[..direction.len()-1], &mut output, poll).is_err());
+    assert_eq!(output, sentinel);
+    assert!(matches!(op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut output,
+        || ControlFlow::Break(())), Err(ElasticityError3::Cancelled)));
+    assert_eq!(output, sentinel);
+    op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut output, poll).unwrap();
+    assert_ne!(output, sentinel);
+    let mut transposed = vec![0.0; op.cells()];
+    op.thermal_residual_temperature_transpose_into(&prepared, &dual, &mut transposed, poll).unwrap();
+    close(dot(&dual, &output), dot(&direction, &transposed), 3e-12, 1e-12);
+    let refreshed = hot(&law, 318.0);
+    op.refresh_material_field(ElasticMaterialField3::ThermoelasticUniform(&refreshed),
+        MaterialRefreshLimits3::default(), poll).unwrap();
+    output.copy_from_slice(&sentinel);
+    assert!(op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut output, poll).is_err());
+    assert_eq!(output, sentinel);
+}
+
+#[test]
+fn prepared_temperature_admission_precedes_callbacks_and_keeps_the_original_owner() {
+    let material_law = law([0.2, -2.0, 0.0008, 0.0001, 0.000002]);
+    let op = cartesian(&material_law, ElasticityFormulation3::Displacement);
+    let (u, _) = fields(op.nodes());
+    let before = cartesian_residual(&op, &u);
+    let baseline = op.prepare_thermal_residual_jacobian(&u, TOTAL_STRAIN, jacobian_limits(), poll).unwrap();
+    let calls = std::cell::Cell::new(0usize);
+    let motion = |p, n| { calls.set(calls.get() + 1); support_motion(p, n) };
+    for limits in [
+        ThermalJacobianLimits3 { max_points: baseline.points() - 1, ..jacobian_limits() },
+        ThermalJacobianLimits3 { max_workspace_components: baseline.workspace_components() - 1, ..jacobian_limits() },
+        ThermalJacobianLimits3 { max_action_terms: baseline.action_terms() - 1, ..jacobian_limits() },
+    ] {
+        assert!(op.prepare_thermal_residual_jacobian_with_motion(&u, &motion, None,
+            TOTAL_STRAIN, limits, poll).is_err());
+        assert_eq!(calls.get(), 0, "all budgets precede boundary evaluation");
+    }
+    assert!(op.prepare_thermal_residual_jacobian(&u, 1e-6, jacobian_limits(), poll).is_err());
+    let bad = |_, _| [f64::NAN, 0.0, 0.0];
+    assert!(op.prepare_thermal_residual_jacobian_with_motion(&u, &motion, Some(&bad),
+        TOTAL_STRAIN, jacobian_limits(), poll).is_err());
+    calls.set(0);
+    assert!(matches!(op.prepare_thermal_residual_jacobian_with_motion(&u, &motion, None,
+        TOTAL_STRAIN, jacobian_limits(), || if calls.get() > 0 { ControlFlow::Break(()) } else { poll() }),
+        Err(ElasticityError3::Cancelled)));
+    assert_eq!(cartesian_residual(&op, &u), before);
+    let kink = hot(&law([0.0, 0.0, 0.001, 0.0001, 0.0]), 300.0);
+    let cut = plain(&kink, [2; 3], 0.73);
+    let (u, _) = fields(cut.nodes());
+    assert!(matches!(cut.prepare_thermal_residual_jacobian(&u, TOTAL_STRAIN, jacobian_limits(), poll),
+        Err(ElasticityError3::Invalid(message)) if message.contains("nonsmooth")));
+}
+
+#[test]
+fn explicit_isotropic_temperature_actions_retain_weak_signed_modes_without_bbar() {
+    for (poisson, hydrostatic) in [(-1.0 + 1e-9, true), (0.5 - 1e-9, false)] {
+        let law = law([poisson, -2.0, 0.0, 0.0, 0.0]);
+        let source = hot(&law, 317.0);
+        let (bulk_slope, shear_slope) = source.source().temperature_derivatives().unwrap().isotropic_moduli_pa_k.unwrap();
+        let op = control(|control| CutElasticity3::build_with_material_field(domain(), [1; 3], &Top(1.2),
+            ElasticMaterialField3::ThermoelasticUniform(&source), &|_| false,
+            ElasticityOptions3 { formulation: ElasticityFormulation3::Displacement, ..Default::default() }, control).unwrap());
+        let amplitude = 0.001;
+        let dual: Vec<_> = op.nodes().iter().flat_map(|&[x, y, z]| {
+            if hydrostatic { [x, y, z] } else { [x, -y, 0.0] }
+        }).collect();
+        let u: Vec<_> = dual.iter().map(|value| amplitude * value).collect();
+        let expected = if hydrostatic { 9.0 * bulk_slope * amplitude } else { 4.0 * shear_slope * amplitude };
+        let direct = op.thermal_residual_temperature_pullback(&u, &dual, TOTAL_STRAIN, POINTS, poll).unwrap();
+        close(direct[0], expected, 2e-11, 1e-14);
+        let prepared = op.prepare_thermal_residual_jacobian(&u, TOTAL_STRAIN, jacobian_limits(), poll).unwrap();
+        let mut force = vec![0.0; op.n()];
+        op.thermal_residual_temperature_apply_into(&prepared, &[1.0], &mut force, poll).unwrap();
+        close(dot(&dual, &force), expected, 2e-11, 1e-14);
+    }
 }

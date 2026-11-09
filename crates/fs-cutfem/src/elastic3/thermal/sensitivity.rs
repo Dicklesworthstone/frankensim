@@ -25,31 +25,33 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Elastici
 
 /// A signed derivative action, never an admitted elastic material.
 #[derive(Clone, Copy)]
-enum TemperatureTangent3<'a> {
+pub(super) enum TemperatureTangent3<'a> {
     Tensor(&'a [[f64; 6]; 6]),
     Isotropic { bulk: f64, shear: f64 },
 }
 
 impl<'a> TemperatureTangent3<'a> {
-    fn new(
+    pub(super) fn new(
         cell: &Cell3,
         derivative: &'a ThermoelasticTemperatureDerivatives,
     ) -> Result<Self, ElasticityError3> {
-        if cell.kinematics.is_projected() {
-            let (bulk, shear) =
-                derivative
-                    .isotropic_moduli_pa_k
-                    .ok_or(ElasticityError3::Invalid(
-                        "B-bar temperature derivative requires native K/G slopes",
-                    ))?;
-            Ok(Self::Isotropic { bulk, shear })
-        } else {
-            Ok(Self::Tensor(&derivative.stiffness_mandel_pa_k))
+        // The original material must prove isotropy; never infer it by fitting
+        // C or C'. Both displacement and B-bar then retain weak signed modes.
+        if cell.material.isotropic_bulk_shear().is_some()
+            && let Some((bulk, shear)) = derivative.isotropic_moduli_pa_k
+        {
+            return Ok(Self::Isotropic { bulk, shear });
         }
+        if cell.kinematics.is_projected() {
+            return Err(ElasticityError3::Invalid(
+                "B-bar temperature derivative requires native K/G slopes",
+            ));
+        }
+        Ok(Self::Tensor(&derivative.stiffness_mandel_pa_k))
     }
 
-    /// Mandel strain to physical stress, following the native B-bar mode split.
-    fn stress(self, strain: [f64; 6]) -> [f64; 6] {
+    /// Mandel strain to physical stress, following the native mode split.
+    pub(super) fn stress(self, strain: [f64; 6]) -> [f64; 6] {
         match self {
             Self::Tensor(matrix) => from_mandel(&std::array::from_fn(|i| {
                 matrix[i].iter().zip(strain).map(|(c, e)| c * e).sum()
@@ -59,12 +61,20 @@ impl<'a> TemperatureTangent3<'a> {
             ),
         }
     }
+    pub(super) fn ghost_slope(self, cell: &Cell3, bound_slope: f64) -> f64 {
+        // Only B-bar changes the native ghost modulus to shear. An explicitly
+        // isotropic displacement element still uses its full stiffness bound.
+        match self {
+            Self::Isotropic { shear, .. } if cell.kinematics.is_projected() => shear,
+            _ => bound_slope,
+        }
+    }
 }
 
 /// Differentiate max_i sum_j |C_ij| only on its differentiable branches.
 /// An inactive row has a strict gap, so its zero entries do not affect the local
 /// maximum. An active absolute-value kink or unequal active-row slopes does.
-fn stiffness_bound_derivative(
+pub(super) fn stiffness_bound_derivative(
     matrix: &[[f64; 6]; 6],
     derivative: &[[f64; 6]; 6],
 ) -> Result<f64, ElasticityError3> {
@@ -109,7 +119,7 @@ fn stiffness_bound_derivative(
     ))
 }
 
-fn traction(stress: [f64; 6], normal: [f64; 3]) -> [f64; 3] {
+pub(super) fn traction(stress: [f64; 6], normal: [f64; 3]) -> [f64; 3] {
     [
         stress[0] * normal[0] + stress[3] * normal[1] + stress[5] * normal[2],
         stress[3] * normal[0] + stress[1] * normal[1] + stress[4] * normal[2],
@@ -118,7 +128,7 @@ fn traction(stress: [f64; 6], normal: [f64; 3]) -> [f64; 3] {
 }
 
 /// Negative temperature derivative of the symmetric Nitsche motion load.
-fn motion_temperature_work(
+pub(super) fn motion_temperature_work(
     motion: [f64; 3],
     motion_slope: [f64; 3],
     traction_slope: [f64; 3],
@@ -365,10 +375,7 @@ impl CutElasticity3 {
                     0.0
                 };
             if ghost_needed[id] {
-                ghost_slopes[id] = match tangent {
-                    TemperatureTangent3::Isotropic { shear, .. } => shear,
-                    TemperatureTangent3::Tensor(_) => bound_slope,
-                };
+                ghost_slopes[id] = tangent.ghost_slope(cell, bound_slope);
             }
             for &(position, weight) in cell.rules.bulk() {
                 poll(&mut checkpoint)?;

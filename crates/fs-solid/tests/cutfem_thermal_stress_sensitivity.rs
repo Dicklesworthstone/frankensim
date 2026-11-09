@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 
 use fs_blake3::ContentHash;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
-use fs_cutfem::elastic3::thermal::ThermoelasticResponse3;
+use fs_cutfem::elastic3::thermal::{ThermalJacobianLimits3, ThermoelasticResponse3};
 use fs_cutfem::elastic3::{
     CutElasticity3, ElasticMaterialField3, ElasticityError3, ElasticityFormulation3,
     ElasticityOptions3, MaterialRefreshLimits3,
@@ -568,6 +568,65 @@ fn solved_adaptive_stress_gradient_preserves_cell_temperatures_ghosts_and_suppor
             .map(|n| op.physical_nodes()[n[0]])
             .collect();
         equilibrium_gradient!(op, AdaptiveElasticity3, law, lower);
+    }
+}
+
+#[test]
+fn prepared_temperature_jacobian_keeps_oriented_tensor_and_expansion_derivatives() {
+    let law = law(false, false);
+    let mut op = cartesian(&law, ElasticityFormulation3::Displacement);
+    let scales: Vec<_> = (0..op.cells()).map(|i| 0.7 + 0.03 * i as f64).collect();
+    op.set_scales(&scales).unwrap();
+    let (u, _) = fields(op.nodes());
+    let lower: Vec<_> = op.cell_nodes().iter().map(|n| op.nodes()[n[0]]).collect();
+    let direction: Vec<_> = (0..op.cells())
+        .map(|i| 0.4 - 0.17 * (i % 5) as f64)
+        .collect();
+    let prepared = op
+        .prepare_thermal_residual_jacobian(
+            &u,
+            TOTAL_STRAIN,
+            ThermalJacobianLimits3 {
+                max_points: POINTS,
+                max_workspace_components: 1_000_000,
+                max_action_terms: 1_000_000,
+            },
+            poll,
+        )
+        .unwrap();
+    let mut tangent = vec![0.0; op.n()];
+    op.thermal_residual_temperature_apply_into(&prepared, &direction, &mut tangent, poll)
+        .unwrap();
+    let h = 0.002;
+    let values = [-1.0, 1.0].map(|sign| {
+        let materials = |bounds: HexCell| {
+            let cell = lower.iter().position(|lo| *lo == bounds.lo()).unwrap();
+            Ok(hot(&law, temperature(bounds) + sign * h * direction[cell]))
+        };
+        op.refresh_material_field(
+            ElasticMaterialField3::ThermoelasticByCell(&materials),
+            MaterialRefreshLimits3::default(),
+            poll,
+        )
+        .unwrap();
+        let mut residual = vec![0.0; op.n()];
+        op.apply(&u, &mut residual);
+        let source = op.prepare_thermoelastic(POINTS, poll).unwrap();
+        for (value, force) in residual
+            .iter_mut()
+            .zip(op.eigenstrain_load(&source, poll).unwrap())
+        {
+            *value -= force;
+        }
+        residual
+    });
+    for (i, derivative) in tangent.iter().enumerate() {
+        close(
+            *derivative,
+            (values[1][i] - values[0][i]) / (2.0 * h),
+            4e-6,
+            3e-8,
+        );
     }
 }
 

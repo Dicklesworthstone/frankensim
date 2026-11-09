@@ -994,3 +994,36 @@ retain their separate owners. The focused `cutfem_thermal_stress_sensitivity`
 fixtures cover Cartesian/adaptive fixed-state and solved stress gradients,
 rotated orthotropic stiffness, separately oriented expansion and refusal
 boundaries; no continuum maximum-stress or heat-step gradient is inferred.
+
+
+## Prepared thermal residual Jacobian
+
+`prepare_thermal_residual_jacobian` and its `_with_motion` entry freeze the
+mixed block d(K(T)u-b_free(T)-b_g(T)-f)/dT at one admitted native physical
+displacement. Temperatures are independent per retained cell. Geometry,
+reference mass, cell scales and external forces remain fixed; optional pure
+embedded-motion callbacks supply g and its local temperature slope. Strong
+box supports remain homogeneous.
+
+Preparation integrates one direct 24-entry force column per cell and retains
+each original ghost jump and its two signed temperature weights. Bulk C'(elastic
+strain)-C alpha, B-bar projection, both symmetric Nitsche consistency terms,
+penalty derivatives and the complete motion product rule use the original
+source/material owners. Native explicit isotropy uses compensated K'/G' for
+both displacement and B-bar; only B-bar changes the ghost modulus to G'.
+
+`ThermalJacobianLimits3` admits bulk/selected-surface/ghost point counts, peak
+cached/scratch scalar storage and original stencil work before allocating or
+calling boundary functions. Pointwise physical strain and smooth stabilization
+branches are admitted during preparation. A failed preparation publishes no
+state. Later forward and transpose `_into` actions allocate no scratch, query
+no sources, integrate no quadrature, and share exactly the cached coefficients.
+The original adaptive T/T^T and homogeneous strong mask remain authoritative.
+
+Binding identity, coordinate space and exact scale bits reject stale material,
+geometry or scale use before output writes. Changed physical displacement or
+boundary data requires explicit new preparation. Directions and duals are
+algebraic; no physical amplitude ceiling applies. Mid-action cancellation or
+arithmetic overflow can leave partial output that the caller must discard.
+This block supports coupled linearization and implicit adjoints; it does not
+itself solve equilibrium, advance heat, or establish whole-system passivity.

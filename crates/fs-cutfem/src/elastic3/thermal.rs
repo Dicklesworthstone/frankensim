@@ -16,9 +16,12 @@ use super::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3, physical_re
 use super::{Cell3, CutElasticity3, ElasticityError3};
 
 mod adjoint;
+mod jacobian;
 mod sensitivity;
 mod stress;
 
+pub use jacobian::{PreparedThermalResidualJacobian3, ThermalJacobianLimits3};
+pub(in crate::elastic3) use jacobian::ThermalCoordinateMap3;
 pub use stress::ThermoelasticStressPullback3;
 pub use adjoint::{
     ThermoelasticAdjointSettings3, ThermoelasticMotion3, ThermoelasticObjective3,
