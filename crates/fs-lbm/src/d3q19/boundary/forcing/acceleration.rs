@@ -34,6 +34,42 @@ impl BoundaryGrid3 {
         RigidFrame3::prepare_body_acceleration(self, acceleration, gate)
     }
 
+    /// Select a spatial body acceleration without advancing time or applying
+    /// an impulse. Values are in lattice units `dx/dt²`, resolved in grid axes.
+    ///
+    /// Samples each fluid cell once in x-fast order, skipping static solids.
+    /// Each cell's actual density supplies `F = rho*a`. Both previous force
+    /// components are replaced; density, physical momentum and force-corrected
+    /// stress are preserved by the original Guo reframe. The callback may
+    /// depend on external state but cannot observe a partially modified grid.
+    /// Refusal, cancellation or callback panic leaves accepted state unchanged.
+    ///
+    /// Refresh the endpoint with
+    /// [`Self::step_with_endpoint_body_acceleration_field`] to follow transported
+    /// density. An ordinary `step` retains the selected force density instead.
+    pub fn rebind_body_acceleration_field(
+        &mut self,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
+        let mut field = self.sample_force_field_for_uniform([0.0; 3], acceleration, gate)?;
+        for tile in 0..self.f[0].len() {
+            poll(gate)?;
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) == 0 {
+                    let cell = self.coords(tile, lane);
+                    let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                    admit_populations(&populations, cell)?;
+                    let value = &mut field[tile * TILE_CELLS + lane];
+                    *value = EndpointSource3::Acceleration(*value)
+                        .force(&populations, tile, lane)
+                        .ok_or(BoundaryForcingError3::Unphysical { cell })?;
+                }
+            }
+        }
+        self.rebind_sampled_forcing([0.0; 3], field, gate)
+    }
+
     /// Advance with prescribed acceleration at the next physical endpoint.
     ///
     /// Collision uses the accepted force `F_n`. After streaming, every fluid
@@ -63,6 +99,45 @@ impl BoundaryGrid3 {
         let endpoint = self.endpoint_body_acceleration(acceleration, gate)?;
         self.step_with_endpoint_forcing_inner(endpoint, None, gate)
             .map(|_| ())
+    }
+
+    /// Advance with a spatial acceleration field at the next physical endpoint.
+    ///
+    /// This is the local counterpart of
+    /// [`Self::step_with_endpoint_body_acceleration`]. Each fluid cell is sampled
+    /// once in x-fast order before collision, in lattice units `dx/dt²`.
+    /// The same sampled value is retained during streaming, donor observation
+    /// and native open-face reconstruction. The endpoint force is
+    /// `rho_(n+1)(x)*a_(n+1)(x)`, including at pressure/velocity and wall seams.
+    /// No stale opening density or extra half-source reframe is substituted.
+    ///
+    /// One sampled acceleration allocation becomes the accepted force vector
+    /// in place. Original population scratch, collision and wall accounting
+    /// are reused. An invalid late cell or cancellation publishes neither
+    /// populations nor forces. This prescribed spatial/time history does not
+    /// solve velocity-dependent loads or add pressure and viscous forces again.
+    pub fn step_with_endpoint_body_acceleration_field(
+        &mut self,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryStepError3> {
+        let endpoint = self.sample_endpoint_acceleration(acceleration, gate)?;
+        self.step_with_endpoint_forcing_inner(endpoint, None, gate)
+            .map(|_| ())
+    }
+
+    /// Spatial acceleration with wall impulse, torque and work from the same
+    /// original collision used by the accepted fluid step.
+    pub fn step_with_endpoint_body_acceleration_field_and_wall_momentum(
+        &mut self,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        self.validate_wall_measurement(links, moment_origin)?;
+        let endpoint = self.sample_endpoint_acceleration(acceleration, gate)?;
+        self.step_with_endpoint_forcing_inner(endpoint, Some((links, moment_origin)), gate)
     }
 
     /// Acceleration step with the original selected-wall impulse, torque and
@@ -97,6 +172,49 @@ impl BoundaryGrid3 {
             Some(endpoint),
         )
         .map(|_| ())
+    }
+
+    /// Pooled spatial acceleration with identical sampling order, native cell
+    /// arithmetic and accepted force/population bits as the serial method.
+    pub fn step_pooled_with_endpoint_body_acceleration_field<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+    ) -> Result<(), BoundaryStepError3> {
+        let endpoint = self.sample_endpoint_acceleration(acceleration, gate)?;
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            Some((&[], [0.0; 3])),
+            None,
+            None,
+            Some(endpoint),
+        )
+        .map(|_| ())
+    }
+
+    /// Pooled spatial acceleration with the same selected-wall measurements
+    /// as [`Self::step_with_endpoint_body_acceleration_field_and_wall_momentum`].
+    pub fn step_pooled_with_endpoint_body_acceleration_field_and_wall_momentum<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        self.validate_wall_measurement(links, moment_origin)?;
+        let endpoint = self.sample_endpoint_acceleration(acceleration, gate)?;
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            Some((links, moment_origin)),
+            None,
+            None,
+            Some(endpoint),
+        )
+        .map(|(exchange, _)| exchange)
     }
 
     /// Pooled acceleration step with the same selected-wall loads as the
@@ -145,6 +263,24 @@ impl BoundaryGrid3 {
             value,
             initial_field,
         })
+    }
+
+    fn sample_endpoint_acceleration(
+        &self,
+        acceleration: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<EndpointForcing3, BoundaryStepError3> {
+        self.sample_force_field_for_uniform([0.0; 3], acceleration, gate)
+            .map(EndpointForcing3::AccelerationField)
+            .map_err(|error| match error {
+                BoundaryForcingError3::Cancelled => BoundaryStepError3::Cancelled,
+                BoundaryForcingError3::Invalid(reason) => {
+                    BoundaryStepError3::EndpointForce { reason }
+                }
+                BoundaryForcingError3::Unphysical { cell } => {
+                    BoundaryStepError3::Unphysical { cell }
+                }
+            })
     }
 
     // The native source frame is linear in force at fixed reconstruction
@@ -224,6 +360,29 @@ impl BoundaryGrid3 {
             self.force_field = Some(field);
         }
         self.force = [0.0; 3];
+        self.force_field_shape = None;
+    }
+
+    // Reuse the sampled acceleration allocation. Every density/product was
+    // admitted by the original stream or open reconstruction before this point.
+    pub(in super::super) fn publish_endpoint_body_acceleration_field(
+        &mut self,
+        mut field: Vec<[f64; 3]>,
+    ) {
+        for (tile, values) in field.chunks_exact_mut(TILE_CELLS).enumerate() {
+            for (lane, value) in values.iter_mut().enumerate() {
+                if self.solid[tile] & (1u64 << lane) == 0 {
+                    let density: f64 = self
+                        .f
+                        .iter()
+                        .map(|populations| populations[tile].0[lane])
+                        .sum();
+                    *value = value.map(|a| density * a);
+                }
+            }
+        }
+        self.force = [0.0; 3];
+        self.force_field = Some(field);
         self.force_field_shape = None;
     }
 }

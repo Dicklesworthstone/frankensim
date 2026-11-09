@@ -1,3 +1,30 @@
+## Spatial body acceleration on native dense D3Q19
+
+`BoundaryGrid3::rebind_body_acceleration_field` selects a prescribed local
+acceleration in lattice units while retaining physical density, velocity and
+force-corrected stress. `step_with_endpoint_body_acceleration_field` and its
+pooled/selected-wall counterparts advance the original collision and stream
+with `F_n`, then use each cell's transported density in `F_(n+1) = rho_(n+1)*a`.
+The sampled local value follows that cell through donor observation, regularized
+velocity/pressure reconstruction and the existing scalar wall-seam closure.
+Body impulse is the trapezoidal sum of endpoint forces; actual wall/reservoir
+transport remains separate.
+
+Callbacks sample active cells once in x-fast order before mutation and skip
+static solids. One acceleration vector becomes accepted force storage in place;
+native population scratch is reused, with no extra collision or cloned grid.
+Failed sampling, numerical admission or cancellation publishes neither source
+nor populations. The prescribed field replaces both previous force components;
+an ordinary step after rebinding holds force density and does not automatically
+refresh acceleration. Velocity-dependent loads require their own implicit law.
+
+G0/G1/G3/G4/G5 tests cover uniform-field parity, analytic transported-density
+response, stress-preserving rebinding, local sampling, linear/angular wall
+impulse, all six profiled reservoir orientations against independently
+converged prescribed-force steps, serial/pooled identity, refusal and exact
+retry. This extends the existing low-Mach lattice model; it does not establish
+general compressible-flow validity or a whole-solver convergence certificate.
+
 ## Physical momentum at forced D3Q19 initialization
 
 `BoundaryGrid3` constructors initialize unit-density fluid at physical rest in

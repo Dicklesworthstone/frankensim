@@ -203,7 +203,7 @@ fn seamed_grid(face: Face3, gate: &CancelGate) -> BoundaryGrid3 {
 // density closure or an extra elapsed reframe/collision on the previous trial.
 fn prescribed_force_reference(
     initial: &BoundaryGrid3,
-    acceleration: [f64; 3],
+    acceleration: impl Fn([usize; 3]) -> [f64; 3],
     gate: &CancelGate,
 ) -> BoundaryGrid3 {
     let mut density: Vec<_> = cells().map(|cell| moments(initial, cell).0).collect();
@@ -211,7 +211,7 @@ fn prescribed_force_reference(
         let mut next = initial.clone();
         next.step_with_endpoint_forcing(
             [0.0; 3],
-            |cell| acceleration.map(|a| a * density[index(cell)]),
+            |cell| acceleration(cell).map(|a| a * density[index(cell)]),
             gate,
         )
         .unwrap();
@@ -253,7 +253,7 @@ fn profiled_wall_seams_match_prescribed_force_reference_and_close_transport() {
     let acceleration = [-0.004, 0.003, 0.002];
     for face in Face3::ALL {
         let initial = seamed_grid(face, &gate);
-        let reference = prescribed_force_reference(&initial, acceleration, &gate);
+        let reference = prescribed_force_reference(&initial, |_| acceleration, &gate);
         let post: Vec<_> = cells()
             .map(|[x, y, z]| {
                 collide_cell3(
@@ -373,6 +373,66 @@ fn profiled_wall_seams_match_prescribed_force_reference_and_close_transport() {
                     + reservoir_impulse[a],
                 4e-11,
             );
+        }
+    }
+}
+
+#[test]
+fn spatial_acceleration_uses_each_donor_and_reservoir_cells_own_density() {
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0xACC50F);
+    let acceleration = |[x, y, z]: [usize; 3]| {
+        [
+            0.001 + 0.0002 * x as f64,
+            -0.0015 + 0.0003 * y as f64,
+            0.0007 - 0.0001 * z as f64,
+        ]
+    };
+    for face in Face3::ALL {
+        let initial = seamed_grid(face, &gate);
+        let reference = prescribed_force_reference(&initial, acceleration, &gate);
+        let mut serial = initial.clone();
+        let mut pooled = initial.clone();
+        serial
+            .step_with_endpoint_body_acceleration_field(acceleration, &gate)
+            .unwrap();
+        pooled
+            .step_pooled_with_endpoint_body_acceleration_field(&pool, &gate, acceleration)
+            .unwrap();
+        assert_eq!(snapshot(&serial), snapshot(&pooled));
+        let axis = face as usize / 2;
+        for cell @ [x, y, z] in cells() {
+            let actual = serial.populations(x, y, z);
+            let expected = reference.populations(x, y, z);
+            let (rho, momentum) = moments(&serial, cell);
+            for q in 0..Q3 {
+                close(actual[q], expected[q], 2e-13);
+            }
+            assert_eq!(serial.force_density(x, y, z), acceleration(cell).map(|a| rho * a));
+            if initial.open_link_mask(x, y, z) == 0 || initial.link_mask(x, y, z) != 0 {
+                continue;
+            }
+            let mut interior = cell;
+            interior[axis] = if cell[axis] == 0 { 1 } else { N - 2 };
+            let (neighbor_rho, neighbor_momentum) = moments(&serial, interior);
+            let inlet = cell[axis]
+                == if (face as usize).is_multiple_of(2) {
+                    0
+                } else {
+                    N - 1
+                };
+            let (target_rho, target_velocity) = if inlet {
+                (neighbor_rho, velocity_trace(cell, axis))
+            } else {
+                (
+                    pressure_trace(cell, axis),
+                    neighbor_momentum.map(|p| p / neighbor_rho),
+                )
+            };
+            close(rho, target_rho, 6e-15);
+            for a in 0..3 {
+                close(momentum[a] / rho, target_velocity[a], 2e-15);
+            }
         }
     }
 }

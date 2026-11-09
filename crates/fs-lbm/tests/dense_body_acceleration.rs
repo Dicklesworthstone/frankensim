@@ -77,6 +77,54 @@ fn models() -> [CollisionModel3; 4] {
     ]
 }
 
+fn spatial_acceleration([x, y, z]: [usize; 3], base: [f64; 3]) -> [f64; 3] {
+    [
+        base[0] + 0.0002 * (y as f64 - 3.0),
+        base[1] - 0.0003 * (z as f64 - 2.0),
+        base[2] + 0.0001 * (x as f64 - 4.0),
+    ]
+}
+
+#[test]
+fn constant_spatial_acceleration_matches_uniform_native_steps() {
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0xACCE3);
+    for model in models() {
+        let mut uniform = BoundaryGrid3::with_collision_model(
+            8,
+            4,
+            4,
+            model,
+            [0.0; 3],
+            BoundarySpec3::periodic(),
+        );
+        uniform
+            .initialize_uniform_equilibrium(1.6, [0.013, -0.007, 0.003], &gate)
+            .unwrap();
+        let mut field = uniform.clone();
+        let first = [0.001, -0.002, 0.003];
+        uniform.rebind_body_acceleration(first, &gate).unwrap();
+        field
+            .rebind_body_acceleration_field(|_| first, &gate)
+            .unwrap();
+        assert_eq!(snapshot(&uniform), snapshot(&field));
+        let mut pooled = field.clone();
+        for acceleration in [first, [-0.002, 0.003, -0.001], [0.0; 3]] {
+            uniform
+                .step_with_endpoint_body_acceleration(acceleration, &gate)
+                .unwrap();
+            field
+                .step_with_endpoint_body_acceleration_field(|_| acceleration, &gate)
+                .unwrap();
+            pooled
+                .step_pooled_with_endpoint_body_acceleration_field(&pool, &gate, |_| acceleration)
+                .unwrap();
+            assert_eq!(snapshot(&uniform), snapshot(&field));
+            assert_eq!(snapshot(&uniform), snapshot(&pooled));
+        }
+    }
+}
+
 #[test]
 fn acceleration_and_jerk_response_do_not_depend_on_density_or_collision_rate() {
     let gate = CancelGate::new_clock_free();
@@ -150,6 +198,37 @@ fn rebinding_replaces_previous_sources_without_erasing_physical_stress_or_impuls
             }
         }
     }
+    // The spatial owner replaces both components just like the uniform owner;
+    // each local density, velocity and non-equilibrium stress survives.
+    grid.rebind_uniform_force([0.0003, -0.0002, 0.0001], &gate)
+        .unwrap();
+    let base = [-0.0007, 0.0008, -0.0004];
+    let mut visited = Vec::new();
+    grid.rebind_body_acceleration_field(
+        |cell| {
+            visited.push(cell);
+            spatial_acceleration(cell, base)
+        },
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(visited, cells(&grid).collect::<Vec<_>>());
+    assert_eq!(grid.uniform_force_density(), [0.0; 3]);
+    for (cell, original) in cells(&grid).zip(&before) {
+        let (rho, momentum, stress) = moments(&grid, cell);
+        close(rho, original.0, 2e-15);
+        for a in 0..3 {
+            close(momentum[a], original.1[a], 3e-16);
+            close(
+                grid.force_density(cell[0], cell[1], cell[2])[a],
+                rho * spatial_acceleration(cell, base)[a],
+                1e-17,
+            );
+            for b in 0..3 {
+                close(stress[a][b], original.2[a][b], 4e-16);
+            }
+        }
+    }
 }
 
 #[test]
@@ -175,8 +254,11 @@ fn transported_density_enters_the_endpoint_source_without_a_fictitious_reframe()
             grid.set_populations(cell[0], cell[1], cell[2], &equilibrium3(density, [0.0; 3]));
         }
         grid.rebind_body_acceleration(start, &gate).unwrap();
-        grid.step_with_endpoint_body_acceleration(end, &gate)
-            .unwrap();
+        grid.step_with_endpoint_body_acceleration_field(
+            |cell| spatial_acceleration(cell, end),
+            &gate,
+        )
+        .unwrap();
         // The independent D3Q19 sums on an affine density field at rest give
         // rho1 = rho0 - (grad rho).a0/2 and raw j1 = -grad rho/3 + rho0*a0/2.
         // A held rho0*a1 or a post-stream reframe changes the physical impulse.
@@ -184,9 +266,10 @@ fn transported_density_enters_the_endpoint_source_without_a_fictitious_reframe()
         let (density, momentum, _) = moments(&grid, [4, 4, 4]);
         close(density, expected_density, 2e-15);
         for a in 0..3 {
-            let expected = -gradient[a] / 3.0 + 0.5 * (1.3 * start[a] + expected_density * end[a]);
+            let local = spatial_acceleration([4, 4, 4], end)[a];
+            let expected = -gradient[a] / 3.0 + 0.5 * (1.3 * start[a] + expected_density * local);
             close(momentum[a], expected, 3e-16);
-            assert_eq!(grid.force_density(4, 4, 4)[a], density * end[a]);
+            assert_eq!(grid.force_density(4, 4, 4)[a], density * local);
         }
     }
 }
@@ -296,7 +379,7 @@ fn periodic_transport_retains_trapezoidal_total_impulse_and_each_local_density()
 }
 
 #[test]
-fn density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_pooled_bits() {
+fn spatial_density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_pooled_bits() {
     let gate = CancelGate::new_clock_free();
     let pool = TilePool::for_host(3, 0xACCE1);
     let origin = [-0.3, 0.7, 1.2];
@@ -331,18 +414,18 @@ fn density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_po
     ] {
         let before = totals(&serial, origin);
         let exchange = serial
-            .step_with_endpoint_body_acceleration_and_wall_momentum(
-                acceleration,
+            .step_with_endpoint_body_acceleration_field_and_wall_momentum(
+                |cell| spatial_acceleration(cell, acceleration),
                 &links,
                 origin,
                 &gate,
             )
             .unwrap();
         let parallel = pooled
-            .step_pooled_with_endpoint_body_acceleration_and_wall_momentum(
+            .step_pooled_with_endpoint_body_acceleration_field_and_wall_momentum(
                 &pool,
                 &gate,
-                acceleration,
+                |cell| spatial_acceleration(cell, acceleration),
                 &links,
                 origin,
             )
@@ -351,6 +434,13 @@ fn density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_po
         assert_eq!(exchange, parallel);
         assert_eq!(snapshot(&serial), snapshot(&pooled));
         close(serial.total_mass(), mass, 2e-12);
+        for cell in cells(&serial) {
+            let density = moments(&serial, cell).0;
+            assert_eq!(
+                serial.force_density(cell[0], cell[1], cell[2]),
+                spatial_acceleration(cell, acceleration).map(|a| density * a)
+            );
+        }
         for a in 0..3 {
             close(
                 after[0][a] - before[0][a] + exchange.wall_impulse[a],
@@ -364,6 +454,63 @@ fn density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_po
             );
         }
     }
+}
+
+#[test]
+fn spatial_sampling_and_late_source_refusals_are_atomic_and_skip_solids() {
+    let gate = CancelGate::new_clock_free();
+    let mut grid = BoundaryGrid3::new(8, 4, 4, 0.9, [0.0; 3], BoundarySpec3::periodic());
+    grid.voxelize_sdf(|p| p[0] - 1.0);
+    grid.initialize_uniform_equilibrium(2.3, [0.01, 0.0, 0.0], &gate)
+        .unwrap();
+    let before = snapshot(&grid);
+    let active = cells(&grid).collect::<Vec<_>>();
+    let last = *active.last().unwrap();
+    let field = |cell| spatial_acceleration(cell, [0.001, -0.002, 0.001]);
+    let mut visited = Vec::new();
+    assert!(
+        grid.rebind_body_acceleration_field(
+            |cell| {
+                visited.push(cell);
+                if cell == last { [f64::MAX; 3] } else { field(cell) }
+            },
+            &gate,
+        )
+        .is_err()
+    );
+    assert_eq!(visited, active);
+    assert_eq!(snapshot(&grid), before);
+    let mut reference = grid.clone();
+    // Sampling succeeds, but the endpoint force product overflows after
+    // collision/streaming has already populated native scratch.
+    assert!(
+        grid.step_with_endpoint_body_acceleration_field(
+            |cell| if cell == last { [f64::MAX; 3] } else { field(cell) },
+            &gate,
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot(&grid), before);
+    let cancelled = CancelGate::new_clock_free();
+    assert!(
+        grid.step_with_endpoint_body_acceleration_field(
+            |cell| {
+                if cell == last {
+                    cancelled.request();
+                }
+                field(cell)
+            },
+            &cancelled,
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot(&grid), before);
+    grid.step_with_endpoint_body_acceleration_field(field, &gate)
+        .unwrap();
+    reference
+        .step_with_endpoint_body_acceleration_field(field, &gate)
+        .unwrap();
+    assert_eq!(snapshot(&grid), snapshot(&reference));
 }
 
 #[test]

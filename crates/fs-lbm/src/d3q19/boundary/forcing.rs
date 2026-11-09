@@ -26,6 +26,9 @@ pub(super) enum EndpointForcing3 {
         // allocation stays private until populations and forcing publish.
         initial_field: Option<Vec<[f64; 3]>>,
     },
+    // Sampled accelerations, not force densities. The admitted vector becomes
+    // the accepted force storage after multiplication by each endpoint density.
+    AccelerationField(Vec<[f64; 3]>),
 }
 
 impl EndpointForcing3 {
@@ -36,7 +39,16 @@ impl EndpointForcing3 {
                 local,
             }),
             Self::Acceleration { value, .. } => Some(EndpointSource3::Acceleration(*value)),
+            Self::AccelerationField(values) => Some(EndpointSource3::AccelerationField(values)),
             Self::Scale(_) => None,
+        }
+    }
+
+    pub(super) fn acceleration_at(&self, tile: usize, lane: usize) -> Option<[f64; 3]> {
+        match self {
+            Self::Acceleration { value, .. } => Some(*value),
+            Self::AccelerationField(values) => Some(values[tile * TILE_CELLS + lane]),
+            Self::Scale(_) | Self::Field { .. } => None,
         }
     }
 }
@@ -48,6 +60,7 @@ pub(super) enum EndpointSource3<'a> {
         local: &'a [[f64; 3]],
     },
     Acceleration([f64; 3]),
+    AccelerationField(&'a [[f64; 3]]),
 }
 
 impl EndpointSource3<'_> {
@@ -59,6 +72,9 @@ impl EndpointSource3<'_> {
     ) -> Option<[f64; 3]> {
         match self {
             Self::Field { uniform, local } => Some(cell_force(uniform, Some(local), tile, lane)),
+            Self::AccelerationField(values) => {
+                Self::Acceleration(values[tile * TILE_CELLS + lane]).force(populations, tile, lane)
+            }
             Self::Acceleration(acceleration) => {
                 let density = populations.iter().sum::<f64>();
                 let force = acceleration.map(|value| density * value);
@@ -392,13 +408,24 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
     ) -> Result<(), BoundaryForcingError3> {
         let field = self.sample_force_field_with_gate(force, gate)?;
+        self.rebind_sampled_forcing(self.force, field, gate)
+    }
+
+    // Shared atomic reframe after the selected uniform and sampled fields
+    // have been admitted. Acceleration replaces BOTH previous components.
+    fn rebind_sampled_forcing(
+        &mut self,
+        uniform: [f64; 3],
+        field: Vec<[f64; 3]>,
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
         for tile in 0..self.f[0].len() {
             poll(gate)?;
             for lane in 0..TILE_CELLS {
                 let mut populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
                 if self.solid[tile] & (1u64 << lane) == 0 {
                     let previous = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                    let next = cell_force(self.force, Some(&field), tile, lane);
+                    let next = cell_force(uniform, Some(&field), tile, lane);
                     if previous != next {
                         let cell = self.coords(tile, lane);
                         admit_populations(&populations, cell)?;
@@ -425,6 +452,7 @@ impl BoundaryGrid3 {
         }
         poll(gate)?;
         core::mem::swap(&mut self.f, &mut self.post);
+        self.force = uniform;
         self.force_field = Some(field);
         self.force_field_shape = None;
         Ok(())
