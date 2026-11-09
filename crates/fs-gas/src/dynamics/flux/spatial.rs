@@ -313,6 +313,46 @@ impl FrozenGas {
         .map(SpatialFaceFlux::from)
     }
 
+    /// Three-dimensional compact stationary reservoir using original calorics.
+    ///
+    /// Pressure/temperature are stagnation data for inflow; the reservoir must
+    /// have exactly zero momentum. Incoming gas has zero transverse velocity
+    /// and carries source stagnation enthalpy once. Departing gas retains both
+    /// interior shears and complete kinetic energy. Choking and reversal use
+    /// [`Self::reservoir_flux`]'s one-sided compact-volume model.
+    pub fn reservoir_spatial_flux(
+        &self,
+        interior: SpatialConserved,
+        reservoir: Conserved,
+        outward_normal: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        let primitive = self.spatial_primitive(interior, &mut cancelled)?;
+        self.trace_reservoir_flux(
+            interior,
+            primitive,
+            reservoir,
+            outward_normal,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed path to [`Self::reservoir_spatial_flux`].
+    /// Both transverse caloric-precision checks remain binding.
+    pub fn reservoir_spatial_flux_from_primitive(
+        &self,
+        interior: SpatialPrimitive,
+        reservoir: Conserved,
+        outward_normal: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.spatial_state_at(interior)?;
+        self.trace_reservoir_flux(state, primitive, reservoir, outward_normal, &mut cancelled)
+            .map(SpatialFaceFlux::from)
+    }
+
     /// Exact thermally perfect shock/rarefaction at a stationary adiabatic slip
     /// wall. `outward_normal` is -1 or +1 along the supplied normal axis. There
     /// is no mass, tangential momentum or energy transfer through this wall.

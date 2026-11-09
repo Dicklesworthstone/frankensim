@@ -185,12 +185,7 @@ impl FrozenGas {
                 "reservoir normal, stationary state or energy reference",
             ));
         }
-        let inside = Primitive {
-            velocity: outward_normal * inside.velocity,
-            ..inside
-        };
-        let port =
-            shared::reservoir_state(self, self, inside, outside, cancelled).map_err(wave_error)?;
+        let port = self.compact_reservoir_state(inside, outside, outward_normal, cancelled)?;
         if port.inflow {
             self.inlet_flux(
                 outside,
@@ -204,6 +199,34 @@ impl FrozenGas {
         }
     }
 
+    /// The same source-owned compact port for axial and multidimensional traces.
+    /// Both thermodynamic states have already been admitted by this gas owner.
+    pub(super) fn compact_reservoir_state(
+        &self,
+        inside: Primitive,
+        outside: Primitive,
+        outward_normal: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<shared::PortState, Error> {
+        poll(cancelled)?;
+        if !matches!(outward_normal, -1.0 | 1.0) || outside.velocity != 0.0 {
+            return Err(Error::Invalid(
+                "compact reservoir normal or stationary state",
+            ));
+        }
+        shared::reservoir_state(
+            self,
+            self,
+            Primitive {
+                velocity: outward_normal * inside.velocity,
+                ..inside
+            },
+            outside,
+            cancelled,
+        )
+        .map_err(wave_error)
+    }
+
     fn outlet_flux(&self, port: Primitive, normal: f64, signal: f64) -> Result<FaceFlux, Error> {
         let q = self.conserved(port.density, port.velocity, port.pressure)?;
         checked_flux(
@@ -214,7 +237,7 @@ impl FrozenGas {
         )
     }
 
-    fn inlet_flux(
+    pub(super) fn inlet_flux(
         &self,
         reservoir: Primitive,
         port: Primitive,

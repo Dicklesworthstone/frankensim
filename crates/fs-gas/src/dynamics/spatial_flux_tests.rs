@@ -8,6 +8,120 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g1_compact_spatial_reservoir_matches_stagnation_choking_and_transports_full_shear() {
+    let gas = gas(0.0, -1e18);
+    let throat_temperature = 2.0_f64 / 2.4;
+    let throat_density = throat_temperature.powf(2.5);
+    let throat_pressure = throat_temperature.powf(3.5);
+    let throat_speed = (1.4 * throat_temperature).sqrt();
+    let reservoir = gas.conserved(1.0, 0.0, 1.0).unwrap();
+    let enthalpy = reservoir.energy + 1.0;
+    for normal in [-1.0, 1.0] {
+        for shear in [[2.0, -3.0], [-3.0, 2.0]] {
+            let inlet = SpatialPrimitive {
+                density: 0.01,
+                normal_velocity: 0.0,
+                transverse_velocity: shear,
+                pressure: 0.01,
+            };
+            let mass = -normal * throat_density * throat_speed;
+            for flux in [
+                gas.reservoir_spatial_flux(conserved(&gas, inlet), reservoir, normal, || false)
+                    .unwrap(),
+                gas.reservoir_spatial_flux_from_primitive(inlet, reservoir, normal, || false)
+                    .unwrap(),
+            ] {
+                close(flux.mass, mass);
+                close(
+                    flux.normal_momentum,
+                    throat_density * throat_speed.powi(2) + throat_pressure,
+                );
+                assert_eq!(flux.transverse_momentum, [0.0; 2]);
+                close(flux.energy, mass * enthalpy);
+            }
+            let outlet = SpatialPrimitive {
+                density: 1.0,
+                normal_velocity: normal * 0.4,
+                transverse_velocity: shear,
+                pressure: 1.0,
+            };
+            let bath = gas.conserved(0.8, 0.0, 0.8).unwrap();
+            let axial = gas
+                .reservoir_flux(
+                    gas.conserved(1.0, normal * 0.4, 1.0).unwrap(),
+                    bath,
+                    normal,
+                    || false,
+                )
+                .unwrap();
+            for flux in [
+                gas.reservoir_spatial_flux(conserved(&gas, outlet), bath, normal, || false)
+                    .unwrap(),
+                gas.reservoir_spatial_flux_from_primitive(outlet, bath, normal, || false)
+                    .unwrap(),
+            ] {
+                close(flux.mass, axial.mass);
+                close(flux.normal_momentum, axial.momentum);
+                for (component, velocity) in flux.transverse_momentum.into_iter().zip(shear) {
+                    close(component, axial.mass * velocity);
+                }
+                close(
+                    flux.energy,
+                    axial.energy + 0.5 * axial.mass * (shear[0].powi(2) + shear[1].powi(2)),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_compact_spatial_reservoir_refuses_nonstationary_and_unresolved_source_states() {
+    let gas = gas(0.4, 0.0);
+    let interior = trace([1.0, -0.4, 2.0, -3.0, 1.0]);
+    let reservoir = gas.conserved(2.0, 0.0, 2.0).unwrap();
+    // Inward interior motion is now physically resolved by a complete reservoir.
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(interior, reservoir, 1.0, || false)
+            .is_ok()
+    );
+    for invalid in [
+        Conserved {
+            momentum: 0.1,
+            ..reservoir
+        },
+        Conserved {
+            density: -1.0,
+            ..reservoir
+        },
+        Conserved {
+            energy: f64::NAN,
+            ..reservoir
+        },
+    ] {
+        assert!(
+            gas.reservoir_spatial_flux_from_primitive(interior, invalid, 1.0, || false)
+                .is_err()
+        );
+    }
+    let unresolved = SpatialPrimitive {
+        transverse_velocity: [1e20, 0.0],
+        ..interior
+    };
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(unresolved, reservoir, 1.0, || false)
+            .is_err()
+    );
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(interior, reservoir, 0.0, || false)
+            .is_err()
+    );
+    assert_eq!(
+        gas.reservoir_spatial_flux_from_primitive(interior, reservoir, 1.0, || true),
+        Err(Error::Cancelled),
+    );
+}
+
+#[test]
 fn g1_spatial_characteristic_outlet_passes_simple_acoustic_waves_and_shear_contacts() {
     let gas = gas(0.0, -1e18);
     let c0 = 1.4_f64.sqrt();
@@ -93,7 +207,11 @@ fn g4_spatial_characteristic_outlet_refuses_backflow_and_lost_caloric_precision(
     for (normal, pressure, velocity) in [(0.0, 1.0, 0.4), (1.0, 0.0, 0.4), (1.0, 1.0, -0.4)] {
         assert!(
             gas.characteristic_outlet_spatial_flux_from_primitive(
-                primitive, normal, pressure, velocity, || false,
+                primitive,
+                normal,
+                pressure,
+                velocity,
+                || false,
             )
             .is_err()
         );

@@ -479,6 +479,88 @@ impl FrozenGas {
         .map(NormalFaceFlux::from)
     }
 
+    /// Compact stationary reservoir with planar transport.
+    ///
+    /// The reservoir's source-admitted pressure and temperature are stagnation
+    /// data for inflow and its pressure is the outflow backpressure. Reservoir
+    /// momentum must be exactly zero. Inflow has zero transverse velocity;
+    /// outflow retains interior shear and its full kinetic energy. This is the
+    /// one-sided choking/reversal law of [`Self::reservoir_flux`], not a held
+    /// exterior Riemann trace or a finite gas inventory.
+    pub fn reservoir_normal_flux(
+        &self,
+        interior: NormalConserved,
+        reservoir: Conserved,
+        outward_normal: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let primitive = self.normal_primitive(interior, &mut cancelled)?;
+        self.trace_reservoir_flux(
+            interior,
+            primitive,
+            reservoir,
+            outward_normal,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed path to [`Self::reservoir_normal_flux`].
+    /// The reservoir remains a stationary conservative state in this energy gauge.
+    pub fn reservoir_normal_flux_from_primitive(
+        &self,
+        interior: NormalPrimitive,
+        reservoir: Conserved,
+        outward_normal: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.normal_state_at(interior)?;
+        self.trace_reservoir_flux(state, primitive, reservoir, outward_normal, &mut cancelled)
+            .map(NormalFaceFlux::from)
+    }
+
+    fn trace_reservoir_flux<const N: usize, Q: Trace<N>>(
+        &self,
+        state: Q,
+        primitive: Primitive,
+        reservoir: Conserved,
+        outward_normal: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
+        poll(cancelled)?;
+        if reservoir.momentum != 0.0 {
+            return Err(Error::Invalid("compact reservoir must be stationary"));
+        }
+        let outside = self.decode(reservoir, None, cancelled)?;
+        let port = self.compact_reservoir_state(primitive, outside, outward_normal, cancelled)?;
+        if port.inflow {
+            let axial = self.inlet_flux(
+                outside,
+                port.primitive,
+                outward_normal,
+                port.signal_speed,
+                cancelled,
+            )?;
+            let mut values = [0.0; N];
+            values[0] = axial.mass;
+            values[1] = axial.momentum;
+            values[N - 1] = axial.energy;
+            poll(cancelled)?;
+            flux(values, axial.signal_speed, false)
+        } else {
+            self.trace_outgoing_flux(
+                state,
+                Primitive {
+                    velocity: outward_normal * port.primitive.velocity,
+                    ..port.primitive
+                },
+                port.signal_speed,
+                cancelled,
+            )
+        }
+    }
+
     fn trace_pressure_outlet<const N: usize, Q: Trace<N>>(
         &self,
         state: Q,

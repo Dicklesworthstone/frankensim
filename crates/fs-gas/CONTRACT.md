@@ -1,5 +1,35 @@
 # fs-gas contract
 
+## Compact stagnation reservoirs on planar and volumetric gas traces
+
+Frozen and evolving-mixture gas owners expose conserved and reconstructed
+planar/three-dimensional compact-reservoir fluxes. They reuse the original
+one-sided reservoir characteristic and source-owned choking law. Reservoir
+pressure and temperature are stagnation data for inflow and pressure is the
+outflow backpressure. A held exterior HLLC state remains a different model.
+
+Incoming gas takes the stationary reservoir's original composition and
+referenced stagnation enthalpy, with zero transverse velocity. Departing gas
+retains interior species, both shear velocities and complete kinetic energy.
+Pressure work is included once in transported enthalpy. Source-domain and full
+caloric-precision admission remain binding; mixture output publishes only
+after final cancellation. Successful face evaluation uses bounded stack
+storage and performs no heap allocation or replacement caloric construction.
+
+Five new native regression groups check exact gamma-law sonic inflow,
+variable-Cp reversal and discharge, both orientations, original energy gauges,
+different donor compositions and absent species, shear/energy transport,
+conserved/reconstructed parity, and late cancellation with unchanged output.
+All 18 selected source-linked native boundary tests passed. This bounded build
+uses the actual boundary sources and original dependency artifacts; unrelated
+network, thermal, chemistry and entropy-flux wrappers are excluded. It is not
+a full crate/workspace Cargo or DSR result.
+
+This is a stationary compact reservoir with externally held state. It supplies
+neither finite mass/energy feedback, resolved mixing, entrance loss, neck
+inertia nor molecular reservoir data. A future finite-volume owner must evolve
+the reservoir with the exact opposite area-integrated port transfers.
+
 ## Planar and volumetric acoustic pressure outlets
 
 The frozen and evolving-mixture gas owners expose characteristic outlet fluxes

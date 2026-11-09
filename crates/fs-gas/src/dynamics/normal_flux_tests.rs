@@ -8,6 +8,68 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g3_compact_planar_reservoir_selects_the_physical_shear_donor_across_reversal() {
+    for cp in [0.0, 0.4] {
+        let gas = gas(cp, 1e18);
+        for normal in [-1.0, 1.0] {
+            for (density, pressure, speed, reservoir_pressure) in [
+                (1.0, 1.0, 0.4, 0.8),
+                (1.0, 1.0, 0.4, 2.0),
+                (0.01, 0.01, 0.0, 1.0),
+                (1.0, 1.0, 0.4, 0.001),
+                (1.0, 1.0, 3.0, 1.0),
+            ] {
+                let velocity = normal * speed;
+                let reservoir = gas
+                    .conserved(reservoir_pressure, 0.0, reservoir_pressure)
+                    .unwrap();
+                let axial = gas.conserved(density, velocity, pressure).unwrap();
+                let reference = gas
+                    .reservoir_flux(axial, reservoir, normal, || false)
+                    .unwrap();
+                for tangent in [-3.0, 0.0, 2.0] {
+                    let primitive = NormalPrimitive {
+                        density,
+                        normal_velocity: velocity,
+                        transverse_velocity: tangent,
+                        pressure,
+                    };
+                    let state = gas
+                        .normal_conserved(density, velocity, tangent, pressure)
+                        .unwrap();
+                    let donor_tangent = if normal * reference.mass < 0.0 {
+                        0.0
+                    } else {
+                        tangent
+                    };
+                    for flux in [
+                        gas.reservoir_normal_flux(state, reservoir, normal, || false)
+                            .unwrap(),
+                        gas.reservoir_normal_flux_from_primitive(
+                            primitive,
+                            reservoir,
+                            normal,
+                            || false,
+                        )
+                        .unwrap(),
+                    ] {
+                        close(flux.mass, reference.mass);
+                        close(flux.normal_momentum, reference.momentum);
+                        close(flux.transverse_momentum, reference.mass * donor_tangent);
+                        close(
+                            flux.energy,
+                            reference.energy + 0.5 * reference.mass * donor_tangent.powi(2),
+                        );
+                        close(flux.signal_speed, reference.signal_speed);
+                        assert!(!flux.used_hll_fallback);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_ale_planar_flux_retains_stationary_and_original_axial_transport() {
     let g = gas(0.4, 1e18);
     for (left, right) in [

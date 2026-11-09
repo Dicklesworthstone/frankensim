@@ -131,8 +131,7 @@ fn g3_multidimensional_characteristic_outlets_retain_species_shear_and_full_ener
                         close(f2[4], expected[3] + 0.5 * mass_flux * shear[0].powi(2));
                         close(
                             f3[5],
-                            expected[3]
-                                + 0.5 * mass_flux * (shear[0].powi(2) + shear[1].powi(2)),
+                            expected[3] + 0.5 * mass_flux * (shear[0].powi(2) + shear[1].powi(2)),
                         );
                         close(report2.signal_speed, axial_report.signal_speed);
                         close(report3.signal_speed, axial_report.signal_speed);
@@ -233,6 +232,240 @@ fn g4_multidimensional_characteristic_refusals_preserve_complete_output() {
         Err(Error::Cancelled)
     );
     assert_eq!(output, original);
+}
+
+#[test]
+fn g3_compact_multidimensional_ports_preserve_donor_species_and_stagnation_energy() {
+    let gas = variable_source(1e18);
+    for (densities, bath_densities) in [([1.0, 0.0], [0.0, 2.0]), ([0.25, 0.75], [0.7, 0.3])] {
+        for normal in [-1.0, 1.0] {
+            for (speed, bath_pressure) in [(0.4, 0.8), (0.4, 3.0), (0.0, 20.0), (0.4, 0.01)] {
+                let velocity = normal * speed;
+                let axial = gas.conserved(&densities, velocity, 1.0).unwrap();
+                let bath = gas.conserved(&bath_densities, 0.0, bath_pressure).unwrap();
+                let mut expected = [0.0; 4];
+                let reference = gas
+                    .reservoir_flux(
+                        axial.as_cell(),
+                        bath.as_cell(),
+                        normal,
+                        &mut expected,
+                        || false,
+                    )
+                    .unwrap();
+                let mass = expected[0] + expected[1];
+                let incoming = normal * mass < 0.0;
+                let donor = if incoming { bath_densities } else { densities };
+                let donor_density = donor[0] + donor[1];
+                for shear in [[2.0, -3.0], [-3.0, 2.0]] {
+                    let planar = NormalPrimitive {
+                        partial_densities: &densities,
+                        normal_velocity: velocity,
+                        transverse_velocity: shear[0],
+                        pressure: 1.0,
+                    };
+                    let spatial = SpatialPrimitive {
+                        partial_densities: &densities,
+                        normal_velocity: velocity,
+                        transverse_velocity: shear,
+                        pressure: 1.0,
+                    };
+                    let mut q2 = [0.0; 5];
+                    let mut q3 = [0.0; 6];
+                    gas.normal_conserved_into(planar, &mut q2).unwrap();
+                    gas.spatial_conserved_into(spatial, &mut q3).unwrap();
+                    let mut f2 = [0.0; 5];
+                    let mut f3 = [0.0; 6];
+                    for reconstructed in [false, true] {
+                        let report2 = if reconstructed {
+                            gas.reservoir_normal_flux_from_primitive(
+                                planar,
+                                bath.as_cell(),
+                                normal,
+                                &mut f2,
+                                || false,
+                            )
+                        } else {
+                            gas.reservoir_normal_flux(
+                                NormalCell {
+                                    partial_densities: &q2[..2],
+                                    normal_momentum: q2[2],
+                                    transverse_momentum: q2[3],
+                                    energy: q2[4],
+                                },
+                                bath.as_cell(),
+                                normal,
+                                &mut f2,
+                                || false,
+                            )
+                        }
+                        .unwrap();
+                        let report3 = if reconstructed {
+                            gas.reservoir_spatial_flux_from_primitive(
+                                spatial,
+                                bath.as_cell(),
+                                normal,
+                                &mut f3,
+                                || false,
+                            )
+                        } else {
+                            gas.reservoir_spatial_flux(
+                                SpatialCell {
+                                    partial_densities: &q3[..2],
+                                    normal_momentum: q3[2],
+                                    transverse_momentum: [q3[3], q3[4]],
+                                    energy: q3[5],
+                                },
+                                bath.as_cell(),
+                                normal,
+                                &mut f3,
+                                || false,
+                            )
+                        }
+                        .unwrap();
+                        for i in 0..3 {
+                            close(f2[i], expected[i]);
+                            close(f3[i], expected[i]);
+                        }
+                        for i in 0..2 {
+                            close(f3[i], mass * donor[i] / donor_density);
+                            if donor[i] == 0.0 {
+                                assert_eq!(f2[i], 0.0);
+                                assert_eq!(f3[i], 0.0);
+                            }
+                        }
+                        let tangents = if incoming { [0.0; 2] } else { shear };
+                        close(f2[3], mass * tangents[0]);
+                        close(f3[3], mass * tangents[0]);
+                        close(f3[4], mass * tangents[1]);
+                        close(f2[4], expected[3] + 0.5 * mass * tangents[0].powi(2));
+                        close(
+                            f3[5],
+                            expected[3] + 0.5 * mass * (tangents[0].powi(2) + tangents[1].powi(2)),
+                        );
+                        if incoming {
+                            assert_eq!(f2[3], 0.0);
+                            assert_eq!([f3[3], f3[4]], [0.0; 2]);
+                            close(f3[5], mass * (bath.energy + bath_pressure) / donor_density);
+                        }
+                        close(report2.signal_speed, reference.signal_speed);
+                        close(report3.signal_speed, reference.signal_speed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_compact_mixture_ports_publish_nothing_after_refusal_or_late_cancellation() {
+    let gas = variable_source(0.0);
+    let densities = [0.4, 0.6];
+    let interior = SpatialPrimitive {
+        partial_densities: &densities,
+        normal_velocity: -0.3,
+        transverse_velocity: [2.0, -3.0],
+        pressure: 1.0,
+    };
+    let bath = gas.conserved(&[0.0, 2.0], 0.0, 3.0).unwrap();
+    let original = [17.0; 6];
+    let mut output = original;
+    let moving = Cell {
+        momentum: 0.1,
+        ..bath.as_cell()
+    };
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(interior, moving, 1.0, &mut output, || false,)
+            .is_err()
+    );
+    assert_eq!(output, original);
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(
+            interior,
+            bath.as_cell(),
+            1.0,
+            &mut output[..5],
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(output, original);
+    let unresolved = SpatialPrimitive {
+        transverse_velocity: [1e20, 0.0],
+        ..interior
+    };
+    assert!(
+        gas.reservoir_spatial_flux_from_primitive(
+            unresolved,
+            bath.as_cell(),
+            1.0,
+            &mut output,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(output, original);
+    let planar = NormalPrimitive {
+        partial_densities: &densities,
+        normal_velocity: -0.3,
+        transverse_velocity: 2.0,
+        pressure: 1.0,
+    };
+    for spatial in [false, true] {
+        let mut calls = 0;
+        if spatial {
+            gas.reservoir_spatial_flux_from_primitive(
+                interior,
+                bath.as_cell(),
+                1.0,
+                &mut output,
+                || {
+                    calls += 1;
+                    false
+                },
+            )
+            .unwrap();
+        } else {
+            gas.reservoir_normal_flux_from_primitive(
+                planar,
+                bath.as_cell(),
+                1.0,
+                &mut output[..5],
+                || {
+                    calls += 1;
+                    false
+                },
+            )
+            .unwrap();
+        }
+        output = original;
+        let mut seen = 0;
+        let result = if spatial {
+            gas.reservoir_spatial_flux_from_primitive(
+                interior,
+                bath.as_cell(),
+                1.0,
+                &mut output,
+                || {
+                    seen += 1;
+                    seen == calls
+                },
+            )
+        } else {
+            gas.reservoir_normal_flux_from_primitive(
+                planar,
+                bath.as_cell(),
+                1.0,
+                &mut output[..5],
+                || {
+                    seen += 1;
+                    seen == calls
+                },
+            )
+        };
+        assert_eq!(result, Err(Error::Cancelled));
+        assert_eq!(output, original);
+    }
 }
 
 // Independent integration for Cp(T)=a+b*T with gas constant r, at fixed Y.
