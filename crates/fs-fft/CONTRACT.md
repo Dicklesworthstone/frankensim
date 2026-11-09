@@ -1372,3 +1372,41 @@ These exercise uniform and triangular profiles and clocks whose low component
 is smaller than one f64 step. Downstream handoff types and source paths were
 inspected; complete optical, EM and material integration execution remains
 unrun. DD arithmetic is not an arbitrary-null relative-error certificate.
+
+## Positive coherent factors for triangular observations
+
+The profile-aware `band_mode_count_hz/rad_s`,
+`real_band_mode_count_hz/rad_s`, `prepare_band_hz/rad_s`,
+`prepare_real_band_hz/rad_s` and their borrowed `_in` constructors admit
+Uniform and Triangular normalized detector profiles. `PreparedHarmonicBand`,
+`HarmonicBandRef` and `HarmonicBandWorkspace` share the original storage and
+contractions. Existing uniform-only constructors retain their original domain.
+
+Triangular sensitivity is integrated once against the observable. Its positive
+factor uses orthogonal polynomials for `(1-|x|) dx` on [-1,1], derived from exact
+rational moments `mu_(2k)=2/((2k+1)(2k+2))`. A positive three-term recurrence
+forms Taylor projection coefficients before original fields are combined.
+No bright frequency-pair matrix, Cholesky repair, time raster or field taper is
+introduced. The modal weight remains `2m+1`; the zeroth actual-real coefficient
+is the normalized weighted field mean.
+
+Original Hz/rad-s clocks, DD source epochs, real-carrier sum terms and proper
+half-normalization remain explicit. The existing 3..64 analytic / 3..32 real
+source and half-phase-width <=0.5 admission supplies at most 17 modes.
+Orthogonal triangular projection has exact-arithmetic omitted power below
+`1e-49*(sum |A_i|)^2`: its best weighted residual is at most twice the uniform
+Legendre residual. Twenty Taylor terms per mode suppress the separate analytic
+projection remainder. Floating phase/coefficient error, source uncertainty and
+arbitrary-null relative accuracy are not certified.
+
+Retained workspace stays 19,456 numerical bytes. Triangular preparation adds
+6,864 bounded numerical scratch bytes for the recurrence and Taylor rows.
+It allocates no heap in the borrowed path; observations retain O(F*M) field
+projection and the same work counts. A normalized shaped mean does not by itself
+give unweighted physical interval energy or an endpoint storage change.
+
+All 102 current shared harmonic tests pass with warnings denied, including four
+new groups: proper fourth-order and real even/odd nulls through 1 ps; independent
+weighted time integration of real and complex cross moments; retained DD epochs
+and proper carrier shifts; and scale/admission/uniform-compatibility behavior.
+Owned and borrowed factors agree in both original frequency units.

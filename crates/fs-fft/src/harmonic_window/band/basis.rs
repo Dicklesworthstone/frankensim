@@ -37,6 +37,20 @@ pub(super) fn admit(
     units: Units,
     real_field: bool,
 ) -> Result<Option<Spec>, WindowError> {
+    let spec = admit_profile(window, frequencies, units, real_field)?;
+    Ok(if window.profile == HarmonicWindowProfile::Uniform {
+        spec
+    } else {
+        None
+    })
+}
+
+pub(super) fn admit_profile(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    units: Units,
+    real_field: bool,
+) -> Result<Option<Spec>, WindowError> {
     let maximum_tones = MAX_UNIFORM_HARMONIC_BAND_TONES / if real_field { 2 } else { 1 };
     if frequencies.len() > maximum_tones {
         return Ok(None);
@@ -44,7 +58,7 @@ pub(super) fn admit(
     if frequencies.iter().any(|f| !f.is_finite()) {
         return Err(WindowError::InvalidFrequency);
     }
-    if window.profile != HarmonicWindowProfile::Uniform || frequencies.len() < 3 {
+    if frequencies.len() < 3 {
         return Ok(None);
     }
     let (minimum, maximum) = frequencies.iter().fold(
@@ -108,10 +122,16 @@ pub(super) fn fill(
     rotations: &mut [[Dd; 2]],
     coefficients: &mut [Dd],
 ) -> Result<(), WindowError> {
+    let triangular = (window.profile == HarmonicWindowProfile::Triangular)
+        .then(|| super::triangular::Basis::new(spec.modes));
     for (i, &frequency) in frequencies.iter().enumerate() {
         let relative = (Dd::from_f64(frequency) - Dd::from_f64(spec.minimum)) - spec.center;
         rotations[i] = units.rotation(window, relative)?;
         let a = units.width(window, relative)?;
+        if let Some(basis) = &triangular {
+            basis.fill(a, i, frequencies.len(), coefficients);
+            continue;
+        }
         let negative_square = -(a * a);
         let mut leading = Dd::ONE;
         for l in 0..spec.modes {
@@ -137,6 +157,27 @@ pub(super) fn prepare_owned(
     let Some(spec) = admit(window, frequencies, units, real_field)? else {
         return Ok(None);
     };
+    prepare_owned_spec(window, frequencies, units, spec)
+}
+
+pub(super) fn prepare_profile_owned(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    units: Units,
+    real_field: bool,
+) -> Result<Option<PreparedUniformHarmonicBand>, WindowError> {
+    let Some(spec) = admit_profile(window, frequencies, units, real_field)? else {
+        return Ok(None);
+    };
+    prepare_owned_spec(window, frequencies, units, spec)
+}
+
+fn prepare_owned_spec(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    units: Units,
+    spec: Spec,
+) -> Result<Option<PreparedUniformHarmonicBand>, WindowError> {
     let mut rotations = vec![[Dd::ZERO; 2]; frequencies.len()];
     let mut coefficients = vec![Dd::ZERO; spec.modes * frequencies.len()];
     fill(

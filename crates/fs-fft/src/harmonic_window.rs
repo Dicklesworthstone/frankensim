@@ -13,7 +13,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod band;
 pub use band::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, PreparedUniformHarmonicBand,
+    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
+    MAX_UNIFORM_HARMONIC_BAND_TONES, PreparedHarmonicBand, PreparedUniformHarmonicBand,
     UniformHarmonicBandRef, UniformHarmonicBandWorkspace,
 };
 mod spectrum;

@@ -1,4 +1,4 @@
-//! Positive uniform-window moments of a short coherent frequency band.
+//! Positive detector-window moments of a short coherent frequency band.
 //!
 //! On x in [-1,1], exp(-i*a*x) = sum_l (2*l+1)*(-i)^l*j_l(a)*P_l(x).
 //! Legendre orthogonality therefore gives <|E|²> = sum_l (2*l+1)*|c_l|²,
@@ -6,7 +6,7 @@
 //! (-i)^l cancels from every second moment, including complex cross moments.
 //! This avoids subtracting bright pair powers to recover a weak coherent null.
 //!
-//! Only uniform windows with at most 64 tones and |a_i| <= 1/2 are admitted.
+//! Uniform-only constructors admit at most 64 tones and |a_i| <= 1/2.
 //! Up to 17 modes are retained. Since |j_l(a)| <= |a|^l/(2*l+1)!! here,
 //! the exact-arithmetic power in omitted Legendre modes is below
 //! 5e-50*(sum_i |A_i|)^2.
@@ -21,6 +21,13 @@
 //!
 //! NIST DLMF 10.60.7 and 10.53.1 supply the expansion and power series:
 //! <https://dlmf.nist.gov/10.60.E7>, <https://dlmf.nist.gov/10.53.E1>.
+//!
+//! Profile-aware constructors also admit triangular sensitivity with the same
+//! source/mode/storage bounds. Its own orthogonal basis uses the actual
+//! triangular measure; fields interfere before products and mode zero is the
+//! weighted actual-real mean. See the triangular module's derivation and
+//! separate truncation bound. A normalized shaped mean is not a uniform
+//! physical interval integral.
 
 use super::{
     Dd, HarmonicWindow, HarmonicWindowProfile, WindowError, check_amplitude, checked,
@@ -28,7 +35,10 @@ use super::{
 };
 
 mod basis;
+mod profile;
+mod triangular;
 mod workspace;
+pub use profile::{HarmonicBandRef, HarmonicBandWorkspace, PreparedHarmonicBand};
 pub use workspace::{UniformHarmonicBandRef, UniformHarmonicBandWorkspace};
 
 /// Hard frequency-count bound on preparation and fixed observation scratch.
@@ -116,7 +126,7 @@ impl PreparedUniformHarmonicBand {
         (2 * self.rotations.len() + 4) * self.modes
     }
 
-    /// Project retained complex fields into the unphased Legendre coefficients.
+    /// Project retained complex fields into unphased orthogonal coefficients.
     /// `output` must have exactly `mode_count()` entries. Only second moments
     /// may omit each mode's common (-i)^l phase. Scratch can change on refusal.
     /// In real preparation, mode zero is also the actual real field mean.
@@ -156,7 +166,7 @@ impl PreparedUniformHarmonicBand {
             .mode_cross_parts_dd_scaled(mode, left, right, positive_scale)
     }
 
-    /// Nonnegative uniform-window average of the prepared field's squared norm.
+    /// Nonnegative normalized-profile mean of the prepared field's squared norm.
     pub fn mean_square_parts_dd(&self, fields: &[[Dd; 2]]) -> Result<Dd, WindowError> {
         self.view().mean_square_parts_dd(fields)
     }
@@ -171,7 +181,7 @@ impl PreparedUniformHarmonicBand {
             .mean_square_parts_dd_scaled(fields, positive_scale)
     }
 
-    /// Uniform-window complex cross moment <left(t)*conj(right(t))>.
+    /// Normalized-profile complex cross moment <left(t)*conj(right(t))>.
     pub fn mean_cross_parts_dd(
         &self,
         left: &[[Dd; 2]],

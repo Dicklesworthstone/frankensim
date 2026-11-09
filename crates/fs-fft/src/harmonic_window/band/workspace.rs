@@ -3,12 +3,15 @@
 use super::basis::{self, Units};
 use super::*;
 
-/// Reusable fixed storage for one uniform temporal factor, with no heap allocation.
+/// Reusable fixed storage for one positive temporal factor, with no heap allocation.
 ///
 /// Its 19,456-byte numerical payload holds at most 64 original source rotations
 /// and 64*17 coefficients. A prepared borrow prevents reuse until observation
 /// is complete. Refusal can alter scratch; the next preparation overwrites every
 /// admitted entry before returning a new borrow.
+/// Profile-aware triangular preparation uses an additional bounded 6,864-byte
+/// numerical scratch payload for its polynomial recurrence and Taylor rows;
+/// it changes neither this retained payload nor per-observation storage.
 pub struct UniformHarmonicBandWorkspace {
     rotations: [[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_TONES],
     coefficients: [Dd; MAX_UNIFORM_HARMONIC_BAND_TONES * MAX_UNIFORM_HARMONIC_BAND_MODES],
@@ -58,6 +61,29 @@ fn prepare_in<'a>(
     let Some(spec) = basis::admit(window, frequencies, units, real_field)? else {
         return Ok(None);
     };
+    prepare_spec_in(window, frequencies, units, spec, workspace)
+}
+
+pub(super) fn prepare_profile_in<'a>(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    units: Units,
+    real_field: bool,
+    workspace: &'a mut UniformHarmonicBandWorkspace,
+) -> Result<Option<UniformHarmonicBandRef<'a>>, WindowError> {
+    let Some(spec) = basis::admit_profile(window, frequencies, units, real_field)? else {
+        return Ok(None);
+    };
+    prepare_spec_in(window, frequencies, units, spec, workspace)
+}
+
+fn prepare_spec_in<'a>(
+    window: HarmonicWindow,
+    frequencies: &[f64],
+    units: Units,
+    spec: basis::Spec,
+    workspace: &'a mut UniformHarmonicBandWorkspace,
+) -> Result<Option<UniformHarmonicBandRef<'a>>, WindowError> {
     let rotations = &mut workspace.rotations[..frequencies.len()];
     let coefficients = &mut workspace.coefficients[..frequencies.len() * spec.modes];
     basis::fill(window, frequencies, units, &spec, rotations, coefficients)?;
@@ -65,7 +91,7 @@ fn prepare_in<'a>(
         rotations,
         coefficients,
         modes: spec.modes,
-        real_field,
+        real_field: spec.real_field,
     }))
 }
 
