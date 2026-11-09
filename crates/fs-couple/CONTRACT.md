@@ -9886,6 +9886,14 @@ refinement. Tests cover phased multiharmonic force/stiffness mechanics and a
 nonlinear original storage with an explicit relaxing strain, including its
 material derivative, native/declared Hessian agreement and bandwidth refusals.
 
+## Resolved thermoviscous interior with full aperture reaction
+
+`cavity_modal::interior::thermoviscous::exterior::RadiatingThermoviscousInterior` connects the original source-bound P2/P1/P2 velocity/pressure/temperature owner to the native BEM self/mutual aperture matrix. One original loaded fluid LU and one small port factor serve coherent feed flow, original structural force, body force and heat-release excitation. Molecular Cp, shear/bulk viscosity, fluid and finite-solid conduction, structural damping and Maxwell memory remain on their original operators. No pressure-only replacement or added attenuation changes the fluid equations.
+
+Radiators must pass the native unit, planar, exclusive traction-port admission. `plane_wave_port_triangles` exposes only those original physical triangles and outward normals; no second fluid mesh is assembled. The BEM applies the explicitly declared constant-velocity lift U/A on the same triangles, with U=-Q. This scalar work pairing does not establish a uniform resolved opening velocity: transverse opening motion outside that lift remains a port-model approximation. Signed/scaled/overlapping traction modes require a dual map and refuse. The caller supplies the independent homogeneous lossless exterior `Medium`; interior molecular loss does not imply an exterior absorption law. The exterior stays rigid outside selected openings, including moving structural walls.
+
+The native outgoing BEM matrix is conjugated once for exp(+i omega t), with both geometric area factors retained. Original physical interface residuals are checked in power coordinates. Driven-port work, original body/heat/structural source work, exterior boundary work and native loss channels are accounted once. Conductive/caloric availability and numerical residuals are not deposited as additional heat. The three focused tests compare complete fields against independent native traction-admittance/BEM equations, vary numerical references, retain coherent Maxwell/body/heat source work, and exercise physical geometry, owner, budget, band and cancellation refusals. These are numerical regression definitions, not mesh-convergence or measured-validation claims.
+
 ## Full material damping in the resolved thermoviscous interior
 
 `ThermoviscousInterior::with_structural_viscosity` binds the existing
