@@ -9063,8 +9063,8 @@ vanishes. Motion in remote bulk cells is admitted.
 These are prescribed velocity/B snapshots on fixed geometry and material
 occupancy. They add no induction evolution, mesh advection, mechanical state
 integration, sliding-interface work law or regulated-power moving policy.
-Planar total-current moving electrodes and axisymmetric motion are not exposed
-by these entry points. Positive source values do not establish uniqueness or
+Axisymmetric motion and regulated-power moving drives are not exposed by
+these entry points. Positive source values do not establish uniqueness or
 convergence.
 
 Ten focused native regressions cover original E'/J source coordinates, motoring,
@@ -9109,3 +9109,27 @@ Five new numerical/readout tests and two complete constructor/query checks passe
 For admitted proper-complex interferometer banks, arm combination now references the first active arm's common carrier delay and composes the retained DD relative-frequency phases. Removing that one global carrier phase leaves every proper second moment unchanged while avoiding independent bright-phase rounding before a dark-envelope projection. Real banks retain their absolute source-clock law. If a delay difference or its carrier product is unrepresentable, the original independent phase path remains available. The original arm reduction order is preserved, no query heap allocation is added, and optional proper work reserves an additional A*(F+1) phase/composition terms.
 
 Three new regression/budget/fallback checks pass within the 36-check aperture/wrench/interferometer set under -Dwarnings. For proper tones 1e15+[0,1,2] rad/s with amplitudes [1,-2,1], centered 1ps Uniform exposure and delay 8e-16s, the old result 6.250162149376229e-51 differs from the independent shifted-fourth-moment value 6.250160000204799e-51 by 3.438586e-7 relative. The repaired unit/coherent-real-gain fixtures agree within 4.45e-16 across both profiles and three delays. Tests also retain nonfirst-active-arm behavior, resolved complex-gain moments, cancellation and previously valid extreme-delay fallback. DD storage still limits arbitrary combined complex-gain, temporal and spatial null conditioning; no universal relative-error claim or native Maxwell/material reconstruction validation is added.
+
+
+### Direct planar moving electrodes and nonlinear source response
+
+Planar prescribed-motion conduction admits direct simultaneous ideal voltage,
+conserved total-current, floating and mixed electrodes through the original
+grouped sparse operator. Each actual constitutive trial groups the native
+motional weak load with the stiffness and performs one solve. Terminal current
+is an integrated reaction; a zero-current electrode may transfer current
+between separate traces. Ordered observations preserve small physical voltage
+drops beneath a common bias. Independent authored terminal work must equal
+conductor-frame Joule/contact heat plus signed Lorentz output, including
+motional open circuit and electrical generation.
+
+The existing original-source closure, relaxation and contact refinement retain
+their source pins, cancellation, local gates and cumulative native solve cap.
+The extra motion/terminal workspace is admitted before allocation. Geometry,
+velocity and imposed normal B remain held, and electrical contact-adjacent cells
+remain stationary. This adds no induction evolution, moving-interface work,
+axisymmetric-motion law or regulated-power policy. Focused native regressions
+cover terminal modes, floating transfer, signed work, source coordinates and
+transactional refusals. Pinned formatting, bounded exact-production type checks
+with dependency stubs and independent reference arithmetic passed; full crate
+integration execution remains outstanding.

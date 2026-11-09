@@ -14157,8 +14157,8 @@ finite links remain internal exchange, and their existing closed-balance gate
 is retained. Other graph electrical bindings refuse without an owner for their
 work. MaterialNetwork conveniences use the same respective endpoint paths.
 
-Planar motion uses held boundary voltage/distributed-current traces; 3D also
-supports the native direct grouped voltage/current/floating/mixed electrodes.
+Planar and 3D motion accept held boundary voltage/distributed-current traces
+and native direct grouped voltage/current/floating/mixed electrodes.
 Original electrical-contact adjacent cells must remain stationary, even with
 zero motional EMF. Motion elsewhere remains a prescribed fixed-domain snapshot:
 occupancy and geometry must stay represented by the original cells. These
@@ -14716,3 +14716,26 @@ sources with optional conduction/electrical feature registrations excluded.
 The normal fs-couple Cargo feature graph and full workspace gate remain
 unverified because the async runtime dependency exceeds the environment's
 8 GiB memory limit. This is not a whole-fluid total-energy certificate.
+
+
+### Planar moving terminal controls through finite heat
+
+MovingConductionResponseDrive extends the existing planar thermal endpoint to
+direct grouped voltage, total-current, floating and mixed electrodes alongside
+original traces. Every thermal proposal refreshes the original bulk/contact
+sources and solves the actual native moving electrode problem. Ordered terminal
+observations stay in the accepted moving source report; no accepted nonlinear
+field is rescaled or independently reconstructed.
+
+Terminal supply uses independently authored native electrode work. Signed
+Lorentz output is subtracted from that supply, and only local conductor-frame
+Joule/contact heat enters the original finite receivers, once. Complete heat
+provider samples/errors, source/phase admission, contact partitions, cumulative
+native work limits and atomic continuation remain shared. Current controls
+retain motional voltage offsets and permit generation; zero total current may
+sustain open-circuit voltage without heat. Focused regressions define two-step
+current/mixed electrothermal feedback, trace/voltage parity, floating operation
+and budget/cancellation refusals. Formatting, targeted API/accounting review
+and independent fixture endpoint arithmetic passed; full repository integration
+execution remains outstanding. The fixed-domain prescribed-motion limitations
+of the existing planar thermal endpoint remain unchanged.
