@@ -4,6 +4,10 @@
 #[path = "network/driven.rs"]
 pub mod driven;
 
+/// Complete corotated Maxwell memory under native body motion.
+#[path = "network/relaxation.rs"]
+pub mod relaxation;
+
 use super::{
     BodyLoads, Change, Dd, DynamicsError, ExternalLoadAccount, HeldExternalLoads, HeldSpatialLoads,
     InternalWrenchStepError, LoadChange, MassProperties, RigidBodyState, RigidKineticEnergyChange,

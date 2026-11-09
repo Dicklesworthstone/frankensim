@@ -14,6 +14,10 @@
 #[path = "network/driven.rs"]
 pub mod driven;
 
+/// Complete material-frame Maxwell histories on the same native graph.
+pub use driven::relaxation;
+
+
 use super::super::{
     InternalWrenchImpulse, InternalWrenchImpulseError, WideVec, add, cross, dd, finite,
     finite_vector,

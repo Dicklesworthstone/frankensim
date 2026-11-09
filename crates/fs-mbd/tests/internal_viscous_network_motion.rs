@@ -3,6 +3,9 @@
 #[path = "internal_viscous_network_motion/driven.rs"]
 mod driven;
 
+#[path = "internal_viscous_network_motion/relaxation.rs"]
+mod relaxation;
+
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
     viscous::{

@@ -9814,3 +9814,93 @@ results cover the earlier homogeneous and ordinary-source owners only.
 The declared piecewise coefficients and finite source spectrum carry no smooth
 modulation or waveform-truncation error bound. This motion/orbit extension does
 not add a physical work/heat ledger, nonlinear bearing law or eigenvalue enclosure.
+
+## Complete spatial Maxwell histories on native rigid-body graphs
+
+The spatial viscous-network owner now exposes network::relaxation.
+Each RelaxationNetworkLink retains the original finite-body geometry and
+full Kelvin matrix and adds explicitly supplied spatial Maxwell branches.
+A branch stores its original six Gram rows L, positive relaxation time tau,
+and all six elastic energy coordinates a. Its law is
+a' = L s - a/tau, wrench = L^T a, with storage |a|^2/2 and
+heat rate |a|^2/tau. Original factor rows define the history basis.
+Equal-time branches, rank-deficient factors and mechanically unobservable
+histories remain distinct; no projection, rank cutoff or pole merging removes
+their storage or heat. The existing strictly admitted spatial stiffness factor
+can initialize a branch, and an explicit elastic displacement can initialize
+its memory. No relaxed stiffness, rest geometry or fitted coefficient is inferred.
+
+Original native wrench columns B and complete body kinetic coordinates y
+produce one simultaneous system:
+y' = B(f - C B^T y - sum L^T a), s = B^T y.
+Identity storage, skew body-memory coupling, original full Kelvin resistance
+and diagonal Maxwell rates enter the existing exact quadratic pHS owner.
+Preparation caches actual port-slip and passive-wrench integrals directly;
+integrated memory forces are not recovered by subtracting endpoint histories.
+Each connector's original Kelvin and Maxwell positive source rows independently
+integrate heat along that same complete trajectory. Signed actuator work remains
+a separate observation. All integrated net impulses enter the original native
+simultaneous network once, retaining full inertia, attachment transport and
+the original world linear and orbital-plus-spin angular momentum gates.
+
+A conservatively PROVED null initial branch stress L^T a0 = 0 follows its
+exact homogeneous decay independently of the driven graph response, which lies
+in range(L). The original TwoProd/TwoSum exactness-witness rules, including
+protection against an underflowed product remainder, admit this separation;
+a rounded zero or numerical tolerance cannot. Its complete six amplitudes and
+independent positive heat are restored using cached decay/expm1 coefficients.
+The full original graph operator and every state remain prepared. Failed
+proof leaves the original dense evolution unchanged. This exact superposition
+prevents large unobservable histories from contaminating a tiny history through
+independently rounded dense transition columns. Cross storage and loss vanish
+by the original constitutive equations, including under nonzero actuation.
+
+Accepted fixed-geometry receipts expose complete body and memory endpoints,
+per-link positive heat and signed drive work, memory storage change, native
+kinetic change and independent native impulse work. Both native work accounts
+and the complete source-coordinate storage change must balance the independently
+integrated heat and actuation. Initial and final native port rates must agree
+with the complete source solution. The public original-to-final memory-energy
+helper retains (after-before)*(after+before)/2 before rounding; it does not
+subtract rounded absolute stored energies. Zero duration preserves the complete
+body/history bank and exact zero impulses and heat, including large held efforts.
+
+The moving entry composes two complete source halves around the existing loaded
+native body drift. Memory amplitudes retain their original first-body material
+basis through that drift, with no material-energy change. Actual endpoint
+geometry and world-held efforts are re-expressed at each source. This is an
+explicit corotated rate model; it does not claim a finite-strain equilibrium
+spring. The whole-step account independently retains original-to-final kinetic
+and memory storage changes, applied load work, gravitational storage, internal
+actuation, material heat and native drift defect. Accepted state and history
+can be transferred together without copying through into_state_and_memory.
+The caller must not reinterpret existing amplitudes under changed factors
+without a separately admitted thermodynamic history transfer.
+
+Shared native geometry preparation is extracted from the existing driven source
+without changing its arithmetic. Source scratch and exact caches are reusable;
+warm fixed-geometry calls evaluate contractions and one native impulse event,
+with bounded linear output allocations and no exponentials or factorizations.
+Complete body, connector, branch, byte and work bounds precede preparation.
+Both twice the full body-plus-memory coordinate count and that count plus all
+physical input coordinates and one must fit the existing 256-coordinate owner.
+The moving budget includes both preparations and retained candidate histories.
+Borrowed bodies, sources and original histories remain unchanged on refusal or
+cancellation. Moving geometry still requires independent temporal refinement.
+Material validity, temperature-dependent factor changes, equilibrium springs,
+contact and caloric receivers remain separate explicit owners.
+
+Verification: All six focused fixed-source groups passed natively after the null-history
+correction: analytic single-arm recoil/storage/heat; original unobservable,
+equal-time and tiny histories with driven superposition; zero-arm original
+viscous parity; full original-coordinate tensor force/torque/history/heat/work
+ODE and fixed-clock continuation; atomic memory/source/resource refusals;
+and compensated original memory-energy change. Three moving groups passed
+against the unchanged moving-source bytes: independent corotated Newton-Euler
+and memory time refinement, loaded common-world-rotation objectivity, and whole
+body/history cancellation and bounds. Nine pre-existing driven graph regressions
+also passed after the shared native geometry extraction. Four hereditary finite
+thermal integration groups passed against the corrected fixed source. These
+are bounded isolated builds of the actual native MBD/time, pHS, linear-algebra
+and material/thermal numerical sources, with no numerical substitutes; they are
+not a full workspace build. Pinned Rust formatting passed for the new modules.

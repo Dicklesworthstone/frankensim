@@ -9,6 +9,10 @@
 //! trajectory. The net impulses then enter the native simultaneous wrench
 //! owner once; its actual momentum, work and endpoint rates gate publication.
 
+/// Complete material-frame Maxwell histories on the same native graph.
+#[path = "driven/relaxation.rs"]
+pub mod relaxation;
+
 use super::super::{
     PreparedViscousConnector, ViscousConnectorControls, ViscousConnectorError,
     checked_vector_divide, finite, poll, rotate_wide, rounded, validate_controls,
@@ -207,85 +211,14 @@ impl PreparedDrivenViscousNetwork {
             }
         }
         let (n, m) = (6 * poses.len(), 6 * links.len());
-        let mut bound_poses = reserve(poses.len())?;
-        let mut bound_properties = reserve(properties.len())?;
-        for (&pose, &properties) in poses.iter().zip(properties) {
-            poll(&mut cancelled)?;
-            let zero = RigidBodyState::new(pose, Vec3::ZERO, Vec3::ZERO)?;
-            zero.kinetic_energy_change_to(properties, zero)?;
-            bound_poses.push(pose);
-            bound_properties.push(properties);
-        }
-        let mut prepared = reserve(links.len())?;
-        let mut input_map = vec![0.0; n * m];
-        let mut rows = vec![0.0; m * n];
-        let mut resistance = vec![Dd::ZERO; n * n];
-        for (e, link) in links.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let geometry = PreparedViscousConnector::new(
-                link.bodies.map(|i| poses[i]),
-                link.bodies.map(|i| properties[i]),
-                link.arms_body_m,
-                link.damping.clone(),
-                0.0,
-                &mut cancelled,
-            )
-            .map_err(|error| connector_error(e, error))?;
-            let columns = geometry
-                .kinetic_columns()
-                .map_err(|error| connector_error(e, error))?;
-            for c in 0..6 {
-                for side in 0..2 {
-                    for axis in 0..6 {
-                        input_map[(6 * link.bodies[side] + axis) * m + 6 * e + c] =
-                            finite(columns[c][6 * side + axis].to_f64())?;
-                    }
-                }
-            }
-            let factor = link
-                .damping
-                .gram_factor()
-                .map_err(|error| connector_error(e, error.into()))?;
-            let c = link.damping.native_coefficients();
-            // Original C supplies the generator; its native checked source
-            // factor supplies independent positive heat. Neither substitutes
-            // a diagonal or clipped law for the other.
-            let mut cb = vec![0.0; 6 * n];
-            for k in 0..6 {
-                poll(&mut cancelled)?;
-                for i in 0..n {
-                    let mut value = Dd::ZERO;
-                    let mut source = Dd::ZERO;
-                    for j in 0..6 {
-                        value = value
-                            + Dd::from_f64(c[k][j]) * Dd::from_f64(input_map[i * m + 6 * e + j]);
-                        source = source
-                            + Dd::from_f64(factor[j][k])
-                                * Dd::from_f64(input_map[i * m + 6 * e + j]);
-                    }
-                    cb[k * n + i] = finite(value.to_f64())?;
-                    rows[(6 * e + k) * n + i] = finite(source.to_f64())?;
-                }
-            }
-            for i in 0..n {
-                poll(&mut cancelled)?;
-                for j in i..n {
-                    let mut entry = Dd::ZERO;
-                    for k in 0..6 {
-                        entry = entry
-                            + Dd::from_f64(input_map[i * m + 6 * e + k])
-                                * Dd::from_f64(cb[k * n + j]);
-                    }
-                    resistance[i * n + j] = resistance[i * n + j] + entry;
-                    resistance[j * n + i] = resistance[i * n + j];
-                }
-            }
-            prepared.push(PreparedLink {
-                bodies: link.bodies,
-                geometry,
-                loss: None,
-            });
-        }
+        let GraphGeometry {
+            poses: bound_poses,
+            properties: bound_properties,
+            links: mut prepared,
+            input_map,
+            rows,
+            resistance,
+        } = prepare_geometry(poses, properties, links, &mut cancelled)?;
         let flow = if duration_s == 0.0 || links.is_empty() {
             None
         } else {
@@ -668,4 +601,109 @@ pub(in crate::spatial_loads) fn planned_costs(
             + 64 * connectors as u128 * n * n
     };
     Ok((dense + native, terms))
+}
+
+// Shared native graph geometry and original positive Kelvin rows. This stage
+// performs no source evolution and does not assign a material memory model.
+struct GraphGeometry {
+    poses: Vec<Pose>,
+    properties: Vec<MassProperties>,
+    links: Vec<PreparedLink>,
+    input_map: Vec<f64>,
+    rows: Vec<f64>,
+    resistance: Vec<Dd>,
+}
+fn prepare_geometry(
+    poses: &[Pose],
+    properties: &[MassProperties],
+    links: &[ViscousNetworkLink],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphGeometry, DrivenViscousNetworkError> {
+    let (n, m) = (6 * poses.len(), 6 * links.len());
+    let mut bound_poses = reserve(poses.len())?;
+    let mut bound_properties = reserve(properties.len())?;
+    for (&pose, &properties) in poses.iter().zip(properties) {
+        poll(&mut *cancelled)?;
+        let zero = RigidBodyState::new(pose, Vec3::ZERO, Vec3::ZERO)?;
+        zero.kinetic_energy_change_to(properties, zero)?;
+        bound_poses.push(pose);
+        bound_properties.push(properties);
+    }
+    let mut prepared = reserve(links.len())?;
+    let mut input_map = vec![0.0; n * m];
+    let mut rows = vec![0.0; m * n];
+    let mut resistance = vec![Dd::ZERO; n * n];
+    for (e, link) in links.iter().enumerate() {
+        poll(&mut *cancelled)?;
+        let geometry = PreparedViscousConnector::new(
+            link.bodies.map(|i| poses[i]),
+            link.bodies.map(|i| properties[i]),
+            link.arms_body_m,
+            link.damping.clone(),
+            0.0,
+            &mut *cancelled,
+        )
+        .map_err(|error| connector_error(e, error))?;
+        let columns = geometry
+            .kinetic_columns()
+            .map_err(|error| connector_error(e, error))?;
+        for c in 0..6 {
+            for side in 0..2 {
+                for axis in 0..6 {
+                    input_map[(6 * link.bodies[side] + axis) * m + 6 * e + c] =
+                        finite(columns[c][6 * side + axis].to_f64())?;
+                }
+            }
+        }
+        let factor = link
+            .damping
+            .gram_factor()
+            .map_err(|error| connector_error(e, error.into()))?;
+        let c = link.damping.native_coefficients();
+        // Original C supplies the generator; its native checked source
+        // factor supplies independent positive heat. Neither substitutes
+        // a diagonal or clipped law for the other.
+        let mut cb = vec![0.0; 6 * n];
+        for k in 0..6 {
+            poll(&mut *cancelled)?;
+            for i in 0..n {
+                let mut value = Dd::ZERO;
+                let mut source = Dd::ZERO;
+                for j in 0..6 {
+                    value =
+                        value + Dd::from_f64(c[k][j]) * Dd::from_f64(input_map[i * m + 6 * e + j]);
+                    source = source
+                        + Dd::from_f64(factor[j][k]) * Dd::from_f64(input_map[i * m + 6 * e + j]);
+                }
+                cb[k * n + i] = finite(value.to_f64())?;
+                rows[(6 * e + k) * n + i] = finite(source.to_f64())?;
+            }
+        }
+        for i in 0..n {
+            poll(&mut *cancelled)?;
+            for j in i..n {
+                let mut entry = Dd::ZERO;
+                for k in 0..6 {
+                    entry = entry
+                        + Dd::from_f64(input_map[i * m + 6 * e + k]) * Dd::from_f64(cb[k * n + j]);
+                }
+                resistance[i * n + j] = resistance[i * n + j] + entry;
+                resistance[j * n + i] = resistance[i * n + j];
+            }
+        }
+        prepared.push(PreparedLink {
+            bodies: link.bodies,
+            geometry,
+            loss: None,
+        });
+    }
+
+    Ok(GraphGeometry {
+        poses: bound_poses,
+        properties: bound_properties,
+        links: prepared,
+        input_map,
+        rows,
+        resistance,
+    })
 }
