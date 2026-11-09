@@ -46,6 +46,8 @@ impl RadiatingWelchBandCoverage {
 /// Each bin retains its own frequency, loaded flow transfer, original source
 /// laws and observations. Conventional propagation must use the same loss law;
 /// molecular propagation must borrow the exact same original reservoir owner.
+/// Molecular exterior bins also retain the same original source object, band
+/// and boundary formulation; equal labels cannot substitute another atmosphere.
 /// Canonical labels/units and physical p/u receiver and
 /// opening identities must match. Matching labels does not fit or interpolate
 /// any source impedance; those original per-frequency laws remain inspectable.
@@ -82,6 +84,7 @@ impl<'b, 'p, 'a> PreparedRadiatingWelchBand<'b, 'p, 'a> {
             if !core::ptr::eq(bin.spectrum(), first.spectrum())
                 || !core::ptr::eq(bin.owner.model, first.owner.model)
                 || !same_propagation(bin.owner.propagation, first.owner.propagation)
+                || !bin.owner.observer.same_source(&first.owner.observer)
                 || bin.source_coordinates() != first.source_coordinates()
                 || bin.owner.ports() != first.owner.ports()
                 || bin.owner.observer.sources() != first.owner.observer.sources()

@@ -13111,6 +13111,63 @@ routing with transport/events, and source/clock/late refusal/retry/cancellation
 isolation. Native execution and shared-helper type checking were unavailable
 when this extension was authored; no runtime validation is inferred.
 
+## Original relaxing exterior in the loaded molecular network
+
+`MolecularRadiatingNetwork::prepare_fields_with_exterior_material` uses an
+explicit `MolecularExteriorMaterial` with the original borrowed RelaxationState,
+declared angular-frequency band, native BEM formulation and native assembly/
+response limits. The complete GasState must match the existing exterior record.
+A sound-speed/density pair or equal source labels cannot stand in for that law.
+The original regional interior gases, material-wall Arc owners, source clock,
+generator impedances, probes, geometry and opening reference planes are retained.
+
+The existing `MolecularBemObservation::prepare_response` computes the full
+self/mutual opening impedance and finite receiver p/u bank together. Unit-integral
+1/area normal-velocity traces retain pressure/volume-flow coordinates. Native
+complex K(omega), the decaying Green function and q = i*rho*omega*v remain in
+one original solver; k times equilibrium sound speed never replaces omega in
+the velocity trace. At most 32 network openings fit one original 256-field BEM
+batch. There is one native assembly/factorization for this exterior basis and
+one original loaded molecular network factorization for all source coordinates.
+
+The paired interior/exterior result retains the original native response and
+an exact bounded clone of the already solved port bank. Coherent drives,
+independent source statistics, directional microphones, source control and
+recorded Welch bins reuse its matched harmonic observer. No second boundary
+solve, additional attenuation filter, material query or opening-power
+independence assumption is introduced. The existing field allowance admits
+three additional opening-work matrices and their original panel projection;
+ComplexOptions and MolecularResponseLimits independently bound native work.
+
+`PreparedRadiatingNetwork::exterior_material` exposes the exact borrowed source,
+band and formulation; `molecular_exterior` exposes the same native response.
+Its source inputs are actual outward opening flows in boundary-label order,
+not generator amplitudes. Existing `exterior_surface_power_w` is signed opening
+boundary work already included in the graph external-load account. In a relaxing
+exterior it includes molecular absorption and outgoing energy; it is neither
+a second dissipation debit nor power on an arbitrarily distant sphere. No
+automatic thermal receiver is inferred. Lossless `far_field` stays unavailable,
+and the native harmonic owner's radiation-momentum refusal remains intact.
+
+Stationary Welch-band composition additionally requires the exact same original
+exterior source object, declared band and boundary formulation. It refuses
+ordinary/relaxing mixtures or numerically identical but distinct source objects,
+including at silent bins. Domain, storage, work, geometry, loading or cancellation
+refusal publishes no partial paired result and leaves the original owners usable.
+The default nondispersive exterior path keeps its existing owners and semantics.
+
+This remains a held homogeneous molecular-compression exterior with inviscid
+momentum, rigid panels outside the declared openings and original spatial
+quadrature. Exterior shear/thermal diffusion, mean flow, distributed wall
+radiation, startup and evolving materials are not added. Three focused native
+regressions in `driving_point/network/radiation/tests/prepared/molecular/fields/exterior.rs`
+cover independent combined-velocity BEM loading/fields and material-wall work,
+empty-reservoir and measured-coherence limits, and gas/domain/budget/cancellation
+and stationary-source identity. Synthetic source fixtures are numerical tests,
+not empirical validation. Whitespace checks reported no errors. Native tests,
+Rust compilation and rustfmt parsing were not executed because the original
+compiler/toolchain was unavailable; source review is not runtime proof.
+
 ## Molecular duct fields and sound under the same full exterior load
 
 `RadiatingNetwork::bind_molecular_with_compliant_walls` binds original molecular

@@ -3,6 +3,7 @@
 
 use super::*;
 use fs_bem::near_field::FirstOrder;
+use fs_bem::observation_transfers::molecular::PreparedMolecularResponse;
 use fs_bem::observation_transfers::{
     BemObservation, HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget,
     PreparedHarmonicObservation, PreparedMicrophoneArray, PreparedRadiationObservation,
@@ -37,6 +38,39 @@ pub(super) enum Propagation<'a> {
     Molecular(&'a MolecularNetwork),
 }
 
+// Retain the original exterior source/response while all existing observation
+// consumers use its native harmonic owner. No receiver or work law is copied.
+enum ExteriorObserver<'a> {
+    Equilibrium(PreparedHarmonicObservation),
+    Molecular {
+        material: MolecularExteriorMaterial<'a>,
+        response: PreparedMolecularResponse,
+    },
+}
+
+impl ExteriorObserver<'_> {
+    fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Equilibrium(_), Self::Equilibrium(_)) => true,
+            (Self::Molecular { material: a, .. }, Self::Molecular { material: b, .. }) => {
+                a.same_source(b)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl core::ops::Deref for ExteriorObserver<'_> {
+    type Target = PreparedHarmonicObservation;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Equilibrium(observer) => observer,
+            Self::Molecular { response, .. } => response.harmonic(),
+        }
+    }
+}
+
 /// One immutable source/network/exterior binding at a common positive frequency.
 /// Both the original source laws and the exterior geometry remain borrowed.
 /// Preparation shares one BEM factorization across openings and one loaded duct
@@ -51,7 +85,7 @@ pub struct PreparedRadiatingNetwork<'a> {
     boundary: CoupledTermination,
     network: PreparedNetworkSources,
     opening_indices: Vec<usize>,
-    observer: PreparedHarmonicObservation,
+    observer: ExteriorObserver<'a>,
     radiation: Option<PreparedRadiationObservation>,
     // Source-major, receiver-minor, per the canonical source coordinate's SI unit.
     receiver_columns: Vec<HarmonicField>,
@@ -137,6 +171,7 @@ impl RadiatingNetwork {
             scalar_loads,
             angular,
             false,
+            None,
             |boundary| {
                 let network = match (propagation, &self.media) {
                     (Propagation::Molecular(molecular), _) => molecular.prepare_sources_controlled(
@@ -188,12 +223,16 @@ impl RadiatingNetwork {
         scalar_loads: &'a [PortTermination],
         angular: Option<(&[[f64; 3]], PreparedRadiationOptions)>,
         retain_field_bank: bool,
+        exterior: Option<MolecularExteriorMaterial<'a>>,
         network_at: impl FnOnce(
             &CoupledTermination,
         ) -> Result<(PreparedNetworkSources, T), ExteriorNetworkError>,
         gate: &CancelGate,
     ) -> Result<(PreparedRadiatingNetwork<'a>, T), ExteriorNetworkError> {
         poll(gate)?;
+        if exterior.is_some() && angular.is_some() {
+            return Err(bad("an absorbing exterior has no lossless far-field power owner"));
+        }
         let count = sources
             .len()
             .checked_add(bank.map_or(0, |b| b.impedance.labels.len()))
@@ -225,14 +264,27 @@ impl RadiatingNetwork {
         // four port-by-source complex arrays plus its default source vector.
         // Its probe/chain workspace remains bounded by NetworkFieldBudget.
         let retained_entries = if retain_field_bank { count * (4 * ports + 1) } else { 0 };
-        let entries = 5 * n * p + 8 * p * r + 4 * count * (ports + r) + retained_entries;
-        let terms = n * n * n + 3 * p * n * n + 4 * p * n * r + 4 * count * p * r;
+        // The molecular owner additionally retains three opening-work matrices
+        // and projects each against the same original panels. Its independent
+        // assembly/response limits remain binding before their allocations.
+        let molecular_entries = if exterior.is_some() { 3 * p * p } else { 0 };
+        let molecular_products = molecular_entries * n;
+        let entries = 5 * n * p + 8 * p * r + 4 * count * (ports + r)
+            + retained_entries + molecular_entries;
+        let terms = n * n * n + 3 * p * n * n + 4 * p * n * r
+            + 4 * count * p * r + molecular_products;
         if entries > self.budget.max_field_entries || terms > self.budget.max_solve_terms {
             return Err(bad(
                 "complete prepared source/exterior basis exceeds its declared budget",
             ));
         }
-        let (boundary, solutions) = self.exterior_basis(omega, gate)?;
+        let (boundary, solutions, molecular) = if let Some(material) = exterior {
+            let (boundary, response) = material.prepare(self, omega, gate)?;
+            (boundary, Vec::new(), Some((material, response)))
+        } else {
+            let (boundary, solutions) = self.exterior_basis(omega, gate)?;
+            (boundary, solutions, None)
+        };
         let (network, fields) = network_at(&boundary)?;
         poll(gate)?;
         let opening_indices = self
@@ -246,45 +298,51 @@ impl RadiatingNetwork {
                     .ok_or_else(|| bad("prepared opening label lost"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let source_ids: Vec<_> = self
-            .patches
-            .iter()
-            .map(|patch| SourceId::ApertureVolumeFlow(patch.port.clone()))
-            .collect();
-        let traces: Vec<Vec<f64>> = self
-            .traces
-            .iter()
-            .map(|trace| trace.iter().map(|value| value.re).collect())
-            .collect();
-        let receivers: Vec<_> = self
-            .receivers
-            .iter()
-            .enumerate()
-            .map(|(i, &position_m)| ReceiverSpec {
-                id: format!("network-receiver-{i}"),
-                position_m,
-            })
-            .collect();
-        let owner = BemObservation::new(
-            &self.surface,
-            Medium {
-                density: self.gas.density,
-                sound_speed: self.gas.sound_speed,
-            },
-            &source_ids,
-            &traces,
-            &receivers,
-            self.clearance_m,
-        )?;
-        // The owner verifies exact source traces, surface, medium and frequency.
-        // It observes the SAME solutions that produced the full boundary above.
-        let observer =
-            owner.prepare_harmonic_from_solutions(omega, &solutions, || gate.is_requested())?;
-        let radiation = angular
-            .map(|(directions, options)| {
-                owner.prepare_radiation_from_solutions(omega, &solutions, directions, options, gate)
-            })
-            .transpose()?;
+        let (observer, radiation) = if let Some((material, response)) = molecular {
+            (ExteriorObserver::Molecular { material, response }, None)
+        } else {
+            let source_ids: Vec<_> = self
+                .patches
+                .iter()
+                .map(|patch| SourceId::ApertureVolumeFlow(patch.port.clone()))
+                .collect();
+            let traces: Vec<Vec<f64>> = self
+                .traces
+                .iter()
+                .map(|trace| trace.iter().map(|value| value.re).collect())
+                .collect();
+            let receivers: Vec<_> = self
+                .receivers
+                .iter()
+                .enumerate()
+                .map(|(i, &position_m)| ReceiverSpec {
+                    id: format!("network-receiver-{i}"),
+                    position_m,
+                })
+                .collect();
+            let owner = BemObservation::new(
+                &self.surface,
+                Medium {
+                    density: self.gas.density,
+                    sound_speed: self.gas.sound_speed,
+                },
+                &source_ids,
+                &traces,
+                &receivers,
+                self.clearance_m,
+            )?;
+            // The owner verifies exact source traces, surface, medium and frequency.
+            // It observes the SAME solutions that produced the full boundary above.
+            let observer = ExteriorObserver::Equilibrium(
+                owner.prepare_harmonic_from_solutions(omega, &solutions, || gate.is_requested())?
+            );
+            let radiation = angular
+                .map(|(directions, options)| {
+                    owner.prepare_radiation_from_solutions(omega, &solutions, directions, options, gate)
+                })
+                .transpose()?;
+            (observer, radiation)
+        };
         let mut prepared = PreparedRadiatingNetwork {
             model: self,
             sources,
@@ -319,6 +377,24 @@ impl<'a> PreparedRadiatingNetwork<'a> {
     /// Original immutable geometry, gas records and exterior source identity.
     pub fn model(&self) -> &'a RadiatingNetwork {
         self.model
+    }
+    /// Exact borrowed molecular exterior source and original numerical domain,
+    /// when selected. The default nondispersive path returns `None`.
+    pub fn exterior_material(&self) -> Option<MolecularExteriorMaterial<'a>> {
+        match &self.observer {
+            ExteriorObserver::Equilibrium(_) => None,
+            ExteriorObserver::Molecular { material, .. } => Some(*material),
+        }
+    }
+    /// Original opening-response bank that supplied BOTH the loaded matrix and
+    /// finite p/u receivers. Its inputs are outward opening volume flows in
+    /// `boundary().labels` order, not generator source coordinates. Its signed
+    /// boundary work is observation-only and must not be debited again.
+    pub fn molecular_exterior(&self) -> Option<&PreparedMolecularResponse> {
+        match &self.observer {
+            ExteriorObserver::Equilibrium(_) => None,
+            ExteriorObserver::Molecular { response, .. } => Some(response),
+        }
     }
     /// Common angular frequency [rad/s], exp(-i omega t).
     pub fn omega(&self) -> f64 {
@@ -617,6 +693,8 @@ impl RadiatingSourceResponse<'_, '_> {
     }
     /// Signed work delivered to just the full exterior opening boundary [W].
     /// Already included in network external-load power; never debit it again.
+    /// A relaxing exterior includes molecular absorption as well as outgoing
+    /// energy; this is not a distant-sphere or far-field radiated-power measure.
     pub fn exterior_surface_power_w(&self) -> Option<f64> {
         self.valid.then_some(self.exterior_surface_power_w)
     }
@@ -644,6 +722,9 @@ impl RadiatingSourceStatistics<'_, '_> {
         self.valid.then_some(&self.fields)
     }
     /// Mean exterior opening work [W], already included in network load power.
+    /// Signed opening boundary work for these source statistics, already in
+    /// the network load account. A relaxing exterior includes gas absorption;
+    /// it is not separately credited heat or distant radiated power.
     pub fn exterior_surface_power_w(&self) -> Option<f64> {
         self.valid.then_some(self.exterior_surface_power_w)
     }

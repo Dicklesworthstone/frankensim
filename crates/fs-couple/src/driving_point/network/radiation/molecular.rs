@@ -14,13 +14,16 @@ use fs_duct::molecular::MolecularCompliantWall;
 
 mod fields;
 pub use fields::{MolecularRadiatingFieldRequest, PreparedMolecularRadiatingFields};
+mod exterior;
+pub use exterior::MolecularExteriorMaterial;
 
 /// Frequency-dependent interior storage, absorption and optional wall diffusion
 /// attached to one original network/exterior owner. Neither binding nor a
 /// frequency sweep changes its geometry, source records or exterior medium.
 ///
-/// The exterior retains the original homogeneous, nondispersive BEM law. Only
-/// the interior edges use the explicitly supplied molecular laws. This is a
+/// The default exterior retains the original homogeneous, nondispersive BEM
+/// law. `prepare_fields_with_exterior_material` explicitly binds the original
+/// molecular exterior law to both reaction and finite receiver fields. This is a
 /// settled harmonic model, without mean flow, evolving materials, switch-on
 /// history or a causal time realization. All original plane-wave, opening-basis,
 /// mesh, molecular support and diffusion-resolution limits remain binding.
