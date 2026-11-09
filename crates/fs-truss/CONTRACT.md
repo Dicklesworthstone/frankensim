@@ -87,6 +87,52 @@ external loads, the full energy-work identity, zero-state compatibility,
 pruned-member semantics, malformed inputs and cancellation. Material consumer
 regressions carry source-resolved moduli through both paths.
 
+## Compatible elastic design sensitivities
+
+`elastic::sensitivity::displacement_functional` computes
+`J = sum(g dot u)` and its implicit design derivatives using the same
+matrix-free elastic owner for the primal and one adjoint. The adjoint has
+homogeneous prescribed motion and solves `K_ff lambda_f = g_f`; supported
+weights remain in the case so their direct support-motion derivative is
+retained. The total native iteration budget is shared between both solves.
+Both recovered-force residuals must pass before any derivative is returned;
+no differentiation through Krylov iterations or second recurrence is used.
+
+For each retained original member, let `e_el = B^T u - L epsilon_0` and
+`z = B_f^T lambda_f`. The returned partial derivatives are:
+
+- Area: `dJ/dA = -(E/L) e_el z`.
+- Young's modulus: `dJ/dE = -(A/L) e_el z`.
+- Stress-free strain: `dJ/d(epsilon_0) = EA z`.
+- Actual nodal loads: `dJ/df = lambda`, with zero supported entries.
+- Prescribed motion: `dJ/du_p = g_p - K_pf lambda_f`, with zero free entries.
+
+Using elastic extension includes the derivative of the eigenstrain/support
+right-hand side as stiffness changes. Substituting the usual homogeneous
+compliance formula can give the wrong sign under imposed motion. The original
+node/member ordering is retained; zero-area members return `None`, explicitly
+excluding derivatives that activate removed topology. Compatible mechanisms
+remain possible: reported load derivatives apply only to perturbations that
+retain solvable equilibrium on the same topology. An unsupported adjoint
+objective refuses even when the original load case alone is solvable.
+
+`MaterialLayout::elastic_displacement_sensitivity` retains each original
+source-resolved E. Geometry, support flags, material source states, weights and
+external loads are frozen for the member partials. Passing `case.loads()` as
+weights gives fixed-load compliance. If a design parameter changes loads,
+the caller adds `load_gradient dot df/dtheta`; changing objective weights
+also adds `u dot dg/dtheta`. Both terms are needed for load-dependent
+compliance, including self-weight: when `g = f` tracks the loads, its total
+load derivative is `lambda + u`. This reduces to `2u` only for zero eigenstrain
+and homogeneous supports. No material-state, density, catalog,
+geometry, geometric-stiffness or fixed-point derivative is inferred.
+
+G1/G3 tests check a settlement/thermal compliance case with a positive area
+derivative, redundant rotated trusses against centered finite differences of
+area, E, eigenstrain, support motion and actual loads, and source-bound
+heterogeneous members. G0/G4 tests preserve removed-member indexing and refuse
+malformed weights, unsupported adjoints, exhausted shared work and cancellation.
+
 ## Public types and semantics
 
 - `GroundRules` is immutable and admitted only through `try_new` or a finite

@@ -20,6 +20,8 @@ use fs_sparse::precond::Precond;
 
 mod imposed;
 pub use imposed::ElasticImposedState;
+/// Implicit derivatives of fixed-geometry displacement functionals.
+pub mod sensitivity;
 
 /// Accuracy and bounded work for the native matrix-free elastic solve.
 #[derive(Debug, Clone, Copy)]

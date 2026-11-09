@@ -1272,3 +1272,46 @@ fn imposed_reference_state_keeps_each_original_material_modulus() {
         relative(response.compliance_j, 1140e-6, 1e-12);
     });
 }
+
+#[test]
+fn source_bound_elastic_adjoints_keep_frozen_moduli_and_reference_strain() {
+    use fs_truss::elastic::{ElasticControls, ElasticImposedState};
+    with_cx(|cx, _| {
+        let (ground, case) = two_members(cx, 12.0);
+        let source = card([8000.0; 2], [4e9, 2e9], [300e6; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let layout = MaterialLayout::try_new(
+            &ground,
+            &case,
+            &states,
+            &[0, 1],
+            LayoutLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let result = layout
+            .elastic_displacement_sensitivity(
+                &[2e-4, 3e-4],
+                &case,
+                ElasticImposedState {
+                    member_stress_free_strain: Some(&[4e-5, -1e-5]),
+                    prescribed_displacements_m: Some(&[[3e-5, 0.0], [0.0; 2], [0.0; 2]]),
+                },
+                case.loads(),
+                ElasticControls::default(),
+                cx,
+            )
+            .unwrap();
+        relative(result.value, 1140e-6, 1e-12);
+        let left = result.members[0].unwrap();
+        let right = result.members[1].unwrap();
+        relative(left.area_derivative, -0.9, 1e-12);
+        relative(right.area_derivative, -0.8, 1e-12);
+        relative(left.young_modulus_derivative, -4.5e-14, 1e-12);
+        relative(right.young_modulus_derivative, -1.2e-13, 1e-12);
+        relative(left.stress_free_strain_derivative, 12.0, 1e-12);
+        relative(right.stress_free_strain_derivative, 12.0, 1e-12);
+        relative(result.load_gradient[2][0], 3.5e-5, 1e-12);
+        relative(result.prescribed_displacement_gradient[0][0], 12.0, 1e-12);
+    });
+}

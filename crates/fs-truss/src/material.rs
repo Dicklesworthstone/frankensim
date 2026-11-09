@@ -601,14 +601,7 @@ impl<'a> MaterialLayout<'a> {
         controls: crate::elastic::ElasticControls,
         cx: &Cx<'_>,
     ) -> Result<crate::elastic::ElasticResponse, crate::elastic::ElasticError> {
-        checkpoint(cx)?;
-        let mut moduli = Vec::with_capacity(self.assignments.len());
-        for (index, &assignment) in self.assignments.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            moduli.push(self.materials[assignment].youngs);
-        }
+        let moduli = self.elastic_moduli(cx)?;
         crate::elastic::solve_with_imposed(
             self.ground,
             case,
@@ -618,6 +611,53 @@ impl<'a> MaterialLayout<'a> {
             controls,
             cx,
         )
+    }
+
+    /// Differentiate a compatible displacement functional using original source E.
+    ///
+    /// Pass case.loads() as weights for compliance with those loads held fixed.
+    /// The shared native adjoint includes imposed strain and support-motion RHS
+    /// derivatives. Source states, geometry, support flags and catalog topology
+    /// remain frozen; returned load and support gradients permit explicit caller
+    /// chain rules. This does not differentiate source-property resolution or
+    /// the self-weight fixed-point iteration.
+    ///
+    /// # Errors
+    /// See [crate::elastic::sensitivity::displacement_functional]; both native
+    /// solves must converge within their shared budget, and all derivatives
+    /// must remain finite. Malformed weights and cancellation fail closed.
+    pub fn elastic_displacement_sensitivity(
+        &self,
+        areas_m2: &[f64],
+        case: &LayoutCase,
+        imposed: crate::elastic::ElasticImposedState<'_>,
+        displacement_weights: &[[f64; 2]],
+        controls: crate::elastic::ElasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<crate::elastic::sensitivity::ElasticSensitivity, crate::elastic::ElasticError> {
+        let moduli = self.elastic_moduli(cx)?;
+        crate::elastic::sensitivity::displacement_functional(
+            self.ground,
+            case,
+            areas_m2,
+            &moduli,
+            imposed,
+            displacement_weights,
+            controls,
+            cx,
+        )
+    }
+
+    fn elastic_moduli(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TrussConstructionError> {
+        checkpoint(cx)?;
+        let mut moduli = Vec::with_capacity(self.assignments.len());
+        for (index, &assignment) in self.assignments.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            moduli.push(self.materials[assignment].youngs);
+        }
+        Ok(moduli)
     }
 
     /// Solve through the existing PDHG owner, retaining both physical totals.
