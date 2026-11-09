@@ -3,11 +3,14 @@
 //! Frozen-turbulence one-dimensional mean-flow/scalar screen with:
 //! `k` and modified dissipation are supplied fields, not transported unknowns.
 //! This is not a validated two-equation RANS solver; see the crate contract.
-//! - Viscous sublayer resolution ($y^+ < 1$)
-//! - Scalar thermal transport and conjugate heat transfer boundary coupling
+//! - Explicit stretched-grid wall-normal transport; wall resolution is caller supplied
+//! - Scalar thermal transport with prescribed wall heat flux
 //! - Darcy-Forchheimer porous medium sink terms ($S_p = -\frac{\mu}{\kappa} u - \frac{1}{2} C_F \rho |u| u$)
 //! - Boussinesq buoyancy source term ($S_b = \beta g (T - T_{\text{ref}})$)
-//! - Deterministic reductions and residual history reporting
+//! - Fixed-order sweeps and explicit iteration diagnostics
+//!
+//! Nonzero heating with an insulated centerline has no thermal steady state
+//! without axial heat removal. This screen does not add that missing transport.
 
 use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSink, RansModelCard};
 
@@ -29,11 +32,13 @@ pub enum RansTerminationReason {
 pub struct RansConvergenceReport {
     /// Iteration count performed.
     pub iterations: usize,
-    /// Final $L_2$ momentum residual.
+    /// Largest accepted velocity update in the last pseudo-time sweep [m/s].
+    /// Convergence is tested on the unscaled momentum equation rate.
     pub final_momentum_residual: f64,
-    /// Final $L_2$ energy/temperature residual.
+    /// Largest accepted temperature update in the last pseudo-time sweep [K].
+    /// Convergence is tested on the unscaled temperature equation rate.
     pub final_energy_residual: f64,
-    /// Conservation balance error (mass & energy imbalance).
+    /// Legacy aggregate iteration-change diagnostic, not a conservation audit.
     pub conservation_imbalance: f64,
     /// Termination disposition.
     pub reason: RansTerminationReason,
@@ -126,7 +131,7 @@ impl RansFieldState {
     }
 }
 
-/// Low-Re RANS steady solver.
+/// Frozen-field mean-flow/scalar relaxation screen.
 pub struct RansSolver {
     /// Associated admitted model card.
     pub card: RansModelCard,
@@ -161,7 +166,11 @@ impl RansSolver {
         }
     }
 
-    /// Solve the coupled low-Re RANS and thermal transport system.
+    /// Relax the frozen-turbulence mean-flow/scalar screen.
+    /// `tol` is an absolute equation-rate threshold, applied separately to
+    /// momentum [m/s²] and temperature [K/s]; small pseudo-steps cannot satisfy it.
+    /// The in-place sweep and existing boundary reconstruction are retained;
+    /// spatial face-flux consistency is not a time-integrated conservation claim.
     ///
     /// # Errors
     /// Returns [`RansTerminationReason::Diverged`] on invalid material/state
@@ -221,14 +230,25 @@ impl RansSolver {
         {
             return Err(RansTerminationReason::Diverged);
         }
+        if let Some(p) = porous.filter(|p| p.enabled) {
+            if p.permeability_m2.is_some_and(|value| !value.is_finite() || value <= 0.0)
+                || p.forchheimer_c_f.is_some_and(|value| !value.is_finite() || value < 0.0)
+            {
+                return Err(RansTerminationReason::Diverged);
+            }
+        }
         let mut iter = 0;
         let mut momentum_res = 1.0;
         let mut energy_res = 1.0;
+        let mut momentum_rate = f64::INFINITY;
+        let mut energy_rate = f64::INFINITY;
 
-        while iter < max_iters && (momentum_res > tol || energy_res > tol) {
+        while iter < max_iters && (momentum_rate > tol || energy_rate > tol) {
             iter += 1;
 
-            // 1. Update eddy viscosity with Launder-Sharma damping f_mu
+            // 1. Update eddy viscosity with Launder-Sharma damping f_mu.
+            // A resolved no-slip wall cannot retain the initializer's eddy seed.
+            state.nu_t[0] = 0.0;
             for i in 1..n {
                 // LS uses the turbulent Reynolds number k²/(nu * eps),
                 // not sqrt(k)*y/nu. NASA TM-110446, Part B §3.
@@ -252,29 +272,39 @@ impl RansSolver {
                 state.nu_t[i] = nu_t;
             }
 
-            // 2. Momentum equation with optional porous sink & buoyancy
+            // 2. Momentum equation with optional porous sink & buoyancy.
+            state.u[0] = 0.0;
+            state.u[n - 1] = state.u[n - 2];
             let mut max_u_delta: f64 = 0.0;
+            momentum_rate = 0.0;
             for i in 1..n - 1 {
                 let dy_m = grid.y_nodes[i] - grid.y_nodes[i - 1];
                 let dy_p = grid.y_nodes[i + 1] - grid.y_nodes[i];
                 let dy_avg = 0.5 * (dy_m + dy_p);
 
-                let nu_eff = self.nu_laminar + state.nu_t[i];
-                let d2u_dy2 =
-                    (state.u[i + 1] - 2.0 * state.u[i] + state.u[i - 1]) / (dy_avg * dy_avg);
-
+                // Divergence of the shared face stress, including grad(nu_t).
+                // The two physical spacings must remain distinct on stretched grids.
+                let lower = ((self.nu_laminar + 0.5 * state.nu_t[i - 1]
+                    + 0.5 * state.nu_t[i]) / dy_m) / dy_avg;
+                let upper = ((self.nu_laminar + 0.5 * state.nu_t[i]
+                    + 0.5 * state.nu_t[i + 1]) / dy_p) / dy_avg;
+                let diffusion = lower * (state.u[i - 1] - state.u[i])
+                    + upper * (state.u[i + 1] - state.u[i]);
+                let mut diagonal = lower + upper;
                 let mut source = pressure_acceleration;
 
                 // Porous sink: S_p = -(mu/kappa)*u - 0.5*C_F*rho*|u|*u
                 if let Some(p) = porous {
                     if p.enabled {
                         if let Some(k_perm) = p.permeability_m2 {
-                            let darcy = (self.nu_laminar / k_perm) * state.u[i];
-                            source -= darcy;
+                            let rate = self.nu_laminar / k_perm;
+                            source -= rate * state.u[i];
+                            diagonal += rate;
                         }
                         if let Some(cf) = p.forchheimer_c_f {
-                            let forch = 0.5 * cf * state.u[i].abs() * state.u[i];
-                            source -= forch;
+                            let rate = cf * state.u[i].abs();
+                            source -= 0.5 * rate * state.u[i];
+                            diagonal += rate;
                         }
                     }
                 }
@@ -289,17 +319,20 @@ impl RansSolver {
                     }
                 }
 
-                let tendency = nu_eff * d2u_dy2 + source;
-                if !tendency.is_finite() {
+                let tendency = diffusion + source;
+                if !tendency.is_finite() || !diagonal.is_finite() || diagonal <= 0.0 {
                     return Err(RansTerminationReason::Diverged);
                 }
-                let u_new = tendency.max(0.0);
-                let relaxed_u = 0.8 * state.u[i] + 0.2 * (state.u[i] + 0.001 * u_new);
+                // Preserve braking and flow reversal. Bound the explicit relaxation
+                // by the diffusion/drag diagonal instead of clipping acceleration.
+                let pseudo_dt = 0.0002_f64.min(0.9 / diagonal);
+                let relaxed_u = state.u[i] + pseudo_dt * tendency;
                 let delta = (relaxed_u - state.u[i]).abs();
                 if !relaxed_u.is_finite() || !delta.is_finite() {
                     return Err(RansTerminationReason::Diverged);
                 }
                 max_u_delta = max_u_delta.max(delta);
+                momentum_rate = momentum_rate.max(tendency.abs());
                 state.u[i] = relaxed_u;
             }
 
@@ -308,9 +341,21 @@ impl RansSolver {
 
             // 3. Temperature transport with wall heat flux
             let mut max_t_delta: f64 = 0.0;
-            // Wall boundary (Neumann q'' = -k dT/dy -> T_0 = T_1 + q'' * dy / k)
+            energy_rate = 0.0;
+            state.temp_k[n - 1] = state.temp_k[n - 2];
+            // Use the SAME face diffusivity as the scalar operator. A molecular
+            // ghost gradient combined with turbulent face transport would multiply
+            // the imposed heat input by alpha_eff/alpha_molecular.
             let dy_0 = grid.y_nodes[1] - grid.y_nodes[0];
-            let wall_temperature = state.temp_k[1] + (wall_heat_flux_w_m2 * dy_0) / self.k_thermal;
+            let wall_diffusivity = thermal_diffusivity
+                + (0.5 * state.nu_t[0] + 0.5 * state.nu_t[1]) / self.pr_turbulent;
+            let wall_flux = (wall_heat_flux_w_m2 / self.rho) / self.cp;
+            if !wall_diffusivity.is_finite() || wall_diffusivity <= 0.0
+                || !wall_flux.is_finite()
+            {
+                return Err(RansTerminationReason::Diverged);
+            }
+            let wall_temperature = state.temp_k[1] + wall_flux * dy_0 / wall_diffusivity;
             if !wall_temperature.is_finite() || wall_temperature <= 0.0 {
                 return Err(RansTerminationReason::Diverged);
             }
@@ -321,14 +366,25 @@ impl RansSolver {
                 let dy_p = grid.y_nodes[i + 1] - grid.y_nodes[i];
                 let dy_avg = 0.5 * (dy_m + dy_p);
 
-                let alpha_eff = thermal_diffusivity + (state.nu_t[i] / self.pr_turbulent);
-                let d2t_dy2 = (state.temp_k[i + 1] - 2.0 * state.temp_k[i] + state.temp_k[i - 1])
-                    / (dy_avg * dy_avg);
-                let t_new = state.temp_k[i] + 0.01 * alpha_eff * d2t_dy2;
+                let lower = ((thermal_diffusivity
+                    + (0.5 * state.nu_t[i - 1] + 0.5 * state.nu_t[i]) / self.pr_turbulent)
+                    / dy_m) / dy_avg;
+                let upper = ((thermal_diffusivity
+                    + (0.5 * state.nu_t[i] + 0.5 * state.nu_t[i + 1]) / self.pr_turbulent)
+                    / dy_p) / dy_avg;
+                let diagonal = lower + upper;
+                let tendency = lower * (state.temp_k[i - 1] - state.temp_k[i])
+                    + upper * (state.temp_k[i + 1] - state.temp_k[i]);
+                if !tendency.is_finite() || !diagonal.is_finite() || diagonal <= 0.0 {
+                    return Err(RansTerminationReason::Diverged);
+                }
+                let pseudo_dt = 0.01_f64.min(0.9 / diagonal);
+                let t_new = state.temp_k[i] + pseudo_dt * tendency;
                 if !t_new.is_finite() || t_new <= 0.0 {
                     return Err(RansTerminationReason::Diverged);
                 }
                 max_t_delta = max_t_delta.max((t_new - state.temp_k[i]).abs());
+                energy_rate = energy_rate.max(tendency.abs());
                 state.temp_k[i] = t_new;
             }
             state.temp_k[n - 1] = state.temp_k[n - 2];
@@ -341,7 +397,7 @@ impl RansSolver {
             }
         }
 
-        let reason = if momentum_res <= tol && energy_res <= tol {
+        let reason = if momentum_rate <= tol && energy_rate <= tol {
             RansTerminationReason::Converged
         } else {
             RansTerminationReason::MaxIterationsExceeded
@@ -445,5 +501,149 @@ mod turbulence_closure_regressions {
             solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12),
             Err(RansTerminationReason::Diverged),
         );
+    }
+}
+
+#[cfg(test)]
+mod mean_flow_relaxation_regressions {
+    use super::*;
+    use crate::rans_card::RansCardDraft;
+
+    fn solver() -> RansSolver {
+        RansSolver::new(
+            RansCardDraft::launder_sharma_channel("electronics-cooling/e10-rans")
+                .freeze()
+                .unwrap(),
+        )
+    }
+
+    fn laminar(grid: &RansChannelGrid, bulk: f64) -> RansFieldState {
+        let mut state = RansFieldState::new_initial(grid, bulk, 300.0);
+        state.k.fill(0.0);
+        state.eps.fill(0.0);
+        state.nu_t.fill(0.0);
+        state
+    }
+
+    #[test]
+    fn pressure_reversal_preserves_signed_acceleration() {
+        let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+        let solver = solver();
+        let mut forward = laminar(&grid, 0.0);
+        let mut reverse = forward.clone();
+        solver.solve(&grid, &mut forward, -2.0, 0.0, None, None, 1, 1e-12).unwrap();
+        solver.solve(&grid, &mut reverse, 2.0, 0.0, None, None, 1, 1e-12).unwrap();
+        assert!((reverse.u[1] + 0.0002 * 2.0 / solver.rho).abs() < 1e-15);
+        for (&a, &b) in forward.u.iter().zip(&reverse.u) {
+            assert_eq!(a, -b);
+        }
+    }
+
+    #[test]
+    fn stretched_diffusion_preserves_analytic_interior_profiles() {
+        let grid = RansChannelGrid::new_stretched(8, 1.0, 1.6);
+        let solver = solver();
+        for quadratic in [false, true] {
+            let mut state = laminar(&grid, 0.0);
+            for (u, &y) in state.u.iter_mut().zip(&grid.y_nodes) {
+                *u = if quadratic { 1.5 * (2.0 * y - y * y) } else { y };
+            }
+            let before = state.u.clone();
+            let dp = if quadratic { -3.0 * solver.nu_laminar * solver.rho } else { 0.0 };
+            solver.solve(&grid, &mut state, dp, 0.0, None, None, 1, 1e-12).unwrap();
+            // The final interior row touches the retained first-order symmetry
+            // reconstruction. All other rows have the exact analytic stencil.
+            for i in 1..grid.num_cells - 1 {
+                assert!((state.u[i] - before[i]).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn stiff_passive_drag_brakes_and_small_steps_cannot_fake_convergence() {
+        let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+        let solver = solver();
+        for speed in [1.0, 1e-6] {
+            let mut state = laminar(&grid, 0.0);
+            state.u[1..].fill(speed);
+            let porous = PorousFinSink {
+                enabled: true,
+                permeability_m2: Some(1.5e-14),
+                forchheimer_c_f: Some(if speed == 1.0 { 2e8 } else { 0.0 }),
+            };
+            let report = solver.solve(
+                &grid, &mut state, 0.0, 0.0, Some(porous), None, 1, 1e-4,
+            ).unwrap();
+            assert!(state.u[1] > 0.0 && state.u[1] < speed);
+            assert_eq!(report.reason, RansTerminationReason::MaxIterationsExceeded);
+            if speed < 1e-4 {
+                assert!(report.final_momentum_residual < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn stretched_thermal_diffusion_obeys_the_discrete_maximum_principle() {
+        let grid = RansChannelGrid::new_stretched(32, 0.01, 1.15);
+        let solver = solver();
+        let mut state = laminar(&grid, 0.0);
+        state.temp_k[16] = 1000.0;
+        let report = solver.solve(
+            &grid, &mut state, 0.0, 0.0, None, None, 100, 1e-12,
+        ).unwrap();
+        assert!(report.final_energy_residual.is_finite());
+        assert!(state.temp_k.iter().all(|&t| (300.0..=1000.0).contains(&t)));
+        assert!(state.temp_k[16] < 1000.0);
+        assert_eq!(state.nu_t[0], 0.0);
+    }
+
+    #[test]
+    fn heated_closed_screen_stays_finite_without_claiming_steady_heat_removal() {
+        let grid = RansChannelGrid::new_stretched(16, 0.01, 1.1);
+        let solver = solver();
+        let mut state = RansFieldState::new_initial(&grid, 1.0, 300.0);
+        let report = solver.solve(
+            &grid, &mut state, -10.0, 1000.0, None, None, 50, 1e-4,
+        ).unwrap();
+        assert_eq!(report.reason, RansTerminationReason::MaxIterationsExceeded);
+        assert!((300.0..500.0).contains(&state.temp_k[0]));
+        assert!(state.temp_k.iter().all(|&t| t.is_finite() && t >= 300.0));
+    }
+
+    #[test]
+    fn imposed_wall_heat_is_not_multiplied_by_turbulent_diffusivity() {
+        let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+        let solver = solver();
+        let mut state = laminar(&grid, 0.0);
+        state.k.fill(1e-3);
+        state.eps.fill(1e-3);
+        solver.solve(&grid, &mut state, 0.0, 40.0, None, None, 1, 1e-12).unwrap();
+        assert!(state.nu_t[1] > 0.0);
+        // The first interior node initially receives only the imposed face flux:
+        // no other temperature gradient or axial transport has been supplied.
+        let expected = 300.0 + 0.01 * 40.0 / (solver.rho * solver.cp * 0.25);
+        assert!((state.temp_k[1] - expected).abs() < 1e-12);
+        let molecular_wall = 300.0 + 40.0 * 0.25 / solver.k_thermal;
+        assert!(state.temp_k[0] < molecular_wall);
+    }
+
+    #[test]
+    fn viscosity_overflow_and_the_finite_high_reynolds_limit_are_distinct() {
+        let grid = RansChannelGrid::new_stretched(4, 1.0, 1.0);
+        let mut solver = solver();
+        let mut state = laminar(&grid, 0.0);
+        state.k[1] = 1e200;
+        state.eps[1] = 1.0;
+        assert_eq!(
+            solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12),
+            Err(RansTerminationReason::Diverged),
+        );
+        let mut state = laminar(&grid, 0.0);
+        solver.nu_laminar = 1e-320;
+        state.k.fill(1.0);
+        state.eps.fill(1.0);
+        solver.solve(&grid, &mut state, 0.0, 0.0, None, None, 1, 1e-12).unwrap();
+        assert!(state.nu_t[1..].iter().all(|&value| value == 0.09));
+        assert_eq!(state.nu_t[0], 0.0);
     }
 }
