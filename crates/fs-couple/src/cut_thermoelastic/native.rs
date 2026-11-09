@@ -84,3 +84,32 @@ pub(super) fn exchange(
     native!(owner, thermoelastic_exchange, laws, before_temperatures, before_u, after_u,
         maximum_kinematic_strain, limits, || checkpoint(cx))
 }
+
+pub(super) fn thermal_parts(
+    owner: CutElasticityRef3<'_>, settings: ThermoelasticEquilibriumSettings3, cx: &Cx<'_>,
+) -> Result<(fs_cutfem::elastic3::eigenstrain::PreparedEigenstrain3,
+    fs_cutfem::elastic3::mass::MaterialMass3), ElasticityError3> {
+    let eigenstrain = native!(owner, prepare_thermoelastic,
+        settings.maximum_points, || checkpoint(cx))?;
+    let mass = native!(owner, prepare_material_mass,
+        settings.maximum_mass_terms, || checkpoint(cx))?;
+    Ok((eigenstrain, mass))
+}
+
+pub(super) fn recover_state(
+    owner: CutElasticityRef3<'_>, displacement: &[f64],
+    eigenstrain: fs_cutfem::elastic3::eigenstrain::PreparedEigenstrain3,
+    mass: fs_cutfem::elastic3::mass::MaterialMass3,
+    settings: ThermoelasticEquilibriumSettings3, cx: &Cx<'_>,
+) -> Result<fs_cutfem::elastic3::thermal::ThermoelasticState3, ElasticityError3> {
+    native!(owner, recover_thermoelastic_state, displacement, eigenstrain, mass,
+        settings.into(), || checkpoint(cx))
+}
+
+pub(super) fn validate_state(
+    owner: CutElasticityRef3<'_>,
+    state: &fs_cutfem::elastic3::thermal::ThermoelasticState3,
+) -> Result<(), ElasticityError3> {
+    native!(owner, validate_eigenstrain, &state.eigenstrain)?;
+    native!(owner, validate_material_mass, &state.mass)
+}

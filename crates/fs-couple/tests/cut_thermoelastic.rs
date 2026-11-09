@@ -438,3 +438,6 @@ fn observer_destructor_panic_occurs_only_after_all_four_accepted_owners_are_repl
 
 #[path = "cut_thermoelastic/network.rs"]
 mod network;
+
+#[path = "cut_thermoelastic/dynamic.rs"]
+mod dynamic;

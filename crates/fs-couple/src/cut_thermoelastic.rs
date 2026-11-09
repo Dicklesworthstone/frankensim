@@ -12,6 +12,7 @@
 //! It is not an exact reversible-entropy or continuum-accuracy claim.
 
 mod binding;
+pub mod dynamic;
 mod heat;
 mod native;
 mod observer;
@@ -64,6 +65,8 @@ pub enum CutThermoelasticError3<E = Infallible> {
     Invalid(&'static str),
     Native(ElasticityError3),
     Source(ThermoelasticError),
+    Initialization(fs_time::galpha::initialization::InitialSolveError),
+    Dynamics(fs_time::galpha::TimeSolveError),
     Phase(PhaseStateError),
     State(ThermalMaterialError),
     Thermal(DepositionError),
@@ -79,6 +82,22 @@ pub enum CutThermoelasticError3<E = Infallible> {
 impl<E> From<ElasticityError3> for CutThermoelasticError3<E> {
     fn from(error: ElasticityError3) -> Self {
         match error { ElasticityError3::Cancelled => Self::Cancelled, other => Self::Native(other) }
+    }
+}
+impl<E> From<fs_time::galpha::initialization::InitialSolveError> for CutThermoelasticError3<E> {
+    fn from(error: fs_time::galpha::initialization::InitialSolveError) -> Self {
+        match error {
+            fs_time::galpha::initialization::InitialSolveError::Cancelled => Self::Cancelled,
+            other => Self::Initialization(other),
+        }
+    }
+}
+impl<E> From<fs_time::galpha::TimeSolveError> for CutThermoelasticError3<E> {
+    fn from(error: fs_time::galpha::TimeSolveError) -> Self {
+        match error {
+            fs_time::galpha::TimeSolveError::Cancelled => Self::Cancelled,
+            other => Self::Dynamics(other),
+        }
     }
 }
 impl<E> From<DepositionError> for CutThermoelasticError3<E> {
@@ -185,6 +204,8 @@ pub struct CutThermoelasticReport3 {
     /// Authored external heat, excluding reversible heat and enclosure net.
     pub external_heat_j: f64,
     pub closed_radiation_net_j: f64,
+    /// Native resistance work plus represented kinetic change (when inertial)
+    /// minus actual external work. Numerical timestep defects are not heat.
     pub mechanical_residual_j: f64,
     pub thermal_residual_j: f64,
     pub combined_residual_j: f64,
@@ -377,11 +398,6 @@ impl<'m> CutThermoelasticSolid3<'m> {
         audit: EnergyAudit, radiation: f64, iteration: usize,
         config: CutThermoelasticConfig3, cx: &Cx<'_>,
     ) -> Result<(CutThermoelasticReport3, Vec<f64>), CutThermoelasticError3<E>> {
-        if exchanges.len() != self.bindings.cells.len()
-            || audit.incoming_mass_kg != 0.0 || audit.incoming_energy_j != 0.0
-        {
-            return Err(CutThermoelasticError3::Invalid("fixed original cell inventory required throughout the interval"));
-        }
         let before = &self.history.equilibrium;
         let mut external = Dd::ZERO;
         let mut mechanical_residual = Dd::ZERO;
@@ -398,56 +414,73 @@ impl<'m> CutThermoelasticSolid3<'m> {
                 * (Dd::from_f64(before.equilibrium.residual[i])
                     + Dd::from_f64(next.equilibrium.residual[i])) * du;
         }
-        let native_work = external + mechanical_residual;
-        let mut bulk = Dd::ZERO;
-        let mut internal = Dd::ZERO;
-        let mut heat = Dd::ZERO;
-        let mut used = Dd::ZERO;
-        let mut defect = Dd::ZERO;
-        let mut cells = Vec::with_capacity(exchanges.len());
-        let mut proposed = Vec::with_capacity(exchanges.len());
-        for (i, exchange) in exchanges.into_iter().enumerate() {
-            poll(cx)?;
-            let q = finite(exchange.retained_reversible_heat_j().to_f64())?;
-            bulk = bulk + exchange.retained_mechanical_work_j();
-            internal = internal + exchange.retained_internal_energy_change_j();
-            heat = heat + exchange.retained_reversible_heat_j();
-            used = used + applied[i];
-            defect = defect + Dd::from_f64((applied[i] - exchange.retained_reversible_heat_j()).to_f64().abs());
-            proposed.push(q);
-            cells.push(CutThermoelasticCellStep3 {
-                cell: self.bindings.cells[i].cell,
-                temperature_k: [self.history.temperatures_k[i], temperatures[i]],
-                exchange,
-            });
-        }
-        let numerical = native_work - bulk;
-        let numerical_work_j = finite(numerical.to_f64())?;
-        let mechanical_residual_j = finite(mechanical_residual.to_f64())?;
-        if mechanical_residual_j.abs() > config.energy_tolerance_j {
-            return Err(CutThermoelasticError3::Invalid("native averaged nodal work fails the mechanical energy allowance"));
-        }
-        // Use the native compensated balance, not subtraction of rounded
-        // absolute caloric totals. Internal radiation roundoff is not supply.
-        let base = Dd::from_f64(audit.residual_j) + Dd::from_f64(radiation);
-        let thermal_residual = base + used - heat;
-        let combined = base + used + internal - external + numerical;
-        let report = CutThermoelasticReport3 {
-            iterations: iteration, thermal_audit: audit, cells,
-            external_work_j: finite(external.to_f64())?,
-            native_work_j: finite(native_work.to_f64())?,
-            physical_bulk_work_j: finite(bulk.to_f64())?, numerical_work_j,
-            internal_energy_change_j: finite(internal.to_f64())?,
-            reversible_heat_j: finite(heat.to_f64())?,
-            applied_heat_j: finite(used.to_f64())?,
-            external_heat_j: finite((Dd::from_f64(audit.external_heat_j) - used
-                - Dd::from_f64(radiation)).to_f64())?,
-            closed_radiation_net_j: radiation, mechanical_residual_j,
-            thermal_residual_j: finite(thermal_residual.to_f64())?,
-            combined_residual_j: finite(combined.to_f64())?,
-            heat_defect_j: finite(defect.to_f64())?,
-        };
-        poll(cx)?;
-        Ok((report, proposed))
+        account_exchange(&self.bindings, &self.history.temperatures_k,
+            temperatures, exchanges, applied, external, external + mechanical_residual,
+            Dd::ZERO, audit, radiation, iteration, config, cx)
+            .map(|(report, heat, _)| (report, heat))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn account_exchange<E>(
+    bindings: &Bindings<'_>, before_temperatures: &[f64], temperatures: &[f64],
+    exchanges: Vec<ThermoelasticCellExchange3>, applied: &[Dd], external: Dd,
+    native_work: Dd, kinetic_change: Dd, audit: EnergyAudit, radiation: f64,
+    iteration: usize, config: CutThermoelasticConfig3, cx: &Cx<'_>,
+) -> Result<(CutThermoelasticReport3, Vec<f64>, Dd), CutThermoelasticError3<E>> {
+    if exchanges.len() != bindings.cells.len()
+        || audit.incoming_mass_kg != 0.0 || audit.incoming_energy_j != 0.0
+    {
+        return Err(CutThermoelasticError3::Invalid("fixed original cell inventory required throughout the interval"));
+    }
+    let mut bulk = Dd::ZERO;
+    let mut internal = Dd::ZERO;
+    let mut heat = Dd::ZERO;
+    let mut used = Dd::ZERO;
+    let mut defect = Dd::ZERO;
+    let mut cells = Vec::with_capacity(exchanges.len());
+    let mut proposed = Vec::with_capacity(exchanges.len());
+    for (i, exchange) in exchanges.into_iter().enumerate() {
+        poll(cx)?;
+        let q = finite(exchange.retained_reversible_heat_j().to_f64())?;
+        bulk = bulk + exchange.retained_mechanical_work_j();
+        internal = internal + exchange.retained_internal_energy_change_j();
+        heat = heat + exchange.retained_reversible_heat_j();
+        used = used + applied[i];
+        defect = defect + Dd::from_f64((applied[i] - exchange.retained_reversible_heat_j()).to_f64().abs());
+        proposed.push(q);
+        cells.push(CutThermoelasticCellStep3 {
+            cell: bindings.cells[i].cell,
+            temperature_k: [before_temperatures[i], temperatures[i]],
+            exchange,
+        });
+    }
+    let numerical = native_work - bulk;
+    let numerical_work_j = finite(numerical.to_f64())?;
+    let mechanical_residual_j = finite((kinetic_change + native_work - external).to_f64())?;
+    if mechanical_residual_j.abs() > config.energy_tolerance_j {
+        return Err(CutThermoelasticError3::Invalid("native work and represented kinetic change fail the mechanical energy allowance"));
+    }
+    // Use the native compensated balance, not subtraction of rounded
+    // absolute caloric totals. Internal radiation roundoff is not supply.
+    let base = Dd::from_f64(audit.residual_j) + Dd::from_f64(radiation);
+    let thermal_residual = base + used - heat;
+    let combined = base + used + internal + kinetic_change - external + numerical;
+    let report = CutThermoelasticReport3 {
+        iterations: iteration, thermal_audit: audit, cells,
+        external_work_j: finite(external.to_f64())?,
+        native_work_j: finite(native_work.to_f64())?,
+        physical_bulk_work_j: finite(bulk.to_f64())?, numerical_work_j,
+        internal_energy_change_j: finite(internal.to_f64())?,
+        reversible_heat_j: finite(heat.to_f64())?,
+        applied_heat_j: finite(used.to_f64())?,
+        external_heat_j: finite((Dd::from_f64(audit.external_heat_j) - used
+            - Dd::from_f64(radiation)).to_f64())?,
+        closed_radiation_net_j: radiation, mechanical_residual_j,
+        thermal_residual_j: finite(thermal_residual.to_f64())?,
+        combined_residual_j: finite(combined.to_f64())?,
+        heat_defect_j: finite(defect.to_f64())?,
+    };
+    poll(cx)?;
+    Ok((report, proposed, internal))
 }

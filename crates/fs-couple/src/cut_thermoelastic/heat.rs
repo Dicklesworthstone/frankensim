@@ -36,7 +36,7 @@ impl CutThermoelasticSolid3<'_> {
         observer: &mut O, target_s: f64, nodal_forces_n: &[f64],
         thermal_config: StepConfig, config: CutThermoelasticConfig3, cx: &'p Cx<'scope>,
     ) -> Result<CutThermoelasticReport3, CutThermoelasticHeatError3<O::Error>> {
-        self.admit_heat_network(thermal, prepared, cx)?;
+        admit(&self.bindings, thermal, prepared, cx)?;
         let seed = prepared.observe(cx, observer.clone(), config.energy_tolerance_j)
             .map_err(CutThermoelasticHeatError3::Heat)?;
         let accepted = self.attempt(&mut native, thermal, &seed, target_s, nodal_forces_n,
@@ -51,13 +51,15 @@ impl CutThermoelasticSolid3<'_> {
         Ok(accepted.report)
     }
 
-    fn admit_heat_network<E>(
-        &self, thermal: &DepositionSimulation<'_>, prepared: &PreparedHeatNetwork<'_, '_>,
+}
+
+pub(super) fn admit<E>(
+        bindings: &Bindings<'_>, thermal: &DepositionSimulation<'_>, prepared: &PreparedHeatNetwork<'_, '_>,
         cx: &Cx<'_>,
     ) -> Result<(), CutThermoelasticHeatError3<E>> {
         cx.checkpoint().map_err(|_| CutThermoelasticHeatError3::Cancelled)?;
         let network = prepared.thermal_material_network().map_err(CutThermoelasticHeatError3::Heat)?;
-        for expected in &self.bindings.cells {
+        for expected in &bindings.cells {
             cx.checkpoint().map_err(|_| CutThermoelasticHeatError3::Cancelled)?;
             let actual = network.cells.iter().find(|cell| cell.cell == expected.cell)
                 .ok_or(CutThermoelasticHeatError3::Invalid("native cut-solid cell lacks its original heat-network binding"))?;
@@ -83,4 +85,3 @@ impl CutThermoelasticSolid3<'_> {
         }
         Ok(())
     }
-}
