@@ -3,6 +3,8 @@
 mod driven;
 #[path = "hertz_transient/rate_dependent.rs"]
 mod rate_dependent;
+#[path = "hertz_transient/rate_driven.rs"]
+mod rate_driven;
 
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::RigidContactBinding;

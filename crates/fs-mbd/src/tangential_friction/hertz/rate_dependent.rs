@@ -13,6 +13,9 @@
 //! separate refinement; neither a small work residual nor a stopping-tail
 //! bound certifies the entire resolved trajectory.
 
+/// Original local-speed friction curves under held external force and torque.
+pub mod driven;
+
 use super::trajectory::PreparedRigidHertzTrajectory;
 use super::transient::{
     HertzTransientControls, PreparedRigidHertzTransient, RigidHertzTransientError,

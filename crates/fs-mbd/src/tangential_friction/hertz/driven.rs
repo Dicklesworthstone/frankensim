@@ -70,13 +70,19 @@ pub struct RigidHertzDrivenCandidate {
 
 #[derive(Clone, Debug)]
 pub struct PreparedRigidHertzDriven {
-    pair: PreparedRigidHertzTrajectory,
+    mechanical: DrivenRigidPair,
+    driven: HertzDrivenControls,
+}
+
+/// Shared original-body response; it contains no substitute friction law.
+#[derive(Clone, Debug)]
+pub(super) struct DrivenRigidPair {
+    pub(super) pair: PreparedRigidHertzTrajectory,
     external: [Wrench; 2],
     mode: HertzDrivenMode,
     drive: [f64; 3],
     normal_acceleration_m_s2: f64,
     normal_response: Vec3,
-    driven: HertzDrivenControls,
 }
 
 #[derive(Debug)]
@@ -153,6 +159,45 @@ impl PreparedRigidHertzDriven {
     ) -> Result<Self, RigidHertzDrivenError> {
         let pair =
             PreparedRigidHertzTrajectory::new(bodies, properties, contact, dt_s, controls, gate)?;
+        Ok(Self {
+            mechanical: DrivenRigidPair::new(pair, external, mode, gate)?,
+            driven,
+        })
+    }
+
+    #[must_use]
+    pub fn contact_points_world(&self) -> [Vec3; 2] {
+        self.mechanical.contact_points_world()
+    }
+
+    /// Retry original coefficients from the same bodies, mode and external drive.
+    pub fn advance(
+        &self,
+        law: &HertzWrenchContact,
+        gate: &CancelGate,
+    ) -> Result<RigidHertzDrivenCandidate, RigidHertzDrivenError> {
+        poll(gate)?;
+        self.mechanical.pair.admit_law(law)?;
+        let capacity = law.parameters().normal_force_n * law.parameters().static_mu;
+        let wrench_bound = capacity.hypot(3.0 * core::f64::consts::PI / 16.0 * capacity);
+        self.mechanical.normal_velocity_bound(wrench_bound)?;
+        let path = law.advance_driven(
+            &self.mechanical.input()?,
+            self.mechanical.pair.controls.contact,
+            self.driven,
+            || gate.is_requested(),
+        )?;
+        self.mechanical.finish_path(path, wrench_bound, gate)
+    }
+}
+
+impl DrivenRigidPair {
+    pub(super) fn new(
+        pair: PreparedRigidHertzTrajectory,
+        external: [Wrench; 2],
+        mode: HertzDrivenMode,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzDrivenError> {
         let mut linear_acceleration = [Vec3::ZERO; 2];
         let mut angular_acceleration = [Vec3::ZERO; 2];
         for i in 0..2 {
@@ -197,7 +242,6 @@ impl PreparedRigidHertzDriven {
             drive,
             normal_acceleration_m_s2,
             normal_response,
-            driven,
         })
     }
 
@@ -206,46 +250,56 @@ impl PreparedRigidHertzDriven {
         self.pair.contact_points_world()
     }
 
-    /// Retry original coefficients from the same bodies, mode and external drive.
+    /// Original contact rates and external-only acceleration in the same frame.
+    pub(super) fn input(&self) -> Result<HertzDrivenInput, RigidHertzDrivenError> {
+        let pair = &self.pair;
+        let initial = relative_point(pair.points_before)?;
+        Ok(HertzDrivenInput {
+            velocity_m_s: [initial.dot(pair.axes[0]), initial.dot(pair.axes[1])],
+            spin_rate_rad_s: relative_spin(pair.points_before).dot(pair.axes[2]),
+            scaled_mobility_per_kg: pair.mobility,
+            driving_acceleration_m_s2: [self.drive[0], self.drive[1]],
+            driving_spin_acceleration_rad_s2: self.drive[2] / pair.radius,
+            dt_s: pair.dt_s,
+            mode: self.mode,
+        })
+    }
+
+    fn normal_velocity_bound(&self, wrench_bound: f64) -> Result<f64, RigidHertzDrivenError> {
+        let pair = &self.pair;
+        let normal_bound = relative_point(pair.points_before)?.dot(pair.axes[2]).abs()
+            + pair.dt_s
+                * (self.normal_acceleration_m_s2.abs()
+                    + magnitude(self.normal_response) * wrench_bound);
+        if !wrench_bound.is_finite()
+            || wrench_bound < 0.0
+            || !normal_bound.is_finite()
+            || normal_bound > pair.controls.velocity_tolerance_m_s
+        {
+            return Err(RigidHertzDrivenError::Invalid(
+                "driven traction cannot preserve held closed normal motion",
+            ));
+        }
+        Ok(normal_bound)
+    }
+
+    /// One original-body impulse/work owner for every admitted driven curve.
     #[allow(clippy::too_many_lines)]
-    pub fn advance(
+    pub(super) fn finish_path(
         &self,
-        law: &HertzWrenchContact,
+        path: HertzDrivenReport,
+        wrench_bound: f64,
         gate: &CancelGate,
     ) -> Result<RigidHertzDrivenCandidate, RigidHertzDrivenError> {
         poll(gate)?;
         let pair = &self.pair;
-        pair.admit_law(law)?;
         let controls = pair.controls;
         let axes = pair.axes;
         let dt = pair.dt_s;
         let initial = relative_point(pair.points_before)?;
         let spin = relative_spin(pair.points_before).dot(axes[2]);
         let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
-        let capacity = law.parameters().normal_force_n * law.parameters().static_mu;
-        let wrench_bound = capacity.hypot(3.0 * core::f64::consts::PI / 16.0 * capacity);
-        let normal_bound = initial.dot(axes[2]).abs()
-            + dt * (self.normal_acceleration_m_s2.abs()
-                + magnitude(self.normal_response) * wrench_bound);
-        if !normal_bound.is_finite() || normal_bound > controls.velocity_tolerance_m_s {
-            return Err(RigidHertzDrivenError::Invalid(
-                "driven traction cannot preserve held closed normal motion",
-            ));
-        }
-        let path = law.advance_driven(
-            &HertzDrivenInput {
-                velocity_m_s: velocity,
-                spin_rate_rad_s: spin,
-                scaled_mobility_per_kg: pair.mobility,
-                driving_acceleration_m_s2: [self.drive[0], self.drive[1]],
-                driving_spin_acceleration_rad_s2: self.drive[2] / pair.radius,
-                dt_s: dt,
-                mode: self.mode,
-            },
-            controls.contact,
-            self.driven,
-            || gate.is_requested(),
-        )?;
+        let normal_bound = self.normal_velocity_bound(wrench_bound)?;
         let impulse = axes[0]
             .scale(path.force_impulse_ns[0])
             .add(axes[1].scale(path.force_impulse_ns[1]));

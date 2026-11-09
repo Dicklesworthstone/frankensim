@@ -1,3 +1,31 @@
+## Driven original local-speed Hertz friction on finite bodies
+
+`tangential_friction::hertz::rate_dependent::driven` advances the original
+pressure-resolved friction curve under held world forces and body-frame torques.
+The captured full contact mobility and native force/couple transport retain both
+finite bodies. Every temperature/coefficient trial starts from the same original
+momenta, external loads and explicit resting/sliding mode; load/radius changes
+refuse. The constitutive initial-value trajectory follows the original weakening
+branch without an algebraic terminal-root selection or centre-speed coefficient.
+
+The private `DrivenRigidPair` is shared with the existing driven Coulomb owner.
+It prepares external acceleration, applies one summed impulse per body, retains
+common-body source work and independently checks actual momentum, kinetic change,
+contact rates and work. Its closed-normal path gate consumes the complete rate
+law's finite-speed/static wrench bound. Source work and physical friction heat
+remain separate; unresolved driven zero-rate events publish neither bodies nor
+mode. The original native report carries all constitutive numerical estimates
+and their availability flag. Delegated Coulomb zeros do not assert a measured
+zero time-discretization error.
+
+Poses, contact arms, inertia, load, radius and external drive remain held within
+a phase. Pressure resolution and adaptive time errors require independent
+refinement; no general nonconstant driven arrest, changing normal geometry or
+source-regime inference is added. Focused native regressions compare analytic
+affine translation/spin/release and true full-body source work, an independent
+mixed weakening body-coordinate ODE, world-frame transformation, reusable source
+trials, geometry refusal, atomic mode publication and spectator preservation.
+
 ## Driven original-body Hertz shear and spin
 
 `tangential_friction::hertz::driven` advances held external world forces and
