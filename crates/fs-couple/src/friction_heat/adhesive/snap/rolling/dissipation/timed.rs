@@ -11,6 +11,9 @@
 //! the mechanical and thermal intervals for transient accuracy. Contact heat
 //! partition and thermal topology remain explicit caller-selected physics.
 
+/// Actual driven finite-body motion and thermal transport on one accepted clock.
+pub mod native;
+
 use super::{
     JkrRollingDissipationHeat, JkrRollingDissipationHeatReport, JkrRollingSnapHeatError,
     JkrRollingSnapHeatStamp, JkrRollingSnapSegment, JkrSnapHeatError,

@@ -1,5 +1,8 @@
 //! G1/G3/G4: continuous plastic heat, release and all-owner rollback.
 
+#[path = "dissipation/timed.rs"]
+mod timed;
+
 use super::{DT, binding, controls, curves, events, fixture, source, thermal};
 use fs_couple::friction_heat::adhesive::snap::{
     JkrSnapHeatError,

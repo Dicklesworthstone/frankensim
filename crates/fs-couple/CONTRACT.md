@@ -11192,3 +11192,15 @@ partial feedback derivatives and arithmetic refusal publish no objective.
 Six physical power regression groups verify complete analytic covectors,
 independent nonlinear-memory neighbors, changed-frequency feedback cycles and
 per-cycle energy, original nonsymmetric/cancelling resistance, and refusal/retry.
+
+## Driven native rolling with physical-time heat transport
+
+`friction_heat::adhesive::snap::rolling::dissipation::timed::native` composes the original driven finite-body rolling lifecycle with the positive-duration heat owner. Held COM forces and body-frame torques drive the actual native motion. Only the internally accepted native angular increment supplies the source replay and irreversible rolling loss; public edited reports or caller-authored heat cannot replace it. The entire retained source state, original normal segment, rolling step and plastic loss must match exactly before acceptance.
+
+Original scheduled thermal events and the prescribed normal/area stage occur at the interval start; normal snap and remaining spring release use their original explicit release partition there. Plastic rolling heat uses its independent partition as average power during native conduction, cooling and scheduled events over that same physical interval. Detached driven work remains kinetic and supplies no rolling heat. Recontact starts a fresh spring without converting historical loss again.
+
+The combined audit cancels internal plastic transfer once, using actual native kinetic change, original incremental spring storage and body work together with the heat owner's compensated relative audits. Independent mechanical and thermal absolute defects cannot cancel. Both native momenta, native contact history, complete heat history, finite caloric cells and thermal clock publish together after the final caller checkpoint and cancellation check. Late transport-budget, caloric, geometry, history or energy refusal leaves every original owner unchanged.
+
+The physical scope remains held poses/frame, prescribed normal loading at interval start and frozen material properties. Interval-average heat and the original inertial midpoint phase require temporal refinement. Finite orientation integration, normal body motion and temperature-dependent source feedback are separate operations.
+
+Three focused integration cases cover eight driven intervals with independent kinetic/contact/cell/outside energy and background power, separation and fresh recontact while physical time advances, and post-snap transport failure, both final cancellation forms, stale time/history and deterministic retry. Pinned format checks and recursive Rust syntax/module-path parsing passed. These new integration cases were not compiled or run: DSR and RCH are unavailable and local memory/disk headroom is exhausted.
