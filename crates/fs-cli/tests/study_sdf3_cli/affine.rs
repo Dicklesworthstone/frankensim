@@ -40,7 +40,7 @@ fn affine_cli_reduces_feasible_material_and_exports_the_complete_physical_witnes
     );
     assert_eq!(
         result.path(&["receipt", "resume_supported"]),
-        Some(&J::Bool(false))
+        Some(&J::Bool(true))
     );
 
     let report = data(&ledger, &result, "report_json");
@@ -163,15 +163,32 @@ fn affine_cli_reduces_feasible_material_and_exports_the_complete_physical_witnes
     );
 
     let before = retained(&ledger, &result, "design");
-    let resumed = command("study")
+    let resumed_output = command("study")
         .args(["--resume", pointer])
         .arg(&ledger)
         .args(["--budget", "2"])
         .output()
         .unwrap();
-    assert_eq!(resumed.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&resumed.stderr).contains("cli-study-sdf3-affine-resume"));
-    assert!(resumed.stdout.is_empty());
+    assert!(matches!(resumed_output.status.code(), Some(0 | 6)),
+        "{}", String::from_utf8_lossy(&resumed_output.stderr));
+    let resumed = document(&resumed_output, resumed_output.status.code().unwrap());
+    let work = resumed.path(&["receipt", "optimizer_work"]).unwrap();
+    assert!(number(work, "iterations") > number(&report, "iterations_completed"));
+    assert!(number(work, "iterations") <= 4.0);
+    assert!(number(work, "restoration_evaluations") >= 1.0);
+    let whole_ledger = dir.join("whole.db");
+    let whole_output = command("study")
+        .arg(dir.join("relocated.fsim"))
+        .arg(&whole_ledger)
+        .args(["--budget", "4"])
+        .output()
+        .unwrap();
+    assert_eq!(whole_output.status.code(), resumed_output.status.code());
+    let whole = document(&whole_output, whole_output.status.code().unwrap());
+    for key in ["design", "iterations"] {
+        assert_eq!(retained(&ledger, &resumed, key), retained(&whole_ledger, &whole, key));
+    }
+    assert_eq!(resumed.path(&["receipt", "trace_hash"]), whole.path(&["receipt", "trace_hash"]));
     assert_eq!(retained(&ledger, &result, "design"), before);
 }
 

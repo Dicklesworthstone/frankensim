@@ -165,7 +165,7 @@ pub(super) fn persist(
     let stop = stopping(state);
     let gradient = &state.gradient;
     let check = format!(
-        "{{\"passed\":{},\"directions\":{},\"step\":{:.17e},\"relative_tolerance\":{:.17e},\"baseline_objective\":{:.17e},\"baseline_constraint\":{:.17e},\"objective_relative_error\":{:.17e},\"constraint_relative_error\":{:.17e},\"linear_iterations\":{},\"linear_solves\":{}}}",
+        "{{\"passed\":{},\"directions\":{},\"step\":{:.17e},\"relative_tolerance\":{:.17e},\"baseline_objective\":{:.17e},\"baseline_constraint\":{:.17e},\"objective_relative_error\":{:.17e},\"constraint_relative_error\":{:.17e},\"linear_iterations\":{},\"linear_solves\":{},\"preconditioner_operator_applications\":{},\"preconditioner_galerkin_products\":{}}}",
         gradient.passed(),
         gradient.directions,
         gradient.options.step,
@@ -175,14 +175,17 @@ pub(super) fn persist(
         gradient.objective_relative_error,
         gradient.constraint_relative_error,
         gradient.work.linear_iterations,
-        gradient.work.linear_solves
+        gradient.work.linear_solves,
+        gradient.work.preconditioner_operator_applications,
+        gradient.work.preconditioner_galerkin_products
     );
     let optimizer = format!(
-        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"evaluation_budget_scope\":\"optimizer evaluations; initial gradient probes share the original Krylov and wall allowances\"}}",
+        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"restoration_evaluations\":{},\"evaluation_budget_scope\":\"optimizer and restored endpoint evaluations; initial gradient probes share the original Krylov and wall allowances\"}}",
         state.optimizer.iterations,
         state.optimizer.evaluations,
         state.optimizer.multiplier_updates,
-        state.optimizer.rejected_trials
+        state.optimizer.rejected_trials,
+        state.checkpoint.restoration_evaluations
     );
     let policy = config.policy(spec.loads.len())?;
     let oracle = policy.oracle_options();
@@ -201,11 +204,12 @@ pub(super) fn persist(
         oracle.separation_tolerance
     );
     let summary = format!(
-        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":false,\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
         state.status,
         state.optimizer.iterations,
         spec.updates,
+        resume::MODE,
         producer.to_hex(),
         quoted(SCOPE)
     );
@@ -254,12 +258,14 @@ pub(super) fn persist(
     let package = package
         .to_json()
         .map_err(|e| fail("cli-study-sdf3-package", e.to_string()))?;
+    let checkpoint = resume::encode(spec, state, producer, &design, &rows);
     let artifacts = [
         ("iterations", "study-iterations", rows.as_bytes()),
         ("design", "study-design", design.as_bytes()),
         ("report_html", "study-report-html", html.as_bytes()),
         ("report_json", "study-report-json", summary.as_bytes()),
         ("package", "study-package", package.as_bytes()),
+        ("checkpoint", resume::KIND, checkpoint.as_bytes()),
     ];
     if artifacts
         .iter()
@@ -309,7 +315,7 @@ pub(super) fn persist(
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":false,\"producer\":{:?}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refs}}}",
             spec.id.to_hex(),
             state.status,
             source.hash.to_hex(),
@@ -317,6 +323,7 @@ pub(super) fn persist(
             spec.updates,
             trace.to_hex(),
             state.spent.wall_s,
+            resume::MODE,
             producer.to_hex()
         );
         let stored = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;

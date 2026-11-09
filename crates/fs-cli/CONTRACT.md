@@ -1998,9 +1998,19 @@ Only convergence at a cap-feasible current point reports `completed`.
 `--budget N` caps additional optimizer updates in the invocation. All solves
 and gradient probes spend the original Krylov and wall allowances; accepted
 results are saved before further optimization. Reports and packages retain
-offset, basis and worst displacement fields without a new solve. Resume
-explicitly refuses: the native affine optimizer does not expose cross-process
-state restoration. The example is
+offset, basis and worst displacement fields without a new solve.
+`study --resume study-<receipt-hash> <ledger.db> --budget N` restores the accepted
+projected AL state, including multipliers, penalty, spectral step, inner
+tolerance, prior violation, complete history and the separate least-material
+feasible incumbent. The original source and executable remain pinned. Geometry
+is rebuilt and the accepted and distinct incumbent responses are re-solved
+against the retained checkpoint; all endpoint evaluations spend the original
+optimizer, Krylov, geometry and wall allowances. Earlier search updates and
+the original gradient experiment are not replayed. The invocation cap adds
+updates without extending the original target. Historical receipts without an
+optimizer checkpoint remain exportable but refuse resume. Failed restoration
+and work lost after a crash cannot be durably charged; previous accepted
+results remain intact. The example is
 `examples/marquee/bracket-3d-affine-load-space.fsim`. Authority is Estimated,
 with no stress, buckling, continuum error, manufacturing tolerance, global
 design-optimality, safety or experimental-validation claim.

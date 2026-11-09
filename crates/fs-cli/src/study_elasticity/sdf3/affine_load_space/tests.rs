@@ -11,7 +11,7 @@ fn fixture() -> Spec {
 }
 
 fn compute(spec: &Spec, updates: usize) -> Computation {
-    compute_observed(spec, &CancelGate::new(), updates, 0.0, |_, _| Ok(())).unwrap()
+    compute_observed(spec, &CancelGate::new(), updates, None, 0.0, |_, _| Ok(())).unwrap()
 }
 
 fn near(a: f64, b: f64) {
@@ -137,12 +137,12 @@ fn g4_affine_design_stops_without_losing_accepted_fields_or_renewing_work() {
     let mut spec = fixture();
     let gate = CancelGate::new();
     gate.request();
-    let stopped = compute_observed(&spec, &gate, 1, 0.0, |_, _| {
+    let stopped = compute_observed(&spec, &gate, 1, None, 0.0, |_, _| {
         panic!("pre-cancelled work cannot publish a baseline")
     });
     assert_eq!(stopped.err().unwrap().exit, exit::CANCELLED);
     spec.linear = 1;
-    let stopped = compute_observed(&spec, &CancelGate::new(), 1, 0.0, |_, _| {
+    let stopped = compute_observed(&spec, &CancelGate::new(), 1, None, 0.0, |_, _| {
         panic!("one Krylov iteration cannot pass the gradient gate")
     });
     assert_eq!(stopped.err().unwrap().exit, exit::BUDGET);
@@ -160,7 +160,7 @@ fn g4_affine_design_stops_without_losing_accepted_fields_or_renewing_work() {
     let spec = fixture();
     let gate = CancelGate::new();
     let mut retained = None;
-    let run = compute_observed(&spec, &gate, 4, 0.0, |_, state| {
+    let run = compute_observed(&spec, &gate, 4, None, 0.0, |_, state| {
         retained = Some(state.accepted.rho.clone());
         gate.request();
         Ok(())
@@ -173,7 +173,7 @@ fn g4_affine_design_stops_without_losing_accepted_fields_or_renewing_work() {
 }
 
 #[test]
-fn g3_affine_artifacts_keep_the_physical_offset_and_refuse_fake_resume() {
+fn g3_affine_artifacts_keep_the_physical_offset_and_optimizer_checkpoint() {
     let spec = spec::parse(FIXTURE).unwrap();
     let ledger = Ledger::open(":memory:").unwrap();
     let out = drive(&spec, &ledger, Some(0), &CancelGate::new()).unwrap();
@@ -184,7 +184,7 @@ fn g3_affine_artifacts_keep_the_physical_offset_and_refuse_fake_resume() {
     );
     assert_eq!(
         retained.value.get("resume_supported"),
-        Some(&JsonValue::Bool(false))
+        Some(&JsonValue::Bool(true))
     );
     let report = linked(&ledger, &retained.value, "report_json", "study-report-json").unwrap();
     let report = JsonValue::parse(std::str::from_utf8(&report).unwrap()).unwrap();
@@ -212,6 +212,8 @@ fn g3_affine_artifacts_keep_the_physical_offset_and_refuse_fake_resume() {
     let package = linked(&ledger, &retained.value, "package", "study-package").unwrap();
     let package = EvidencePackage::from_json(std::str::from_utf8(&package).unwrap()).unwrap();
     assert!(fs_checker::check(&package).passed());
-    assert!(super::super::resume(&ledger, &retained, Some("1"), &CancelGate::new()).is_err());
+    assert_eq!(retained.value.str_field("resume_mode"), Some(resume::MODE));
+    let checkpoint = linked(&ledger, &retained.value, "checkpoint", resume::KIND).unwrap();
+    assert!(!checkpoint.is_empty());
     assert_eq!(load(&ledger, &out.pointer).unwrap().bytes, retained.bytes);
 }

@@ -347,8 +347,7 @@ pub(super) fn resume(
     gate: &CancelGate,
 ) -> Result<Outcome> {
     if old.value.str_field("driver") == Some(AFFINE_LOAD_SPACE3_DRIVER) {
-        return Err(fail("cli-study-sdf3-affine-resume",
-            "affine load-space studies retain accepted designs but the native optimizer does not support cross-process restoration; start a new study to run a different budget"));
+        return affine_load_space::resume(ledger, old, budget(override_text)?, gate);
     }
     if old.value.str_field("driver") == Some(LOAD_SPACE3_DRIVER) {
         return load_space::resume(ledger, old, budget(override_text)?, gate);

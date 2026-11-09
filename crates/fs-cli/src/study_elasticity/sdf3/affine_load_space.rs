@@ -8,16 +8,22 @@ use fs_topopt::sdf3::response::limits::design::MinimumMaterialObjective3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3,
     design::{
-        AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignIteration3,
-        AffineLoadSpaceDesignOptions3, AffineLoadSpaceDesignPoint3, AffineLoadSpaceGradientCheck3,
+        AffineLoadSpaceDesign3, AffineLoadSpaceDesignCheckpoint3, AffineLoadSpaceDesignGoal3,
+        AffineLoadSpaceDesignIteration3, AffineLoadSpaceDesignOptions3,
+        AffineLoadSpaceDesignPoint3, AffineLoadSpaceGradientCheck3,
     },
 };
-use std::io::Write as _;
-
 #[path = "affine_load_space/output.rs"]
 mod output;
+#[path = "affine_load_space/resume.rs"]
+mod resume;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only physically cap-feasible accepted points enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization, but the native affine optimizer has no cross-process restoration API: resume is unsupported. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No stress, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only physically cap-feasible accepted points enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No stress, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+
+const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
+    objective: MinimumMaterialObjective3::VolumeFraction,
+    volume_scale: 1.0,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Config {
@@ -78,6 +84,7 @@ struct State {
     optimizer: ProjectedAlWork,
     spent: Spent,
     status: &'static str,
+    checkpoint: AffineLoadSpaceDesignCheckpoint3,
 }
 impl State {
     fn capture(
@@ -94,6 +101,7 @@ impl State {
             optimizer: design.optimizer_work(),
             spent: Spent::default(),
             status: "checkpointed",
+            checkpoint: design.checkpoint(),
         }
     }
     fn selected(&self) -> &AffineLoadSpaceDesignPoint3 {
@@ -163,6 +171,7 @@ fn compute_observed(
     spec: &Spec,
     gate: &CancelGate,
     limit: usize,
+    recovery: Option<&resume::Recovery>,
     preparation_wall_s: f64,
     mut observed: impl FnMut(&CutDensityStudy3<AdaptiveSolveSpace3>, &State) -> Result<()>,
 ) -> Result<Computation> {
@@ -174,7 +183,7 @@ fn compute_observed(
     })?;
     config.validate(spec)?;
     let policy = config.policy(spec.loads.len())?;
-    let prior = Spent::default().add(
+    let prior = recovery.map_or(Spent::default(), |r| r.spent).add(
         SolveWork::default(),
         QuadratureWork3::default(),
         preparation_wall_s,
@@ -217,8 +226,8 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut quadrature = QuadratureControl3::new(
         QuadratureOptions3 {
-            max_boxes: spec.boxes,
-            max_points: spec.points,
+            max_boxes: spec.boxes - prior.geometry.boxes,
+            max_points: spec.points - prior.geometry.points,
             ..Default::default()
         },
         &mut cp,
@@ -258,7 +267,7 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
-            total_iterations: spec.linear,
+            total_iterations: spec.linear - prior.linear.linear_iterations,
             per_solve_iterations: spec.per_solve,
         },
         &mut cp,
@@ -288,23 +297,33 @@ fn compute_observed(
         // The changing material body force is assembled by the native owner
         // once at eroded occupancy. It must not be baked into each basis load.
         let dead = vec![0.0; forces[0].len()];
-        let mut design = AffineLoadSpaceDesign3::new(
-            &mut study,
-            &dead,
-            &basis,
-            &raw,
-            policy,
-            AffineLoadSpaceDesignGoal3::MinimumMaterial {
-                objective: MinimumMaterialObjective3::VolumeFraction,
-                volume_scale: 1.0,
-            },
-            config.options,
-            &mut control,
-        )
+        let mut design = match recovery {
+            None => AffineLoadSpaceDesign3::new(
+                &mut study,
+                &dead,
+                &basis,
+                &raw,
+                policy,
+                GOAL,
+                config.options,
+                &mut control,
+            ),
+            Some(recovery) => AffineLoadSpaceDesign3::restore(
+                &mut study,
+                &dead,
+                &basis,
+                &mut recovery.checkpoint.clone(),
+                policy,
+                GOAL,
+                config.options,
+                &mut control,
+            ),
+        }
         .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
         let result = design.run(0);
         let mut state = State::capture(&design, result);
-        for _ in 0..limit.min(spec.updates) {
+        let updates = limit.min(spec.updates - design.optimizer_work().iterations);
+        for _ in 0..updates {
             if state.error.is_some()
                 || state
                     .report
@@ -331,26 +350,20 @@ pub(super) fn drive(
     cap: Option<usize>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
-    let admission = Instant::now();
-    let producer = checkpoint::producer_identity(gate)?;
-    let limit = cap.unwrap_or(spec.updates).min(spec.updates);
-    let mut previous = None;
-    let run = compute_observed(spec, gate, limit, admission.elapsed().as_secs_f64(), |study, state| {
-        let out = output::persist(spec, ledger, study, state, producer, previous, limit)?;
-        previous = out.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
-        let _ = writeln!(std::io::stderr().lock(),
-            "{{\"schema\":\"frankensim.cli.sdf3-affine-load-space-progress.v1\",\"run_id\":{},\"iterations_completed\":{}}}",
-            quoted(&out.pointer), state.optimizer.iterations);
-        Ok(())
-    }).map_err(|mut error| {
-        if let Some(previous) = previous {
-            error.message.push_str(&format!("; last durable result: study-{}", previous.to_hex()));
-        }
-        error
-    })?;
-    output::persist(
-        spec, ledger, &run.study, &run.state, producer, previous, limit,
-    )
+    resume::drive(spec, ledger, cap, gate, None)
+}
+
+pub(super) fn resume(
+    ledger: &Ledger,
+    old: &Loaded,
+    cap: Option<usize>,
+    gate: &CancelGate,
+) -> Result<Outcome> {
+    let source = linked(ledger, &old.value, "source", "study-source")?;
+    let source = std::str::from_utf8(&source)
+        .map_err(|e| fail("cli-study-sdf3-affine-load-space-checkpoint", e.to_string()))?;
+    let spec = spec::parse(source)?;
+    resume::drive(&spec, ledger, cap, gate, Some(old))
 }
 
 #[cfg(test)]

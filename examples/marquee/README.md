@@ -109,8 +109,20 @@ and separate last-accepted and least-material feasible designs.
 Report export writes the retained eroded/nominal/dilated density fields and
 offset, basis and worst displacements to VTU. An infeasible selected design
 does not produce a field export. Incomplete runs retain their accepted results
-and exit 6; this affine mode explicitly refuses `study --resume` because its
-native optimizer currently has no cross-process restoration API.
+and exit 6. Continue an accepted prefix with:
+
+```sh
+frankensim --json study --resume study-<receipt-hash> affine.db --budget 2
+```
+
+Resume restores the accepted augmented-Lagrangian state, its history and the
+least-material feasible incumbent under the original source and executable.
+It rebuilds geometry and re-solves the accepted and distinct incumbent endpoints
+to check their physical responses before continuing. Those evaluations spend
+the original optimizer, Krylov, geometry and wall allowances; earlier search
+updates and the initial gradient experiment are not repeated. The new budget
+adds updates without extending the original target. Historical receipts written
+before checkpoint support remain exportable but cannot resume.
 
 Stiffness and self-weight both use eroded occupancy, while the objective uses
 dilated volume. Under self-weight this does not establish erosion as the worst
