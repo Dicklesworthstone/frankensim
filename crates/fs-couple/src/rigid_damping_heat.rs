@@ -6,12 +6,16 @@
 //! Original caloric laws convert energy to temperature; numerical mechanical
 //! defects never heat a receiver. Unrouted loss remains an explicit outflow.
 //!
-//! Inertias, damping forms, material arms and external loads are held for this
-//! advance. The caller owns their spatial correspondence and temperature domain.
-//! This is finite self-heating, not temperature-dependent damping, reversible
-//! thermoelastic work or an inferred heat partition. Thermal geometry remains
-//! caller-owned. Native transport order and moving-geometry splitting require
-//! temporal and spatial refinement independently of conservation tolerances.
+//! The baseline entry holds damping forms fixed; [`temperature`] feeds original
+//! caloric temperatures back into explicitly authored passive damping laws.
+//! Inertias, material arms and external loads remain held. The caller owns their
+//! spatial correspondence and material validity. Thermal geometry remains
+//! caller-owned; no reversible thermoelastic work or heat partition is inferred.
+//! Native transport order and moving-geometry splitting require temporal and
+//! spatial refinement independently of conservation tolerances.
+
+/// Temperature-dependent passive laws on the same accepted native timeline.
+pub mod temperature;
 
 use fs_math::{dd::Dd, eft::two_sum};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
@@ -27,7 +31,7 @@ use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
     HeatTransfer, StepConfig,
 };
-use std::{borrow::Cow, cell::RefCell, collections::BTreeMap};
+use std::{borrow::Cow, cell::RefCell, collections::BTreeMap, convert::Infallible};
 
 /// Borrowed original mechanical state, laws and explicitly authored heat routes.
 #[derive(Clone, Copy, Debug)]
@@ -123,15 +127,23 @@ impl<'m, O> RigidDampingThermalCandidate<'m, O> {
 }
 
 #[derive(Debug)]
-pub enum RigidDampingThermalError<E> {
+pub enum RigidDampingThermalError<E, S = Infallible> {
     Invalid(&'static str),
     Motion(ViscousNetworkMotionError),
     Thermal(DepositionError),
     Observer(E),
-    Energy { residual_j: f64, allowance_j: f64 },
+    /// Original connector index and the authored source's own refusal.
+    Source {
+        connector: usize,
+        error: S,
+    },
+    Energy {
+        residual_j: f64,
+        allowance_j: f64,
+    },
     Cancelled,
 }
-impl<E> From<DepositionError> for RigidDampingThermalError<E> {
+impl<E, S> From<DepositionError> for RigidDampingThermalError<E, S> {
     fn from(error: DepositionError) -> Self {
         match error {
             DepositionError::Cancelled => Self::Cancelled,
@@ -139,7 +151,7 @@ impl<E> From<DepositionError> for RigidDampingThermalError<E> {
         }
     }
 }
-impl<E> From<ViscousNetworkMotionError> for RigidDampingThermalError<E> {
+impl<E, S> From<ViscousNetworkMotionError> for RigidDampingThermalError<E, S> {
     fn from(error: ViscousNetworkMotionError) -> Self {
         match error {
             ViscousNetworkMotionError::Cancelled => Self::Cancelled,
@@ -147,27 +159,32 @@ impl<E> From<ViscousNetworkMotionError> for RigidDampingThermalError<E> {
         }
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for RigidDampingThermalError<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display
+    for RigidDampingThermalError<E, S>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "rigid damping/thermal advance refused: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for RigidDampingThermalError<E> {}
-type Result<T, E> = core::result::Result<T, RigidDampingThermalError<E>>;
+impl<E: std::error::Error + 'static, S: std::error::Error + 'static> std::error::Error
+    for RigidDampingThermalError<E, S>
+{
+}
+type Result<T, E, S = Infallible> = core::result::Result<T, RigidDampingThermalError<E, S>>;
 
-fn number<E>(value: f64) -> Result<f64, E> {
+fn number<E, S>(value: f64) -> Result<f64, E, S> {
     if value.is_finite() {
         Ok(value)
     } else {
         Err(DepositionError::Arithmetic.into())
     }
 }
-fn value<E>(wide: Dd) -> Result<f64, E> {
+fn value<E, S>(wide: Dd) -> Result<f64, E, S> {
     number(wide.hi)?;
     number(wide.lo)?;
     number(wide.to_f64())
 }
-fn balance<E>(residual: f64, allowance: f64) -> Result<(), E> {
+fn balance<E, S>(residual: f64, allowance: f64) -> Result<(), E, S> {
     if number(residual)?.abs() > allowance {
         Err(RigidDampingThermalError::Energy {
             residual_j: residual,
@@ -201,6 +218,55 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     config: RigidDampingThermalConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<RigidDampingThermalCandidate<'m, O>, O::Error> {
+    advance_with_source(
+        input,
+        thermal,
+        observer,
+        FrozenSource(input.links),
+        target_s,
+        config,
+        cancelled,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+// Only the source binding varies. The original timeline, native mechanics,
+// per-cell heat handoff and independent final energy admission remain shared.
+trait DampingSource: Clone {
+    type Error;
+    fn links(&self) -> &[ViscousNetworkLink];
+    fn synchronize<E>(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<(), E, Self::Error>;
+}
+
+#[derive(Clone, Copy)]
+struct FrozenSource<'a>(&'a [ViscousNetworkLink]);
+impl DampingSource for FrozenSource<'_> {
+    type Error = Infallible;
+    fn links(&self) -> &[ViscousNetworkLink] {
+        self.0
+    }
+    fn synchronize<E>(
+        &mut self,
+        _thermal: &DepositionSimulation<'_>,
+        _requested: &dyn Fn() -> bool,
+    ) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
+    input: RigidDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    source: S,
+    target_s: f64,
+    config: RigidDampingThermalConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(RigidDampingThermalCandidate<'m, O>, S), O::Error, S::Error> {
     let cancellation = RefCell::new(cancelled);
     let requested = || (*cancellation.borrow_mut())();
     let checkpoint = || {
@@ -259,6 +325,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     }
     let coupled = HeatObserver {
         input,
+        source,
         states: Cow::Borrowed(input.states),
         time_s: input.time_s,
         inner: Cow::Borrowed(observer),
@@ -270,13 +337,18 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         connector_heat: vec![Dd::ZERO; input.links.len()],
         pair_relaxations: 0,
     };
-    let (thermal, coupled, audit) =
+    let (thermal, mut coupled, audit) =
         thermal.advance_observed(&coupled, target_s, config.thermal, checkpoint)?;
     if coupled.pending.is_some() || coupled.time_s.to_bits() != target_s.to_bits() {
         return Err(RigidDampingThermalError::Invalid(
             "mechanical and thermal endpoints must agree",
         ));
     }
+    // Native events at target_s have all finished. Synchronize the memoryless
+    // law to this exact endpoint before publishing either physical owner.
+    coupled
+        .source
+        .synchronize::<O::Error>(&thermal, &requested)?;
     let mut kinetic = RigidKineticEnergyChange::new();
     let mut potential = Dd::ZERO;
     let g = input.loads.gravity.acceleration_world();
@@ -327,7 +399,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
             .iter()
             .copied()
             .map(value)
-            .collect::<Result<Vec<_>, O::Error>>()?,
+            .collect::<Result<Vec<_>, O::Error, S::Error>>()?,
         dissipated_energy_j: value(accounts.heat)?,
         deposited_heat_j: value(accounts.deposited)?,
         unallocated_energy_j: value(accounts.unallocated)?,
@@ -345,12 +417,15 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     if requested() {
         return Err(RigidDampingThermalError::Cancelled);
     }
-    Ok(RigidDampingThermalCandidate {
-        states: coupled.states.into_owned(),
-        thermal,
-        observer: coupled.inner.into_owned(),
-        report,
-    })
+    Ok((
+        RigidDampingThermalCandidate {
+            states: coupled.states.into_owned(),
+            thermal,
+            observer: coupled.inner.into_owned(),
+            report,
+        },
+        coupled.source,
+    ))
 }
 
 #[derive(Clone, Default)]
@@ -375,8 +450,9 @@ struct Pending {
     absolute_handoff: Dd,
 }
 #[derive(Clone)]
-struct HeatObserver<'a, 'g, O: Clone> {
+struct HeatObserver<'a, 'g, O: Clone, S: DampingSource> {
     input: RigidDampingThermalInput<'a>,
+    source: S,
     states: Cow<'a, [RigidBodyState]>,
     time_s: f64,
     inner: Cow<'g, O>,
@@ -388,9 +464,9 @@ struct HeatObserver<'a, 'g, O: Clone> {
     connector_heat: Vec<Dd>,
     pair_relaxations: usize,
 }
-impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
-    type Error = RigidDampingThermalError<O::Error>;
-    fn begin(&mut self) -> Result<(), O::Error> {
+impl<O: DepositionObserver, S: DampingSource> DepositionObserver for HeatObserver<'_, '_, O, S> {
+    type Error = RigidDampingThermalError<O::Error, S::Error>;
+    fn begin(&mut self) -> Result<(), O::Error, S::Error> {
         self.inner
             .to_mut()
             .begin()
@@ -403,7 +479,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<Option<f64>, O::Error> {
+    ) -> Result<Option<f64>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .next_transition_time_s(thermal, check)
@@ -413,7 +489,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+    ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .sources(thermal, check)
@@ -423,7 +499,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<BTreeMap<u64, f64>, O::Error> {
+    ) -> Result<BTreeMap<u64, f64>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .conductances(thermal, check)
@@ -433,7 +509,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+    ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .ambient_conductances(thermal, check)
@@ -443,7 +519,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+    ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .reservoir_conductances(thermal, check)
@@ -453,7 +529,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<Vec<HeatTransfer>, O::Error> {
+    ) -> Result<Vec<HeatTransfer>, O::Error, S::Error> {
         self.inner
             .to_mut()
             .heat_transfers(thermal, check)
@@ -464,7 +540,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         thermal: &DepositionSimulation<'_>,
         proposed_s: f64,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<f64, O::Error> {
+    ) -> Result<f64, O::Error, S::Error> {
         self.inner
             .to_mut()
             .limit_timestep_s(thermal, proposed_s, check)
@@ -477,7 +553,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         dt_s: f64,
         end_s: f64,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+    ) -> Result<BTreeMap<CellId, f64>, O::Error, S::Error> {
         check()?;
         if self.pending.is_some() || self.time_s.to_bits() != start_s.to_bits() {
             return Err(RigidDampingThermalError::Invalid(
@@ -494,6 +570,8 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
                 }
             }
         }
+        self.source
+            .synchronize::<O::Error>(thermal, self.requested)?;
         let mut rates = self
             .inner
             .to_mut()
@@ -502,7 +580,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         let step = step_viscous_network_with_loads(
             &self.states,
             self.input.properties,
-            self.input.links,
+            self.source.links(),
             self.input.loads,
             dt_s,
             self.config.mechanical,
@@ -526,7 +604,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
             }
             edge_heat = edge_heat + Dd::from_f64(heat);
             let rest = Dd::from_f64(heat) * remaining;
-            if value::<O::Error>(rest)? == 0.0
+            if value::<O::Error, S::Error>(rest)? == 0.0
                 && heat != 0.0
                 && (remaining.hi != 0.0 || remaining.lo != 0.0)
             {
@@ -536,7 +614,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
             for (&id, &fraction) in route {
                 check()?;
                 let part = Dd::from_f64(heat) * Dd::from_f64(fraction);
-                if value::<O::Error>(part)? == 0.0 && heat != 0.0 && fraction != 0.0 {
+                if value::<O::Error, S::Error>(part)? == 0.0 && heat != 0.0 && fraction != 0.0 {
                     return Err(DepositionError::Arithmetic.into());
                 }
                 let total = allocated.entry(id).or_insert(Dd::ZERO);
@@ -546,12 +624,12 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         let mut deposited = Dd::ZERO;
         let mut ideal = Dd::ZERO;
         let mut absolute = Dd::from_f64(
-            value::<O::Error>(edge_heat - Dd::from_f64(step.dissipated_energy_j))?.abs(),
+            value::<O::Error, S::Error>(edge_heat - Dd::from_f64(step.dissipated_energy_j))?.abs(),
         );
         for (id, heat) in allocated {
             check()?;
             ideal = ideal + heat;
-            let watts = number(value::<O::Error>(heat)? / dt_s)?;
+            let watts = number(value::<O::Error, S::Error>(heat)? / dt_s)?;
             if watts == 0.0 && (heat.hi != 0.0 || heat.lo != 0.0) {
                 return Err(DepositionError::Arithmetic.into());
             }
@@ -561,13 +639,13 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
             *rate = number(next)?;
             let received = (Dd::from_f64(next) - Dd::from_f64(old)) * Dd::from_f64(dt_s);
             deposited = deposited + received;
-            absolute = absolute + Dd::from_f64(value::<O::Error>(received - heat)?.abs());
+            absolute = absolute + Dd::from_f64(value::<O::Error, S::Error>(received - heat)?.abs());
             if lost != 0.0 {
                 absolute = absolute + Dd::from_f64(number((lost.abs() * dt_s).next_up())?);
             }
         }
-        absolute =
-            absolute + Dd::from_f64(value::<O::Error>(ideal + unallocated - edge_heat)?.abs());
+        absolute = absolute
+            + Dd::from_f64(value::<O::Error, S::Error>(ideal + unallocated - edge_heat)?.abs());
         balance(value(absolute)?, self.config.energy_tolerance_j)?;
         self.pending = Some(Pending {
             start_s,
@@ -580,7 +658,11 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         });
         Ok(rates)
     }
-    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
+    fn event(
+        &mut self,
+        event: &Event,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), O::Error, S::Error> {
         if self.pending.is_some() || self.time_s.to_bits() != thermal.time_s().to_bits() {
             return Err(RigidDampingThermalError::Invalid(
                 "event outside accepted shared clock",
@@ -599,7 +681,7 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, O> {
         old: &BTreeMap<CellId, f64>,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
-    ) -> Result<(), O::Error> {
+    ) -> Result<(), O::Error, S::Error> {
         check()?;
         let pending = self
             .pending

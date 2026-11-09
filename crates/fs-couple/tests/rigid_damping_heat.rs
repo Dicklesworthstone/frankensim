@@ -1,5 +1,11 @@
 //! Analytic damping, original nonlinear calorics, shared receivers and clocks.
 
+#[path = "rigid_damping_heat/shift.rs"]
+mod calibrated_shift;
+
+use fs_couple::rigid_damping_heat::temperature::{
+    TemperatureDampingLaw, advance_candidate as advance_temperature,
+};
 use fs_couple::rigid_damping_heat::{
     RigidDampingThermalConfig, RigidDampingThermalError, RigidDampingThermalInput,
     advance_candidate,
@@ -745,4 +751,401 @@ fn a_large_outside_interval_source_cannot_erase_physical_damper_heat() {
             .values()
             .all(|cell| cell.specific_h_j_kg == 0.0)
     );
+}
+
+// Synthetic memoryless source, with an independent closed-form continuum
+// solution below. This is not a fitted or measured material assertion.
+struct LinearTemperatureDamping {
+    beta_per_k: f64,
+    maximum_k: f64,
+}
+impl TemperatureDampingLaw for LinearTemperatureDamping {
+    type Error = &'static str;
+    fn at_temperature(
+        &self,
+        _connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, Self::Error> {
+        if !(300.0..=self.maximum_k).contains(&temperature_k) {
+            return Err("synthetic source temperature domain");
+        }
+        let c = reference.native_coefficients()[0][0]
+            * (1.0 + self.beta_per_k * (temperature_k - 300.0));
+        let mut matrix = [[0.0; 6]; 6];
+        matrix[0][0] = c;
+        PassiveBushingMatrix::try_new(
+            matrix,
+            BushingCoordinateScales {
+                translation_m: 1.0,
+                rotation_rad: 1.0,
+            },
+        )
+        .map_err(|_| "synthetic source passive form")
+    }
+}
+fn linear_calorics() -> [Caloric; 2] {
+    core::array::from_fn(|i| Caloric {
+        a: 0.5,
+        b: 0.0,
+        maximum: 1e6,
+        basis: if i == 0 {
+            ThermalStorageBasis::Enthalpy
+        } else {
+            ThermalStorageBasis::InternalEnergy
+        },
+    })
+}
+
+#[test]
+fn two_way_feedback_matches_independent_nonlinear_decay_with_first_order_refinement() {
+    let bodies = Bodies::new([0.7, 0.0]);
+    let laws = linear_calorics();
+    let initial = thermal(&laws, false, true);
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let mut input = bodies.input(&routes);
+    input.links = &bodies.links[..1];
+    let law = LinearTemperatureDamping {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    // m1=m2=2 kg gives relative mobility 1/kg and E0=2 J. Cell 0 has
+    // capacity 2*0.5=1 J/K, so T=300+(E0-E). Then E'=-a E+b E².
+    // This continuum reference is independent of the split source algorithm.
+    let e0 = 2.0;
+    let a = 2.0 * 0.7 * (1.0 + law.beta_per_k * e0);
+    let b = 2.0 * 0.7 * law.beta_per_k;
+    let target = 0.5;
+    let exponential = (-a * target).exp();
+    let exact = a * e0 * exponential / (a - b * e0 * (1.0 - exponential));
+    let mut errors = Vec::new();
+    for steps in [16, 32, 64, 128] {
+        let mut controls = config();
+        controls.thermal.max_dt_s = target / steps as f64;
+        let candidate = advance_temperature(
+            input,
+            &initial,
+            &(),
+            &law,
+            &[CellId(0)],
+            target,
+            controls,
+            || false,
+        )
+        .unwrap();
+        let first = candidate.states()[0]
+            .center_of_mass_velocity_world(bodies.properties[0])
+            .unwrap();
+        let second = candidate.states()[1]
+            .center_of_mass_velocity_world(bodies.properties[1])
+            .unwrap();
+        let energy = 0.5 * (first.x - second.x).powi(2);
+        let heat = candidate.report().dissipated_energy_j;
+        let temperature = candidate.thermal().temperature_k(CellId(0)).unwrap();
+        near(energy + heat, e0, 1e-12);
+        near(temperature - 300.0, heat, 7e-14);
+        near(candidate.report().combined_energy_residual_j, 0.0, 1e-11);
+        assert_eq!(candidate.temperatures_k(), &[temperature]);
+        near(
+            candidate.endpoint_links()[0].damping.native_coefficients()[0][0],
+            0.7 * (1.0 + law.beta_per_k * (temperature - 300.0)),
+            0.0,
+        );
+        assert_eq!(candidate.law_evaluations(), steps + 1);
+        assert!(
+            energy > exact,
+            "lagged hardening must underdamp this reference"
+        );
+        errors.push(energy - exact);
+    }
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            (1.8..2.2).contains(&ratio),
+            "first-order ladder: {errors:?}"
+        );
+    }
+    assert!(
+        errors[3] < 0.005,
+        "fine-grid physical energy errors: {errors:?}"
+    );
+    assert_eq!(bodies.links[0].damping.native_coefficients()[0][0], 0.7);
+    assert_eq!(initial.temperature_k(CellId(0)).unwrap(), 300.0);
+}
+
+#[test]
+fn temperature_feedback_continuation_uses_original_reference_without_compounding() {
+    let bodies = Bodies::new([0.7, 0.0]);
+    let laws = linear_calorics();
+    let initial = thermal(&laws, false, true);
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let mut input = bodies.input(&routes);
+    input.links = &bodies.links[..1];
+    let law = LinearTemperatureDamping {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    let cells = [CellId(0)];
+    let mut controls = config();
+    controls.thermal.max_dt_s = 0.03125;
+    let whole =
+        advance_temperature(input, &initial, &(), &law, &cells, 0.5, controls, || false).unwrap();
+    let first =
+        advance_temperature(input, &initial, &(), &law, &cells, 0.25, controls, || false).unwrap();
+    let continued = advance_temperature(
+        RigidDampingThermalInput {
+            time_s: first.report().time_s,
+            states: first.states(),
+            ..input
+        },
+        first.thermal(),
+        first.observer(),
+        &law,
+        &cells,
+        0.5,
+        controls,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(continued.states(), whole.states());
+    assert_eq!(continued.thermal().cells(), whole.thermal().cells());
+    assert_eq!(continued.endpoint_links(), whole.endpoint_links());
+    assert_eq!(continued.temperatures_k(), whole.temperatures_k());
+    near(
+        first.report().dissipated_energy_j + continued.report().dissipated_energy_j,
+        whole.report().dissipated_energy_j,
+        5e-15,
+    );
+}
+
+#[test]
+fn explicit_temperature_coordinate_is_independent_of_heat_routes_and_event_clipped() {
+    let bodies = Bodies::new([0.7, 0.0]);
+    let laws = linear_calorics();
+    let initial = DepositionSimulation::new(
+        vec![
+            birth(0, 0.0, 0.0),
+            birth(1, 0.0, 0.0),
+            TimedEvent {
+                time_s: 0.35,
+                event: Event::Boundary(CellId(1), boundary(3.0)),
+            },
+        ],
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        budget(),
+    )
+    .unwrap();
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let mut input = bodies.input(&routes);
+    input.links = &bodies.links[..1];
+    let law = LinearTemperatureDamping {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    let mut controls = config();
+    controls.thermal.max_dt_s = 0.35;
+    let observer = Observe::default();
+    let candidate = advance_temperature(
+        input,
+        &initial,
+        &observer,
+        &law,
+        &[CellId(1)],
+        1.0,
+        controls,
+        || false,
+    )
+    .unwrap();
+    // Heat goes only to cell 0; the explicitly distinct source coordinate is
+    // cell 1 (capacity 1.5 J/K). Its boundary supplies 3 W only after t=.35.
+    // Source temperatures are 300, 300 and 300.7 K on the three intervals.
+    let integrated_c: f64 = 0.7 * (0.7 + (1.0 + 2.0 * 0.7) * 0.3);
+    let expected_velocity = (-integrated_c).exp();
+    near(
+        candidate.states()[0]
+            .center_of_mass_velocity_world(bodies.properties[0])
+            .unwrap()
+            .x,
+        expected_velocity,
+        2e-14,
+    );
+    near(candidate.temperatures_k()[0], 301.3, 6e-14);
+    near(
+        candidate.report().external_thermal_heat_j,
+        3.0 * 0.65,
+        2e-14,
+    );
+    near(candidate.report().combined_energy_residual_j, 0.0, 2e-12);
+    assert_eq!(candidate.observer().intervals.len(), 3);
+    assert_eq!(candidate.observer().intervals[0], (0.0, 0.35, 0.35));
+    assert_eq!(candidate.observer().intervals[1], (0.35, 0.35, 0.7));
+    assert_eq!(candidate.observer().events, [0.0, 0.0, 0.35]);
+    assert_eq!(candidate.law_evaluations(), 3); // unchanged 300 K is reused
+    assert_eq!(observer, Observe::default());
+    assert!(initial.cells().is_empty());
+}
+
+#[test]
+fn constant_temperature_and_zero_resistance_recover_original_native_results() {
+    let laws = linear_calorics();
+    let initial = thermal(&laws, false, true);
+    let law = LinearTemperatureDamping {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    for zero in [false, true] {
+        let mut bodies = Bodies::new(if zero { [0.0; 2] } else { [0.7, 1.1] });
+        if zero {
+            bodies.loads[0] = Wrench {
+                force_world: Vec3::new(0.2, 0.0, 0.0),
+                torque_body: Vec3::ZERO,
+            };
+            bodies.gravity = Gravity::new(Vec3::new(0.0, -0.3, 0.0)).unwrap();
+        }
+        let routes = [BTreeMap::new(), BTreeMap::new()];
+        let input = bodies.input(&routes);
+        let observer = Observe {
+            interval_watts: zero.then_some(0.2),
+            ..Default::default()
+        };
+        let frozen =
+            advance_candidate(input, &initial, &observer, 0.5, config(), || false).unwrap();
+        let feedback = advance_temperature(
+            input,
+            &initial,
+            &observer,
+            &law,
+            &[CellId(0), CellId(0)],
+            0.5,
+            config(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(feedback.states(), frozen.states());
+        assert_eq!(feedback.thermal().cells(), frozen.thermal().cells());
+        assert_eq!(feedback.observer(), frozen.observer());
+        assert_eq!(
+            feedback.report().dissipated_energy_j,
+            frozen.report().dissipated_energy_j
+        );
+        assert_eq!(
+            feedback.report().combined_energy_residual_j,
+            frozen.report().combined_energy_residual_j
+        );
+        if zero {
+            assert_eq!(feedback.report().pair_relaxations, 0);
+            assert_eq!(feedback.report().dissipated_energy_j, 0.0);
+        } else {
+            assert_eq!(feedback.law_evaluations(), 2);
+            assert_eq!(feedback.endpoint_links(), &bodies.links);
+        }
+    }
+}
+
+#[test]
+fn temperature_source_endpoint_refusal_and_cancellation_leave_originals_retryable() {
+    let bodies = Bodies::new([0.7, 0.0]);
+    let laws = linear_calorics();
+    let initial = thermal(&laws, false, true);
+    let saved = initial.cells().clone();
+    let observer = Observe::default();
+    let routes = [BTreeMap::from([(CellId(0), 1.0)])];
+    let mut input = bodies.input(&routes);
+    input.links = &bodies.links[..1];
+    let mut controls = config();
+    controls.thermal.max_dt_s = 0.25;
+    let narrow = LinearTemperatureDamping {
+        beta_per_k: 2.0,
+        maximum_k: 300.01,
+    };
+    // The one whole interval is mechanically and calorically admissible. Its
+    // final stored temperature lies outside the SOURCE domain, so the final
+    // zero-work endpoint synchronization must reject all candidate histories.
+    assert!(matches!(
+        advance_temperature(
+            input,
+            &initial,
+            &observer,
+            &narrow,
+            &[CellId(0)],
+            0.25,
+            controls,
+            || false,
+        ),
+        Err(RigidDampingThermalError::Source {
+            connector: 0,
+            error: "synthetic source temperature domain"
+        })
+    ));
+    assert_eq!(initial.cells(), &saved);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(observer, Observe::default());
+    let broad = LinearTemperatureDamping {
+        maximum_k: 303.0,
+        ..narrow
+    };
+    let mut polls = 0;
+    let expected = advance_temperature(
+        input,
+        &initial,
+        &observer,
+        &broad,
+        &[CellId(0)],
+        0.25,
+        controls,
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    let mut repeated = 0;
+    assert!(matches!(
+        advance_temperature(
+            input,
+            &initial,
+            &observer,
+            &broad,
+            &[CellId(0)],
+            0.25,
+            controls,
+            || {
+                repeated += 1;
+                repeated == polls
+            },
+        ),
+        Err(RigidDampingThermalError::Cancelled)
+    ));
+    for cells in [&[][..], &[CellId(99)][..]] {
+        assert!(
+            advance_temperature(
+                input,
+                &initial,
+                &observer,
+                &broad,
+                cells,
+                0.25,
+                controls,
+                || false,
+            )
+            .is_err()
+        );
+    }
+    let retry = advance_temperature(
+        input,
+        &initial,
+        &observer,
+        &broad,
+        &[CellId(0)],
+        0.25,
+        controls,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(retry.states(), expected.states());
+    assert_eq!(retry.thermal().cells(), expected.thermal().cells());
+    assert_eq!(retry.observer(), expected.observer());
+    assert_eq!(retry.endpoint_links(), expected.endpoint_links());
+    assert_eq!(initial.cells(), &saved);
+    assert_eq!(observer, Observe::default());
 }

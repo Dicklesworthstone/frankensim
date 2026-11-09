@@ -1805,8 +1805,8 @@ energy residuals, accumulated absolute interval mechanical defects and absolute
 handoff defects each obey the explicit whole-call joule allowance; numerical
 defects never become heat.
 
-Mechanical laws, inertias and held loads remain frozen over this call. The caller
-owns their validity interval and any subsequent material refresh. This is finite
+The baseline entry keeps mechanical laws, inertias and held loads frozen over
+this call. The caller owns their validity interval and subsequent refresh. This is finite
 self-heating, not a temperature-feedback damping law, thermomechanical expansion,
 phase-dependent mechanics or moving thermal geometry. The existing native thermal
 order, geometry splitting and explicit source subdivision still require refinement.
@@ -1821,6 +1821,60 @@ regressions cover independent exponential losses, shared nonlinear H/U receivers
 partial routing, all observer hooks, event-clipped intervals, native zero-law
 motion, same-time births, empty thermal inventory, precision/refusal boundaries
 and late-failure/cancellation retry.
+
+## Temperature feedback in moving rigid damper networks
+
+`rigid_damping_heat::temperature::advance_candidate` feeds each explicitly
+authored source cell's original caloric temperature into a deterministic,
+memoryless `TemperatureDampingLaw`. Each original connector has one declared
+CellId; this coordinate is independent of its heat fractions. Shared source
+cells are allowed and sampled once per synchronization. There is no average of
+two body temperatures, inferred interface temperature or new heat-capacity law.
+Original H/U storage, transport, birth/boundary events, observer hooks and exact
+native interval selection remain with the same thermal owner.
+
+Each actual interval resolves the complete passive six-coordinate damping form
+from the ORIGINAL reference matrix and its accepted start temperature, then
+uses the same native moving network and compensated heat handoff. At the complete
+endpoint, after all same-time native events, every source resolves successfully
+against the actual final caloric temperature before any candidate is returned.
+The output includes these endpoint forms and temperatures for inspection. The
+caller retains the original reference graph across continuation calls; an
+already shifted output is never a new reference calibration.
+
+`temperature::shift::CalibratedKelvinDamping` binds that original graph to one
+declared native WLF/Arrhenius `TemperatureShift` per connector. Its original
+convention is `a_T = tau(T)/tau(T_ref)`, so the Kelvin resistance is
+`C(T) = a_T C_ref`. The adapter checks exact original reference binding, retains
+full anisotropy/cross-coupling/null directions, and uses the matrix owner's
+retained-factor scaling without another semidefinite factorization. It refuses
+source-domain violations, unrepresentable coefficients and compounded shifted
+references. Source calibration and the applicability of temperature
+superposition remain caller declarations, not inferred material evidence.
+
+This is a FIRST-ORDER lagged-temperature coupling, not an implicit endpoint
+solve. A final law consistent with final temperature does not mean that law was
+used throughout the preceding interval. Source-freezing error needs independent
+max_dt_s refinement even when native mechanical damping and energy conservation
+are exact. Native geometry splitting and thermal transport retain their own
+orders and controls. Inertias, attachment geometry and applied loads stay fixed;
+elastic moduli/reference changes, Maxwell history, expansion, phase-dependent
+mechanics and moving thermal geometry require their existing physical owners.
+
+Changing only a memoryless passive damping coefficient stores no energy and
+therefore creates no additional parameter work or heat. Original independent
+endpoint mechanical/thermal storage, physical edge losses, per-cell handoff
+precision and whole-call absolute defect gates remain unchanged. A late source
+domain failure, thermal/observer refusal, cancellation or energy failure drops
+the entire proposed body/thermal/observer state. Pure source evaluation cannot
+mutate external physical history; external callback effects are not reversible.
+
+The source keeps one cached graph and its current per-connector temperatures.
+Unchanged temperatures reuse already admitted forms. Additional live storage is
+O(connectors + distinct source cells); source sampling is O(connectors *
+log(distinct source cells)) per native interval. There are at most
+connectors * (accepted intervals + 1) source evaluations and no added mechanical
+relaxations, thermal solver, trajectory storage or outer nonlinear iterations.
 
 ## Explicit rigid-impact loss heating in original finite caloric cells
 

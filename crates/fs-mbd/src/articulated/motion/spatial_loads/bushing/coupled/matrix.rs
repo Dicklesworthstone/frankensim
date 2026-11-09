@@ -194,6 +194,100 @@ impl PassiveBushingMatrix {
         }
     }
 
+    /// Multiply this admitted form by a finite nonnegative physical coefficient.
+    ///
+    /// The original Gram directions are retained and scaled by the square root
+    /// of the coefficient. No factorization or rank decision is repeated, so a
+    /// changing viscosity cannot create a spurious negative pivot in an exactly
+    /// dependent passive mode. Original coordinate scales and diagonal action
+    /// are preserved. A unit multiplier returns an identical clone; an explicit
+    /// zero multiplier supplies the exact zero form.
+    ///
+    /// Native coefficients, scaled factors and their equilibrated reconstruction
+    /// are checked before returning. Nonzero coefficients or factor entries may
+    /// not silently disappear through underflow. Work and storage are bounded
+    /// by six coordinates; no heap allocation is required.
+    pub fn scaled(&self, coefficient: f64) -> Result<Self, BushingMatrixError> {
+        if !coefficient.is_finite() || coefficient < 0.0 {
+            return Err(BushingMatrixError(
+                "finite nonnegative matrix multiplier required",
+            ));
+        }
+        if coefficient == 1.0 {
+            return Ok(self.clone());
+        }
+        if coefficient == 0.0 {
+            return Ok(Self {
+                native: [[0.0; 6]; 6],
+                scales: self.scales,
+                gram: [[0.0; 6]; 6],
+                diagonal: true,
+                reconstruction_residual: 0.0,
+            });
+        }
+        let product = |original: f64, multiplier: f64| {
+            let result = original * multiplier;
+            if !result.is_finite() || (original != 0.0 && result == 0.0) {
+                Err(BushingMatrixError("scaled passive form is unrepresentable"))
+            } else {
+                Ok(result)
+            }
+        };
+        let root = fs_math::det::sqrt(coefficient);
+        let mut next = self.clone();
+        let mut scaled = [[0.0; 6]; 6];
+        let mut diagonal_roots = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                next.native[i][j] = product(self.native[i][j], coefficient)?;
+                next.gram[i][j] = product(self.gram[i][j], root)?;
+                scaled[i][j] =
+                    product(product(next.native[i][j], self.scales[i])?, self.scales[j])?;
+            }
+            diagonal_roots[i] = fs_math::det::sqrt(scaled[i][i]);
+        }
+        let mut normalized = [[0.0; 6]; 6];
+        for i in 0..6 {
+            if diagonal_roots[i] == 0.0 {
+                continue;
+            }
+            for j in 0..6 {
+                let value = next.gram[i][j] / diagonal_roots[i];
+                if !value.is_finite() || (next.gram[i][j] != 0.0 && value == 0.0) {
+                    return Err(BushingMatrixError("scaled passive factor is unresolved"));
+                }
+                normalized[i][j] = value;
+            }
+        }
+        next.reconstruction_residual = 0.0;
+        for i in 0..6 {
+            for j in 0..=i {
+                if diagonal_roots[i] == 0.0 || diagonal_roots[j] == 0.0 {
+                    continue;
+                }
+                let expected = (scaled[i][j] / diagonal_roots[i]) / diagonal_roots[j];
+                let actual = (0..6).fold(fs_math::dd::Dd::ZERO, |sum, k| {
+                    sum + fs_math::dd::Dd::from_f64(normalized[i][k])
+                        * fs_math::dd::Dd::from_f64(normalized[j][k])
+                });
+                let residual = (actual - fs_math::dd::Dd::from_f64(expected))
+                    .to_f64()
+                    .abs();
+                if !expected.is_finite()
+                    || (scaled[i][j] != 0.0 && expected == 0.0)
+                    || !residual.is_finite()
+                    || residual > 128.0 * f64::EPSILON
+                {
+                    return Err(BushingMatrixError(
+                        "scaled factor does not reconstruct the supplied form",
+                    ));
+                }
+                next.reconstruction_residual = next.reconstruction_residual.max(residual);
+            }
+        }
+        Ok(next)
+    }
+
     /// Maximum absolute entry defect after diagonal equilibration, dimensionless.
     pub const fn reconstruction_residual(&self) -> f64 {
         self.reconstruction_residual
@@ -368,6 +462,119 @@ mod tests {
             law.evaluate([0., 8., 0., 9., 0., 0.]).unwrap(),
             ([0.; 6], 0.)
         );
+    }
+
+    #[test]
+    fn physical_scaling_retains_dependent_directions_and_positive_loss() {
+        let mode = [1.0, 2.0, 0.0, -4.0, 0.0, 0.0];
+        let law = PassiveBushingMatrix::try_new(
+            core::array::from_fn(|i| core::array::from_fn(|j| mode[i] * mode[j])),
+            BushingCoordinateScales {
+                translation_m: 1.0,
+                rotation_rad: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(law.scaled(1.0).unwrap(), law);
+        for coefficient in [1e-120, 0.1, 0.3, 7.3, 1e120] {
+            let shifted = law.scaled(coefficient).unwrap();
+            assert_eq!(shifted.coordinate_scales(), law.coordinate_scales());
+            for i in 0..6 {
+                for j in 0..6 {
+                    assert_eq!(
+                        shifted.native_coefficients()[i][j],
+                        law.native_coefficients()[i][j] * coefficient
+                    );
+                }
+            }
+            // This exact free twist must stay free as the viscosity changes.
+            assert_eq!(
+                shifted.evaluate([2.0, -1.0, 7.0, 0.0, 9.0, -4.0]).unwrap(),
+                ([0.0; 6], 0.0)
+            );
+            let (force, heat_rate) = shifted.evaluate([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+            assert!((heat_rate - coefficient).abs() < 1e-13 * coefficient);
+            for i in 0..6 {
+                assert!(
+                    (force[i] - coefficient * mode[i]).abs() <= 1e-13 * coefficient * mode[i].abs()
+                );
+            }
+            assert!(shifted.reconstruction_residual() <= 128.0 * f64::EPSILON);
+        }
+        assert_eq!(
+            law.scaled(0.0).unwrap().evaluate(mode).unwrap(),
+            ([0.0; 6], 0.0)
+        );
+    }
+
+    #[test]
+    fn physical_scaling_matches_original_cross_work_and_preserves_weak_modes() {
+        let direction = [1.0, -2.0, 0.5, 3.0, -1.0, 2.0];
+        let native = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                direction[i] * direction[j] + if i == j { 2.0 + i as f64 } else { 0.0 }
+            })
+        });
+        let law = PassiveBushingMatrix::try_new(
+            native,
+            BushingCoordinateScales {
+                translation_m: 0.002,
+                rotation_rad: 0.3,
+            },
+        )
+        .unwrap();
+        let x = [0.02, -0.04, 0.03, 0.3, -0.2, 0.1];
+        let base_force: [f64; 6] =
+            core::array::from_fn(|i| (0..6).map(|j| native[i][j] * x[j]).sum());
+        let base_work: f64 = (0..6).map(|i| x[i] * base_force[i]).sum();
+        for coefficient in [1e-60, 0.37, 6.5, 1e60] {
+            let (force, work) = law.scaled(coefficient).unwrap().evaluate(x).unwrap();
+            for i in 0..6 {
+                assert!(
+                    (force[i] - coefficient * base_force[i]).abs()
+                        <= 2e-12 * (coefficient * base_force[i]).abs()
+                );
+            }
+            assert!((work - coefficient * base_work).abs() <= 2e-12 * coefficient * base_work);
+        }
+        let tiny = PassiveBushingMatrix::try_new(
+            core::array::from_fn(|i| {
+                core::array::from_fn(|j| if i == j { f64::MIN_POSITIVE } else { 0.0 })
+            }),
+            BushingCoordinateScales {
+                translation_m: 1.0,
+                rotation_rad: 1.0,
+            },
+        )
+        .unwrap()
+        .scaled(0.5)
+        .unwrap();
+        let (force, work) = tiny.evaluate([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(force[0], 0.5 * f64::MIN_POSITIVE);
+        assert_eq!(work, 0.5 * f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn physical_scaling_refuses_lost_coefficients_without_changing_reference() {
+        let diagonal = |entry| {
+            PassiveBushingMatrix::try_new(
+                core::array::from_fn(|i| {
+                    core::array::from_fn(|j| if i == j { entry } else { 0.0 })
+                }),
+                BushingCoordinateScales {
+                    translation_m: 1.0,
+                    rotation_rad: 1.0,
+                },
+            )
+            .unwrap()
+        };
+        let original = diagonal(1e-200);
+        let saved = original.clone();
+        for coefficient in [f64::NAN, f64::INFINITY, -1.0, 1e-200] {
+            assert!(original.scaled(coefficient).is_err());
+            assert_eq!(original, saved);
+        }
+        assert!(diagonal(1e200).scaled(1e200).is_err());
     }
 
     #[test]

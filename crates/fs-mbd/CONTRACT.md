@@ -5024,6 +5024,19 @@ or positive loss floor repairs the data. The factor reconstruction residual is
 reported in equilibrated coordinates. Exact zero/free directions are admitted;
 near-dependent passive forms may refuse without an exact-rank certificate.
 
+`PassiveBushingMatrix::scaled` multiplies an already admitted form by a finite
+nonnegative physical coefficient. It retains the original Gram directions,
+scales them by the coefficient's square root and rechecks native coefficients,
+coordinate congruence and equilibrated reconstruction without refactorization.
+Exact free directions stay free; a positive coefficient or factor cannot vanish
+silently through underflow. Unit scaling preserves the original representation
+exactly and explicit zero scaling supplies the zero form. This permits calibrated
+temperature-dependent Kelvin viscosity to reuse the original passive shape with
+fixed-size, allocation-free work. It advances no physical state and supplies no
+parameter work for a change in elastic stiffness. Seven focused matrix tests,
+including three scaling regressions, cover dependent translation/rotation modes,
+independent cross work, very weak positive directions and representability refusal.
+
 `CoupledSpatialBushing` fixes those prepared K/C forms to the original material
 frames. Full cross-axis and translation/rotation forces use the SAME strain,
 log differential, reciprocal wrench lift and finite-state admission as diagonal
