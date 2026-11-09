@@ -12,6 +12,8 @@ use super::{
     SpeciesDiffusionStep, VoxelDomain, nonnegative, poll, poll_every, refuse,
 };
 
+pub mod adaptive;
+
 /// The SAME accepted constituent and thermal inventories after diffusion.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeciesEnthalpyDiffusionStep<const N: usize> {
@@ -21,6 +23,7 @@ pub struct SpeciesEnthalpyDiffusionStep<const N: usize> {
     pub specific_enthalpy_j_kg: Vec<f64>,
     /// Signed energy received by each cell through the actual pair transfers [J].
     /// Already included in the endpoint enthalpy; do not deposit it again.
+    /// Scalar readback rounds once; internal composition retains its low parts.
     pub diffusive_enthalpy_change_j: Vec<f64>,
     /// Independent physical-unit energy admission.
     pub report: SpeciesEnthalpyDiffusionReport,
@@ -214,6 +217,28 @@ impl MaterialAdvectionStep {
         maximum_enthalpy_defect_j: f64,
         gate: &CancelGate,
     ) -> Result<SpeciesEnthalpyDiffusionStep<N>, ChtError> {
+        self.diffuse_species_with_enthalpy_accounted(
+            domain, species_mass_kg, specific_enthalpy_j_kg, diffusivity_m2_s,
+            duration_s, face_partial_enthalpy, controls, maximum_enthalpy_defect_j, gate,
+        ).map(|(step, _)| step)
+    }
+
+    // Internal composition retains the original transported-energy low parts.
+    // The public scalar readback rounds only at its output boundary; an outer
+    // physical integrator must not reconstruct these increments from it.
+    #[allow(clippy::too_many_arguments)]
+    fn diffuse_species_with_enthalpy_accounted<const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        specific_enthalpy_j_kg: &[f64],
+        diffusivity_m2_s: &[f64],
+        duration_s: f64,
+        face_partial_enthalpy: impl Fn([usize; 2], usize) -> Result<[f64; N], ChtError>,
+        controls: SpeciesDiffusionControls<N>,
+        maximum_enthalpy_defect_j: f64,
+        gate: &CancelGate,
+    ) -> Result<(SpeciesEnthalpyDiffusionStep<N>, Vec<EnergySum>), ChtError> {
         poll(gate)?;
         nonnegative(maximum_enthalpy_defect_j)?;
         if specific_enthalpy_j_kg.len() != domain.cell_count() {
@@ -284,7 +309,7 @@ impl MaterialAdvectionStep {
             return Err(refuse("diffusion exceeds its enthalpy balance budget"));
         }
         poll(gate)?;
-        Ok(SpeciesEnthalpyDiffusionStep {
+        let step = SpeciesEnthalpyDiffusionStep {
             species,
             specific_enthalpy_j_kg: specific_h,
             diffusive_enthalpy_change_j: changes,
@@ -294,6 +319,7 @@ impl MaterialAdvectionStep {
                 mass_frame_enthalpy_defect_j: thermal.mass_frame_defect.value(),
                 absolute_enthalpy_defect_j,
             },
-        })
+        };
+        Ok((step, thermal.increments))
     }
 }

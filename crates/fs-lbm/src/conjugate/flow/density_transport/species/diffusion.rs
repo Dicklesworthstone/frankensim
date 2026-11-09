@@ -36,6 +36,10 @@ pub use boundary::{
 };
 mod enthalpy;
 pub use enthalpy::{SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep};
+pub use enthalpy::adaptive::{
+    AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
+    AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
+};
 mod gas;
 pub use gas::{
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,

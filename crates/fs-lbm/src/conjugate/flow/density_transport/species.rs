@@ -19,6 +19,8 @@ pub use diffusion::{
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
+    AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
+    AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,
     ThermochemicalSpeciesDiffusionReport, ThermochemicalSpeciesDiffusionStep,
 };

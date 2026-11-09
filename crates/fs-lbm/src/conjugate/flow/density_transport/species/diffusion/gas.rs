@@ -19,6 +19,7 @@ use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Amount, Temperature};
 
+mod adaptive;
 mod diffusivity;
 pub use diffusivity::GasSpeciesDiffusivity;
 

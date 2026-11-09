@@ -1860,6 +1860,67 @@ Regression definitions cover variable-Cp analytic binary exchange, formation
 reference invariance, graded physical face interpolation, absent species,
 source-dependent diffusivity, validity axes and atomic refusals.
 
+## Adaptive species and enthalpy with original material feedback
+
+`SpeciesEnthalpyDiffusionModel` provides one original state-dependent caloric
+and transport closure. `diffuse_species_with_enthalpy_adaptive` prepares the
+original state, advances a positive half-step predictor, and prepares its
+midpoint properties. A full-step corrector then starts from the original
+substep inventories using those properties. Predictor heat is never deposited
+again. The endpoint source image supplies the next substep and is returned
+as `state` on acceptance; a gas caller obtains refreshed Cp, conductivity,
+viscosity, EOS density and diffusivity without repeating the final inversion.
+`GasSpeciesEnthalpySource` implements this same generic closure directly.
+
+Complete intervals at n and 2n physical refresh steps estimate smooth
+second-order time error through |fine-coarse|/3. Temperature in K, specific
+enthalpy in absolute J/kg, and each constituent mass fraction have independent
+allowances. Formation-energy totals cannot enlarge a thermal tolerance.
+The accepted candidate is the original positive fine trajectory, with no
+extrapolation, clipping or composition normalization. The prior fine solution
+becomes the next coarse comparison. This is estimated temporal accuracy,
+not a certified global error bound; sharp constitutive changes and phase corners
+need their own source validity and resolution controls.
+
+
+Complete relaxation can make coarse and fine endpoints agree after both have
+skipped a thermal transient. The driver therefore compares sampled D and
+error-free centered species partial-enthalpy differences at the start and
+midpoint. For changing coefficients, the accepted outer face relaxation must
+not exceed one half. That rate is recovered over the full physical refresh
+step, so increasing the inner frozen sweeps cannot bypass the check. Exact
+unchanged coefficients retain the large-step path. This anti-saturation check
+uses counted face queries without another source inversion or face buffer;
+it supplements the temporal estimate rather than certifying a constitutive law.
+
+Every predictor, corrector and discarded trajectory contributes to total
+pair/component work and source-query counts. The storage gate reserves live
+comparison states and three source preparations before allocation; obsolete
+coarse source images are dropped before finer work. Original source-table
+storage and temporary source-evaluation scratch remain additional. A refused
+source state, depleted budget or cancellation publishes no candidate.
+
+Accepted physical correctors accumulate their original constituent-mass and
+enthalpy defects. A separate initial-to-final audit uses error-free subtraction
+and products for represented storage. Internally, the frozen kernel returns its
+existing compensated energy increments by move; both components survive
+substep composition, even when a public scalar heat readback rounds away a
+small term beside formation energy. Initial/final caloric-inversion residuals
+remain explicit in the joule budget, and the largest accepted-stage residual
+is reported separately. Rejected trajectories consume resources but are not
+added to the accepted physical history.
+
+Focused original-kernel regressions cover the isothermal frozen limit,
+independent variable-Cp analytic convergence, a smooth nonlinear heat-of-mixing
+case that defeats unguarded step doubling, simultaneous thermal/diffusivity
+feedback against an independently refined ODE, source/work/storage/cancellation
+refusals, and exact conservation of small heat between large opposing formation
+references. A separate integration regression couples the original NASA source,
+binary material diffusivity and the native carrier to an independent two-cell
+mass/energy ODE. These remain fixed-carrier constitutive diffusion steps;
+pressure/volume evolution, reactions and nonideal molecular cross-effects
+require their original physical owners.
+
 ## Local SGS with general prescribed moving walls
 
 `Grid3::prepare_sgs_with_moving_walls` and the corresponding serial/pooled

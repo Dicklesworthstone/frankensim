@@ -1428,3 +1428,7 @@ fn reservoir_faces_refuse_wrong_ownership_bad_data_and_cumulative_budgets_atomic
     assert_eq!(state, before);
     assert_eq!(initial, [[0.8, 0.2], [0.2, 0.8]]);
 }
+
+
+#[path = "tests/enthalpy_adaptive.rs"]
+mod enthalpy_adaptive;

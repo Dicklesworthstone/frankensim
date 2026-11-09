@@ -312,3 +312,7 @@ fn g3_exact_absence_preserves_isothermal_source_identity_and_refuses_atomically(
     assert_eq!(masses, before.1);
     assert_eq!(h, before.2);
 }
+
+
+#[path = "species_enthalpy_gas/adaptive.rs"]
+mod adaptive;
