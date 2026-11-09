@@ -43,6 +43,8 @@ pub mod adaptive;
 pub mod advection;
 /// Locally nonisothermal, entropy-conjugate heat and binary species transport.
 pub mod nonisothermal;
+/// Isothermal finite-volume transport with full multicomponent Maxwell–Stefan coupling.
+pub mod multicomponent;
 pub mod temperature;
 pub mod thermal;
 pub mod transport;

@@ -9668,3 +9668,53 @@ G1/G3 tests in `tests/density_momentum/coupled.rs` cover acceleration from rest
 with same-interval density/inventory transport, reference-density invariance,
 closed unequal-density mass/carried/kinetic balances, and atomic nonlinear,
 CFL, missing-donor and cancellation refusals.
+
+## Multicomponent liquid miscibility with Maxwell–Stefan transport
+
+`miscibility::multicomponent` connects the original complete regular-solution
+model to the original molar-frame Maxwell–Stefan evaluator on a closed finite-volume
+graph. Every component has an independent compensated inventory. Canonical face
+transfers debit and credit the same amount; each returned candidate checks every
+global species balance, every fixed cell capacity and the actual original
+homogeneous Gibbs-energy change. Unequal molecular masses are retained: zero net
+molar flux does not assert zero diffusive mass flux in the barycentric frame.
+
+Each face uses the finite original chemical-potential difference, including every
+nonideal interaction. The common chemical-potential gauge is removed through
+antisymmetric Gibbs–Duhem pair accumulation at the arithmetic face composition.
+The full coupled friction system is solved with its original equation/frame
+residual checks. This admits cross diffusion, including an individual component
+moving uphill while total chemical free energy decreases; independent Fick laws
+are not substituted. The arithmetic face rule is a consistent two-point spatial
+approximation, not exact finite-jump Fick diffusion.
+
+Preparation canonicalizes faces, shares explicitly authored complete pair
+diffusivity matrices, computes the fixed-temperature interaction matrix once,
+and admits a sufficient global convexity bound using the original tangent
+spectrum and its numerical uncertainty. Local stability at one composition and
+pairwise binary miscibility alone do not establish this admission. The bound is
+conservative and numerical, not an interval certificate or a general phase flash.
+
+The explicit synchronous step has no hidden subcycles: positivity or actual
+free-energy failure refuses atomically. Common strictly positive species support,
+constant equal partial molar volumes and a uniform prescribed temperature are
+required. Absent-species contacts, nonconvex multicomponent phase separation,
+local thermal evolution, variable molecular-diffusivity sources and momentum
+coupling remain outside this owner. Time/space refinement remains necessary.
+The instantaneous constitutive dissipation rate is a diagnostic; it is not an
+integrated explicit-step dissipation certificate.
+
+Numerical storage is contiguous by cell/species, with one reused original
+Maxwell–Stefan workspace per sweep and a shared matrix table. Admission charges
+retained payload and conservative simultaneous transaction/adaptive scratch,
+excluding allocator and species-string overhead. Geometry/species limits,
+checked byte arithmetic and cancellation bound the work.
+
+Validation: all 97 numerical miscibility unit tests passed on the pinned
+nightly-2026-07-06 compiler in the focused actual-source dependency closure
+with one compiler frontend thread. Eight independent new regressions cover
+binary reduction, ternary uphill diffusion, unequal masses/volumes, canonical
+faces, positive traces, convexity/source/workspace refusals, large-step energy
+and positivity refusal, cancellation and deterministic replay. This is focused
+numerical execution, not a full-workspace or physical-validation certificate.
+
