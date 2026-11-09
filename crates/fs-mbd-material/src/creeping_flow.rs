@@ -4,9 +4,9 @@
 //! torque=-8*pi*mu*a^3*omega. An explicit source-bound [`navier_slip`]
 //! interface changes both resistances. Fully immersed buoyancy is -rho*V*g.
 //! The shared fluid snapshot supplies rho and mu; the original material body
-//! supplies mass and inertia. The existing rigid-body integrator owns ALL
-//! momentum, position and attitude updates. Only its linear midpoint load
-//! relation is closed here, not a second time integrator.
+//! supplies mass and inertia. Native rigid-body mechanics owns all momentum,
+//! position and attitude updates. The ordinary entry closes its midpoint load
+//! relation; [`exact`] explicitly selects the native exact held relaxation.
 //!
 //! References: R. Fitzpatrick, *Axisymmetric Stokes Flow Around a Solid Sphere*,
 //! equations (10.94), (10.125)-(10.128),
@@ -33,6 +33,8 @@ use fs_mbd::{
     DynamicsError, Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 
+/// Exact held Stokes velocity, displacement and free-spin relaxation.
+pub mod exact;
 /// Nonrotating, quasi-steady sphere motion beyond the Stokes regime.
 pub mod finite_reynolds;
 /// Uniform Navier slip from the original ordered solid/fluid interface source.

@@ -3,6 +3,8 @@
 mod common;
 #[path = "creeping_flow/driven.rs"]
 mod driven;
+#[path = "creeping_flow/exact.rs"]
+mod exact;
 #[path = "creeping_flow/finite_reynolds.rs"]
 mod finite_reynolds;
 #[path = "creeping_flow/navier_slip.rs"]

@@ -1,5 +1,28 @@
 # CONTRACT: fs-mbd
 
+## Exact held isotropic drag
+
+`linear_drag::IsotropicLinearDrag` advances the original native pose and momenta
+under a fixed world force, uniform gravity, held translational bath velocity and
+nonnegative isotropic translation/rotation resistance. The body must have exactly
+equal principal moments and no applied couple. Translation and its displacement
+follow the affine exponential solution; free spin decays about a fixed axis and
+the attitude uses its integrated angular velocity. The shared `fs-math::decay`
+owner retains tiny losses and representable late tails. There is no relaxation
+number cutoff, midpoint sign reversal, speed clamp, inertia projection or new
+material law; changing sources, lift, contact and general forced/tumbling
+rotation remain outside this explicit reduction.
+
+The receipt integrates drag impulses, held force/gravity work, maintaining-bath
+work and translation/spin heat independently of represented-state energy.
+Translation heat uses the nonnegative mean-square plus exponential-variance
+integral, including its regular zero-drag limit. The shared native kinetic-change
+owner and actual returned coordinates determine storage and numerical residuals;
+lost coordinate or momentum increments remain visible rather than becoming heat.
+`tests/linear_drag.rs` covers independent analytic driven motion/work, stiff
+entrainment, semigroup composition, terminal settling, a tiny unresolved state
+change, zero drag, Galilean covariance and unsupported-input refusal.
+
 ## Relative contact velocity
 
 The shared articulated normal, tangential and bilateral velocity rows accumulate

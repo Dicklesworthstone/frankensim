@@ -33,6 +33,8 @@ pub mod goddard;
 /// Conservative uniform and spatial gravity on the native rigid-body state.
 pub mod gravity;
 pub mod howe;
+/// Exact held linear drag, spherical spin decay and integrated source work.
+pub mod linear_drag;
 pub mod otis;
 pub mod otto;
 pub mod planar_drive;

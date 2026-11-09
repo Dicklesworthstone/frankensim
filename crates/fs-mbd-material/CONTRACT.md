@@ -1210,6 +1210,31 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+### Exact held Stokes relaxation on the same material sphere
+
+`CreepingSphere::step_exact` and `step_exact_with_wrench` explicitly select
+`fs-mbd::linear_drag::IsotropicLinearDrag`, using the original body's mass and
+inertia and the existing frozen source's translation/rotation resistances.
+Sourced Navier slip changes those same coefficients; no alternative material
+or drag formula is introduced. Body gravity, buoyancy and an optional held
+world force act throughout the analytically integrated velocity/displacement
+path. Spherical free-spin decay also advances its exact integrated attitude.
+Nonzero applied torque and selected rotational lift refuse rather than being
+omitted or advanced with an incorrect fixed-axis rotation.
+
+`ExactCreepingStepControls` retains a positive work-defect budget and finite
+duration but imposes no midpoint relaxation-fraction ceiling. Source, geometry,
+Reynolds and fluid-diffusion admission remain in force. Relative velocity lies
+on the straight segment between its endpoints and free spin only decreases,
+so endpoint speed checks bound the whole exact held interval. Independently
+integrated heat and background-flow work remain separate from external-force
+work and actual kinetic/gravity/buoyancy storage. These are numerical-model
+checks, not a claim that large intervals resolve changing reservoirs, fluid
+history or contact. The existing midpoint and thermal APIs are unchanged.
+`tests/creeping_flow/exact.rs` checks material-only substitutions, Navier-source
+coefficients, long-step settling and entrainment, held drives and retained
+regime/cancellation refusal.
+
 ### Source-bound Navier slip on the same native sphere
 
 `CreepingSphere::with_navier_slip` accepts a `navier_slip::NavierSlipBoundary`
