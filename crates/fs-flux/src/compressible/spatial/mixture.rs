@@ -42,7 +42,8 @@ pub mod reactive;
 pub mod vorticity;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
-pub use reservoir::ReservoirBoundary;
+pub use reservoir::{FiniteReservoir, FiniteReservoirReport, ReservoirBoundary};
+pub use super::super::mixture::{FiniteReservoirInventory, FiniteReservoirTransfer};
 /// Prepared physical-face reservoir traces for spatially varying inflow.
 pub mod reservoir_profiles;
 pub use reservoir_profiles::ReservoirFaceState;
@@ -256,7 +257,8 @@ impl MixtureEuler3d {
             scalars
                 .checked_mul(size_of::<f64>())?
                 .checked_add(grid.len().checked_mul(size_of::<Primitive>())?)?
-                .checked_add(faces.checked_mul(size_of::<FaceFlux>())?)
+                .checked_add(faces.checked_mul(size_of::<FaceFlux>())?)?
+                .checked_add(size_of::<super::super::mixture::finite::FiniteReservoirs<3, 6>>())
         };
         checked().ok_or(Error::Invalid("volumetric species workspace size overflow"))
     }
@@ -384,9 +386,11 @@ impl MixtureEuler3d {
     /// specify the upstream stagnation state. The original one-sided gas law
     /// resolves inflow, outflow, choking and reversal; outward entropy and shear
     /// remain interior-owned. Unselected reservoirs retain their full-state
-    /// Riemann boundary. An empty selection restores that original behavior.
+    /// Riemann boundary. An empty selection restores that original behavior on
+    /// held reservoirs; finite tanks always retain their compact pressure law.
     ///
-    /// This is fixed infinite storage, not a finite tank or a molecular bath.
+    /// Held reservoirs retain infinite storage. Finite tank bindings preserve
+    /// their compact law; neither selection supplies a molecular boundary bath.
     /// Spatial/time-dependent exterior profiles are not selected by this entry.
     /// Selection reuses fixed metadata and allocates no stepping workspace.
     pub fn with_stagnation_reservoirs(
@@ -687,7 +691,7 @@ impl MixtureEuler3d {
                                 &self.gas,
                                 &self.grid,
                                 self.boundaries,
-                                &self.reservoirs,
+                                &mut self.reservoirs,
                                 &workspace.kicked,
                                 &mut self.work,
                                 dt,
@@ -732,7 +736,7 @@ impl MixtureEuler3d {
                             &self.gas,
                             &self.grid,
                             self.boundaries,
-                            &self.reservoirs,
+                            &mut self.reservoirs,
                             &self.states,
                             &mut self.work,
                             dt,
@@ -804,6 +808,7 @@ impl MixtureEuler3d {
                 .expect("prepared stage profiles")
                 .commit();
         }
+        self.reservoirs.finite.publish();
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
             .copy_from_slice(&self.work.boundary_trial);
@@ -818,7 +823,7 @@ fn attempt(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     original: &[f64],
     work: &mut Workspace,
     dt: f64,
@@ -848,7 +853,7 @@ fn attempt_with_contact(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     original: &[f64],
     work: &mut Workspace,
     dt: f64,
@@ -884,7 +889,7 @@ fn rk_stage(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     trial_profiles: bool,
     original: &[f64],
     work: &mut Workspace,
@@ -902,6 +907,7 @@ fn rk_stage(
         boundaries,
         reservoirs,
         trial_profiles,
+        final_stage,
         if final_stage { &work.stage } else { original },
         &mut work.primitive,
         &mut work.slopes,
@@ -961,6 +967,13 @@ fn rk_stage(
         },
         cancelled,
     )?;
+    reservoirs.finite.stage(
+        gas,
+        &work.boundary_trial,
+        BoundarySide::ALL.map(|side| grid.face_count(side)),
+        if final_stage { 1.0 } else { 2.0 },
+        cancelled,
+    )?;
     Ok(stats)
 }
 
@@ -985,6 +998,7 @@ fn spatial(
         boundaries,
         reservoirs,
         false,
+        false,
         states,
         primitive,
         slopes,
@@ -1004,6 +1018,7 @@ fn spatial_with_contact(
     boundaries: Boundaries3d,
     reservoirs: &reservoir::Reservoirs,
     trial_profiles: bool,
+    trial_finite: bool,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -1020,6 +1035,7 @@ fn spatial_with_contact(
         boundaries,
         reservoirs,
         trial_profiles,
+        trial_finite,
         states,
         primitive,
         slopes,
@@ -1040,6 +1056,7 @@ fn spatial_with_motion(
     boundaries: Boundaries3d,
     reservoirs: &reservoir::Reservoirs,
     trial_profiles: bool,
+    trial_finite: bool,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -1127,6 +1144,8 @@ fn spatial_with_motion(
         limited,
         ..stepping::StageStats::default()
     };
+    let mut finite_rates = [0.0; 6];
+    let mut finite_corrections = [0.0; 6];
     let mut left = [0.0; WIDTH_LIMIT];
     let mut right = [0.0; WIDTH_LIMIT];
     let mut result = [0.0; WIDTH_LIMIT];
@@ -1241,7 +1260,9 @@ fn spatial_with_motion(
                     let c = grid.coordinates(k);
                     let [a, b] = tangents(axis);
                     let boundary_face = c[a] + grid.shape[a] * c[b];
-                    if let Some(reservoir) = reservoirs.stagnation_cell(axis, sign, n) {
+                    if let Some(reservoir) =
+                        reservoirs.stagnation_cell_at(axis, sign, n, trial_finite)
+                    {
                         if first_order {
                             gas.reservoir_spatial_flux(
                                 q(k),
@@ -1378,6 +1399,20 @@ fn spatial_with_motion(
                 cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
             }
         };
+        if let cartesian::FaceKind::Boundary { sign, .. } = face.kind {
+            let slot = 2 * axis + usize::from(sign > 0.0);
+            if let Some(volume) = reservoirs.finite.volume(slot) {
+                let increment = 0.5 * grid.face_area(BoundarySide::ALL[slot])
+                    * receipt.signal_speed / volume;
+                let y = increment - finite_corrections[slot];
+                let next = finite_rates[slot] + y;
+                finite_corrections[slot] = (next - finite_rates[slot]) - y;
+                finite_rates[slot] = next;
+                if !finite_rates[slot].is_finite() {
+                    return Err(Error::Invalid("finite volumetric reservoir CFL overflow"));
+                }
+            }
+        }
         if let Some((workspace, _)) = contact.as_mut() {
             match face.kind {
                 cartesian::FaceKind::Interior { left: l, right: r } => {
@@ -1417,7 +1452,8 @@ fn spatial_with_motion(
         grid,
         |axis, face| metadata[axis][face].signal_speed,
         cancelled,
-    )?;
+    )?
+    .max(finite_rates.into_iter().fold(0.0, f64::max));
     if force_control.is_some() {
         stats.rate = stats.rate.max(cell_rate);
     }

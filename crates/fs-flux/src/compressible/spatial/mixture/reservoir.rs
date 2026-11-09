@@ -2,6 +2,10 @@
 
 use super::*;
 use crate::compressible::AxisBoundaries;
+use crate::compressible::mixture::finite::FiniteReservoirs;
+
+mod finite;
+pub use finite::{FiniteReservoir, FiniteReservoirReport};
 
 /// Uniform externally maintained gas on one original physical side.
 ///
@@ -29,6 +33,7 @@ pub(super) struct Reservoirs {
     states: Vec<f64>,
     primitive: Vec<Primitive>,
     pub(super) profiles: Option<reservoir_profiles::Profiles>,
+    pub(super) finite: FiniteReservoirs<3, 6>,
 }
 
 impl Reservoirs {
@@ -61,6 +66,7 @@ impl Reservoirs {
             states: allocated(inputs.len() * width, 0.0)?,
             primitive: allocated(inputs.len(), Primitive::default())?,
             profiles: None,
+            finite: FiniteReservoirs::empty(),
         };
         let mut conservative = [0.0; WIDTH_LIMIT];
         for (index, input) in inputs.iter().enumerate() {
@@ -113,7 +119,8 @@ impl Reservoirs {
             return Err(Error::Invalid("too many compact reservoir sides"));
         }
         let n = gas.species_count();
-        let mut candidate = [false; 6];
+        let mut candidate = std::array::from_fn(|slot| self.finite.has_side(slot));
+        let mut selected = [false; 6];
         let mut flux = [0.0; WIDTH_LIMIT];
         for &side in sides {
             stepping::poll::<Error>(cancelled)?;
@@ -123,7 +130,7 @@ impl Reservoirs {
             let index = self.slots[slot].ok_or(Error::Invalid(
                 "compact reservoir needs an already bound uniform exterior",
             ))?;
-            if candidate[slot] || self.primitive[index].velocity != [0.0; 3] {
+            if selected[slot] || self.primitive[index].velocity != [0.0; 3] {
                 return Err(Error::Invalid(
                     "compact reservoir sides must be unique and exactly stationary",
                 ));
@@ -142,6 +149,7 @@ impl Reservoirs {
                 &mut *cancelled,
             )?;
             candidate[slot] = true;
+            selected[slot] = true;
         }
         stepping::poll::<Error>(cancelled)?;
         self.stagnation = candidate;
@@ -162,7 +170,20 @@ impl Reservoirs {
         sign: f64,
         species: usize,
     ) -> Option<fs_gas::multicomponent::Cell<'_>> {
+        self.stagnation_cell_at(axis, sign, species, false)
+    }
+
+    pub(super) fn stagnation_cell_at(
+        &self,
+        axis: usize,
+        sign: f64,
+        species: usize,
+        trial_finite: bool,
+    ) -> Option<fs_gas::multicomponent::Cell<'_>> {
         let slot = side_index(axis, sign);
+        if let Some(state) = self.finite.state(slot, trial_finite) {
+            return Some(state);
+        }
         if !self.stagnation[slot] {
             return None;
         }
@@ -194,6 +215,8 @@ impl Reservoirs {
                 continue;
             };
             let [a, b] = tangents(axis);
+            let mut compact_rate = 0.0;
+            let mut compact_correction = 0.0;
             for face in 0..grid.face_count(side) {
                 let mut c = [0; 3];
                 c[axis] = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
@@ -222,7 +245,18 @@ impl Reservoirs {
                     })
                     .sum::<f64>();
                 maximum = maximum.max(local);
+                if let Some(volume) = self.finite.volume(side_index(axis, sign)) {
+                    let increment = 0.5 * grid.face_area(side) * face.signal_speed / volume;
+                    let y = increment - compact_correction;
+                    let next = compact_rate + y;
+                    compact_correction = (next - compact_rate) - y;
+                    compact_rate = next;
+                }
             }
+            if !compact_rate.is_finite() {
+                return Err(Error::Invalid("finite volumetric reservoir CFL overflow"));
+            }
+            maximum = maximum.max(compact_rate);
         }
         Ok(maximum)
     }
@@ -231,9 +265,14 @@ impl Reservoirs {
         self.states.capacity() * size_of::<f64>()
             + self.primitive.capacity() * size_of::<Primitive>()
             + self.profiles.as_ref().map_or(0, |p| p.workspace_bytes())
+            + self.finite.workspace_bytes()
     }
 
-    pub(super) fn try_clone(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
+    pub(super) fn try_clone(
+        &self,
+        gas: &MixtureGas,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
         let mut states = allocated(self.states.len(), 0.0)?;
         copy_values(&self.states, &mut states, cancelled)?;
         let mut primitive = allocated(self.primitive.len(), Primitive::default())?;
@@ -251,6 +290,7 @@ impl Reservoirs {
             states,
             primitive,
             profiles,
+            finite: self.finite.try_clone(gas, cancelled)?,
         })
     }
 
@@ -259,6 +299,15 @@ impl Reservoirs {
         side: BoundarySide,
         species: usize,
     ) -> Option<ReservoirBoundary<'_>> {
+        let slot = side_index(side.axis(), side.sign());
+        if let Some(state) = self.finite.state(slot, false) {
+            return Some(ReservoirBoundary {
+                side,
+                partial_densities: state.partial_densities,
+                velocity: [0.0; 3],
+                pressure_pa: self.finite.primitive(slot, false)?.pressure,
+            });
+        }
         self.row(side.axis(), side.sign(), species)
             .map(|row| ReservoirBoundary {
                 side,
@@ -307,7 +356,9 @@ impl Reservoirs {
             .as_ref()
             .and_then(|profile| profile.primitive_at(side, face, trial_profiles))
             .or_else(|| {
-                self.slots[side_index(side.axis(), side.sign())].map(|index| self.primitive[index])
+                let slot = side_index(side.axis(), side.sign());
+                self.finite_primitive(slot)
+                    .or_else(|| self.slots[slot].map(|index| self.primitive[index]))
             })
     }
 
@@ -335,8 +386,32 @@ impl Reservoirs {
         {
             return Some(normal_primitive(row, species, axis));
         }
+        let slot = side_index(axis, sign);
+        if let Some(state) = self.finite.state(slot, false) {
+            return Some(SpatialPrimitive {
+                partial_densities: state.partial_densities,
+                normal_velocity: 0.0,
+                transverse_velocity: [0.0; 2],
+                pressure: self.finite.primitive(slot, false)?.pressure,
+            });
+        }
         self.row(axis, sign, species)
             .map(|row| normal_primitive(row, species, axis))
+    }
+
+    fn finite_primitive(&self, slot: usize) -> Option<Primitive> {
+        self.finite.primitive(slot, false).map(|p| Primitive {
+            density: p.density,
+            velocity: [0.0; 3],
+            pressure: p.pressure,
+            temperature: p.temperature,
+            sound_speed: p.sound_speed,
+        })
+    }
+
+    /// Additional storage beyond the empty finite metadata already in the field.
+    pub(super) fn extra_workspace_bytes(&self) -> usize {
+        self.workspace_bytes() - size_of::<FiniteReservoirs<3, 6>>()
     }
 
     pub(super) fn maximum_rate(&self, grid: &CartesianGrid) -> f64 {
@@ -344,8 +419,13 @@ impl Reservoirs {
     }
 
     pub(super) fn maximum_rate_at(&self, grid: &CartesianGrid, trial_profiles: bool) -> f64 {
-        self.primitive
+        self.slots
             .iter()
+            .enumerate()
+            .filter_map(|(slot, index)| {
+                self.finite_primitive(slot)
+                    .or_else(|| index.map(|index| self.primitive[index]))
+            })
             .map(|p| {
                 (0..3)
                     .map(|axis| (p.velocity[axis].abs() + p.sound_speed) / grid.spacing[axis])

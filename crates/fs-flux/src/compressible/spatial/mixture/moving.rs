@@ -220,6 +220,7 @@ pub(super) fn attempt(
             boundaries,
             reservoirs,
             false,
+            false,
             input,
             &mut work.primitive,
             &mut work.slopes,

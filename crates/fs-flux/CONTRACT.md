@@ -10826,3 +10826,47 @@ whole-domain W using the authored depth; external RCR powers remain W/m. Neither
 physical resistor loss nor numerical BDF defect is combined with molecular
 heating or silently deposited in a carried inventory.
 
+
+## Finite evolving-mixture pressure storage on volumetric Cartesian fields
+
+`MixtureEuler3d::with_finite_reservoirs` connects each selected stationary,
+uniform physical side to the same source-owned finite-mixture storage used by
+the planar field. All faces on one side share its rigid, perfectly mixed tank;
+different sides retain independent inventories. Both native SSPRK2 residuals
+use the corresponding field and tank stages. The complete first tank stage
+drives the second pressure/composition trace, and the accepted inventory
+receives the same two weighted outward face transfers as the field account.
+
+Every canonical species and the original referenced total energy is conserved
+across a port. Incoming kinetic energy thermalizes, pressure flow work is
+counted once, and complete Cartesian impulse goes to the fixed support. Public
+uniform and physical-face readback follows accepted tank composition and
+pressure. Reports preserve source pressure/temperature, species inventories,
+support impulse and both referenced and original-gauge energy residuals.
+
+Initial and residual admission include compensated finite aperture/volume wave
+rates alongside the unsplit three-axis field CFL. Prepared accepted/trial
+inventories, explicit total capacity admission and joint publication preserve
+cells, tanks, loads, clock and reports on cancellation or refused trials. The
+existing forcing and timed-profile routes share this stage owner; other sides
+may retain their original prescribed profiles. An explicitly requested contact
+equilibrium correction remains a separate field energy receipt, not tank heat.
+
+Reactive and molecular prepared-field cloning/budget/reset sites retain the
+finite inventory and its accepted reports without warm allocations. This adds
+no reaction or heat-transfer law inside the tank. The existing molecular
+admission still refuses compact ports without a physical diffusive bath, and
+nonzero moving-grid admission still refuses bound exteriors.
+
+Five new volumetric native regression groups passed together with the five
+planar groups: all six orientations, both reconstruction orders, filling and
+blowdown with different variable-Cp compositions, exact-zero species, complete
+support/shear transfer, body-force work, global species/energy balance, tiny-tank
+initial CFL, workspace refusal and late cancellation followed by exact retry.
+The measured pressure-feedback errors decreased by approximately four on
+successive timestep halvings. The bounded build used the actual inviscid field,
+reconstruction, RK, forcing, moving-grid/profile interfaces and original gas
+EOS/port/Plenum sources. Full reactive/molecular orchestration and the complete
+workspace were not executed; their narrow clone/reset edits were reviewed and
+Rust-parsed. These compact tanks retain the original estimated-model scope:
+no internal tank waves, finite mixing time or discrete entropy theorem.

@@ -359,8 +359,10 @@ fn g1_volumetric_compact_reservoir_supplies_canonical_species_and_stagnation_ent
                 }
                 assert_eq!(flow.workspace_bytes(), bytes);
             }
-            let cloned = flow.reservoirs.try_clone(&mut || false).unwrap();
+            let cloned = flow.reservoirs.try_clone(flow.gas(), &mut || false).unwrap();
             assert!(cloned.is_stagnation(side.axis(), side.sign()));
         }
     }
 }
+
+mod finite;

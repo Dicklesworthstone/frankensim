@@ -127,7 +127,7 @@ impl ReactingEuler3d {
                 flow.gas(),
                 flow.grid(),
             )?)
-            .and_then(|bytes| bytes.checked_add(flow.reservoirs.workspace_bytes()))
+            .and_then(|bytes| bytes.checked_add(flow.reservoirs.extra_workspace_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
                     flow.boundary_impulses
@@ -217,8 +217,8 @@ impl ReactingEuler3d {
             MixtureEuler3d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
-        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
-        trial.workspace_bytes += trial.reservoirs.workspace_bytes();
+        trial.reservoirs = flow.reservoirs.try_clone(flow.gas(), &mut cancelled)?;
+        trial.workspace_bytes += trial.reservoirs.extra_workspace_bytes();
         copy_physical(&flow, &mut trial, &mut cancelled)?;
         let mut boundary_impulses = allocated(flow.boundary_impulses.len(), 0.0)?;
         copy_field(
@@ -1139,6 +1139,11 @@ fn copy_physical(
             ));
         }
     }
+    target.reservoirs.finite.copy_accepted_from(
+        &source.gas,
+        &source.reservoirs.finite,
+        cancelled,
+    )?;
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())
