@@ -137,6 +137,87 @@ pub struct RelaxationNetworkLink {
     pub branches: Vec<SpatialRelaxationBranch>,
 }
 
+/// Held viscous kinetics relative to the ORIGINAL reference laws.
+///
+/// One multiplier per Kelvin form and one per original Maxwell branch. Material
+/// Gram rows, branch order and complete elastic histories keep their reference
+/// identity; rate changes alter no stored energy and create no parameter work.
+/// This low-level bank carries no empirical temperature law or validity claim.
+/// Higher material owners evaluate their declared calibration and always scale
+/// the reference law, never an already shifted result.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldRelaxationKinetics<'a> {
+    /// Finite nonnegative multipliers on original Kelvin viscosity.
+    pub viscosity_scales: &'a [f64],
+    /// Positive time ratios tau/tau_ref in original [link][branch] order.
+    pub relaxation_time_scales: &'a [Vec<f64>],
+}
+impl HeldRelaxationKinetics<'_> {
+    /// Admit every effective coefficient without allocating or preparing flow.
+    /// Work is linear in the supplied graph and branch counts, with bounded
+    /// six-coordinate matrix work. Original Kelvin Gram directions are retained
+    /// by their existing scaling owner; memory factors are never refactored.
+    pub fn validate(&self, links: &[RelaxationNetworkLink]) -> Result<(), RelaxationNetworkError> {
+        self.validate_layout(links)?;
+        for (e, link) in links.iter().enumerate() {
+            self.damping(e, &link.viscous.damping)?;
+            for (branch, source) in link.branches.iter().enumerate() {
+                self.relaxation_time(e, branch, source.relaxation_time_s)?;
+            }
+        }
+        Ok(())
+    }
+    fn validate_layout(
+        &self,
+        links: &[RelaxationNetworkLink],
+    ) -> Result<(), RelaxationNetworkError> {
+        if self.viscosity_scales.len() != links.len()
+            || self.relaxation_time_scales.len() != links.len()
+            || self
+                .relaxation_time_scales
+                .iter()
+                .zip(links)
+                .any(|(scales, link)| scales.len() != link.branches.len())
+        {
+            return Err(RelaxationNetworkError::Invalid(
+                "held kinetics require complete original connector and branch banks",
+            ));
+        }
+        Ok(())
+    }
+    fn damping(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+    ) -> Result<PassiveBushingMatrix, RelaxationNetworkError> {
+        Ok(reference
+            .scaled(self.viscosity_scales[connector])
+            .map_err(|error| connector_error(connector, error.into()))?)
+    }
+    fn relaxation_time(
+        &self,
+        connector: usize,
+        branch: usize,
+        reference_s: f64,
+    ) -> Result<f64, RelaxationNetworkError> {
+        let scale = self.relaxation_time_scales[connector][branch];
+        let time = reference_s * scale;
+        let rate = time.recip();
+        if !scale.is_finite()
+            || scale <= 0.0
+            || !time.is_finite()
+            || time <= 0.0
+            || !rate.is_finite()
+            || rate <= 0.0
+        {
+            return Err(RelaxationNetworkError::Invalid(
+                "held Maxwell time scales require positive representable times and rates",
+            ));
+        }
+        Ok(time)
+    }
+}
+
 /// Complete [link][original branch][six original factor rows] elastic histories.
 /// A zero row may hold independently relaxing stored energy. Such a supplied
 /// history is kept, never projected away or relabeled as mechanical work.
@@ -248,6 +329,7 @@ struct Scratch {
 // vanishes because that response lies in range(L). Cache its scalar law once.
 struct PreparedMemory {
     rows: [[f64; 6]; 6],
+    relaxation_time_s: f64,
     decay: f64,
     heat_fraction: f64,
     separable: bool,
@@ -309,6 +391,49 @@ impl PreparedRelaxationNetwork {
         links: &[RelaxationNetworkLink],
         duration_s: f64,
         limits: RelaxationNetworkLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RelaxationNetworkError> {
+        Self::prepare(
+            poses, properties, links, None, duration_s, limits, cancelled,
+        )
+    }
+
+    /// Freeze explicitly supplied kinetics for this source interval.
+    ///
+    /// Only the original Kelvin viscosity and Maxwell times change. Full
+    /// original material factors and history coordinates retain their identity.
+    /// The existing exact source integrates its OWN held coefficients and heat;
+    /// variation within an interval belongs to the composing time/thermal owner.
+    /// No empirical law, entropy term or stiffness-change work is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_kinetics(
+        poses: &[Pose],
+        properties: &[MassProperties],
+        links: &[RelaxationNetworkLink],
+        kinetics: HeldRelaxationKinetics<'_>,
+        duration_s: f64,
+        limits: RelaxationNetworkLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RelaxationNetworkError> {
+        Self::prepare(
+            poses,
+            properties,
+            links,
+            Some(kinetics),
+            duration_s,
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        poses: &[Pose],
+        properties: &[MassProperties],
+        links: &[RelaxationNetworkLink],
+        kinetics: Option<HeldRelaxationKinetics<'_>>,
+        duration_s: f64,
+        limits: RelaxationNetworkLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, RelaxationNetworkError> {
         poll(&mut cancelled)?;
@@ -353,19 +478,31 @@ impl PreparedRelaxationNetwork {
                 ));
             }
         }
+        if let Some(kinetics) = kinetics {
+            kinetics.validate_layout(links)?;
+        }
         let mut viscous = reserve(links.len())?;
         let mut branch_counts = reserve(links.len())?;
         let mut memories = reserve(branches)?;
-        for link in links {
+        for (e, link) in links.iter().enumerate() {
             poll(&mut cancelled)?;
-            viscous.push(link.viscous.clone());
+            let mut effective = link.viscous.clone();
+            if let Some(kinetics) = kinetics {
+                effective.damping = kinetics.damping(e, &link.viscous.damping)?;
+            }
+            viscous.push(effective);
             branch_counts.push(link.branches.len());
-            for branch in &link.branches {
+            for (b, branch) in link.branches.iter().enumerate() {
                 poll(&mut cancelled)?;
-                let distance = duration_s * branch.relaxation_time_s.recip();
+                let relaxation_time_s = match kinetics {
+                    Some(kinetics) => kinetics.relaxation_time(e, b, branch.relaxation_time_s)?,
+                    None => branch.relaxation_time_s,
+                };
+                let distance = duration_s * relaxation_time_s.recip();
                 let separable = duration_s > 0.0 && distance > 0.0 && distance.is_finite();
                 memories.push(PreparedMemory {
                     rows: branch.gram_rows,
+                    relaxation_time_s,
                     decay: if separable { det::exp(-distance) } else { 1.0 },
                     heat_fraction: if separable {
                         -det::expm1(-2.0 * distance)
@@ -422,7 +559,7 @@ impl PreparedRelaxationNetwork {
             let mut row_offset = m;
             for (e, link) in links.iter().enumerate() {
                 poll(&mut cancelled)?;
-                let c = link.viscous.damping.native_coefficients();
+                let c = viscous[e].damping.native_coefficients();
                 for component in 0..6 {
                     for i in 0..body_n {
                         let mut value = Dd::ZERO;
@@ -436,7 +573,7 @@ impl PreparedRelaxationNetwork {
                 }
                 for branch in &link.branches {
                     poll(&mut cancelled)?;
-                    let rate = branch.relaxation_time_s.recip();
+                    let rate = memories[(memory - body_n) / 6].relaxation_time_s.recip();
                     let root = det::sqrt(rate);
                     for a in 0..6 {
                         let index = memory + a;
@@ -540,6 +677,21 @@ impl PreparedRelaxationNetwork {
             planned_live_bytes: bytes as usize,
             planned_preparation_terms: terms as u64,
         })
+    }
+
+    /// The actual held Kelvin form used by dynamics, impulse and heat.
+    pub fn effective_damping(&self, connector: usize) -> Option<&PassiveBushingMatrix> {
+        self.links.get(connector).map(|link| &link.geometry.damping)
+    }
+
+    /// Actual held relaxation time in original connector/branch order.
+    /// No allocation or numerical preparation occurs.
+    pub fn effective_relaxation_time_s(&self, connector: usize, branch: usize) -> Option<f64> {
+        if branch >= *self.branch_counts.get(connector)? {
+            return None;
+        }
+        let offset: usize = self.branch_counts[..connector].iter().sum();
+        Some(self.memories[offset + branch].relaxation_time_s)
     }
 
     pub const fn duration_s(&self) -> f64 {

@@ -26,7 +26,9 @@ use crate::spatial_loads::internal_impulse::{
     },
 };
 pub use crate::spatial_loads::{
-    internal_impulse::viscous::network::relaxation::RelaxationNetworkLimits,
+    internal_impulse::viscous::network::relaxation::{
+        HeldRelaxationKinetics, RelaxationNetworkLimits,
+    },
     internal_motion::viscous::driven::HeldInternalEffort,
 };
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, RigidKineticEnergyChange, Vec3};
@@ -142,6 +144,7 @@ pub fn step_relaxation_network(
         links,
         memory,
         efforts,
+        None,
         BodyLoads::Unloaded,
         duration_s,
         controls,
@@ -170,6 +173,7 @@ pub fn step_relaxation_network_with_loads(
         links,
         memory,
         efforts,
+        None,
         BodyLoads::Held(loads),
         duration_s,
         controls,
@@ -197,6 +201,102 @@ pub fn step_relaxation_network_with_spatial_loads(
         links,
         memory,
         efforts,
+        None,
+        BodyLoads::Spatial(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// The same complete native motion with explicitly held viscous kinetics.
+/// Original reference laws and memory bases stay fixed; this bank changes
+/// Kelvin viscosity and Maxwell times only. Both source halves use the same
+/// admitted coefficients. The composing thermal/time owner resolves their
+/// variation and supplies the next interval's bank without resetting history.
+#[allow(clippy::too_many_arguments)]
+pub fn step_relaxation_network_with_kinetics(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[RelaxationNetworkLink],
+    memory: &[Vec<[f64; 6]>],
+    efforts: &[HeldInternalEffort],
+    kinetics: HeldRelaxationKinetics<'_>,
+    duration_s: f64,
+    controls: RelaxationNetworkMotionControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RelaxationNetworkMotionStep, RelaxationNetworkMotionError> {
+    step_network(
+        states,
+        properties,
+        links,
+        memory,
+        efforts,
+        Some(kinetics),
+        BodyLoads::Unloaded,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// The same complete native motion with explicitly held viscous kinetics.
+/// Original reference laws and memory bases stay fixed; this bank changes
+/// Kelvin viscosity and Maxwell times only. Both source halves use the same
+/// admitted coefficients. The composing thermal/time owner resolves their
+/// variation and supplies the next interval's bank without resetting history.
+#[allow(clippy::too_many_arguments)]
+pub fn step_relaxation_network_with_loads_and_kinetics(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[RelaxationNetworkLink],
+    memory: &[Vec<[f64; 6]>],
+    efforts: &[HeldInternalEffort],
+    kinetics: HeldRelaxationKinetics<'_>,
+    loads: HeldExternalLoads<'_>,
+    duration_s: f64,
+    controls: RelaxationNetworkMotionControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RelaxationNetworkMotionStep, RelaxationNetworkMotionError> {
+    step_network(
+        states,
+        properties,
+        links,
+        memory,
+        efforts,
+        Some(kinetics),
+        BodyLoads::Held(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// The same complete native motion with explicitly held viscous kinetics.
+/// Original reference laws and memory bases stay fixed; this bank changes
+/// Kelvin viscosity and Maxwell times only. Both source halves use the same
+/// admitted coefficients. The composing thermal/time owner resolves their
+/// variation and supplies the next interval's bank without resetting history.
+#[allow(clippy::too_many_arguments)]
+pub fn step_relaxation_network_with_spatial_loads_and_kinetics(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[RelaxationNetworkLink],
+    memory: &[Vec<[f64; 6]>],
+    efforts: &[HeldInternalEffort],
+    kinetics: HeldRelaxationKinetics<'_>,
+    loads: HeldSpatialLoads<'_>,
+    duration_s: f64,
+    controls: RelaxationNetworkMotionControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RelaxationNetworkMotionStep, RelaxationNetworkMotionError> {
+    step_network(
+        states,
+        properties,
+        links,
+        memory,
+        efforts,
+        Some(kinetics),
         BodyLoads::Spatial(loads),
         duration_s,
         controls,
@@ -211,6 +311,7 @@ fn step_network(
     links: &[RelaxationNetworkLink],
     memory: &[Vec<[f64; 6]>],
     efforts: &[HeldInternalEffort],
+    kinetics: Option<HeldRelaxationKinetics<'_>>,
     loads: BodyLoads<'_>,
     duration_s: f64,
     controls: RelaxationNetworkMotionControls,
@@ -279,6 +380,9 @@ fn step_network(
         terms,
         controls.limits.source.maximum_preparation_terms as u128,
     )?;
+    if let Some(kinetics) = kinetics {
+        kinetics.validate(links)?;
+    }
     let source_limits = RelaxationNetworkLimits {
         source: DrivenViscousNetworkLimits {
             maximum_bodies: n,
@@ -302,14 +406,25 @@ fn step_network(
             poll(&mut || cancelled())?;
             commands[i] = efforts[i].in_first_frame(states[link.viscous.bodies[0]])?;
         }
-        let mut prepared = PreparedRelaxationNetwork::new(
-            poses,
-            properties,
-            links,
-            half,
-            source_limits,
-            &mut *cancelled,
-        )?;
+        let mut prepared = match kinetics {
+            Some(kinetics) => PreparedRelaxationNetwork::new_with_kinetics(
+                poses,
+                properties,
+                links,
+                kinetics,
+                half,
+                source_limits,
+                &mut *cancelled,
+            )?,
+            None => PreparedRelaxationNetwork::new(
+                poses,
+                properties,
+                links,
+                half,
+                source_limits,
+                &mut *cancelled,
+            )?,
+        };
         Ok(prepared.advance(states, memory, commands, controls.source, cancelled)?)
     };
     let initial = source(&poses, states, memory, &mut commands, &mut cancelled)?;
