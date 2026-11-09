@@ -1168,9 +1168,32 @@ molecular viscosity remains with the momentum owner. The original accepted
 mass divided by native cell volume supplies density, including graded grids and
 spatial density jumps. Coefficients are frozen for the requested mixing interval.
 
+`FvFlow::diffuse_turbulent_species_adaptive` connects the native momentum
+eddy field to the original conservative temporal-refinement owner.
+`FvFlow::diffuse_molecular_and_turbulent_species_adaptive` additionally consumes
+one explicit nonnegative common molecular diffusivity per cell. The law is
+`j_k = -rho (D_molecular + nu_t/Sc_t) grad(Y_k)`: molecular transport survives
+zero SGS viscosity. The two cellwise contributions are added BEFORE the
+original graded half-cell resistance is formed; adding independently
+harmonized molecular and turbulent face coefficients is a different interface
+model. Molecular D is never inferred from viscosity or the thermal Prandtl
+number. Both coefficients must vanish in solids; a zero total coefficient
+blocks the face. Negative/nonfinite inputs and unrepresentable positive
+transport refuse without clipping or an invented diffusion floor.
+
+Both adaptive entries retain per-species concentration tolerances, all
+coarse/fine work in the aggregate budget, and the original mass/partition
+accounts. Storage includes the combined D field and the simultaneously live
+coarse comparison. The finer conservative state is authoritative; no
+Richardson extrapolation alters its inventories. The temporal estimate is
+asymptotic and does not certify spatial or model error. The molecular entry
+admits binary Fick diffusion or an independently justified COMMON-D molecular
+model; it does not stand in for unequal-species or Maxwell–Stefan transport.
+
 The common face map preserves each species' global mass and the cell carrier
 partition to the caller's declared budgets. Uniform mass fractions are
-stationary at variable density; zero eddy viscosity is an exact identity.
+stationary at variable density. Zero eddy viscosity is an exact identity for
+the turbulent-only entries; molecular diffusion can remain active.
 Exterior and solid faces are impermeable to this diffusion component, while
 advective inlet/backflow composition remains with `advect_species`. Work is
 `O(N * (cells + faces * substeps))`, storage `O(N * cells + faces)`;

@@ -18,6 +18,19 @@ fn controls() -> SpeciesDiffusionControls<3> {
     }
 }
 
+fn adaptive_controls() -> AdaptiveSpeciesDiffusionControls<3> {
+    AdaptiveSpeciesDiffusionControls {
+        solver: SpeciesDiffusionControls {
+            substeps: 1,
+            maximum_pair_updates: 1 << 22,
+            ..controls()
+        },
+        absolute_mass_fraction_tolerance: [2e-7; 3],
+        relative_tolerance: 0.0,
+        maximum_refinements: 20,
+    }
+}
+
 fn carrier(domain: &VoxelDomain, field: &FlowField, mass: &[f64]) -> MaterialAdvectionStep {
     field.project_and_advect_material(
         domain,
@@ -74,7 +87,7 @@ fn native_transient_sgs_drives_conservative_three_species_mixing() {
     march.inner_iterations = 400;
     march.inner_tolerance = 1e-8;
     let gate = CancelGate::new_clock_free();
-    let flow = simple_unsteady_with_sgs(
+    let mut flow = simple_unsteady_with_sgs(
         &domain, &fluid(), &config, &march,
         FvSgsConfig {
             model: SgsModel::Smagorinsky { cs: 0.2 },
@@ -112,6 +125,30 @@ fn native_transient_sgs_drives_conservative_three_species_mixing() {
     for (c, values) in result.species_mass_kg.iter().enumerate() {
         assert!((values[1] - initial[c][1]).abs() < 1e-15);
     }
+
+    // Both adaptive entries consume this actual native SGS result. Molecular
+    // and eddy coefficients combine in each original cell before the shared
+    // graded face operator is prepared.
+    let molecular = vec![0.01; domain.cell_count()];
+    let combined: Vec<_> = d.iter().zip(&molecular).map(|(&t, &m)| m + t).collect();
+    let mixed = flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &molecular, 0.7, 1.0, adaptive_controls(), &gate,
+    ).unwrap();
+    let expected = accepted.diffuse_species_adaptive(
+        &domain, &initial, &combined, 1.0, adaptive_controls(), &gate,
+    ).unwrap();
+    assert_eq!(mixed, expected);
+    let turbulent = flow.diffuse_turbulent_species_adaptive(
+        &domain, &accepted, &initial, 0.7, 1.0, adaptive_controls(), &gate,
+    ).unwrap();
+    assert_eq!(turbulent, accepted.diffuse_species_adaptive(
+        &domain, &initial, &d, 1.0, adaptive_controls(), &gate,
+    ).unwrap());
+    flow.heat_eddy_viscosity_m2_s.fill(9.0);
+    flow.turbulent_prandtl = 4.0;
+    assert_eq!(mixed, flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &molecular, 0.7, 1.0, adaptive_controls(), &gate,
+    ).unwrap());
 }
 
 #[test]
@@ -174,4 +211,146 @@ fn zero_turbulence_is_exact_and_invalid_input_never_changes_state() {
         &domain, &accepted, &initial, 0.7, 1.0, controls(), &gate,
     ), Err(ChtError::Cancelled)));
     assert_eq!(accepted, before);
+}
+
+#[test]
+fn molecular_diffusion_survives_laminar_flow_and_combines_before_face_resistance() {
+    let domain = VoxelDomain::graded([vec![0.5, 1.5], vec![2.0], vec![1.0]]).unwrap();
+    let mass = [0.7, 4.5];
+    let initial = [[0.49, 0.14, 0.07], [0.45, 1.35, 2.7]];
+    let gate = CancelGate::new_clock_free();
+    for (molecular, eddy) in [([0.02, 0.2], [0.0; 2]), ([0.2, 0.01], [0.01, 0.2])] {
+        let flow = quiescent_flow(&domain, eddy.to_vec());
+        let accepted = carrier(&domain, &flow.field, &mass);
+        let before = accepted.clone();
+        let result = flow.diffuse_molecular_and_turbulent_species_adaptive(
+            &domain, &accepted, &initial, &molecular, 1.0, 0.7, adaptive_controls(), &gate,
+        ).unwrap();
+        let total = [molecular[0] + eddy[0], molecular[1] + eddy[1]];
+        let rho = [mass[0] / domain.volume(0), mass[1] / domain.volume(1)];
+        // Exact two-control-volume Fick solution, independently reconstructed.
+        let conductance = 2.0 / (0.25 / (rho[0] * total[0]) + 0.75 / (rho[1] * total[1]));
+        let capacity = mass[0] * mass[1] / (mass[0] + mass[1]);
+        let relaxation = -(-conductance * 0.7 / capacity).exp_m1();
+        for k in 0..3 {
+            let transfer = capacity * relaxation * (initial[0][k] / mass[0] - initial[1][k] / mass[1]);
+            assert!((result.step.species_mass_kg[0][k] - (initial[0][k] - transfer)).abs() < 2e-14);
+            assert!((result.step.species_mass_kg[1][k] - (initial[1][k] + transfer)).abs() < 2e-14);
+            assert!(result.step.report.mass_change_kg[k].abs() < 1e-14);
+        }
+        assert_ne!(result.step.species_mass_kg, initial);
+        if eddy == [0.0; 2] {
+            let turbulent = flow.diffuse_turbulent_species_adaptive(
+                &domain, &accepted, &initial, 1.0, 0.7, adaptive_controls(), &gate,
+            ).unwrap();
+            assert_eq!(turbulent.step.species_mass_kg, initial);
+            assert_eq!(turbulent.total_pair_updates, 0);
+        }
+        assert_eq!(accepted, before);
+        assert_eq!(flow.eddy_viscosity_m2_s, eddy);
+    }
+}
+
+#[test]
+fn native_combined_mixing_resolves_the_independent_neumann_decay_mode() {
+    let cells = 8;
+    let h = 1.0 / cells as f64;
+    let domain = VoxelDomain::graded([vec![h; cells], vec![1.0], vec![1.0]]).unwrap();
+    let flow = quiescent_flow(&domain, vec![0.08; cells]);
+    let accepted = carrier(&domain, &flow.field, &vec![h; cells]);
+    let mean = [0.5, 0.3, 0.2];
+    let amplitude = [0.3, -0.2, -0.1];
+    let mode = |c: usize| (core::f64::consts::PI * (c as f64 + 0.5) * h).cos();
+    let initial: Vec<[f64; 3]> = (0..cells).map(|c| {
+        core::array::from_fn(|k| h * (mean[k] + amplitude[k] * mode(c)))
+    }).collect();
+    let result = flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &vec![0.02; cells], 1.0, 2.0,
+        adaptive_controls(), &CancelGate::new_clock_free(),
+    ).unwrap();
+    let decay = (-4.0 * (0.02 + 0.08) / h.powi(2)
+        * (0.5 * core::f64::consts::PI * h).sin().powi(2) * 2.0).exp();
+    assert!(result.refinements > 1);
+    assert!(result.maximum_error_ratio <= 1.0);
+    for c in 0..cells {
+        for k in 0..3 {
+            let exact = mean[k] + amplitude[k] * decay * mode(c);
+            assert!((result.step.species_mass_kg[c][k] / h - exact).abs() < 3e-7);
+            assert!(result.step.species_mass_kg[c][k] >= 0.0);
+        }
+    }
+    assert_eq!(result.total_pair_updates,
+        2 * (cells - 1) * (2 * result.step.report.substeps - 1));
+}
+
+#[test]
+fn combined_mixing_refuses_invalid_coefficients_and_aggregate_limits_atomically() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let mut flow = quiescent_flow(&domain, vec![0.1; 2]);
+    let accepted = carrier(&domain, &flow.field, &[1.0; 2]);
+    let before = accepted.clone();
+    let initial = [[0.7, 0.2, 0.1], [0.1, 0.3, 0.6]];
+    let gate = CancelGate::new_clock_free();
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+            &domain, &accepted, &initial, &[bad, 0.02], 0.7, 1.0, adaptive_controls(), &gate,
+        ).is_err());
+    }
+    assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &[0.02], 0.7, 1.0, adaptive_controls(), &gate,
+    ).is_err());
+    for schmidt in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+            &domain, &accepted, &initial, &[0.02; 2], schmidt, 1.0, adaptive_controls(), &gate,
+        ).is_err());
+    }
+    let mut limited = adaptive_controls();
+    limited.solver.maximum_pair_updates = 5; // Coarse two + fine four exceeds five.
+    assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &[0.02; 2], 0.7, 1.0, limited, &gate,
+    ).is_err());
+    limited = adaptive_controls();
+    limited.solver.maximum_storage_bytes = 2 * core::mem::size_of::<f64>() - 1;
+    assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &[0.02; 2], 0.7, 1.0, limited, &gate,
+    ).is_err());
+    flow.eddy_viscosity_m2_s.fill(f64::MAX);
+    assert!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &[f64::MAX; 2], 1.0, 1.0, adaptive_controls(), &gate,
+    ).is_err());
+    flow.eddy_viscosity_m2_s.fill(0.1);
+    gate.request();
+    assert!(matches!(flow.diffuse_molecular_and_turbulent_species_adaptive(
+        &domain, &accepted, &initial, &[0.02; 2], 0.7, 1.0, adaptive_controls(), &gate,
+    ), Err(ChtError::Cancelled)));
+    assert_eq!(accepted, before);
+    assert_eq!(initial, [[0.7, 0.2, 0.1], [0.1, 0.3, 0.6]]);
+}
+
+#[test]
+fn cell_diffusivity_keeps_laminar_and_turbulent_limits() {
+    assert_eq!(combined_species_diffusivity(0.125, 0.0, 2.0).unwrap(), 0.125);
+    assert_eq!(combined_species_diffusivity(0.0, 0.5, 2.0).unwrap(), 0.25);
+    assert_eq!(combined_species_diffusivity(0.125, 0.5, 2.0).unwrap(), 0.375);
+    assert_eq!(combined_species_diffusivity(0.125, 1.0, 4.0).unwrap(), 0.375);
+    assert_eq!(combined_species_diffusivity(0.0, 0.0, 2.0).unwrap(), 0.0);
+}
+
+#[test]
+fn cell_diffusivity_rejects_invalid_physical_coefficients() {
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(combined_species_diffusivity(invalid, 0.5, 2.0).is_err());
+        assert!(combined_species_diffusivity(0.125, invalid, 2.0).is_err());
+        assert!(combined_species_diffusivity(0.125, 0.5, invalid).is_err());
+    }
+    assert!(combined_species_diffusivity(0.125, 0.5, 0.0).is_err());
+}
+
+#[test]
+fn cell_diffusivity_refuses_lost_positive_transport_without_flooring() {
+    assert!(combined_species_diffusivity(f64::MAX, f64::MAX, 1.0).is_err());
+    assert!(combined_species_diffusivity(0.0, f64::MAX, 0.5).is_err());
+    assert!(combined_species_diffusivity(0.125, f64::MIN_POSITIVE, f64::MAX).is_err());
+    assert_eq!(combined_species_diffusivity(f64::MIN_POSITIVE, 0.0, 1.0).unwrap(), f64::MIN_POSITIVE);
+    assert_eq!(combined_species_diffusivity(0.0, f64::MIN_POSITIVE, 1.0).unwrap(), f64::MIN_POSITIVE);
 }
