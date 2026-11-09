@@ -406,7 +406,8 @@ pub trait SecondOrderProblem {
     /// Its displacement/velocity partials and parameter VJPs must still match
     /// that same physical resistance; this hook introduces no new force law.
     /// A zero `fraction` evaluates the base displacement without using `dq`.
-    /// Linear models can delegate to [`linear_resistance_balance`].
+    /// Linear models with a fixed affine force offset can also delegate to
+    /// [`linear_resistance_balance`].
     fn resistance_balance(
         &self,
         q_base: &[f64],
@@ -483,8 +484,9 @@ pub trait SecondOrderProblem {
 
 /// Evaluate the split force balance for a declared linear structural model.
 ///
-/// Requires state-independent stiffness/damping with `r(q) = K q` and
-/// `R(q,v) = K q + C v`. The original internal-force, tangent and damping
+/// Requires state-independent stiffness/damping with `r(q) = K q + r0` and
+/// `R(q,v) = K q + r0 + C v`, where `r0` is fixed during the step. The tangent
+/// must apply only K, without the affine force offset. Internal-force and damping
 /// actions are reused; the applied preload is subtracted before adding the
 /// increment's elastic force and physical damping. This preserves small
 /// dynamic forces when `K q_base` is large and nearly balanced by `forcing`.

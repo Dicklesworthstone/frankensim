@@ -1,12 +1,15 @@
 //! Material-backed CutFEM motion through the original generalized-alpha owner.
 //!
 //! The retained native stiffness and consistent mass provide M a + K q = f.
+//! A held eigenstrain changes resistance to K q - b_free using its original
+//! native equivalent force; caller-supplied forcing remains external only.
 //! Strong homogeneous supports are removed once from every action and load;
 //! adaptive hanging constraints remain inside the original native operators.
 //! No mass lumping, stabilization inertia, constitutive fit or new time scheme
 //! is introduced. Geometry, material, occupancy and stiffness scales are fixed
-//! during a trajectory. Nonzero/moving supports, prestress and physical damping
-//! are outside this elastic adapter.
+//! during a trajectory. Free strain is also fixed when supplied. Evolving
+//! temperature, nonzero/moving supports, geometric prestress and physical
+//! damping are outside this elastic adapter.
 //!
 //! Native mass and strain callbacks poll cancellation within their kernels.
 //! The original stiffness action remains indivisible; cancellation is checked
@@ -16,6 +19,7 @@ use std::cell::RefCell;
 use std::ops::ControlFlow;
 
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+use fs_cutfem::elastic3::eigenstrain::PreparedEigenstrain3;
 use fs_cutfem::elastic3::mass::MaterialMass3;
 use fs_cutfem::elastic3::{CutElasticity3, ElasticityError3};
 use fs_exec::CancelGate;
@@ -34,21 +38,21 @@ pub enum CutElasticityRef3<'a> {
 }
 
 impl<'a> CutElasticityRef3<'a> {
-    fn operator(self) -> &'a dyn LinearOp {
+    pub(super) fn operator(self) -> &'a dyn LinearOp {
         match self {
             Self::Cartesian(op) => op,
             Self::Adaptive(op) => op,
         }
     }
 
-    fn fixed(self) -> &'a [bool] {
+    pub(super) fn fixed(self) -> &'a [bool] {
         match self {
             Self::Cartesian(op) => op.fixed(),
             Self::Adaptive(op) => op.fixed(),
         }
     }
 
-    fn validate_mass(self, mass: &MaterialMass3) -> Result<(), ElasticityError3> {
+    pub(super) fn validate_mass(self, mass: &MaterialMass3) -> Result<(), ElasticityError3> {
         match self {
             Self::Cartesian(op) => op.validate_material_mass(mass),
             Self::Adaptive(op) => op.validate_material_mass(mass),
@@ -59,6 +63,48 @@ impl<'a> CutElasticityRef3<'a> {
         match self {
             Self::Cartesian(op) => op.admit_material_domain(q, || checkpoint(gate)),
             Self::Adaptive(op) => op.admit_material_domain(q, || checkpoint(gate)),
+        }
+    }
+
+    fn validate_eigenstrain(self, prepared: &PreparedEigenstrain3) -> Result<(), ElasticityError3> {
+        match self {
+            Self::Cartesian(op) => op.validate_eigenstrain(prepared),
+            Self::Adaptive(op) => op.validate_eigenstrain(prepared),
+        }
+    }
+
+    fn eigenstrain_load(
+        self,
+        prepared: &PreparedEigenstrain3,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        match self {
+            Self::Cartesian(op) => op.eigenstrain_load(prepared, || checkpoint(gate)),
+            Self::Adaptive(op) => op.eigenstrain_load(prepared, || checkpoint(gate)),
+        }
+    }
+
+    fn admit_eigenstrain(
+        self,
+        held: &HeldEigenstrain3<'_>,
+        q: &[f64],
+        gate: &CancelGate,
+    ) -> Result<(), ElasticityError3> {
+        match self {
+            Self::Cartesian(op) => op.admit_eigenstrain(
+                held.prepared,
+                q,
+                held.maximum_kinematic_strain,
+                held.maximum_points,
+                || checkpoint(gate),
+            ),
+            Self::Adaptive(op) => op.admit_eigenstrain(
+                held.prepared,
+                q,
+                held.maximum_kinematic_strain,
+                held.maximum_points,
+                || checkpoint(gate),
+            ),
         }
     }
 }
@@ -88,12 +134,22 @@ struct Scratch {
     output: Vec<f64>,
 }
 
+struct HeldEigenstrain3<'a> {
+    prepared: &'a PreparedEigenstrain3,
+    /// Already in the same free coordinates as M and K, assembled only once.
+    force: Vec<f64>,
+    maximum_kinematic_strain: f64,
+    maximum_points: usize,
+}
+
 /// Fixed material pencil in free native coordinates, usable by structural
 /// stepping, consistent acceleration initialization and discrete adjoints.
 ///
 /// Source identity is checked by the native mass owner, not by shape equality.
 /// Physical displacement admission uses the original material strain ceilings
-/// at every generalized-alpha stage and endpoint. All operator actions retain
+/// at every generalized-alpha stage and endpoint. A held eigenstrain uses
+/// elastic strain for those ceilings and a separate total-kinematic budget,
+/// evaluated at the native owner's retained quadrature points. All actions retain
 /// O(native DOFs) scratch; no dense pencil or copied material field is prepared.
 /// Positive mass diagonals are necessary admission, not a nonsingularity proof.
 /// Native solver residuals and spatial/model validity remain separate claims.
@@ -104,6 +160,7 @@ pub struct CutSecondOrderProblem3<'a> {
     gate: &'a CancelGate,
     free: Vec<usize>,
     mass_diagonal: Vec<f64>,
+    eigenstrain: Option<HeldEigenstrain3<'a>>,
     scratch: RefCell<Scratch>,
 }
 
@@ -153,11 +210,67 @@ impl<'a> CutSecondOrderProblem3<'a> {
             gate,
             free,
             mass_diagonal,
+            eigenstrain: None,
             scratch: RefCell::new(Scratch {
                 input: vec![0.0; n],
                 output: vec![0.0; n],
             }),
         })
+    }
+
+    /// Bind a prescribed thermal or transformation strain for the entire
+    /// trajectory. Native preparation must belong to this exact geometry,
+    /// material assignment, supports and displacement space; equal dimensions
+    /// are insufficient. The immutable source borrow also freezes its scales.
+    /// Its equivalent force is assembled at those scales and retained once in
+    /// free coordinates, independently of the physical mass fractions.
+    ///
+    /// The equation is `M a + (K q - b_free) = f_external`. Supply EXTERNAL
+    /// forcing only to [`Self::advance`], consistent acceleration initialization
+    /// and the existing discrete adjoints; adding `b_free` again doubles it.
+    /// Tangents and state/force VJPs hold free strain fixed. This constructor
+    /// neither advances temperature nor supplies a thermal-parameter gradient.
+    ///
+    /// `maximum_kinematic_strain` is the finite total-strain Frobenius budget
+    /// in (0,1); the original material separately admits actual and B-bar
+    /// elastic strains. Both checks use the native retained bulk points, not
+    /// certified field extrema. `maximum_eigenstrain_points` bounds this work
+    /// at every physical stage and endpoint without allocating stress outputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_eigenstrain(
+        source: CutElasticityRef3<'a>,
+        mass: &'a MaterialMass3,
+        occupancy: &'a [f64],
+        eigenstrain: &'a PreparedEigenstrain3,
+        maximum_kinematic_strain: f64,
+        maximum_eigenstrain_points: usize,
+        maximum_native_dofs: usize,
+        gate: &'a CancelGate,
+    ) -> Result<Self, ElasticityError3> {
+        poll(gate)?;
+        source.validate_eigenstrain(eigenstrain)?;
+        if !maximum_kinematic_strain.is_finite()
+            || maximum_kinematic_strain <= 0.0
+            || maximum_kinematic_strain >= 1.0
+        {
+            return Err(invalid("invalid CutFEM dynamics total-strain budget"));
+        }
+        if eigenstrain.bulk_points() > maximum_eigenstrain_points {
+            return Err(invalid(
+                "CutFEM dynamics exceeds the eigenstrain-point allowance",
+            ));
+        }
+        let mut model = Self::new(source, mass, occupancy, maximum_native_dofs, gate)?;
+        let native_force = source.eigenstrain_load(eigenstrain, gate)?;
+        let force = model.restrict_force(&native_force)?;
+        poll(gate)?;
+        model.eigenstrain = Some(HeldEigenstrain3 {
+            prepared: eigenstrain,
+            force,
+            maximum_kinematic_strain,
+            maximum_points: maximum_eigenstrain_points,
+        });
+        Ok(model)
     }
 
     /// Sorted independent native DOFs. Adaptive entries are master coordinates.
@@ -185,8 +298,10 @@ impl<'a> CutSecondOrderProblem3<'a> {
     }
 
     /// Advance using the existing generalized-alpha method and this same gate.
-    /// `native_stage_force_n` is evaluated at that method's force stage time
-    /// t_n+(1-alpha_f)h. The original integrator owns convergence, physical-state
+    /// `native_stage_force_n` contains external forces only, evaluated at the
+    /// method's force stage time `t_n+(1-alpha_f)h`. A configured eigenstrain
+    /// already contributes through internal resistance and must not be added
+    /// to this input. The original integrator owns convergence, physical-state
     /// admission and atomic publication; no second accepted clock is kept here.
     pub fn advance(
         &self,
@@ -282,7 +397,12 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
             self.admit_vector(v, self.free.len())?;
             let mut scratch = self.scratch.borrow_mut();
             self.scatter(q, &mut scratch.input)?;
-            self.source.admit(&scratch.input, self.gate)
+            match &self.eigenstrain {
+                Some(held) => self
+                    .source
+                    .admit_eigenstrain(held, &scratch.input, self.gate),
+                None => self.source.admit(&scratch.input, self.gate),
+            }
         };
         admitted().map_err(|error| error.to_string())
     }
@@ -302,13 +422,31 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
     }
 
     fn internal_force(&self, q: &[f64], output: &mut [f64]) {
-        if self.action(q, output, false, false).is_err() {
+        let result = (|| -> Result<(), ElasticityError3> {
+            self.action(q, output, false, false)?;
+            if let Some(held) = &self.eigenstrain {
+                for (i, (value, force)) in output.iter_mut().zip(&held.force).enumerate() {
+                    if i % 192 == 0 {
+                        poll(self.gate)?;
+                    }
+                    *value -= force;
+                    if !value.is_finite() {
+                        return Err(invalid("CutFEM dynamics eigenstrain force overflow"));
+                    }
+                }
+            }
+            poll(self.gate)
+        })();
+        if result.is_err() {
             output.fill(f64::NAN);
         }
     }
 
     fn tangent_apply(&self, _: &[f64], direction: &[f64], output: &mut [f64]) {
-        self.internal_force(direction, output);
+        // The held free-strain force is an affine offset, not a tangent action.
+        if self.action(direction, output, false, false).is_err() {
+            output.fill(f64::NAN);
+        }
     }
 
     fn resistance_balance(
@@ -343,7 +481,7 @@ impl SecondOrderProblem for CutSecondOrderProblem3<'_> {
 }
 
 /// State/force pullbacks at this fixed physical configuration. No design,
-/// geometry, occupancy or material parameter derivative is implicitly claimed.
+/// geometry, occupancy, free-strain or material parameter derivative is claimed.
 impl SecondOrderVjp for CutSecondOrderProblem3<'_> {
     fn parameter_count(&self) -> usize {
         0

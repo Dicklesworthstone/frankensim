@@ -13751,3 +13751,25 @@ Source temperatures are piecewise constant by layer; continuous gradients
 require through-thickness refinement. `tests/frame_laminate_thermal.rs`
 defines independent free/restrained bimetal, nonuniform heating, inertia and
 modal-refresh, thin-flexibility, layer-refinement and cancellation regressions.
+
+
+## Held-eigenstrain CutFEM dynamics
+
+`cutfront::dynamics3::CutSecondOrderProblem3::new_with_eigenstrain` extends the
+original Cartesian/adaptive structural-time adapter to `M a + K q - b_free = f`.
+The native equivalent force is cached once in free coordinates at the borrowed
+source's fixed stiffness scales. Physical reference-density mass retains its
+independent cell occupancy. Caller forcing is external only. Tangents and existing
+state/force adjoints apply pure K and hold free strain fixed.
+
+Initial, actual generalized-alpha stage and endpoint states use the original
+thermal admission owner: total small-deformation and elastic calibration limits
+are separate, checked at retained bulk points without allocating stress outputs.
+Construction validates binding and policy without assuming the unexpanded state
+is admissible. The original consistent initialization, split resistance, nonlinear
+iteration, cancellation and accepted-state publication remain the sole time owners.
+`cutfem_eigenstrain_dynamics` adds hot equilibrium, consistent acceleration,
+translated trajectory, affine tangent/adjoint and rollback regression sources.
+The field, geometry, tensor and scales stay fixed during the trajectory; evolving
+temperature, moving supports and geometric-prestress dynamics require their own
+explicit integration and are not silently approximated here.
