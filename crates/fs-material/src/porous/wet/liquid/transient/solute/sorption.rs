@@ -187,8 +187,9 @@ impl<'a, const N: usize> SorptionStorage<'a, N> {
     }
 
     fn extra_bytes(n: usize) -> usize {
-        // n,N already admitted to 4096,32. Two output fields and fixed report.
-        (2 * n * N + 8 * N) * core::mem::size_of::<f64>() + 512
+        // n,N already admitted to 4096,32. Two output fields, aggregation
+        // arrays, retained defects and the simultaneously assembled report.
+        (2 * n * N + 16 * N) * core::mem::size_of::<f64>() + 512
     }
 
     pub(super) fn finish(

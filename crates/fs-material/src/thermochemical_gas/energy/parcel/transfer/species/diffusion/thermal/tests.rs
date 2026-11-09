@@ -1,4 +1,6 @@
 //! Manufactured analytic checks; no empirical accuracy claim for named gases.
+mod adaptive;
+
 use super::*;
 use crate::thermochemical_gas::energy::{
     GasEnergySolve,

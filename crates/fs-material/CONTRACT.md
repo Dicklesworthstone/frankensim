@@ -22059,6 +22059,40 @@ These are synthetic implementation checks, not measured component-life evidence.
 
 The thermal network samples every edge from one unchanged snapshot, then combines molecular masses and additional heat with all existing authored transport paths before one inventory/caloric reconstruction per parcel. Gross original-species withdrawals, mass/energy budgets, pinned source support on the combined endpoint and actual total entropy are checked before publication. This is explicit first-order finite-volume transport, with authored local T/p limits; it supplies no implicit stability guarantee, momentum closure, thermal transpiration, source uncertainty bound or empirical coefficient inference. Six analytic/source/native-network tests cover Soret counterflow, reciprocal heat, variable-Cp divided-enthalpy entropy pairing, common-heat and formation-reference invariance, exact-zero/trace behavior, original endpoint source support, cancellation and coupled conservation.
 
+### Adaptive source-conjugate gas thermodiffusion
+
+`species::diffusion::thermal::network::advance_candidate` completes a closed
+nonisothermal gas-network window through the existing molecular temporal owner.
+Every full/half probe runs the original thermal snapshot transaction: source
+T/p/composition, Soret/Fourier/reciprocal heat, original donor species enthalpy,
+other declared transport paths and actual endpoint source admission remain
+coupled. Only accepted half steps contribute inventory and integrated accounts.
+
+Independent local criteria compare species inventories, temperatures and each
+original thermal link's signed and both gross-sign constituent masses and
+additional heat. The latter is separate from species enthalpy, not a second
+charge for total thermal carriage. Compensated coarse/fine comparisons retain
+low parts and prevent opposing links or within-interval reversals from hiding
+transport error. The optional report criterion is absent for original endpoint-
+only controllers, whose acceptance arithmetic is unchanged. Other authored
+paths share endpoint control and accounting but have no per-path integral
+criterion through this API. These first-order local estimates are not certified
+whole-window, spatial or source-uncertainty bounds.
+
+Rejected probes spend the original evaluation budget but no accepted inventory.
+Only native withdrawal, endpoint entropy and caloric-bracket refusals permit
+cutback; source/domain failures remain fatal. Original whole-window species,
+mass, source-relative energy and entropy budgets apply once. Last-step source
+and flux receipts describe the start of the final accepted half step; actual
+final material support is admitted separately. This is explicit transport,
+without an implicit stability or bulk-momentum claim.
+
+The exact production integral-comparison helper passed three native tests with
+the genuine fs-math double-double owner. Five analytic thermal-relaxation,
+transfer-accuracy, caloric-reference, equilibrium and transactional-refusal
+integration groups are authored but unexecuted because the dependency build
+remains blocked before fs-material. Source parsing is not crate type checking.
+
 ## Original measured hardening, rate dependence and thermal source transport
 
 The tabulated J2 family retains the original accumulated-equivalent-plastic-strain

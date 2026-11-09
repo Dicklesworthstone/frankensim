@@ -7,6 +7,10 @@
 //! admitted before any endpoint is returned. Caller-controlled time refinement
 //! remains necessary; this explicit update is not an implicit stability claim.
 
+use super::super::network::adaptive::{
+    self, DiffusionNetworkAdvanceCandidate, DiffusionNetworkAdvanceControls,
+    DiffusionNetworkAdvanceError, DiffusionNetworkAdvanceReport,
+};
 use super::{
     ClosedGasParcel, GasDiffusionGeometry, GasEnergyError, GasThermodiffusionFlux,
     GasThermodiffusionModel, GasThermodiffusionSolve, GasThermodiffusionWorkspace, positive,
@@ -25,6 +29,31 @@ use crate::thermochemical_gas::energy::{
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Independent local endpoint and original thermal-link transfer tolerances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasThermodiffusionNetworkAdvanceControls {
+    pub temporal: DiffusionNetworkAdvanceControls,
+    /// Absolute allowance for EACH thermal link and constituent's signed and
+    /// gross incoming/outgoing integrated mass [kg]. Positive and finite.
+    pub absolute_species_transfer_tolerance_kg: f64,
+    /// Absolute allowance for EACH thermal link's signed and gross-sign
+    /// additional heat [J]. This excludes the separately owned species enthalpy.
+    pub absolute_additional_heat_tolerance_j: f64,
+}
+
+/// Original transport receipt and source samples at the START of the final
+/// accepted half step. Its final material endpoints were admitted separately.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasThermodiffusionNetworkStep {
+    pub transport: transport::GasTransportStep,
+    pub links: Vec<GasThermodiffusionLinkStep>,
+}
+
+pub type GasThermodiffusionNetworkAdvanceCandidate =
+    DiffusionNetworkAdvanceCandidate<GasThermodiffusionNetworkStep>;
+pub type GasThermodiffusionNetworkAdvanceReport =
+    DiffusionNetworkAdvanceReport<GasThermodiffusionNetworkStep>;
 
 /// An explicitly exposed molecular face, positive from parcels[0] to parcels[1].
 /// It already includes ordinary molecular diffusion and heat conduction; do not
@@ -228,4 +257,50 @@ pub fn step_candidate(
         transport,
         links: sampled,
     })
+}
+
+/// Complete a closed nonisothermal diffusion window with source refresh and
+/// local first-order step-doubling control. All mechanisms sample each actual
+/// coarse/fine snapshot before one species/enthalpy/heat reconstruction.
+///
+/// Besides the original species-inventory and temperature criteria, each
+/// thermal link checks its signed and both gross-sign integrated species masses
+/// and additional heat. Coarse-to-fine comparisons retain low parts before
+/// subtraction; opposing links and reversal within a comparison cannot cancel.
+/// Tolerances are local to each comparison, not certified whole-window bounds.
+/// Other paths share endpoint control and accounting but have no independent
+/// per-path integral criterion here. Donor species enthalpy remains owned once
+/// by the original transaction; additional heat is not total energy carriage.
+///
+/// Only original gross-withdrawal, actual entropy and caloric-bracket refusals
+/// can shorten a trial. Source/domain failures remain fatal. Rejected trials
+/// spend the existing evaluation budget but contribute no state or ledger.
+/// Every accepted half step qualifies its actual final material endpoints.
+/// Original whole-window mass/species/energy/entropy budgets apply once.
+/// Workspaces are scratch; failures publish no partially advanced parcels.
+/// This explicit method supplies neither an implicit stability guarantee nor
+/// spatial/source uncertainty bounds, thermal transpiration or bulk momentum.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_candidate(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[GasThermodiffusionLink<'_>],
+    workspaces: &mut [GasThermodiffusionWorkspace],
+    other_paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: GasTransportSolve,
+    controls: GasThermodiffusionNetworkAdvanceControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasThermodiffusionNetworkAdvanceCandidate, DiffusionNetworkAdvanceError> {
+    adaptive::thermal::advance_candidate(
+        original,
+        links,
+        workspaces,
+        other_paths,
+        duration_s,
+        endpoints,
+        physical,
+        controls,
+        cancelled,
+    )
 }

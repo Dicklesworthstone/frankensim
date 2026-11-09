@@ -7,6 +7,8 @@
 //! used for both. The local estimate is not a global error certificate or a
 //! license to leave the selected molecular closure's constitutive domain.
 
+pub(crate) mod thermal;
+
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::super::super::network::transport::{
     GasTransportError, GasTransportSolve, audit_closed_window,
@@ -77,6 +79,9 @@ pub struct DiffusionNetworkAdvanceReport<Step = DiffusionNetworkStep> {
     pub maximum_accepted_substep_s: f64,
     pub maximum_species_error_ratio: f64,
     pub maximum_temperature_error_ratio: f64,
+    /// Additional original-link signed/gross transfer criterion, when requested
+    /// by a source-conjugate thermal network. None means endpoint control only.
+    pub maximum_transfer_error_ratio: Option<f64>,
     pub transfers: Vec<DiffusionNetworkIntegratedTransfer>,
     /// Integrated additional heat from accepted fine steps only. Canonical
     /// endpoints fix its sign; original species enthalpy stays in transfers.
@@ -136,6 +141,11 @@ pub enum DiffusionNetworkAdvanceError {
         step_s: f64,
         error: BinaryDiffusionNetworkError,
     },
+    ThermalStep {
+        elapsed_s: f64,
+        step_s: f64,
+        error: super::super::thermal::network::GasThermodiffusionNetworkError,
+    },
     PairWorkLimit {
         elapsed_s: f64,
         accepted_intervals: usize,
@@ -147,6 +157,7 @@ pub enum DiffusionNetworkAdvanceError {
         step_s: f64,
         species_error_ratio: f64,
         temperature_error_ratio: f64,
+        transfer_error_ratio: Option<f64>,
     },
     Entropy {
         elapsed_s: f64,
@@ -174,6 +185,7 @@ enum TrialFailure {
     /// trial whose requested endpoint energy lies outside its original bracket.
     SourceEndpoint(DiffusionNetworkError),
     Binary(BinaryDiffusionNetworkError),
+    Thermal(super::super::thermal::network::GasThermodiffusionNetworkError),
     Entropy(f64),
     Work,
     PairWork,
@@ -202,6 +214,14 @@ trait Candidate {
     fn transfers(&self) -> impl Iterator<Item = Transfer<'_>>;
     fn heat(&self) -> &[SpeciesNetworkHeatTransfer] {
         &[]
+    }
+    fn transfer_error_ratio(
+        &self,
+        _first: &Self,
+        _second: &Self,
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<f64>, Error> {
+        Ok(None)
     }
     fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, Self::Receipt);
 }
@@ -712,6 +732,7 @@ fn advance_with_kernel<C: Candidate>(
     let (mut accepted, mut rejected) = (0usize, 0usize);
     let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
     let (mut max_species_error, mut max_temperature_error) = (0.0_f64, 0.0_f64);
+    let mut max_transfer_error: Option<f64> = None;
     let mut ledger = Ledger::default();
     let mut last = None;
     while elapsed < duration_s {
@@ -786,6 +807,23 @@ fn advance_with_kernel<C: Candidate>(
                 }
                 error
             }
+            Err(TrialFailure::Thermal(error)) => {
+                if error
+                    == super::super::thermal::network::GasThermodiffusionNetworkError::Cancelled
+                {
+                    return Err(Error::Cancelled);
+                }
+                let retry = thermal::retryable(&error);
+                let error = Error::ThermalStep {
+                    elapsed_s: elapsed,
+                    step_s: dt,
+                    error,
+                };
+                if !retry {
+                    return Err(error);
+                }
+                error
+            }
             Err(TrialFailure::Physical(error)) => {
                 let retry = matches!(
                     error,
@@ -811,7 +849,12 @@ fn advance_with_kernel<C: Candidate>(
                     controls,
                     &mut cancelled,
                 )?;
-                if species_error <= 1.0 && temperature_error <= 1.0 {
+                let transfer_error =
+                    coarse.transfer_error_ratio(&first, &second, &mut cancelled)?;
+                if species_error <= 1.0
+                    && temperature_error <= 1.0
+                    && transfer_error.is_none_or(|ratio| ratio <= 1.0)
+                {
                     ledger.record(&first, &mut cancelled)?;
                     ledger.record(&second, &mut cancelled)?;
                     let (next, step) = second.into_parts();
@@ -822,13 +865,20 @@ fn advance_with_kernel<C: Candidate>(
                     maximum = maximum.max(half);
                     max_species_error = max_species_error.max(species_error);
                     max_temperature_error = max_temperature_error.max(temperature_error);
+                    if let Some(ratio) = transfer_error {
+                        max_transfer_error = Some(max_transfer_error.unwrap_or(0.0).max(ratio));
+                    }
                     elapsed = if dt == remaining {
                         duration_s
                     } else {
                         elapsed + dt
                     };
                     // First-order local error scales quadratically with dt.
-                    ceiling = if species_error.max(temperature_error) <= 0.25 {
+                    let mut error = species_error.max(temperature_error);
+                    if let Some(ratio) = transfer_error {
+                        error = error.max(ratio);
+                    }
+                    ceiling = if error <= 0.25 {
                         if dt < 0.5 * controls.maximum_step_s {
                             2.0 * dt
                         } else {
@@ -844,6 +894,7 @@ fn advance_with_kernel<C: Candidate>(
                     step_s: dt,
                     species_error_ratio: species_error,
                     temperature_error_ratio: temperature_error,
+                    transfer_error_ratio: transfer_error,
                 }
             }
         };
@@ -905,6 +956,7 @@ fn advance_with_kernel<C: Candidate>(
             maximum_accepted_substep_s: maximum,
             maximum_species_error_ratio: max_species_error,
             maximum_temperature_error_ratio: max_temperature_error,
+            maximum_transfer_error_ratio: max_transfer_error,
             transfers,
             heat: ledger
                 .heat
