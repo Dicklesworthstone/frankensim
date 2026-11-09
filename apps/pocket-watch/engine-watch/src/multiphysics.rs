@@ -28,8 +28,8 @@ use core::f64::consts::{PI, TAU};
 
 use fs_ad::{Dual64, Real};
 use fs_convection::{
-    CorrelationId, CorrelationInputs, Length as ConvLength, NaturalConvectionGeometry,
-    ThermalConductivity, evaluate as eval_convection,
+    CorrelationId, CorrelationInputs, NaturalConvectionGeometry, ThermalConductivity,
+    evaluate as eval_convection,
 };
 use fs_ivl::Interval;
 use fs_lbm::{
@@ -38,6 +38,7 @@ use fs_lbm::{
 };
 use fs_material::gas::GasState;
 use fs_mbd_material::VolumeMoments;
+use fs_qty::Length as ConvLength;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 use fs_tribo::journal::{
     GeneralizedNewtonianJournal, JournalGeometry, JournalShearSolve, JournalViscosityKnot,
@@ -989,9 +990,7 @@ impl MultiphysicsState {
                     CorrelationInputs::natural(ra_case, 0.71),
                 )
                 .and_then(|nu| {
-                    let _ = NaturalConvectionGeometry::HorizontalCylinder {
-                        diameter: ConvLength::new(d_case_m),
-                    };
+                    let _ = NaturalConvectionGeometry::HorizontalCylinder;
                     nu.heat_transfer_coefficient(
                         ThermalConductivity::new(0.0263),
                         ConvLength::new(d_case_m),
@@ -1379,10 +1378,10 @@ impl MultiphysicsState {
                             -0.0012 * (nc.temperature_k - c.temperature_k);
                         let m_lbm_c = self.lbm_free_surface.grid.moments(idx);
                         let m_lbm_n = self.lbm_free_surface.grid.moments(nidx);
-                        let u_face = 0.5
-                            * ((m_lbm_c.ux + m_lbm_n.ux) * (dx as f64)
-                                + (m_lbm_c.uy + m_lbm_n.uy) * (dy as f64));
-                        let lbm_head = (u_face * 1.8).clamp(-0.35, 0.35);
+                        let u_face: f64 = 0.5
+                            * ((m_lbm_c.u[0] + m_lbm_n.u[0]) * (dx as f64)
+                                + (m_lbm_c.u[1] + m_lbm_n.u[1]) * (dy as f64));
+                        let lbm_head = (u_face * 1.8_f64).clamp(-0.35, 0.35);
 
                         let delta_p = (p_c - p_n) + marangoni_head + lbm_head;
                         let (donor, acceptor, dp_abs) = if delta_p >= 0.0 {
@@ -1718,21 +1717,20 @@ impl MultiphysicsState {
             .map(|vm| vm.volume_m3())
             .unwrap_or(9.2e-11);
         let poise_screw_mass_kg = 16.0 * poise_screw_vol_m3 * GOLD_18K_CARD.density_kg_m3;
-        let air_gas = GasState {
-            density: (101_325.0 / (287.058 * t_bal.max(77.0))).clamp(0.25, 4.8),
-            dynamic_viscosity: (1.825e-5 * (t_bal.max(77.0) / 293.15).powf(0.76))
-                .clamp(5.0e-6, 7.5e-5),
-            ..GasState::default()
-        };
         let (air_added_mass_kg, balance_aero_drag_s_inv) =
-            oscillating_cylinder(0.275e-3, 2.0 * std::f64::consts::PI * 2.5, &air_gas)
-                .map(|cd| {
-                    let ring_circumference_m = 2.0 * std::f64::consts::PI * 0.0052;
-                    let added_m = cd.added_mass_kg_per_m * ring_circumference_m;
-                    let drag_s_inv = (cd.resistance_n_s_per_m2 * ring_circumference_m
-                        / (0.00036 + poise_screw_mass_kg))
-                        .clamp(0.001, 2.5);
-                    (added_m, drag_s_inv)
+            GasState::try_new_moist_air(t_bal.clamp(220.0, 365.0), 101_325.0, 0.35)
+                .ok()
+                .and_then(|air_gas| {
+                    oscillating_cylinder(0.275e-3, 2.0 * std::f64::consts::PI * 2.5, &air_gas)
+                        .ok()
+                        .map(|cd| {
+                            let ring_circumference_m = 2.0 * std::f64::consts::PI * 0.0052;
+                            let added_m = cd.added_mass_kg_per_m * ring_circumference_m;
+                            let drag_s_inv = (cd.resistance_n_s_per_m2 * ring_circumference_m
+                                / (0.00036 + poise_screw_mass_kg))
+                                .clamp(0.001, 2.5);
+                            (added_m, drag_s_inv)
+                        })
                 })
                 .unwrap_or((1.8e-9, 0.018));
         let gold_on_bal_g = self.nodes[WatchNodeId::BalanceWheelRim as usize].molten_gold_g
@@ -1965,22 +1963,20 @@ impl MultiphysicsState {
 
         // 7. Forward-mode Automatic Differentiation (`fs_ad::Dual64`) for exact thermoelastic rate sensitivity d(rate)/dT
         //    and Certified Interval Arithmetic (`fs_ivl::Interval`) for worst-case manufacturing tolerance enclosure!
-        let dt_ad = Dual64::variable(t_sp - T_REF_K);
-        let alpha_sp_ad = Dual64::constant(sp_card.alpha_1_k);
-        let alpha_bal_ad = Dual64::constant(bal_card.alpha_1_k);
-        let d_e_dt_ad = Dual64::constant(sp_card.d_modulus_d_t_1_k);
-        let e_ratio_ad = (Dual64::constant(1.0) + d_e_dt_ad * dt_ad)
-            .max(Dual64::constant(0.18))
-            .min(Dual64::constant(1.25));
+        let dt_ad = Dual64::<1>::variable((t_sp - T_REF_K).clamp(-200.0, 600.0), 0);
+        let alpha_sp_ad = Dual64::<1>::constant(sp_card.cte_per_k);
+        let alpha_bal_ad = Dual64::<1>::constant(bal_card.cte_per_k);
+        let d_e_dt_ad = Dual64::<1>::constant(sp_card.thermoelastic_beta_per_k);
+        let e_ratio_ad = Dual64::<1>::constant(1.0) + d_e_dt_ad * dt_ad;
         let k_sp_ad = e_ratio_ad
-            * (Dual64::constant(1.0) + Dual64::constant(3.0) * alpha_sp_ad * dt_ad)
-            * Dual64::constant(k_oil_ratio * k_mag_ratio);
-        let i_bal_ad = (Dual64::constant(1.0) + alpha_bal_ad * dt_ad)
-            * (Dual64::constant(1.0) + alpha_bal_ad * dt_ad)
-            * Dual64::constant(mass_loading_ratio);
-        let rate_ad = ((k_sp_ad / i_bal_ad).sqrt() - Dual64::constant(1.0))
-            * Dual64::constant(86_400.0);
-        let rate_sensitivity_s_day_per_k = rate_ad.deriv();
+            * (Dual64::<1>::constant(1.0) + Dual64::<1>::constant(3.0) * alpha_sp_ad * dt_ad)
+            * Dual64::<1>::constant(k_oil_ratio * k_mag_ratio);
+        let i_bal_ad = (Dual64::<1>::constant(1.0) + alpha_bal_ad * dt_ad)
+            * (Dual64::<1>::constant(1.0) + alpha_bal_ad * dt_ad)
+            * Dual64::<1>::constant(mass_loading_ratio);
+        let rate_ad = ((k_sp_ad / i_bal_ad).sqrt() - Dual64::<1>::constant(1.0))
+            * Dual64::<1>::constant(86_400.0);
+        let rate_sensitivity_s_day_per_k = rate_ad.eps[0];
 
         // Interval arithmetic (`fs_ivl::Interval`): propagate +-1.5% hairspring thickness tolerance and +-0.4 K thermal gradient
         let k_ivl = Interval::new(
@@ -1991,8 +1987,8 @@ impl MultiphysicsState {
             (balance_inertia_ratio * 0.99985).max(0.50),
             balance_inertia_ratio * 1.00015,
         );
-        let ratio_lo = (k_ivl.lo / i_ivl.hi).max(0.01).sqrt();
-        let ratio_hi = (k_ivl.hi / i_ivl.lo).max(0.01).sqrt();
+        let ratio_lo = (k_ivl.lo() / i_ivl.hi()).max(0.01).sqrt();
+        let ratio_hi = (k_ivl.hi() / i_ivl.lo()).max(0.01).sqrt();
         let rate_ivl = Interval::new((ratio_lo - 1.0) * 86_400.0, (ratio_hi - 1.0) * 86_400.0);
 
         self.modifiers = CoupledWatchModifiers {
@@ -2002,8 +1998,8 @@ impl MultiphysicsState {
             natural_freq_ratio,
             theoretical_rate_s_per_day,
             rate_sensitivity_s_day_per_k,
-            rate_interval_lo_s_day: rate_ivl.lo,
-            rate_interval_hi_s_day: rate_ivl.hi,
+            rate_interval_lo_s_day: rate_ivl.lo(),
+            rate_interval_hi_s_day: rate_ivl.hi(),
             balance_aero_drag_s_inv,
             pivot_friction_multiplier,
             extra_balance_damping_s_inv,
