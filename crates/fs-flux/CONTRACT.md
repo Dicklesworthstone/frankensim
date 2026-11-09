@@ -9095,3 +9095,69 @@ and DC compliance, the complete expanded KM operator, cycle-averaged gas work,
 and material/physical-domain refusals. Native gas coherence and transport code
 were included verbatim through restricted dependency facades. Full Cargo/DSR
 remains unavailable without the seven constellation siblings and DSR/RCH.
+
+## Nonlinear finite-gas caloric bubbles
+
+The explicitly opt-in `caloric-cavitation` feature exposes
+`cavitation::caloric::CaloricBubble`. It combines either original
+Rayleigh--Plesset or Keller--Miksis liquid momentum kernel with one source-backed
+`ClosedGasParcel`. Radius, radial velocity, gas internal-energy increment,
+supplied heat and gas pressure work evolve together through the original
+fixed-stack DP5(4) integrator. The original `GasCaloricBranch` integrates the
+actual temperature-dependent Cv; no fixed polytropic exponent or surrogate gas
+is substituted. Source/composition identity, mass and auxiliary query axes
+survive every accepted endpoint.
+
+The gas law is `p_g = m R_g T/V` and its energy equation is
+`U_g' = Q_heat - p_g V'`. Keller--Miksis consumes its analytic derivative
+`p_g' = -3 (1+R_g/Cv) p_g R'/R + R_g Q_heat/(Cv V)` at the same RK stage,
+including both compression and signed heat input. The existing viscous
+acceleration denominator, pressure-drive derivative and acoustic
+back-reaction remain in the native shared equation. The original polytropic
+owners use those same liquid kernels and retain their own gas laws.
+
+Original-source energy reconstruction cancels common formation references
+before arithmetic. The complete-window residual `Delta U_g + integral p_g dV
+- integral Q_heat dt` and original-source/integrated-coordinate discrepancy
+must both satisfy an explicit absolute joule budget. Inner caloric tolerance
+must fit the declared local and complete-window energy scales. This is a gas
+heat/work account, not a total compressible-liquid/radiation energy theorem.
+The inherited incompressible liquid kinetic-energy output remains only a
+leading-order diagnostic for Keller--Miksis.
+
+Preparation amortizes continuous caloric-source admission across the complete
+advance; radial stages allocate no source model, transport receipt or history.
+Each caloric inversion retains its original bounded work/cancellation checks.
+A final endpoint resolves the original material transport/source domain once.
+`prepare_advance_controlled` returns a borrowing proposal for downstream
+acoustic admission; a dropped proposal, source refusal, numerical failure,
+physical boundary or cancellation leaves all accepted gas and radial state
+unchanged. Heat and pressure callbacks must be deterministic and bounded and
+must have their bandwidth resolved by the maximum native time step.
+
+Both phases remain in explicit restricted models: frozen Newtonian liquid,
+fixed-mass/composition ideal noncondensable gas, spatially uniform gas pressure
+and lumped temperature. The source's declared water species is refused.
+Original radius, liquid wall Mach, vapor/liquid density and selected KM
+pressure/bulk-modulus limits apply, and every stage independently bounds actual
+gas/liquid density ratio, gas wall Mach using its current Cv/T, and vapor
+pressure fraction. The latter three ceilings are at most 0.1. These are
+applicability restrictions, not experimental error bounds. Other gas phase
+validity, incident compactness and the uniform-temperature approximation
+remain caller conditions. The signed heat callback is an explicit external
+power port, not a derived conduction closure. No vapor calorics/latent heat,
+phase mass transfer, liquid thermal diffusion, chemistry, dissolution, shocks,
+wall jets or erosion prediction is implied.
+
+Focused G1/G3/G4 tests are authored to compare both radial equations with the
+constant-Cv adiabatic polytropic limit, independently integrate the entropy and
+energy of `Cp/R = 3.5 + b T`, shift the formation-energy datum, verify the KM
+heat term, and exercise signed heat, preserved inventories, source-domain
+refusal and transactional cancellation. They are numerical model checks, not
+experimental validation of cavitation or heat-transfer coefficients.
+
+The implementation remains opt-in while native regression execution is pending.
+The implementation environment became unavailable before compilation/tests
+completed; no passing runtime result is claimed for this extension. The intended
+focused selector is `cargo test -p fs-flux --no-default-features --features
+caloric-cavitation --lib cavitation`.

@@ -22,6 +22,10 @@ use core::f64::consts::PI;
 use core::fmt;
 use fs_material::cavitation::CavitationState;
 
+/// Nonlinear radial dynamics with finite, source-backed gas calorics and heat.
+#[cfg(feature = "caloric-cavitation")]
+#[path = "cavitation/caloric.rs"]
+pub mod caloric;
 #[path = "cavitation/cluster.rs"]
 mod cluster;
 /// Original polytropic gas inventory expressed in volume coordinates.
@@ -506,25 +510,39 @@ impl RayleighPlessetBubble {
 
     fn dynamics(&self, state: &BubbleState, pressure: f64) -> Result<(f64, f64), CavitationError> {
         validate_state(state, self.liquid, self.limits)?;
-        let radius = state.radius_m;
-        let velocity = state.wall_velocity_m_s;
-        if !pressure.is_finite() {
-            return Err(CavitationError::InvalidInput("imposed absolute pressure"));
-        }
-        let gas_pressure = self.gas.pressure(radius)?;
-        // This ordering exactly preserves the equilibrium constructor's
-        // pressure balance at R0, and includes both capillary and viscous stress.
-        let driving_pressure = gas_pressure
-            - (pressure - self.liquid.saturation_pressure_pa()
-                + 2.0 * self.liquid.surface_tension_n_m() / radius)
-            - 4.0 * self.liquid.dynamic_viscosity_pa_s() * velocity / radius;
-        let acceleration = finite(
-            (driving_pressure / self.liquid.liquid_density_kg_m3() - 1.5 * velocity * velocity)
-                / radius,
-            "wall acceleration",
-        )?;
+        let gas_pressure = self.gas.pressure(state.radius_m)?;
+        let acceleration =
+            rayleigh_plesset_acceleration(self.liquid, state, pressure, gas_pressure)?;
         Ok((gas_pressure, acceleration))
     }
+}
+
+// Constitutive gas owners share the original liquid momentum equation. Gas
+// pressure can come from the original polytrope or a finite caloric inventory;
+// no alternate Rayleigh--Plesset equation is introduced by thermal coupling.
+fn rayleigh_plesset_acceleration(
+    liquid: CavitationState,
+    state: &BubbleState,
+    pressure: f64,
+    gas_pressure: f64,
+) -> Result<f64, CavitationError> {
+    if !pressure.is_finite() {
+        return Err(CavitationError::InvalidInput("imposed absolute pressure"));
+    }
+    if !nonnegative(gas_pressure) {
+        return Err(CavitationError::InvalidInput("gas pressure"));
+    }
+    let radius = state.radius_m;
+    let velocity = state.wall_velocity_m_s;
+    // Retain the original equilibrium-preserving ordering.
+    let driving_pressure = gas_pressure
+        - (pressure - liquid.saturation_pressure_pa()
+            + 2.0 * liquid.surface_tension_n_m() / radius)
+        - 4.0 * liquid.dynamic_viscosity_pa_s() * velocity / radius;
+    finite(
+        (driving_pressure / liquid.liquid_density_kg_m3() - 1.5 * velocity * velocity) / radius,
+        "wall acceleration",
+    )
 }
 
 impl SphericalBubbleModel for RayleighPlessetBubble {

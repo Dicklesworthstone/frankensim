@@ -18,6 +18,8 @@ surface-surfactant = ["dep:fs-math"]
 # Finite aqueous adsorption/desorption on the original surface inventories.
 surface-soluble = ["surface-surfactant", "dep:fs-material", "dep:fs-thermochem"]
 cavitation = ["dep:fs-material", "dep:fs-la", "dep:fs-math"]
+# Nonlinear radial response with finite source-backed gas heat and pressure work.
+caloric-cavitation = ["cavitation"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
 # Observe the original coherent atmosphere on source-owned physical gas faces.

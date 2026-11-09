@@ -52,7 +52,7 @@ impl BubblePressureSample {
         Ok(sample)
     }
 
-    fn validate(self) -> Result<(), CavitationError> {
+    pub(super) fn validate(self) -> Result<(), CavitationError> {
         if !self.absolute_pressure_pa.is_finite() || !self.time_derivative_pa_s.is_finite() {
             return Err(CavitationError::InvalidInput(
                 "imposed absolute pressure and its time derivative",
@@ -217,53 +217,82 @@ impl KellerMiksisBubble {
     ) -> Result<(f64, f64), CavitationError> {
         validate_state(state, self.liquid, self.limits.bubble)?;
         pressure.validate()?;
-        let radius = state.radius_m;
-        let velocity = state.wall_velocity_m_s;
-        let density = self.liquid.liquid_density_kg_m3();
-        let sound_speed = self.liquid.liquid_sound_speed_m_s();
-        let viscosity = self.liquid.dynamic_viscosity_pa_s();
-        let surface_tension = self.liquid.surface_tension_n_m();
-        let gas_pressure = self.gas.pressure(radius)?;
-        let capillary_pressure = 2.0 * surface_tension / radius;
-        // Keep the original equilibrium-preserving pressure ordering.
-        let pressure_jump = finite(
-            gas_pressure
-                - (pressure.absolute_pressure_pa - self.liquid.saturation_pressure_pa()
-                    + capillary_pressure)
-                - 4.0 * viscosity * velocity / radius,
-            "liquid wall pressure jump",
-        )?;
-        let pressure_ratio = finite(
-            ((pressure_jump / density) / sound_speed).abs() / sound_speed,
-            "liquid pressure/bulk-modulus ratio",
-        )?;
-        if pressure_ratio > self.limits.maximum_pressure_ratio {
-            return Err(CavitationError::PressureRatioExceeded {
-                pressure_ratio,
-                maximum_pressure_ratio: self.limits.maximum_pressure_ratio,
-            });
-        }
-        let mach = velocity / sound_speed;
-        let denominator = radius * (1.0 - mach) + (4.0 * viscosity / density) / sound_speed;
-        if !positive(denominator) {
-            return Err(CavitationError::NonFiniteDerived(
-                "Keller-Miksis acceleration denominator",
-            ));
-        }
-        let radial_strain_rate = velocity / radius;
-        let pressure_rate_without_acceleration =
-            (-3.0 * self.gas.polytropic_exponent * gas_pressure + capillary_pressure)
-                * radial_strain_rate
-                + 4.0 * viscosity * radial_strain_rate * radial_strain_rate
-                - pressure.time_derivative_pa_s;
-        let acceleration = finite(
-            ((1.0 + mach) * pressure_jump / density - (1.5 - 0.5 * mach) * velocity * velocity
-                + (radius / sound_speed) * pressure_rate_without_acceleration / density)
-                / denominator,
-            "Keller-Miksis wall acceleration",
+        let gas_pressure = self.gas.pressure(state.radius_m)?;
+        let acceleration = acceleration_with_gas(
+            self.liquid,
+            state,
+            pressure,
+            self.limits.maximum_pressure_ratio,
+            gas_pressure,
+            -3.0 * self.gas.polytropic_exponent * gas_pressure,
+            0.0,
         )?;
         Ok((gas_pressure, acceleration))
     }
+}
+
+/// Shared liquid equation for both polytropic and source-backed caloric gas.
+/// The gas derivative is `dpg/dt = radial_strain_pressure * R'/R + rate`.
+/// Keeping these chain-rule terms separate preserves the original polytropic
+/// arithmetic while allowing the actual heat contribution to pressure rate.
+pub(super) fn acceleration_with_gas(
+    liquid: CavitationState,
+    state: &BubbleState,
+    pressure: BubblePressureSample,
+    maximum_pressure_ratio: f64,
+    gas_pressure: f64,
+    radial_strain_pressure: f64,
+    explicit_pressure_rate: f64,
+) -> Result<f64, CavitationError> {
+    pressure.validate()?;
+    if !super::nonnegative(gas_pressure)
+        || !radial_strain_pressure.is_finite()
+        || !explicit_pressure_rate.is_finite()
+    {
+        return Err(CavitationError::InvalidInput("gas pressure and derivative"));
+    }
+    let radius = state.radius_m;
+    let velocity = state.wall_velocity_m_s;
+    let density = liquid.liquid_density_kg_m3();
+    let sound_speed = liquid.liquid_sound_speed_m_s();
+    let viscosity = liquid.dynamic_viscosity_pa_s();
+    let capillary_pressure = 2.0 * liquid.surface_tension_n_m() / radius;
+    let pressure_jump = finite(
+        gas_pressure
+            - (pressure.absolute_pressure_pa - liquid.saturation_pressure_pa()
+                + capillary_pressure)
+            - 4.0 * viscosity * velocity / radius,
+        "liquid wall pressure jump",
+    )?;
+    let pressure_ratio = finite(
+        ((pressure_jump / density) / sound_speed).abs() / sound_speed,
+        "liquid pressure/bulk-modulus ratio",
+    )?;
+    if pressure_ratio > maximum_pressure_ratio {
+        return Err(CavitationError::PressureRatioExceeded {
+            pressure_ratio,
+            maximum_pressure_ratio,
+        });
+    }
+    let mach = velocity / sound_speed;
+    let denominator = radius * (1.0 - mach) + (4.0 * viscosity / density) / sound_speed;
+    if !positive(denominator) {
+        return Err(CavitationError::NonFiniteDerived(
+            "Keller-Miksis acceleration denominator",
+        ));
+    }
+    let radial_strain_rate = velocity / radius;
+    let pressure_rate_without_acceleration = (radial_strain_pressure + capillary_pressure)
+        * radial_strain_rate
+        + 4.0 * viscosity * radial_strain_rate * radial_strain_rate
+        - pressure.time_derivative_pa_s
+        + explicit_pressure_rate;
+    finite(
+        ((1.0 + mach) * pressure_jump / density - (1.5 - 0.5 * mach) * velocity * velocity
+            + (radius / sound_speed) * pressure_rate_without_acceleration / density)
+            / denominator,
+        "Keller-Miksis wall acceleration",
+    )
 }
 
 impl SphericalBubbleModel for KellerMiksisBubble {
