@@ -79,13 +79,21 @@ pub struct FusionNeutronActivationStep {
     pub nuclear_released: EnergyChannels,
     /// Actual internal births from the original finite radioactive stock.
     pub decay_neutrons: f64,
+    /// Internally born delayed families, in the same finite decay history.
+    pub decay_precursors: f64,
     /// Original decay radiation transferred into neutron kinetic storage [J].
     /// Already removed from combined exports; do not add it as material heat.
     pub transferred_decay_neutron_energy_j: f64,
+    /// Original decay radiation reserved in newly born delayed families [J].
+    pub reserved_decay_precursor_energy_j: f64,
     /// Accepted external injection, excluding internally emitted neutrons.
     pub external_injected_neutrons: f64,
+    /// External family births, excluding internally reserved decay cohorts.
+    pub external_injected_precursors: f64,
     /// Kinetic energy supplied from outside this nuclear system [J].
     pub external_injected_kinetic_energy_j: f64,
+    /// Stored future-neutron energy supplied by external precursors [J].
+    pub external_injected_precursor_energy_j: f64,
     /// Noncancelling external/internal injection reconciliation [neutrons].
     pub injection_number_roundoff: f64,
     /// Net signed nuclear conversion: original inventory event releases plus
@@ -99,7 +107,7 @@ pub struct FusionNeutronActivationStep {
     /// Conservative energy weighting of native neutron/material count defects:
     /// each cell's defect times its largest absolute event-energy coefficient.
     pub reaction_energy_defect_j: f64,
-    /// Final neutron energy - initial + all exports - external kinetic energy
+    /// Final neutron and precursor storage - initial + all exports - external energy
     /// - generated nuclear-event energy [J].
     pub energy_balance_residual_j: f64,
     /// Noncancelling energy-account and coupling defect total [J].
@@ -189,8 +197,9 @@ impl FusionNeutronActivationState {
             neutrons: spatial.neutrons().clone(),
             released: vec![[Accumulator::new(0.0); 3]; cells],
             nuclear_reaction_energy: vec![Accumulator::new(0.0); cells],
+            exported_precursor_energy: vec![Accumulator::new(0.0); cells],
         };
-        kinetic.kinetic_energy_j()?;
+        kinetic.stored_energy_j()?;
         Ok(Self {
             spatial,
             kinetic,
@@ -225,6 +234,25 @@ impl FusionNeutronActivationState {
     /// Retained neutron kinetic energy [J], without a future nuclear-Q reservoir.
     pub fn kinetic_energy_j(&self) -> Result<f64, NeutronKineticError> {
         self.kinetic.kinetic_energy_j()
+    }
+
+    /// Future-neutron energy retained in the original precursor populations [J].
+    pub fn precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        self.kinetic.precursor_energy_j()
+    }
+
+    /// Current neutron kinetic plus reserved precursor energy [J].
+    pub fn stored_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        self.kinetic.stored_energy_j()
+    }
+
+    /// Stored energy carried out by precursor flow since binding [J].
+    pub fn cumulative_exported_precursor_energy_j(&self) -> Result<f64, NeutronKineticError> {
+        self.kinetic.cumulative_exported_precursor_energy_j()
+    }
+
+    pub fn cell_exported_precursor_energy_j(&self, cell: usize) -> Option<f64> {
+        self.kinetic.cell_exported_precursor_energy_j(cell)
     }
 
     /// Neutron-associated exports, including prompt Q, since binding.
@@ -271,6 +299,28 @@ impl FusionNeutronActivationState {
         temperatures_k: &[f64],
         neutron_rates_s: &[f64],
         budget: FusionNeutronActivationBudget,
+        checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, FusionNeutronActivationStep), FusionNeutronActivationError> {
+        self.trial_with_sources(
+            duration_s,
+            temperatures_k,
+            neutron_rates_s,
+            &vec![0.0; self.neutrons().precursor_counts().len()],
+            budget,
+            checkpoint,
+        )
+    }
+
+    /// Evolve supplied neutron and delayed-family rates on the same finite stock.
+    /// External precursors carry their explicitly admitted stored neutron energy;
+    /// internally born families reserve energy from their original decay events.
+    pub fn trial_with_sources(
+        &self,
+        duration_s: f64,
+        temperatures_k: &[f64],
+        neutron_rates_s: &[f64],
+        precursor_rates_s: &[f64],
+        budget: FusionNeutronActivationBudget,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, FusionNeutronActivationStep), FusionNeutronActivationError> {
         checkpoint()?;
@@ -279,14 +329,16 @@ impl FusionNeutronActivationState {
                 "finite nonnegative combined energy allowance required",
             ));
         }
-        if neutron_rates_s.len() != self.neutrons().neutron_counts().len() {
+        if neutron_rates_s.len() != self.neutrons().neutron_counts().len()
+            || precursor_rates_s.len() != self.neutrons().precursor_counts().len()
+        {
             return Err(FusionNeutronActivationError::Invalid(
-                "one external neutron rate per original cell and group required",
+                "one external neutron and precursor rate per original cell/group/family required",
             ));
         }
         let sources = DiffusionBurnupSources {
             neutron_rates_s: neutron_rates_s.to_vec(),
-            precursor_rates_s: vec![],
+            precursor_rates_s: precursor_rates_s.to_vec(),
             nuclide_rates_s: self
                 .inventories()
                 .iter()
@@ -321,6 +373,7 @@ impl FusionNeutronActivationState {
                     &spatial_step,
                     duration_s,
                     neutron_rates_s,
+                    precursor_rates_s,
                     &mut checkpoint,
                 )
             })
@@ -343,6 +396,16 @@ impl FusionNeutronActivationState {
             .as_ref()
             .map_or(kinetic_step.injected_kinetic_energy_j, |value| {
                 value.external_energy_j
+            });
+        let external_injected_precursors = transfer
+            .as_ref()
+            .map_or(spatial_step.neutrons.injected_precursors, |value| {
+                value.external_precursors
+            });
+        let external_injected_precursor_energy_j = transfer
+            .as_ref()
+            .map_or(kinetic_step.injected_precursor_energy_j, |value| {
+                value.external_precursor_energy_j
             });
         let mut defect = Accumulator::new(kinetic_step.energy_roundoff_j);
         if let Some(transfer) = &transfer {
@@ -404,10 +467,14 @@ impl FusionNeutronActivationState {
         let energy_balance_residual_j = checked(sum(&[
             kinetic_step.final_kinetic_energy_j,
             -kinetic_step.initial_kinetic_energy_j,
+            kinetic_step.final_precursor_energy_j,
+            -kinetic_step.initial_precursor_energy_j,
+            kinetic_step.exported_precursor_energy_j,
             exports.deposited_j,
             exports.radiation_j,
             exports.escaped_j,
             -external_injected_kinetic_energy_j,
+            -external_injected_precursor_energy_j,
             -generated.value(),
         ]))?;
         defect.add(energy_balance_residual_j.abs())?;
@@ -421,11 +488,17 @@ impl FusionNeutronActivationState {
             kinetic: kinetic_step,
             nuclear_released: crate::channel_values(nuclear_totals),
             decay_neutrons: transfer.as_ref().map_or(0.0, |value| value.decay_neutrons),
+            decay_precursors: transfer.as_ref().map_or(0.0, |value| value.decay_precursors),
             transferred_decay_neutron_energy_j: transfer
                 .as_ref()
                 .map_or(0.0, |value| value.transferred_energy_j),
+            reserved_decay_precursor_energy_j: transfer
+                .as_ref()
+                .map_or(0.0, |value| value.reserved_precursor_energy_j),
             external_injected_neutrons,
+            external_injected_precursors,
             external_injected_kinetic_energy_j,
+            external_injected_precursor_energy_j,
             injection_number_roundoff,
             nuclear_generated_energy_j: generated.value(),
             cell_released,
@@ -581,3 +654,9 @@ fn channels(value: EnergyChannels) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod precursor_tests;
+
+#[cfg(test)]
+pub(crate) use precursor_tests::{expected_history as precursor_expected_history, material_precursor_fixture};

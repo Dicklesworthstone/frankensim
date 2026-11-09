@@ -3674,8 +3674,51 @@ permission to duplicate an explicitly represented fragment's later emission.
 Ten additional regressions were written: source metadata/refusal, independent
 high-precision gamma references, tiny cutoff ratios, narrow/adjacent-float tail
 bins, refinement and unit rescaling, bounds/cancellation, finite SF histories,
-and full material heat/continuation/rollback. Formatting and source review
-completed. The subsequent native compiler was killed with exit 137, then the
-execution environment became unavailable; no LF7/LF9 Rust tests ran. The earlier
-200-test LF5 result above does not validate these additions. Native validation
-of this extension remains pending; no empirical or performance claim is made.
+and full material heat/continuation/rollback. The recovered focused original-source
+suite subsequently passed 30 native tests, zero failures: 10 source, 5 analytic
+moment, 11 binding, 1 evaluated Cf-252 and 3 material regressions. All nine
+feature-file hashes matched the committed source. The compile used sequential
+code generation and disabled only unrelated test modules; its unused test-helper
+warnings do not establish a full Cargo/constellation gate. No empirical or
+performance claim is made.
+
+## Delayed radioactive families, stored energy and material heat
+
+The original joint neutron/precursor/nuclide propagator admits radioactive
+parent-to-family births through BurnupDecayNeutronEmission::new_with_precursors.
+Immediate and delayed yields retain exact nuclide and family order. Only native
+spontaneous reaction fractions create these births; capture, material transfer
+and exterior removal do not. Accepted family births enter native precursor
+injection accounts, while native decay, transfer and outflow retain their
+within-interval ages. Transported stocks require unchanged source identities,
+spectra and yields in each compartment.
+
+NeutronKineticModel::new_with_precursor_storage explicitly assigns each family
+the future-neutron reserve sum(spectrum[g]*E[g]). Initial families and external
+family feeds carry that reserve. Family decay converts it internally into the
+original neutron spectrum, with no additional Q, heat or radiation. Transfer
+moves the reserve; outflow exports it separately from neutron leakage. Existing
+model constructors still reject delayed families, and positive induced-fission
+delayed yields still require a separate physical funding declaration.
+
+Finite activation reserves both immediate neutron energy and future family
+energy from the original rate-weighted radioactive radiation allowance. It
+reports internal births/reservations separately from external neutron/family
+feeds. Neutron and precursor storage, internal conversion, original event
+release and exported reserve close in the same accepted step. Cumulative
+precursor outflow survives continuation and restart. The history entrypoint and
+material transaction retain these accounts; only accepted deposited energy
+heats the material, including capture after delayed release.
+
+This raw native API requires caller-authored compatible energy and cohort
+ownership. It does not infer aggregate ENDF-family funding or permission to
+also retain the same radioactive fragments; the evaluated source adapter owns
+those additional admissions.
+
+Thirteen focused regressions were added for analytical family birth/release,
+continuous feeds, capture competition/refinement, precursor and parent
+transport/outflow, source and energy refusal, histories, cancellation/retry,
+and original material temperature/energy. Source review completed. The runtime
+became unavailable after the preceding analytic-spectrum validation, before
+these new native tests or formatting could run; their validation remains
+pending. The prior 200-test and 30-test results do not validate this extension.

@@ -8,7 +8,9 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 struct Partition {
     neutrons_per_decay: f64,
+    precursors_per_decay: f64,
     neutron_j: f64,
+    precursor_j: f64,
     radiation_j: f64,
     roundoff_j: f64,
 }
@@ -19,9 +21,13 @@ pub(super) struct DecayPartitions(Vec<Vec<Option<Partition>>>);
 pub(super) struct DecayTransfer {
     pub remaining_radiation_j: Vec<f64>,
     pub decay_neutrons: f64,
+    pub decay_precursors: f64,
     pub transferred_energy_j: f64,
+    pub reserved_precursor_energy_j: f64,
     pub external_neutrons: f64,
+    pub external_precursors: f64,
     pub external_energy_j: f64,
+    pub external_precursor_energy_j: f64,
     pub number_roundoff: f64,
     pub energy_roundoff_j: f64,
 }
@@ -39,22 +45,19 @@ impl DecayPartitions {
             let mut parents = Vec::with_capacity(emission.neutron_yields().len());
             for (parent, yields) in emission.neutron_yields().iter().enumerate() {
                 let mut error = Accumulator::new(0.0);
-                let mut emitted = Accumulator::new(0.0);
-                let mut multiplicity = Accumulator::new(0.0);
-                let mut multiplicity_error = Accumulator::new(0.0);
-                for (&yield_, &energy) in yields.iter().zip(model.group_energies_j()) {
-                    add(&mut multiplicity, yield_, &mut multiplicity_error)?;
-                    let value = product(yield_, energy, &mut error)?;
-                    add(&mut emitted, value, &mut error)?;
-                }
-                let neutron_j = export(emitted, &mut error)?;
-                if neutron_j == 0.0 {
+                let (neutrons_per_decay, neutron_j) =
+                    moments(yields, model.group_energies_j(), &mut error)?;
+                let (precursors_per_decay, precursor_j) = moments(
+                    &emission.precursor_yields()[parent],
+                    model.precursor_energies_j(),
+                    &mut error,
+                )?;
+                let reserved = checked(sum(&[neutron_j, precursor_j]))?;
+                error.add(sum(&[neutron_j, precursor_j, -reserved]).abs())?;
+                if reserved == 0.0 {
                     parents.push(None);
                     continue;
                 }
-                multiplicity.add(multiplicity_error.hi)?;
-                multiplicity.add(multiplicity_error.lo)?;
-                let neutrons_per_decay = upper(multiplicity)?;
                 let lambda = emission.model().nuclides()[parent]
                     .law
                     .decay_constant()
@@ -96,11 +99,11 @@ impl DecayPartitions {
                     if rate > 0.0 && weight == 0.0 {
                         return Err(FissionError::Arithmetic.into());
                     }
-                    let difference = checked(sum(&[radiation, -neutron_j]))?;
+                    let difference = checked(sum(&[radiation, -reserved]))?;
                     let division_error = checked(weight.mul_add(scale, -rate).abs() / scale)?;
                     partition_error.add(checked(division_error * difference.abs())?)?;
                     partition_error.add(checked(
-                        sum(&[radiation, -neutron_j, -difference]).abs() * weight,
+                        sum(&[radiation, -reserved, -difference]).abs() * weight,
                     )?)?;
                     let value = product(weight, difference, &mut partition_error)?;
                     add(&mut remaining, value, &mut partition_error)?;
@@ -110,7 +113,7 @@ impl DecayPartitions {
                 let numerator = export(remaining, &mut partition_error)?;
                 if numerator < 0.0 {
                     return Err(FusionNeutronActivationError::Invalid(
-                        "emitted neutron energy exceeds original decay radiation; capture radiation cannot fund it",
+                        "immediate and reserved delayed-neutron energy exceeds original decay radiation",
                     ));
                 }
                 let radiation_j = checked(numerator / denominator)?;
@@ -122,7 +125,9 @@ impl DecayPartitions {
                 error.add(checked(upper(partition_error)? / denominator)?)?;
                 parents.push(Some(Partition {
                     neutrons_per_decay,
+                    precursors_per_decay,
                     neutron_j,
+                    precursor_j,
                     radiation_j,
                     roundoff_j: upper(error)?,
                 }));
@@ -139,6 +144,7 @@ impl DecayPartitions {
         step: &DiffusionBurnupStep,
         duration_s: f64,
         external_rates_s: &[f64],
+        external_precursor_rates_s: &[f64],
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<DecayTransfer, FusionNeutronActivationError> {
         let births =
@@ -148,7 +154,17 @@ impl DecayPartitions {
                     "accepted decay emission account is missing",
                 ))?;
         let groups = model.group_energies_j().len();
-        if births.len() != self.0.len() || births.iter().any(|row| row.len() != groups) {
+        let families = model.precursor_energies_j().len();
+        let precursor_births = step.decay_precursor_counts.as_ref().ok_or(
+            FusionNeutronActivationError::Invalid("accepted decay precursor account is missing"),
+        )?;
+        if births.len() != self.0.len()
+            || births.iter().any(|row| row.len() != groups)
+            || precursor_births.len() != self.0.len()
+            || precursor_births.iter().any(|row| row.len() != families)
+            || external_rates_s.len() != self.0.len() * groups
+            || external_precursor_rates_s.len() != self.0.len() * families
+        {
             return Err(FusionNeutronActivationError::Invalid(
                 "accepted decay emission layout changed",
             ));
@@ -156,9 +172,13 @@ impl DecayPartitions {
         let mut energy_error = Accumulator::new(0.0);
         let mut number_error = Accumulator::new(0.0);
         let mut emitted = Accumulator::new(0.0);
+        let mut born_precursors = Accumulator::new(0.0);
         let mut transferred = Accumulator::new(0.0);
+        let mut reserved_precursors = Accumulator::new(0.0);
         let mut external = Accumulator::new(0.0);
+        let mut external_precursors = Accumulator::new(0.0);
         let mut external_energy = Accumulator::new(0.0);
+        let mut external_precursor_energy = Accumulator::new(0.0);
         let mut remaining_radiation_j = Vec::with_capacity(self.0.len());
         for (cell, ((partitions, inventory), report)) in
             self.0.iter().zip(inventories).zip(&step.burnup).enumerate()
@@ -168,7 +188,9 @@ impl DecayPartitions {
             let mut parent_count_errors = vec![Accumulator::new(0.0); partitions.len()];
             let mut remaining = Accumulator::new(0.0);
             let mut cell_transfer = Accumulator::new(0.0);
+            let mut cell_reservation = Accumulator::new(0.0);
             let mut cell_born_energy = Accumulator::new(0.0);
+            let mut cell_precursor_energy = Accumulator::new(0.0);
             for (reaction, &count) in inventory
                 .model()
                 .reactions()
@@ -204,24 +226,35 @@ impl DecayPartitions {
                     let neutron_error =
                         product(count_error, partition.neutrons_per_decay, &mut number_error)?;
                     number_error.add(neutron_error)?;
+                    let precursor_error =
+                        product(count_error, partition.precursors_per_decay, &mut number_error)?;
+                    number_error.add(precursor_error)?;
                     let weighted_error = product(
                         count_error,
-                        checked(sum(&[partition.neutron_j, partition.radiation_j]))?,
+                        checked(sum(&[
+                            partition.neutron_j,
+                            partition.precursor_j,
+                            partition.radiation_j,
+                        ]))?,
                         &mut energy_error,
                     )?;
                     energy_error.add(weighted_error)?;
                     energy_error.add(checked(count * partition.roundoff_j)?)?;
                     let radiation = product(count, partition.radiation_j, &mut energy_error)?;
                     let transfer = product(count, partition.neutron_j, &mut energy_error)?;
+                    let reservation = product(count, partition.precursor_j, &mut energy_error)?;
                     add(&mut remaining, radiation, &mut energy_error)?;
                     add(&mut cell_transfer, transfer, &mut energy_error)?;
+                    add(&mut cell_reservation, reservation, &mut energy_error)?;
                 }
             }
             let radiation = export(remaining, &mut energy_error)?;
             let transfer = export(cell_transfer, &mut energy_error)?;
+            let reservation = export(cell_reservation, &mut energy_error)?;
             energy_error
-                .add(checked(sum(&[radiation, transfer, -report.released.radiation_j]))?.abs())?;
+                .add(checked(sum(&[radiation, transfer, reservation, -report.released.radiation_j]))?.abs())?;
             add(&mut transferred, transfer, &mut energy_error)?;
+            add(&mut reserved_precursors, reservation, &mut energy_error)?;
             remaining_radiation_j.push(radiation);
             for (group, &internal) in births[cell].iter().enumerate() {
                 checkpoint()?;
@@ -245,30 +278,76 @@ impl DecayPartitions {
             }
             let born_energy_j = export(cell_born_energy, &mut energy_error)?;
             energy_error.add(checked(sum(&[transfer, -born_energy_j]))?.abs())?;
+            for (family, &internal) in precursor_births[cell].iter().enumerate() {
+                checkpoint()?;
+                let index = cell * families + family;
+                let supplied = product(external_precursor_rates_s[index], duration_s, &mut number_error)?;
+                number_error.add(checked(sum(&[
+                    step.neutrons.injected_precursor_counts[index],
+                    -internal,
+                    -supplied,
+                ]))?.abs())?;
+                add(&mut born_precursors, internal, &mut number_error)?;
+                add(&mut external_precursors, supplied, &mut number_error)?;
+                let energy = model.precursor_energies_j()[family];
+                let internal_energy = product(internal, energy, &mut energy_error)?;
+                let supplied_energy = product(supplied, energy, &mut energy_error)?;
+                add(&mut cell_precursor_energy, internal_energy, &mut energy_error)?;
+                add(&mut external_precursor_energy, supplied_energy, &mut energy_error)?;
+            }
+            let born_precursor_energy_j = export(cell_precursor_energy, &mut energy_error)?;
+            energy_error.add(checked(sum(&[reservation, -born_precursor_energy_j]))?.abs())?;
         }
         let decay_neutrons = export(emitted, &mut number_error)?;
+        let decay_precursors = export(born_precursors, &mut number_error)?;
         let external_neutrons = export(external, &mut number_error)?;
+        let external_precursors = export(external_precursors, &mut number_error)?;
         let transferred_energy_j = export(transferred, &mut energy_error)?;
+        let reserved_precursor_energy_j = export(reserved_precursors, &mut energy_error)?;
         let external_energy_j = export(external_energy, &mut energy_error)?;
+        let external_precursor_energy_j = export(external_precursor_energy, &mut energy_error)?;
         let number_roundoff = upper(number_error)?;
         energy_error.add(checked(
             number_roundoff
                 * model
                     .group_energies_j()
                     .iter()
+                    .chain(model.precursor_energies_j())
                     .copied()
                     .fold(0.0_f64, f64::max),
         )?)?;
         Ok(DecayTransfer {
             remaining_radiation_j,
             decay_neutrons,
+            decay_precursors,
             transferred_energy_j,
+            reserved_precursor_energy_j,
             external_neutrons,
+            external_precursors,
             external_energy_j,
+            external_precursor_energy_j,
             number_roundoff,
             energy_roundoff_j: upper(energy_error)?,
         })
     }
+}
+
+fn moments(
+    yields: &[f64],
+    energies: &[f64],
+    error: &mut Accumulator,
+) -> Result<(f64, f64), FusionNeutronActivationError> {
+    let mut energy = Accumulator::new(0.0);
+    let mut multiplicity = Accumulator::new(0.0);
+    let mut count_error = Accumulator::new(0.0);
+    for (&yield_, &coefficient) in yields.iter().zip(energies) {
+        add(&mut multiplicity, yield_, &mut count_error)?;
+        let value = product(yield_, coefficient, error)?;
+        add(&mut energy, value, error)?;
+    }
+    multiplicity.add(count_error.hi)?;
+    multiplicity.add(count_error.lo)?;
+    Ok((upper(multiplicity)?, export(energy, error)?))
 }
 
 fn product(a: f64, b: f64, error: &mut Accumulator) -> Result<f64, FusionNeutronActivationError> {

@@ -192,6 +192,11 @@ pub struct DiffusionBurnupStep {
     /// are included in the neutron owner's total injected counts, separately
     /// from externally prescribed sources. None means no emission binding.
     pub decay_neutron_counts: Option<Vec<Vec<f64>>>,
+    /// Internally born radioactive precursors, cell-major then native delayed
+    /// family. Included in native injected-precursor counts; their subsequent
+    /// decays emit neutrons through the unchanged delayed-family operator.
+    /// None means no radioactive-emission binding, as for decay_neutron_counts.
+    pub decay_precursor_counts: Option<Vec<Vec<f64>>>,
     pub iterations: usize,
     pub reaction_defect: f64,
     pub reaction_defect_by_cell: Vec<f64>,
@@ -459,7 +464,7 @@ impl DiffusionBurnupState {
                 )?)
             };
             let initial = self.neutrons.rebind_model(model)?;
-            let (neutrons, neutron_step, trial, decay_neutron_counts) =
+            let (neutrons, neutron_step, trial, decay_neutron_counts, decay_precursor_counts) =
                 if self.decay_neutrons.is_some() {
                     let (neutrons, report, trial, births) = self.trial_decay_neutrons(
                         &initial,
@@ -471,7 +476,7 @@ impl DiffusionBurnupState {
                         budget,
                         &mut checkpoint,
                     )?;
-                    (neutrons, report, trial, Some(births))
+                    (neutrons, report, trial, Some(births.neutrons), Some(births.precursors))
                 } else {
                     let (neutrons, neutron_step) = if let Some(sources) = sources {
                         initial.trial_with_sources(
@@ -493,7 +498,7 @@ impl DiffusionBurnupState {
                         budget.burnup,
                         &mut checkpoint,
                     )?;
-                    (neutrons, neutron_step, trial, None)
+                    (neutrons, neutron_step, trial, None, None)
                 };
             let mut by_reaction: Vec<Vec<Accumulator>> = inventories
                 .iter()
@@ -554,6 +559,7 @@ impl DiffusionBurnupState {
                         produced_nuclei_by_cell: trial.produced_by_cell,
                         transport: trial.transport,
                         decay_neutron_counts,
+                        decay_precursor_counts,
                         iterations: iteration,
                         reaction_defect: last_defect,
                         reaction_defect_by_cell: defects,

@@ -247,7 +247,7 @@ impl NuclearHeatSource for FusionNeutronActivationCellSource {
                 .trial_with_sources(
                     0.0,
                     self.forcing.rates_at(time_s)?,
-                    &[],
+                    &vec![0.0; self.state.neutrons().precursor_counts().len()],
                     budget.spatial.diffusion,
                     || Ok(()),
                 )
