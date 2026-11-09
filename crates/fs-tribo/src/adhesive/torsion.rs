@@ -13,8 +13,8 @@
 //! This is a lumped bonded-contact idealization, not the local Coulomb partial-
 //! slip solution: that solution develops edge slip before global saturation.
 //! The normal owner supplies the attached circular area and must screen its
-//! applicability. An explicit held-twist radius refresh retains the complete
-//! elastic/plastic memory and returns signed parameter work. This prescribes
+//! applicability. An explicit held-twist radius/material refresh retains the
+//! complete elastic/plastic memory and returns signed parameter work. This prescribes
 //! homogeneous bonded twist on the changed disk; stress-free recruitment of
 //! newly attached annuli needs a separate spatial-history model. Sliding,
 //! reciprocal mixed-mode area change, detachment, frame transport and heat
@@ -86,7 +86,7 @@ pub struct AdhesiveTorsionStep {
     pub plastic_twist_increment_rad: f64,
 }
 
-/// Held-twist change of the attached radius with the original calibration.
+/// Held-twist change of radius/material response with the original calibration.
 /// Complete double-double twist and elastic memory survive unchanged. Its
 /// signed storage change is reversible parameter work, not plastic loss.
 #[derive(Clone, Debug, PartialEq)]
@@ -221,9 +221,29 @@ impl AdhesiveTorsionContact {
         old: &AdhesiveTorsionState,
         contact_radius_m: f64,
     ) -> Result<AdhesiveTorsionRefresh, AdhesiveTorsionError> {
+        self.refresh_material_response(old, contact_radius_m, self.parameters.shear_moduli_pa)
+    }
+
+    /// Prescribe the original bodies' shear moduli and attached radius at held
+    /// twist. The source owner must establish those material/area values and
+    /// validity of the retained critical angle and small-deformation ceiling.
+    /// This leaf does not infer a temperature law for either the moduli or the
+    /// independently calibrated yield threshold.
+    ///
+    /// Double-double elastic and total twist survive unchanged; changing the
+    /// spring coefficient supplies signed parameter work without plastic flow.
+    /// This is an endpoint homogeneous-twist update, not caloric heat, a resolved
+    /// thermal path or stress-free recruitment of newly attached annuli.
+    pub fn refresh_material_response(
+        &self,
+        old: &AdhesiveTorsionState,
+        contact_radius_m: f64,
+        shear_moduli_pa: [f64; 2],
+    ) -> Result<AdhesiveTorsionRefresh, AdhesiveTorsionError> {
         self.admit(old)?;
         let law = Self::new(AdhesiveTorsionParameters {
             contact_radius_m,
+            shear_moduli_pa,
             ..self.parameters
         })?;
         let state = AdhesiveTorsionState {
@@ -501,6 +521,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn g1_material_refresh_adds_body_compliances_and_retains_reversal_history() {
+        let p = parameters();
+        let law = AdhesiveTorsionContact::new(p).unwrap();
+        let c = p.critical_twist_angle_rad;
+        let old_compliance = (3.0 / (16.0 * p.contact_radius_m.powi(3)))
+            * (p.shear_moduli_pa[0].recip() + p.shear_moduli_pa[1].recip());
+        for sign in [-1.0, 1.0] {
+            let loaded = law.advance(&law.initial_state(), sign * 3.0 * c).unwrap();
+            let reversed = law.advance(&loaded.state, -sign * 2.5 * c).unwrap();
+            for (radius_scale, body_scales) in [
+                (1.0, [0.5, 4.0]),
+                (1.0, [2.0, 0.25]),
+                (0.5, [0.5, 4.0]),
+                (2.0, [2.0, 0.25]),
+            ] {
+                let a = radius_scale * p.contact_radius_m;
+                let moduli = [
+                    body_scales[0] * p.shear_moduli_pa[0],
+                    body_scales[1] * p.shear_moduli_pa[1],
+                ];
+                let refresh = law
+                    .refresh_material_response(&loaded.state, a, moduli)
+                    .unwrap();
+                // Independent sum of each elastic half-space compliance.
+                let compliance =
+                    (3.0 / (16.0 * a.powi(3))) * (moduli[0].recip() + moduli[1].recip());
+                let k = compliance.recip();
+                let phi = loaded.state.elastic_twist_rad();
+                close(refresh.law().stiffness_nm_per_rad(), k);
+                close(refresh.storage_after_j(), 0.5 * k * phi * phi);
+                close(
+                    refresh.storage_change_j(),
+                    0.5 * (k - old_compliance.recip()) * phi * phi,
+                );
+                assert_eq!(
+                    refresh.storage_change_j().signum(),
+                    (old_compliance - compliance).signum()
+                );
+                assert_eq!(
+                    refresh.state().elastic_fraction,
+                    loaded.state.elastic_fraction
+                );
+                assert_eq!(refresh.state().angle, loaded.state.angle);
+                let returned = refresh
+                    .law()
+                    .refresh_material_response(
+                        &refresh.state(),
+                        p.contact_radius_m,
+                        p.shear_moduli_pa,
+                    )
+                    .unwrap();
+                assert_eq!(returned.state(), loaded.state);
+                assert_eq!(returned.law(), &law);
+                assert_eq!(returned.storage_change_j(), -refresh.storage_change_j());
+                let next = refresh
+                    .law()
+                    .advance(&refresh.state(), -sign * 2.5 * c)
+                    .unwrap();
+                assert_eq!(next.state.elastic_fraction, reversed.state.elastic_fraction);
+                assert_eq!(next.state.angle, reversed.state.angle);
+                let ratio = old_compliance / compliance;
+                close(
+                    next.irreversible_loss_j,
+                    ratio * reversed.irreversible_loss_j,
+                );
+                close(next.applied_work_j, ratio * reversed.applied_work_j);
+                balance(&next, -sign * 2.5 * c);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_material_refresh_keeps_low_bits_and_atomically_refuses_invalid_sources() {
+        let p = parameters();
+        let law = AdhesiveTorsionContact::new(p).unwrap();
+        let half = law
+            .advance(&law.initial_state(), 0.5 * p.critical_twist_angle_rad)
+            .unwrap()
+            .state;
+        let tiny = law
+            .advance(&half, 1e-20 * p.critical_twist_angle_rad)
+            .unwrap()
+            .state;
+        assert_ne!(tiny, half);
+        assert_eq!(tiny.accumulated_angle_rad(), half.accumulated_angle_rad());
+        let refresh = law
+            .refresh_material_response(
+                &tiny,
+                1.25 * p.contact_radius_m,
+                [0.5 * p.shear_moduli_pa[0], 3.0 * p.shear_moduli_pa[1]],
+            )
+            .unwrap();
+        let returned = refresh
+            .law()
+            .refresh_material_response(&refresh.state(), p.contact_radius_m, p.shear_moduli_pa)
+            .unwrap();
+        assert_eq!(returned.state(), tiny);
+        assert_eq!(returned.storage_change_j(), -refresh.storage_change_j());
+        let foreign = AdhesiveTorsionContact::new(AdhesiveTorsionParameters {
+            shear_moduli_pa: [2.0 * p.shear_moduli_pa[0], p.shear_moduli_pa[1]],
+            ..p
+        })
+        .unwrap();
+        assert_eq!(
+            foreign.refresh_material_response(&tiny, p.contact_radius_m, p.shear_moduli_pa),
+            Err(AdhesiveTorsionError::StateMismatch)
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                law.refresh_material_response(&tiny, bad, p.shear_moduli_pa)
+                    .is_err()
+            );
+            assert!(
+                law.refresh_material_response(
+                    &tiny,
+                    p.contact_radius_m,
+                    [bad, p.shear_moduli_pa[1]]
+                )
+                .is_err()
+            );
+            assert!(
+                law.refresh_material_response(
+                    &tiny,
+                    p.contact_radius_m,
+                    [p.shear_moduli_pa[0], bad]
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(tiny, returned.state());
+        assert_eq!(law.parameters(), p);
     }
 
     #[test]

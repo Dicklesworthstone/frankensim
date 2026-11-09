@@ -9,10 +9,11 @@
 //! a universal microscopic law for contact migration or a calibrated material.
 //!
 //! The normal owner supplies one attached JKR radius and its applicability.
-//! Source conditions and the rolling axis remain fixed. An explicit held-angle
-//! radius refresh preserves the complete elastic/plastic history and returns
-//! its signed storage change as parameter work. It does not solve the reciprocal
-//! normal force or turn that reversible work into heat. Detachment, arbitrary
+//! Source conditions and the rolling axis remain fixed during angular motion.
+//! An explicit held-angle radius/material refresh preserves the complete
+//! elastic/plastic history and returns its signed storage change as parameter
+//! work. It does not solve the reciprocal normal force or turn that reversible
+//! work into heat. Detachment, arbitrary
 //! vector rolling, spin, sliding and heat allocation remain outside this owner.
 //! One signed scalar increment is a monotone physical path. Its exact
 //! elastic/yield split is allocation-free and independent of step size.
@@ -84,7 +85,7 @@ pub struct AdhesiveRollingStep {
     pub plastic_rolling_increment_m: f64,
 }
 
-/// Held-angle change of the original contact radius, with unchanged calibration.
+/// Held-angle change of contact radius/material response, with unchanged calibration.
 /// Elastic fraction and accumulated angle retain their full double-double bits.
 /// No angular increment or plastic flow occurs during this prescribed update.
 #[derive(Clone, Debug, PartialEq)]
@@ -245,9 +246,37 @@ impl AdhesiveRollingContact {
         old: &AdhesiveRollingState,
         contact_radius_m: f64,
     ) -> Result<AdhesiveRollingRefresh, AdhesiveRollingError> {
+        self.refresh_material_response(
+            old,
+            contact_radius_m,
+            self.parameters.work_of_adhesion_j_m2,
+            self.parameters.reduced_modulus_pa,
+        )
+    }
+
+    /// Prescribe original normal-source coefficients at held angle and shift.
+    /// The normal owner supplies the attached radius, work of adhesion and
+    /// reduced modulus; this leaf does not infer their temperature dependence.
+    /// Radius, adhesion and modulus may change together. The sphere radius,
+    /// critical displacement and small-shift ceiling remain fixed, and the
+    /// caller must establish validity of that unchanged yield calibration.
+    ///
+    /// Complete elastic/plastic memory survives without a plastic increment.
+    /// Signed storage change is parameter work, not frictional heat or entropy.
+    /// This endpoint operation supplies neither a thermal path nor reciprocal
+    /// normal effort; every original coefficient and small-shift gate re-runs.
+    pub fn refresh_material_response(
+        &self,
+        old: &AdhesiveRollingState,
+        contact_radius_m: f64,
+        work_of_adhesion_j_m2: f64,
+        reduced_modulus_pa: f64,
+    ) -> Result<AdhesiveRollingRefresh, AdhesiveRollingError> {
         self.admit(old)?;
         let law = Self::new(AdhesiveRollingParameters {
             contact_radius_m,
+            work_of_adhesion_j_m2,
+            reduced_modulus_pa,
             ..self.parameters
         })?;
         let state = AdhesiveRollingState {
@@ -600,6 +629,142 @@ mod tests {
         assert_eq!(no_op.state(), loaded);
         assert_eq!(no_op.law(), &model);
         assert_eq!(no_op.storage_change_j(), 0.0);
+    }
+
+    #[test]
+    fn g1_material_refresh_tracks_primary_stiffness_and_retains_reversal_history() {
+        let p = parameters();
+        let law = AdhesiveRollingContact::new(p).unwrap();
+        let critical = law.critical_rolling_angle_rad();
+        for sign in [-1.0, 1.0] {
+            let loaded = law
+                .advance(&law.initial_state(), sign * 3.0 * critical)
+                .unwrap();
+            let reversed = law.advance(&loaded.state, -sign * 2.5 * critical).unwrap();
+            for (area_scale, adhesion_scale, modulus_scale) in [
+                (1.0, 4.0, 1.0),
+                (1.0, 1.0, 0.25),
+                (0.5, 4.0, 0.25),
+                (2.0, 0.25, 4.0),
+            ] {
+                let a = area_scale * p.contact_radius_m;
+                let w = adhesion_scale * p.work_of_adhesion_j_m2;
+                let e = modulus_scale * p.reduced_modulus_pa;
+                let refresh = law
+                    .refresh_material_response(&loaded.state, a, w, e)
+                    .unwrap();
+                // Original equation (25), independent of the factored
+                // constructor: Fc=3 pi W R/2; a0^3=9 pi W R^2/(2 E*).
+                let a0 = (4.5 * PI * w * p.effective_radius_m.powi(2) / e).cbrt();
+                let k = 6.0 * PI * w * (a / a0).powf(1.5);
+                let old_k = 6.0 * PI * p.work_of_adhesion_j_m2;
+                let xi = loaded.state.elastic_shift_m();
+                close(refresh.law().stiffness_n_per_m(), k);
+                close(refresh.law().equilibrium_contact_radius_m(), a0);
+                close(refresh.storage_after_j(), 0.5 * k * xi * xi);
+                close(refresh.storage_change_j(), 0.5 * (k - old_k) * xi * xi);
+                assert_eq!(refresh.storage_change_j().signum(), (k - old_k).signum());
+                assert_eq!(
+                    refresh.state().elastic_fraction,
+                    loaded.state.elastic_fraction
+                );
+                assert_eq!(refresh.state().angle, loaded.state.angle);
+                let returned = refresh
+                    .law()
+                    .refresh_material_response(
+                        &refresh.state(),
+                        p.contact_radius_m,
+                        p.work_of_adhesion_j_m2,
+                        p.reduced_modulus_pa,
+                    )
+                    .unwrap();
+                assert_eq!(returned.state(), loaded.state);
+                assert_eq!(returned.law(), &law);
+                assert_eq!(returned.storage_change_j(), -refresh.storage_change_j());
+                let next = refresh
+                    .law()
+                    .advance(&refresh.state(), -sign * 2.5 * critical)
+                    .unwrap();
+                assert_eq!(next.state.elastic_fraction, reversed.state.elastic_fraction);
+                assert_eq!(next.state.angle, reversed.state.angle);
+                close(
+                    next.irreversible_loss_j,
+                    reversed.irreversible_loss_j * k / old_k,
+                );
+                close(next.applied_work_j, reversed.applied_work_j * k / old_k);
+                balance(&next, -sign * 2.5 * critical);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_material_refresh_keeps_low_bits_and_atomically_refuses_invalid_sources() {
+        let p = parameters();
+        let law = AdhesiveRollingContact::new(p).unwrap();
+        let c = law.critical_rolling_angle_rad();
+        let half = law.advance(&law.initial_state(), 0.5 * c).unwrap().state;
+        let tiny = law.advance(&half, 1e-20 * c).unwrap().state;
+        assert_ne!(tiny, half);
+        assert_eq!(tiny.accumulated_angle_rad(), half.accumulated_angle_rad());
+        let refresh = law
+            .refresh_material_response(
+                &tiny,
+                1.25 * p.contact_radius_m,
+                0.5 * p.work_of_adhesion_j_m2,
+                3.0 * p.reduced_modulus_pa,
+            )
+            .unwrap();
+        let returned = refresh
+            .law()
+            .refresh_material_response(
+                &refresh.state(),
+                p.contact_radius_m,
+                p.work_of_adhesion_j_m2,
+                p.reduced_modulus_pa,
+            )
+            .unwrap();
+        assert_eq!(returned.state(), tiny);
+        assert_eq!(returned.storage_change_j(), -refresh.storage_change_j());
+        let foreign = AdhesiveRollingContact::new(AdhesiveRollingParameters {
+            work_of_adhesion_j_m2: 2.0 * p.work_of_adhesion_j_m2,
+            ..p
+        })
+        .unwrap();
+        assert_eq!(
+            foreign.refresh_material_response(
+                &tiny,
+                p.contact_radius_m,
+                p.work_of_adhesion_j_m2,
+                p.reduced_modulus_pa,
+            ),
+            Err(AdhesiveRollingError::StateMismatch)
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                law.refresh_material_response(&tiny, p.contact_radius_m, bad, p.reduced_modulus_pa)
+                    .is_err()
+            );
+            assert!(
+                law.refresh_material_response(
+                    &tiny,
+                    p.contact_radius_m,
+                    p.work_of_adhesion_j_m2,
+                    bad
+                )
+                .is_err()
+            );
+        }
+        assert!(matches!(
+            law.refresh_material_response(
+                &tiny,
+                p.critical_rolling_displacement_m,
+                p.work_of_adhesion_j_m2,
+                p.reduced_modulus_pa,
+            ),
+            Err(AdhesiveRollingError::OutsideSmallShift { .. })
+        ));
+        assert_eq!(tiny, returned.state());
+        assert_eq!(law.parameters(), p);
     }
 
     #[test]

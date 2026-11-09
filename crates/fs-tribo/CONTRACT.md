@@ -2967,3 +2967,27 @@ axis, material state or temperature needs an explicit work/history transfer.
 `AdhesiveTorsionContact::refresh_contact_radius` retains the complete double-double elastic fraction and accumulated twist while the original normal owner prescribes a new circular radius. Both original shear moduli and the calibrated critical twist stay fixed; stiffness and yield moment retain their cubic radius dependence. Signed storage work is evaluated from the coefficient difference before multiplying retained history. Shrinking area returns reversible work rather than inventing plastic loss or heat. Invalid radius, foreign history and unrepresentable arithmetic refuse without mutation.
 
 This is homogeneous bonded twist on the changed disk. It supplies no reciprocal normal effort, stress-free recruitment of annuli, mixed-mode equilibrium, separation or thermal destination. The two added G1/G3 unit groups cover cubic storage/work, loaded yield continuation, reversible radius cycles, sub-ULP memory and invalid/foreign trials. The complete production torsion leaf's seven unit tests passed with pinned nightly and the original moment kernel plus real fs-math; this is not a workspace or cross-crate integration gate.
+
+## Loaded adhesive angular material continuation
+
+Both `AdhesiveRollingContact::refresh_material_response` and
+`AdhesiveTorsionContact::refresh_material_response` continue an existing spring
+at held angular coordinate with an explicitly supplied attached radius and
+material coefficients. Rolling uses the original work of adhesion and reduced
+elastic modulus; torsion retains both half-space shear compliances. Geometry,
+critical shift or twist, and declared applicability ceilings remain unchanged.
+The original constructors recheck the new response before any proposal exists.
+
+The exact double-double elastic fraction and accumulated angle survive the
+update. Signed parameter work is formed from the change of the original energy
+coefficient before multiplying retained history. It is separate from angular
+motion, irreversible loss, and heat. Radius-only refresh delegates to the same
+owner with unchanged material coefficients. Source and thermal owners remain
+responsible for temperature queries, calibration validity and work supplies.
+
+Four new focused tests check independent analytic material/radius scaling,
+signed work and round trips, reverse-yield continuation, sub-ULP history and
+atomic foreign-state/invalid-coefficient refusal. All 20 production angular
+leaf tests passed using the actual moment/rolling/torsion modules and existing
+real `fs-math` artifact. This isolated execution does not claim a full workspace
+build, coupled thermal validation or experimental calibration.
