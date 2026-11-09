@@ -21,17 +21,17 @@ pub use equivalent::{
 mod frequency;
 mod mechanical;
 pub use mechanical::{
-    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
-    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
-    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
-    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
-    MechanicalWallResidue, PreparedMechanicalResonance,
-    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
-    MechanicalSpectrumOptions,
-    MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
-    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
-    MechanicalWallPower,
-    PreparedMechanicalHarmonic,
+    DrivenResonance, MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse,
+    MechanicalHarmonicLimits, MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions,
+    MechanicalPoleResponseOptions, MechanicalPoleWall, MechanicalPressureObservation,
+    MechanicalRelaxationParameterDirection, MechanicalResonanceDrive,
+    MechanicalResonanceObservation, MechanicalResonanceParameterDerivative,
+    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceResidue,
+    MechanicalResonanceResponseError, MechanicalResonanceSpectrum, MechanicalSpectrumOptions,
+    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallParameterDerivative,
+    MechanicalWallParameterDirection, MechanicalWallPhasors, MechanicalWallPower,
+    MechanicalWallResidue, PreparedMechanicalHarmonic, PreparedMechanicalResonance,
+    ResonanceControls, ResonanceSearchError,
 };
 mod resonance;
 pub use resonance::{ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError};

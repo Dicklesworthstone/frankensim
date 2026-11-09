@@ -3000,3 +3000,35 @@ The caller supplies coefficient derivatives per its own parameter. Geometry,
 trace operators, bulk fluid and source laws stay fixed. The API admits a local
 simple-pole derivative and does not infer a temperature law, material validity
 extension, finite design step, repeated-mode sensitivity or driven linewidth.
+
+
+## Complete physical-drive cavity and wall resonance searches
+
+`HeterogeneousHelmholtzFe::driven_resonance_with_coupled_mechanical_walls`
+resolves an observed maximum and optional two-sided half-height width for the
+complete original pressure, distributed wall and Maxwell-memory equations.
+`MechanicalResonanceDrive` combines fixed coherent velocity traces, owner-bound
+boundary and volume velocity sources, and original `WallTractionProfile`s.
+Each actual-frequency preparation binds the traction to its own full-system LU;
+that factor is reused for the complete analytic frequency derivative. Fixed
+fluid injections still differentiate their `i*omega*b` RHS. Fixed applied
+tractions remain direct wall momentum forces, with no reciprocal impedance.
+
+`MechanicalResonanceObservation` selects pressure at a physical point, a signed
+coherent sum of up to 128 physical pressure samples, or dimensionless weights on
+one wall's original displacement or normal-velocity coefficients. Source and
+receiver cancellation occurs before amplitude powers. The matching
+`survey_resonances_with_coupled_mechanical_walls` discovers grid-resolved peaks
+under the same experiment; it does not certify a complete mode census.
+
+The original geometry/material snapshots, source ownership, pressure-release
+constraints, work accounting, cancellation and resource limits remain active.
+Each caller-supplied local interval must isolate a maximum and, if requested,
+both half-height crossings. Silent modes, notches, singular samples and missing
+crossings do not become invented peaks or widths. These are observation-specific
+amplitude resonances, not pole-decay Q or emitted acoustic power.
+
+Two native coupled/search tests cover independent pressure, displacement and
+velocity peak/width limits, hereditary loss, and coherent cancellation. Two
+public FE integration tests additionally exercise applied traction, integrated
+volume injection and foreign-owner refusal.

@@ -803,3 +803,6 @@ fn original_memory(displacement: &[C64], extension: &[C64], coupling: f64) -> Ve
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod driven_tests;

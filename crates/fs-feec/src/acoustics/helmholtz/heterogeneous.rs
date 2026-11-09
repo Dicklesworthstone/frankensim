@@ -40,22 +40,22 @@ use fs_sparse::{Coo, Csr};
 
 mod harmonic;
 pub use harmonic::{
-    MechanicalRelaxationParameterDirection, MechanicalResonanceParameterDerivative,
-    MechanicalWallParameterDerivative, MechanicalWallParameterDirection,
+    BoundaryAdmittance, BoundaryAdmittanceFrequencySample, DrivenResonance,
     EquivalentFluidCoefficients, EquivalentFluidControls, EquivalentFluidElementPower,
-    EquivalentFluidPressureField, PreparedEquivalentFluid, PreparedEquivalentFluidTraction,
-    MechanicalPoleError, MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleWall,
-    MechanicalPoleResponseOptions, MechanicalResonanceResidue, MechanicalResonanceResponseError,
-    MechanicalWallResidue, PreparedMechanicalResonance,
-    MechanicalResonancePole, MechanicalResonanceRegion, MechanicalResonanceSpectrum,
-    MechanicalSpectrumOptions,
-    BoundaryAdmittance, BoundaryAdmittanceFrequencySample, HarmonicLimits,
-    HeterogeneousFrequencyResponse, HeterogeneousPressureField, MAX_HARMONIC_DOFS,
-    MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
-    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
-    MechanicalWallPower,
-    PreparedHeterogeneous, PreparedMechanicalHarmonic, ResonanceSurvey, ResonanceSurveyControls,
-    ResonanceSurveyError, VelocityTrace,
+    EquivalentFluidPressureField, HarmonicLimits, HeterogeneousFrequencyResponse,
+    HeterogeneousPressureField, MAX_HARMONIC_DOFS, MechanicalHarmonicField,
+    MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits, MechanicalPoleError,
+    MechanicalPoleLimits, MechanicalPoleOptions, MechanicalPoleResponseOptions, MechanicalPoleWall,
+    MechanicalPressureObservation, MechanicalRelaxationParameterDirection,
+    MechanicalResonanceDrive, MechanicalResonanceObservation,
+    MechanicalResonanceParameterDerivative, MechanicalResonancePole, MechanicalResonanceRegion,
+    MechanicalResonanceResidue, MechanicalResonanceResponseError, MechanicalResonanceSpectrum,
+    MechanicalSpectrumOptions, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
+    MechanicalWallParameterDerivative, MechanicalWallParameterDirection, MechanicalWallPhasors,
+    MechanicalWallPower, MechanicalWallResidue, PreparedEquivalentFluid,
+    PreparedEquivalentFluidTraction, PreparedHeterogeneous, PreparedMechanicalHarmonic,
+    PreparedMechanicalResonance, ResonanceControls, ResonanceSearchError, ResonanceSurvey,
+    ResonanceSurveyControls, ResonanceSurveyError, VelocityTrace,
 };
 
 mod observation;

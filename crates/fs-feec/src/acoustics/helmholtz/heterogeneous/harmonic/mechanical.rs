@@ -21,7 +21,13 @@ pub use frequency::coupled::{
 };
 use fs_math::dd::Dd;
 use fs_phs::RelaxationBranch;
-use fs_phs::harmonic::resonance::{ResonanceSearchError, survey_resonances};
+use fs_phs::harmonic::resonance::survey_resonances;
+
+mod driven;
+pub use driven::{
+    DrivenResonance, MechanicalPressureObservation, MechanicalResonanceDrive,
+    MechanicalResonanceObservation, ResonanceControls, ResonanceSearchError,
+};
 
 mod poles;
 pub use poles::{
